@@ -17,6 +17,15 @@
  *   app origin. (Granting both flags simultaneously is the documented escape
  *   hatch that lets framed code remove its own sandbox — we never do that.)
  * - `referrerPolicy="no-referrer"` so the artifact host never learns the app URL.
+ * VERSION SWITCHING: callers that need a clean execution environment per version
+ * (e.g. `ArtifactCanvas`) remount this component with a React `key` tied to the
+ * version id. Each version therefore gets a fresh iframe + fresh `onLoad` →
+ * `postCode`, with no shared JS state from the prior version. This component does
+ * NOT implement an in-place "re-post on code change" path: a `code` change without
+ * a remount is not a supported usage (both current callers either pass a single
+ * code value or remount via `key`), and adding one would silently share execution
+ * state across versions.
+ *
  * - The artifact code is delivered by `postMessage` AFTER the frame loads — code
  *   is never embedded in the iframe `src`, never serialized into app-origin HTML,
  *   and never passed to `dangerouslySetInnerHTML`. The post uses `targetOrigin:
@@ -92,16 +101,13 @@ export function ArtifactSandbox({
   // strips the `/render` path back to the bare origin and returns null for a
   // missing/invalid value (→ fail closed).
   const [origin] = useState(() => normalizeOrigin(src));
-  // Whether the frame has loaded at least once (so a `code` change after load
-  // re-posts without waiting for another `onLoad`, which fires only on navigation).
-  const loadedRef = useRef(false);
   // Track whether the iframe load succeeded or failed (e.g. CSP blocked or
   // sandbox origin returned 404) so we can show a meaningful error notice.
   const [frameStatus, setFrameStatus] = useState<FrameLoadStatus>("loading");
 
   /**
    * Post the current code to the framed host. Reads `code` and `origin` via
-   * closure; callers re-invoke on load and on code change.
+   * closure; invoked once by `handleLoad` after the frame's `onLoad` fires.
    *
    * SECURITY — why targetOrigin is "*" here and not the sandbox origin:
    * The frame is `sandbox="allow-scripts"` WITHOUT `allow-same-origin`, so the
@@ -124,13 +130,6 @@ export function ArtifactSandbox({
     frame.contentWindow?.postMessage({ type: "atrium-render", code }, "*");
   }, [code, origin]);
 
-  // Re-post whenever the code changes (e.g. switching versions) AFTER the initial
-  // load. The onLoad handler covers the first post; this covers subsequent edits
-  // to the same mounted frame (onLoad does not re-fire without a navigation).
-  useEffect(() => {
-    if (loadedRef.current) postCode();
-  }, [postCode]);
-
   // Optional: listen for the host's render acknowledgement for observability /
   // future error surfacing. We validate the event origin strictly and ignore
   // anything else; we do not act on the payload beyond bookkeeping so a forged
@@ -148,7 +147,6 @@ export function ArtifactSandbox({
   }, [origin]);
 
   const handleLoad = useCallback(() => {
-    loadedRef.current = true;
     setFrameStatus("loaded");
     postCode();
   }, [postCode]);

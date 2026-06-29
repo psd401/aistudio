@@ -331,6 +331,13 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
           {message ?? "Could not load this artifact."}
         </div>
       ) : tab === "preview" ? (
+        // `key={selectedVersionId}` is the intentional version-switch mechanism:
+        // it remounts <ArtifactSandbox> on every version change so each version
+        // renders in a FRESH iframe with a clean JS execution environment (no
+        // state leaking from the previously-previewed version). The brief reload
+        // flash is the deliberate trade for execution isolation between versions.
+        // ArtifactSandbox does not implement an in-place re-post path (see its
+        // header) — remounting via key is how code changes are delivered here.
         <ArtifactSandbox key={selectedVersionId ?? ""} code={code} src={sandboxSrc} className="atrium-artifact-preview" />
       ) : (
         <CodeEditor

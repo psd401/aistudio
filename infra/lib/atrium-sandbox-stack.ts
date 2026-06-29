@@ -58,7 +58,6 @@ export class AtriumSandboxStack extends cdk.Stack {
     super(scope, id, props);
 
     const isProd = props.environment === 'prod';
-    const cdns = props.allowedArtifactCdns ?? [];
 
     // Normalize origins to canonical scheme+host (no trailing slash, no path).
     // Browsers report event.origin without a trailing slash or path component;
@@ -68,23 +67,41 @@ export class AtriumSandboxStack extends cdk.Stack {
     // synth on an invalid entry rather than baking the raw string in — a
     // misconfiguration must fail the deploy loudly, not produce a dead sandbox.
     function normalizeOriginStr(raw: string): string {
-      let origin: string;
+      let url: URL;
       try {
-        origin = new URL(raw).origin;
+        url = new URL(raw);
       } catch {
         throw new Error(
           `AtriumSandboxStack: allowedParentOrigins entry is not a valid absolute URL: "${raw}"`
         );
       }
+      // Only http(s) origins are valid embedding parents / CDN sources. Reject
+      // any other scheme (ftp:, ws:, etc.) — `new URL("ftp://h").origin` is the
+      // non-opaque "ftp://h", so the "null" check below does NOT catch it. Without
+      // this guard a cdk.json entry like "ftp://evil" or a non-web scheme would be
+      // baked into the sandbox CSP / parent-origin allowlist. Mirrors the protocol
+      // guard in lib/content/artifact-sandbox-config.ts:normalizeOrigin so all
+      // three origin resolvers (app config, middleware via that config, and this
+      // CDK synth) agree on what a valid origin is.
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+        throw new Error(
+          `AtriumSandboxStack: allowedParentOrigins entry must be an http(s) origin: "${raw}"`
+        );
+      }
       // `new URL("data:...").origin` etc. yields the literal "null" (opaque) — reject it.
-      if (origin === 'null') {
+      if (url.origin === 'null') {
         throw new Error(
           `AtriumSandboxStack: allowedParentOrigins entry resolves to an opaque origin: "${raw}"`
         );
       }
-      return origin;
+      return url.origin;
     }
     const normalizedParentOrigins = props.allowedParentOrigins.map(normalizeOriginStr);
+    // CDN allowlist entries are baked verbatim into the sandbox CSP script-src/
+    // style-src/img-src. Run them through the SAME normalizer (protocol + opaque-
+    // origin guard) so a non-http(s) cdk.json entry (e.g. "file://…", "ftp://…")
+    // fails synth loudly instead of silently widening the CSP with a bogus source.
+    const normalizedCdns = (props.allowedArtifactCdns ?? []).map(normalizeOriginStr);
 
     // Fail-closed is correct (an empty allowlist → frame-ancestors 'none' + the
     // host accepts no render messages), but a SILENT empty allowlist almost always
@@ -107,17 +124,17 @@ export class AtriumSandboxStack extends cdk.Stack {
     // to arbitrary HTTPS hosts. Artifacts that need to display images must embed
     // them inline (data URLs) or load from an explicitly allowlisted CDN.
     // frame-ancestors restricts who can embed the host to the allowed parent origins.
-    const scriptSrc = ["'unsafe-inline'", ...cdns].join(' ');
+    const scriptSrc = ["'unsafe-inline'", ...normalizedCdns].join(' ');
     // style-src mirrors script-src: an allowlisted CDN (e.g. a Bootstrap/Tailwind
     // stylesheet on cdnjs) must be loadable for an artifact that opts into it,
     // matching the documented behavior that the CDN allowlist governs BOTH
     // script-src and style-src. Without this, an operator who allowlists a CDN
     // sees stylesheets silently blocked and may "fix" it by widening to https:/*,
     // which would defeat the tight img-src/exfiltration controls.
-    const styleSrc = ["'unsafe-inline'", ...cdns].join(' ');
-    const imgSrc = cdns.length > 0
-      ? `data: ${cdns.join(' ')}`  // allowlisted CDN images + data URLs
-      : "data:";                   // data URIs only when no CDNs configured
+    const styleSrc = ["'unsafe-inline'", ...normalizedCdns].join(' ');
+    const imgSrc = normalizedCdns.length > 0
+      ? `data: ${normalizedCdns.join(' ')}`  // allowlisted CDN images + data URLs
+      : "data:";                             // data URIs only when no CDNs configured
     const frameAncestors =
       normalizedParentOrigins.length > 0
         ? normalizedParentOrigins.join(' ')

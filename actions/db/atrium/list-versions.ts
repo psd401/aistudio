@@ -21,7 +21,7 @@ import {
   generateRequestId,
   startTimer,
 } from "@/lib/logger";
-import { createSuccess, handleError } from "@/lib/error-utils";
+import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import { versionService } from "@/lib/content/version-service";
 import type { ActionState } from "@/types";
@@ -54,6 +54,19 @@ export async function listVersionsAction(
     const requester = await getOptionalRequester(requestId);
     // Enforce canView + resolve the stable object id (idOrSlug may be a slug).
     const obj = await contentService.get(requester, idOrSlug);
+
+    // Artifact-only, mirroring getArtifactCodeAction. The version dropdown this
+    // feeds is an artifact-canvas surface; a document idOrSlug here is a caller
+    // bug. canView already blocks non-viewable objects (no authorization bypass),
+    // but without this guard a viewer could enumerate a visible DOCUMENT's version
+    // provenance (authorActor, timestamps, version numbers) through an action that
+    // is meant only for artifacts. Reject it the same way the code loader does.
+    if (obj.kind !== "artifact") {
+      throw ErrorFactories.validationFailed([
+        { field: "idOrSlug", message: "Object is not an artifact" },
+      ]);
+    }
+
     const versions = await versionService.list(obj.id);
 
     const summaries: VersionSummary[] = versions.map((v) => ({

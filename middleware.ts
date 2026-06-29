@@ -1,5 +1,6 @@
 import { authMiddleware } from "@/auth";
 import { NextResponse } from "next/server";
+import { getArtifactSandboxOrigin } from "@/lib/content/artifact-sandbox-config";
 
 // Public paths that don't require authentication
 const PUBLIC_PATHS = [
@@ -33,25 +34,22 @@ const PUBLIC_PATHS = [
 // the frame. The origin (`ATRIUM_SANDBOX_ORIGIN`) is a CloudFront domain injected
 // by the CDK deploy — known only at runtime — so the CSP is built HERE (middleware
 // runs per request and can read runtime env) instead of in next.config (which is
-// evaluated at build time). Validated to an absolute http(s) origin; never a
-// wildcard — the frame source must be exact.
-function resolveSandboxFrameOrigin(): string | null {
-  const raw = process.env.ATRIUM_SANDBOX_ORIGIN || process.env.NEXT_PUBLIC_ATRIUM_SANDBOX_ORIGIN;
-  if (!raw) return null;
-  try {
-    const url = new URL(raw.trim());
-    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-    return url.origin;
-  } catch {
-    return null;
-  }
-}
-
+// evaluated at build time).
+//
+// SINGLE SOURCE OF TRUTH: the origin is resolved via `getArtifactSandboxOrigin()`
+// from artifact-sandbox-config.ts — the SAME resolver the iframe `src` uses. This
+// guarantees the CSP `frame-src` entry and the iframe `src` resolve to byte-
+// identical origins (including the same env-var priority and the same-origin
+// fail-closed guard). A divergent local resolver here previously read the env vars
+// in the opposite priority order, so a mixed local/CDK env could allowlist origin
+// A while the iframe pointed at origin B → the browser silently blocks the frame.
+// The shared module is Edge-Runtime safe (only `URL` + `process.env`).
+//
 // Built once at module init; the sandbox origin is stable for the process life.
 // frame-src keeps 'self' + the Canva embed origin and appends the sandbox origin
 // only when configured (otherwise the artifact preview frame is simply blocked,
 // matching the component's fail-closed behavior).
-const SANDBOX_FRAME_ORIGIN = resolveSandboxFrameOrigin();
+const SANDBOX_FRAME_ORIGIN = getArtifactSandboxOrigin();
 const FRAME_SRC = ["'self'", "https://www.canva.com", ...(SANDBOX_FRAME_ORIGIN ? [SANDBOX_FRAME_ORIGIN] : [])].join(" ");
 const CONTENT_SECURITY_POLICY =
   "default-src 'self'; " +
