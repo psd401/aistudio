@@ -62,7 +62,7 @@
     "@ai-sdk/amazon-bedrock": "~4.0.120",
     "@ai-sdk/azure": "~3.0.77",
     "@ai-sdk/google": "~3.0.83",
-    "@ai-sdk/mcp": "1.0.52",
+    "@ai-sdk/mcp": "2.0.3",
     "@ai-sdk/openai": "~3.0.74",
     "@ai-sdk/react": "~3.0.210",
     "@assistant-ui/react": "^0.14.23",
