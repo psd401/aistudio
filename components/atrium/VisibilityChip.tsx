@@ -110,6 +110,8 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   const [roleOptions, setRoleOptions] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [savedLevel, setSavedLevel] = useState<Level>("private");
+  const [savedGrants, setSavedGrants] = useState<Grant[]>([]);
 
   // Load the current visibility once per object so the badge shows the real
   // level even before the dialog is opened. The fetch + its setStates run inside
@@ -125,8 +127,8 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
         const loadedGrants = result.data.grants as Grant[];
         setLevel(loadedLevel);
         setGrants(loadedGrants);
-        savedLevelRef.current = loadedLevel;
-        savedGrantsRef.current = loadedGrants;
+        setSavedLevel(loadedLevel);
+        setSavedGrants(loadedGrants);
         setCanEdit(result.data.canEdit);
         setError(null);
       } else {
@@ -144,8 +146,6 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   // successful load even though `roleOptions.length` is intentionally NOT a dep
   // (depending on it would re-run the effect on every option-list change).
   const roleOptionsLoaded = useRef(false);
-  const savedLevelRef = useRef<Level>("private");
-  const savedGrantsRef = useRef<Grant[]>([]);
   useEffect(() => {
     if (!open || !canEdit || roleOptionsLoaded.current) return;
     let cancelled = false;
@@ -197,8 +197,8 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
     setSaving(false);
     if (result.isSuccess) {
       const newLevel = result.data.visibilityLevel as Level;
-      savedLevelRef.current = newLevel;
-      savedGrantsRef.current = level === "group" ? grants : [];
+      setSavedLevel(newLevel);
+      setSavedGrants(level === "group" ? grants : []);
       setOpen(false);
       onChange?.(newLevel);
     } else {
@@ -211,12 +211,12 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   // to the last-persisted values so the chip never shows unsaved state as saved.
   const handleOpenChange = useCallback((next: boolean) => {
     if (!next) {
-      setLevel(savedLevelRef.current);
-      setGrants(savedGrantsRef.current);
+      setLevel(savedLevel);
+      setGrants(savedGrants);
       setError(null);
     }
     setOpen(next);
-  }, []);
+  }, [savedLevel, savedGrants]);
 
   const chrome = levelChrome(level);
 
