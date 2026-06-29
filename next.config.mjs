@@ -15,6 +15,25 @@ const s3RemotePatterns = S3_BUCKET
     ]
   : []
 
+// Atrium artifact sandbox (#1052): the app embeds an <iframe> pointing at a
+// SEPARATE origin that runs untrusted artifact code (spec §19.2/§28.1). The app's
+// own CSP `frame-src` must explicitly allow that origin, or the browser blocks the
+// frame. We add it only when configured, and only after validating it is an
+// absolute http(s) origin (never a wildcard — the frame source must be exact).
+function resolveSandboxFrameOrigin() {
+  const raw = process.env.NEXT_PUBLIC_ATRIUM_SANDBOX_ORIGIN || process.env.ATRIUM_SANDBOX_ORIGIN
+  if (!raw) return null
+  try {
+    const url = new URL(raw.trim())
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null
+    return url.origin
+  } catch {
+    return null
+  }
+}
+const SANDBOX_FRAME_ORIGIN = resolveSandboxFrameOrigin()
+const frameSrc = ["'self'", 'https://www.canva.com', ...(SANDBOX_FRAME_ORIGIN ? [SANDBOX_FRAME_ORIGIN] : [])].join(' ')
+
 const nextConfig = {
   reactCompiler: true,
   reactStrictMode: true,
@@ -88,7 +107,7 @@ const nextConfig = {
           },
           {
             key: 'Content-Security-Policy',
-            value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com; frame-src 'self' https://www.canva.com; frame-ancestors 'none';"
+            value: `default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com; frame-src ${frameSrc}; frame-ancestors 'none';`
           }
         ],
       },

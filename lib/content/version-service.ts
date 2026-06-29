@@ -372,6 +372,66 @@ export const versionService = {
   },
 
   /**
+   * Load one version by id, scoped to its object (the caller already knows the
+   * object). Returns null when the version does not exist OR does not belong to
+   * `objectId` — scoping by object prevents a caller who passed `canView` for
+   * object A from loading a version of an unrelated, possibly-restricted object B
+   * by guessing its version id.
+   */
+  async getById(
+    objectId: string,
+    versionId: string
+  ): Promise<ContentVersionDTO | null> {
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select(versionSelectFields)
+          .from(contentVersions)
+          .where(
+            and(
+              eq(contentVersions.id, versionId),
+              eq(contentVersions.objectId, objectId)
+            )
+          )
+          .limit(1),
+      "content.versionById"
+    );
+    return rows[0] ? rowToVersionDTO(rows[0] as VersionRowAsText) : null;
+  },
+
+  /**
+   * Resolve the raw artifact code for an artifact version, from wherever it lives
+   * (inline `body_inline` for small bodies, or the S3 object at `body_location`
+   * for larger ones — see `snapshotInTx`). Returns the verbatim, UNTRUSTED code.
+   *
+   * SECURITY: the returned string is untrusted artifact source. It must only be
+   * shown in the CodeMirror editor or delivered to the cross-origin
+   * `<ArtifactSandbox>` via postMessage — never `dangerouslySetInnerHTML`, never
+   * served as text/html on the app origin (§28.1).
+   *
+   * Document versions have no artifact body; calling this on one throws so a
+   * mis-routed caller fails loudly rather than reading `source.md` as "code".
+   * An S3 read failure (e.g. NoSuchKey) is surfaced to the caller, which should
+   * degrade gracefully (the reader shows an empty/unavailable preview) rather
+   * than leaking the raw S3 error.
+   */
+  async loadArtifactCode(version: ContentVersionDTO): Promise<string> {
+    if (version.bodyFormat === "markdown") {
+      throw new ValidationError(
+        "loadArtifactCode called on a non-artifact (markdown) version",
+        { versionId: version.id }
+      );
+    }
+    if (version.bodyLocation === "inline") {
+      // Inline bodies always carry their code in `body_inline`. A null here means
+      // the row is malformed; treat it as empty rather than crashing the canvas.
+      return version.bodyInline ?? "";
+    }
+    // Larger artifacts: `body_location` is the deterministic S3 key.
+    return s3Store.getText(version.bodyLocation);
+  },
+
+  /**
    * Point the object's working head at an earlier version, enforcing edit
    * permission. Validates the target version belongs to the object.
    * Re-publishing the rolled-back version is an explicit, separate step
