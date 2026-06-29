@@ -87,9 +87,11 @@ export class AtriumSandboxStack extends cdk.Stack {
     // served asset deterministic and reviewable.
     const templatePath = path.join(__dirname, '..', 'sandbox-host', 'render.html');
     const template = fs.readFileSync(templatePath, 'utf8');
+    // replaceAll (not replace): guard against a future edit reintroducing the
+    // token elsewhere in the template — replace() would substitute only the first.
     const renderedHtml = template
-      .replace('__ALLOWED_PARENT_ORIGINS__', JSON.stringify(props.allowedParentOrigins))
-      .replace('__CSP_POLICY__', cspPolicy);
+      .replaceAll('__ALLOWED_PARENT_ORIGINS__', JSON.stringify(props.allowedParentOrigins))
+      .replaceAll('__CSP_POLICY__', cspPolicy);
 
     // Private bucket; CloudFront reads it via Origin Access Control. No public
     // ACLs — the only way to reach the host page is through the distribution

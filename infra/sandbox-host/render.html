@@ -37,7 +37,8 @@
     <!--
       Fallback CSP for environments that don't set the response header (e.g. local
       file preview). CloudFront sets the authoritative, identical policy as a
-      response header in production. __CSP_POLICY__ is substituted at deploy time.
+      response header in production. The CSP token in the meta below is
+      substituted at deploy time by the CDK stack.
     -->
     <meta http-equiv="Content-Security-Policy" content="__CSP_POLICY__" />
     <title>Artifact</title>
