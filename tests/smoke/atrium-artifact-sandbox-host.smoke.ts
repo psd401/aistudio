@@ -1,3 +1,4 @@
+/// <reference types="bun-types" />
 /**
  * Atrium artifact sandbox HOST PAGE security smoke (Bun + jsdom) — #1052, Phase 2
  *
