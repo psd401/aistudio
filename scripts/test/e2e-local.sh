@@ -31,9 +31,9 @@
 # KNOBS:
 #   SKIP_E2E=1         skip entirely for one push       (never runs in CI)
 #   E2E_PORT=3000      port for the dev server
-#   E2E_WORKERS=N      Playwright worker count (default: 2 when reusing a warm
-#                      server, 1 when we cold-start one — the cold dev server
-#                      thrashes compiling routes under parallel load)
+#   E2E_WORKERS=2      Playwright worker count (global-setup warms every route the
+#                      suite hits, so a cold server doesn't thrash at 2; drop to 1
+#                      if you still see compile-timeout flakiness)
 #   E2E_RUN_EXTERNAL=1 also run live-provider specs (AI chat / voice; needs keys)
 set -uo pipefail
 
@@ -53,14 +53,9 @@ fi
 
 # --- Reuse a running :3000 dev server, or start our own ----------------------------
 STARTED_PID=""
-# Worker count default: a reused server is already warm and handles parallelism; a
-# server we cold-start compiles routes on first hit and thrashes under parallel load
-# (the 17-route warm can't cover every route the suite touches), so run it serially.
-DEFAULT_WORKERS=2
 if curl -sf "$BASE/api/healthz" >/dev/null 2>&1; then
   echo "e2e-local: reusing the dev server already on :$E2E_PORT"
 else
-  DEFAULT_WORKERS=1
   echo "e2e-local: starting a dev server on :$E2E_PORT (AUTH_URL pinned to it; isolated .next-e2e)…"
   AUTH_URL="$BASE" NEXT_DIST_DIR=.next-e2e \
   DATABASE_URL="${DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/aistudio}" \
@@ -113,9 +108,8 @@ export PLAYWRIGHT_AUTH_ENABLED=true
 export PLAYWRIGHT_WARM=1
 if [ "${E2E_RUN_EXTERNAL:-}" != "1" ]; then export E2E_EXCLUDE_EXTERNAL=1; fi
 
-WORKERS="${E2E_WORKERS:-$DEFAULT_WORKERS}"
-echo "e2e-local: running Playwright suite against $BASE (workers=$WORKERS, retries=${E2E_RETRIES:-2})…"
-bunx playwright test --workers="$WORKERS" --retries="${E2E_RETRIES:-2}" "$@"
+echo "e2e-local: running Playwright suite against $BASE (workers=${E2E_WORKERS:-2}, retries=${E2E_RETRIES:-2})…"
+bunx playwright test --workers="${E2E_WORKERS:-2}" --retries="${E2E_RETRIES:-2}" "$@"
 RESULT=$?
 
 if [ "$RESULT" -ne 0 ]; then

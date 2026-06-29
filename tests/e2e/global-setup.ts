@@ -29,22 +29,35 @@ const SESSIONS: Array<{ file: string; email: string; sub: string }> = [
   { file: "user-b.json", email: "staff@example.com", sub: "e2e-staff-user" },
 ];
 
+// Every route the suite navigates to (derived from page.goto across tests/e2e),
+// warmed once serially here so the parallel run never compiles a route under load
+// (which thrashed a cold dev server). Keep in sync when specs add new routes.
 const WARM_ROUTES = [
+  "/",
+  "/dashboard",
   "/nexus",
   "/nexus/decision-capture",
   "/admin/users",
   "/admin/roles",
   "/admin/agents",
+  "/admin/agents/skills/review",
   "/admin/credentials",
   "/admin/skill-review",
+  "/admin/settings",
+  "/admin/tools",
   "/repositories",
   "/prompt-library",
   "/schedules",
   "/compare",
   "/settings",
   "/skills",
+  "/agent-connect",
   "/utilities/assistant-architect",
+  "/utilities/assistant-architect/create",
   "/utilities/assistant-catalog",
+  // Heavy dynamic routes for the seeded fixture architect (assistant-architect-seed.sql).
+  "/utilities/assistant-architect/9000/edit/prompts", // ReactFlow editor
+  "/tools/assistant-architect/9000", // execution/streaming page
   "/atrium/a7100000-0000-4000-8000-000000004040/edit",
   "/c/board-procedure-4040",
 ];
