@@ -169,19 +169,17 @@ export const publishService = {
 
     const publicationId = await executeTransaction(
       async (tx: DbTransaction) => {
-        // Always mark the object as published. Optionally widen visibility in
-        // the same tx so the status change and any grant updates are atomic.
-        if (input.visibility?.level === "group") {
-          await visibilityService.applyGrants(
-            tx,
-            objectId,
-            input.visibility.grants ?? []
-          );
+        // Optionally widen visibility in the same tx so the status change and
+        // any grant updates are atomic. `setLevelInTx` replaces the level + (for
+        // group) its grants, enforcing the group-needs-grants guard; it does NOT
+        // touch status, so the publish path sets `published` itself below.
+        if (input.visibility) {
+          await visibilityService.setLevelInTx(tx, objectId, input.visibility);
         }
+        // Always mark the object as published.
         await tx
           .update(contentObjects)
           .set({
-            ...(input.visibility ? { visibilityLevel: input.visibility.level } : {}),
             status: "published",
             updatedAt: new Date(),
           })

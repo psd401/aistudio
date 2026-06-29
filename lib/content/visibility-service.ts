@@ -14,6 +14,7 @@
 import { and, desc, eq, sql, type SQL } from "drizzle-orm";
 import {
   executeQuery,
+  executeTransaction,
   type DbTransaction,
   type DrizzleDB,
 } from "@/lib/db/drizzle-client";
@@ -23,13 +24,15 @@ import {
 } from "@/lib/db/schema";
 import { principalOf } from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
-import { ValidationError } from "./errors";
+import { NotFoundError, ValidationError } from "./errors";
 import type {
   ContentObjectDTO,
   ListFilter,
   Principal,
   Requester,
   VisibilityGrant,
+  VisibilityInput,
+  VisibilityLevel,
 } from "./types";
 
 /** Upper bound on a `listVisible` tag filter, mirroring the tags column width. */
@@ -164,6 +167,72 @@ export interface ViewableObject {
   visibilityLevel: "private" | "group" | "internal" | "public";
 }
 
+/**
+ * Replace an object's grants with the supplied set (delete-then-insert) inside
+ * the caller's transaction. Validates every grant value first so a bad value
+ * aborts the whole replace (no partial application). A no-op delete-only when
+ * `grants` is empty (clears grants).
+ */
+async function applyGrantsInTx(
+  tx: DbTransaction,
+  objectId: string,
+  grants: VisibilityGrant[]
+): Promise<void> {
+  for (const grant of grants) assertValidGrant(grant);
+  await tx
+    .delete(contentVisibilityGrants)
+    .where(eq(contentVisibilityGrants.objectId, objectId));
+  if (grants.length > 0) {
+    await tx.insert(contentVisibilityGrants).values(
+      grants.map((g) => ({
+        objectId,
+        grantKind: g.kind,
+        grantValue: g.value,
+      }))
+    );
+  }
+}
+
+/**
+ * Replace an object's visibility level (and, for `group`, its grants) inside the
+ * caller's transaction — the atomic primitive shared by the standalone
+ * `setLevel` (the visibility editor) and the publish path (which widens
+ * visibility in the same transaction it records the publication).
+ *
+ * Semantics:
+ * - `level !== "group"` clears all grants (a non-group level is not grant-keyed;
+ *   leaving stale grants would silently widen access if the level were later
+ *   flipped back to `group`). The clear runs through `applyGrants(tx, id, [])`.
+ * - `level === "group"` requires at least one grant — a grantless group object
+ *   is visible to no one but the owner/admin (private semantics without saying
+ *   so), almost always a mistake (mirrors `contentService.create`).
+ *
+ * Does NOT change `status` (that is the publish path's concern) and does NOT run
+ * any permission check — callers gate with `assertCanEdit` first.
+ */
+async function setLevelInTx(
+  tx: DbTransaction,
+  objectId: string,
+  visibility: VisibilityInput
+): Promise<void> {
+  const level = visibility.level;
+  const grants = level === "group" ? visibility.grants ?? [] : [];
+
+  if (level === "group" && grants.length === 0) {
+    throw new ValidationError("group visibility requires at least one grant", {
+      objectId,
+    });
+  }
+
+  // Replace grants first (validates each value), then the level — both inside
+  // the one transaction so the level and its grant set are never observed apart.
+  await applyGrantsInTx(tx, objectId, grants);
+  await tx
+    .update(contentObjects)
+    .set({ visibilityLevel: level, updatedAt: new Date() })
+    .where(eq(contentObjects.id, objectId));
+}
+
 /** Load the normalized grants for an object. */
 async function grantsFor(objectId: string): Promise<VisibilityGrant[]> {
   const rows = await executeQuery(
@@ -244,21 +313,52 @@ export const visibilityService = {
     objectId: string,
     grants: VisibilityGrant[]
   ): Promise<void> {
-    // Validate every grant value before touching the DB so a bad value aborts
-    // the whole replace (no partial application).
-    for (const grant of grants) assertValidGrant(grant);
-    await tx
-      .delete(contentVisibilityGrants)
-      .where(eq(contentVisibilityGrants.objectId, objectId));
-    if (grants.length > 0) {
-      await tx.insert(contentVisibilityGrants).values(
-        grants.map((g) => ({
-          objectId,
-          grantKind: g.kind,
-          grantValue: g.value,
-        }))
-      );
-    }
+    await applyGrantsInTx(tx, objectId, grants);
+  },
+
+  /**
+   * Replace an object's grants AND level inside the caller's transaction — used
+   * by the publish path, which widens visibility in the same transaction it
+   * records the publication. See `setLevelInTx` for the level/grant semantics.
+   */
+  async setLevelInTx(
+    tx: DbTransaction,
+    objectId: string,
+    visibility: VisibilityInput
+  ): Promise<void> {
+    await setLevelInTx(tx, objectId, visibility);
+  },
+
+  /**
+   * Set an object's visibility level (and, for `group`, replace its grants) as a
+   * standalone, atomic write — the visibility editor's persistence path (§12.4
+   * "publish-widening" generalized to any level change).
+   *
+   * The object must exist (404 otherwise) and the caller is expected to have
+   * already passed `assertCanEdit`. Does NOT change `status`. Returns the new
+   * level so the surface can reflect it without a re-read.
+   */
+  async setLevel(
+    objectId: string,
+    visibility: VisibilityInput
+  ): Promise<{ visibilityLevel: VisibilityLevel }> {
+    await executeTransaction(async (tx) => {
+      // Guard against a missing object inside the tx so the level write does not
+      // silently no-op (UPDATE ... WHERE id = <absent> affects zero rows). Lock
+      // the row FOR UPDATE so a concurrent delete cannot slip between this check
+      // and the setLevelInTx update.
+      const rows = await tx
+        .select({ id: contentObjects.id })
+        .from(contentObjects)
+        .where(eq(contentObjects.id, objectId))
+        .for("update")
+        .limit(1);
+      if (!rows[0]) {
+        throw new NotFoundError("Content not found", { objectId });
+      }
+      await setLevelInTx(tx, objectId, visibility);
+    }, "content.setLevel");
+    return { visibilityLevel: visibility.level };
   },
 
   /**
