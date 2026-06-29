@@ -74,13 +74,32 @@ const input = {
   agentId: "bot-1",
 } as const;
 
-/** Run applyAgentEdit and, on the next tick, fire `event` on the fake socket. */
-async function runAndDrive(event: "close" | "error"): Promise<Error> {
-  const p = applyAgentEdit({ ...input });
-  // The fake socket is constructed synchronously inside applyAgentEdit; give the
-  // event loop a tick, then drive the lifecycle event the test wants to assert on.
-  await new Promise((r) => setTimeout(r, 0));
+/**
+ * Wait until applyAgentEdit has constructed THIS call's fake socket.
+ *
+ * applyAgentEdit `await`s async token signing (crypto.subtle) BEFORE it
+ * constructs the WebSocket, so the socket is NOT guaranteed to exist after a
+ * single macrotask — on a slower runtime (CI/Bun-on-Linux) signing can take
+ * longer than one `setTimeout(0)`. The earlier harness read the module-level
+ * `liveSocket` after exactly one tick without resetting it, so a slow second
+ * call drove the PREVIOUS (already-settled) socket — a no-op — and the real
+ * socket then hit the 10s SYNC_TIMEOUT, surfacing as a flaky `'collab sync
+ * timeout'` in CI. Reset + poll removes the race deterministically.
+ */
+async function waitForSocket(): Promise<void> {
+  for (let i = 0; i < 200 && !liveSocket; i += 1) {
+    await new Promise((r) => setTimeout(r, 5)); // ≤1s cap, well under SYNC_TIMEOUT
+  }
   assert.ok(liveSocket, "socket was constructed");
+}
+
+/** Run applyAgentEdit and, once its socket exists, fire `event` on it. */
+async function runAndDrive(event: "close" | "error"): Promise<Error> {
+  liveSocket = null; // clear any socket left over from a previous check
+  const p = applyAgentEdit({ ...input });
+  // Drive THIS call's socket — not a stale one — once token signing has resolved
+  // and the socket is constructed.
+  await waitForSocket();
   liveSocket!.emit(event);
   try {
     await p;
@@ -101,9 +120,9 @@ await check("rejects when the socket errors", async () => {
 });
 
 await check("connects to the collab WS path with a token query param", async () => {
+  liveSocket = null;
   const p = applyAgentEdit({ ...input });
-  await new Promise((r) => setTimeout(r, 0));
-  assert.ok(liveSocket, "socket constructed");
+  await waitForSocket();
   assert.match(FakeWebSocket.lastUrl, /\/api\/atrium-collab\//);
   assert.match(FakeWebSocket.lastUrl, /[?&]token=/);
   assert.ok(
