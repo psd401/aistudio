@@ -216,7 +216,7 @@
     "@types/cheerio": "^1.0.0",
     "@types/escape-html": "^1.0.4",
     "@types/jest": "^30.0.0",
-    "@types/jsdom": "^21.1.7",
+    "@types/jsdom": "^28.0.3",
     "@types/node": "^26.0.0",
     "@types/oidc-provider": "^9.5.0",
     "@types/pdf-parse": "^1.1.5",
