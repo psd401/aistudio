@@ -1,0 +1,129 @@
+<!doctype html>
+<!--
+  Atrium artifact sandbox host page (#1052, Epic #1059, Phase 2, spec §19.2 / §28.1)
+
+  Served from the DEDICATED sandbox origin (ATRIUM_SANDBOX_ORIGIN) — a distinct
+  CloudFront distribution / subdomain that shares NO cookies or storage with the
+  AI Studio app origin. The app embeds this page in an
+  <iframe sandbox="allow-scripts"> (NO allow-same-origin) and posts the untrusted
+  artifact code to it via postMessage AFTER load.
+
+  Containment layers (defense in depth):
+   1. Cross-origin: this page is never same-origin with the app, so even if the
+      sandbox attributes were bypassed it could not read app cookies/storage.
+   2. iframe sandbox without allow-same-origin: the framed document runs in an
+      opaque origin — it cannot read THIS origin's cookies/storage either, and
+      cannot reach the app origin.
+   3. CSP: CloudFront serves this page with a strict Content-Security-Policy
+      (default-src 'none'; connect-src 'none'; ...), so artifact code cannot call
+      first-party APIs or exfiltrate over the network except to explicitly
+      allowlisted CDNs. The <meta> CSP below is a same-value fallback for local
+      preview; the authoritative CSP is the response header.
+   4. Parent-origin allowlist: this page only accepts a render message whose
+      event.origin is in the build-time ALLOWED_PARENT_ORIGINS list, so a random
+      site cannot frame it and inject code (it would also be blocked by the host
+      CSP `frame-ancestors`, but we check defensively).
+
+  The injected artifact may include inline <script> tags; setting innerHTML does
+  not execute them, so we recreate each <script> node (allowed by the host CSP's
+  script-src 'unsafe-inline'). We render only ONE message (the first valid one
+  is replaced on each subsequent valid message) and never eval arbitrary strings
+  ourselves beyond reconstructing the author's own script nodes.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Fallback CSP for environments that don't set the response header (e.g. local
+      file preview). CloudFront sets the authoritative, identical policy as a
+      response header in production. __CSP_POLICY__ is substituted at deploy time.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="__CSP_POLICY__" />
+    <title>Artifact</title>
+    <style>
+      html, body { margin: 0; padding: 0; }
+      body { font-family: system-ui, sans-serif; }
+      #atrium-artifact-root { padding: 0; }
+      #atrium-artifact-empty {
+        display: flex; align-items: center; justify-content: center;
+        min-height: 200px; color: #9ca3af; font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="atrium-artifact-root">
+      <div id="atrium-artifact-empty">Waiting for artifact…</div>
+    </div>
+    <script>
+      (function () {
+        "use strict";
+
+        // Build-time substitution: the JSON array of app origins allowed to post
+        // render messages to this host. The CDK stack replaces this token.
+        var ALLOWED_PARENT_ORIGINS = __ALLOWED_PARENT_ORIGINS__;
+
+        var root = document.getElementById("atrium-artifact-root");
+
+        function isAllowedOrigin(origin) {
+          if (!Array.isArray(ALLOWED_PARENT_ORIGINS)) return false;
+          for (var i = 0; i < ALLOWED_PARENT_ORIGINS.length; i++) {
+            if (ALLOWED_PARENT_ORIGINS[i] === origin) return true;
+          }
+          return false;
+        }
+
+        // Recreate <script> nodes so the browser executes them (innerHTML does
+        // not run injected scripts). Only the author's own scripts are recreated;
+        // we never eval arbitrary strings of our own construction.
+        function executeScripts(container) {
+          var scripts = container.querySelectorAll("script");
+          for (var i = 0; i < scripts.length; i++) {
+            var old = scripts[i];
+            var s = document.createElement("script");
+            for (var a = 0; a < old.attributes.length; a++) {
+              s.setAttribute(old.attributes[a].name, old.attributes[a].value);
+            }
+            s.textContent = old.textContent;
+            old.parentNode.replaceChild(s, old);
+          }
+        }
+
+        function render(code) {
+          // Replace the entire root subtree with the artifact markup, then
+          // execute any inline scripts. The CSP confines what those scripts can
+          // reach; the cross-origin + sandbox confinement does the rest.
+          root.innerHTML = typeof code === "string" ? code : "";
+          executeScripts(root);
+        }
+
+        window.addEventListener("message", function (event) {
+          // Reject any message from an origin not on the build-time allowlist.
+          if (!isAllowedOrigin(event.origin)) return;
+          var data = event.data;
+          if (!data || data.type !== "atrium-render") return;
+          try {
+            render(data.code);
+            // Acknowledge back to the (validated) parent so the app can surface
+            // load state. We do NOT send any artifact data back.
+            event.source &&
+              event.source.postMessage(
+                { type: "atrium-artifact-rendered", ok: true },
+                event.origin
+              );
+          } catch (err) {
+            event.source &&
+              event.source.postMessage(
+                {
+                  type: "atrium-artifact-rendered",
+                  ok: false,
+                  error: String((err && err.message) || err),
+                },
+                event.origin
+              );
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>
