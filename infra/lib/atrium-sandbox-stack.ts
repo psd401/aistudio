@@ -1,5 +1,5 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -86,6 +86,20 @@ export class AtriumSandboxStack extends cdk.Stack {
     }
     const normalizedParentOrigins = props.allowedParentOrigins.map(normalizeOriginStr);
 
+    // Fail-closed is correct (an empty allowlist → frame-ancestors 'none' + the
+    // host accepts no render messages), but a SILENT empty allowlist almost always
+    // means a misconfigured deploy: the sandbox would deploy fine yet reject all
+    // embedding, surfacing only as a broken preview. Warn loudly at synth so an
+    // operator who passes [] sees it before the deploy rather than in the UI.
+    if (normalizedParentOrigins.length === 0) {
+      cdk.Annotations.of(this).addWarning(
+        'AtriumSandboxStack: allowedParentOrigins is empty — the sandbox will ' +
+          "reject ALL embedding (frame-ancestors 'none') and render no artifacts. " +
+          'This is fail-closed but is almost certainly a misconfiguration; pass the ' +
+          'app origin(s) allowed to embed the sandbox.'
+      );
+    }
+
     // STRICT CSP for the sandbox host. connect-src 'none' blocks first-party API
     // calls / exfiltration; script-src/style-src widen ONLY for allowlisted CDNs.
     // img-src is intentionally restricted to data: only (no https: wildcard) to
@@ -126,6 +140,9 @@ export class AtriumSandboxStack extends cdk.Stack {
     // contents here (rather than fragile in-bucket token replacement) keeps the
     // served asset deterministic and reviewable.
     const templatePath = path.join(__dirname, '..', 'sandbox-host', 'render.html');
+    // Path is __dirname + fixed literal segments (the repo's committed host
+    // template) — no external input. The lint rule cannot prove that statically.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
     const template = fs.readFileSync(templatePath, 'utf8');
     // replaceAll (not replace): guard against a future edit reintroducing the
     // token elsewhere in the template — replace() would substitute only the first.
@@ -176,34 +193,9 @@ export class AtriumSandboxStack extends cdk.Stack {
       }
     );
 
-    const distribution = new cloudfront.Distribution(this, 'SandboxDistribution', {
-      comment: `Atrium artifact sandbox origin (${props.environment})`,
-      defaultRootObject: 'render.html',
-      defaultBehavior: {
-        origin: origins.S3BucketOrigin.withOriginAccessControl(hostBucket),
-        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
-        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-        responseHeadersPolicy: responseHeaders,
-      },
-      // Serve the host page at both `/` and `/render` (the app points the iframe
-      // at `${origin}/render`). render.html is the only object in the bucket.
-      additionalBehaviors: {
-        '/render': {
-          origin: origins.S3BucketOrigin.withOriginAccessControl(hostBucket),
-          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
-          cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-          responseHeadersPolicy: responseHeaders,
-        },
-      },
-      // `/render` (no extension) must resolve to render.html. CloudFront does not
-      // append an index for non-root paths, so map the path to the object via a
-      // CloudFront Function on viewer-request.
-    });
-
     // Rewrite the extensionless `/render` request to `/render.html` so the single
-    // host object is served at the path the app's iframe src uses.
+    // host object is served at the path the app's iframe src uses. Defined BEFORE
+    // the distribution so it can be attached natively to the /render behavior.
     const rewriteFn = new cloudfront.Function(this, 'SandboxPathRewrite', {
       comment: 'Rewrite /render to /render.html for the Atrium sandbox host',
       code: cloudfront.FunctionCode.fromInline(
@@ -218,20 +210,39 @@ export class AtriumSandboxStack extends cdk.Stack {
         ].join('\n')
       ),
     });
-    // Attach the rewrite to the /render behavior.
-    // L1 escape: the CloudFront L2 `Distribution` construct does not expose
-    // FunctionAssociations on non-default (additional) behaviors. We access the
-    // underlying CfnDistribution via `node.defaultChild` to add it via a property
-    // override. This is an intentional, scope-limited L1 escape — no other L1
-    // properties are modified.
-    const cfnDist = distribution.node.defaultChild as cloudfront.CfnDistribution;
-    // The additional behavior for /render is index 0 in CacheBehaviors.
-    cfnDist.addPropertyOverride('DistributionConfig.CacheBehaviors.0.FunctionAssociations', [
-      {
-        EventType: 'viewer-request',
-        FunctionARN: rewriteFn.functionArn,
+
+    const distribution = new cloudfront.Distribution(this, 'SandboxDistribution', {
+      comment: `Atrium artifact sandbox origin (${props.environment})`,
+      defaultRootObject: 'render.html',
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(hostBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        responseHeadersPolicy: responseHeaders,
       },
-    ]);
+      // Serve the host page at both `/` and `/render` (the app points the iframe
+      // at `${origin}/render`). render.html is the only object in the bucket.
+      // `/render` (no extension) must resolve to render.html: CloudFront does not
+      // append an index for non-root paths, so the viewer-request function rewrites
+      // the path. CDK v2 supports functionAssociations natively on additional
+      // behaviors (BehaviorOptions), so no L1 (CfnDistribution) escape is needed.
+      additionalBehaviors: {
+        '/render': {
+          origin: origins.S3BucketOrigin.withOriginAccessControl(hostBucket),
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+          cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+          responseHeadersPolicy: responseHeaders,
+          functionAssociations: [
+            {
+              function: rewriteFn,
+              eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+            },
+          ],
+        },
+      },
+    });
 
     // Deploy the rendered host page. Invalidate on deploy so a CSP / allowlist
     // change is served immediately rather than waiting for the cache TTL.

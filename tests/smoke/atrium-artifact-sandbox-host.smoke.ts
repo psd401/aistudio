@@ -156,14 +156,19 @@ async function main(): Promise<void> {
     // The token must be fully substituted (no leftover placeholder ships).
     assert.doesNotMatch(html, /__ALLOWED_PARENT_ORIGINS__/);
     assert.doesNotMatch(html, /__CSP_POLICY__/);
-    // Assert the EXACT serialized allowlist array the stack bakes in
-    // (`ALLOWED_PARENT_ORIGINS = ["https://app.example.com"];`), not a bare
-    // substring of the origin — a precise, full-token check (also avoids the
-    // "substring could appear anywhere in a URL" sanitization-shaped pattern).
-    const expectedAllowlist = `ALLOWED_PARENT_ORIGINS = ${JSON.stringify([APP_ORIGIN])};`;
-    assert.ok(
-      html.includes(expectedAllowlist),
-      `host page is missing the exact allowlist assignment: ${expectedAllowlist}`
+    // Parse the baked-in allowlist out of the served HTML and assert it equals
+    // the exact expected origins. We extract the assignment and JSON.parse the
+    // array rather than `html.includes(<origin>)`: a bare substring check on a URL
+    // both lets an attacker-shaped value match anywhere in the page AND trips the
+    // "incomplete URL substring sanitization" static-analysis pattern. Deep-equal
+    // on the parsed array is precise and avoids the URL-substring shape entirely.
+    const match = html.match(/ALLOWED_PARENT_ORIGINS\s*=\s*(\[[^\]]*\]);/);
+    assert.ok(match, "host page is missing the ALLOWED_PARENT_ORIGINS assignment");
+    const bakedOrigins = JSON.parse(match[1]) as string[];
+    assert.deepEqual(
+      bakedOrigins,
+      [APP_ORIGIN],
+      `baked parent-origin allowlist does not match: ${match[1]}`
     );
   });
 

@@ -17,10 +17,14 @@
  *   app origin. (Granting both flags simultaneously is the documented escape
  *   hatch that lets framed code remove its own sandbox — we never do that.)
  * - `referrerPolicy="no-referrer"` so the artifact host never learns the app URL.
- * - The artifact code is delivered by `postMessage` AFTER the frame loads, with
- *   an EXACT `targetOrigin` (never `"*"`) — code is never embedded in the iframe
- *   `src`, never serialized into app-origin HTML, and never passed to
- *   `dangerouslySetInnerHTML`.
+ * - The artifact code is delivered by `postMessage` AFTER the frame loads — code
+ *   is never embedded in the iframe `src`, never serialized into app-origin HTML,
+ *   and never passed to `dangerouslySetInnerHTML`. The post uses `targetOrigin:
+ *   "*"` because a sandbox frame with `allow-scripts` and no `allow-same-origin`
+ *   runs in an OPAQUE origin that a concrete targetOrigin can never match (the
+ *   message would be silently dropped). Authentication is inverted: the host page
+ *   accepts the message only from an allowlisted `event.origin`. The payload is
+ *   the untrusted code itself, so `"*"` leaks no app secret. See `postCode` below.
  *
  * When the sandbox origin is not configured (or, defensively, resolves to the
  * app origin) the component fails CLOSED — it renders an "unavailable" notice
@@ -81,9 +85,12 @@ export function ArtifactSandbox({
 }: ArtifactSandboxProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   // The render URL is resolved server-side and arrives via `src`. Derive the
-  // exact postMessage targetOrigin from it once on mount (the origin is stable
-  // for the frame's life). normalizeOrigin strips the `/render` path back to the
-  // bare origin and returns null for a missing/invalid value (→ fail closed).
+  // bare sandbox origin from it once on mount (stable for the frame's life). This
+  // origin is NOT used as the postMessage targetOrigin (the frame is opaque-origin
+  // — see postCode); it gates whether we post at all (fail closed when null) and
+  // is the strict allowlist for the inbound render-ack listener. normalizeOrigin
+  // strips the `/render` path back to the bare origin and returns null for a
+  // missing/invalid value (→ fail closed).
   const [origin] = useState(() => normalizeOrigin(src));
   // Whether the frame has loaded at least once (so a `code` change after load
   // re-posts without waiting for another `onLoad`, which fires only on navigation).
@@ -93,15 +100,28 @@ export function ArtifactSandbox({
   const [frameStatus, setFrameStatus] = useState<FrameLoadStatus>("loading");
 
   /**
-   * Post the current code to the framed host with an EXACT target origin. Reads
-   * `code` and `origin` via closure; callers re-invoke on load and on code change.
+   * Post the current code to the framed host. Reads `code` and `origin` via
+   * closure; callers re-invoke on load and on code change.
+   *
+   * SECURITY — why targetOrigin is "*" here and not the sandbox origin:
+   * The frame is `sandbox="allow-scripts"` WITHOUT `allow-same-origin`, so the
+   * framed document runs in an OPAQUE origin (it is NOT `origin`, even though it
+   * was served from there). A `postMessage` whose targetOrigin is a concrete URL
+   * is only delivered when the frame's document origin matches that URL exactly;
+   * an opaque-origin document matches NO concrete origin, so a targeted post is
+   * silently dropped and the artifact never renders (MDN: opaque/`data:`-origin
+   * frames require `"*"`). We therefore post with `"*"` and rely on the HOST page
+   * to authenticate the SENDER instead: render.html only acts on a message whose
+   * `event.origin` is on its build-time parent-origin allowlist. The payload is
+   * the untrusted artifact code itself — there is no app secret to leak via `"*"`,
+   * and the cross-origin + sandbox + CSP layers remain the isolation boundary.
+   * We still gate on `origin` (resolved from the configured sandbox URL) so an
+   * unconfigured/same-origin sandbox posts nothing (fail closed).
    */
   const postCode = useCallback(() => {
     const frame = iframeRef.current;
     if (!frame || !origin) return;
-    // targetOrigin is the resolved sandbox origin — NEVER "*". If the frame were
-    // ever navigated elsewhere, the browser would refuse to deliver the message.
-    frame.contentWindow?.postMessage({ type: "atrium-render", code }, origin);
+    frame.contentWindow?.postMessage({ type: "atrium-render", code }, "*");
   }, [code, origin]);
 
   // Re-post whenever the code changes (e.g. switching versions) AFTER the initial

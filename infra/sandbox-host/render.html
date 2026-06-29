@@ -75,8 +75,13 @@
         }
 
         // Recreate <script> nodes so the browser executes them (innerHTML does
-        // not run injected scripts). Only the author's own scripts are recreated;
-        // we never eval arbitrary strings of our own construction.
+        // not run injected scripts). We recreate the artifact's OWN <script> nodes
+        // verbatim, copying every attribute INCLUDING `src` — so external-`src`
+        // scripts are recreated too, NOT filtered out here. Their loading is
+        // governed solely by the host CSP `script-src`: a CDN must be on the
+        // allowlist or the load is blocked. (Inline-only mode = `'unsafe-inline'`
+        // with no host expression, which blocks all external `src` loads.) The CSP
+        // is the mitigation; this function does not sanitize.
         function executeScripts(container) {
           var scripts = container.querySelectorAll("script");
           for (var i = 0; i < scripts.length; i++) {
@@ -86,7 +91,13 @@
               s.setAttribute(old.attributes[a].name, old.attributes[a].value);
             }
             s.textContent = old.textContent;
-            old.parentNode.replaceChild(s, old);
+            // Guard against a null parent: an earlier recreated script that runs
+            // synchronously could remove a later sibling from the DOM before this
+            // loop reaches it (the NodeList was captured before any script ran).
+            // Without this guard, `null.replaceChild` would throw, the catch in
+            // the message handler would ack { ok:false }, and the preview would
+            // sit blank with no surfaced error.
+            if (old.parentNode) old.parentNode.replaceChild(s, old);
           }
         }
 

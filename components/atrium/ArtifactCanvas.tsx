@@ -36,7 +36,11 @@ type LoadState = "loading" | "ready" | "error";
 
 /** Label for a version in the dropdown: "v3 · AI (current)". */
 function versionLabel(v: VersionSummary): string {
-  const author = v.authorActor === "agent" ? " · AI" : " · you";
+  // "· human" (not "· you"): VersionSummary intentionally omits authorUserId
+  // (anti-enumeration), so we cannot know whether the human author is the current
+  // viewer. "human" is accurate for every viewer; "you" would mislabel another
+  // user's (e.g. an admin's) edit as the viewer's own.
+  const author = v.authorActor === "agent" ? " · AI" : " · human";
   return `v${v.versionNumber}${author}${v.isCurrent ? " (current)" : ""}`;
 }
 
@@ -201,6 +205,14 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
   // hide the dropdown for a still-loaded artifact). The `seq` guard discards a
   // stale refresh after the object changed. Returns the fetched list (or null
   // when the fetch failed or was superseded) so callers can react.
+  //
+  // NOTE on the token: `seq` must be a token THIS caller owns exclusively for the
+  // lifetime of the refresh. Do NOT pass the same token that `loadCode` will also
+  // bump (loadCode increments `loadSeqRef` on entry) — that would make the guard
+  // below fire spuriously and silently drop a valid version list. Callers that
+  // run refreshVersions concurrently with loadCode should pass no token (the
+  // setState into "loading"/the load itself already governs the object identity)
+  // or a dedicated token, not loadCode's.
   const refreshVersions = useCallback(
     async (seq?: number): Promise<VersionSummary[] | null> => {
       const result = await listVersionsAction(idOrSlug);
@@ -220,20 +232,26 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
   // "loading", so the first paint shows the loading state without a sync setState.
   useEffect(() => {
     // Bump the load token so any in-flight load/refresh from a previous object
-    // is discarded, and capture the token this run owns.
-    const seq = ++loadSeqRef.current;
+    // is discarded. `loadCode` will bump it again on entry and OWN the token for
+    // this run — so we must NOT pass a captured token to `refreshVersions` (doing
+    // so made its guard fire on every mount, dropping the version list → empty
+    // dropdown). `loadCode` is the single owner of the staleness invariant; a
+    // version list that arrives for a superseded object is harmless (the next
+    // load's setState replaces it), so refreshVersions runs untokened here.
+    loadSeqRef.current += 1;
     void (async () => {
       setState("loading");
       setMessage(null);
-      // loadCode bumps the token itself; capture the head id it returns. Run the
-      // list refresh under the SAME run token so a slow refresh from a prior
-      // object cannot land in this one's view.
-      const [, headVersionId] = await Promise.all([
-        refreshVersions(seq),
-        loadCode(null),
-      ]);
-      if (headVersionId && seq === loadSeqRef.current) {
-        setSelectedVersionId(headVersionId);
+      try {
+        // loadCode sets selectedVersionId internally on success; we don't need
+        // its return value here. Both run concurrently; if either rejects the
+        // catch surfaces an error rather than leaving the canvas stuck loading.
+        await Promise.all([refreshVersions(), loadCode(null)]);
+      } catch (err) {
+        // A newer load (object change) bumps the token; only surface the error if
+        // this run is still the current one, otherwise the next run owns state.
+        setState((prev) => (prev === "loading" ? "error" : prev));
+        setMessage(err instanceof Error ? err.message : "Failed to load artifact");
       }
     })();
     return () => {
@@ -254,16 +272,24 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
 
   const handleSave = useCallback(
     async (next: string) => {
+      // Capture the load token at save time so the post-save reconciliation does
+      // not clobber a DIFFERENT mounted object. If the user navigates to another
+      // artifact mid-save, the effect cleanup bumps loadSeqRef and we bail before
+      // committing any version/selection state into the wrong canvas.
+      const saveSeq = loadSeqRef.current;
       const target = objectIdRef.current ?? idOrSlug;
       const result = await createVersionAction(target, {
         body: next,
         bodyFormat,
       });
+      if (saveSeq !== loadSeqRef.current) return; // object changed during save
       if (!result.isSuccess) {
         // Surface to the CodeEditor's save handler (it shows the message).
         throw new Error(result.message ?? "Save failed");
       }
-      const newHead = result.data.version;
+      // Defensive optional chaining: `version` may be absent on an unexpected
+      // success payload — fall back to a refresh-driven head selection below.
+      const newHead = result.data?.version;
       // Optimistically reflect the new head in the dropdown BEFORE the refresh so
       // the <select value> always has a matching <option> (see withOptimisticHead).
       if (newHead) {
@@ -272,13 +298,19 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
         setCode(next);
       }
       // Reconcile with the authoritative server list (idempotent; replaces the
-      // optimistic entry). A failure preserves the optimistic list above.
-      const refreshed = await refreshVersions();
+      // optimistic entry). Token-guarded so a refresh that resolves after the
+      // user navigated away does not write into the wrong canvas. A failure
+      // preserves the optimistic list above.
+      const refreshed = await refreshVersions(saveSeq);
+      if (saveSeq !== loadSeqRef.current) return;
       if (!newHead && refreshed && refreshed[0]) {
-        setSelectedVersionId(refreshed[0].id);
+        // No version id came back from createVersion — adopt the refreshed head
+        // AND reload its code so the editor/preview reflect the saved content
+        // (otherwise the selection changes but the body stays stale: split-brain).
+        await loadCode(refreshed[0].id);
       }
     },
-    [idOrSlug, bodyFormat, refreshVersions]
+    [idOrSlug, bodyFormat, refreshVersions, loadCode]
   );
 
   return (

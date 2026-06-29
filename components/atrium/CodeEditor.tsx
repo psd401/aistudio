@@ -182,6 +182,8 @@ export function CodeEditor({
         ref={hostRef}
         className="atrium-code-editor rounded border"
         data-testid="artifact-code-editor"
+        role="group"
+        aria-label={editable ? "Artifact code editor" : "Artifact code (read-only)"}
       />
       {editable && onSave && (
         <div className="flex items-center gap-3 text-xs text-gray-500">
