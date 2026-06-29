@@ -139,7 +139,15 @@ export default async function ReaderPage({
   const log = createLogger({ action: "atrium.readerPage" });
 
   // (b)+(c) Object must exist AND have a live intranet publication, else 404.
-  const published = await loadPublishedObject(slug);
+  // `loadPublishedObject` (a DB lookup) and `getOptionalRequester` (a session
+  // lookup) are independent, so run them concurrently — under Aurora Serverless
+  // v2 with dev auto-pause, cold-start connection latency would otherwise stack
+  // serially on every reader render. The session lookup is cheap and wasted only
+  // on the (rare) 404 path; the visibility gate below still 404s before using it.
+  const [published, requester] = await Promise.all([
+    loadPublishedObject(slug),
+    getOptionalRequester(),
+  ]);
   if (!published) {
     notFound();
   }
@@ -148,7 +156,6 @@ export default async function ReaderPage({
   // out-of-building user) 404s — NOT 403 — so its slug cannot be enumerated by
   // distinguishing "exists but forbidden" from "absent". `getOptionalRequester`
   // resolves the session into the principal `canView` evaluates.
-  const requester = await getOptionalRequester();
   const viewable = await visibilityService.canView(requester, {
     id: published.id,
     ownerUserId: published.ownerUserId,

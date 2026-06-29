@@ -225,11 +225,43 @@ export const publishService = {
     // Destination side effect runs AFTER the transaction commits (never inside
     // it): external IO in a transaction is a drizzle-client anti-pattern. The
     // intranet adapter is a no-op; `external_ref` stays whatever the row holds.
-    await adapter.publish({
-      objectId,
-      slug: obj.slug,
-      versionId: publishedVersionId,
-    });
+    //
+    // The publication row was committed as `status: "live"` above. If the adapter
+    // throws (a real non-no-op adapter — Schoology/Google — failing to notify the
+    // destination), the row would otherwise be a dangling "live" record for a
+    // version that never went live downstream. Compensate: flip the row to
+    // `failed` so a retry re-runs the adapter, and re-throw so the caller sees the
+    // failure. The intranet adapter cannot reach this path (it never throws).
+    try {
+      await adapter.publish({
+        objectId,
+        slug: obj.slug,
+        versionId: publishedVersionId,
+      });
+    } catch (adapterError) {
+      log.error("Publish adapter failed; marking publication failed", {
+        objectId,
+        destination: input.destination,
+        publicationId,
+        error: adapterError instanceof Error ? adapterError.message : String(adapterError),
+      });
+      await executeQuery(
+        (db) =>
+          db
+            .update(contentPublications)
+            .set({ status: "failed", updatedAt: new Date() })
+            .where(eq(contentPublications.id, publicationId)),
+        "publish.markFailed"
+      ).catch((markError) =>
+        // Best-effort compensation: if even the status flip fails, surface the
+        // ORIGINAL adapter error (more actionable) but log the marking failure.
+        log.error("Failed to mark publication failed after adapter error", {
+          publicationId,
+          error: markError instanceof Error ? markError.message : String(markError),
+        })
+      );
+      throw adapterError;
+    }
 
     log.info("Published content", {
       objectId,

@@ -203,16 +203,28 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
           const syncType = syncProtocol.readSyncMessage(decoder, enc, ydoc, ws);
           if (encoding.length(enc) > 1) ws.send(encoding.toUint8Array(enc));
           // Once the server's SyncStep2 has hydrated our doc, apply the edit once,
-          // then allow time for the update to flush before resolving.
+          // then allow time for the update to flush before resolving. Mark
+          // `applied` ONLY after applyEdit() AND the settle timer both succeed:
+          // if applyEdit() throws (e.g. ws.send() races OPEN->CLOSING and raises
+          // InvalidStateError), `applied` stays false so the subsequent `close`
+          // handler rejects rather than silently resolving an edit that never
+          // transmitted (HTTP 200 with no edit landed).
           if (!applied && syncType === SYNC_STEP_2) {
-            applied = true;
             applyEdit();
             settleTimer = setTimeout(settle, AGENT_SETTLE_MS);
+            applied = true;
           }
         } catch (e) {
-          log.error("Agent bridge sync message error", {
-            msg: e instanceof Error ? e.message : String(e),
-          });
+          // A failure in the sync/apply path (the only branch that mutates the
+          // doc) must FAIL the promise — not just log — so the bridge route
+          // returns an error instead of a false HTTP 200. Previously this only
+          // logged, so an InvalidStateError from ws.send() racing OPEN->CLOSING
+          // left `applied` set by the old ordering and the close handler resolved
+          // successfully (silent dropped edit). Log for observability AND reject.
+          const msg = e instanceof Error ? e.message : String(e);
+          log.error("Agent bridge sync/apply failed", { msg });
+          clearTimeout(timer);
+          reject(new Error(`collab sync apply failed: ${msg}`));
         }
       });
 

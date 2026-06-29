@@ -27,6 +27,7 @@
 
 import type { IncomingMessage } from "node:http";
 import { parse as parseUrl } from "node:url";
+import { randomUUID } from "node:crypto";
 import type WebSocket from "ws";
 import * as Y from "yjs";
 import * as syncProtocol from "y-protocols/sync";
@@ -77,7 +78,42 @@ const MAX_CONNS_PER_ROOM = ((): number => {
   return Number.isFinite(n) && n >= 0 ? n : 50;
 })();
 
+/**
+ * Max bytes for a single inbound websocket frame. Post-authentication, every
+ * binary frame is handed to y-protocols' readSyncMessage, which allocates to
+ * decode the embedded Yjs update — an authenticated user could otherwise send a
+ * single ~100 MB frame and spike memory enough to OOM the ECS task, taking down
+ * every concurrent collab session on it. A legitimate Yjs sync/update frame for
+ * a document is small (KB-scale); 8 MB is generous headroom for a large paste +
+ * the 512 KB agent-bridge ceiling while still bounding the per-frame allocation.
+ * Override with COLLAB_MAX_FRAME_BYTES; 0 disables the cap. Parsed strictly (an
+ * empty string must NOT collapse to 0 and silently disable the guard).
+ */
+const MAX_FRAME_BYTES = ((): number => {
+  const raw = process.env.COLLAB_MAX_FRAME_BYTES;
+  if (raw === undefined || raw.trim() === "") return 8 * 1024 * 1024;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 8 * 1024 * 1024;
+})();
+
 const REDIS_CHANNEL_PREFIX = "atrium:collab:";
+
+/**
+ * Per-process identity prefixed onto every Redis-published update so this
+ * instance can recognise — and skip applying — its OWN messages when they loop
+ * back through the pub/sub fan-out.
+ *
+ * Without it, an instance's local edit is published to Redis, received back by
+ * its own subscriber, and re-applied with origin "redis". Because the broadcast
+ * guard is `conn !== origin` and origin is the string "redis" (never a
+ * WebSocket), the update is re-broadcast to ALL local connections including the
+ * one that produced it — a self-echo that flickers the originating editor and
+ * wastes bandwidth on every keystroke under multi-instance Redis mode. The 16
+ * raw UUID bytes are prepended to the payload and stripped on receive.
+ */
+const INSTANCE_ID = randomUUID();
+const INSTANCE_ID_BYTES: Buffer = Buffer.from(INSTANCE_ID.replace(/-/g, ""), "hex");
+const INSTANCE_ID_LEN = INSTANCE_ID_BYTES.length; // 16
 
 interface DocEntry {
   ydoc: Y.Doc;
@@ -130,7 +166,17 @@ function initRedis(): void {
     const docName = channel.toString("utf8").slice(REDIS_CHANNEL_PREFIX.length);
     const entry = docs.get(docName);
     if (!entry) return;
-    Y.applyUpdate(entry.ydoc, new Uint8Array(message), "redis");
+    // Frames are `[16-byte instance id][update]`. Skip our OWN published frames
+    // looping back through pub/sub — re-applying them would re-broadcast the
+    // update to the local connection that originated it (self-echo flicker).
+    if (
+      message.length < INSTANCE_ID_LEN ||
+      message.compare(INSTANCE_ID_BYTES, 0, INSTANCE_ID_LEN, 0, INSTANCE_ID_LEN) === 0
+    ) {
+      return;
+    }
+    const update = new Uint8Array(message.subarray(INSTANCE_ID_LEN));
+    Y.applyUpdate(entry.ydoc, update, "redis");
     // Also schedule a (debounced) persist on the RECEIVING instance. The
     // ydoc "update" handler skips persist for origin === "redis" to avoid every
     // instance writing the same update, relying on the ORIGINATING instance to
@@ -247,6 +293,11 @@ async function getOrCreateDoc(docName: string): Promise<DocEntry> {
       }
 
       ydoc.on("update", (update: Uint8Array, origin: unknown) => {
+        // The `origin === "init"` guard is a forward-safety net, not a live path
+        // today: the hydrate/seed `Y.applyUpdate(..., "init")` calls above run
+        // BEFORE this observer is attached, so they never reach here. It exists so
+        // that if that ordering ever changes (e.g. a re-seed after attach), the
+        // initial-load update is not broadcast/persisted back as a user edit.
         if (origin === "init") return;
         // Broadcast to local connections (except the originator).
         const enc = encoding.createEncoder();
@@ -265,8 +316,10 @@ async function getOrCreateDoc(docName: string): Promise<DocEntry> {
           // best-effort while logging the failure.
           void redisPub
             ?.publish(
+              // Prefix the 16-byte instance id so this process can recognise +
+              // skip its own frame when the pub/sub fan-out loops it back.
               Buffer.from(`${REDIS_CHANNEL_PREFIX}${docName}`),
-              Buffer.from(update)
+              Buffer.concat([INSTANCE_ID_BYTES, Buffer.from(update)])
             )
             .catch((e) =>
               log.warn("Redis publish failed", {
@@ -345,6 +398,19 @@ function attachPreAuthBuffer(
     }
   };
   const onMessage = (data: Buffer): void => {
+    // Bound per-frame allocation BEFORE decoding. A single oversized binary frame
+    // (pre- or post-auth) handed to y-protocols' readSyncMessage would allocate
+    // to decode the embedded update; an authenticated user sending a ~100 MB
+    // frame could OOM the task. Reject + close oversized frames outright.
+    if (MAX_FRAME_BYTES > 0 && data.byteLength > MAX_FRAME_BYTES) {
+      log.warn("Inbound frame exceeds size limit, closing connection", {
+        docName,
+        bytes: data.byteLength,
+        limit: MAX_FRAME_BYTES,
+      });
+      rejectConn(4009, "Frame too large");
+      return;
+    }
     const u8 = new Uint8Array(data);
     if (processFrame) {
       processFrame(u8);

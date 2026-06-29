@@ -39,11 +39,76 @@ import { JSDOM } from "jsdom";
  */
 const SAFE_URL_SCHEME = /^(?:https?:|mailto:|tel:|#|\/(?!\/)|\.\/)/i;
 
-/** Plain URL-bearing attributes checked against the scheme allowlist. */
-const URL_ATTRS = ["href", "src"] as const;
+/**
+ * Plain URL-bearing attributes checked against the scheme allowlist. `poster`
+ * (<video>) is a single URL like `src`. `srcset` is handled separately below
+ * (it is a comma-separated candidate list, not a single URL).
+ */
+const URL_ATTRS = ["href", "src", "poster"] as const;
+
+/**
+ * Attributes whose value is a `srcset`-style candidate list: comma-separated
+ * `<url> [descriptor]` entries (`<img srcset>`, `<source srcset>`). DOMPurify
+ * keeps these by default and its scheme check does not parse the per-candidate
+ * URLs, so a protocol-relative entry (`//evil.com/x.png 2x`) survives and the
+ * browser fetches it cross-origin on render (tracking/exfil). Each candidate's
+ * URL is validated against SAFE_URL_SCHEME; if ANY candidate is unsafe the whole
+ * attribute is dropped (a partially-rewritten srcset is fragile and low-value).
+ */
+const SRCSET_ATTRS = ["srcset"] as const;
+
+/**
+ * Pull the URL token out of one `srcset` candidate (`<url> [descriptor]`). The
+ * URL is the leading run of non-whitespace; the optional descriptor (`2x`,
+ * `640w`) follows whitespace. Empty candidates (from trailing/double commas)
+ * yield "".
+ */
+function srcsetCandidateUrl(candidate: string): string {
+  return candidate.trim().split(/\s+/, 1)[0] ?? "";
+}
 
 /** The XLink namespace SVG `xlink:href` lives in (set via setAttributeNS). */
 const XLINK_NS = "http://www.w3.org/1999/xlink";
+
+/** Strip plain single-URL attributes (`href`/`src`/`poster`) with an unsafe scheme. */
+function stripUnsafeUrlAttrs(el: Element): void {
+  for (const attr of URL_ATTRS) {
+    if (el.hasAttribute(attr)) {
+      const value = (el.getAttribute(attr) ?? "").trim();
+      if (value && !SAFE_URL_SCHEME.test(value)) el.removeAttribute(attr);
+    }
+  }
+}
+
+/**
+ * Drop a `srcset`-style attribute if ANY of its comma-separated candidate URLs
+ * is unsafe (e.g. a protocol-relative `//evil.com/x.png 2x` the browser would
+ * fetch cross-origin on render). A partially-rewritten srcset is fragile and
+ * low-value, so the whole attribute is removed.
+ */
+function stripUnsafeSrcsetAttrs(el: Element): void {
+  for (const attr of SRCSET_ATTRS) {
+    if (!el.hasAttribute(attr)) continue;
+    const raw = (el.getAttribute(attr) ?? "").trim();
+    if (!raw) continue;
+    const unsafe = raw
+      .split(",")
+      .map(srcsetCandidateUrl)
+      .some((url) => url !== "" && !SAFE_URL_SCHEME.test(url));
+    if (unsafe) el.removeAttribute(attr);
+  }
+}
+
+/**
+ * Strip a namespaced SVG `xlink:href` with an unsafe scheme. The unprefixed
+ * has/get/removeAttribute calls cannot see it (it lives in the XLink namespace),
+ * so the *NS variants are required for this defense-in-depth check to cover it.
+ */
+function stripUnsafeXlinkHref(el: Element): void {
+  if (typeof el.getAttributeNS !== "function") return;
+  const xlink = (el.getAttributeNS(XLINK_NS, "href") ?? "").trim();
+  if (xlink && !SAFE_URL_SCHEME.test(xlink)) el.removeAttributeNS(XLINK_NS, "href");
+}
 
 /**
  * Lazily-constructed DOMPurify instance bound to a jsdom window. Built once per
@@ -64,23 +129,9 @@ function getPurifier(): DOMPurify {
   instance.addHook("afterSanitizeAttributes", (node) => {
     const el = node as Element;
     if (typeof el.hasAttribute !== "function") return;
-    for (const attr of URL_ATTRS) {
-      if (el.hasAttribute(attr)) {
-        const value = (el.getAttribute(attr) ?? "").trim();
-        if (value && !SAFE_URL_SCHEME.test(value)) {
-          el.removeAttribute(attr);
-        }
-      }
-    }
-    // SVG `xlink:href` lives in the XLink namespace; the unprefixed
-    // has/get/removeAttribute calls above cannot see it. Use the *NS variants so
-    // this defense-in-depth scheme check actually covers it.
-    if (typeof el.getAttributeNS === "function") {
-      const xlink = (el.getAttributeNS(XLINK_NS, "href") ?? "").trim();
-      if (xlink && !SAFE_URL_SCHEME.test(xlink)) {
-        el.removeAttributeNS(XLINK_NS, "href");
-      }
-    }
+    stripUnsafeUrlAttrs(el);
+    stripUnsafeSrcsetAttrs(el);
+    stripUnsafeXlinkHref(el);
   });
 
   purifier = instance;

@@ -35,6 +35,56 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * Per-document in-process async serialization lock (keyed on objectId).
+ *
+ * In "append" mode the screen→apply sequence reads the current doc state and
+ * then writes new content. If two concurrent agent-bridge requests target the
+ * SAME document, each could independently pass Bedrock Guardrails screening and
+ * then both apply in overlapping CRDT transactions — a TOCTOU race that lets
+ * combined content bypass the guardrail that reviewed each piece in isolation.
+ *
+ * This map chains each incoming request for a given objectId behind the
+ * previous request's completion (a promise chain / async mutex). Only one
+ * screen→apply sequence per document runs at a time within this ECS task.
+ *
+ * SCOPE: in-process only. Multiple ECS tasks do NOT share this lock; two tasks
+ * handling concurrent requests for the same document can still race. Cross-task
+ * serialization (e.g. a DynamoDB or Redis distributed lock) is a documented
+ * Phase 2 concern and is NOT added here to avoid the operational complexity of
+ * a Redis dependency (local dev has no Redis; it is optional).
+ */
+const _docLocks = new Map<string, Promise<void>>();
+
+/**
+ * Acquire the per-document lock, run `fn`, then release. Cleans up the map
+ * entry when this call is the last in the chain so the map stays bounded.
+ */
+async function withDocumentLock<T>(objectId: string, fn: () => Promise<T>): Promise<T> {
+  const prior = _docLocks.get(objectId) ?? Promise.resolve();
+  let release!: () => void;
+  const next = new Promise<void>((res) => { release = res; });
+  // Capture the chained promise in ONE variable: `prior.then(...)` returns a NEW
+  // promise each call, so we must store the SAME reference we later identity-check
+  // against — comparing two separate `.then()` results would never match, leaking
+  // the map entry forever (unbounded growth for documents that stop receiving writes).
+  const chained = prior.then(() => next);
+  _docLocks.set(objectId, chained);
+  try {
+    await prior;
+    return await fn();
+  } finally {
+    release();
+    // Clean up only if our chained promise is still the current tail. A later
+    // request for the same objectId would have replaced it (and chained behind
+    // `next`), in which case we must NOT delete — that request owns the entry.
+    if (_docLocks.get(objectId) === chained) {
+      _docLocks.delete(objectId);
+    }
+  }
+}
+
+
+/**
  * Validate the attribution agent id. The `X-Agent-Id` header is stamped onto the
  * CRDT nodes the edit produces, so anything that trusts that mark (audit trail, UI
  * attribution, export) trusts this value.
@@ -208,13 +258,23 @@ async function postHandler(
       return NextResponse.json({ error: "Unknown agent identity" }, { status: 403 });
     }
 
-    const blocked = await screenAgentMarkdown(markdown, loaded.obj.id, log);
-    if (blocked) {
+    // Serialize screen→apply for this document to prevent a TOCTOU race:
+    // two concurrent append-mode requests could each pass Bedrock Guardrails
+    // independently and then both apply in overlapping CRDT transactions, letting
+    // their combined content bypass the guardrail that reviewed each in isolation.
+    // withDocumentLock ensures only one screen→apply sequence runs per objectId at
+    // a time within this ECS task. See the _docLocks comment for cross-task scope.
+    const lockResult = await withDocumentLock(loaded.obj.id, async () => {
+      const blocked = await screenAgentMarkdown(markdown, loaded.obj.id, log);
+      if (blocked) return blocked;
+      await applyAgentEdit({ objectId: loaded.obj.id, markdown, agentId, mode });
+      return null;
+    });
+    if (lockResult !== null) {
+      // screenAgentMarkdown returned a blocked response inside the lock.
       timer({ status: "error" });
-      return blocked;
+      return lockResult;
     }
-
-    await applyAgentEdit({ objectId: loaded.obj.id, markdown, agentId, mode });
 
     timer({ status: "success" });
     log.info("Applied agent edit", { objectId: loaded.obj.id, agentId, mode });

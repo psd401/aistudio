@@ -24,7 +24,13 @@ import { SignJWT, jwtVerify } from "jose";
 
 const ISSUER = "atrium-collab";
 const AUDIENCE = "atrium-collab-ws";
-const TTL_SECONDS = 300; // 5 minutes; the client re-mints a fresh token on every websocket reconnect (DocumentEditor).
+const TTL_SECONDS = 60; // 60 seconds; reduced from 300s (Finding 2, PR #1062 review).
+// The client re-mints a fresh token on every websocket reconnect (DocumentEditor),
+// and the mint route (app/api/content/[id]/collab/route.ts) re-runs canView/canEdit
+// on EVERY mint (lines 51-68). A revoked user's existing token therefore expires
+// within <=60s because the next reconnect re-authorizes and will be denied.
+// A jti blocklist (Redis-backed instant revocation) is a Phase 2 concern.
+
 /**
  * Tighter TTL for the server-side agent bridge. That path connects to loopback,
  * completes within SYNC_TIMEOUT_MS (10s) and tears down — it never needs the
@@ -62,16 +68,29 @@ function secretKey(): Uint8Array {
   );
 }
 
-/** Mint a collab session token for one document. */
-export async function signCollabToken(claims: CollabClaims): Promise<string> {
+/**
+ * Single sign path for both the browser and agent-bridge tokens — they differ
+ * ONLY in TTL, so the issuer/audience/alg/claim-shape live in one place and an
+ * algorithm migration (e.g. HS256 -> EdDSA) only needs editing here, not in two
+ * near-identical copies that could drift.
+ */
+async function signCollabTokenWithTtl(
+  claims: CollabClaims,
+  ttlSeconds: number
+): Promise<string> {
   return new SignJWT({ oid: claims.oid, w: claims.w })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(claims.sub)
     .setIssuer(ISSUER)
     .setAudience(AUDIENCE)
     .setIssuedAt()
-    .setExpirationTime(`${TTL_SECONDS}s`)
+    .setExpirationTime(`${ttlSeconds}s`)
     .sign(secretKey());
+}
+
+/** Mint a collab session token for one document. */
+export async function signCollabToken(claims: CollabClaims): Promise<string> {
+  return signCollabTokenWithTtl(claims, TTL_SECONDS);
 }
 
 /**
@@ -81,14 +100,7 @@ export async function signCollabToken(claims: CollabClaims): Promise<string> {
  * with no special-casing.
  */
 export async function signAgentCollabToken(claims: CollabClaims): Promise<string> {
-  return new SignJWT({ oid: claims.oid, w: claims.w })
-    .setProtectedHeader({ alg: "HS256" })
-    .setSubject(claims.sub)
-    .setIssuer(ISSUER)
-    .setAudience(AUDIENCE)
-    .setIssuedAt()
-    .setExpirationTime(`${AGENT_TTL_SECONDS}s`)
-    .sign(secretKey());
+  return signCollabTokenWithTtl(claims, AGENT_TTL_SECONDS);
 }
 
 /**
