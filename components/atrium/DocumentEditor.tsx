@@ -30,6 +30,8 @@ import { getSchemaExtensions } from "@/lib/content/collab/editor-extensions";
 import { makeAuthorTag } from "@/lib/content/collab/provenance";
 import { snapshotDocumentAction } from "@/actions/db/atrium/snapshot-document";
 import { publishDocumentAction } from "@/actions/db/atrium/publish-document";
+import { unpublishDocumentAction } from "@/actions/db/atrium/unpublish-document";
+import { EditorToolbar } from "./EditorToolbar";
 import { AuthoredTracker } from "./authored-tracker";
 import { ProvenanceRail } from "./provenance-rail";
 import "@/styles/atrium-content.css";
@@ -197,41 +199,30 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
     setMessage(result.isSuccess ? "Published to intranet" : result.message ?? "Publish failed");
   }, [idOrSlug]);
 
+  // Unpublish: removes the live intranet publication and hides the auto-created
+  // nav item (#1054). The action 404-masks a non-viewable object and re-checks
+  // edit permission server-side.
+  const handleUnpublish = useCallback(async () => {
+    const target = docNameRef.current ?? idOrSlug;
+    const result = await unpublishDocumentAction(target, { destination: "intranet" });
+    setMessage(
+      result.isSuccess
+        ? result.data.unpublished
+          ? "Unpublished from intranet"
+          : "Not currently published"
+        : result.message ?? "Unpublish failed"
+    );
+  }, [idOrSlug]);
+
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-3 text-xs text-gray-500">
-        <span aria-live="polite">
-          {status === "connecting" && "Connecting…"}
-          {status === "ready" && (canEdit ? "Connected" : "Read-only")}
-          {status === "error" && "Connection error"}
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--atrium-human)" }} />
-          You
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--atrium-agent)" }} />
-          Agent
-        </span>
-        {canEdit && (
-          <span className="ml-auto flex gap-2">
-            <button
-              type="button"
-              onClick={handleSnapshot}
-              className="rounded border px-2 py-1 hover:bg-gray-50"
-            >
-              Snapshot
-            </button>
-            <button
-              type="button"
-              onClick={handlePublish}
-              className="rounded border px-2 py-1 hover:bg-gray-50"
-            >
-              Publish
-            </button>
-          </span>
-        )}
-      </div>
+      <EditorToolbar
+        status={status}
+        canEdit={canEdit}
+        onSnapshot={handleSnapshot}
+        onPublish={handlePublish}
+        onUnpublish={handleUnpublish}
+      />
       <div className="atrium-editor">
         <EditorContent editor={editor} className="atrium-content" />
       </div>
