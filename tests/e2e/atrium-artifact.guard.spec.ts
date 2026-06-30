@@ -8,16 +8,20 @@ import { test, expect } from "./fixtures";
  * route, now rendering artifacts in the cross-origin sandbox) and the authoring
  * page at `/atrium/[id]/edit`.
  *
- * These guards prove the routes are WIRED and existence-masked without needing a
- * session or a seeded artifact:
+ * These guards prove the routes are WIRED (auth-gated) without needing a session or
+ * a seeded artifact:
  *  - `/c/[slug]` while unauthenticated -> redirected to sign-in. The reader is
  *    under `(protected)`, so read access requires a session (then bounded by
  *    `visibilityService.canView` on the resolved principal). The 404-existence-
  *    masking contract — absent slug and out-of-audience object BOTH -> 404, never
- *    403 — is an AUTHENTICATED-tier guarantee covered by the gated functional spec;
- *    an anonymous probe is redirected before it reaches the canView/notFound logic.
+ *    403 — cannot be exercised by an anonymous probe (it is redirected before it
+ *    reaches the canView/notFound logic), so it is covered at two OTHER tiers:
+ *      • tests/unit/atrium-reader-page-masking.test.tsx drives the real ReaderPage
+ *        function and asserts canView===false -> notFound() (always-run, CI-safe);
+ *      • the gated functional spec (atrium-visibility-editor.spec.ts) exercises the
+ *        full authenticated round-trip when PLAYWRIGHT_AUTH_ENABLED=true.
  *  - `/atrium/[id]/edit` for an absent id while unauthenticated -> redirected to
- *    sign-in (the (protected) layout gates the route).
+ *    sign-in (the middleware gates the (protected) route, same 307 as /c/[slug]).
  *
  * The full functional flow (agent generates an artifact -> preview renders
  * sandboxed -> code edit creates a human version -> publish renders a reader page)
@@ -30,7 +34,7 @@ import { test, expect } from "./fixtures";
 const ABSENT_SLUG = "atrium-artifact-guard-does-not-exist";
 const SOME_ID = "00000000-0000-0000-0000-000000000000";
 
-test.describe("Atrium artifact surfaces — wiring + existence masking (always-run)", () => {
+test.describe("Atrium artifact surfaces — route auth-gating (always-run)", () => {
   test("GET /c/[slug] unauthenticated -> auth-gated (sign-in redirect, never served)", async ({
     request,
   }) => {
@@ -44,12 +48,16 @@ test.describe("Atrium artifact surfaces — wiring + existence masking (always-r
     expect(res.headers()["location"]).toContain("/api/auth/signin");
   });
 
-  test("GET /atrium/[id]/edit unauthenticated -> not a 200 (auth-gated)", async ({
+  test("GET /atrium/[id]/edit unauthenticated -> sign-in redirect (auth-gated)", async ({
     request,
   }) => {
-    // Under (protected): an unauthenticated request is redirected to sign-in (3xx)
-    // or otherwise denied — it must never serve the editor (200) for an absent id.
+    // Under (protected): the same middleware that gates /c/[slug] redirects an
+    // unauthenticated request to sign-in (307) before the route runs. Assert the
+    // SPECIFIC 307 + location header (not a loose `not.toBe(200)`, which a 500
+    // server crash would also satisfy) so a regression that downgrades the gate —
+    // or starts serving the editor outright — is caught.
     const res = await request.get(`/atrium/${SOME_ID}/edit`, { maxRedirects: 0 });
-    expect(res.status()).not.toBe(200);
+    expect(res.status()).toBe(307);
+    expect(res.headers()["location"]).toContain("/api/auth/signin");
   });
 });

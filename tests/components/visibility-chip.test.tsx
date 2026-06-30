@@ -454,9 +454,66 @@ describe("VisibilityChip", () => {
     await waitFor(() => {
       expect(
         screen.getByText(
-          "Failed to load role options — please close and reopen."
+          "Failed to load role options — switch the level away and back to retry."
         )
       ).toBeTruthy();
     });
+  });
+
+  it("retries the role-options load when the level switches away from group and back", async () => {
+    // Regression for the retry gap: a transient role-options failure left
+    // `roleOptionsLoaded` false but the effect deps ([open, canEdit, onError]) never
+    // changed on a level switch, so the dropdown stayed permanently empty for the
+    // whole dialog session. `level === "group"` is now a dep, so leaving group and
+    // returning re-runs the load — which succeeds on the second attempt here.
+    mockGet.mockResolvedValue(
+      getState({
+        visibilityLevel: "group",
+        grants: [{ kind: "role", value: "staff" }],
+      }) as Awaited<ReturnType<typeof getVisibilityAction>>
+    );
+    // First attempt fails, second succeeds.
+    mockListOptions
+      .mockResolvedValueOnce({
+        isSuccess: false,
+        message: "Could not load roles",
+      } as Awaited<ReturnType<typeof listGrantOptionsAction>>)
+      .mockResolvedValueOnce({
+        isSuccess: true,
+        data: { roles: ["staff", "administrator"] },
+      } as Awaited<ReturnType<typeof listGrantOptionsAction>>);
+
+    await act(async () => {
+      render(<VisibilityChip idOrSlug="obj-1" />);
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    // Open the editor (level is group) — the first role-options load runs and fails.
+    await act(async () => {
+      fireEvent.click(
+        screen.getByLabelText("Visibility: Group (click to edit)")
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Could not load roles")).toBeTruthy();
+    });
+    expect(mockListOptions).toHaveBeenCalledTimes(1);
+
+    const levelSelect = screen.getAllByTestId("select")[0] as HTMLSelectElement;
+    // Switch away from group (clears the error; the grant editor unmounts).
+    await act(async () => {
+      fireEvent.change(levelSelect, { target: { value: "internal" } });
+    });
+    expect(screen.queryByText("Could not load roles")).toBeNull();
+
+    // Switch back to group — the effect re-runs (groupActive false→true) and retries.
+    await act(async () => {
+      fireEvent.change(levelSelect, { target: { value: "group" } });
+    });
+    await waitFor(() => {
+      expect(mockListOptions).toHaveBeenCalledTimes(2);
+    });
+    // The retry succeeded: no error banner lingers.
+    expect(screen.queryByText("Could not load roles")).toBeNull();
   });
 });

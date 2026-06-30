@@ -144,10 +144,18 @@ export interface VisibilityChipProps {
 }
 
 /**
- * Lazily load the role options the first time the editor opens for an editor (only
- * an editor building a group grant needs them). A boolean ref guards against a
- * re-fetch after a successful load even though `roles.length` is intentionally NOT
- * a dep (depending on it would re-run the effect on every option-list change).
+ * Lazily load the role options the role-grant dropdown needs (only an editor with
+ * the GROUP level open needs them). A boolean ref guards against a re-fetch after a
+ * SUCCESSFUL load — but it is set ONLY on success, so a transient failure leaves it
+ * `false` and the next time the load condition becomes true again the effect retries.
+ *
+ * `groupActive` (level === "group") is a dep precisely so that retry path works: a
+ * failed load while on `group` leaves the dropdown empty, and switching the level
+ * picker away from `group` and back re-runs this effect (groupActive flips
+ * false→true) to retry — otherwise a one-time network blip would strand the dropdown
+ * empty for the entire dialog session with no escape but closing and reopening.
+ * `roleOptions.length` is intentionally NOT a dep (depending on it would re-run on
+ * every option-list change).
  *
  * NOTE: a boolean ref is correct HERE (unlike the parameterized-route anti-pattern
  * in CLAUDE.md) because the role list is GLOBAL — it does not depend on `idOrSlug`
@@ -159,12 +167,13 @@ export interface VisibilityChipProps {
 function useRoleOptions(
   open: boolean,
   canEdit: boolean,
+  groupActive: boolean,
   onError: (message: string) => void
 ): string[] {
   const [roleOptions, setRoleOptions] = useState<string[]>([]);
   const roleOptionsLoaded = useRef(false);
   useEffect(() => {
-    if (!open || !canEdit || roleOptionsLoaded.current) return;
+    if (!open || !canEdit || !groupActive || roleOptionsLoaded.current) return;
     let cancelled = false;
     void (async () => {
       // try/catch so a THROWN fetch (network error) still surfaces an error
@@ -176,20 +185,24 @@ function useRoleOptions(
           roleOptionsLoaded.current = true;
           setRoleOptions(result.data.roles);
         } else {
-          // Surface the failure so the user knows why the role dropdown is empty,
-          // rather than silently leaving them with zero role options.
+          // Surface the failure so the user knows why the role dropdown is empty.
+          // `roleOptionsLoaded` stays false, so returning to the group editor
+          // (groupActive false→true) retries this load.
           onError(result.message);
         }
       } catch {
         if (!cancelled) {
-          onError("Failed to load role options — please close and reopen.");
+          // Same retry-on-return semantics as the !isSuccess branch above:
+          // `roleOptionsLoaded` is untouched, so the load reattempts when the
+          // user switches the level picker back to `group`.
+          onError("Failed to load role options — switch the level away and back to retry.");
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [open, canEdit, onError]);
+  }, [open, canEdit, groupActive, onError]);
   return roleOptions;
 }
 
@@ -337,8 +350,10 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
     };
   }, [idOrSlug]);
 
-  // Role options for the group-grant builder, loaded lazily on first editor open.
-  const roleOptions = useRoleOptions(open, canEdit, setError);
+  // Role options for the group-grant builder, loaded lazily when the GROUP editor
+  // is open. Passing `level === "group"` lets a failed load retry when the user
+  // switches the level picker away from group and back (see useRoleOptions).
+  const roleOptions = useRoleOptions(open, canEdit, level === "group", setError);
 
   // Changing the level clears any stale error: a transient `useRoleOptions`
   // failure (or a prior save/validation error) is no longer actionable once the
