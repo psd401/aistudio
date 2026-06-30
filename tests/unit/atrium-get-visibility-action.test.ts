@@ -56,6 +56,17 @@ jest.mock("@/actions/db/atrium/requester", () => ({
     roles: ["staff"],
     isAdmin: false,
   })),
+  // listGrantOptionsAction resolves the requester (authoritative null/sub check)
+  // before the capability check. Mirror the real helper: throw when the threaded
+  // session is null / has no sub, otherwise resolve an authenticated user.
+  getUserRequester: jest.fn(
+    async (_requestId?: string, session?: { sub?: string } | null) => {
+      if (!session?.sub) {
+        throw new Error("No active session");
+      }
+      return { kind: "user", userId: 7, roles: ["staff"], isAdmin: false };
+    }
+  ),
 }));
 
 // ─── mocks for listGrantOptionsAction ──────────────────────────────────────
