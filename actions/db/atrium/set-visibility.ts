@@ -47,6 +47,18 @@ export async function setVisibilityAction(
   const log = createLogger({ requestId, action: "setVisibilityAction" });
 
   try {
+    // Log FIRST (matching get-visibility/list-grant-options and the Server Action
+    // Template) so unauthenticated, wrong-capability, and invalid-input failures
+    // below still produce an "Action started" entry rather than being invisible in
+    // the log stream. `input.level` is raw/untrusted here — sanitize it.
+    log.info("Action started: set visibility", {
+      objectId,
+      input: sanitizeForLogging({
+        level: input?.level,
+        grantCount: input?.grants?.length ?? 0,
+      }),
+    });
+
     if (!objectId) {
       throw ErrorFactories.missingRequiredField("objectId");
     }
@@ -75,11 +87,6 @@ export async function setVisibilityAction(
       kind: assertGrantKind(g.kind),
       value: g.value,
     }));
-
-    log.info("Action started: set visibility", {
-      objectId,
-      input: sanitizeForLogging({ level, grantCount: grants.length }),
-    });
 
     // Load the object and enforce view (mask existence → NotFound) then edit
     // permission BEFORE writing — the service's setLevel does not run permission

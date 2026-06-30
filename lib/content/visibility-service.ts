@@ -11,7 +11,7 @@
  * visibility widening (`setLevel`) lands with the publish service in Phase 5/7.
  */
 
-import { and, desc, eq, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, ne, sql, type SQL } from "drizzle-orm";
 import {
   executeQuery,
   executeTransaction,
@@ -214,19 +214,76 @@ async function applyGrantsInTx(
 }
 
 /**
+ * Validate a level + the grants supplied with it for a level write. Throws a
+ * `ValidationError` for an unknown level, grants supplied for a non-group level
+ * (a silent drop would widen access), or a grantless group level.
+ */
+function assertWritableLevel(
+  level: string,
+  grants: VisibilityGrant[] | undefined
+): void {
+  if (!VISIBILITY_LEVEL_SET.has(level)) {
+    throw new ValidationError(`Invalid visibility level: ${level}`, { level });
+  }
+  const grantCount = grants?.length ?? 0;
+  // Reject grants supplied for a non-group level rather than silently dropping
+  // them: those levels are not grant-keyed, and a caller that sent grants (e.g. a
+  // future REST/MCP path) intended to RESTRICT access — silently clearing them
+  // would widen access to exactly the principals the caller meant to scope.
+  if (level !== "group" && grantCount > 0) {
+    throw new ValidationError("grants are only valid for group visibility", {
+      level,
+      grantCount,
+    });
+  }
+  if (level === "group" && grantCount === 0) {
+    throw new ValidationError("group visibility requires at least one grant", {
+      level,
+    });
+  }
+}
+
+/**
+ * Reconcile the persisted grant set with the target level (see `setLevelInTx`
+ * JSDoc for the per-level rules): group replaces the full set, private preserves
+ * `user`-kind grants, internal/public clear everything.
+ */
+async function reconcileGrantsInTx(
+  tx: DbTransaction,
+  objectId: string,
+  level: string,
+  grants: VisibilityGrant[] | undefined
+): Promise<void> {
+  if (level === "group") {
+    await applyGrantsInTx(tx, objectId, grants ?? []);
+  } else if (level === "private") {
+    await clearNonUserGrantsInTx(tx, objectId);
+  } else {
+    await applyGrantsInTx(tx, objectId, []);
+  }
+}
+
+/**
  * Replace an object's visibility level (and, for `group`, its grants) inside the
  * caller's transaction — the atomic primitive shared by the standalone
  * `setLevel` (the visibility editor) and the publish path (which widens
  * visibility in the same transaction it records the publication).
  *
  * Semantics:
- * - `level !== "group"` clears any existing grants — a non-group level is not
- *   grant-keyed, so it always lands with zero grants on the row. But the caller
- *   MUST NOT *supply* grants for a non-group level: passing a non-empty `grants`
- *   array with such a level throws `ValidationError` rather than silently
+ * - `level === "internal"` / `level === "public"` clears ALL existing grants —
+ *   neither read path (`buildVisibilitySql`, `canView`) consults grants for these
+ *   levels, so they always land with zero grants on the row.
+ * - `level === "private"` clears every grant EXCEPT `user`-kind grants. Both read
+ *   paths honor a per-user grant on a `private` object (`buildVisibilitySql`'s
+ *   `privateUserGrant` EXISTS clause and `canView`'s `grants.some(... kind ===
+ *   "user")` branch), so deleting them on a level-write would silently revoke
+ *   access the read paths still grant — a write/read contradiction. We preserve
+ *   them so "keep this private" (re-saving `private`) is non-destructive.
+ * - The caller MUST NOT *supply* grants for a non-group level: passing a non-empty
+ *   `grants` array with such a level throws `ValidationError` rather than silently
  *   dropping it, because a caller that sent grants intended to RESTRICT access
- *   and a silent drop would widen it. The clear of prior persisted grants runs
- *   through `applyGrantsInTx(tx, id, [])`.
+ *   and a silent drop would widen it. (Existing `user`-grant preservation above is
+ *   about *retaining persisted* grants, not accepting *supplied* ones.)
  * - `level === "group"` requires at least one grant — a grantless group object
  *   is visible to no one but the owner/admin (private semantics without saying
  *   so), almost always a mistake (mirrors `contentService.create`).
@@ -246,35 +303,40 @@ async function setLevelInTx(
   extraSet: Record<string, unknown> = {}
 ): Promise<void> {
   const level = visibility.level;
-  if (!VISIBILITY_LEVEL_SET.has(level)) {
-    throw new ValidationError(`Invalid visibility level: ${level}`, { level });
-  }
-  // Reject grants supplied for a non-group level rather than silently dropping
-  // them: those levels are not grant-keyed, and a caller that sent grants (e.g. a
-  // future REST/MCP path) intended to RESTRICT access — silently clearing them
-  // would widen access to exactly the principals the caller meant to scope. Fail
-  // loud (no silent failure) instead.
-  if (level !== "group" && (visibility.grants?.length ?? 0) > 0) {
-    throw new ValidationError("grants are only valid for group visibility", {
-      level,
-      grantCount: visibility.grants?.length ?? 0,
-    });
-  }
-  const grants = level === "group" ? visibility.grants ?? [] : [];
+  assertWritableLevel(level, visibility.grants);
 
-  if (level === "group" && grants.length === 0) {
-    throw new ValidationError("group visibility requires at least one grant", {
-      objectId,
-    });
-  }
+  // Reconcile the persisted grant set with the target level — both inside the one
+  // transaction so the level and its grant set are never observed apart.
+  await reconcileGrantsInTx(tx, objectId, level, visibility.grants);
 
-  // Replace grants first (validates each value), then the level — both inside
-  // the one transaction so the level and its grant set are never observed apart.
-  await applyGrantsInTx(tx, objectId, grants);
   await tx
     .update(contentObjects)
-    .set({ visibilityLevel: level, updatedAt: new Date(), ...extraSet })
+    // Spread `extraSet` FIRST so the validated `visibilityLevel`/`updatedAt`
+    // always win — a future caller passing those keys in `extraSet` cannot
+    // override the level that just passed VISIBILITY_LEVEL_SET validation.
+    .set({ ...extraSet, visibilityLevel: level, updatedAt: new Date() })
     .where(eq(contentObjects.id, objectId));
+}
+
+/**
+ * Clear every grant on an object EXCEPT `user`-kind grants, inside the caller's
+ * transaction. Used when an object transitions to `private`: the read paths still
+ * honor per-user grants on a private object, so those must survive a level-write
+ * that no longer keys off role/building/department/grade grants. (Group grants of
+ * those kinds are meaningless once the object is private and are dropped.)
+ */
+async function clearNonUserGrantsInTx(
+  tx: DbTransaction,
+  objectId: string
+): Promise<void> {
+  await tx
+    .delete(contentVisibilityGrants)
+    .where(
+      and(
+        eq(contentVisibilityGrants.objectId, objectId),
+        ne(contentVisibilityGrants.grantKind, "user")
+      )
+    );
 }
 
 /** Load the normalized grants for an object. */

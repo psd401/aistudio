@@ -24,6 +24,7 @@ jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
   desc: (a: unknown) => a,
   eq: (...a: unknown[]) => a,
+  ne: (...a: unknown[]) => a,
   // `sql` is a tagged-template fn with a `.join` helper (used by buildVisibilitySql).
   sql: Object.assign((..._a: unknown[]) => ({}), {
     join: (..._a: unknown[]) => ({}),
@@ -316,8 +317,16 @@ describe("setLevelInTx — level + grant write semantics", () => {
   function fakeTx() {
     const inserted: unknown[][] = [];
     const updates: Record<string, unknown>[] = [];
+    // Record each delete's `where` argument so we can tell a full grant clear
+    // (`applyGrantsInTx` → `eq(objectId)`) apart from the user-preserving clear
+    // (`clearNonUserGrantsInTx` → `and(eq(objectId), ne(kind, "user"))`).
+    const deletes: unknown[] = [];
     const tx = {
-      delete: () => ({ where: async () => undefined }),
+      delete: () => ({
+        where: async (clause: unknown) => {
+          deletes.push(clause);
+        },
+      }),
       insert: () => ({
         values: async (rows: unknown) => {
           inserted.push(rows as unknown[]);
@@ -330,7 +339,7 @@ describe("setLevelInTx — level + grant write semantics", () => {
         },
       }),
     };
-    return { tx: tx as never, inserted, updates };
+    return { tx: tx as never, inserted, updates, deletes };
   }
 
   it("rejects a group level with no grants", async () => {
@@ -353,13 +362,16 @@ describe("setLevelInTx — level + grant write semantics", () => {
     expect(updates[0]?.visibilityLevel).toBe("group");
   });
 
-  it("clears grants when narrowing to a non-group level (e.g. private)", async () => {
-    // A non-group level is not grant-keyed: setLevel must clear any prior grants
-    // (the delete runs) and insert none, so stale grants can't silently widen
-    // access if the level is later flipped back to group.
-    const { tx, inserted, updates } = fakeTx();
+  it("preserves user grants when narrowing to private (read paths honor them)", async () => {
+    // private IS grant-keyed for per-user grants on both read paths
+    // (buildVisibilitySql's privateUserGrant + canView's user-grant branch), so a
+    // write to `private` must NOT delete them — it issues a single user-preserving
+    // delete (drops role/building/department/grade grants only) and inserts none.
+    const { tx, inserted, updates, deletes } = fakeTx();
     await visibilityService.setLevelInTx(tx, "obj-1", { level: "private" });
     expect(inserted).toHaveLength(0);
+    expect(deletes).toHaveLength(1); // the user-preserving clear
+    expect(deletes[0]).toBeDefined(); // a `where` clause (not a full unconditional delete)
     expect(updates[0]?.visibilityLevel).toBe("private");
   });
 

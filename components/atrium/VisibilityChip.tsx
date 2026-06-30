@@ -85,9 +85,21 @@ function levelChrome(level: Level): {
     case "group":
       return { variant: "warning", icon: <Users className="h-3 w-3" />, label: "Group" };
     case "private":
-    default:
       return { variant: "ghost", icon: <Lock className="h-3 w-3" />, label: "Private" };
+    default:
+      // Exhaustiveness guard: adding a new Level to LEVELS without a case here is
+      // a compile error, not a silent fall-through to a "Private" lock badge.
+      return assertNeverLevel(level);
   }
+}
+
+/**
+ * Compile-time exhaustiveness check for `Level`. The `never` parameter makes
+ * TypeScript reject any call reached with an unhandled level; the runtime fallback
+ * keeps the chip rendering if an out-of-band value ever slips past the type.
+ */
+function assertNeverLevel(level: never): LevelChrome {
+  return { variant: "ghost", icon: <Lock className="h-3 w-3" />, label: String(level) };
 }
 
 type LevelChrome = ReturnType<typeof levelChrome>;
