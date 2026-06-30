@@ -37,6 +37,7 @@ import { actorKindOf, agentIdOf, assertCanEdit, authorUserIdOf } from "./helpers
 import { rowToVersionDTO, type VersionRowAsText } from "./mappers";
 import { renderMarkdownToHtml } from "./render/markdown-render";
 import { s3Store } from "./storage/s3-store";
+import { contentEvents } from "./events";
 import { visibilityService } from "./visibility-service";
 import {
   ConflictError,
@@ -336,6 +337,16 @@ export const versionService = {
       "content.snapshot"
     );
     await flushSnapshotWrites(s3Writes);
+
+    // Emit after the row commits + blobs flush (§27): drives re-index of the new
+    // head. Best-effort — never rolls back a committed version.
+    await contentEvents.emit("content.version_created", {
+      objectId: obj.id,
+      versionId: version.id,
+      actorKind: actorKindOf(req),
+      agentLabel: req.kind === "user" ? null : req.agentLabel,
+    });
+
     return version;
   },
 

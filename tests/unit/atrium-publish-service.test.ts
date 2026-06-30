@@ -7,7 +7,8 @@
  *  - object exists but not viewable         -> NotFoundError (404, NOT 403 —
  *                                              existence masking for private ids)
  *  - viewable but not editable              -> ForbiddenError (via assertCanEdit)
- *  - destination public_web                 -> ForbiddenError (later phase)
+ *  - public-facing publish, caller lacks publish_public -> ApprovalRequiredError
+ *                                              (§26.4 gate); an admin passes it
  *  - unimplemented destination (schoology)  -> ValidationError (adapter throws)
  *  - no working head (currentVersionId null) -> ValidationError
  *  - happy path                              -> resolves with ids; applyGrants is
@@ -134,11 +135,17 @@ const chainProxy = new Proxy(chain, chainHandler);
 const txStub = chainProxy;
 
 import { publishService } from "@/lib/content/publish-service";
-import { ForbiddenError, NotFoundError, ValidationError } from "@/lib/content/errors";
+import {
+  ApprovalRequiredError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from "@/lib/content/errors";
 import type { Requester } from "@/lib/content/types";
 
 const owner: Requester = { kind: "user", userId: 7, roles: ["staff"], isAdmin: false };
 const stranger: Requester = { kind: "user", userId: 99, roles: ["staff"], isAdmin: false };
+const admin: Requester = { kind: "user", userId: 1, roles: ["administrator"], isAdmin: true };
 
 beforeEach(() => {
   publishableRows = [
@@ -193,10 +200,33 @@ describe("publishService.publish", () => {
     ).rejects.toThrow(ForbiddenError);
   });
 
-  it("throws ForbiddenError for the public_web destination (later phase)", async () => {
+  it("throws ApprovalRequiredError for public_web when the caller lacks publish_public (§26.4 gate)", async () => {
+    // The owner is a non-admin staff user with no publish_public capability, so
+    // the public-publish gate blocks them with a structured approval signal
+    // (surfaces map it to 202 / approval_required), not a hard 403.
     await expect(
       publishService.publish(owner, "o1", { destination: "public_web" })
-    ).rejects.toThrow(ForbiddenError);
+    ).rejects.toThrow(ApprovalRequiredError);
+  });
+
+  it("throws ApprovalRequiredError when widening visibility to public without publish_public", async () => {
+    // Public-facing is destination OR a visibility widening to `public`.
+    await expect(
+      publishService.publish(owner, "o1", {
+        destination: "intranet",
+        visibility: { level: "public" },
+      })
+    ).rejects.toThrow(ApprovalRequiredError);
+  });
+
+  it("lets an admin past the public_web gate (then hits the not-yet-implemented adapter)", async () => {
+    // An admin passes canPublishPublic, so the gate does NOT fire; the publish
+    // proceeds through the tx and only fails at the public_web adapter, which is
+    // still a later-phase no-op-throw. Proves the gate is conditional, not blanket.
+    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    await expect(
+      publishService.publish(admin, "o1", { destination: "public_web" })
+    ).rejects.toThrow(ValidationError);
   });
 
   it("throws ValidationError for an unimplemented destination (schoology)", async () => {

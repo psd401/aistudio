@@ -32,9 +32,15 @@ import {
 } from "@/lib/db/drizzle-client";
 import { contentObjects, contentPublications } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
-import { assertCanEdit, authorUserIdOf } from "./helpers";
+import {
+  actorKindOf,
+  assertCanEdit,
+  authorUserIdOf,
+  canPublishPublic,
+} from "./helpers";
 import { visibilityService } from "./visibility-service";
-import { NotFoundError, ValidationError, ForbiddenError } from "./errors";
+import { contentEvents } from "./events";
+import { NotFoundError, ValidationError, ApprovalRequiredError } from "./errors";
 import type { PublishAdapter, PublishDestination } from "./publish-adapters/types";
 import { intranetAdapter } from "./publish-adapters/intranet";
 import type {
@@ -122,7 +128,14 @@ export const publishService = {
   async publish(
     req: Requester,
     objectId: string,
-    input: PublishInput
+    input: PublishInput,
+    /**
+     * Surface-resolved authorization context. `hasPublishPublicCapability` lets
+     * the in-app server-action surface pass a non-admin human's
+     * `content.publish_public` capability into the §26.4 gate; API/MCP surfaces
+     * omit it (agents are scope-gated, admins pass via `req.isAdmin`).
+     */
+    opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<{ publicationId: string; publishedVersionId: string }> {
     const log = createLogger({ action: "publish.publish" });
 
@@ -148,13 +161,29 @@ export const publishService = {
     }
     assertCanEdit(req, obj.ownerUserId);
 
-    // Public web publishing (and the approval/capability gate it requires per
-    // §26.4) lands in a later phase. The Phase 1 reference path only needs
-    // `intranet`, so reject `public_web` explicitly rather than half-wiring it.
-    if (input.destination === "public_web") {
-      throw new ForbiddenError(
-        "Publishing to the public web is not available yet",
-        { destination: input.destination }
+    // §26.4 — the public-publish gate. Targeting a public-facing destination, or
+    // widening visibility to `public`, requires `content:publish_public`:
+    // autonomous agents never hold it, under-scoped delegated agents lack it, and
+    // non-admin humans need the capability. When the caller is not authorized,
+    // emit the approval-queue signal and raise the structured ApprovalRequiredError
+    // (surfaces map it to 202 / `approval_required`) — never silently publish
+    // unreviewed content to families/the public.
+    const isPublicFacing =
+      input.destination === "public_web" || input.visibility?.level === "public";
+    if (
+      isPublicFacing &&
+      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
+    ) {
+      await contentEvents.emit("content.public_publish_requested", {
+        objectId,
+        slug: obj.slug,
+        destination: input.destination,
+        actorKind: actorKindOf(req),
+        agentLabel: req.kind === "user" ? null : req.agentLabel,
+      });
+      throw new ApprovalRequiredError(
+        "Publishing to a public destination requires approval",
+        { destination: input.destination, objectId }
       );
     }
 
@@ -294,6 +323,19 @@ export const publishService = {
       destination: input.destination,
       publishedVersionId,
     });
+
+    // Emit AFTER the commit + adapter side effect, exactly once per successful
+    // publish (§27): re-index for retrieval, run connector pushes, notify. Best
+    // effort — a bus failure never rolls back the publish.
+    await contentEvents.emit("content.published", {
+      objectId,
+      slug: obj.slug,
+      versionId: publishedVersionId,
+      destination: input.destination,
+      actorKind: actorKindOf(req),
+      agentLabel: req.kind === "user" ? null : req.agentLabel,
+    });
+
     return { publicationId, publishedVersionId };
   },
 
@@ -410,6 +452,17 @@ export const publishService = {
     }
 
     log.info("Unpublished content", { objectId, destination });
+
+    // Emit after the commit + adapter teardown, only when a live publication was
+    // actually removed (the `unpublished: false` no-op path returned above).
+    await contentEvents.emit("content.unpublished", {
+      objectId,
+      slug: obj.slug,
+      destination,
+      actorKind: actorKindOf(req),
+      agentLabel: req.kind === "user" ? null : req.agentLabel,
+    });
+
     return { unpublished: true };
   },
 
