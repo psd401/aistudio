@@ -51,7 +51,16 @@ export function LibraryView(): React.JSX.Element {
   const [collectionId, setCollectionId] = useState<string | null>(null);
   const [kind, setKind] = useState<KindFilter>("all");
   const [tag, setTag] = useState("");
+  // Debounced copy of `tag`: the tag filter is a SERVER round-trip (unlike the
+  // client-side title search), so feeding every keystroke into `load` fires a
+  // request storm and flickers the list. Debounce 300ms before it reaches `load`.
+  const [debouncedTag, setDebouncedTag] = useState("");
   const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedTag(tag), 300);
+    return () => clearTimeout(t);
+  }, [tag]);
 
   const [items, setItems] = useState<ContentObjectDTO[]>([]);
   const [loading, setLoading] = useState(true);
@@ -73,7 +82,7 @@ export function LibraryView(): React.JSX.Element {
       const res = await listContentAction({
         collectionId: collectionId ?? undefined,
         kind: kind === "all" ? undefined : kind,
-        tag: tag.trim() || undefined,
+        tag: debouncedTag.trim() || undefined,
       });
       if (reqSeq !== reqSeqRef.current) return; // stale response — drop it
       if (res.isSuccess) {
@@ -91,7 +100,7 @@ export function LibraryView(): React.JSX.Element {
     } finally {
       if (reqSeq === reqSeqRef.current) setLoading(false);
     }
-  }, [collectionId, kind, tag]);
+  }, [collectionId, kind, debouncedTag]);
 
   useEffect(() => {
     void load();

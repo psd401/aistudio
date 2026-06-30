@@ -15,8 +15,9 @@
  *  - a collection lights up when it (or a descendant) holds a visible object, and
  *    every ANCESTOR of a visible node is kept so the tree stays connected.
  *
- * `loadAllCollections` (executeQuery) and `visibilityService.listVisible` are
- * mocked so the tree is computed purely in memory.
+ * `loadAllCollections` (executeQuery) and
+ * `visibilityService.visibleCountsByCollection` are mocked so the tree is computed
+ * purely in memory.
  */
 
 let allCollections: Array<{
@@ -53,7 +54,18 @@ jest.mock("drizzle-orm", () => ({
 
 jest.mock("@/lib/content/visibility-service", () => ({
   visibilityService: {
-    listVisible: jest.fn(async () => visibleObjects),
+    // The tree derives section visibility from per-collection counts (a GROUP BY
+    // aggregate in production). Fold the `visibleObjects` fixture into the same
+    // count-map shape the real `visibleCountsByCollection` returns.
+    visibleCountsByCollection: jest.fn(async () => {
+      const counts = new Map<string, number>();
+      for (const obj of visibleObjects) {
+        if (obj.collectionId) {
+          counts.set(obj.collectionId, (counts.get(obj.collectionId) ?? 0) + 1);
+        }
+      }
+      return counts;
+    }),
   },
 }));
 

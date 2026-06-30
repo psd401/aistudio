@@ -15,10 +15,12 @@
  *    private → admin only; group → cannot be satisfied at the collection level
  *    because collections carry no grants — see below), OR
  *  - the principal can view at least one content object placed in the collection
- *    (its subtree counts too). The visible-object set is computed by the same
- *    permission-pushed `listVisible` SQL every other read path uses, so a
- *    `group`-scoped collection naturally becomes visible to exactly the
- *    principals who can see content inside it (via the objects' own grants).
+ *    (its subtree counts too). The visible-object counts are computed by the same
+ *    permission-pushed visibility predicate (`buildVisibilitySql`) every other
+ *    read path uses, via a per-collection `GROUP BY` aggregate bounded by
+ *    collection count (not object count), so a `group`-scoped collection
+ *    naturally becomes visible to exactly the principals who can see content
+ *    inside it (via the objects' own grants).
  *
  * This keeps the two acceptance guarantees aligned:
  *  - "Published content appears in the collection tree" — a visible object lights
@@ -114,18 +116,6 @@ async function loadAllCollections(): Promise<CollectionRow[]> {
   }));
 }
 
-/** Count the requester-visible objects per collection (null collection ignored). */
-function countVisibleByCollection(
-  visibleObjects: Array<{ collectionId: string | null }>
-): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const obj of visibleObjects) {
-    if (!obj.collectionId) continue;
-    counts.set(obj.collectionId, (counts.get(obj.collectionId) ?? 0) + 1);
-  }
-  return counts;
-}
-
 /** Index collections by id and by parent id (the child lists), in one pass. */
 function indexCollections(collections: CollectionRow[]): {
   byId: Map<string, CollectionRow>;
@@ -188,16 +178,17 @@ export const collectionService = {
    */
   async tree(req: Requester): Promise<CollectionTreeNode[]> {
     const principal = principalOf(req);
-    const [collections, visibleObjects] = await Promise.all([
+    const [collections, visibleCountByCollection] = await Promise.all([
       loadAllCollections(),
-      // The objects this requester may view (permission-pushed). Excludes archived;
-      // published + draft both count toward "this section has content I can see".
-      // The reader sidebar is the same data filtered by canView, so a non-author
-      // only ever sees published content they're entitled to anyway.
-      visibilityService.listVisible(req, { limit: 200 }),
+      // Per-collection visible-object counts (permission-pushed, GROUP BY in SQL).
+      // Excludes archived; published + draft both count toward "this section has
+      // content I can see". Bounded by collection count, not object count, so a
+      // large library never silently prunes a section whose visible objects fall
+      // outside a capped list page (the reader sidebar is the same visibility, so
+      // a non-author only ever counts published content they're entitled to).
+      visibilityService.visibleCountsByCollection(req),
     ]);
 
-    const visibleCountByCollection = countVisibleByCollection(visibleObjects);
     const { byId, childrenOf } = indexCollections(collections);
     const keep = computeKeepSet(
       collections,

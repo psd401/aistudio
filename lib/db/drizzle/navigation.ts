@@ -157,6 +157,12 @@ export async function getNavigationItemById(id: number) {
  * Get navigation items accessible to a specific role
  * Uses navigation_item_roles junction table
  *
+ * EXCLUDES Atrium content nav items (`content_object_id IS NOT NULL`) for the same
+ * reason `getNavigationItems` does (Issue #1054): these role/capability-gated nav
+ * queries do NOT enforce the content object's `canView` visibility, so surfacing a
+ * content row here would leak a visibility-restricted object's title to a whole
+ * role. Content is surfaced only through the visibility-filtered `CollectionTree`.
+ *
  * @param roleName - Role name to filter by
  */
 export async function getNavigationItemsByRole(roleName: string) {
@@ -186,7 +192,9 @@ export async function getNavigationItemsByRole(roleName: string) {
         .where(
           and(
             eq(navigationItemRoles.roleName, roleName),
-            eq(navigationItems.isActive, true)
+            eq(navigationItems.isActive, true),
+            // Exclude Atrium content nav items (visibility-gated elsewhere).
+            isNull(navigationItems.contentObjectId)
           )
         )
         .orderBy(asc(navigationItems.position)),
@@ -197,6 +205,10 @@ export async function getNavigationItemsByRole(roleName: string) {
 /**
  * Get navigation items accessible to a user by their Cognito sub
  * Queries through user -> user_roles -> roles -> navigation_item_roles -> navigation_items
+ *
+ * EXCLUDES Atrium content nav items (`content_object_id IS NOT NULL`) — same
+ * rationale as `getNavigationItemsByRole`: this path is role-gated, not
+ * `canView`-gated, so a content row would leak a restricted object's title.
  *
  * @param cognitoSub - User's Cognito sub identifier
  */
@@ -230,7 +242,9 @@ export async function getNavigationItemsByUser(cognitoSub: string) {
         .where(
           and(
             eq(users.cognitoSub, cognitoSub),
-            eq(navigationItems.isActive, true)
+            eq(navigationItems.isActive, true),
+            // Exclude Atrium content nav items (visibility-gated elsewhere).
+            isNull(navigationItems.contentObjectId)
           )
         )
         .orderBy(asc(navigationItems.position)),

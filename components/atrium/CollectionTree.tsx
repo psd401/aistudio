@@ -65,8 +65,14 @@ function TreeRow({
         {hasChildren ? (
           <button
             type="button"
-            aria-label={expanded ? "Collapse section" : "Expand section"}
-            className="shrink-0 rounded p-0.5 hover:bg-muted"
+            aria-expanded={expanded}
+            aria-controls={`section-children-${node.id}`}
+            // Name the section in the label so a screen-reader user tabbing through
+            // several chevrons can tell them apart (generic "Expand section" can't).
+            aria-label={
+              expanded ? `Collapse ${node.name}` : `Expand ${node.name}`
+            }
+            className="shrink-0 rounded p-1 hover:bg-muted"
             onClick={(e) => {
               e.stopPropagation();
               setExpanded((v) => !v);
@@ -96,7 +102,7 @@ function TreeRow({
         </button>
       </div>
       {hasChildren && expanded && (
-        <ul>
+        <ul id={`section-children-${node.id}`}>
           {node.children.map((child) => (
             <TreeRow
               key={child.id}

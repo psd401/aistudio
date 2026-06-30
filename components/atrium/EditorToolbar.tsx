@@ -10,11 +10,15 @@
  * object UUID and re-check permission server-side).
  */
 
+import { Button } from "@/components/ui/button";
+
 type Status = "connecting" | "ready" | "error";
 
 interface EditorToolbarProps {
   status: Status;
   canEdit: boolean;
+  /** An edit action is in flight — disables the buttons to block double-fire. */
+  busy: boolean;
   onSnapshot: () => void;
   onPublish: () => void;
   onUnpublish: () => void;
@@ -23,6 +27,7 @@ interface EditorToolbarProps {
 export function EditorToolbar({
   status,
   canEdit,
+  busy,
   onSnapshot,
   onPublish,
   onUnpublish,
@@ -50,27 +55,35 @@ export function EditorToolbar({
       </span>
       {canEdit && (
         <span className="ml-auto flex gap-2">
-          <button
+          <Button
             type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy}
             onClick={onSnapshot}
-            className="rounded border px-2 py-1 hover:bg-gray-50"
           >
             Snapshot
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            size="sm"
+            disabled={busy}
             onClick={onPublish}
-            className="rounded border px-2 py-1 hover:bg-gray-50"
           >
             Publish
-          </button>
-          <button
+          </Button>
+          {/* Visually separated as the "undo a public action" control so it isn't
+              mistaken for Snapshot/Publish — unpublish removes a live page. */}
+          <Button
             type="button"
+            size="sm"
+            variant="ghost"
+            disabled={busy}
             onClick={onUnpublish}
-            className="rounded border px-2 py-1 hover:bg-gray-50"
+            className="text-destructive hover:text-destructive"
           >
             Unpublish
-          </button>
+          </Button>
         </span>
       )}
     </div>
