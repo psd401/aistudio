@@ -109,6 +109,8 @@ export async function POST(request: NextRequest): Promise<NextResponse | Respons
     cognitoSub: auth.cognitoSub,
     scopes: auth.scopes,
     requestId,
+    oauthClientId: auth.oauthClientId,
+    delegatedForUserId: auth.delegatedForUserId,
   }
 
   // --- Dispatch ---

@@ -31,6 +31,12 @@ export type {
 } from "./audit";
 
 export {
+  requesterFromApiAuth,
+  buildDelegatedRequester,
+} from "./requester-from-auth";
+export type { RequesterAuthInput } from "./requester-from-auth";
+
+export {
   ContentError,
   ForbiddenError,
   NotFoundError,

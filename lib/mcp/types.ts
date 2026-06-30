@@ -120,4 +120,15 @@ export interface McpToolContext {
   cognitoSub: string
   scopes: string[]
   requestId: string
+  /**
+   * The OIDC client id, when authenticated via an OAuth bearer token. Atrium
+   * content tools use it to resolve an autonomous `agent_identities` caller
+   * (§26). Absent for sk- key / session auth.
+   */
+  oauthClientId?: string
+  /**
+   * The human a delegated agent acts for (Atrium §26.1), from a token
+   * `delegated_for` claim. Drives `agent-delegated` requester construction.
+   */
+  delegatedForUserId?: number
 }
