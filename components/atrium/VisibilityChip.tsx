@@ -90,6 +90,36 @@ function levelChrome(level: Level): {
   }
 }
 
+type LevelChrome = ReturnType<typeof levelChrome>;
+
+/**
+ * The at-a-glance badge inside the chip's trigger button. Until the real level
+ * loads it shows a neutral placeholder instead of the default `private` chrome —
+ * otherwise an object that is actually public/internal/group briefly flashes a
+ * "Private" lock badge while the initial fetch is in flight.
+ */
+function ChipBadge({
+  loaded,
+  chrome,
+}: {
+  loaded: boolean;
+  chrome: LevelChrome;
+}) {
+  if (!loaded) {
+    return (
+      <Badge variant="ghost" className="gap-1 opacity-50">
+        Visibility…
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant={chrome.variant} className="gap-1 cursor-pointer">
+      {chrome.icon}
+      {chrome.label}
+    </Badge>
+  );
+}
+
 export interface VisibilityChipProps {
   /** Content object id or slug (the actions resolve a slug to the UUID). */
   idOrSlug: string;
@@ -179,6 +209,17 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   // Role options for the group-grant builder, loaded lazily on first editor open.
   const roleOptions = useRoleOptions(open, canEdit, setError);
 
+  // Changing the level clears any stale error: a transient `useRoleOptions`
+  // failure (or a prior save/validation error) is no longer actionable once the
+  // user picks a different level — e.g. switching away from `group` hides the
+  // grant builder entirely, so a "couldn't load roles" banner would otherwise
+  // linger with nothing the user can do about it. `handleOpenChange` only clears
+  // on close, not on level change.
+  const changeLevel = useCallback((next: Level) => {
+    setLevel(next);
+    setError(null);
+  }, []);
+
   const removeGrant = useCallback((index: number) => {
     setGrants((prev) => prev.filter((_, i) => i !== index));
   }, []);
@@ -239,13 +280,14 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
         <button
           type="button"
           className="inline-flex"
-          aria-label={`Visibility: ${chrome.label}${canEdit ? " (click to edit)" : ""}`}
+          aria-label={
+            loaded
+              ? `Visibility: ${chrome.label}${canEdit ? " (click to edit)" : ""}`
+              : "Loading visibility…"
+          }
           disabled={!loaded}
         >
-          <Badge variant={chrome.variant} className="gap-1 cursor-pointer">
-            {chrome.icon}
-            {chrome.label}
-          </Badge>
+          <ChipBadge loaded={loaded} chrome={chrome} />
         </button>
       </DialogTrigger>
       <DialogContent>
@@ -261,7 +303,7 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
           <LevelPicker
             level={level}
             disabled={!canEdit || saving}
-            onChange={setLevel}
+            onChange={changeLevel}
           />
 
           {level === "group" && (

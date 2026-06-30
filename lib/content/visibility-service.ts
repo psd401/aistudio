@@ -231,13 +231,19 @@ async function applyGrantsInTx(
  *   is visible to no one but the owner/admin (private semantics without saying
  *   so), almost always a mistake (mirrors `contentService.create`).
  *
- * Does NOT change `status` (that is the publish path's concern) and does NOT run
- * any permission check — callers gate with `assertCanEdit` first.
+ * Does NOT run any permission check — callers gate with `assertCanEdit` first.
+ *
+ * `extraSet` folds additional columns into the single level UPDATE rather than
+ * forcing the caller to issue a second UPDATE on the same row in the same
+ * transaction (the publish path uses it for `status: "published"` so the row is
+ * touched once, not twice with a doubly-stamped `updatedAt`). It does NOT change
+ * `status` itself — that remains the caller's concern.
  */
 async function setLevelInTx(
   tx: DbTransaction,
   objectId: string,
-  visibility: VisibilityInput
+  visibility: VisibilityInput,
+  extraSet: Record<string, unknown> = {}
 ): Promise<void> {
   const level = visibility.level;
   if (!VISIBILITY_LEVEL_SET.has(level)) {
@@ -267,7 +273,7 @@ async function setLevelInTx(
   await applyGrantsInTx(tx, objectId, grants);
   await tx
     .update(contentObjects)
-    .set({ visibilityLevel: level, updatedAt: new Date() })
+    .set({ visibilityLevel: level, updatedAt: new Date(), ...extraSet })
     .where(eq(contentObjects.id, objectId));
 }
 
@@ -374,14 +380,17 @@ export const visibilityService = {
   /**
    * Replace an object's grants AND level inside the caller's transaction — used
    * by the publish path, which widens visibility in the same transaction it
-   * records the publication. See `setLevelInTx` for the level/grant semantics.
+   * records the publication. `extraSet` folds extra columns (e.g.
+   * `status: "published"`) into the single level UPDATE so the publish path
+   * touches the row once. See `setLevelInTx` for the level/grant semantics.
    */
   async setLevelInTx(
     tx: DbTransaction,
     objectId: string,
-    visibility: VisibilityInput
+    visibility: VisibilityInput,
+    extraSet: Record<string, unknown> = {}
   ): Promise<void> {
-    await setLevelInTx(tx, objectId, visibility);
+    await setLevelInTx(tx, objectId, visibility, extraSet);
   },
 
   /**

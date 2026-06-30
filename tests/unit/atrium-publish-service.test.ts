@@ -30,6 +30,7 @@ let publishableRows: Array<{
 
 let setLevelInTxCalls = 0;
 let lastSetLevelVisibility: unknown = null;
+let lastSetLevelExtraSet: unknown = null;
 let canViewResult = true;
 
 jest.mock("@/lib/db/drizzle-client", () => ({
@@ -69,10 +70,18 @@ jest.mock("@/lib/content/visibility-service", () => ({
     // replaces level + grants atomically); track its invocation + the visibility
     // it received so the happy-path assertions can distinguish "no visibility
     // change" from "group widening".
-    setLevelInTx: jest.fn(async (_tx: unknown, _id: unknown, visibility: unknown) => {
-      setLevelInTxCalls += 1;
-      lastSetLevelVisibility = visibility;
-    }),
+    setLevelInTx: jest.fn(
+      async (
+        _tx: unknown,
+        _id: unknown,
+        visibility: unknown,
+        extraSet: unknown
+      ) => {
+        setLevelInTxCalls += 1;
+        lastSetLevelVisibility = visibility;
+        lastSetLevelExtraSet = extraSet;
+      }
+    ),
   },
 }));
 
@@ -123,6 +132,7 @@ beforeEach(() => {
   canViewResult = true;
   setLevelInTxCalls = 0;
   lastSetLevelVisibility = null;
+  lastSetLevelExtraSet = null;
   adapterPublishCalls = 0;
   txResults = [];
   jest.clearAllMocks();
@@ -199,6 +209,10 @@ describe("publishService.publish", () => {
       level: "group",
       grants: [{ kind: "role", value: "staff" }],
     });
+    // The `status: "published"` write is folded into setLevelInTx's single level
+    // UPDATE (via extraSet) rather than issued as a redundant second UPDATE on the
+    // same row in the same transaction.
+    expect(lastSetLevelExtraSet).toEqual({ status: "published" });
   });
 
   it("throws ValidationError when the upsert returns no row", async () => {

@@ -189,19 +189,23 @@ export const publishService = {
 
         // Optionally widen visibility in the same tx so the status change and
         // any grant updates are atomic. `setLevelInTx` replaces the level + (for
-        // group) its grants, enforcing the group-needs-grants guard; it does NOT
-        // touch status, so the publish path sets `published` itself below.
+        // group) its grants, enforcing the group-needs-grants guard. When a
+        // visibility change is requested, fold `status: "published"` into its
+        // single level UPDATE (via `extraSet`) so the row is touched once;
+        // otherwise issue a standalone status-only UPDATE.
         if (input.visibility) {
-          await visibilityService.setLevelInTx(tx, objectId, input.visibility);
-        }
-        // Always mark the object as published.
-        await tx
-          .update(contentObjects)
-          .set({
+          await visibilityService.setLevelInTx(tx, objectId, input.visibility, {
             status: "published",
-            updatedAt: new Date(),
-          })
-          .where(eq(contentObjects.id, objectId));
+          });
+        } else {
+          await tx
+            .update(contentObjects)
+            .set({
+              status: "published",
+              updatedAt: new Date(),
+            })
+            .where(eq(contentObjects.id, objectId));
+        }
 
         // Idempotent upsert: republishing the same destination updates the live
         // version + status in place (unique on (object_id, destination)).
