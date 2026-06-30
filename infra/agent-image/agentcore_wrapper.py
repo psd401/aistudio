@@ -30,6 +30,7 @@ kills the class of Converse format-translation bugs we used to own
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -98,6 +99,36 @@ def start_mantle_proxy() -> None:
 
     logger.error("Mantle proxy did not become ready within 20s")
     sys.exit(1)
+
+def read_proxy_usage() -> dict:
+    """Read cumulative token usage from the Mantle proxy's /usage endpoint
+    (issue #1083). Returns a dict with input_tokens / output_tokens / model,
+    or zeros when the proxy is unreachable / not yet emitting usage.
+
+    The wrapper calls this immediately before and after adapter.process() and
+    takes the delta — that sums a single turn's usage across all the Mantle
+    sub-calls a tool loop makes, since the proxy is per-container = per-session
+    and turns are serial. Never raises: telemetry must never break a chat turn.
+    """
+    import urllib.request
+    import urllib.error
+
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:18791/usage", timeout=2
+        ) as r:
+            if r.status != 200:
+                return {"input_tokens": 0, "output_tokens": 0, "model": None}
+            data = json.loads(r.read().decode("utf-8"))
+        return {
+            "input_tokens": int(data.get("input_tokens") or 0),
+            "output_tokens": int(data.get("output_tokens") or 0),
+            "model": data.get("model"),
+        }
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+        logger.warning("read_proxy_usage failed: %s", str(exc)[:200])
+        return {"input_tokens": 0, "output_tokens": 0, "model": None}
+
 
 # Track which workspace prefix this microVM is currently serving so we can
 # (a) skip redundant S3 pulls and (b) push to the right prefix on shutdown.
@@ -479,6 +510,12 @@ def main():
         yield {"type": "start", "session_id": session_id}
 
         loop = asyncio.get_running_loop()
+        # Snapshot the proxy's cumulative usage BEFORE the turn so we can take a
+        # delta afterward (issue #1083). The proxy is the ground-truth capture
+        # point for GLM-5 token usage — OpenClaw's WS events don't surface it
+        # reliably. Read in the executor so the (blocking) HTTP call doesn't
+        # stall the event loop.
+        usage_baseline = await loop.run_in_executor(None, read_proxy_usage)
         process_task = loop.run_in_executor(
             None, adapter.process, framed, session_id, model_override
         )
@@ -494,6 +531,19 @@ def main():
                 elapsed = int(time.time() - invocation_start)
                 yield {"type": "heartbeat", "elapsed_s": elapsed}
 
+        # Take the post-turn usage delta from the Mantle proxy (issue #1083).
+        # This is the authoritative token source: the proxy reads every
+        # OpenAI-compatible response's `usage` object, whereas the harness
+        # adapter's WS-event extraction frequently yields 0. We prefer the
+        # proxy delta and fall back to the harness numbers only when the proxy
+        # delta is 0 (proxy unreachable / pre-#1083 image). The proxy also
+        # carries the real model id (e.g. "zai.glm-5") so we never record the
+        # literal "default".
+        usage_final = await loop.run_in_executor(None, read_proxy_usage)
+        proxy_in = max(0, usage_final["input_tokens"] - usage_baseline["input_tokens"])
+        proxy_out = max(0, usage_final["output_tokens"] - usage_baseline["output_tokens"])
+        proxy_model = usage_final.get("model")
+
         # Adapter contract: TurnResult preferred; legacy str still
         # accepted so older adapters keep working during a phased rollout.
         if isinstance(result, str):
@@ -501,19 +551,25 @@ def main():
             metadata: dict = {
                 "session_id": session_id,
                 "user_id": user_email,
-                "model": model_override or "default",
+                "model": proxy_model or model_override or "zai.glm-5",
+                "input_tokens": proxy_in,
+                "output_tokens": proxy_out,
             }
         else:
             reply_text = result.text or ""
+            # Proxy delta wins; harness value is the fallback when the proxy
+            # reported nothing (e.g. usage chunk missing on a rescued turn).
+            input_tokens = proxy_in or result.tokens_in
+            output_tokens = proxy_out or result.tokens_out
             metadata = {
                 "session_id": session_id,
                 "user_id": user_email,
-                # Real values when the harness surfaces them; fall through
-                # to the override or "default" so the router's coalesce
-                # logic still has something sane.
-                "model": result.model or model_override or "default",
-                "input_tokens": result.tokens_in,
-                "output_tokens": result.tokens_out,
+                # Real model id, in priority order: proxy-observed > harness-
+                # observed > caller override > the known default model. We
+                # never emit the literal "default" anymore (issue #1083).
+                "model": proxy_model or result.model or model_override or "zai.glm-5",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "latency_ms": result.latency_ms,
                 # Deep-telemetry payload: per-turn messages + tool calls.
                 # The router reads these and inserts into
