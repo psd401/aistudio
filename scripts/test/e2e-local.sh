@@ -108,8 +108,12 @@ export PLAYWRIGHT_AUTH_ENABLED=true
 export PLAYWRIGHT_WARM=1
 if [ "${E2E_RUN_EXTERNAL:-}" != "1" ]; then export E2E_EXCLUDE_EXTERNAL=1; fi
 
-echo "e2e-local: running Playwright suite against $BASE (workers=${E2E_WORKERS:-2}, retries=${E2E_RETRIES:-2})…"
-bunx playwright test --workers="${E2E_WORKERS:-2}" --retries="${E2E_RETRIES:-2}" "$@"
+# Default to ONE worker: the host `next dev` server recompiles routes on demand and
+# can't keep up with the parallel suite, so workers=2 produced load-induced timeout
+# flakes (tests that pass in isolation). Serial is slower but reliable, so the hook
+# passes without SKIP_E2E. Override with E2E_WORKERS=N for a faster, flakier run.
+echo "e2e-local: running Playwright suite against $BASE (workers=${E2E_WORKERS:-1}, retries=${E2E_RETRIES:-2})…"
+bunx playwright test --workers="${E2E_WORKERS:-1}" --retries="${E2E_RETRIES:-2}" "$@"
 RESULT=$?
 
 if [ "$RESULT" -ne 0 ]; then
