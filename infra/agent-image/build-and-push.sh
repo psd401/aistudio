@@ -27,6 +27,21 @@ echo "Environment: ${ENVIRONMENT}"
 echo "Tag: ${TAG}"
 echo ""
 
+# Supply-chain enforcement gate (SEC-009): the agent image must ship no
+# unresolved BLOCKER(prod) markers. Every install in the Dockerfile is
+# expected to be checksum- or hash-verified; a lingering BLOCKER(prod)
+# comment means a known supply-chain gap is still open. Fail the build
+# before doing any expensive work if any marker remains.
+echo "Checking for unresolved BLOCKER(prod) markers in Dockerfile..."
+if grep -n 'BLOCKER(prod)' "${SCRIPT_DIR}/Dockerfile"; then
+  echo "ERROR: BLOCKER(prod) marker(s) found in Dockerfile (see above)." >&2
+  echo "       Resolve the supply-chain gap (checksum/hash verification) and" >&2
+  echo "       remove the marker before building." >&2
+  exit 1
+fi
+echo "  OK — no BLOCKER(prod) markers."
+echo ""
+
 # Get ECR repository URI from CloudFormation outputs
 echo "Looking up ECR repository from stack ${STACK_NAME}..."
 ECR_URI=$(aws cloudformation describe-stacks \
