@@ -82,6 +82,7 @@
     "084-drop-legacy-tools-tables.sql",
     "085-atrium-content.sql",
     "086-atrium-doc-state.sql",
-    "087-atrium-nav-content-uniqueness.sql"
+    "087-atrium-nav-content-uniqueness.sql",
+    "088-glm5-agent-pricing.sql"
   ]
 }

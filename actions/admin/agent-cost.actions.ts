@@ -73,10 +73,20 @@ async function queryCost(params: CostQueryParams) {
 /**
  * Get agent platform cost summary from AWS Cost Explorer.
  *
- * Uses the `costCenter=ai-agents` tag applied to the AgentCore execution
- * role. Bedrock IAM cost allocation (issue #887) propagates this tag to
- * every Bedrock invocation under that role, so the Cost Explorer filter
- * catches per-user spend without per-user IAM roles.
+ * RECONCILIATION ONLY — this is NOT the model-cost source of truth (issue
+ * #1083). It surfaces AgentCore / infrastructure spend tagged
+ * `costCenter=ai-agents` on the execution role.
+ *
+ * It does NOT capture GLM-5 model spend: GLM-5 runs through Bedrock Mantle
+ * (`bedrock-mantle.us-east-1.api.aws`) authenticated by a SEPARATE IAM user's
+ * bearer token (`AWS_BEARER_TOKEN_BEDROCK`, IAM user `psd-agent-bedrock-<env>`),
+ * not the tagged AgentCore execution role — so that model spend never carries
+ * the `costCenter` tag and won't appear here. Model cost is computed from
+ * tokens × ai_models pricing in agent-cost-projection.actions.ts.
+ *
+ * Follow-ups to investigate: (a) activate the `costCenter` cost-allocation tag
+ * in Billing; (b) determine whether Bedrock Marketplace/Mantle usage is
+ * taggable at all. Until then, the token×pricing path is authoritative.
  */
 export async function getAgentCostSummary(
   range: CostDateRange = "30d"
