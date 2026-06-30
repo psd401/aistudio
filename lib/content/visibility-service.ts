@@ -25,6 +25,7 @@ import {
 import { principalOf } from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
 import { NotFoundError, ValidationError } from "./errors";
+import { GRANT_KIND_SET } from "./validators";
 import type {
   ContentObjectDTO,
   ListFilter,
@@ -43,9 +44,6 @@ const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
 
 /** Upper bound on a grant value, mirroring the `grant_value varchar(255)` column. */
 const MAX_GRANT_VALUE_LENGTH = 255;
-
-/** Allowed grant kinds — mirrors the `grant_kind` DB enum. */
-const VALID_GRANT_KINDS = new Set(["role", "building", "department", "grade", "user"]);
 
 /** Allowed visibility levels — mirrors the `visibility_level` DB enum. */
 const VALID_VISIBILITY_LEVELS = new Set(["private", "group", "internal", "public"]);
@@ -67,7 +65,7 @@ const VALID_VISIBILITY_LEVELS = new Set(["private", "group", "internal", "public
  * contract and what `canView` / `buildVisibilitySql` both match on.
  */
 function assertValidGrant(grant: VisibilityGrant): void {
-  if (!VALID_GRANT_KINDS.has(grant.kind)) {
+  if (!GRANT_KIND_SET.has(grant.kind)) {
     throw new ValidationError(`Invalid grant kind: ${grant.kind}`, { kind: grant.kind });
   }
   const value = grant.value;
@@ -228,9 +226,13 @@ async function applyGrantsInTx(
  * visibility in the same transaction it records the publication).
  *
  * Semantics:
- * - `level !== "group"` clears all grants (a non-group level is not grant-keyed;
- *   leaving stale grants would silently widen access if the level were later
- *   flipped back to `group`). The clear runs through `applyGrants(tx, id, [])`.
+ * - `level !== "group"` clears any existing grants — a non-group level is not
+ *   grant-keyed, so it always lands with zero grants on the row. But the caller
+ *   MUST NOT *supply* grants for a non-group level: passing a non-empty `grants`
+ *   array with such a level throws `ValidationError` rather than silently
+ *   dropping it, because a caller that sent grants intended to RESTRICT access
+ *   and a silent drop would widen it. The clear of prior persisted grants runs
+ *   through `applyGrantsInTx(tx, id, [])`.
  * - `level === "group"` requires at least one grant — a grantless group object
  *   is visible to no one but the owner/admin (private semantics without saying
  *   so), almost always a mistake (mirrors `contentService.create`).

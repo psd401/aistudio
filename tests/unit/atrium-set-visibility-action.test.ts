@@ -9,7 +9,9 @@
  *  - a non-viewable object → NotFound-style error, setLevel NEVER called
  *  - a viewer who cannot edit → error, setLevel NEVER called
  *  - a valid owner edit → setLevel called with the resolved UUID + grants
- *  - a non-group level → grants cleared (empty array) regardless of input grants
+ *  - a non-group level → the action forwards level + grants verbatim to the
+ *    service (the service, not the action, decides their fate — it REJECTS
+ *    non-empty grants for a non-group level; see atrium-visibility.test.ts)
  */
 
 type LoadedObj = {
@@ -137,17 +139,24 @@ describe("setVisibilityAction — write", () => {
     expect(visibility.grants).toEqual([{ kind: "role", value: "staff" }]);
   });
 
-  it("forwards a non-group level to the service (which clears grants)", async () => {
+  it("forwards a non-group level + grants verbatim to the service", async () => {
     // The action forwards the level + any grants verbatim; the SERVICE
-    // (setLevelInTx) is the single point that ignores grants for a non-group
-    // level (verified in atrium-visibility.test.ts). The action must not
-    // second-guess that layering — it just validates + delegates.
+    // (setLevelInTx) is the single point that decides their fate — it REJECTS
+    // non-empty grants for a non-group level (verified in
+    // atrium-visibility.test.ts). The action must not second-guess that
+    // layering — it just validates the level/kinds + delegates. Here the
+    // service is mocked, so we only assert the forwarding contract: the level
+    // and the grants reach setLevel unchanged.
     await setVisibilityAction("o1", {
       level: "internal",
       grants: [{ kind: "role", value: "staff" }],
     });
     expect(setLevelMock).toHaveBeenCalledTimes(1);
-    const visibility = setLevelMock.mock.calls[0][1] as { level: string };
+    const visibility = setLevelMock.mock.calls[0][1] as {
+      level: string;
+      grants: { kind: string; value: string }[];
+    };
     expect(visibility.level).toBe("internal");
+    expect(visibility.grants).toEqual([{ kind: "role", value: "staff" }]);
   });
 });

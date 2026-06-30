@@ -26,27 +26,13 @@ import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { assertCanEdit } from "@/lib/content/helpers";
-import { ValidationError, NotFoundError } from "@/lib/content/errors";
-import { assertGrantKind } from "@/lib/content/validators";
+import { NotFoundError } from "@/lib/content/errors";
+import { assertGrantKind, assertLevel } from "@/lib/content/validators";
 import type { VisibilityLevel } from "@/lib/content/types";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
-
-/**
- * The visibility levels the DB enum accepts. The input `level` arrives as a plain
- * `string`, so it is narrowed via a RUNTIME check before reaching the service —
- * a bare `as` cast would let an unexpected level through to the enum column.
- */
-const VALID_LEVELS = ["private", "group", "internal", "public"] as const;
-const LEVEL_SET = new Set<string>(VALID_LEVELS);
-function assertLevel(level: string): VisibilityLevel {
-  if (!LEVEL_SET.has(level)) {
-    throw new ValidationError(`Invalid visibility level: ${level}`, { level });
-  }
-  return level as VisibilityLevel;
-}
 
 export async function setVisibilityAction(
   objectId: string,
@@ -73,8 +59,14 @@ export async function setVisibilityAction(
     // reads see the same session). Resolve the requester FIRST so an
     // unauthenticated caller gets a 401 (please log in) rather than a 403.
     const session = await getServerSession();
+    // `getUserRequester` throws `authNoSession()` for a null session / sub, so
+    // by this line `session` is guaranteed non-null with a `sub`. Use `session!`
+    // (not `session?.`): optional chaining would pass `undefined` to
+    // `hasCapabilityAccess`, which then re-resolves the session internally —
+    // defeating the "both reads see the same session" invariant this block
+    // promises. The non-null assertion makes that invariant visible here.
     const requester = await getUserRequester(requestId, session);
-    if (!(await hasCapabilityAccess("atrium-content", session?.sub))) {
+    if (!(await hasCapabilityAccess("atrium-content", session!.sub))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 

@@ -19,7 +19,7 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { publishService } from "@/lib/content/publish-service";
-import { assertGrantKind } from "@/lib/content/validators";
+import { assertGrantKind, assertLevel } from "@/lib/content/validators";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
@@ -29,7 +29,15 @@ export async function publishDocumentAction(
   objectId: string,
   input: {
     destination: "intranet";
-    visibility?: { level: "group"; grants: { kind: string; value: string }[] };
+    /**
+     * Optional visibility-widening applied in the publish transaction. `level`
+     * arrives as a plain `string` (the action/REST/MCP input contract) and is
+     * narrowed via `assertLevel` before reaching the service — matching the
+     * service's full `VisibilityLevel` capability rather than narrowing to
+     * `group` only at the type boundary. `grants` are only meaningful (and only
+     * accepted by the service) for `level: "group"`.
+     */
+    visibility?: { level: string; grants: { kind: string; value: string }[] };
   }
 ): Promise<ActionState<{ publicationId: string; publishedVersionId: string }>> {
   const requestId = generateRequestId();
@@ -45,8 +53,12 @@ export async function publishDocumentAction(
     // (authNoSession → "please log in") rather than a 403 — `hasCapabilityAccess`
     // returns false (not throws) on a missing session, so gating on it first would
     // surface "access denied" to a caller who simply needs to log in.
+    // `getUserRequester` throws `authNoSession()` for a null session / sub, so
+    // `session` is non-null past this line. Use `session!.sub` (not `session?.`):
+    // optional chaining would pass `undefined` to `hasCapabilityAccess`, which
+    // re-resolves the session internally and breaks the same-session invariant.
     const requester = await getUserRequester(requestId, session);
-    if (!(await hasCapabilityAccess("atrium-content", session?.sub))) {
+    if (!(await hasCapabilityAccess("atrium-content", session!.sub))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 
@@ -63,15 +75,15 @@ export async function publishDocumentAction(
       }),
     });
 
-    // `input.visibility` carries a widened `grant.kind` (plain `string`).
-    // `assertGrantKind` narrows it via a RUNTIME check (throwing ValidationError on
-    // an unexpected value) before it reaches `visibilityService.applyGrants` — the
-    // DB enum is the last line of defense, not the first.
+    // `input.visibility` carries a widened `level` and `grant.kind` (plain
+    // `string`). `assertLevel` / `assertGrantKind` narrow each via a RUNTIME
+    // check (throwing ValidationError on an unexpected value) before they reach
+    // the service — the DB enum is the last line of defense, not the first.
     const result = await publishService.publish(requester, objectId, {
       destination: input.destination,
       visibility: input.visibility
         ? {
-            level: input.visibility.level,
+            level: assertLevel(input.visibility.level),
             grants: input.visibility.grants.map((g) => ({
               kind: assertGrantKind(g.kind),
               value: g.value,

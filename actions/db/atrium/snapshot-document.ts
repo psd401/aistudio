@@ -51,8 +51,12 @@ export async function snapshotDocumentAction(
     // (authNoSession → "please log in") rather than a 403 — `hasCapabilityAccess`
     // returns false (not throws) on a missing session, so gating on it first would
     // surface "access denied" to a caller who simply needs to log in.
+    // `getUserRequester` throws `authNoSession()` for a null session / sub, so
+    // `session` is non-null past this line. Use `session!.sub` (not `session?.`):
+    // optional chaining would pass `undefined` to `hasCapabilityAccess`, which
+    // re-resolves the session internally and breaks the same-session invariant.
     const requester = await getUserRequester(requestId, session);
-    if (!(await hasCapabilityAccess("atrium-content", session?.sub))) {
+    if (!(await hasCapabilityAccess("atrium-content", session!.sub))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 
