@@ -40,7 +40,7 @@ export default async function AssistantArchitectsPage() {
   const rejectedTools = userTools.filter((tool) => tool.status === "rejected")
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-testid="assistant-architect-page">
       <div className="mb-6">
         <PageBranding />
         <div className="flex items-center justify-between">
