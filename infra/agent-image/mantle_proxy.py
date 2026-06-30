@@ -406,7 +406,17 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             d = json.loads(payload)
                         except Exception:
                             continue
-                        ch_obj = d.get("choices", [{}])[0]
+                        # A present-but-empty `choices: []` (the usage chunk
+                        # emitted for stream_options.include_usage, which OpenClaw
+                        # 2026.6.11 now requests) makes `.get("choices", [{}])`
+                        # return [] — the default only applies when the key is
+                        # ABSENT — so [0] would IndexError. Skip empty/usage
+                        # chunks; the raw bytes still relay to OpenClaw untouched,
+                        # this parse only feeds the retry/rescue classification.
+                        choices = d.get("choices") or []
+                        if not choices:
+                            continue
+                        ch_obj = choices[0]
                         delta = ch_obj.get("delta") or {}
                         if delta.get("content"):
                             content += delta["content"]
@@ -416,9 +426,15 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                     # Non-streaming: parse once.
                     try:
                         d = json.loads(joined)
-                        msg = d.get("choices", [{}])[0].get("message", {})
-                        content = msg.get("content") or ""
-                        finish = d.get("choices", [{}])[0].get("finish_reason")
+                        # Same empty-`choices` guard as the streaming path: a
+                        # present-but-empty list must not be indexed (the prior
+                        # `[{}]` default silently dropped content here under the
+                        # except: pass).
+                        choices = d.get("choices") or []
+                        if choices:
+                            msg = choices[0].get("message", {})
+                            content = msg.get("content") or ""
+                            finish = choices[0].get("finish_reason")
                     except Exception:
                         pass
                 log.info(j(

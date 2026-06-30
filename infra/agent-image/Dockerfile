@@ -11,56 +11,91 @@
 
 # Pin base image to a known-good immutable digest.
 #
-# Pinned to OpenClaw 2026.4.20 — the release that introduced kimi-k2.6 defaults
-# and the last upstream we've verified end-to-end with the Morning Brief flow.
+# Pinned to OpenClaw 2026.6.11 — the latest stable release (cut 2026-06-30),
+# bumped from 2026.4.20 for issue #1082. Digests verified 2026-06-30.
 #
-# Why pinned: `:latest` floated forward through 2026.4.21–2026.4.23 and broke
-# our agent runtime on 2026-04-22 and again 2026-04-24. Failure modes seen:
+# Background — why the old 2026.4.20 pin existed: `:latest` floated through
+# 2026.4.21–2026.4.23 and broke the runtime twice:
 #   - Morning Brief cron: harness adapter "chat deadline expired" (no final event)
-#   - Today (4/24): ENOENT on rename to '/home/node/.openclaw/.openclaw/workspace-state.json'
-#     — matches OpenClaw upstream regression tracked in issues #44783, #45765 and
-#     unmerged fix PRs #53326, #44806. Nested `.openclaw/.openclaw/` path is the
-#     same bug the PR author cites verbatim.
+#   - 4/24: ENOENT on rename to '/home/node/.openclaw/.openclaw/workspace-state.json'
+#     Our workspace is the `.openclaw`-suffixed path (openclaw.json), which
+#     triggered upstream's OPENCLAW_HOME double-nesting bug (issues #44783/#45765).
+#
+# Why 2026.6.11 is safe to bump to:
+#   - The double-nesting fix merged upstream as PR #93520 ("fix(workspace):
+#     store setup state outside workspace dot-dir", merged 2026-06-16) and is
+#     present in 2026.6.9+. Confirmed by commit ancestry — merge commit
+#     52280351bb53 is an ancestor of v2026.6.9 / v2026.6.10 / v2026.6.11; it is
+#     NOT in v2026.6.8 or earlier. The earlier targeted fix PRs
+#     (#45793/#46016/#47298/#45784) and #53326/#44806 were all closed UNMERGED
+#     — do not rely on those numbers.
+#   - The "chat deadline expired" Morning Brief failure is NOT confirmable from
+#     source. 2026.6.11 ships many gateway/session/chat-delivery fixes that
+#     plausibly cover it, but it MUST be re-confirmed by the Morning Brief
+#     smoke test (docs/operations/agent-platform-setup.md) before trusting it.
 #
 # Multi-arch index digest (Docker picks arm64 at build time via --platform):
-#   ghcr.io/openclaw/openclaw:2026.4.20
-#   index: sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
-#   arm64: sha256:437aed68f7ef7abce04dd17e5e1d80f92378111ea5db72ce54fdd517843cca79
+#   ghcr.io/openclaw/openclaw:2026.6.11
+#   index: sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
+#   arm64: sha256:0d5a5edced0af33baea44e0612d72f4d2cf75251613b48ea68ca14727faf2373
 #
-# DO NOT revert to `:latest` or bump without a clean end-to-end test that
-# includes the Morning Brief payload — a trivial "respond OK" prompt can mask
-# session-completion regressions. Track upstream PRs before moving forward.
-FROM ghcr.io/openclaw/openclaw@sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
+# Rollback target (previous good pin):
+#   2026.4.20  index sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
+#
+# DO NOT revert to `:latest` or bump without (a) confirming the workspace
+# double-nesting fix by commit ancestry and (b) a clean end-to-end test that
+# includes the Morning Brief payload — a trivial "respond OK" prompt masks
+# session-completion regressions.
+FROM ghcr.io/openclaw/openclaw@sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
 
 # Switch to root for installations
 USER root
 
+# Base OS packages FIRST so the checksum-verified installs below have the
+# tooling they need: `unzip` for bun's .zip release artifact, `curl` +
+# `ca-certificates` for the downloads, and the python3 venv stack for the
+# AgentCore SDK. (The exact Python version tracks the base image's distro;
+# verify with: docker run --rm psd-agent-base:latest python3 --version)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-venv tzdata ca-certificates curl unzip && \
+    rm -rf /var/lib/apt/lists/*
+
 # Pin versions for supply-chain safety. Update these as needed.
 ARG BUN_VERSION=1.2.12
 ARG UV_VERSION=0.7.9
-ARG BEDROCK_AGENTCORE_VERSION=1.0.0
 
-# Install bun (JS/TS runtime) and uv (Python package manager)
-# Pinned versions mitigate supply-chain risk. curl-pipe-bash is the official
-# install method for both tools.
-# BLOCKER(prod): Before production deployment, replace curl-pipe-bash with
-# checksum-verified installs. Compute SHA256 of each install script at the
-# pinned version and verify before execution:
-#   curl -fsSL https://bun.sh/install -o /tmp/bun-install.sh
-#   echo "<sha256>  /tmp/bun-install.sh" | sha256sum -c -
-#   bash /tmp/bun-install.sh "bun-v${BUN_VERSION}"
-# This prevents MITM/CDN compromise of the install scripts.
-RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
-    ln -s /root/.bun/bin/bun /usr/local/bin/bun && \
-    curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh && \
-    ln -s /root/.local/bin/uv /usr/local/bin/uv
-
-# Install Python and pip for the AgentCore wrapper.
-# The exact Python version depends on the base image's distro packages.
-# Verify with: docker run --rm psd-agent-base:latest python3 --version
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip python3-venv tzdata ca-certificates curl && \
-    rm -rf /var/lib/apt/lists/*
+# bun (JS/TS runtime) and uv (Python package manager) install from their
+# official GitHub release artifacts with SHA256 verification — NOT via
+# curl-pipe-bash. A CDN/DNS compromise of bun.sh / astral.sh would otherwise
+# substitute attacker binaries into every agent container, which holds IAM
+# reach to psd-agent-creds/${env}/* and psd-agent/${env}/* secrets. (Same
+# verified-download pattern as the gws and gh binaries below.)
+#
+# The SHA256 values are the published release checksums for the currently
+# pinned versions (aarch64 = the ARM64 AgentCore runtime). When bumping a
+# version, refresh the matching hash from the release:
+#   bun: github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/SHASUMS256.txt
+#        (the `bun-linux-aarch64.zip` line — glibc, NOT the -musl variant)
+#   uv:  github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-aarch64-unknown-linux-gnu.tar.gz.sha256
+ARG BUN_SHA256=c898a2057f919b700bf289d843dae49ee114c8f625c7c1fed043790f54694509
+ARG UV_SHA256=23242a8051e2191ed8d61f71a6792f2fc069ef18e6cdf07dedac3d3f648643c5
+RUN set -eux; \
+    curl -fsSL -o /tmp/bun.zip \
+      "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-aarch64.zip"; \
+    echo "${BUN_SHA256}  /tmp/bun.zip" | sha256sum -c -; \
+    unzip -q /tmp/bun.zip -d /tmp/bun-extract; \
+    install -m 0755 /tmp/bun-extract/bun-linux-aarch64/bun /usr/local/bin/bun; \
+    rm -rf /tmp/bun.zip /tmp/bun-extract; \
+    bun --version; \
+    curl -fsSL -o /tmp/uv.tar.gz \
+      "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-aarch64-unknown-linux-gnu.tar.gz"; \
+    echo "${UV_SHA256}  /tmp/uv.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/uv.tar.gz -C /tmp; \
+    install -m 0755 /tmp/uv-aarch64-unknown-linux-gnu/uv /usr/local/bin/uv; \
+    install -m 0755 /tmp/uv-aarch64-unknown-linux-gnu/uvx /usr/local/bin/uvx; \
+    rm -rf /tmp/uv.tar.gz /tmp/uv-aarch64-unknown-linux-gnu; \
+    uv --version
 
 # Google Workspace CLI (#912) — Rust single binary invoked by the psd-workspace
 # skill. ARM64 matches AgentCore runtime. The skill passes OAuth access tokens
@@ -117,16 +152,20 @@ RUN set -eux; \
     /usr/local/bin/gh.real --version; \
     /usr/local/bin/gh --version
 
-# Install the bedrock-agentcore SDK in a virtual environment (avoids --break-system-packages)
-# BLOCKER(prod): Verify the "bedrock-agentcore" PyPI package is the official AWS SDK
-# (not an unrelated name-squatted package). The SDK is pre-GA as of this PR — confirm
-# the package name on https://pypi.org/project/bedrock-agentcore/ before production use.
+# Install the bedrock-agentcore SDK in a virtual environment (avoids
+# --break-system-packages). Provenance is confirmed: this IS the official AWS
+# SDK (github.com/aws/bedrock-agentcore-sdk-python, author "AWS"), so the
+# earlier name-squat concern is disproven. It is hash-pinned to 1.15.1 via
+# requirements-agentcore.txt and installed with --require-hashes — the full
+# transitive closure must be present and hashed, so pip aborts the build on any
+# tampering or mismatch (the image build IS the supply-chain test). API
+# compatibility with agentcore_wrapper.py is verified for 1.15.1 (see the
+# header in requirements-agentcore.txt). Regenerate the hashes after a bump.
+COPY requirements-agentcore.txt /tmp/requirements-agentcore.txt
 RUN python3 -m venv /opt/agentcore-venv && \
-    /opt/agentcore-venv/bin/pip install --no-cache-dir \
-      "bedrock-agentcore==${BEDROCK_AGENTCORE_VERSION}" \
-      "websocket-client>=1.7.0" \
-      "boto3>=1.34.0" \
-      "aiohttp>=3.9.0"
+    /opt/agentcore-venv/bin/pip install --no-cache-dir --require-hashes \
+      -r /tmp/requirements-agentcore.txt && \
+    rm -f /tmp/requirements-agentcore.txt
 # matplotlib was added here for chat-chart's local engine, but it triggers
 # AgentCore's overlay-mount snapshotter to fail at microVM boot
 # (2026-05-18 — every microVM dies with "Failed to mount overlay: No such

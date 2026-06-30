@@ -283,8 +283,19 @@ class OpenClawAdapter(HarnessAdapter):
                     "id": connect_id,
                     "method": "connect",
                     "params": {
+                        # OpenClaw 2026.6.11's gateway moved to WS protocol v4
+                        # (PROTOCOL_VERSION=4); it rejects any [minProtocol,
+                        # maxProtocol] range that does not include its current
+                        # protocol (the pin at 3/3 produced PROTOCOL_MISMATCH /
+                        # WS_AUTH_FAIL after the bump). Advertise [3,4] per the
+                        # gateway protocol docs so we negotiate v4 against this
+                        # gateway yet stay compatible with a v3 gateway on
+                        # rollback. The v4 connect envelope + fields below are
+                        # unchanged, and device auth is disabled in the gateway
+                        # config (dangerouslyDisableDeviceAuth=true), so no
+                        # `device` block is required.
                         "minProtocol": 3,
-                        "maxProtocol": 3,
+                        "maxProtocol": 4,
                         "client": self.CLIENT_INFO,
                         "caps": [],
                         "auth": {"token": gateway_token},
@@ -488,14 +499,33 @@ class OpenClawAdapter(HarnessAdapter):
                                 if isinstance(to, int):
                                     tokens_out = max(tokens_out, to)
                         if stream == "assistant" and isinstance(data, dict):
-                            delta = (
-                                data.get("delta")
+                            # OpenClaw protocol v4 streams assistant text as
+                            # `deltaText` (the incremental piece) alongside
+                            # `message` (the CUMULATIVE snapshot); `replace=true`
+                            # means deltaText replaces the buffer rather than
+                            # appends. Protocol v3 used `delta`/`text` for the
+                            # increment. Accumulate ONLY an incremental field;
+                            # treat `message` as a whole-value snapshot (assign,
+                            # never +=) — summing a cumulative field double-counts
+                            # and garbles the reply ("H"+"He"+"Hel"…). The agent
+                            # event payload is logged by the diagnostic above on
+                            # first occurrence, so the live v4 shape is verifiable.
+                            replace = data.get("replace") is True
+                            increment = (
+                                data.get("deltaText")
+                                or data.get("delta")
                                 or data.get("text")
                                 or self._extract_text(data.get("content"))
-                                or self._extract_text(data.get("message"))
                             )
-                            if isinstance(delta, str) and delta:
-                                agent_assistant_accum += delta
+                            cumulative = self._extract_text(data.get("message"))
+                            if isinstance(increment, str) and increment:
+                                agent_assistant_accum = (
+                                    increment
+                                    if replace
+                                    else agent_assistant_accum + increment
+                                )
+                            elif isinstance(cumulative, str) and cumulative:
+                                agent_assistant_accum = cumulative
                         elif stream == "tool_call" and isinstance(data, dict):
                             tool_id = (
                                 data.get("id")
