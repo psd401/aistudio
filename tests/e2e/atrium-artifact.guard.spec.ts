@@ -10,11 +10,12 @@ import { test, expect } from "./fixtures";
  *
  * These guards prove the routes are WIRED and existence-masked without needing a
  * session or a seeded artifact:
- *  - `/c/[slug]` for an absent slug -> 404 (notFound). The reader resolves the
- *    object/publication first and 404s when there is none; it never 403s (an
- *    out-of-audience or unauthenticated probe cannot distinguish "exists but
- *    forbidden" from "absent" — the slug is not enumerable). Same contract as the
- *    document reader.
+ *  - `/c/[slug]` while unauthenticated -> redirected to sign-in. The reader is
+ *    under `(protected)`, so read access requires a session (then bounded by
+ *    `visibilityService.canView` on the resolved principal). The 404-existence-
+ *    masking contract — absent slug and out-of-audience object BOTH -> 404, never
+ *    403 — is an AUTHENTICATED-tier guarantee covered by the gated functional spec;
+ *    an anonymous probe is redirected before it reaches the canView/notFound logic.
  *  - `/atrium/[id]/edit` for an absent id while unauthenticated -> redirected to
  *    sign-in (the (protected) layout gates the route).
  *
@@ -30,12 +31,17 @@ const ABSENT_SLUG = "atrium-artifact-guard-does-not-exist";
 const SOME_ID = "00000000-0000-0000-0000-000000000000";
 
 test.describe("Atrium artifact surfaces — wiring + existence masking (always-run)", () => {
-  test("GET /c/[slug] for an absent artifact slug -> 404 (existence masked)", async ({
+  test("GET /c/[slug] unauthenticated -> auth-gated (sign-in redirect, never served)", async ({
     request,
   }) => {
-    const res = await request.get(`/c/${ABSENT_SLUG}`);
-    // notFound() renders the 404 page; an absent slug must NOT 403/redirect.
-    expect(res.status()).toBe(404);
+    // The reader is under (protected): an unauthenticated request is redirected to
+    // sign-in (307), never served (200). The 404-existence-masking contract (absent
+    // slug vs out-of-audience object both -> 404, never 403) is an AUTHENTICATED-tier
+    // guarantee — see the gated functional spec — because an anonymous probe is
+    // redirected before it reaches the canView/notFound logic.
+    const res = await request.get(`/c/${ABSENT_SLUG}`, { maxRedirects: 0 });
+    expect(res.status()).toBe(307);
+    expect(res.headers()["location"]).toContain("/api/auth/signin");
   });
 
   test("GET /atrium/[id]/edit unauthenticated -> not a 200 (auth-gated)", async ({
