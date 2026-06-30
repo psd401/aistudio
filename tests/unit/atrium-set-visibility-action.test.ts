@@ -106,6 +106,25 @@ describe("setVisibilityAction — enforcement", () => {
     expect(setLevelMock).not.toHaveBeenCalled();
   });
 
+  it("masks existence over input validity: a bad level on a non-viewable object fails identically to a valid one", async () => {
+    // SECURITY: input validation (assertLevel) must run AFTER the existence/view
+    // check, so a caller probing an object they cannot view cannot distinguish
+    // "exists but I sent a bad level" from "absent". Both must produce the same
+    // failed result — same uniform message, and the service is never reached (so
+    // no validation-specific error path leaks before the existence check).
+    canViewMock.mockResolvedValueOnce(false);
+    const badInput = await setVisibilityAction("o1", { level: "__nope__" });
+    canViewMock.mockResolvedValueOnce(false);
+    const goodInput = await setVisibilityAction("o1", { level: "internal" });
+
+    expect(badInput.isSuccess).toBe(false);
+    expect(goodInput.isSuccess).toBe(false);
+    // Indistinguishable to the caller: identical user-facing message...
+    expect(badInput.message).toBe(goodInput.message);
+    // ...and validation never short-circuited ahead of the existence/view check.
+    expect(setLevelMock).not.toHaveBeenCalled();
+  });
+
   it("404s a missing object and never writes", async () => {
     loadByIdOrSlugMock.mockResolvedValueOnce(null);
     const result = await setVisibilityAction("o1", { level: "internal" });
@@ -139,18 +158,22 @@ describe("setVisibilityAction — write", () => {
     expect(visibility.grants).toEqual([{ kind: "role", value: "staff" }]);
   });
 
-  it("forwards a non-group level + grants verbatim to the service", async () => {
+  it("forwards a non-group level + grants verbatim, and surfaces the service rejection", async () => {
     // The action forwards the level + any grants verbatim; the SERVICE
     // (setLevelInTx) is the single point that decides their fate — it REJECTS
     // non-empty grants for a non-group level (verified in
-    // atrium-visibility.test.ts). The action must not second-guess that
-    // layering — it just validates the level/kinds + delegates. Here the
-    // service is mocked, so we only assert the forwarding contract: the level
-    // and the grants reach setLevel unchanged.
-    await setVisibilityAction("o1", {
+    // atrium-visibility.test.ts). The action must not second-guess that layering.
+    // Mock the service to throw exactly as the real `setLevel` would for this
+    // input, so the test reflects PRODUCTION behavior (a failed save) instead of
+    // masking it with an unconditional success mock.
+    setLevelMock.mockRejectedValueOnce(
+      new Error("grants are only valid for group visibility")
+    );
+    const result = await setVisibilityAction("o1", {
       level: "internal",
       grants: [{ kind: "role", value: "staff" }],
     });
+    // The forwarding contract: the level + grants reach setLevel unchanged...
     expect(setLevelMock).toHaveBeenCalledTimes(1);
     const visibility = setLevelMock.mock.calls[0][1] as {
       level: string;
@@ -158,5 +181,7 @@ describe("setVisibilityAction — write", () => {
     };
     expect(visibility.level).toBe("internal");
     expect(visibility.grants).toEqual([{ kind: "role", value: "staff" }]);
+    // ...and the service's rejection surfaces as a failed ActionState, not success.
+    expect(result.isSuccess).toBe(false);
   });
 });

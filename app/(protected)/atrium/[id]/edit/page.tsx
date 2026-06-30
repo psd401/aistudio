@@ -72,7 +72,7 @@ export default async function AtriumEditPage({
               Interactive artifact · preview runs in an isolated sandbox
             </p>
           </div>
-          <VisibilityChip idOrSlug={obj.id} />
+          <VisibilityChip key={obj.id} idOrSlug={obj.id} />
         </header>
         <ArtifactCanvas key={obj.id} idOrSlug={obj.id} canEdit={userCanEdit} sandboxSrc={getArtifactSandboxRenderUrl()} />
       </main>

@@ -141,6 +141,8 @@ describe("getVisibilityAction — success shape", () => {
     canViewMock.mockReset().mockResolvedValue(true);
     grantsForMock.mockReset().mockResolvedValue([{ kind: "role", value: "staff" }]);
     canEditMock.mockReset().mockReturnValue(true);
+    getServerSessionMock.mockReset().mockResolvedValue({ sub: "cognito-sub-1" });
+    hasCapabilityAccessMock.mockReset().mockResolvedValue(true);
   });
 
   it("returns level, grants, and canEdit=true for the object owner", async () => {
@@ -150,6 +152,20 @@ describe("getVisibilityAction — success shape", () => {
     expect(result.data.visibilityLevel).toBe("group");
     expect(result.data.grants).toEqual([{ kind: "role", value: "staff" }]);
     expect(result.data.canEdit).toBe(true);
+  });
+
+  it("returns canEdit=false for an owner WITHOUT the atrium-content capability", async () => {
+    // The edit gate must match setVisibilityAction's (owner/admin AND capability),
+    // or the chip would show a Save button to a non-capable owner whose every save
+    // then fails with an opaque authz error. canEdit (owner) is true here, but the
+    // missing capability must zero out the editable flag.
+    hasCapabilityAccessMock.mockResolvedValueOnce(false);
+    const result = await getVisibilityAction("uuid-1");
+    expect(result.isSuccess).toBe(true);
+    if (!result.isSuccess) return;
+    expect(result.data.canEdit).toBe(false);
+    // A non-editor must not receive the grant list.
+    expect(result.data.grants).toEqual([]);
   });
 
   it("returns canEdit=false AND no grants for a non-owner who can only view", async () => {

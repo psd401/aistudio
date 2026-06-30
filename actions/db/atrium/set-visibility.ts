@@ -85,15 +85,17 @@ export async function setVisibilityAction(
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 
-    const level = assertLevel(input.level);
-    const grants = (input.grants ?? []).map((g) => ({
-      kind: assertGrantKind(g.kind),
-      value: g.value,
-    }));
-
     // Load the object and enforce view (mask existence → NotFound) then edit
     // permission BEFORE writing — the service's setLevel does not run permission
     // checks (it is also the publish path's primitive, which gates separately).
+    //
+    // SECURITY — order matters: existence/permission checks run BEFORE input
+    // validation (assertLevel / assertGrantKind below). If validation ran first, a
+    // caller probing a UUID they don't own with a bad `level` would get a
+    // ValidationError, while a non-existent UUID gets NotFound — distinguishing
+    // "exists but I sent garbage" from "absent" and defeating the existence
+    // masking the rest of this flow enforces. Both an unowned and an absent object
+    // must 404 identically regardless of input validity.
     const obj = await contentService.loadByIdOrSlug(idOrSlug);
     if (!obj) throw new NotFoundError("Content not found", { idOrSlug });
     const viewable = await visibilityService.canView(requester, {
@@ -103,6 +105,14 @@ export async function setVisibilityAction(
     });
     if (!viewable) throw new NotFoundError("Content not found", { idOrSlug });
     assertCanEdit(requester, obj.ownerUserId);
+
+    // Only now (the caller is a confirmed editor of an existing object) validate
+    // the input — a ValidationError here cannot leak existence to a non-editor.
+    const level = assertLevel(input.level);
+    const grants = (input.grants ?? []).map((g) => ({
+      kind: assertGrantKind(g.kind),
+      value: g.value,
+    }));
 
     // TOCTOU note: `canView` / `assertCanEdit` run here against `obj` loaded
     // OUTSIDE the write transaction that `setLevel` opens, so the object's

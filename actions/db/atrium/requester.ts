@@ -134,8 +134,17 @@ export async function getUserRequester(
  * access is bounded entirely by `canView`, not by the presence of a session.
  */
 export async function getOptionalRequester(
-  requestId?: string
+  requestId?: string,
+  /**
+   * Optional pre-resolved session, threaded through to avoid a second
+   * `getServerSession()` when the caller also runs a capability check against the
+   * same session (e.g. `getVisibilityAction`).
+   */
+  preResolvedSession?: CognitoSession | null
 ): Promise<Requester> {
-  const requester = await resolveAuthenticatedRequester(requestId);
+  const requester = await resolveAuthenticatedRequester(
+    requestId,
+    preResolvedSession
+  );
   return requester ?? GUEST_REQUESTER;
 }

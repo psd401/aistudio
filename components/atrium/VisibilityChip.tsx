@@ -145,11 +145,16 @@ export interface VisibilityChipProps {
 
 /**
  * Lazily load the role options the first time the editor opens for an editor (only
- * an editor building a group grant needs them). A ref guards against a re-fetch
- * after a successful load even though `roles.length` is intentionally NOT a dep
- * (depending on it would re-run the effect on every option-list change). Extracted
- * from the component to keep its body under the max-lines lint cap and to isolate
- * the fetch lifecycle (cancel flag + load guard) in one place.
+ * an editor building a group grant needs them). A boolean ref guards against a
+ * re-fetch after a successful load even though `roles.length` is intentionally NOT
+ * a dep (depending on it would re-run the effect on every option-list change).
+ *
+ * NOTE: a boolean ref is correct HERE (unlike the parameterized-route anti-pattern
+ * in CLAUDE.md) because the role list is GLOBAL — it does not depend on `idOrSlug`
+ * or any other prop, so it never needs to reset for a different id. The parent
+ * additionally keys `VisibilityChip` on `obj.id`, so the whole component (and this
+ * ref) remounts on navigation regardless. Extracted from the component to keep its
+ * body under the max-lines lint cap and to isolate the fetch lifecycle.
  */
 function useRoleOptions(
   open: boolean,
@@ -181,15 +186,30 @@ function useRoleOptions(
 }
 
 /**
- * Mirror the server's grant reconciliation (`clearNonUserGrantsInTx`) so the
- * chip's local `savedGrants` never diverges from what was actually persisted:
- * group keeps all supplied grants, private PRESERVES `user`-kind grants (both read
- * paths honor them), internal/public clear everything.
+ * Mirror the server's grant reconciliation so the chip's local `savedGrants` never
+ * diverges from what was actually persisted: group keeps all supplied grants,
+ * private PRESERVES `user`-kind grants (both read paths honor them), internal/public
+ * clear everything. Values are trimmed and (kind,value)-deduped to match the
+ * server's `applyGrantsInTx` normalization — otherwise a later Cancel would restore
+ * un-trimmed draft values as the "last persisted" state.
  */
 function reconcileSavedGrants(level: Level, grants: Grant[]): Grant[] {
-  if (level === "group") return grants;
-  if (level === "private") return grants.filter((g) => g.kind === "user");
-  return [];
+  const kept =
+    level === "group"
+      ? grants
+      : level === "private"
+        ? grants.filter((g) => g.kind === "user")
+        : [];
+  const seen = new Set<string>();
+  const normalized: Grant[] = [];
+  for (const g of kept) {
+    const value = g.value.trim();
+    const key = `${g.kind}:${value}`;
+    if (value.length === 0 || seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ kind: g.kind, value });
+  }
+  return normalized;
 }
 
 export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {

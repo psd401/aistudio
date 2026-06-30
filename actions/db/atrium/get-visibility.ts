@@ -25,6 +25,7 @@ import { hasCapabilityAccess } from "@/utils/roles";
 import { NotFoundError } from "@/lib/content/errors";
 import type { VisibilityGrant, VisibilityLevel } from "@/lib/content/types";
 import type { ActionState } from "@/types";
+import { getServerSession } from "@/lib/auth/server-session";
 import { getOptionalRequester } from "./requester";
 
 export interface VisibilityState {
@@ -46,7 +47,11 @@ export async function getVisibilityAction(
       idOrSlug: sanitizeForLogging(idOrSlug),
     });
 
-    const requester = await getOptionalRequester(requestId);
+    // Resolve the session ONCE and thread it to both the requester build and the
+    // capability check below, so a token refresh mid-action can't make the two
+    // observe different sessions (matching set-visibility / list-grant-options).
+    const session = await getServerSession();
+    const requester = await getOptionalRequester(requestId, session);
     const obj = await contentService.loadByIdOrSlug(idOrSlug);
     if (!obj) throw new NotFoundError("Content not found", { idOrSlug });
 
@@ -66,7 +71,8 @@ export async function getVisibilityAction(
     // check already passed — a non-owner is read-only regardless.
     const editable =
       canEdit(requester, obj.ownerUserId) &&
-      (await hasCapabilityAccess("atrium-content"));
+      !!session?.sub &&
+      (await hasCapabilityAccess("atrium-content", session.sub));
 
     // Return the grant list ONLY to an editor (owner/admin). The grant set names
     // every principal explicitly granted access — including the numeric users.id of
