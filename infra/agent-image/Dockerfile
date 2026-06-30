@@ -11,26 +11,42 @@
 
 # Pin base image to a known-good immutable digest.
 #
-# Pinned to OpenClaw 2026.4.20 — the release that introduced kimi-k2.6 defaults
-# and the last upstream we've verified end-to-end with the Morning Brief flow.
+# Pinned to OpenClaw 2026.6.11 — the latest stable release (cut 2026-06-30),
+# bumped from 2026.4.20 for issue #1082. Digests verified 2026-06-30.
 #
-# Why pinned: `:latest` floated forward through 2026.4.21–2026.4.23 and broke
-# our agent runtime on 2026-04-22 and again 2026-04-24. Failure modes seen:
+# Background — why the old 2026.4.20 pin existed: `:latest` floated through
+# 2026.4.21–2026.4.23 and broke the runtime twice:
 #   - Morning Brief cron: harness adapter "chat deadline expired" (no final event)
-#   - Today (4/24): ENOENT on rename to '/home/node/.openclaw/.openclaw/workspace-state.json'
-#     — matches OpenClaw upstream regression tracked in issues #44783, #45765 and
-#     unmerged fix PRs #53326, #44806. Nested `.openclaw/.openclaw/` path is the
-#     same bug the PR author cites verbatim.
+#   - 4/24: ENOENT on rename to '/home/node/.openclaw/.openclaw/workspace-state.json'
+#     Our workspace is the `.openclaw`-suffixed path (openclaw.json), which
+#     triggered upstream's OPENCLAW_HOME double-nesting bug (issues #44783/#45765).
+#
+# Why 2026.6.11 is safe to bump to:
+#   - The double-nesting fix merged upstream as PR #93520 ("fix(workspace):
+#     store setup state outside workspace dot-dir", merged 2026-06-16) and is
+#     present in 2026.6.9+. Confirmed by commit ancestry — merge commit
+#     52280351bb53 is an ancestor of v2026.6.9 / v2026.6.10 / v2026.6.11; it is
+#     NOT in v2026.6.8 or earlier. The earlier targeted fix PRs
+#     (#45793/#46016/#47298/#45784) and #53326/#44806 were all closed UNMERGED
+#     — do not rely on those numbers.
+#   - The "chat deadline expired" Morning Brief failure is NOT confirmable from
+#     source. 2026.6.11 ships many gateway/session/chat-delivery fixes that
+#     plausibly cover it, but it MUST be re-confirmed by the Morning Brief
+#     smoke test (docs/operations/agent-platform-setup.md) before trusting it.
 #
 # Multi-arch index digest (Docker picks arm64 at build time via --platform):
-#   ghcr.io/openclaw/openclaw:2026.4.20
-#   index: sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
-#   arm64: sha256:437aed68f7ef7abce04dd17e5e1d80f92378111ea5db72ce54fdd517843cca79
+#   ghcr.io/openclaw/openclaw:2026.6.11
+#   index: sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
+#   arm64: sha256:0d5a5edced0af33baea44e0612d72f4d2cf75251613b48ea68ca14727faf2373
 #
-# DO NOT revert to `:latest` or bump without a clean end-to-end test that
-# includes the Morning Brief payload — a trivial "respond OK" prompt can mask
-# session-completion regressions. Track upstream PRs before moving forward.
-FROM ghcr.io/openclaw/openclaw@sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
+# Rollback target (previous good pin):
+#   2026.4.20  index sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
+#
+# DO NOT revert to `:latest` or bump without (a) confirming the workspace
+# double-nesting fix by commit ancestry and (b) a clean end-to-end test that
+# includes the Morning Brief payload — a trivial "respond OK" prompt masks
+# session-completion regressions.
+FROM ghcr.io/openclaw/openclaw@sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
 
 # Switch to root for installations
 USER root

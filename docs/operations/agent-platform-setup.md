@@ -280,7 +280,7 @@ the Dockerfile (the enforcement gate that keeps these from regressing).
 
 | Artifact | Pin | Verification |
 |----------|-----|--------------|
-| OpenClaw base | `ghcr.io/openclaw/openclaw@sha256:5db497…` (2026.4.20) | Immutable digest in `FROM` |
+| OpenClaw base | `ghcr.io/openclaw/openclaw@sha256:3814fb…` (2026.6.11) | Immutable digest in `FROM` |
 | bun | `1.2.12` | `bun-linux-aarch64.zip` SHA256 vs `BUN_SHA256` ARG |
 | uv | `0.7.9` | `uv-aarch64-unknown-linux-gnu.tar.gz` SHA256 vs `UV_SHA256` ARG |
 | Google Workspace CLI (`gws`) | `0.22.5` | `.tar.gz` SHA256 vs `GWS_SHA256` ARG |
@@ -311,6 +311,38 @@ uv pip compile --universal --generate-hashes --python-version 3.11 \
 
 Paste each refreshed hash into the matching `ARG` in the Dockerfile (or commit
 the regenerated `requirements-agentcore.txt`). Never hand-edit a hash.
+
+**Bumping the OpenClaw base image (the `FROM` digest):**
+
+This is gated on a regression check, not just a digest swap — see the Dockerfile
+header for the full history. The runtime has twice been broken by a new OpenClaw
+release (Morning Brief "chat deadline expired"; nested
+`/home/node/.openclaw/.openclaw/` ENOENT). Resolve the digest and verify the
+workspace double-nesting fix is present — no Docker required, just `curl`/`jq`/`gh`:
+
+```bash
+REPO=openclaw/openclaw; TAG=2026.6.11        # target the latest stable release
+TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:$REPO:pull&service=ghcr.io" | jq -r .token)
+
+# Multi-arch index digest (this is what goes in FROM):
+curl -sI -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.oci.image.index.v1+json" \
+  "https://ghcr.io/v2/$REPO/manifests/$TAG" | grep -i docker-content-digest
+
+# arm64 sub-digest (record in the header for traceability):
+curl -s -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.oci.image.index.v1+json" \
+  "https://ghcr.io/v2/$REPO/manifests/$TAG" \
+  | jq -r '.manifests[] | select(.platform.architecture=="arm64") | .digest'
+
+# MANDATORY gate: confirm the workspace double-nesting fix (PR #93520, merge
+# commit 52280351bb53) is an ancestor of the target tag. ahead_by==0 ⇒ present.
+gh api "repos/$REPO/compare/v$TAG...52280351bb53" --jq '{ahead_by, fix_present: (.ahead_by==0)}'
+```
+
+Then update the `FROM` digest and the header block in `infra/agent-image/Dockerfile`,
+and **always** finish with the Morning Brief smoke test (below) — a trivial
+"respond OK" prompt masks session-completion regressions.
 
 ## Rich Chat output — cards, charts, button callbacks
 
