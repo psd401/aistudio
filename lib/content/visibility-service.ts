@@ -244,6 +244,17 @@ function assertWritableLevel(
 }
 
 /**
+ * Extra columns a level-write may fold into its single UPDATE. The `?: never`
+ * members make passing a reserved column a COMPILE error (not just a spread-order
+ * convention), so a caller can never override the validated `visibilityLevel` or
+ * the fresh `updatedAt`.
+ */
+type ExtraSet = Record<string, unknown> & {
+  visibilityLevel?: never;
+  updatedAt?: never;
+};
+
+/**
  * Reconcile the persisted grant set with the target level (see `setLevelInTx`
  * JSDoc for the per-level rules): group replaces the full set, private preserves
  * `user`-kind grants, internal/public clear everything.
@@ -300,7 +311,7 @@ async function setLevelInTx(
   tx: DbTransaction,
   objectId: string,
   visibility: VisibilityInput,
-  extraSet: Record<string, unknown> = {}
+  extraSet: ExtraSet = {}
 ): Promise<void> {
   const level = visibility.level;
   assertWritableLevel(level, visibility.grants);
@@ -390,13 +401,16 @@ export const visibilityService = {
     }
 
     if (obj.visibilityLevel === "private") {
-      // Private is owner/admin only, plus any explicit per-user grant.
+      // Private is owner/admin only, plus any explicit per-user grant. A caller
+      // with no userId (anonymous / autonomous-agent) can never match a `user`
+      // grant, so skip the grantsFor DB round-trip entirely — both for efficiency
+      // AND to close the timing side-channel that the existence-masking
+      // (notFound vs forbidden) is meant to remove. The SQL path
+      // (buildVisibilitySql.privateUserGrant) short-circuits the same way.
+      if (principal.userId == null) return false;
       const grants = await grantsFor(obj.id);
       return grants.some(
-        (g) =>
-          g.kind === "user" &&
-          principal.userId != null &&
-          String(principal.userId) === g.value
+        (g) => g.kind === "user" && String(principal.userId) === g.value
       );
     }
 
@@ -428,8 +442,15 @@ export const visibilityService = {
   },
 
   /**
-   * Replace an object's grants with the supplied set (delete-then-insert) inside
-   * the caller's transaction. A no-op (clears grants) when `grants` is empty.
+   * LOW-LEVEL primitive: replace an object's grants with the supplied set
+   * (delete-then-insert) inside the caller's transaction, validating each grant
+   * VALUE. A no-op (clears grants) when `grants` is empty.
+   *
+   * ⚠️ Does NOT enforce level invariants (group-needs-≥1-grant, non-group-clears,
+   * private-preserves-user). A caller writing grants alongside a level MUST use
+   * `applyGrantsForLevel` (or `setLevelInTx`) instead — calling this directly with
+   * `[]` on a `group` object leaves it grant-less and invisible to everyone but
+   * the owner/admin. Kept public only for value-validation unit coverage.
    */
   async applyGrants(
     tx: DbTransaction,
@@ -437,6 +458,24 @@ export const visibilityService = {
     grants: VisibilityGrant[]
   ): Promise<void> {
     await applyGrantsInTx(tx, objectId, grants);
+  },
+
+  /**
+   * Reconcile an object's grants for a target level, enforcing the same level
+   * invariants as `setLevelInTx` (group needs ≥1 grant and only group accepts
+   * supplied grants; private preserves persisted `user` grants; internal/public
+   * clear all). Used by `contentService.create`, which writes the level inline on
+   * INSERT and so cannot route the grants through `setLevelInTx`'s UPDATE — this
+   * gives it the same guard without the level write.
+   */
+  async applyGrantsForLevel(
+    tx: DbTransaction,
+    objectId: string,
+    level: string,
+    grants: VisibilityGrant[]
+  ): Promise<void> {
+    assertWritableLevel(level, grants);
+    await reconcileGrantsInTx(tx, objectId, level, grants);
   },
 
   /**
@@ -450,7 +489,7 @@ export const visibilityService = {
     tx: DbTransaction,
     objectId: string,
     visibility: VisibilityInput,
-    extraSet: Record<string, unknown> = {}
+    extraSet: ExtraSet = {}
   ): Promise<void> {
     await setLevelInTx(tx, objectId, visibility, extraSet);
   },

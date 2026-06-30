@@ -28,6 +28,7 @@ import { asc } from "drizzle-orm";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
+import { getUserRequester } from "./requester";
 
 export interface GrantOptions {
   /** Role names selectable for a `role` grant (matched against principal roles). */
@@ -42,11 +43,14 @@ export async function listGrantOptionsAction(): Promise<ActionState<GrantOptions
   try {
     log.info("Action started: list grant options");
 
+    // Resolve the session ONCE and thread it to both the requester build and the
+    // capability check (matching set-visibility / the other write-gated actions).
+    // `getUserRequester` owns the authoritative null/sub check, so this action
+    // automatically picks up any future session-contract changes (e.g. a
+    // suspended-user gate) rather than rolling its own `!session?.sub`.
     const session = await getServerSession();
-    if (!session?.sub) {
-      throw ErrorFactories.authNoSession();
-    }
-    if (!(await hasCapabilityAccess("atrium-content", session.sub))) {
+    await getUserRequester(requestId, session);
+    if (!(await hasCapabilityAccess("atrium-content", session!.sub))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 

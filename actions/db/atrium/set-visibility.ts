@@ -104,6 +104,16 @@ export async function setVisibilityAction(
     if (!viewable) throw new NotFoundError("Content not found", { idOrSlug });
     assertCanEdit(requester, obj.ownerUserId);
 
+    // TOCTOU note: `canView` / `assertCanEdit` run here against `obj` loaded
+    // OUTSIDE the write transaction that `setLevel` opens, so the object's
+    // ownership/visibility could in principle change between this check and the
+    // write. This is acceptable: only the owner (or an admin) passes
+    // `assertCanEdit`, ownership is effectively immutable, and `setLevel` re-loads
+    // the row `FOR UPDATE` inside its transaction (serializing concurrent writes
+    // and failing closed with NotFound if the row was deleted in the gap). The
+    // worst case is an owner's own edit racing their own concurrent edit, which
+    // the row lock orders deterministically.
+    //
     // Target the resolved UUID (the input may be a slug) so a slug change between
     // load and write cannot retarget a different object.
     const result = await visibilityService.setLevel(obj.id, { level, grants });

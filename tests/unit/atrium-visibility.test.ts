@@ -129,6 +129,15 @@ describe("canView — private", () => {
     withGrants([{ kind: "role", value: "staff" }]);
     expect(await visibilityService.canView(staffUser, obj("private"))).toBe(false);
   });
+  it("short-circuits (no grantsFor DB call) for a userId-less principal", async () => {
+    // A role-only autonomous agent has no userId, so it can never match a `user`
+    // grant — `canView` must return false WITHOUT the grantsFor round-trip (both
+    // for efficiency and to avoid a timing side-channel on private existence).
+    expect(await visibilityService.canView(roledAgent, obj("private"))).toBe(
+      false
+    );
+    expect(executeQueryMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("canView — group grants", () => {
@@ -408,6 +417,53 @@ describe("setLevelInTx — level + grant write semantics", () => {
       })
     ).rejects.toThrow(/invalid visibility level/i);
     expect(updates).toHaveLength(0);
+  });
+});
+
+describe("applyGrantsForLevel — level-aware grant reconciliation", () => {
+  function fakeTx() {
+    const inserted: unknown[][] = [];
+    const deletes: unknown[] = [];
+    const tx = {
+      delete: () => ({
+        where: async (clause: unknown) => {
+          deletes.push(clause);
+        },
+      }),
+      insert: () => ({
+        values: async (rows: unknown) => {
+          inserted.push(rows as unknown[]);
+        },
+      }),
+    };
+    return { tx: tx as never, inserted, deletes };
+  }
+
+  it("enforces the group-≥1-grant invariant (closes the applyGrants bypass)", async () => {
+    // Unlike the low-level `applyGrants`, this path runs `assertWritableLevel`, so
+    // a group object can never be left grant-less and invisible.
+    const { tx } = fakeTx();
+    await expect(
+      visibilityService.applyGrantsForLevel(tx, "obj-1", "group", [])
+    ).rejects.toThrow(/at least one grant/i);
+  });
+
+  it("rejects grants supplied for a non-group level (no silent drop)", async () => {
+    const { tx } = fakeTx();
+    await expect(
+      visibilityService.applyGrantsForLevel(tx, "obj-1", "private", [
+        { kind: "user", value: "100" },
+      ])
+    ).rejects.toThrow(/only valid for group/i);
+  });
+
+  it("inserts the supplied grants for a valid group level", async () => {
+    const { tx, inserted } = fakeTx();
+    await visibilityService.applyGrantsForLevel(tx, "obj-1", "group", [
+      { kind: "role", value: "staff" },
+    ]);
+    expect(inserted).toHaveLength(1);
+    expect((inserted[0] as unknown[]).length).toBe(1);
   });
 });
 

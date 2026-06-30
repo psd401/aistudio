@@ -14,6 +14,7 @@
 import {
   createLogger,
   generateRequestId,
+  sanitizeForLogging,
   startTimer,
 } from "@/lib/logger";
 import { createSuccess, handleError } from "@/lib/error-utils";
@@ -40,7 +41,9 @@ export async function getVisibilityAction(
   const log = createLogger({ requestId, action: "getVisibilityAction" });
 
   try {
-    log.info("Action started: get visibility", { idOrSlug });
+    log.info("Action started: get visibility", {
+      idOrSlug: sanitizeForLogging(idOrSlug),
+    });
 
     const requester = await getOptionalRequester(requestId);
     const obj = await contentService.loadByIdOrSlug(idOrSlug);

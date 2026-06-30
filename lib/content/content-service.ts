@@ -212,6 +212,9 @@ export const contentService = {
 
     // A group object with no grants is invisible to everyone but the owner/admin
     // (equivalent to private without the semantics) — almost always a mistake.
+    // The authoritative enforcement is `applyGrantsForLevel` below (against the
+    // RESOLVED level, so a collection-defaulted `group` is covered too); this is a
+    // cheap pre-transaction fast-fail for the common explicit-group case.
     if (
       input.visibility?.level === "group" &&
       (input.visibility.grants?.length ?? 0) === 0
@@ -264,9 +267,13 @@ export const contentService = {
           throw new ConflictError("Failed to create content object", { slug });
         }
 
-        await visibilityService.applyGrants(
+        // Reconcile grants against the RESOLVED level (enforces group-≥1-grant
+        // even when the level came from the collection default, and the
+        // non-group / private rules) — the same invariant `setLevelInTx` applies.
+        await visibilityService.applyGrantsForLevel(
           tx,
           row.id,
+          visibilityLevel,
           input.visibility?.grants ?? []
         );
 
