@@ -193,30 +193,26 @@ test.describe('Nexus Error Handling — Authenticated', () => {
     expect(isOnNexus).toBe(true)
   })
 
-  test('sending empty message is prevented (button disabled)', async ({ page }) => {
+  test('an empty submit is a no-op (no user message)', async ({ page }) => {
     await gotoNexus(page)
 
     const input = page.locator('[aria-label="Message input"]')
     await input.clear()
-    await input.fill('')
+    await page.locator('[aria-label="Send message"]').click()
 
-    const sendButton = page.locator('[aria-label="Send message"]')
-    await expect(sendButton).toBeDisabled()
-
-    // No messages should appear
-    const userBubbles = page.locator('[data-role="user"]')
-    await expect(userBubbles).toHaveCount(0)
+    // The composer guards an empty submit — no user message is created.
+    await expect(page.locator('[data-role="user"]')).toHaveCount(0)
   })
 
-  test('whitespace-only message is prevented (button disabled)', async ({ page }) => {
+  test('a whitespace-only submit is a no-op (no user message)', async ({ page }) => {
     await gotoNexus(page)
 
     const input = page.locator('[aria-label="Message input"]')
     await input.fill('   ')
+    await page.locator('[aria-label="Send message"]').click()
 
-    const sendButton = page.locator('[aria-label="Send message"]')
-    // The send button should remain disabled for whitespace-only input
-    await expect(sendButton).toBeDisabled()
+    // A whitespace-only submit is guarded too — no user message is created.
+    await expect(page.locator('[data-role="user"]')).toHaveCount(0)
   })
 })
 

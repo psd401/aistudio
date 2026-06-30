@@ -83,18 +83,20 @@ test.describe('Nexus Core Chat — Authenticated', () => {
     await expect(page.locator('[aria-label="Send message"]')).toBeVisible()
   })
 
-  test('send button is disabled while input is empty', async ({ page }) => {
+  test('an empty submit is a no-op; Send is ready once there is text', async ({ page }) => {
     const input = page.locator('[aria-label="Message input"]')
     const sendButton = page.locator('[aria-label="Send message"]')
 
+    // The composer keeps Send enabled (it only disables during attachment
+    // processing) and GUARDS an empty submit — clicking Send with no text is a no-op,
+    // so no user message is created.
     await input.clear()
-    await expect(sendButton).toBeDisabled()
+    await sendButton.click()
+    await expect(page.locator('[data-role="user"]')).toHaveCount(0)
 
+    // With text the button is ready (we don't actually send — that needs a provider).
     await input.fill('hello')
     await expect(sendButton).toBeEnabled()
-
-    await input.fill('')
-    await expect(sendButton).toBeDisabled()
   })
 
   test('stop button appears while AI is streaming, disappears when done', async ({ page }) => {
