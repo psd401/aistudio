@@ -16,6 +16,15 @@
 #   uv pip compile --universal --generate-hashes --python-version 3.11 \
 #     --no-annotate --no-header requirements-agentcore.in -o requirements-agentcore.txt
 #
+# VERIFY with the LITERAL production installer before merge. The Dockerfile
+# installs via `pip install --require-hashes` (not uv), so validate with the
+# same tool on the target runtime (Python 3.11, aarch64-linux) — a base-image
+# python/pip change can shift wheel-tag resolution and should fail here, not in
+# the build:
+#   python3 -m venv /tmp/verify-venv && \
+#     /tmp/verify-venv/bin/pip install --no-cache-dir --require-hashes \
+#       -r requirements-agentcore.txt --dry-run
+#
 # API compatibility with agentcore_wrapper.py confirmed for 1.15.1:
 #   bedrock_agentcore.runtime.BedrockAgentCoreApp, @app.entrypoint(payload,
 #   context), context.session_id, async-generator -> text/event-stream SSE.

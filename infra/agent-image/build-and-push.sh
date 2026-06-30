@@ -33,6 +33,14 @@ echo ""
 # comment means a known supply-chain gap is still open. Fail the build
 # before doing any expensive work if any marker remains.
 echo "Checking for unresolved BLOCKER(prod) markers in Dockerfile..."
+# Fail closed if the Dockerfile can't be read: an `if grep ...` condition is
+# exempt from `set -e`, and grep's "no match" (exit 1) and "error" (exit 2,
+# e.g. unreadable/missing file) are indistinguishable to the `if`. Without
+# this guard a broken checkout would silently report "OK" and skip the gate.
+if [ ! -r "${SCRIPT_DIR}/Dockerfile" ]; then
+  echo "ERROR: cannot read ${SCRIPT_DIR}/Dockerfile — the supply-chain gate could not run." >&2
+  exit 1
+fi
 if grep -n 'BLOCKER(prod)' "${SCRIPT_DIR}/Dockerfile"; then
   echo "ERROR: BLOCKER(prod) marker(s) found in Dockerfile (see above)." >&2
   echo "       Resolve the supply-chain gap (checksum/hash verification) and" >&2
