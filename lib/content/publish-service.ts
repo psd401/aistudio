@@ -169,6 +169,24 @@ export const publishService = {
 
     const publicationId = await executeTransaction(
       async (tx: DbTransaction) => {
+        // Lock the content row FOR UPDATE at the start of the transaction so two
+        // concurrent publishes of the same object serialize here rather than racing
+        // through `applyGrantsInTx`'s DELETE (no contention) and both reaching the
+        // grant INSERT — where the second would hit the `uq_cvg` unique constraint
+        // and roll back as an opaque 500. The standalone `visibilityService.setLevel`
+        // acquires the same lock; mirror it here. The row was confirmed to exist via
+        // `loadPublishable` above, but re-select inside the tx (a concurrent delete
+        // could have removed it between the load and this lock); a missing row 404s.
+        const locked = await tx
+          .select({ id: contentObjects.id })
+          .from(contentObjects)
+          .where(eq(contentObjects.id, objectId))
+          .for("update")
+          .limit(1);
+        if (!locked[0]) {
+          throw new NotFoundError("Content not found", { objectId });
+        }
+
         // Optionally widen visibility in the same tx so the status change and
         // any grant updates are atomic. `setLevelInTx` replaces the level + (for
         // group) its grants, enforcing the group-needs-grants guard; it does NOT

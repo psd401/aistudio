@@ -141,12 +141,19 @@ describe("getVisibilityAction — success shape", () => {
     expect(result.data.canEdit).toBe(true);
   });
 
-  it("returns canEdit=false for a non-owner who can only view", async () => {
+  it("returns canEdit=false AND no grants for a non-owner who can only view", async () => {
+    // Security: the grant list names every principal explicitly granted access
+    // (including the numeric users.id of each `user` grant). A viewer who is not the
+    // owner/admin must NOT be able to enumerate it — they only need the level for the
+    // read-only badge. The action must return an empty grant list and never call
+    // grantsFor for a non-editor.
     canEditMock.mockReturnValueOnce(false);
     const result = await getVisibilityAction("uuid-1");
     expect(result.isSuccess).toBe(true);
     if (!result.isSuccess) return;
     expect(result.data.canEdit).toBe(false);
+    expect(result.data.grants).toEqual([]);
+    expect(grantsForMock).not.toHaveBeenCalled();
   });
 
   it("always loads grants, even for non-group levels (preserves prior selection in UI)", async () => {

@@ -25,7 +25,7 @@ import {
 import { principalOf } from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
 import { NotFoundError, ValidationError } from "./errors";
-import { GRANT_KIND_SET } from "./validators";
+import { GRANT_KIND_SET, POSITIVE_INT_RE, VISIBILITY_LEVEL_SET } from "./validators";
 import type {
   ContentObjectDTO,
   ListFilter,
@@ -39,14 +39,8 @@ import type {
 /** Upper bound on a `listVisible` tag filter, mirroring the tags column width. */
 const MAX_TAG_LENGTH = 100;
 
-/** A positive-integer ID string (no leading zeros required, no sign, no spaces). */
-const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
-
 /** Upper bound on a grant value, mirroring the `grant_value varchar(255)` column. */
 const MAX_GRANT_VALUE_LENGTH = 255;
-
-/** Allowed visibility levels — mirrors the `visibility_level` DB enum. */
-const VALID_VISIBILITY_LEVELS = new Set(["private", "group", "internal", "public"]);
 
 /**
  * Validate a grant before it is persisted. Only a `user` grant carries a numeric
@@ -246,7 +240,7 @@ async function setLevelInTx(
   visibility: VisibilityInput
 ): Promise<void> {
   const level = visibility.level;
-  if (!VALID_VISIBILITY_LEVELS.has(level)) {
+  if (!VISIBILITY_LEVEL_SET.has(level)) {
     throw new ValidationError(`Invalid visibility level: ${level}`, { level });
   }
   // Reject grants supplied for a non-group level rather than silently dropping
@@ -327,10 +321,9 @@ export const visibilityService = {
       return true;
     }
 
-    const grants = await grantsFor(obj.id);
-
     if (obj.visibilityLevel === "private") {
       // Private is owner/admin only, plus any explicit per-user grant.
+      const grants = await grantsFor(obj.id);
       return grants.some(
         (g) =>
           g.kind === "user" &&
@@ -339,18 +332,31 @@ export const visibilityService = {
       );
     }
 
-    // group:
-    return grants.some(
-      (g) =>
-        (g.kind === "role" && principal.roles.includes(g.value)) ||
-        (g.kind === "building" && principal.building === g.value) ||
-        (g.kind === "department" && principal.department === g.value) ||
-        (g.kind === "grade" &&
-          (principal.gradeLevels ?? []).includes(g.value)) ||
-        (g.kind === "user" &&
-          principal.userId != null &&
-          String(principal.userId) === g.value)
-    );
+    if (obj.visibilityLevel === "group") {
+      // Gate the grant sweep on the `group` level explicitly — `buildVisibilitySql`
+      // gates its EXISTS subquery with `AND visibility_level = 'group'`, so a stale
+      // grant on a non-group object (a direct DB edit or a future migration path)
+      // must NOT authorize a principal here that the SQL predicate would deny. The
+      // explicit `=== "group"` check keeps the two paths equivalent AND skips the DB
+      // round-trip for any non-group level (which never consults grants).
+      const grants = await grantsFor(obj.id);
+      return grants.some(
+        (g) =>
+          (g.kind === "role" && principal.roles.includes(g.value)) ||
+          (g.kind === "building" && principal.building === g.value) ||
+          (g.kind === "department" && principal.department === g.value) ||
+          (g.kind === "grade" &&
+            (principal.gradeLevels ?? []).includes(g.value)) ||
+          (g.kind === "user" &&
+            principal.userId != null &&
+            String(principal.userId) === g.value)
+      );
+    }
+
+    // Any level not handled above (e.g. a future level added to the enum but not
+    // yet wired into the visibility rules) denies by default — fail closed, never
+    // leak. Mirror the new level in buildVisibilitySql in the same commit.
+    return false;
   },
 
   /**

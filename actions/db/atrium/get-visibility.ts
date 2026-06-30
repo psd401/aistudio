@@ -54,14 +54,20 @@ export async function getVisibilityAction(
     });
     if (!viewable) throw new NotFoundError("Content not found", { idOrSlug });
 
-    // Group grants are only meaningful for a `group` object; load them regardless
-    // (cheap, indexed) so the editor can show the prior selection if the level was
-    // toggled away from group and back without losing the grant set in the UI.
-    const grants = await visibilityService.grantsFor(obj.id);
-
     // The edit gate is resolved with the same helper the write action uses, so
     // the chip can render read-only for a viewer who is not the owner/admin.
     const editable = canEdit(requester, obj.ownerUserId);
+
+    // Return the grant list ONLY to an editor (owner/admin). The grant set names
+    // every principal explicitly granted access — including the numeric users.id of
+    // each `user` grant — which the owner never intended to expose to grantees. A
+    // non-editor who can view the object (e.g. via a single `user` grant) must not
+    // be able to enumerate everyone else's grants. They only need the level to
+    // render the read-only badge; the editor's grant builder is the sole consumer
+    // of this list (it is hidden for non-editors). Group grants are only meaningful
+    // for a `group` object; load them (cheap, indexed) so the editor can show the
+    // prior selection if the level was toggled away from group and back.
+    const grants = editable ? await visibilityService.grantsFor(obj.id) : [];
 
     timer({ status: "success" });
     log.info("Visibility loaded", {

@@ -37,7 +37,7 @@ export async function publishDocumentAction(
      * `group` only at the type boundary. `grants` are only meaningful (and only
      * accepted by the service) for `level: "group"`.
      */
-    visibility?: { level: string; grants: { kind: string; value: string }[] };
+    visibility?: { level: string; grants?: { kind: string; value: string }[] };
   }
 ): Promise<ActionState<{ publicationId: string; publishedVersionId: string }>> {
   const requestId = generateRequestId();
@@ -84,7 +84,11 @@ export async function publishDocumentAction(
       visibility: input.visibility
         ? {
             level: assertLevel(input.visibility.level),
-            grants: input.visibility.grants.map((g) => ({
+            // `?? []` guard: `grants` is optional on the input contract (a REST/MCP
+            // caller, or a future action passing `{ visibility: { level: "internal" } }`,
+            // can omit it). Without the guard `undefined.map()` throws a TypeError —
+            // mirrors the `(input.grants ?? []).map(...)` guard in set-visibility.ts.
+            grants: (input.visibility.grants ?? []).map((g) => ({
               kind: assertGrantKind(g.kind),
               value: g.value,
             })),

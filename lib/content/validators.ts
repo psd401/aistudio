@@ -49,7 +49,26 @@ const VALID_VISIBILITY_LEVELS: readonly VisibilityLevel[] = [
   "internal",
   "public",
 ];
-const VISIBILITY_LEVEL_SET = new Set<string>(VALID_VISIBILITY_LEVELS);
+/**
+ * The single membership-test source for visibility levels. Exported so the
+ * visibility *service* (`setLevelInTx`, the last guard before the DB enum) reuses
+ * it instead of maintaining a parallel untyped `Set` — adding a level then edits
+ * exactly one place, derived from the typed `VisibilityLevel[]` so a missed value
+ * is a type error, not a silent gap where one code path accepts a new level the
+ * other still rejects.
+ */
+export const VISIBILITY_LEVEL_SET: ReadonlySet<string> = new Set<string>(
+  VALID_VISIBILITY_LEVELS
+);
+
+/**
+ * A positive-integer ID string (no leading zeros, no sign, no spaces). The single
+ * source of truth for `user`-grant value validation, shared by the service's
+ * last-line guard (`assertValidGrant`) and the client-side editor (VisibilityChip)
+ * so the two never diverge — a tightened server regex with a looser client check
+ * would surface a confusing 400 on save with no prior warning.
+ */
+export const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
 
 /**
  * Narrow a widened `string` visibility level to `VisibilityLevel`, throwing a

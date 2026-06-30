@@ -46,8 +46,7 @@ import { Globe, Lock, Users, Building2, X } from "lucide-react";
 import { getVisibilityAction } from "@/actions/db/atrium/get-visibility";
 import { setVisibilityAction } from "@/actions/db/atrium/set-visibility";
 import { listGrantOptionsAction } from "@/actions/db/atrium/list-grant-options";
-
-const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
+import { POSITIVE_INT_RE } from "@/lib/content/validators";
 
 /** The visibility levels, in widening order, with their picker labels. */
 const LEVELS = [
@@ -101,13 +100,49 @@ export interface VisibilityChipProps {
   onChange?: (level: Level) => void;
 }
 
+/**
+ * Lazily load the role options the first time the editor opens for an editor (only
+ * an editor building a group grant needs them). A ref guards against a re-fetch
+ * after a successful load even though `roles.length` is intentionally NOT a dep
+ * (depending on it would re-run the effect on every option-list change). Extracted
+ * from the component to keep its body under the max-lines lint cap and to isolate
+ * the fetch lifecycle (cancel flag + load guard) in one place.
+ */
+function useRoleOptions(
+  open: boolean,
+  canEdit: boolean,
+  onError: (message: string) => void
+): string[] {
+  const [roleOptions, setRoleOptions] = useState<string[]>([]);
+  const roleOptionsLoaded = useRef(false);
+  useEffect(() => {
+    if (!open || !canEdit || roleOptionsLoaded.current) return;
+    let cancelled = false;
+    void (async () => {
+      const result = await listGrantOptionsAction();
+      if (cancelled) return;
+      if (result.isSuccess) {
+        roleOptionsLoaded.current = true;
+        setRoleOptions(result.data.roles);
+      } else {
+        // Surface the failure so the user knows why the role dropdown is empty,
+        // rather than silently leaving them with zero role options.
+        onError(result.message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, canEdit, onError]);
+  return roleOptions;
+}
+
 export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [canEdit, setCanEdit] = useState(false);
   const [level, setLevel] = useState<Level>("private");
   const [grants, setGrants] = useState<Grant[]>([]);
-  const [roleOptions, setRoleOptions] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedLevel, setSavedLevel] = useState<Level>("private");
@@ -141,30 +176,8 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
     };
   }, [idOrSlug]);
 
-  // Lazily load role options the first time the editor opens (only an editor
-  // building a group grant needs them). A ref guards against a re-fetch after a
-  // successful load even though `roleOptions.length` is intentionally NOT a dep
-  // (depending on it would re-run the effect on every option-list change).
-  const roleOptionsLoaded = useRef(false);
-  useEffect(() => {
-    if (!open || !canEdit || roleOptionsLoaded.current) return;
-    let cancelled = false;
-    void (async () => {
-      const result = await listGrantOptionsAction();
-      if (cancelled) return;
-      if (result.isSuccess) {
-        roleOptionsLoaded.current = true;
-        setRoleOptions(result.data.roles);
-      } else {
-        // Surface the failure so the user knows why the role dropdown is empty,
-        // rather than silently leaving them with zero role options.
-        setError(result.message);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [open, canEdit]);
+  // Role options for the group-grant builder, loaded lazily on first editor open.
+  const roleOptions = useRoleOptions(open, canEdit, setError);
 
   const removeGrant = useCallback((index: number) => {
     setGrants((prev) => prev.filter((_, i) => i !== index));
