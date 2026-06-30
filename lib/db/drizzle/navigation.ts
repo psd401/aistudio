@@ -10,7 +10,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, asc } from "drizzle-orm";
+import { eq, and, asc, isNull } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   navigationItems,
@@ -45,7 +45,16 @@ export interface NavigationItemData {
 // ============================================
 
 /**
- * Get all navigation items ordered by position
+ * Get all navigation items ordered by position.
+ *
+ * EXCLUDES Atrium *content* nav items (rows with a non-null `content_object_id`,
+ * created by `navItemService.ensureNavItem` on publish — Issue #1054). The global
+ * navbar filters by ROLE/CAPABILITY, NOT by the content object's `canView`
+ * visibility, so surfacing a content row here would leak a visibility-restricted
+ * object's title to any authenticated user. Content is surfaced only through the
+ * visibility-filtered reader sidebar / `CollectionTree`. The `content_object_id`
+ * projection is retained for callers that inspect it; the row set never includes
+ * content items.
  *
  * @param activeOnly - If true, only return active items
  */
@@ -70,7 +79,13 @@ export async function getNavigationItems(activeOnly: boolean = false) {
             contentObjectId: navigationItems.contentObjectId,
           })
           .from(navigationItems)
-          .where(eq(navigationItems.isActive, true))
+          .where(
+            and(
+              eq(navigationItems.isActive, true),
+              // Exclude Atrium content nav items (visibility-gated elsewhere).
+              isNull(navigationItems.contentObjectId)
+            )
+          )
           .orderBy(asc(navigationItems.position)),
       "getNavigationItems"
     );
@@ -95,6 +110,8 @@ export async function getNavigationItems(activeOnly: boolean = false) {
           contentObjectId: navigationItems.contentObjectId,
         })
         .from(navigationItems)
+        // Exclude Atrium content nav items from the global navbar (see above).
+        .where(isNull(navigationItems.contentObjectId))
         .orderBy(asc(navigationItems.position)),
     "getNavigationItems"
   );

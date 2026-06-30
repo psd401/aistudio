@@ -73,8 +73,16 @@ export const jobStatusEnum = pgEnum("job_status", [
  * `navigation_items.content_object_id` column (migration 085). A dedicated
  * `content` enum value is intentionally NOT added: `ALTER TYPE ... ADD VALUE`
  * needs ownership of this enum, which is owned by `postgres` while migrations run
- * as `master` (fails 42501 on Aurora). Deferred to Phase 4; content nav items are
- * identified by `content_object_id`, not the type value.
+ * as `master` (fails 42501 on Aurora), and the fail-fast migration runner cannot
+ * tolerate that error.
+ *
+ * RESOLVED (Phase 4, Issue #1054): this is now the FINAL design, not a deferral.
+ * Content nav items are identified by `content_object_id IS NOT NULL` and stored
+ * with `type='link'` (a content nav item is a link to the reader route). They are
+ * EXCLUDED from the global navbar query (`lib/db/drizzle/navigation.ts`) because
+ * that surface filters by role/capability, not by the object's `canView`
+ * visibility; content is surfaced through the visibility-filtered reader sidebar
+ * (`CollectionTree`) instead. See `lib/content/nav-item-service.ts`.
  */
 export const navigationTypeEnum = pgEnum("navigation_type", [
   "link",

@@ -86,6 +86,8 @@ interface PublishableObject {
   visibilityLevel: VisibilityLevel;
   currentVersionId: string | null;
   slug: string;
+  title: string;
+  collectionId: string | null;
 }
 
 /** Load the publish-relevant columns for an object, or null when absent. */
@@ -100,6 +102,8 @@ async function loadPublishable(
           visibilityLevel: contentObjects.visibilityLevel,
           currentVersionId: contentObjects.currentVersionId,
           slug: contentObjects.slug,
+          title: contentObjects.title,
+          collectionId: contentObjects.collectionId,
         })
         .from(contentObjects)
         .where(eq(contentObjects.id, objectId))
@@ -257,6 +261,8 @@ export const publishService = {
         objectId,
         slug: obj.slug,
         versionId: publishedVersionId,
+        title: obj.title,
+        collectionId: obj.collectionId,
       });
     } catch (adapterError) {
       log.error("Publish adapter failed; marking publication failed", {
@@ -289,6 +295,122 @@ export const publishService = {
       publishedVersionId,
     });
     return { publicationId, publishedVersionId };
+  },
+
+  /**
+   * Unpublish an object from a destination (Phase 4, §15.3 / §21). Marks the
+   * publication `unpublished`, reverts the object to `draft`, then runs the
+   * destination adapter's `unpublish` teardown (for the intranet adapter: hide
+   * the object's nav item) AFTER the transaction commits — same
+   * external-IO-outside-the-tx discipline as `publish`.
+   *
+   * Permission + existence-masking mirror `publish`: a non-viewable object 404s
+   * (never 403, so private ids cannot be enumerated), then `assertCanEdit`. A
+   * no-op-safe call when there is no live publication (returns `unpublished:
+   * false`) rather than throwing — unpublishing an already-unpublished object is
+   * idempotent from the caller's view.
+   */
+  async unpublish(
+    req: Requester,
+    objectId: string,
+    destination: PublishDestination
+  ): Promise<{ unpublished: boolean }> {
+    const log = createLogger({ action: "publish.unpublish" });
+
+    const obj = await loadPublishable(objectId);
+    if (!obj) {
+      throw new NotFoundError("Content not found", { objectId });
+    }
+    // Mask existence before revealing edit state (404, not 403).
+    const viewable = await visibilityService.canView(req, {
+      id: objectId,
+      ownerUserId: obj.ownerUserId,
+      visibilityLevel: obj.visibilityLevel,
+    });
+    if (!viewable) {
+      throw new NotFoundError("Content not found", { objectId });
+    }
+    assertCanEdit(req, obj.ownerUserId);
+
+    const adapter = adapters[destination];
+
+    // Mark the publication unpublished and revert the object to draft atomically.
+    // Lock the row FOR UPDATE so a concurrent publish/unpublish serializes here.
+    const externalRef = await executeTransaction(
+      async (tx: DbTransaction) => {
+        const locked = await tx
+          .select({ id: contentObjects.id })
+          .from(contentObjects)
+          .where(eq(contentObjects.id, objectId))
+          .for("update")
+          .limit(1);
+        if (!locked[0]) {
+          throw new NotFoundError("Content not found", { objectId });
+        }
+
+        // Find the live publication. No live row → nothing to unpublish; the
+        // status revert is skipped and the caller is told `unpublished: false`.
+        const pub = await tx
+          .select({
+            id: contentPublications.id,
+            externalRef: contentPublications.externalRef,
+          })
+          .from(contentPublications)
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.destination, destination),
+              eq(contentPublications.status, "live")
+            )
+          )
+          .limit(1);
+        if (!pub[0]) return undefined;
+
+        await tx
+          .update(contentPublications)
+          .set({ status: "unpublished", updatedAt: new Date() })
+          .where(eq(contentPublications.id, pub[0].id));
+
+        // Revert the object to draft so it no longer reads as published. Visibility
+        // is intentionally NOT narrowed here — unpublishing removes the live
+        // surface, not the grant set; a later republish reuses the same visibility.
+        await tx
+          .update(contentObjects)
+          .set({ status: "draft", updatedAt: new Date() })
+          .where(eq(contentObjects.id, objectId));
+
+        return pub[0].externalRef;
+      },
+      "publish.unpublish"
+    );
+
+    if (externalRef === undefined) {
+      // No live publication existed — idempotent no-op.
+      return { unpublished: false };
+    }
+
+    // Destination teardown AFTER the transaction commits (external/secondary IO
+    // outside the tx). For the intranet adapter this hides the nav item; a
+    // failure is logged and surfaced (the publication is already marked
+    // unpublished, so the live surface is gone regardless).
+    if (adapter.unpublish) {
+      try {
+        await adapter.unpublish({ objectId, externalRef });
+      } catch (adapterError) {
+        log.error("Unpublish adapter teardown failed", {
+          objectId,
+          destination,
+          error:
+            adapterError instanceof Error
+              ? adapterError.message
+              : String(adapterError),
+        });
+        throw adapterError;
+      }
+    }
+
+    log.info("Unpublished content", { objectId, destination });
+    return { unpublished: true };
   },
 
   /**

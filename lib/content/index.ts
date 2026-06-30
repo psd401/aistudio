@@ -11,6 +11,11 @@
 export { contentService } from "./content-service";
 export { versionService } from "./version-service";
 export { visibilityService } from "./visibility-service";
+export { collectionService } from "./collection-service";
+export type { CollectionTreeNode } from "./collection-service";
+export { navItemService } from "./nav-item-service";
+export type { NavObject } from "./nav-item-service";
+export { publishService } from "./publish-service";
 export { s3Store } from "./storage/s3-store";
 export { renderMarkdownToHtml } from "./render/markdown-render";
 export { sanitizeHtml } from "./render/html-sanitize";
