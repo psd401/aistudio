@@ -56,10 +56,11 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     return contentErrorToResponse(err, requestId);
   }
 
-  // The public-publish gate keys off authority; for an API caller that is the
-  // token's scope set (admins also pass via req.isAdmin inside the service).
-  const hasPublishPublicCapability =
-    auth.scopes.includes("content:publish_public") || auth.scopes.includes("*");
+  // The public-publish gate keys off authority. For an API caller that is the
+  // token's EXPLICIT content:publish_public scope. A session's wildcard ["*"]
+  // must NOT auto-grant it (every logged-in human would otherwise bypass the
+  // gate) — admin humans still pass via req.isAdmin inside the service.
+  const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
 
   try {
     const result = await publishService.publish(

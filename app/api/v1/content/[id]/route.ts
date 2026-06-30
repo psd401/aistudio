@@ -28,7 +28,9 @@ import { createLogger } from "@/lib/logger";
 const updateBodySchema = z.object({
   title: z.string().min(1).max(500).optional(),
   tags: z.array(z.string()).nullable().optional(),
-  collectionId: z.string().nullable().optional(),
+  // .min(1): an empty string must be a validation error, not silently treated as
+  // "unchanged" (undefined). Use null to explicitly clear the collection.
+  collectionId: z.string().min(1).nullable().optional(),
   status: z.enum(["draft", "published", "archived"]).optional(),
 });
 

@@ -153,7 +153,7 @@ async function resolveReq(
 
 const createDocumentSchema = z.object({
   title: z.string().min(1),
-  collection: z.string().optional(),
+  collection: z.string().min(1).optional(),
   markdown: z.string().optional(),
   visibility: visibilityZ.optional(),
   tags: z.array(z.string()).optional(),
@@ -195,7 +195,7 @@ async function handleCreateDocument(
 
 const createArtifactSchema = z.object({
   title: z.string().min(1),
-  collection: z.string().optional(),
+  collection: z.string().min(1).optional(),
   code: z.string().min(1),
   bodyFormat: z.enum(["html", "jsx"]),
   visibility: visibilityZ.optional(),
@@ -274,7 +274,7 @@ async function handleGetContent(
 
 const listContentSchema = z.object({
   kind: z.enum(["document", "artifact"]).optional(),
-  collection: z.string().optional(),
+  collection: z.string().min(1).optional(),
   tag: z.string().optional(),
   status: z.enum(["draft", "published", "archived"]).optional(),
 });
@@ -315,7 +315,7 @@ const updateContentSchema = z.object({
   id: z.string().min(1),
   title: z.string().optional(),
   tags: z.array(z.string()).nullable().optional(),
-  collection: z.string().nullable().optional(),
+  collection: z.string().min(1).nullable().optional(),
   status: z.enum(["draft", "published", "archived"]).optional(),
 });
 
@@ -466,12 +466,13 @@ async function handlePublishContent(
   const { req } = resolved;
   const destination = parsed.data.destination;
   try {
-    // The public-publish gate is keyed to authority; for an API/MCP caller that
-    // authority IS the token's scope set (a session/in-app capability is the UI
-    // equivalent). Admins pass via req.isAdmin inside the service.
-    const hasPublishPublicCapability =
-      context.scopes.includes("content:publish_public") ||
-      context.scopes.includes("*");
+    // The public-publish gate is keyed to authority: an API/MCP caller's EXPLICIT
+    // content:publish_public scope. A session's wildcard ["*"] must NOT auto-grant
+    // it (every logged-in human would otherwise bypass the gate) — admin humans
+    // still pass via req.isAdmin inside the service.
+    const hasPublishPublicCapability = context.scopes.includes(
+      "content:publish_public"
+    );
     const result = await publishService.publish(
       req,
       parsed.data.id,

@@ -23,6 +23,7 @@ import { executeQuery } from "@/lib/db/drizzle-client";
 import { agentIdentities, roles, users } from "@/lib/db/schema";
 import { getUserRoles } from "@/lib/db/user-roles";
 import { createLogger } from "@/lib/logger";
+import { ForbiddenError } from "./errors";
 import type { Requester } from "./types";
 
 const ADMIN_ROLE = "administrator";
@@ -46,6 +47,9 @@ async function loadUserContext(userId: number): Promise<{
   department: string | null;
   gradeLevels: string[] | null;
 } | null> {
+  // Defensive: a malformed token sub could yield a non-positive / NaN id; skip
+  // the query and let the caller surface a clean auth error.
+  if (!Number.isInteger(userId) || userId <= 0) return null;
   const rows = await executeQuery(
     (db) =>
       db
@@ -142,9 +146,10 @@ export async function requesterFromApiAuth(
   if (auth.delegatedForUserId != null) {
     const ctx = await loadUserContext(auth.delegatedForUserId);
     if (!ctx) {
-      throw new Error(
-        `Delegated-for user ${auth.delegatedForUserId} not found`
-      );
+      // A token for a deleted/invalid human is an auth failure (403), not a 500.
+      throw new ForbiddenError("Delegated-for user not found", {
+        delegatedForUserId: auth.delegatedForUserId,
+      });
     }
     log.debug("Resolved agent-delegated requester", {
       actingForUserId: auth.delegatedForUserId,
@@ -183,7 +188,8 @@ export async function requesterFromApiAuth(
   // 3. User: sk- key, session, or a human OIDC token acting as themselves.
   const ctx = await loadUserContext(auth.userId);
   if (!ctx) {
-    throw new Error(`User ${auth.userId} not found`);
+    // A token for a deleted/invalid user is an auth failure (403), not a 500.
+    throw new ForbiddenError("User not found", { userId: auth.userId });
   }
   log.debug("Resolved user requester", { userId: auth.userId });
   return {
