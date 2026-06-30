@@ -190,7 +190,11 @@ describe("canView — unauthenticated", () => {
   });
 });
 
-describe("applyGrants — value validation", () => {
+describe("applyGrantsForLevel — grant value validation (group level)", () => {
+  // The public grant-write surface is `applyGrantsForLevel`; for `group` it routes
+  // every supplied grant through the same value validation/dedup/trim logic the
+  // (now-internal) applyGrantsInTx primitive runs. These cases drive that path.
+
   /** Minimal tx whose delete/insert builders resolve and record inserted rows. */
   function fakeTx() {
     const inserted: unknown[] = [];
@@ -205,19 +209,25 @@ describe("applyGrants — value validation", () => {
     return { tx: tx as never, inserted };
   }
 
+  const apply = (tx: never, grants: Grant[]) =>
+    visibilityService.applyGrantsForLevel(
+      tx,
+      "obj-1",
+      "group",
+      grants as never
+    );
+
   it("rejects an empty grant value", async () => {
     const { tx } = fakeTx();
-    await expect(
-      visibilityService.applyGrants(tx, "obj-1", [{ kind: "role", value: "" }])
-    ).rejects.toThrow(/required/i);
+    await expect(apply(tx, [{ kind: "role", value: "" }])).rejects.toThrow(
+      /required/i
+    );
   });
 
   it("rejects a non-numeric 'user' grant value", async () => {
     const { tx } = fakeTx();
     await expect(
-      visibilityService.applyGrants(tx, "obj-1", [
-        { kind: "user", value: "not-an-id" },
-      ])
+      apply(tx, [{ kind: "user", value: "not-an-id" }])
     ).rejects.toThrow(/positive-integer/i);
   });
 
@@ -226,24 +236,20 @@ describe("applyGrants — value validation", () => {
     // principal.roles in canView. It must NOT be validated as a numeric id —
     // doing so (Phase 0 behaviour) made role-based group grants unmatchable.
     const { tx, inserted } = fakeTx();
-    await visibilityService.applyGrants(tx, "obj-1", [
-      { kind: "role", value: "staff" },
-    ]);
+    await apply(tx, [{ kind: "role", value: "staff" }]);
     expect(inserted).toHaveLength(1);
   });
 
   it("rejects a grant value over 255 chars", async () => {
     const { tx } = fakeTx();
     await expect(
-      visibilityService.applyGrants(tx, "obj-1", [
-        { kind: "building", value: "x".repeat(256) },
-      ])
+      apply(tx, [{ kind: "building", value: "x".repeat(256) }])
     ).rejects.toThrow(/maximum length/i);
   });
 
   it("accepts a numeric user id, a role NAME, and opaque building values", async () => {
     const { tx, inserted } = fakeTx();
-    await visibilityService.applyGrants(tx, "obj-1", [
+    await apply(tx, [
       { kind: "user", value: "42" },
       { kind: "role", value: "staff" },
       { kind: "building", value: "High School" },
@@ -252,9 +258,9 @@ describe("applyGrants — value validation", () => {
     expect((inserted[0] as unknown[]).length).toBe(3);
   });
 
-  it("clears grants (no insert) when given an empty set", async () => {
+  it("clears grants (no insert) when narrowing to internal with an empty set", async () => {
     const { tx, inserted } = fakeTx();
-    await visibilityService.applyGrants(tx, "obj-1", []);
+    await visibilityService.applyGrantsForLevel(tx, "obj-1", "internal", []);
     expect(inserted).toHaveLength(0);
   });
 
@@ -264,9 +270,7 @@ describe("applyGrants — value validation", () => {
     // reaches the DB enum column.
     const { tx } = fakeTx();
     await expect(
-      visibilityService.applyGrants(tx, "obj-1", [
-        { kind: "superuser" as never, value: "1" },
-      ])
+      apply(tx, [{ kind: "superuser" as never, value: "1" }])
     ).rejects.toThrow(/invalid grant kind/i);
   });
 
@@ -275,7 +279,7 @@ describe("applyGrants — value validation", () => {
     // constraint and roll back the tx with a confusing 23505. Dedup keeps the
     // insert clean.
     const { tx, inserted } = fakeTx();
-    await visibilityService.applyGrants(tx, "obj-1", [
+    await apply(tx, [
       { kind: "role", value: "staff" },
       { kind: "role", value: "staff" },
       { kind: "user", value: "42" },
@@ -289,9 +293,7 @@ describe("applyGrants — value validation", () => {
     // attribute, so it must be rejected as missing rather than stored inert.
     const { tx } = fakeTx();
     await expect(
-      visibilityService.applyGrants(tx, "obj-1", [
-        { kind: "building", value: "   " },
-      ])
+      apply(tx, [{ kind: "building", value: "   " }])
     ).rejects.toThrow(/required/i);
   });
 
@@ -299,9 +301,7 @@ describe("applyGrants — value validation", () => {
     // A padded " Math " would never equal the un-padded users.building attribute
     // it matches in canView; store the trimmed value so the grant authorizes.
     const { tx, inserted } = fakeTx();
-    await visibilityService.applyGrants(tx, "obj-1", [
-      { kind: "building", value: " Math " },
-    ]);
+    await apply(tx, [{ kind: "building", value: " Math " }]);
     expect(inserted).toHaveLength(1);
     const rows = inserted[0] as Array<{ grantValue: string }>;
     expect(rows[0].grantValue).toBe("Math");
@@ -309,7 +309,7 @@ describe("applyGrants — value validation", () => {
 
   it("dedups a padded value against its trimmed twin", async () => {
     const { tx, inserted } = fakeTx();
-    await visibilityService.applyGrants(tx, "obj-1", [
+    await apply(tx, [
       { kind: "role", value: "staff" },
       { kind: "role", value: " staff " },
     ]);

@@ -217,6 +217,17 @@ async function applyGrantsInTx(
  * Validate a level + the grants supplied with it for a level write. Throws a
  * `ValidationError` for an unknown level, grants supplied for a non-group level
  * (a silent drop would widen access), or a grantless group level.
+ *
+ * DESIGN NOTE — `private` + `user` grants: the read paths
+ * (`buildVisibilitySql.privateUserGrant` + `canView`'s user-grant branch) HONOR a
+ * per-user grant on a `private` object, and `setLevelInTx` PRESERVES existing ones
+ * (`clearNonUserGrantsInTx`). But there is intentionally NO path to *supply* a new
+ * grant on a non-group level — `group` is the only grant-authoring level in the
+ * UI. The honored-but-unsuppliable `private` user grant exists only so a
+ * group→private→(later)group round-trip does not silently revoke a user's access;
+ * it is not a feature with its own editor. If a future surface needs to add a
+ * per-user grant to a private object, add an explicit, separately-gated path —
+ * do NOT relax this guard (which would let a `setLevel` call widen access).
  */
 function assertWritableLevel(
   level: string,
@@ -244,14 +255,17 @@ function assertWritableLevel(
 }
 
 /**
- * Extra columns a level-write may fold into its single UPDATE. The `?: never`
- * members make passing a reserved column a COMPILE error (not just a spread-order
- * convention), so a caller can never override the validated `visibilityLevel` or
- * the fresh `updatedAt`.
+ * Extra columns a level-write may fold into its single UPDATE. Deliberately an
+ * EXPLICIT ALLOWLIST (not `Record<string, unknown>`): Drizzle maps any recognized
+ * column key in the spread to a SQL assignment, so an open record would let a
+ * caller fold in `ownerUserId`, `slug`, `collectionId`, etc. — silently
+ * transferring ownership or retargeting the row inside a write that already holds
+ * the `FOR UPDATE` lock and passed auth. Only `status` is foldable today (the
+ * publish path). Add columns here explicitly as new needs arise; never widen to an
+ * arbitrary record.
  */
-type ExtraSet = Record<string, unknown> & {
-  visibilityLevel?: never;
-  updatedAt?: never;
+type ExtraSet = {
+  status?: "draft" | "published" | "archived";
 };
 
 /**
@@ -442,25 +456,6 @@ export const visibilityService = {
   },
 
   /**
-   * LOW-LEVEL primitive: replace an object's grants with the supplied set
-   * (delete-then-insert) inside the caller's transaction, validating each grant
-   * VALUE. A no-op (clears grants) when `grants` is empty.
-   *
-   * ⚠️ Does NOT enforce level invariants (group-needs-≥1-grant, non-group-clears,
-   * private-preserves-user). A caller writing grants alongside a level MUST use
-   * `applyGrantsForLevel` (or `setLevelInTx`) instead — calling this directly with
-   * `[]` on a `group` object leaves it grant-less and invisible to everyone but
-   * the owner/admin. Kept public only for value-validation unit coverage.
-   */
-  async applyGrants(
-    tx: DbTransaction,
-    objectId: string,
-    grants: VisibilityGrant[]
-  ): Promise<void> {
-    await applyGrantsInTx(tx, objectId, grants);
-  },
-
-  /**
    * Reconcile an object's grants for a target level, enforcing the same level
    * invariants as `setLevelInTx` (group needs ≥1 grant and only group accepts
    * supplied grants; private preserves persisted `user` grants; internal/public
@@ -476,6 +471,17 @@ export const visibilityService = {
   ): Promise<void> {
     assertWritableLevel(level, grants);
     await reconcileGrantsInTx(tx, objectId, level, grants);
+  },
+
+  /**
+   * Validate a level + its grants WITHOUT writing — lets a caller that builds the
+   * row in a single INSERT (`contentService.create`) fail an invalid level/grant
+   * combination (e.g. a collection-defaulted `group` with no grants) BEFORE the
+   * INSERT, rather than rolling back an already-written row. Same rules as
+   * `applyGrantsForLevel` / `setLevelInTx`.
+   */
+  assertWritableLevel(level: string, grants: VisibilityGrant[] | undefined): void {
+    assertWritableLevel(level, grants);
   },
 
   /**

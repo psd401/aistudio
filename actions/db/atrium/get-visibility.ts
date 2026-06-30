@@ -21,6 +21,7 @@ import { createSuccess, handleError } from "@/lib/error-utils";
 import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { canEdit } from "@/lib/content/helpers";
+import { hasCapabilityAccess } from "@/utils/roles";
 import { NotFoundError } from "@/lib/content/errors";
 import type { VisibilityGrant, VisibilityLevel } from "@/lib/content/types";
 import type { ActionState } from "@/types";
@@ -57,9 +58,15 @@ export async function getVisibilityAction(
     });
     if (!viewable) throw new NotFoundError("Content not found", { idOrSlug });
 
-    // The edit gate is resolved with the same helper the write action uses, so
-    // the chip can render read-only for a viewer who is not the owner/admin.
-    const editable = canEdit(requester, obj.ownerUserId);
+    // The edit gate must match `setVisibilityAction`'s gate exactly, or the chip
+    // shows a live Save button to an owner who lacks the `atrium-content`
+    // capability and every save then fails with an opaque authz error. The write
+    // action requires BOTH owner/admin (assertCanEdit) AND the capability, so AND
+    // them here too. Only run the (cheap) capability check when the owner/admin
+    // check already passed — a non-owner is read-only regardless.
+    const editable =
+      canEdit(requester, obj.ownerUserId) &&
+      (await hasCapabilityAccess("atrium-content"));
 
     // Return the grant list ONLY to an editor (owner/admin). The grant set names
     // every principal explicitly granted access — including the numeric users.id of

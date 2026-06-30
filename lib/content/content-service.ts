@@ -232,6 +232,15 @@ export const contentService = {
           (await collectionDefault(tx, input.collectionId)) ??
           "private";
 
+        // Validate the RESOLVED level + grants BEFORE the INSERT so an invalid
+        // combination (e.g. a collection-defaulted `group` with no grants) fails
+        // without writing — and rolling back — an object row. The pre-transaction
+        // guard above only catches the explicit-`group` case.
+        visibilityService.assertWritableLevel(
+          visibilityLevel,
+          input.visibility?.grants ?? []
+        );
+
         // Translate a slug unique-violation that slips past uniqueSlug (a
         // concurrent create racing the SELECT) into a typed ConflictError.
         const inserted = await tx

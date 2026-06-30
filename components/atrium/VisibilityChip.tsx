@@ -180,6 +180,18 @@ function useRoleOptions(
   return roleOptions;
 }
 
+/**
+ * Mirror the server's grant reconciliation (`clearNonUserGrantsInTx`) so the
+ * chip's local `savedGrants` never diverges from what was actually persisted:
+ * group keeps all supplied grants, private PRESERVES `user`-kind grants (both read
+ * paths honor them), internal/public clear everything.
+ */
+function reconcileSavedGrants(level: Level, grants: Grant[]): Grant[] {
+  if (level === "group") return grants;
+  if (level === "private") return grants.filter((g) => g.kind === "user");
+  return [];
+}
+
 export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -279,7 +291,7 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
     if (result.isSuccess) {
       const newLevel = result.data.visibilityLevel as Level;
       setSavedLevel(newLevel);
-      setSavedGrants(level === "group" ? grants : []);
+      setSavedGrants(reconcileSavedGrants(newLevel, grants));
       setOpen(false);
       onChange?.(newLevel);
     } else {

@@ -55,7 +55,7 @@ export async function setVisibilityAction(
     // below still produce an "Action started" entry rather than being invisible in
     // the log stream. `input.level` is raw/untrusted here — sanitize it.
     log.info("Action started: set visibility", {
-      idOrSlug,
+      idOrSlug: sanitizeForLogging(idOrSlug),
       input: sanitizeForLogging({
         level: input?.level,
         grantCount: input?.grants?.length ?? 0,
