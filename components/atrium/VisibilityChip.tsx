@@ -106,18 +106,19 @@ type LevelChrome = ReturnType<typeof levelChrome>;
 
 /**
  * The at-a-glance badge inside the chip's trigger button. Until the real level
- * loads it shows a neutral placeholder instead of the default `private` chrome —
- * otherwise an object that is actually public/internal/group briefly flashes a
- * "Private" lock badge while the initial fetch is in flight.
+ * is KNOWN (the fetch succeeded — `levelKnown`) it shows a neutral placeholder
+ * instead of the default `private` chrome — otherwise an object that is actually
+ * public/internal/group would flash a "Private" lock badge while the fetch is in
+ * flight, OR permanently show one if the fetch failed (level never learned).
  */
 function ChipBadge({
-  loaded,
+  levelKnown,
   chrome,
 }: {
-  loaded: boolean;
+  levelKnown: boolean;
   chrome: LevelChrome;
 }) {
-  if (!loaded) {
+  if (!levelKnown) {
     return (
       <Badge variant="ghost" className="gap-1 opacity-50">
         Visibility…
@@ -182,6 +183,12 @@ function useRoleOptions(
 export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  // Whether the fetch actually resolved the real level. Distinct from `loaded`:
+  // a FAILED fetch is `loaded` (the button is interactive so the user can open
+  // the dialog and read the error) but NOT `levelKnown` (so the badge shows the
+  // neutral placeholder, never a misleading "Private" lock for a doc whose real
+  // level we never learned).
+  const [levelKnown, setLevelKnown] = useState(false);
   const [canEdit, setCanEdit] = useState(false);
   const [level, setLevel] = useState<Level>("private");
   const [grants, setGrants] = useState<Grant[]>([]);
@@ -197,6 +204,11 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      // Reset per-object inside the IIFE (not synchronously in the effect body,
+      // which the React Compiler flags): a new id must not show the prior
+      // object's chrome while its fetch is in flight.
+      setLoaded(false);
+      setLevelKnown(false);
       const result = await getVisibilityAction(idOrSlug);
       if (cancelled) return;
       if (result.isSuccess) {
@@ -208,7 +220,10 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
         setSavedGrants(loadedGrants);
         setCanEdit(result.data.canEdit);
         setError(null);
+        setLevelKnown(true);
       } else {
+        // Leave `levelKnown=false` so the badge keeps the neutral placeholder
+        // rather than the default "Private" chrome for an unknown level.
         setError(result.message);
       }
       setLoaded(true);
@@ -293,13 +308,15 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
           type="button"
           className="inline-flex"
           aria-label={
-            loaded
+            levelKnown
               ? `Visibility: ${chrome.label}${canEdit ? " (click to edit)" : ""}`
-              : "Loading visibility…"
+              : loaded
+                ? "Visibility unavailable"
+                : "Loading visibility…"
           }
           disabled={!loaded}
         >
-          <ChipBadge loaded={loaded} chrome={chrome} />
+          <ChipBadge levelKnown={levelKnown} chrome={chrome} />
         </button>
       </DialogTrigger>
       <DialogContent>

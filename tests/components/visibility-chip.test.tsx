@@ -355,4 +355,28 @@ describe("VisibilityChip", () => {
 
     expect(screen.queryByText("Could not load roles")).toBeNull();
   });
+
+  it("does NOT show a 'Private' badge when the initial visibility fetch fails", async () => {
+    // A failed getVisibilityAction never tells us the real level, so the badge
+    // must keep the neutral placeholder (never a misleading "Private" lock). The
+    // button still becomes interactive so the user can open the dialog and read
+    // the error, but its aria-label reflects "unavailable", not a level.
+    mockGet.mockResolvedValue({
+      isSuccess: false,
+      message: "Could not load visibility",
+    } as Awaited<ReturnType<typeof getVisibilityAction>>);
+
+    await act(async () => {
+      render(<VisibilityChip idOrSlug="obj-1" />);
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    // No level chrome of any kind — placeholder persists.
+    expect(screen.queryByLabelText(/Visibility: Private/)).toBeNull();
+    expect(screen.queryByLabelText(/Visibility: Public/)).toBeNull();
+    // The placeholder/unavailable aria-label is present and the button is enabled.
+    const trigger = screen.getByLabelText("Visibility unavailable");
+    expect(trigger).toBeTruthy();
+    expect((trigger as HTMLButtonElement).disabled).toBe(false);
+  });
 });

@@ -35,7 +35,10 @@ import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
 
 export async function setVisibilityAction(
-  objectId: string,
+  // Accepts a UUID OR a slug — resolved via `loadByIdOrSlug` below. Named to
+  // match `getVisibilityAction` so a future reader does not add UUID-only
+  // validation that silently breaks slug callers.
+  idOrSlug: string,
   input: {
     level: string;
     /** Required (and only meaningful) when level === "group". */
@@ -52,15 +55,15 @@ export async function setVisibilityAction(
     // below still produce an "Action started" entry rather than being invisible in
     // the log stream. `input.level` is raw/untrusted here — sanitize it.
     log.info("Action started: set visibility", {
-      objectId,
+      idOrSlug,
       input: sanitizeForLogging({
         level: input?.level,
         grantCount: input?.grants?.length ?? 0,
       }),
     });
 
-    if (!objectId) {
-      throw ErrorFactories.missingRequiredField("objectId");
+    if (!idOrSlug) {
+      throw ErrorFactories.missingRequiredField("idOrSlug");
     }
     if (!input) {
       throw ErrorFactories.missingRequiredField("input");
@@ -91,14 +94,14 @@ export async function setVisibilityAction(
     // Load the object and enforce view (mask existence → NotFound) then edit
     // permission BEFORE writing — the service's setLevel does not run permission
     // checks (it is also the publish path's primitive, which gates separately).
-    const obj = await contentService.loadByIdOrSlug(objectId);
-    if (!obj) throw new NotFoundError("Content not found", { objectId });
+    const obj = await contentService.loadByIdOrSlug(idOrSlug);
+    if (!obj) throw new NotFoundError("Content not found", { idOrSlug });
     const viewable = await visibilityService.canView(requester, {
       id: obj.id,
       ownerUserId: obj.ownerUserId,
       visibilityLevel: obj.visibilityLevel,
     });
-    if (!viewable) throw new NotFoundError("Content not found", { objectId });
+    if (!viewable) throw new NotFoundError("Content not found", { idOrSlug });
     assertCanEdit(requester, obj.ownerUserId);
 
     // Target the resolved UUID (the input may be a slug) so a slug change between
