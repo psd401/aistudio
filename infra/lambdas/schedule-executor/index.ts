@@ -535,6 +535,10 @@ async function executeAssistantArchitectForSchedule(scheduledExecution: any, exe
     toolId: scheduledExecution.assistant_architect_id,
     inputs: scheduledExecution.input_data || {},
     userId: scheduledExecution.user_id,
+    // Atrium Phase 5 (#1055): when present, the ECS execute endpoint runs under
+    // this autonomous agent identity for content authoring/publishing (§25);
+    // null preserves the user-identity path.
+    agentIdentityId: scheduledExecution.agent_identity_id ?? null,
     triggeredBy: 'eventbridge',
     scheduledAt: new Date().toISOString()
   };
@@ -660,7 +664,8 @@ async function loadScheduledExecution(scheduledExecutionId: any, expectedUserId:
           se.input_data,
           se.active,
           se.created_at,
-          aa.name as assistant_architect_name
+          aa.name as assistant_architect_name,
+          se.agent_identity_id
         FROM scheduled_executions se
         JOIN assistant_architects aa ON se.assistant_architect_id = aa.id
         ${whereClause}
@@ -685,7 +690,11 @@ async function loadScheduledExecution(scheduledExecutionId: any, expectedUserId:
       input_data: record[5].stringValue ? safeJsonParse(record[5].stringValue || null, {}, 'input_data') : {},
       active: record[6].booleanValue,
       created_at: record[7].stringValue,
-      assistant_architect_name: record[8].stringValue
+      assistant_architect_name: record[8].stringValue,
+      // Atrium Phase 5 (#1055): the autonomous agent identity this schedule runs
+      // as, or null for the owning-user path. Forwarded to the ECS execute
+      // endpoint so the run can build an agent-autonomous content Requester.
+      agent_identity_id: record[9] && !record[9].isNull ? record[9].stringValue : null
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
