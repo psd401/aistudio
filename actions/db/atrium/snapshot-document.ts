@@ -83,7 +83,13 @@ export async function snapshotDocumentAction(
       ownerUserId: obj.ownerUserId,
       visibilityLevel: obj.visibilityLevel,
     });
-    if (!viewable || !canEdit(requester, obj.ownerUserId)) {
+    // Mask existence: a non-viewable object 404s rather than revealing — via a
+    // 403 — that this UUID exists. Matches setVisibilityAction, getVisibilityAction,
+    // and publishService.publish (§12.4). The edit gate (403) only applies once the
+    // caller can already see the object.
+    if (!viewable)
+      throw new NotFoundError("Content object not found", { objectId });
+    if (!canEdit(requester, obj.ownerUserId)) {
       throw new ForbiddenError("Not permitted to edit this content");
     }
 
