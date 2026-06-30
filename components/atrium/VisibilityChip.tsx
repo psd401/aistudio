@@ -167,15 +167,23 @@ function useRoleOptions(
     if (!open || !canEdit || roleOptionsLoaded.current) return;
     let cancelled = false;
     void (async () => {
-      const result = await listGrantOptionsAction();
-      if (cancelled) return;
-      if (result.isSuccess) {
-        roleOptionsLoaded.current = true;
-        setRoleOptions(result.data.roles);
-      } else {
-        // Surface the failure so the user knows why the role dropdown is empty,
-        // rather than silently leaving them with zero role options.
-        onError(result.message);
+      // try/catch so a THROWN fetch (network error) still surfaces an error
+      // rather than silently leaving the role dropdown empty with no explanation.
+      try {
+        const result = await listGrantOptionsAction();
+        if (cancelled) return;
+        if (result.isSuccess) {
+          roleOptionsLoaded.current = true;
+          setRoleOptions(result.data.roles);
+        } else {
+          // Surface the failure so the user knows why the role dropdown is empty,
+          // rather than silently leaving them with zero role options.
+          onError(result.message);
+        }
+      } catch {
+        if (!cancelled) {
+          onError("Failed to load role options — please close and reopen.");
+        }
       }
     })();
     return () => {
@@ -212,6 +220,61 @@ function reconcileSavedGrants(level: Level, grants: Grant[]): Grant[] {
   return normalized;
 }
 
+/**
+ * Persist a visibility change and apply the resulting local state. Extracted to a
+ * module-level helper (taking the component's setters) so the component body stays
+ * under the max-lines lint cap, mirroring the `useRoleOptions` extraction.
+ *
+ * The try/catch/finally guarantees `setSaving(false)` always runs even when the
+ * server action THROWS (network error, server crash) — otherwise the dialog would
+ * be stranded in the "Saving…" state with Save+Cancel permanently disabled.
+ */
+async function performVisibilitySave(
+  idOrSlug: string,
+  level: Level,
+  grants: Grant[],
+  setters: {
+    setSaving: (v: boolean) => void;
+    setError: (v: string | null) => void;
+    setSavedLevel: (v: Level) => void;
+    setSavedGrants: (v: Grant[]) => void;
+    setOpen: (v: boolean) => void;
+    onChange?: (level: Level) => void;
+  }
+): Promise<void> {
+  const { setSaving, setError, setSavedLevel, setSavedGrants, setOpen, onChange } =
+    setters;
+  setSaving(true);
+  setError(null);
+  // A group object with no grants is visible to no one but the owner/admin —
+  // block the save client-side with a clear message (the service also rejects).
+  if (level === "group" && grants.length === 0) {
+    setError("Group visibility needs at least one grant.");
+    setSaving(false);
+    return;
+  }
+  try {
+    const result = await setVisibilityAction(idOrSlug, {
+      level,
+      // Grants are only sent for `group`; other levels clear them server-side.
+      grants: level === "group" ? grants : [],
+    });
+    if (result.isSuccess) {
+      const newLevel = result.data.visibilityLevel as Level;
+      setSavedLevel(newLevel);
+      setSavedGrants(reconcileSavedGrants(newLevel, grants));
+      setOpen(false);
+      onChange?.(newLevel);
+    } else {
+      setError(result.message);
+    }
+  } catch {
+    setError("Failed to save — please try again.");
+  } finally {
+    setSaving(false);
+  }
+}
+
 export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -241,24 +304,33 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
       // object's chrome while its fetch is in flight.
       setLoaded(false);
       setLevelKnown(false);
-      const result = await getVisibilityAction(idOrSlug);
-      if (cancelled) return;
-      if (result.isSuccess) {
-        const loadedLevel = result.data.visibilityLevel as Level;
-        const loadedGrants = result.data.grants as Grant[];
-        setLevel(loadedLevel);
-        setGrants(loadedGrants);
-        setSavedLevel(loadedLevel);
-        setSavedGrants(loadedGrants);
-        setCanEdit(result.data.canEdit);
-        setError(null);
-        setLevelKnown(true);
-      } else {
-        // Leave `levelKnown=false` so the badge keeps the neutral placeholder
-        // rather than the default "Private" chrome for an unknown level.
-        setError(result.message);
+      // try/catch/finally so a THROWN fetch (network error, server crash) can
+      // never leave `loaded=false` and the trigger button permanently disabled
+      // — `setLoaded(true)` always runs in `finally` (guarded by `cancelled`).
+      try {
+        const result = await getVisibilityAction(idOrSlug);
+        if (cancelled) return;
+        if (result.isSuccess) {
+          const loadedLevel = result.data.visibilityLevel as Level;
+          const loadedGrants = result.data.grants as Grant[];
+          setLevel(loadedLevel);
+          setGrants(loadedGrants);
+          setSavedLevel(loadedLevel);
+          setSavedGrants(loadedGrants);
+          setCanEdit(result.data.canEdit);
+          setError(null);
+          setLevelKnown(true);
+        } else {
+          // Leave `levelKnown=false` so the badge keeps the neutral placeholder
+          // rather than the default "Private" chrome for an unknown level.
+          setError(result.message);
+        }
+      } catch {
+        if (cancelled) return;
+        setError("Failed to load visibility — please refresh.");
+      } finally {
+        if (!cancelled) setLoaded(true);
       }
-      setLoaded(true);
     })();
     return () => {
       cancelled = true;
@@ -292,32 +364,18 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
     );
   }, []);
 
-  const save = useCallback(async () => {
-    setSaving(true);
-    setError(null);
-    // A group object with no grants is visible to no one but the owner/admin —
-    // block the save client-side with a clear message (the service also rejects).
-    if (level === "group" && grants.length === 0) {
-      setError("Group visibility needs at least one grant.");
-      setSaving(false);
-      return;
-    }
-    const result = await setVisibilityAction(idOrSlug, {
-      level,
-      // Grants are only sent for `group`; other levels clear them server-side.
-      grants: level === "group" ? grants : [],
-    });
-    setSaving(false);
-    if (result.isSuccess) {
-      const newLevel = result.data.visibilityLevel as Level;
-      setSavedLevel(newLevel);
-      setSavedGrants(reconcileSavedGrants(newLevel, grants));
-      setOpen(false);
-      onChange?.(newLevel);
-    } else {
-      setError(result.message);
-    }
-  }, [idOrSlug, level, grants, onChange]);
+  const save = useCallback(
+    () =>
+      performVisibilitySave(idOrSlug, level, grants, {
+        setSaving,
+        setError,
+        setSavedLevel,
+        setSavedGrants,
+        setOpen,
+        onChange,
+      }),
+    [idOrSlug, level, grants, onChange]
+  );
 
   // Discard unsaved edits whenever the dialog is dismissed without saving
   // (Esc, outside-click, Dialog X button, or Cancel). Resets draft level/grants

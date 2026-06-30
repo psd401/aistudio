@@ -88,7 +88,7 @@ export default async function AtriumEditPage({
             Live document · agent edits show purple, your edits show green
           </p>
         </div>
-        <VisibilityChip idOrSlug={obj.id} />
+        <VisibilityChip key={obj.id} idOrSlug={obj.id} />
       </header>
       <DocumentEditor key={obj.id} idOrSlug={obj.id} userId={req.userId} />
     </main>

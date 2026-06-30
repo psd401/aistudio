@@ -379,4 +379,84 @@ describe("VisibilityChip", () => {
     expect(trigger).toBeTruthy();
     expect((trigger as HTMLButtonElement).disabled).toBe(false);
   });
+
+  it("does NOT strand the trigger disabled when the initial fetch THROWS", async () => {
+    // A thrown getVisibilityAction (network error / server crash) must still set
+    // `loaded` so the trigger becomes interactive — otherwise the user can never
+    // open the visibility editor at all. The catch surfaces an error message.
+    mockGet.mockRejectedValue(new Error("network down"));
+
+    await act(async () => {
+      render(<VisibilityChip idOrSlug="obj-1" />);
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    const trigger = screen.getByLabelText("Visibility unavailable");
+    await waitFor(() => {
+      expect((trigger as HTMLButtonElement).disabled).toBe(false);
+    });
+    expect(
+      screen.getByText("Failed to load visibility — please refresh.")
+    ).toBeTruthy();
+  });
+
+  it("does NOT strand the Save button when setVisibilityAction THROWS", async () => {
+    // A thrown setVisibilityAction must still clear `saving` (finally) so Save and
+    // Cancel are not permanently disabled, and must surface an error message.
+    mockGet.mockResolvedValue(
+      getState({ visibilityLevel: "internal" }) as Awaited<
+        ReturnType<typeof getVisibilityAction>
+      >
+    );
+    mockSet.mockRejectedValue(new Error("server crash"));
+
+    await act(async () => {
+      render(<VisibilityChip idOrSlug="obj-1" />);
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    const saveButton = screen.getByText("Save") as HTMLButtonElement;
+    await act(async () => {
+      fireEvent.click(saveButton);
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Failed to save — please try again.")
+      ).toBeTruthy();
+    });
+    // Save is re-enabled (saving cleared in finally) so the user can retry.
+    expect(saveButton.disabled).toBe(false);
+  });
+
+  it("surfaces an error when listGrantOptionsAction THROWS (not just ActionState failure)", async () => {
+    // A thrown role-options fetch must surface a retry hint rather than leaving the
+    // role dropdown silently empty with no explanation.
+    mockGet.mockResolvedValue(
+      getState({
+        visibilityLevel: "group",
+        grants: [{ kind: "role", value: "staff" }],
+      }) as Awaited<ReturnType<typeof getVisibilityAction>>
+    );
+    mockListOptions.mockRejectedValue(new Error("network down"));
+
+    await act(async () => {
+      render(<VisibilityChip idOrSlug="obj-1" />);
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByLabelText("Visibility: Group (click to edit)")
+      );
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Failed to load role options — please close and reopen."
+        )
+      ).toBeTruthy();
+    });
+  });
 });
