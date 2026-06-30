@@ -135,8 +135,13 @@ function indexCollections(collections: CollectionRow[]): {
 /**
  * The set of collection ids to KEEP: every directly-visible collection (its level
  * admits the principal OR it holds ≥1 visible object) plus every ANCESTOR of one,
- * so the tree stays connected. A `seen` guard bounds the ancestor walk against a
- * pathological cycle (the FK is a tree, but defend anyway).
+ * so the tree stays connected.
+ *
+ * The ancestor walk stops as soon as it reaches a node already in `keep`: because
+ * any node added to `keep` had its full ancestor chain added in the same walk,
+ * hitting an already-kept node means every node above it is kept too. That
+ * `!keep.has(cursorId)` terminator doubles as the cycle guard (a cycle revisits a
+ * kept node and stops), so no per-iteration `seen` set is needed.
  */
 function computeKeepSet(
   collections: CollectionRow[],
@@ -150,11 +155,9 @@ function computeKeepSet(
     const hasVisibleObject = (visibleCountByCollection.get(c.id) ?? 0) > 0;
     if (!levelOk && !hasVisibleObject) continue;
 
-    // Directly visible: mark it and every ancestor KEEP.
+    // Directly visible: mark it and every not-yet-kept ancestor KEEP.
     let cursorId: string | null = c.id;
-    const seen = new Set<string>();
-    while (cursorId != null && byId.has(cursorId) && !seen.has(cursorId)) {
-      seen.add(cursorId);
+    while (cursorId != null && byId.has(cursorId) && !keep.has(cursorId)) {
       keep.add(cursorId);
       cursorId = byId.get(cursorId)?.parentId ?? null;
     }

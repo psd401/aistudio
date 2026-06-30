@@ -81,6 +81,7 @@
     "083-tool-version-deprecation.sql",
     "084-drop-legacy-tools-tables.sql",
     "085-atrium-content.sql",
-    "086-atrium-doc-state.sql"
+    "086-atrium-doc-state.sql",
+    "087-atrium-nav-content-uniqueness.sql"
   ]
 }

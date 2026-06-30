@@ -37,10 +37,17 @@ export async function unpublishDocumentAction(
     // the capability check — mirrors publishDocumentAction.
     const session = await getServerSession();
     // Requester FIRST so an unauthenticated caller gets a 401, not a 403
-    // (hasCapabilityAccess returns false on a null session). `session!.sub` (not
-    // optional chaining) preserves the same-session invariant.
+    // (hasCapabilityAccess returns false on a null session). `getUserRequester`
+    // already throws authNoSession() for a null session; the explicit guard below
+    // restates that for the type system so the capability check reads `session.sub`
+    // without a fragile non-null assertion (and a future reorder fails loud, not
+    // with a TypeError). The same `session` object is reused — same-session invariant
+    // preserved (never re-resolve via optional chaining → undefined → re-read).
     const requester = await getUserRequester(requestId, session);
-    if (!(await hasCapabilityAccess("atrium-content", session!.sub))) {
+    if (!session) {
+      throw ErrorFactories.authNoSession();
+    }
+    if (!(await hasCapabilityAccess("atrium-content", session.sub))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 

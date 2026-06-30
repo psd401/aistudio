@@ -95,55 +95,43 @@ export const navItemService = {
    * `content_object_id`: a republish updates the label / parent and re-activates
    * the existing row rather than inserting a duplicate. The link points at the
    * intranet reader route (`/c/[slug]`).
+   *
+   * ATOMIC upsert keyed by `content_object_id` (unique constraint
+   * `uq_nav_content_object`, migration 087): a single `INSERT ... ON CONFLICT
+   * DO UPDATE` replaces the former check-then-insert, so two OVERLAPPING publishes
+   * of the same object can no longer both observe "no row" and both insert — the
+   * second conflicts and updates the same row. The DO UPDATE branch is also the
+   * republish path (re-activates a previously hidden row, preserving its id and
+   * any manual position).
    */
   async ensureNavItem(object: NavObject): Promise<void> {
     const parentId = await parentNavItemIdFor(object.collectionId);
     const link = `/c/${object.slug}`;
 
-    // Look up an existing content nav item for this object (keyed by the FK, not
-    // by type). A prior publish (or a republish after an unpublish) reuses the row.
-    const existing = await executeQuery(
+    await executeQuery(
       (db) =>
         db
-          .select({ id: navigationItems.id })
-          .from(navigationItems)
-          .where(eq(navigationItems.contentObjectId, object.id))
-          .limit(1),
-      "navItem.findExisting"
-    );
-
-    if (existing[0]) {
-      // Update in place: refresh label/link/parent and re-activate (a republish
-      // after unpublish). Keeps the row id and any manual position.
-      await executeQuery(
-        (db) =>
-          db
-            .update(navigationItems)
-            .set({
+          .insert(navigationItems)
+          .values({
+            label: object.title,
+            icon: CONTENT_NAV_ICON,
+            link,
+            parentId,
+            type: CONTENT_NAV_TYPE,
+            isActive: true,
+            contentObjectId: object.id,
+          })
+          .onConflictDoUpdate({
+            target: navigationItems.contentObjectId,
+            set: {
               label: object.title,
               link,
               parentId,
               type: CONTENT_NAV_TYPE,
               isActive: true,
-            })
-            .where(eq(navigationItems.id, existing[0].id)),
-        "navItem.update"
-      );
-      return;
-    }
-
-    await executeQuery(
-      (db) =>
-        db.insert(navigationItems).values({
-          label: object.title,
-          icon: CONTENT_NAV_ICON,
-          link,
-          parentId,
-          type: CONTENT_NAV_TYPE,
-          isActive: true,
-          contentObjectId: object.id,
-        }),
-      "navItem.insert"
+            },
+          }),
+      "navItem.upsert"
     );
   },
 
