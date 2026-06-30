@@ -19,28 +19,11 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { publishService } from "@/lib/content/publish-service";
-import { ValidationError } from "@/lib/content/errors";
+import { assertGrantKind } from "@/lib/content/validators";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
-
-/**
- * The visibility grant kinds the DB enum accepts. `grant.kind` arrives as a plain
- * `string` (the action's input type is widened for the API surface), so it MUST be
- * checked at runtime before being handed to `visibilityService.applyGrants` — a
- * bare `as` cast is a type-system fiction that lets an unexpected `kind` through.
- */
-const VALID_GRANT_KINDS = ["role", "building", "department", "grade", "user"] as const;
-type GrantKind = (typeof VALID_GRANT_KINDS)[number];
-const GRANT_KIND_SET = new Set<string>(VALID_GRANT_KINDS);
-
-function assertGrantKind(kind: string): GrantKind {
-  if (!GRANT_KIND_SET.has(kind)) {
-    throw new ValidationError(`Invalid visibility grant kind: ${kind}`, { kind });
-  }
-  return kind as GrantKind;
-}
 
 export async function publishDocumentAction(
   objectId: string,

@@ -187,14 +187,23 @@ async function applyGrantsInTx(
   objectId: string,
   grants: VisibilityGrant[]
 ): Promise<void> {
-  for (const grant of grants) assertValidGrant(grant);
+  // Normalize values (trim surrounding whitespace) BEFORE validation/storage. A
+  // padded value like " Math " is a non-empty string that passes the required-value
+  // check yet can never equal the un-padded users.building attribute it is meant to
+  // match — a silently inert grant that authorizes no one. Trimming also collapses a
+  // whitespace-only value to "" so assertValidGrant rejects it as missing.
+  const normalized = grants.map((g) => ({
+    kind: g.kind,
+    value: typeof g.value === "string" ? g.value.trim() : g.value,
+  }));
+  for (const grant of normalized) assertValidGrant(grant);
   // Deduplicate on (kind, value) before INSERT — the uq_cvg constraint enforces
   // uniqueness at the DB level, but a duplicate in the caller's input would throw
   // a 23505 unique_violation and roll back the transaction with a confusing error.
   // The delete-then-insert pattern means any prior duplicates are already gone,
   // so deduping the incoming array is both safe and necessary.
   const seen = new Set<string>();
-  const unique = grants.filter((g) => {
+  const unique = normalized.filter((g) => {
     const key = `${g.kind}:${g.value}`;
     return seen.has(key) ? false : (seen.add(key), true);
   });
@@ -237,6 +246,17 @@ async function setLevelInTx(
   const level = visibility.level;
   if (!VALID_VISIBILITY_LEVELS.has(level)) {
     throw new ValidationError(`Invalid visibility level: ${level}`, { level });
+  }
+  // Reject grants supplied for a non-group level rather than silently dropping
+  // them: those levels are not grant-keyed, and a caller that sent grants (e.g. a
+  // future REST/MCP path) intended to RESTRICT access — silently clearing them
+  // would widen access to exactly the principals the caller meant to scope. Fail
+  // loud (no silent failure) instead.
+  if (level !== "group" && (visibility.grants?.length ?? 0) > 0) {
+    throw new ValidationError("grants are only valid for group visibility", {
+      level,
+      grantCount: visibility.grants?.length ?? 0,
+    });
   }
   const grants = level === "group" ? visibility.grants ?? [] : [];
 

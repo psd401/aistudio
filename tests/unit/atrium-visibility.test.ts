@@ -247,6 +247,65 @@ describe("applyGrants — value validation", () => {
     await visibilityService.applyGrants(tx, "obj-1", []);
     expect(inserted).toHaveLength(0);
   });
+
+  it("rejects an unknown grant kind (defense-in-depth)", async () => {
+    // A cast-through/untyped caller could pass a kind outside the enum. The
+    // service guard must reject it with a clean ValidationError before it
+    // reaches the DB enum column.
+    const { tx } = fakeTx();
+    await expect(
+      visibilityService.applyGrants(tx, "obj-1", [
+        { kind: "superuser" as never, value: "1" },
+      ])
+    ).rejects.toThrow(/invalid grant kind/i);
+  });
+
+  it("deduplicates grants on (kind, value) before insert", async () => {
+    // A duplicate in the caller's input would otherwise hit the uq_cvg unique
+    // constraint and roll back the tx with a confusing 23505. Dedup keeps the
+    // insert clean.
+    const { tx, inserted } = fakeTx();
+    await visibilityService.applyGrants(tx, "obj-1", [
+      { kind: "role", value: "staff" },
+      { kind: "role", value: "staff" },
+      { kind: "user", value: "42" },
+    ]);
+    expect(inserted).toHaveLength(1);
+    expect((inserted[0] as unknown[]).length).toBe(2);
+  });
+
+  it("rejects a whitespace-only grant value (trims to empty → required)", async () => {
+    // "   " is a non-empty string but trims to "" — it could never equal a real
+    // attribute, so it must be rejected as missing rather than stored inert.
+    const { tx } = fakeTx();
+    await expect(
+      visibilityService.applyGrants(tx, "obj-1", [
+        { kind: "building", value: "   " },
+      ])
+    ).rejects.toThrow(/required/i);
+  });
+
+  it("trims surrounding whitespace from grant values before storing", async () => {
+    // A padded " Math " would never equal the un-padded users.building attribute
+    // it matches in canView; store the trimmed value so the grant authorizes.
+    const { tx, inserted } = fakeTx();
+    await visibilityService.applyGrants(tx, "obj-1", [
+      { kind: "building", value: " Math " },
+    ]);
+    expect(inserted).toHaveLength(1);
+    const rows = inserted[0] as Array<{ grantValue: string }>;
+    expect(rows[0].grantValue).toBe("Math");
+  });
+
+  it("dedups a padded value against its trimmed twin", async () => {
+    const { tx, inserted } = fakeTx();
+    await visibilityService.applyGrants(tx, "obj-1", [
+      { kind: "role", value: "staff" },
+      { kind: "role", value: " staff " },
+    ]);
+    expect(inserted).toHaveLength(1);
+    expect((inserted[0] as unknown[]).length).toBe(1);
+  });
 });
 
 describe("setLevelInTx — level + grant write semantics", () => {
@@ -294,18 +353,28 @@ describe("setLevelInTx — level + grant write semantics", () => {
     expect(updates[0]?.visibilityLevel).toBe("group");
   });
 
-  it("clears grants when the level is not group (e.g. private)", async () => {
+  it("clears grants when narrowing to a non-group level (e.g. private)", async () => {
     // A non-group level is not grant-keyed: setLevel must clear any prior grants
     // (the delete runs) and insert none, so stale grants can't silently widen
     // access if the level is later flipped back to group.
     const { tx, inserted, updates } = fakeTx();
-    await visibilityService.setLevelInTx(tx, "obj-1", {
-      level: "private",
-      // grants are ignored for a non-group level.
-      grants: [{ kind: "role", value: "staff" }],
-    });
+    await visibilityService.setLevelInTx(tx, "obj-1", { level: "private" });
     expect(inserted).toHaveLength(0);
     expect(updates[0]?.visibilityLevel).toBe("private");
+  });
+
+  it("rejects grants supplied for a non-group level (no silent drop)", async () => {
+    // Grants on a non-grant-keyed level are a caller bug. Throw rather than
+    // silently clearing them — silent clearing would widen access to exactly the
+    // principals the caller meant to scope.
+    const { tx, updates } = fakeTx();
+    await expect(
+      visibilityService.setLevelInTx(tx, "obj-1", {
+        level: "internal",
+        grants: [{ kind: "role", value: "staff" }],
+      })
+    ).rejects.toThrow(/only valid for group/i);
+    expect(updates).toHaveLength(0);
   });
 
   it("writes public/internal levels with no grants", async () => {
@@ -315,6 +384,18 @@ describe("setLevelInTx — level + grant write semantics", () => {
       expect(inserted).toHaveLength(0);
       expect(updates[0]?.visibilityLevel).toBe(level);
     }
+  });
+
+  it("rejects an unknown visibility level (defense-in-depth)", async () => {
+    // A cast-through/untyped caller (e.g. a future API route) could pass a level
+    // outside the enum. The service guard must reject it before any DB write.
+    const { tx, updates } = fakeTx();
+    await expect(
+      visibilityService.setLevelInTx(tx, "obj-1", {
+        level: "restricted" as never,
+      })
+    ).rejects.toThrow(/invalid visibility level/i);
+    expect(updates).toHaveLength(0);
   });
 });
 

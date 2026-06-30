@@ -27,6 +27,7 @@ import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { assertCanEdit } from "@/lib/content/helpers";
 import { ValidationError, NotFoundError } from "@/lib/content/errors";
+import { assertGrantKind } from "@/lib/content/validators";
 import type { VisibilityLevel } from "@/lib/content/types";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
@@ -45,22 +46,6 @@ function assertLevel(level: string): VisibilityLevel {
     throw new ValidationError(`Invalid visibility level: ${level}`, { level });
   }
   return level as VisibilityLevel;
-}
-
-/**
- * The visibility grant kinds the DB enum accepts. `grant.kind` arrives as a plain
- * `string` (the input is widened for the API surface), so it MUST be checked at
- * runtime before being handed to the service. The grant *value* is validated by
- * `visibilityService` (role = name, user = numeric id, the rest opaque).
- */
-const VALID_GRANT_KINDS = ["role", "building", "department", "grade", "user"] as const;
-type GrantKind = (typeof VALID_GRANT_KINDS)[number];
-const GRANT_KIND_SET = new Set<string>(VALID_GRANT_KINDS);
-function assertGrantKind(kind: string): GrantKind {
-  if (!GRANT_KIND_SET.has(kind)) {
-    throw new ValidationError(`Invalid visibility grant kind: ${kind}`, { kind });
-  }
-  return kind as GrantKind;
 }
 
 export async function setVisibilityAction(
