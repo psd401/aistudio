@@ -26,6 +26,8 @@ let publishableRows: Array<{
   visibilityLevel: string;
   currentVersionId: string | null;
   slug: string;
+  title: string;
+  collectionId: string | null;
 }> = [];
 
 let setLevelInTxCalls = 0;
@@ -47,6 +49,8 @@ jest.mock("@/lib/db/schema", () => ({
     visibilityLevel: "contentObjects.visibilityLevel",
     currentVersionId: "contentObjects.currentVersionId",
     slug: "contentObjects.slug",
+    title: "contentObjects.title",
+    collectionId: "contentObjects.collectionId",
   },
   contentPublications: {
     id: "contentPublications.id",
@@ -55,6 +59,7 @@ jest.mock("@/lib/db/schema", () => ({
     publishedVersionId: "contentPublications.publishedVersionId",
     status: "contentPublications.status",
     publishedBy: "contentPublications.publishedBy",
+    externalRef: "contentPublications.externalRef",
   },
 }));
 
@@ -85,8 +90,10 @@ jest.mock("@/lib/content/visibility-service", () => ({
   },
 }));
 
-// The intranet adapter is a no-op; track that it ran AFTER the transaction.
+// The intranet adapter ensures/hides the nav item; track that publish/unpublish
+// ran AFTER the transaction.
 let adapterPublishCalls = 0;
+let adapterUnpublishCalls = 0;
 jest.mock("@/lib/content/publish-adapters/intranet", () => ({
   intranetAdapter: {
     destination: "intranet",
@@ -94,12 +101,18 @@ jest.mock("@/lib/content/publish-adapters/intranet", () => ({
       adapterPublishCalls += 1;
       return { externalRef: null };
     }),
+    unpublish: jest.fn(async () => {
+      adapterUnpublishCalls += 1;
+    }),
   },
 }));
 
-// A chainable tx stub. Terminal `.returning()` shifts the next queued result off
-// `txResults` (the publication upsert RETURNING id); `.update()/.set()/.where()`
-// and `.insert()/.values()/.onConflictDoUpdate()` keep the chain fluent.
+// A chainable tx stub. The TERMINAL builder methods `.limit()` and `.returning()`
+// each shift the next queued result off `txResults` (in call order): a `.limit()`
+// terminates a SELECT (the FOR UPDATE lock, the live-publication lookup), and a
+// `.returning()` terminates the publication upsert. All other methods
+// (`.select()/.update()/.set()/.where()/.for()/.insert()/.values()/.onConflictDoUpdate()`)
+// keep the chain fluent. Queue results in the order the awaited terminals run.
 let txResults: unknown[] = [];
 function nextResult(): unknown {
   return txResults.shift() ?? [];
@@ -111,7 +124,9 @@ const chainHandler: ProxyHandler<Record<string, unknown>> = {
     // proxy returned a function for `then`, JS would treat it as a never-resolving
     // thenable. Return undefined for `then` so awaiting the chain resolves to it.
     if (prop === "then") return undefined;
-    if (prop === "returning") return () => nextResult();
+    // `.limit()` and `.returning()` are the awaited terminals — each yields the
+    // next queued result so SELECTs and the upsert RETURNING are deterministic.
+    if (prop === "returning" || prop === "limit") return () => nextResult();
     return () => chainProxy;
   },
 };
@@ -127,13 +142,21 @@ const stranger: Requester = { kind: "user", userId: 99, roles: ["staff"], isAdmi
 
 beforeEach(() => {
   publishableRows = [
-    { ownerUserId: 7, visibilityLevel: "private", currentVersionId: "v1", slug: "s1" },
+    {
+      ownerUserId: 7,
+      visibilityLevel: "private",
+      currentVersionId: "v1",
+      slug: "s1",
+      title: "Doc 1",
+      collectionId: null,
+    },
   ];
   canViewResult = true;
   setLevelInTxCalls = 0;
   lastSetLevelVisibility = null;
   lastSetLevelExtraSet = null;
   adapterPublishCalls = 0;
+  adapterUnpublishCalls = 0;
   txResults = [];
   jest.clearAllMocks();
 });
@@ -155,7 +178,14 @@ describe("publishService.publish", () => {
 
   it("throws ForbiddenError when viewable but not owner/admin", async () => {
     publishableRows = [
-      { ownerUserId: 7, visibilityLevel: "public", currentVersionId: "v1", slug: "s1" },
+      {
+        ownerUserId: 7,
+        visibilityLevel: "public",
+        currentVersionId: "v1",
+        slug: "s1",
+        title: "Doc 1",
+        collectionId: null,
+      },
     ];
     canViewResult = true;
     await expect(
@@ -170,7 +200,10 @@ describe("publishService.publish", () => {
   });
 
   it("throws ValidationError for an unimplemented destination (schoology)", async () => {
-    txResults = [[{ id: "pub1" }]];
+    // The tx (lock select -> upsert RETURNING) runs and commits FIRST; the
+    // not-implemented schoology adapter then throws when called after the tx.
+    // tx queue: FOR UPDATE lock row, then the publication upsert RETURNING id.
+    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
     await expect(
       publishService.publish(owner, "o1", { destination: "schoology" })
     ).rejects.toThrow(ValidationError);
@@ -178,7 +211,14 @@ describe("publishService.publish", () => {
 
   it("throws ValidationError when there is no working head", async () => {
     publishableRows = [
-      { ownerUserId: 7, visibilityLevel: "private", currentVersionId: null, slug: "s1" },
+      {
+        ownerUserId: 7,
+        visibilityLevel: "private",
+        currentVersionId: null,
+        slug: "s1",
+        title: "Doc 1",
+        collectionId: null,
+      },
     ];
     await expect(
       publishService.publish(owner, "o1", { destination: "intranet" })
@@ -186,7 +226,8 @@ describe("publishService.publish", () => {
   });
 
   it("resolves and runs the adapter AFTER the tx on the happy path", async () => {
-    txResults = [[{ id: "pub1" }]];
+    // tx queue: FOR UPDATE lock row, then the publication upsert RETURNING id.
+    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
     const result = await publishService.publish(owner, "o1", {
       destination: "intranet",
     });
@@ -197,7 +238,8 @@ describe("publishService.publish", () => {
   });
 
   it("widens visibility via setLevelInTx only when visibility is provided", async () => {
-    txResults = [[{ id: "pub2" }]];
+    // tx queue: FOR UPDATE lock row, then the publication upsert RETURNING id.
+    txResults = [[{ id: "o1" }], [{ id: "pub2" }]];
     await publishService.publish(owner, "o1", {
       destination: "intranet",
       visibility: { level: "group", grants: [{ kind: "role", value: "staff" }] },
@@ -216,9 +258,59 @@ describe("publishService.publish", () => {
   });
 
   it("throws ValidationError when the upsert returns no row", async () => {
-    txResults = [[]]; // RETURNING yields nothing
+    // tx queue: FOR UPDATE lock row (found), then the upsert RETURNING yields [].
+    txResults = [[{ id: "o1" }], []];
     await expect(
       publishService.publish(owner, "o1", { destination: "intranet" })
     ).rejects.toThrow(ValidationError);
+  });
+});
+
+describe("publishService.unpublish", () => {
+  it("throws NotFoundError when the object does not exist", async () => {
+    publishableRows = [];
+    await expect(
+      publishService.unpublish(owner, "o1", "intranet")
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it("throws NotFoundError (not ForbiddenError) when not viewable (existence masking)", async () => {
+    canViewResult = false;
+    await expect(
+      publishService.unpublish(stranger, "o1", "intranet")
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it("throws ForbiddenError when viewable but not owner/admin", async () => {
+    publishableRows = [
+      {
+        ownerUserId: 7,
+        visibilityLevel: "public",
+        currentVersionId: "v1",
+        slug: "s1",
+        title: "Doc 1",
+        collectionId: null,
+      },
+    ];
+    canViewResult = true;
+    await expect(
+      publishService.unpublish(stranger, "o1", "intranet")
+    ).rejects.toThrow(ForbiddenError);
+  });
+
+  it("is a no-op (unpublished:false) and does NOT run the adapter when there is no live publication", async () => {
+    // tx queue: FOR UPDATE lock row, then the live-publication lookup returns [].
+    txResults = [[{ id: "o1" }], []];
+    const result = await publishService.unpublish(owner, "o1", "intranet");
+    expect(result).toEqual({ unpublished: false });
+    expect(adapterUnpublishCalls).toBe(0);
+  });
+
+  it("marks unpublished and runs the adapter teardown AFTER the tx on the happy path", async () => {
+    // tx queue: FOR UPDATE lock row, then a live publication row with externalRef.
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    const result = await publishService.unpublish(owner, "o1", "intranet");
+    expect(result).toEqual({ unpublished: true });
+    expect(adapterUnpublishCalls).toBe(1);
   });
 });

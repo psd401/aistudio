@@ -533,6 +533,47 @@ export const visibilityService = {
   },
 
   /**
+   * Count requester-visible, non-archived objects grouped by collection — the
+   * collection tree's "does this section hold content I can see?" check, pushed
+   * fully into SQL using the same `buildVisibilitySql` predicate as `listVisible`.
+   *
+   * Bounded by the number of collections, NEVER the object count: a requester
+   * with more visible objects than `listVisible`'s page cap cannot have a real
+   * section silently pruned from their tree because its only visible objects fell
+   * outside the most-recent page. Objects with a null collection are ignored
+   * (they belong to no section). Published + draft both count (archived excluded),
+   * matching the unfiltered `listVisible` the tree previously derived counts from.
+   */
+  async visibleCountsByCollection(req: Requester): Promise<Map<string, number>> {
+    const principal = principalOf(req);
+    const o = contentObjects;
+    const visiblePredicate = buildVisibilitySql(principal);
+    const rows = await executeQuery(
+      (db: DrizzleDB) =>
+        db
+          .select({
+            collectionId: o.collectionId,
+            count: sql<number>`count(*)::int`,
+          })
+          .from(o)
+          .where(
+            and(
+              sql`${o.status} <> 'archived'`,
+              sql`${o.collectionId} IS NOT NULL`,
+              visiblePredicate
+            )
+          )
+          .groupBy(o.collectionId),
+      "content.visibleCountsByCollection"
+    );
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      if (row.collectionId) counts.set(row.collectionId, Number(row.count));
+    }
+    return counts;
+  },
+
+  /**
    * Permission-pushed listing: returns exactly the objects visible to the
    * requester, filtering in SQL. Mirrors `canView`'s logic (§12.3). Optional
    * filters narrow by collection/kind/tag/status.

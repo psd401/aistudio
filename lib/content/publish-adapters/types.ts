@@ -57,19 +57,25 @@ export interface PublishAdapter {
 
   /**
    * Make `versionId` of object `objectId` live at this destination. `slug` is the
-   * object's URL slug (the reader/public address). Returns the external
-   * identifier to persist, or `{ externalRef: null }` when the destination has
-   * no external system.
+   * object's URL slug (the reader/public address); `title` and `collectionId`
+   * let a destination place the object in its information architecture (the
+   * intranet adapter uses them to label/parent the auto-created nav item — §21).
+   * Returns the external identifier to persist, or `{ externalRef: null }` when
+   * the destination has no external system.
    */
   publish(input: {
     objectId: string;
     slug: string;
     versionId: string;
+    title: string;
+    collectionId: string | null;
   }): Promise<PublishResult>;
 
   /**
-   * Tear down the external side effect for a previously published object.
-   * Optional: reader-backed destinations (e.g. `intranet`) have nothing to undo.
+   * Tear down the external side effect for a previously published object. The
+   * intranet adapter uses `objectId` to deactivate the object's nav item (§21).
+   * Optional only for destinations with literally nothing to undo; the intranet
+   * adapter implements it.
    */
   unpublish?(input: {
     objectId: string;

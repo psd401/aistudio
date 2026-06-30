@@ -20,7 +20,7 @@
  * stable conversation id.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import { Collaboration } from "@tiptap/extension-collaboration";
 import { Markdown } from "tiptap-markdown";
@@ -28,8 +28,9 @@ import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import { getSchemaExtensions } from "@/lib/content/collab/editor-extensions";
 import { makeAuthorTag } from "@/lib/content/collab/provenance";
-import { snapshotDocumentAction } from "@/actions/db/atrium/snapshot-document";
-import { publishDocumentAction } from "@/actions/db/atrium/publish-document";
+import { cn } from "@/lib/utils";
+import { EditorToolbar } from "./EditorToolbar";
+import { useEditorActions } from "./use-editor-actions";
 import { AuthoredTracker } from "./authored-tracker";
 import { ProvenanceRail } from "./provenance-rail";
 import "@/styles/atrium-content.css";
@@ -61,7 +62,6 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
   const providerRef = useRef<WebsocketProvider | null>(null);
   const [status, setStatus] = useState<Status>("connecting");
   const [canEdit, setCanEdit] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
   // The resolved object UUID from the collab session (`docName`). The component is
   // mounted with `idOrSlug`, which MAY be a slug; the snapshot/publish actions must
   // target the stable UUID so a slug change between load and save can't retarget a
@@ -180,62 +180,40 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
     editor?.setEditable(canEdit);
   }, [editor, canEdit]);
 
-  const handleSnapshot = useCallback(async () => {
-    if (!editor) return;
-    // Target the resolved UUID, not the (possibly slug) mount prop. Until the
-    // session resolves, fall back to idOrSlug — but the buttons only render once
-    // canEdit is true, which is set together with docName, so the ref is populated.
-    const target = docNameRef.current ?? idOrSlug;
-    const body = editor.storage.markdown.getMarkdown();
-    const result = await snapshotDocumentAction(target, { body });
-    setMessage(result.isSuccess ? "Snapshot saved" : result.message ?? "Snapshot failed");
-  }, [editor, idOrSlug]);
-
-  const handlePublish = useCallback(async () => {
-    const target = docNameRef.current ?? idOrSlug;
-    const result = await publishDocumentAction(target, { destination: "intranet" });
-    setMessage(result.isSuccess ? "Published to intranet" : result.message ?? "Publish failed");
-  }, [idOrSlug]);
+  // Snapshot / publish / unpublish, with shared busy + success/error feedback.
+  const {
+    message,
+    actionError,
+    busy,
+    handleSnapshot,
+    handlePublish,
+    handleUnpublish,
+  } = useEditorActions({ editor, idOrSlug, docNameRef });
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-3 text-xs text-gray-500">
-        <span aria-live="polite">
-          {status === "connecting" && "Connecting…"}
-          {status === "ready" && (canEdit ? "Connected" : "Read-only")}
-          {status === "error" && "Connection error"}
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--atrium-human)" }} />
-          You
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--atrium-agent)" }} />
-          Agent
-        </span>
-        {canEdit && (
-          <span className="ml-auto flex gap-2">
-            <button
-              type="button"
-              onClick={handleSnapshot}
-              className="rounded border px-2 py-1 hover:bg-gray-50"
-            >
-              Snapshot
-            </button>
-            <button
-              type="button"
-              onClick={handlePublish}
-              className="rounded border px-2 py-1 hover:bg-gray-50"
-            >
-              Publish
-            </button>
-          </span>
-        )}
-      </div>
+      <EditorToolbar
+        status={status}
+        canEdit={canEdit}
+        busy={busy}
+        onSnapshot={handleSnapshot}
+        onPublish={handlePublish}
+        onUnpublish={handleUnpublish}
+      />
       <div className="atrium-editor">
         <EditorContent editor={editor} className="atrium-content" />
       </div>
-      {message && <p className="text-xs text-gray-500">{message}</p>}
+      {message && (
+        <p
+          aria-live="polite"
+          className={cn(
+            "text-xs",
+            actionError ? "text-destructive" : "text-muted-foreground"
+          )}
+        >
+          {message}
+        </p>
+      )}
     </div>
   );
 }
