@@ -270,6 +270,48 @@ bunx cdk deploy AIStudio-AgentPlatformStack-Dev \
   --context baseDomain=yourdomain.com
 ```
 
+### Agent image supply-chain pins (SEC-009)
+
+Every third-party artifact baked into the agent base image is pinned and
+verified before use — the container holds IAM reach to `psd-agent-creds/${env}/*`
+and `psd-agent/${env}/*`, so build-time substitution is a real compromise
+vector. `build-and-push.sh` fails fast if any `BLOCKER(prod)` marker remains in
+the Dockerfile (the enforcement gate that keeps these from regressing).
+
+| Artifact | Pin | Verification |
+|----------|-----|--------------|
+| OpenClaw base | `ghcr.io/openclaw/openclaw@sha256:5db497…` (2026.4.20) | Immutable digest in `FROM` |
+| bun | `1.2.12` | `bun-linux-aarch64.zip` SHA256 vs `BUN_SHA256` ARG |
+| uv | `0.7.9` | `uv-aarch64-unknown-linux-gnu.tar.gz` SHA256 vs `UV_SHA256` ARG |
+| Google Workspace CLI (`gws`) | `0.22.5` | `.tar.gz` SHA256 vs `GWS_SHA256` ARG |
+| GitHub CLI (`gh`) | `2.92.0` | `.tar.gz` SHA256 vs `GH_SHA256` ARG |
+| `bedrock-agentcore` (+ closure) | `1.15.1` | `pip install --require-hashes -r requirements-agentcore.txt` |
+
+bun and uv install from their official GitHub release artifacts (no
+`curl … | bash`). `bedrock-agentcore` is the official AWS SDK
+(`github.com/aws/bedrock-agentcore-sdk-python`); its full transitive closure is
+hash-pinned in `requirements-agentcore.txt`, so `--require-hashes` aborts the
+build on any mismatch — the image build itself is the supply-chain test.
+
+**Bumping a pinned artifact:**
+
+```bash
+# bun — refresh the bun-linux-aarch64.zip line from SHASUMS256.txt:
+curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v<VER>/SHASUMS256.txt" | grep bun-linux-aarch64.zip
+
+# uv — refresh from the .sha256 sidecar:
+curl -fsSL "https://github.com/astral-sh/uv/releases/download/<VER>/uv-aarch64-unknown-linux-gnu.tar.gz.sha256"
+
+# bedrock-agentcore (+ transitive deps) — regenerate the hashed closure:
+cd infra/agent-image
+# edit requirements-agentcore.in (top-level pins), then:
+uv pip compile --universal --generate-hashes --python-version 3.11 \
+  --no-annotate --no-header requirements-agentcore.in -o requirements-agentcore.txt
+```
+
+Paste each refreshed hash into the matching `ARG` in the Dockerfile (or commit
+the regenerated `requirements-agentcore.txt`). Never hand-edit a hash.
+
 ## Rich Chat output — cards, charts, button callbacks
 
 Phase 1 of native Chat interactivity (#TBD) added two skills and one shared
