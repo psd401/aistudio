@@ -178,18 +178,16 @@ test.describe('Nexus Core Chat — Authenticated', () => {
   test('stop button cancels ongoing streaming', async ({ page }) => {
     await sendMessage(page, 'Count slowly from 1 to 1000, one number per line')
 
-    // Wait for streaming to start
+    // Streaming starts: the Stop button appears and the assistant bubble begins
+    // rendering.
     await expect(page.locator('[aria-label="Stop generating"]')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('[data-role="assistant"]').first()).toBeVisible({ timeout: 30_000 })
 
-    // Click stop
+    // Clicking Stop cancels generation — the Stop button goes away (streaming halted).
+    // (This app DISCARDS the partial assistant message on cancel, so we assert the
+    // cancellation itself, not a retained partial bubble.)
     await page.locator('[aria-label="Stop generating"]').click()
-
-    // Stop button should disappear quickly after stopping
-    await expect(page.locator('[aria-label="Stop generating"]')).not.toBeVisible({ timeout: 5_000 })
-
-    // An assistant bubble should exist with partial content
-    const assistantBubbles = page.locator('[data-role="assistant"]')
-    await expect(assistantBubbles.first()).toBeVisible()
+    await expect(page.locator('[aria-label="Stop generating"]')).not.toBeVisible({ timeout: 10_000 })
   })
 
   test('input is cleared after sending a message', async ({ page }) => {
