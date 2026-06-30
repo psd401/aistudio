@@ -19,34 +19,25 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { publishService } from "@/lib/content/publish-service";
-import { ValidationError } from "@/lib/content/errors";
+import { assertGrantKind, assertLevel } from "@/lib/content/validators";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
 
-/**
- * The visibility grant kinds the DB enum accepts. `grant.kind` arrives as a plain
- * `string` (the action's input type is widened for the API surface), so it MUST be
- * checked at runtime before being handed to `visibilityService.applyGrants` — a
- * bare `as` cast is a type-system fiction that lets an unexpected `kind` through.
- */
-const VALID_GRANT_KINDS = ["role", "building", "department", "grade", "user"] as const;
-type GrantKind = (typeof VALID_GRANT_KINDS)[number];
-const GRANT_KIND_SET = new Set<string>(VALID_GRANT_KINDS);
-
-function assertGrantKind(kind: string): GrantKind {
-  if (!GRANT_KIND_SET.has(kind)) {
-    throw new ValidationError(`Invalid visibility grant kind: ${kind}`, { kind });
-  }
-  return kind as GrantKind;
-}
-
 export async function publishDocumentAction(
   objectId: string,
   input: {
     destination: "intranet";
-    visibility?: { level: "group"; grants: { kind: string; value: string }[] };
+    /**
+     * Optional visibility-widening applied in the publish transaction. `level`
+     * arrives as a plain `string` (the action/REST/MCP input contract) and is
+     * narrowed via `assertLevel` before reaching the service — matching the
+     * service's full `VisibilityLevel` capability rather than narrowing to
+     * `group` only at the type boundary. `grants` are only meaningful (and only
+     * accepted by the service) for `level: "group"`.
+     */
+    visibility?: { level: string; grants?: { kind: string; value: string }[] };
   }
 ): Promise<ActionState<{ publicationId: string; publishedVersionId: string }>> {
   const requestId = generateRequestId();
@@ -62,8 +53,12 @@ export async function publishDocumentAction(
     // (authNoSession → "please log in") rather than a 403 — `hasCapabilityAccess`
     // returns false (not throws) on a missing session, so gating on it first would
     // surface "access denied" to a caller who simply needs to log in.
+    // `getUserRequester` throws `authNoSession()` for a null session / sub, so
+    // `session` is non-null past this line. Use `session!.sub` (not `session?.`):
+    // optional chaining would pass `undefined` to `hasCapabilityAccess`, which
+    // re-resolves the session internally and breaks the same-session invariant.
     const requester = await getUserRequester(requestId, session);
-    if (!(await hasCapabilityAccess("atrium-content", session?.sub))) {
+    if (!(await hasCapabilityAccess("atrium-content", session!.sub))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 
@@ -80,16 +75,20 @@ export async function publishDocumentAction(
       }),
     });
 
-    // `input.visibility` carries a widened `grant.kind` (plain `string`).
-    // `assertGrantKind` narrows it via a RUNTIME check (throwing ValidationError on
-    // an unexpected value) before it reaches `visibilityService.applyGrants` — the
-    // DB enum is the last line of defense, not the first.
+    // `input.visibility` carries a widened `level` and `grant.kind` (plain
+    // `string`). `assertLevel` / `assertGrantKind` narrow each via a RUNTIME
+    // check (throwing ValidationError on an unexpected value) before they reach
+    // the service — the DB enum is the last line of defense, not the first.
     const result = await publishService.publish(requester, objectId, {
       destination: input.destination,
       visibility: input.visibility
         ? {
-            level: input.visibility.level,
-            grants: input.visibility.grants.map((g) => ({
+            level: assertLevel(input.visibility.level),
+            // `?? []` guard: `grants` is optional on the input contract (a REST/MCP
+            // caller, or a future action passing `{ visibility: { level: "internal" } }`,
+            // can omit it). Without the guard `undefined.map()` throws a TypeError —
+            // mirrors the `(input.grants ?? []).map(...)` guard in set-visibility.ts.
+            grants: (input.visibility.grants ?? []).map((g) => ({
               kind: assertGrantKind(g.kind),
               value: g.value,
             })),

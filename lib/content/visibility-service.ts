@@ -11,9 +11,10 @@
  * visibility widening (`setLevel`) lands with the publish service in Phase 5/7.
  */
 
-import { and, desc, eq, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, ne, sql, type SQL } from "drizzle-orm";
 import {
   executeQuery,
+  executeTransaction,
   type DbTransaction,
   type DrizzleDB,
 } from "@/lib/db/drizzle-client";
@@ -23,31 +24,44 @@ import {
 } from "@/lib/db/schema";
 import { principalOf } from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
-import { ValidationError } from "./errors";
+import { NotFoundError, ValidationError } from "./errors";
+import { GRANT_KIND_SET, POSITIVE_INT_RE, VISIBILITY_LEVEL_SET } from "./validators";
 import type {
   ContentObjectDTO,
   ListFilter,
   Principal,
   Requester,
   VisibilityGrant,
+  VisibilityInput,
+  VisibilityLevel,
 } from "./types";
 
 /** Upper bound on a `listVisible` tag filter, mirroring the tags column width. */
 const MAX_TAG_LENGTH = 100;
 
-/** A positive-integer ID string (no leading zeros required, no sign, no spaces). */
-const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
-
 /** Upper bound on a grant value, mirroring the `grant_value varchar(255)` column. */
 const MAX_GRANT_VALUE_LENGTH = 255;
 
 /**
- * Validate a grant before it is persisted. `user`/`role` values are numeric IDs
- * stored as strings (§12.2); the rest are non-empty opaque tokens. Rejecting an
- * empty or malformed value here prevents, e.g., an empty-string role grant from
- * matching unintended principals once the `g.grant_value = ''` comparison runs.
+ * Validate a grant before it is persisted. Only a `user` grant carries a numeric
+ * id (the `users.id`, matched as `String(userId)` in §12.2). A `role` grant
+ * carries the role *name* (e.g. "staff"), because `canView` matches it against
+ * `principal.roles` — which are role NAMES (`getUserRoles` returns
+ * `roles.name`), never role ids. The remaining kinds (building / department /
+ * grade) carry the user-attribute string verbatim. Rejecting an empty or
+ * over-long value here prevents, e.g., an empty-string role grant from matching
+ * unintended principals once the `g.grant_value = ''` comparison runs.
+ *
+ * NOTE: a `role` grant value MUST NOT be validated as a numeric id. Doing so
+ * (the Phase 0 behaviour) made role-based group grants unmatchable end-to-end:
+ * any value that passed validation (a number) could never equal a role name, so
+ * the grant silently granted access to no one. role=name / user=id is the §12.2
+ * contract and what `canView` / `buildVisibilitySql` both match on.
  */
 function assertValidGrant(grant: VisibilityGrant): void {
+  if (!GRANT_KIND_SET.has(grant.kind)) {
+    throw new ValidationError(`Invalid grant kind: ${grant.kind}`, { kind: grant.kind });
+  }
   const value = grant.value;
   if (typeof value !== "string" || value.length === 0) {
     throw new ValidationError("Grant value is required", { kind: grant.kind });
@@ -57,12 +71,10 @@ function assertValidGrant(grant: VisibilityGrant): void {
       kind: grant.kind,
     });
   }
-  if (
-    (grant.kind === "user" || grant.kind === "role") &&
-    !POSITIVE_INT_RE.test(value)
-  ) {
+  // Only `user` grants are numeric ids; `role` matches by NAME (see above).
+  if (grant.kind === "user" && !POSITIVE_INT_RE.test(value)) {
     throw new ValidationError(
-      `Grant value for '${grant.kind}' must be a positive-integer id`,
+      `Grant value for 'user' must be a positive-integer id`,
       { kind: grant.kind, value }
     );
   }
@@ -156,6 +168,202 @@ export interface ViewableObject {
   visibilityLevel: "private" | "group" | "internal" | "public";
 }
 
+/**
+ * Replace an object's grants with the supplied set (delete-then-insert) inside
+ * the caller's transaction. Validates every grant value first so a bad value
+ * aborts the whole replace (no partial application). A no-op delete-only when
+ * `grants` is empty (clears grants).
+ */
+async function applyGrantsInTx(
+  tx: DbTransaction,
+  objectId: string,
+  grants: VisibilityGrant[]
+): Promise<void> {
+  // Normalize values (trim surrounding whitespace) BEFORE validation/storage. A
+  // padded value like " Math " is a non-empty string that passes the required-value
+  // check yet can never equal the un-padded users.building attribute it is meant to
+  // match — a silently inert grant that authorizes no one. Trimming also collapses a
+  // whitespace-only value to "" so assertValidGrant rejects it as missing.
+  const normalized = grants.map((g) => ({
+    kind: g.kind,
+    value: typeof g.value === "string" ? g.value.trim() : g.value,
+  }));
+  for (const grant of normalized) assertValidGrant(grant);
+  // Deduplicate on (kind, value) before INSERT — the uq_cvg constraint enforces
+  // uniqueness at the DB level, but a duplicate in the caller's input would throw
+  // a 23505 unique_violation and roll back the transaction with a confusing error.
+  // The delete-then-insert pattern means any prior duplicates are already gone,
+  // so deduping the incoming array is both safe and necessary.
+  const seen = new Set<string>();
+  const unique = normalized.filter((g) => {
+    const key = `${g.kind}:${g.value}`;
+    return seen.has(key) ? false : (seen.add(key), true);
+  });
+  await tx
+    .delete(contentVisibilityGrants)
+    .where(eq(contentVisibilityGrants.objectId, objectId));
+  if (unique.length > 0) {
+    await tx.insert(contentVisibilityGrants).values(
+      unique.map((g) => ({
+        objectId,
+        grantKind: g.kind,
+        grantValue: g.value,
+      }))
+    );
+  }
+}
+
+/**
+ * Validate a level + the grants supplied with it for a level write. Throws a
+ * `ValidationError` for an unknown level, grants supplied for a non-group level
+ * (a silent drop would widen access), or a grantless group level.
+ *
+ * DESIGN NOTE — `private` + `user` grants: the read paths
+ * (`buildVisibilitySql.privateUserGrant` + `canView`'s user-grant branch) HONOR a
+ * per-user grant on a `private` object, and `setLevelInTx` PRESERVES existing ones
+ * (`clearNonUserGrantsInTx`). But there is intentionally NO path to *supply* a new
+ * grant on a non-group level — `group` is the only grant-authoring level in the
+ * UI. The honored-but-unsuppliable `private` user grant exists only so a
+ * group→private→(later)group round-trip does not silently revoke a user's access;
+ * it is not a feature with its own editor. If a future surface needs to add a
+ * per-user grant to a private object, add an explicit, separately-gated path —
+ * do NOT relax this guard (which would let a `setLevel` call widen access).
+ */
+function assertWritableLevel(
+  level: string,
+  grants: VisibilityGrant[] | undefined
+): void {
+  if (!VISIBILITY_LEVEL_SET.has(level)) {
+    throw new ValidationError(`Invalid visibility level: ${level}`, { level });
+  }
+  const grantCount = grants?.length ?? 0;
+  // Reject grants supplied for a non-group level rather than silently dropping
+  // them: those levels are not grant-keyed, and a caller that sent grants (e.g. a
+  // future REST/MCP path) intended to RESTRICT access — silently clearing them
+  // would widen access to exactly the principals the caller meant to scope.
+  if (level !== "group" && grantCount > 0) {
+    throw new ValidationError("grants are only valid for group visibility", {
+      level,
+      grantCount,
+    });
+  }
+  if (level === "group" && grantCount === 0) {
+    throw new ValidationError("group visibility requires at least one grant", {
+      level,
+    });
+  }
+}
+
+/**
+ * Extra columns a level-write may fold into its single UPDATE. Deliberately an
+ * EXPLICIT ALLOWLIST (not `Record<string, unknown>`): Drizzle maps any recognized
+ * column key in the spread to a SQL assignment, so an open record would let a
+ * caller fold in `ownerUserId`, `slug`, `collectionId`, etc. — silently
+ * transferring ownership or retargeting the row inside a write that already holds
+ * the `FOR UPDATE` lock and passed auth. Only `status` is foldable today (the
+ * publish path). Add columns here explicitly as new needs arise; never widen to an
+ * arbitrary record.
+ */
+type ExtraSet = {
+  status?: "draft" | "published" | "archived";
+};
+
+/**
+ * Reconcile the persisted grant set with the target level (see `setLevelInTx`
+ * JSDoc for the per-level rules): group replaces the full set, private preserves
+ * `user`-kind grants, internal/public clear everything.
+ */
+async function reconcileGrantsInTx(
+  tx: DbTransaction,
+  objectId: string,
+  level: string,
+  grants: VisibilityGrant[] | undefined
+): Promise<void> {
+  if (level === "group") {
+    await applyGrantsInTx(tx, objectId, grants ?? []);
+  } else if (level === "private") {
+    await clearNonUserGrantsInTx(tx, objectId);
+  } else {
+    await applyGrantsInTx(tx, objectId, []);
+  }
+}
+
+/**
+ * Replace an object's visibility level (and, for `group`, its grants) inside the
+ * caller's transaction — the atomic primitive shared by the standalone
+ * `setLevel` (the visibility editor) and the publish path (which widens
+ * visibility in the same transaction it records the publication).
+ *
+ * Semantics:
+ * - `level === "internal"` / `level === "public"` clears ALL existing grants —
+ *   neither read path (`buildVisibilitySql`, `canView`) consults grants for these
+ *   levels, so they always land with zero grants on the row.
+ * - `level === "private"` clears every grant EXCEPT `user`-kind grants. Both read
+ *   paths honor a per-user grant on a `private` object (`buildVisibilitySql`'s
+ *   `privateUserGrant` EXISTS clause and `canView`'s `grants.some(... kind ===
+ *   "user")` branch), so deleting them on a level-write would silently revoke
+ *   access the read paths still grant — a write/read contradiction. We preserve
+ *   them so "keep this private" (re-saving `private`) is non-destructive.
+ * - The caller MUST NOT *supply* grants for a non-group level: passing a non-empty
+ *   `grants` array with such a level throws `ValidationError` rather than silently
+ *   dropping it, because a caller that sent grants intended to RESTRICT access
+ *   and a silent drop would widen it. (Existing `user`-grant preservation above is
+ *   about *retaining persisted* grants, not accepting *supplied* ones.)
+ * - `level === "group"` requires at least one grant — a grantless group object
+ *   is visible to no one but the owner/admin (private semantics without saying
+ *   so), almost always a mistake (mirrors `contentService.create`).
+ *
+ * Does NOT run any permission check — callers gate with `assertCanEdit` first.
+ *
+ * `extraSet` folds additional columns into the single level UPDATE rather than
+ * forcing the caller to issue a second UPDATE on the same row in the same
+ * transaction (the publish path uses it for `status: "published"` so the row is
+ * touched once, not twice with a doubly-stamped `updatedAt`). It does NOT change
+ * `status` itself — that remains the caller's concern.
+ */
+async function setLevelInTx(
+  tx: DbTransaction,
+  objectId: string,
+  visibility: VisibilityInput,
+  extraSet: ExtraSet = {}
+): Promise<void> {
+  const level = visibility.level;
+  assertWritableLevel(level, visibility.grants);
+
+  // Reconcile the persisted grant set with the target level — both inside the one
+  // transaction so the level and its grant set are never observed apart.
+  await reconcileGrantsInTx(tx, objectId, level, visibility.grants);
+
+  await tx
+    .update(contentObjects)
+    // Spread `extraSet` FIRST so the validated `visibilityLevel`/`updatedAt`
+    // always win — a future caller passing those keys in `extraSet` cannot
+    // override the level that just passed VISIBILITY_LEVEL_SET validation.
+    .set({ ...extraSet, visibilityLevel: level, updatedAt: new Date() })
+    .where(eq(contentObjects.id, objectId));
+}
+
+/**
+ * Clear every grant on an object EXCEPT `user`-kind grants, inside the caller's
+ * transaction. Used when an object transitions to `private`: the read paths still
+ * honor per-user grants on a private object, so those must survive a level-write
+ * that no longer keys off role/building/department/grade grants. (Group grants of
+ * those kinds are meaningless once the object is private and are dropped.)
+ */
+async function clearNonUserGrantsInTx(
+  tx: DbTransaction,
+  objectId: string
+): Promise<void> {
+  await tx
+    .delete(contentVisibilityGrants)
+    .where(
+      and(
+        eq(contentVisibilityGrants.objectId, objectId),
+        ne(contentVisibilityGrants.grantKind, "user")
+      )
+    );
+}
+
 /** Load the normalized grants for an object. */
 async function grantsFor(objectId: string): Promise<VisibilityGrant[]> {
   const rows = await executeQuery(
@@ -192,65 +400,136 @@ export const visibilityService = {
     // Unauthenticated (no user, no roles) can only ever see public.
     if (principal.userId == null && principal.roles.length === 0) return false;
 
+    // Admin short-circuit BEFORE level checks — mirrors the top-level guard in
+    // buildVisibilitySql. Keeping the ordering identical prevents latent divergence
+    // if a future level is inserted that could return false for admins before reaching
+    // the isAdmin check (e.g. a `restricted` level with sub-permission checks).
+    if (principal.isAdmin) return true;
+
     if (obj.visibilityLevel === "internal") {
       // Any authenticated principal (a user, or an agent with a role).
       return principal.userId != null || principal.roles.length > 0;
     }
-    if (principal.isAdmin) return true;
     if (principal.userId != null && principal.userId === obj.ownerUserId) {
       return true;
     }
 
-    const grants = await grantsFor(obj.id);
-
     if (obj.visibilityLevel === "private") {
-      // Private is owner/admin only, plus any explicit per-user grant.
+      // Private is owner/admin only, plus any explicit per-user grant. A caller
+      // with no userId (anonymous / autonomous-agent) can never match a `user`
+      // grant, so skip the grantsFor DB round-trip entirely — both for efficiency
+      // AND to close the timing side-channel that the existence-masking
+      // (notFound vs forbidden) is meant to remove. The SQL path
+      // (buildVisibilitySql.privateUserGrant) short-circuits the same way.
+      if (principal.userId == null) return false;
+      const grants = await grantsFor(obj.id);
       return grants.some(
-        (g) =>
-          g.kind === "user" &&
-          principal.userId != null &&
-          String(principal.userId) === g.value
+        (g) => g.kind === "user" && String(principal.userId) === g.value
       );
     }
 
-    // group:
-    return grants.some(
-      (g) =>
-        (g.kind === "role" && principal.roles.includes(g.value)) ||
-        (g.kind === "building" && principal.building === g.value) ||
-        (g.kind === "department" && principal.department === g.value) ||
-        (g.kind === "grade" &&
-          (principal.gradeLevels ?? []).includes(g.value)) ||
-        (g.kind === "user" &&
-          principal.userId != null &&
-          String(principal.userId) === g.value)
-    );
+    if (obj.visibilityLevel === "group") {
+      // Gate the grant sweep on the `group` level explicitly — `buildVisibilitySql`
+      // gates its EXISTS subquery with `AND visibility_level = 'group'`, so a stale
+      // grant on a non-group object (a direct DB edit or a future migration path)
+      // must NOT authorize a principal here that the SQL predicate would deny. The
+      // explicit `=== "group"` check keeps the two paths equivalent AND skips the DB
+      // round-trip for any non-group level (which never consults grants).
+      const grants = await grantsFor(obj.id);
+      return grants.some(
+        (g) =>
+          (g.kind === "role" && principal.roles.includes(g.value)) ||
+          (g.kind === "building" && principal.building === g.value) ||
+          (g.kind === "department" && principal.department === g.value) ||
+          (g.kind === "grade" &&
+            (principal.gradeLevels ?? []).includes(g.value)) ||
+          (g.kind === "user" &&
+            principal.userId != null &&
+            String(principal.userId) === g.value)
+      );
+    }
+
+    // Any level not handled above (e.g. a future level added to the enum but not
+    // yet wired into the visibility rules) denies by default — fail closed, never
+    // leak. Mirror the new level in buildVisibilitySql in the same commit.
+    return false;
   },
 
   /**
-   * Replace an object's grants with the supplied set (delete-then-insert) inside
-   * the caller's transaction. A no-op (clears grants) when `grants` is empty.
+   * Reconcile an object's grants for a target level, enforcing the same level
+   * invariants as `setLevelInTx` (group needs ≥1 grant and only group accepts
+   * supplied grants; private preserves persisted `user` grants; internal/public
+   * clear all). Used by `contentService.create`, which writes the level inline on
+   * INSERT and so cannot route the grants through `setLevelInTx`'s UPDATE — this
+   * gives it the same guard without the level write.
    */
-  async applyGrants(
+  async applyGrantsForLevel(
     tx: DbTransaction,
     objectId: string,
+    level: string,
     grants: VisibilityGrant[]
   ): Promise<void> {
-    // Validate every grant value before touching the DB so a bad value aborts
-    // the whole replace (no partial application).
-    for (const grant of grants) assertValidGrant(grant);
-    await tx
-      .delete(contentVisibilityGrants)
-      .where(eq(contentVisibilityGrants.objectId, objectId));
-    if (grants.length > 0) {
-      await tx.insert(contentVisibilityGrants).values(
-        grants.map((g) => ({
-          objectId,
-          grantKind: g.kind,
-          grantValue: g.value,
-        }))
-      );
-    }
+    assertWritableLevel(level, grants);
+    await reconcileGrantsInTx(tx, objectId, level, grants);
+  },
+
+  /**
+   * Validate a level + its grants WITHOUT writing — lets a caller that builds the
+   * row in a single INSERT (`contentService.create`) fail an invalid level/grant
+   * combination (e.g. a collection-defaulted `group` with no grants) BEFORE the
+   * INSERT, rather than rolling back an already-written row. Same rules as
+   * `applyGrantsForLevel` / `setLevelInTx`.
+   */
+  assertWritableLevel(level: string, grants: VisibilityGrant[] | undefined): void {
+    assertWritableLevel(level, grants);
+  },
+
+  /**
+   * Replace an object's grants AND level inside the caller's transaction — used
+   * by the publish path, which widens visibility in the same transaction it
+   * records the publication. `extraSet` folds extra columns (e.g.
+   * `status: "published"`) into the single level UPDATE so the publish path
+   * touches the row once. See `setLevelInTx` for the level/grant semantics.
+   */
+  async setLevelInTx(
+    tx: DbTransaction,
+    objectId: string,
+    visibility: VisibilityInput,
+    extraSet: ExtraSet = {}
+  ): Promise<void> {
+    await setLevelInTx(tx, objectId, visibility, extraSet);
+  },
+
+  /**
+   * Set an object's visibility level (and, for `group`, replace its grants) as a
+   * standalone, atomic write — the visibility editor's persistence path (§12.4
+   * "publish-widening" generalized to any level change).
+   *
+   * The object must exist (404 otherwise) and the caller is expected to have
+   * already passed `assertCanEdit`. Does NOT change `status`. Returns the new
+   * level so the surface can reflect it without a re-read.
+   */
+  async setLevel(
+    objectId: string,
+    visibility: VisibilityInput
+  ): Promise<{ visibilityLevel: VisibilityLevel }> {
+    await executeTransaction(async (tx) => {
+      // Guard against a missing object inside the tx so the level write does not
+      // silently no-op (UPDATE ... WHERE id = <absent> affects zero rows). Lock
+      // the row FOR UPDATE so a concurrent delete cannot slip between this check
+      // and the setLevelInTx update.
+      const rows = await tx
+        .select({ id: contentObjects.id })
+        .from(contentObjects)
+        .where(eq(contentObjects.id, objectId))
+        .for("update")
+        .limit(1);
+      if (!rows[0]) {
+        throw new NotFoundError("Content not found", { objectId });
+      }
+      await setLevelInTx(tx, objectId, visibility);
+    }, "content.setLevel");
+    return { visibilityLevel: visibility.level };
   },
 
   /**

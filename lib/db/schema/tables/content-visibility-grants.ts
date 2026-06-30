@@ -11,9 +11,16 @@
  * ## Columns of note
  * - `grant_kind` — the dimension the grant keys on (role / building / department /
  *   grade / user).
- * - `grant_value` — the value to match. For `role` and `user` grants this is the
- *   numeric id stored as text; for building/department/grade it is the attribute
- *   string.
+ * - `grant_value` — the value to match.
+ *   - `role` grants: the role **NAME** (e.g. `"staff"`) — matched against
+ *     `principal.roles` from `getUserRoles()` which returns names, not ids.
+ *   - `user` grants: the numeric user id serialised as text (e.g. `"42"`).
+ *   - `building` / `department` / `grade` grants: the attribute string
+ *     (e.g. `"High School"`, `"Math"`, `"9"`).
+ *
+ *   ⚠️  DO NOT store a numeric id for `role` grants — the in-memory `canView`
+ *   and the SQL `buildVisibilitySql` both match by name, so an id-valued role
+ *   grant will never authorize anyone.
  */
 
 import {

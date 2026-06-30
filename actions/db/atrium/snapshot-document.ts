@@ -51,8 +51,12 @@ export async function snapshotDocumentAction(
     // (authNoSession → "please log in") rather than a 403 — `hasCapabilityAccess`
     // returns false (not throws) on a missing session, so gating on it first would
     // surface "access denied" to a caller who simply needs to log in.
+    // `getUserRequester` throws `authNoSession()` for a null session / sub, so
+    // `session` is non-null past this line. Use `session!.sub` (not `session?.`):
+    // optional chaining would pass `undefined` to `hasCapabilityAccess`, which
+    // re-resolves the session internally and breaks the same-session invariant.
     const requester = await getUserRequester(requestId, session);
-    if (!(await hasCapabilityAccess("atrium-content", session?.sub))) {
+    if (!(await hasCapabilityAccess("atrium-content", session!.sub))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 
@@ -79,7 +83,13 @@ export async function snapshotDocumentAction(
       ownerUserId: obj.ownerUserId,
       visibilityLevel: obj.visibilityLevel,
     });
-    if (!viewable || !canEdit(requester, obj.ownerUserId)) {
+    // Mask existence: a non-viewable object 404s rather than revealing — via a
+    // 403 — that this UUID exists. Matches setVisibilityAction, getVisibilityAction,
+    // and publishService.publish (§12.4). The edit gate (403) only applies once the
+    // caller can already see the object.
+    if (!viewable)
+      throw new NotFoundError("Content object not found", { objectId });
+    if (!canEdit(requester, obj.ownerUserId)) {
       throw new ForbiddenError("Not permitted to edit this content");
     }
 

@@ -82,6 +82,23 @@ describe("publishDocumentAction — grant.kind runtime validation", () => {
     expect(publishMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does not crash when visibility is present but grants is omitted", async () => {
+    // A REST/MCP caller (or a future action) can send `{ visibility: { level } }`
+    // with no `grants`. Without the `?? []` guard, `grants.map()` throws a
+    // TypeError. The action must coalesce to an empty list and forward it.
+    const result = await publishDocumentAction("o1", {
+      destination: "intranet",
+      visibility: { level: "internal" },
+    });
+    expect(result.isSuccess).toBe(true);
+    expect(publishMock).toHaveBeenCalledTimes(1);
+    const passedInput = publishMock.mock.calls[0][2] as {
+      visibility?: { level: string; grants: unknown[] };
+    };
+    expect(passedInput.visibility?.level).toBe("internal");
+    expect(passedInput.visibility?.grants).toEqual([]);
+  });
+
   it("rejects when only some grants are invalid (fails on the bad one)", async () => {
     const result = await publishDocumentAction("o1", {
       destination: "intranet",

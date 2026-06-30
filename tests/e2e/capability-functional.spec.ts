@@ -83,8 +83,12 @@ test.describe('Capability functional flows (authenticated)', () => {
  * churn; the point is "capability granted + page mounted".
  */
 async function assertCapabilityPageLoads(page: Page, route: string): Promise<void> {
+  // `goto` resolves on the load event. Do NOT waitForLoadState('networkidle') —
+  // capability pages poll (e.g. /schedules execution status) and, under concurrent
+  // test load on the dev server, the network never goes idle, so the wait times out
+  // flakily. The element assertions below are the real readiness signal (Playwright
+  // auto-waits on them).
   await page.goto(route)
-  await page.waitForLoadState('networkidle')
   expect(new URL(page.url()).pathname).toBe(route)
   await expect(page.getByRole('navigation')).toBeVisible({ timeout: 15_000 })
   await expect(page.getByRole('main').first()).toBeVisible()

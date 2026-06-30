@@ -169,23 +169,43 @@ export const publishService = {
 
     const publicationId = await executeTransaction(
       async (tx: DbTransaction) => {
-        // Always mark the object as published. Optionally widen visibility in
-        // the same tx so the status change and any grant updates are atomic.
-        if (input.visibility?.level === "group") {
-          await visibilityService.applyGrants(
-            tx,
-            objectId,
-            input.visibility.grants ?? []
-          );
+        // Lock the content row FOR UPDATE at the start of the transaction so two
+        // concurrent publishes of the same object serialize here rather than racing
+        // through `applyGrantsInTx`'s DELETE (no contention) and both reaching the
+        // grant INSERT — where the second would hit the `uq_cvg` unique constraint
+        // and roll back as an opaque 500. The standalone `visibilityService.setLevel`
+        // acquires the same lock; mirror it here. The row was confirmed to exist via
+        // `loadPublishable` above, but re-select inside the tx (a concurrent delete
+        // could have removed it between the load and this lock); a missing row 404s.
+        const locked = await tx
+          .select({ id: contentObjects.id })
+          .from(contentObjects)
+          .where(eq(contentObjects.id, objectId))
+          .for("update")
+          .limit(1);
+        if (!locked[0]) {
+          throw new NotFoundError("Content not found", { objectId });
         }
-        await tx
-          .update(contentObjects)
-          .set({
-            ...(input.visibility ? { visibilityLevel: input.visibility.level } : {}),
+
+        // Optionally widen visibility in the same tx so the status change and
+        // any grant updates are atomic. `setLevelInTx` replaces the level + (for
+        // group) its grants, enforcing the group-needs-grants guard. When a
+        // visibility change is requested, fold `status: "published"` into its
+        // single level UPDATE (via `extraSet`) so the row is touched once;
+        // otherwise issue a standalone status-only UPDATE.
+        if (input.visibility) {
+          await visibilityService.setLevelInTx(tx, objectId, input.visibility, {
             status: "published",
-            updatedAt: new Date(),
-          })
-          .where(eq(contentObjects.id, objectId));
+          });
+        } else {
+          await tx
+            .update(contentObjects)
+            .set({
+              status: "published",
+              updatedAt: new Date(),
+            })
+            .where(eq(contentObjects.id, objectId));
+        }
 
         // Idempotent upsert: republishing the same destination updates the live
         // version + status in place (unique on (object_id, destination)).
