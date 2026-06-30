@@ -15,6 +15,15 @@ export interface JwtSigner {
   signJwt(payload: Record<string, unknown>): Promise<string>
   getPublicKeyJwk(): Promise<JwksKey>
   getKid(): string
+  /**
+   * The PRIVATE signing JWK for node-oidc-provider to sign JWT access/id tokens
+   * with, or `null` when the key is non-exportable (KMS). The public counterpart
+   * is served via `getPublicKeyJwk`, so the API middleware verifies tokens
+   * against the same key. In production with KMS this returns null; an
+   * exportable OIDC signing key must be supplied separately (see
+   * oidc-provider-config.ts and the Phase 5 verification runbook).
+   */
+  getSigningJwk(): Promise<Record<string, unknown> | null>
 }
 
 // ============================================
@@ -46,7 +55,12 @@ class LocalJwtSigner implements JwtSigner {
   private async _generateKeyPair(): Promise<void> {
     const { generateKeyPair, exportJWK } = await import("jose")
 
-    const { privateKey, publicKey } = await generateKeyPair("RS256")
+    // `extractable: true` so the private key can be exported as a JWK for
+    // node-oidc-provider to sign JWT access tokens (Atrium Phase 5,
+    // `getSigningJwk`). Dev-only key; production uses KMS / an injected key.
+    const { privateKey, publicKey } = await generateKeyPair("RS256", {
+      extractable: true,
+    })
     this.privateKey = privateKey
 
     const jwk = await exportJWK(publicKey)
@@ -76,6 +90,14 @@ class LocalJwtSigner implements JwtSigner {
   async getPublicKeyJwk(): Promise<JwksKey> {
     await this.init()
     return this.publicKeyJwk!
+  }
+
+  async getSigningJwk(): Promise<Record<string, unknown> | null> {
+    await this.init()
+    const { exportJWK } = await import("jose")
+    const jwk = await exportJWK(this.privateKey as CryptoKey)
+    // Include the metadata oidc-provider needs to select + advertise the key.
+    return { ...jwk, use: "sig", alg: "RS256", kid: this.kid }
   }
 
   getKid(): string {

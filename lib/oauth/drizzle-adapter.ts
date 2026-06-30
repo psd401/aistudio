@@ -308,12 +308,31 @@ class DrizzleAdapter implements Adapter {
     payload: AdapterPayload,
     expiresAt?: Date
   ): Promise<void> {
+    // Client-credentials tokens (Atrium Phase 5) have no end-user `accountId`;
+    // the row's user_id is NOT NULL, so fall back to the configured Atrium system
+    // user (the owner of autonomous-agent content). Without it configured, a
+    // client-credentials token cannot be persisted — surface that as a clear
+    // error rather than a NaN insert.
+    const accountUserId = Number.parseInt(payload.accountId as string, 10)
+    let userId = accountUserId
+    if (Number.isNaN(userId)) {
+      const sysId = Number.parseInt(process.env.ATRIUM_SYSTEM_USER_ID ?? "", 10)
+      if (Number.isNaN(sysId)) {
+        // Operator misconfiguration (missing env var), not a type check —
+        // prefer-type-error's heuristic misreads the surrounding isNaN guard.
+        // eslint-disable-next-line unicorn/prefer-type-error
+        throw new Error(
+          "Cannot persist a user-less access token (client_credentials) without ATRIUM_SYSTEM_USER_ID"
+        )
+      }
+      userId = sysId
+    }
     await executeQuery(
       (db) =>
         db.insert(oauthAccessTokens).values({
           jti: id,
           clientId: payload.clientId as string,
-          userId: Number.parseInt(payload.accountId as string, 10),
+          userId,
           scopes: (payload.scope as string)?.split(" ") ?? [],
           expiresAt: expiresAt ?? new Date(Date.now() + 900_000),
         }),
