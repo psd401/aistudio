@@ -1,5 +1,6 @@
 import { test, expect } from '../fixtures'
 import { gotoNexus, sendMessage, waitForStreamingComplete, getConversationIdFromUrl } from './utils'
+import { authenticateContext } from '../helpers/session-auth'
 
 // Core Nexus chat E2E tests — auth-independent (redirect/401) and auth-required groups.
 
@@ -62,6 +63,7 @@ test.describe('Nexus Core Chat — Authenticated', () => {
   )
 
   test.beforeEach(async ({ page }) => {
+    await authenticateContext(page.context())
     await gotoNexus(page)
   })
 
@@ -227,6 +229,10 @@ test.describe('Nexus Voice Availability API — Authenticated', () => {
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
+
+  test.beforeEach(async ({ page }) => {
+    await authenticateContext(page.context())
+  })
 
   test('GET /api/nexus/voice/availability returns shape when authenticated', async ({ page }) => {
     await page.goto('/nexus')

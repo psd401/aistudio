@@ -1,5 +1,6 @@
 import { test, expect } from '../fixtures'
 import { gotoNexus, sendMessage, waitForStreamingComplete, getConversationIdFromUrl } from './utils'
+import { authenticateContext } from '../helpers/session-auth'
 
 // Advanced Nexus E2E tests — fork conversation, model/tool/voice selectors, error handling.
 
@@ -21,6 +22,10 @@ test.describe('Nexus Fork Conversation — Authenticated', () => {
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
+
+  test.beforeEach(async ({ page }) => {
+    await authenticateContext(page.context())
+  })
 
   test('forking a non-existent conversation returns 404', async ({ page }) => {
     await page.goto('/nexus')
@@ -92,6 +97,7 @@ test.describe('Nexus Model Selector — Authenticated', () => {
   )
 
   test.beforeEach(async ({ page }) => {
+    await authenticateContext(page.context())
     await gotoNexus(page)
   })
 
@@ -161,6 +167,10 @@ test.describe('Nexus Error Handling — Authenticated', () => {
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
 
+  test.beforeEach(async ({ page }) => {
+    await authenticateContext(page.context())
+  })
+
   test('navigating to non-existent conversation ID shows error or redirects', async ({ page }) => {
     // UUID that is syntactically valid but does not exist — use ?id= query param (the app's routing form)
     await page.goto('/nexus?id=00000000-0000-0000-0000-000000000000')
@@ -217,6 +227,10 @@ test.describe('Nexus API Error Handling — Authenticated', () => {
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
+
+  test.beforeEach(async ({ page }) => {
+    await authenticateContext(page.context())
+  })
 
   test('PATCH non-existent conversation returns 404', async ({ page }) => {
     await page.goto('/nexus')
@@ -281,6 +295,10 @@ test.describe('Nexus Message Persistence — Authenticated', () => {
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
+
+  test.beforeEach(async ({ page }) => {
+    await authenticateContext(page.context())
+  })
 
   test('messages sent in chat are retrievable from /api/nexus/conversations/<id>/messages', async ({
     page,
