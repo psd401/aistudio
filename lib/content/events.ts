@@ -14,10 +14,11 @@
  *    dev, tests, and the pre-deploy window work without the topic.
  *  - The publish path emits exactly once per successful publish.
  *
- * Mirrors the SNS usage in `lib/safety/bedrock-guardrails-service.ts`.
+ * The Subject-cap + best-effort send/swallow live in the shared
+ * `lib/aws/sns.ts` helper (also used by `lib/safety/bedrock-guardrails-service.ts`).
  */
 
-import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
+import { snsPublishBestEffort } from "@/lib/aws/sns";
 import { createLogger } from "@/lib/logger";
 
 export type ContentEventType =
@@ -36,24 +37,6 @@ export interface ContentEventPayload {
   agentLabel?: string | null;
   requestId?: string | null;
   [key: string]: unknown;
-}
-
-/** SNS `Subject` is capped at 100 chars by the API — a longer one fails the publish. */
-function buildSubject(type: ContentEventType): string {
-  const subject = `Atrium: ${type}`;
-  return subject.length > 100 ? subject.slice(0, 100) : subject;
-}
-
-let snsClientCache: SNSClient | null = null;
-
-function getSnsClient(): SNSClient {
-  if (snsClientCache) return snsClientCache;
-  // Credentials resolve automatically from the ECS task role (IMDSv2) in prod
-  // and from the default chain locally.
-  snsClientCache = new SNSClient({
-    region: process.env.AWS_REGION ?? "us-east-1",
-  });
-  return snsClientCache;
 }
 
 export const contentEvents = {
@@ -76,28 +59,26 @@ export const contentEvents = {
       return;
     }
 
-    try {
-      await getSnsClient().send(
-        new PublishCommand({
-          TopicArn: topicArn,
-          Subject: buildSubject(type),
-          Message: JSON.stringify({
-            event: type,
-            ...payload,
-            // Stamp at emit time; callers need not thread a clock through.
-            emittedAt: new Date().toISOString(),
-          }),
-          MessageAttributes: {
-            eventType: { DataType: "String", StringValue: type },
-          },
-        })
-      );
+    const { sent, error } = await snsPublishBestEffort({
+      topicArn,
+      subject: `Atrium: ${type}`,
+      message: JSON.stringify({
+        event: type,
+        ...payload,
+        // Stamp at emit time; callers need not thread a clock through.
+        emittedAt: new Date().toISOString(),
+      }),
+      messageAttributes: {
+        eventType: { DataType: "String", StringValue: type },
+      },
+    });
+    if (sent) {
       log.info("Emitted content event", { type, objectId: payload.objectId });
-    } catch (err) {
+    } else {
       log.error("Failed to emit content event", {
         type,
         objectId: payload.objectId,
-        error: err instanceof Error ? err.message : String(err),
+        error: error instanceof Error ? error.message : String(error),
       });
     }
   },

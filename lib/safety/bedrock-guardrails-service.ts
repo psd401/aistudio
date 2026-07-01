@@ -17,7 +17,8 @@ import {
   type ApplyGuardrailCommandInput,
   type GuardrailAssessment as SDKGuardrailAssessment,
 } from '@aws-sdk/client-bedrock-runtime';
-import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
+import { SNSClient } from '@aws-sdk/client-sns';
+import { snsPublishBestEffort } from '@/lib/aws/sns';
 import { createLogger, generateRequestId } from '@/lib/logger';
 import { createHmac } from 'node:crypto';
 import type {
@@ -670,52 +671,49 @@ export class BedrockGuardrailsService {
       return;
     }
 
-    try {
-      const message = {
-        timestamp: violation.timestamp,
-        violationId: violation.violationId,
-        source: violation.source,
-        categories: violation.categories,
-        action: violation.action,
-        modelId: violation.modelId,
-        provider: violation.provider,
-        // Note: userIdHash is a hash, not actual user ID for privacy
-        userIdHash: violation.userIdHash,
-      };
+    const message = {
+      timestamp: violation.timestamp,
+      violationId: violation.violationId,
+      source: violation.source,
+      categories: violation.categories,
+      action: violation.action,
+      modelId: violation.modelId,
+      provider: violation.provider,
+      // Note: userIdHash is a hash, not actual user ID for privacy
+      userIdHash: violation.userIdHash,
+    };
 
-      const command = new PublishCommand({
-        TopicArn: this.config.violationTopicArn,
-        // SNS Subject max is 100 chars. Truncate category list to fit.
-        Subject: (() => {
-          const base = 'K-12 Content Safety Alert: ';
-          const full = base + violation.categories.join(', ');
-          return full.length <= 100 ? full : full.slice(0, 97) + '...';
-        })(),
-        Message: JSON.stringify(message, null, 2),
-        MessageAttributes: {
-          violationType: {
-            DataType: 'String',
-            StringValue: violation.source,
-          },
-          action: {
-            DataType: 'String',
-            StringValue: violation.action,
-          },
+    // Best-effort publish via the shared helper (Subject cap + swallow — never
+    // throws, so no surrounding try/catch needed). Use THIS service's own
+    // region-configured client, not the shared default.
+    const { sent, error } = await snsPublishBestEffort({
+      client: this.snsClient,
+      topicArn: this.config.violationTopicArn,
+      subject: 'K-12 Content Safety Alert: ' + violation.categories.join(', '),
+      message: JSON.stringify(message, null, 2),
+      messageAttributes: {
+        violationType: {
+          DataType: 'String',
+          StringValue: violation.source,
         },
-      });
+        action: {
+          DataType: 'String',
+          StringValue: violation.action,
+        },
+      },
+    });
 
-      await this.snsClient.send(command);
-
+    if (sent) {
       this.log.info('Violation notification sent', {
         violationId: violation.violationId,
         categories: violation.categories,
       });
-    } catch (error) {
+    } else {
+      // Don't throw - notification failure shouldn't block the response.
       this.log.error('Failed to send violation notification', {
         violationId: violation.violationId,
         error: error instanceof Error ? error.message : String(error),
       });
-      // Don't throw - notification failure shouldn't block the response
     }
   }
 

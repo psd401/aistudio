@@ -159,32 +159,44 @@ const createDocumentSchema = z.object({
   tags: z.array(z.string()).optional(),
 });
 
-async function handleCreateDocument(
-  args: Record<string, unknown>,
-  context: McpToolContext
+/**
+ * Shared create flow for the document + artifact tools (they differ only in
+ * `kind` and how body/bodyFormat map from each tool's own schema). Resolves the
+ * requester, enforces the session capability gate + the §26.4 public-publish
+ * gate, creates, audits, and maps errors — in ONE place so the two thin handlers
+ * can't drift on the shared logic.
+ */
+async function createContent(
+  context: McpToolContext,
+  kind: "document" | "artifact",
+  common: {
+    title: string;
+    collection?: string;
+    visibility?: z.infer<typeof visibilityZ>;
+    tags?: string[];
+  },
+  body: { body?: string; bodyFormat?: "markdown" | "html" | "jsx" }
 ): Promise<McpToolResult> {
-  const parsed = createDocumentSchema.safeParse(args);
-  if (!parsed.success) return zodFail(parsed.error);
   const resolved = await resolveReq(context);
   if ("result" in resolved) return resolved.result;
   const { req } = resolved;
   try {
     // Session humans must also hold the atrium-content capability (see helper).
     await assertContentAuthoringCapability(context);
-    const collectionId = await resolveCollectionId(parsed.data.collection);
+    const collectionId = await resolveCollectionId(common.collection);
     const hasPublishPublicCapability = context.scopes.includes(
       "content:publish_public"
     );
     const created = await contentService.create(
       req,
       {
-        kind: "document",
-        title: parsed.data.title,
+        kind,
+        title: common.title,
         collectionId,
-        body: parsed.data.markdown,
-        bodyFormat: parsed.data.markdown ? "markdown" : undefined,
-        visibility: parsed.data.visibility,
-        tags: parsed.data.tags,
+        body: body.body,
+        bodyFormat: body.bodyFormat,
+        visibility: common.visibility,
+        tags: common.tags,
       },
       { hasPublishPublicCapability }
     );
@@ -200,6 +212,21 @@ async function handleCreateDocument(
   } catch (err) {
     return fail(err, { req, action: "create", requestId: context.requestId });
   }
+}
+
+async function handleCreateDocument(
+  args: Record<string, unknown>,
+  context: McpToolContext
+): Promise<McpToolResult> {
+  const parsed = createDocumentSchema.safeParse(args);
+  if (!parsed.success) return zodFail(parsed.error);
+  const { title, collection, markdown, visibility, tags } = parsed.data;
+  return createContent(
+    context,
+    "document",
+    { title, collection, visibility, tags },
+    { body: markdown, bodyFormat: markdown ? "markdown" : undefined }
+  );
 }
 
 const createArtifactSchema = z.object({
@@ -218,41 +245,13 @@ async function handleCreateArtifact(
 ): Promise<McpToolResult> {
   const parsed = createArtifactSchema.safeParse(args);
   if (!parsed.success) return zodFail(parsed.error);
-  const resolved = await resolveReq(context);
-  if ("result" in resolved) return resolved.result;
-  const { req } = resolved;
-  try {
-    // Session humans must also hold the atrium-content capability (see helper).
-    await assertContentAuthoringCapability(context);
-    const collectionId = await resolveCollectionId(parsed.data.collection);
-    const hasPublishPublicCapability = context.scopes.includes(
-      "content:publish_public"
-    );
-    const created = await contentService.create(
-      req,
-      {
-        kind: "artifact",
-        title: parsed.data.title,
-        collectionId,
-        body: parsed.data.code,
-        bodyFormat: parsed.data.bodyFormat,
-        visibility: parsed.data.visibility,
-        tags: parsed.data.tags,
-      },
-      { hasPublishPublicCapability }
-    );
-    await recordContentAudit({
-      req,
-      action: "create",
-      surface: "mcp",
-      objectId: created.id,
-      outcome: "ok",
-      requestId: context.requestId,
-    });
-    return ok({ id: created.id, slug: created.slug, url: contentDeepLink(created.slug) });
-  } catch (err) {
-    return fail(err, { req, action: "create", requestId: context.requestId });
-  }
+  const { title, collection, code, bodyFormat, visibility, tags } = parsed.data;
+  return createContent(
+    context,
+    "artifact",
+    { title, collection, visibility, tags },
+    { body: code, bodyFormat }
+  );
 }
 
 const getContentSchema = z.object({ idOrSlug: z.string().min(1) });

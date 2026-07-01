@@ -26,7 +26,7 @@ import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { assertCanEdit } from "@/lib/content/helpers";
-import { NotFoundError } from "@/lib/content/errors";
+import { ApprovalRequiredError, NotFoundError } from "@/lib/content/errors";
 import { assertGrantKind, assertLevel } from "@/lib/content/validators";
 import type { VisibilityLevel } from "@/lib/content/types";
 import type { ActionState } from "@/types";
@@ -143,6 +143,19 @@ export async function setVisibilityAction(
     return createSuccess(result, "Visibility updated");
   } catch (error) {
     timer({ status: "error" });
+    // The §26.4 public-publish gate is not a failure — it's a pending-approval
+    // outcome (an approval-queue event was emitted). Surface it distinctly so the
+    // UI shows "submitted for review", not a generic "failed" error (mirrors the
+    // REST/MCP surfaces mapping ApprovalRequiredError to 202/approval_required).
+    if (error instanceof ApprovalRequiredError) {
+      log.info("Visibility change requires approval", { requestId });
+      return {
+        isSuccess: false,
+        approvalRequired: true,
+        message:
+          "Making this public requires administrator approval — your request has been submitted for review.",
+      };
+    }
     return handleError(error, "Failed to update visibility", {
       context: "setVisibilityAction",
       requestId,

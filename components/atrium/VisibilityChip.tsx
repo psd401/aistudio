@@ -249,16 +249,25 @@ async function performVisibilitySave(
   setters: {
     setSaving: (v: boolean) => void;
     setError: (v: string | null) => void;
+    setPendingApproval: (v: string | null) => void;
     setSavedLevel: (v: Level) => void;
     setSavedGrants: (v: Grant[]) => void;
     setOpen: (v: boolean) => void;
     onChange?: (level: Level) => void;
   }
 ): Promise<void> {
-  const { setSaving, setError, setSavedLevel, setSavedGrants, setOpen, onChange } =
-    setters;
+  const {
+    setSaving,
+    setError,
+    setPendingApproval,
+    setSavedLevel,
+    setSavedGrants,
+    setOpen,
+    onChange,
+  } = setters;
   setSaving(true);
   setError(null);
+  setPendingApproval(null);
   // A group object with no grants is visible to no one but the owner/admin —
   // block the save client-side with a clear message (the service also rejects).
   if (level === "group" && grants.length === 0) {
@@ -278,6 +287,10 @@ async function performVisibilitySave(
       setSavedGrants(reconcileSavedGrants(newLevel, grants));
       setOpen(false);
       onChange?.(newLevel);
+    } else if (result.approvalRequired) {
+      // Not an error — the §26.4 gate accepted the request into the approval
+      // queue. Show it as a distinct pending notice, not a red failure.
+      setPendingApproval(result.message);
     } else {
       setError(result.message);
     }
@@ -302,6 +315,8 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   const [grants, setGrants] = useState<Grant[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // §26.4 pending-approval notice — rendered distinctly from `error` (not a failure).
+  const [pendingApproval, setPendingApproval] = useState<string | null>(null);
   const [savedLevel, setSavedLevel] = useState<Level>("private");
   const [savedGrants, setSavedGrants] = useState<Grant[]>([]);
 
@@ -364,6 +379,7 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   const changeLevel = useCallback((next: Level) => {
     setLevel(next);
     setError(null);
+    setPendingApproval(null);
   }, []);
 
   const removeGrant = useCallback((index: number) => {
@@ -384,6 +400,7 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
       performVisibilitySave(idOrSlug, level, grants, {
         setSaving,
         setError,
+        setPendingApproval,
         setSavedLevel,
         setSavedGrants,
         setOpen,
@@ -400,6 +417,7 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
       setLevel(savedLevel);
       setGrants(savedGrants);
       setError(null);
+      setPendingApproval(null);
     }
     setOpen(next);
   }, [savedLevel, savedGrants]);
@@ -452,6 +470,9 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
           )}
 
           {error && <p className="text-sm text-destructive">{error}</p>}
+          {pendingApproval && (
+            <p className="text-sm text-amber-600" role="status">{pendingApproval}</p>
+          )}
         </div>
 
         {canEdit && (

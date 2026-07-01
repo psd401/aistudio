@@ -350,7 +350,13 @@ interface JwtAuthResult {
   userId: number;
   cognitoSub: string;
   scopes: string[];
-  clientId: string;
+  /**
+   * The OIDC `client_id`/`azp`, or `undefined` when the token carries neither.
+   * NOT a sentinel string — `requesterFromApiAuth` does a truthy check on
+   * `oauthClientId`, so a literal `"unknown"` would be treated as a real client
+   * id and route the caller down the agent-resolution branch.
+   */
+  clientId?: string;
   /** The human a delegated agent acts for, from a `delegated_for` claim. */
   delegatedForUserId?: number;
 }
@@ -409,7 +415,8 @@ async function verifyJwtToken(
         if (!cid) {
           log.warn("JWT missing client_id and azp claims")
         }
-        return cid ?? "unknown"
+        // undefined (not a sentinel) when absent — see JwtAuthResult.clientId.
+        return cid || undefined
       })(),
       delegatedForUserId,
     };

@@ -188,4 +188,21 @@ describe("setVisibilityAction — write", () => {
     // ...and the service's rejection surfaces as a failed ActionState, not success.
     expect(result.isSuccess).toBe(false);
   });
+
+  it("surfaces the §26.4 gate as a distinct approval_required state, not a generic error", async () => {
+    // A non-admin widening to `public` is denied by the gate as an
+    // ApprovalRequiredError. The action must map it to `approvalRequired: true`
+    // (with an approval-worded message) so the UI shows a distinct "submitted for
+    // review" notice rather than a red "Failed to update visibility" error.
+    const { ApprovalRequiredError } = jest.requireActual("@/lib/content/errors");
+    setLevelMock.mockRejectedValueOnce(
+      new ApprovalRequiredError("Widening to public requires approval")
+    );
+    const result = await setVisibilityAction("o1", { level: "public" });
+    expect(result.isSuccess).toBe(false);
+    expect(
+      (result as { approvalRequired?: boolean }).approvalRequired
+    ).toBe(true);
+    expect(result.message).toMatch(/approval/i);
+  });
 });
