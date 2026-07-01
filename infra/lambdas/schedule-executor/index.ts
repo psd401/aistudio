@@ -501,18 +501,21 @@ async function executeAssistantArchitectForSchedule(scheduledExecution: any, exe
     throw new Error('ECS_INTERNAL_ENDPOINT_PARAM environment variable not configured');
   }
 
-  const ecsEndpoint = await getEcsEndpoint(ecsEndpointParamName, requestId);
-  if (!ecsEndpoint) {
-    throw new Error('Failed to retrieve ECS endpoint from SSM Parameter Store');
-  }
-
   // Get internal API secret for JWT generation (from Secrets Manager via SSM)
   const secretArnParamName = requiredEnvVars.INTERNAL_API_SECRET_ARN_PARAM;
   if (!secretArnParamName) {
     throw new Error('INTERNAL_API_SECRET_ARN_PARAM environment variable not configured');
   }
 
-  const internalApiSecret = await getInternalApiSecret(secretArnParamName, requestId);
+  // The ECS-endpoint SSM read and the internal-API-secret read are independent,
+  // so fetch them concurrently to shave a round trip off every cold-start run.
+  const [ecsEndpoint, internalApiSecret] = await Promise.all([
+    getEcsEndpoint(ecsEndpointParamName, requestId),
+    getInternalApiSecret(secretArnParamName, requestId),
+  ]);
+  if (!ecsEndpoint) {
+    throw new Error('Failed to retrieve ECS endpoint from SSM Parameter Store');
+  }
 
   // Generate short-lived JWT token for authentication
 

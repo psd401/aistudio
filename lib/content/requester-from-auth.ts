@@ -50,22 +50,29 @@ async function loadUserContext(userId: number): Promise<{
   // Defensive: a malformed token sub could yield a non-positive / NaN id; skip
   // the query and let the caller surface a clean auth error.
   if (!Number.isInteger(userId) || userId <= 0) return null;
-  const rows = await executeQuery(
-    (db) =>
-      db
-        .select({
-          building: users.building,
-          department: users.department,
-          gradeLevels: users.gradeLevels,
-        })
-        .from(users)
-        .where(eq(users.id, userId))
-        .limit(1),
-    "atrium.requesterFromAuth.loadUser"
-  );
+  // The user-attributes SELECT and the roles lookup are independent, so run them
+  // concurrently — this is on the hot path of every authenticated content REST/MCP
+  // call. A not-found user makes the roles query wasted work, but that path is
+  // rare (a deleted/invalid token sub) and the common found-user path saves a
+  // round trip.
+  const [rows, roleNames] = await Promise.all([
+    executeQuery(
+      (db) =>
+        db
+          .select({
+            building: users.building,
+            department: users.department,
+            gradeLevels: users.gradeLevels,
+          })
+          .from(users)
+          .where(eq(users.id, userId))
+          .limit(1),
+      "atrium.requesterFromAuth.loadUser"
+    ),
+    getUserRoles(userId),
+  ]);
   const row = rows[0];
   if (!row) return null;
-  const roleNames = await getUserRoles(userId);
   return {
     roles: roleNames,
     building: row.building,
