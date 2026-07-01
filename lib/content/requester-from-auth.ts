@@ -113,6 +113,80 @@ async function findAgentIdentity(oauthClientId: string): Promise<{
 }
 
 /**
+ * Look up the active autonomous agent identity by its PRIMARY KEY (`agent_identities.id`),
+ * including its own `scopes` column. Distinct from `findAgentIdentity` (which keys on
+ * `oauthClientId` and reads scopes from the OAuth token): a scheduled run has NO
+ * token, so the identity's authority MUST come from the row itself.
+ */
+async function findAgentIdentityById(agentIdentityId: string): Promise<{
+  id: string;
+  name: string;
+  roleId: number | null;
+  roleName: string | null;
+  scopes: string[];
+} | null> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: agentIdentities.id,
+          name: agentIdentities.name,
+          roleId: agentIdentities.roleId,
+          roleName: roles.name,
+          scopes: agentIdentities.scopes,
+        })
+        .from(agentIdentities)
+        .leftJoin(roles, eq(agentIdentities.roleId, roles.id))
+        .where(
+          and(
+            eq(agentIdentities.id, agentIdentityId),
+            eq(agentIdentities.isActive, true)
+          )
+        )
+        .limit(1),
+    "atrium.requesterFromAuth.findAgentById"
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Build an `agent-autonomous` Requester from an `agent_identities.id` — the
+ * identity-first path a SCHEDULED Assistant Architect run uses (§25). Unlike
+ * `requesterFromApiAuth` (token-first: scopes come from the OAuth token), the
+ * scopes here come from the identity row, because a scheduled run carries no token.
+ *
+ * Fails CLOSED: throws `ForbiddenError` when the identity is missing, inactive, or
+ * deleted. A scheduled run that requested a specific service identity must NOT
+ * silently degrade to running as the owning user (that would grant the run the
+ * user's full human authority instead of the identity's bounded scopes) — the
+ * caller surfaces the failure so an operator who deactivated an identity sees the
+ * run stop, not quietly run with the wrong authority.
+ */
+export async function buildAutonomousRequesterForIdentity(
+  agentIdentityId: string
+): Promise<Requester> {
+  const log = createLogger({ action: "atrium.autonomousRequesterForIdentity" });
+  const identity = await findAgentIdentityById(agentIdentityId);
+  if (!identity) {
+    throw new ForbiddenError("No active agent identity for this id", {
+      agentIdentityId,
+    });
+  }
+  log.debug("Resolved agent-autonomous requester by id", {
+    agentId: identity.id,
+    agentLabel: identity.name,
+  });
+  return {
+    kind: "agent-autonomous",
+    agentId: identity.id,
+    roleId: identity.roleId,
+    roles: identity.roleName ? [identity.roleName] : [],
+    scopes: identity.scopes,
+    agentLabel: identity.name,
+  };
+}
+
+/**
  * Build the `agent-delegated` requester. Exposed (and unit-tested) on its own so
  * the grant-inheritance invariant is explicit: it carries the human's roles/org
  * but `principalOf` forces `isAdmin:false`, so a delegated agent can NEVER exceed
