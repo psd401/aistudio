@@ -23,6 +23,7 @@ import type { Editor } from "@tiptap/react";
 import { snapshotDocumentAction } from "@/actions/db/atrium/snapshot-document";
 import { publishDocumentAction } from "@/actions/db/atrium/publish-document";
 import { unpublishDocumentAction } from "@/actions/db/atrium/unpublish-document";
+import type { ActionState } from "@/types";
 
 interface UseEditorActionsParams {
   editor: Editor | null;
@@ -45,13 +46,47 @@ export interface EditorActions {
 
 /**
  * The outcome of a toolbar action. `pending` (a §26.4 approval-required result) is
- * neither success nor error: it is a distinct amber "submitted for review" state,
- * so a caller must not collapse it into the `ok` boolean.
+ * neither success nor error: it is a distinct amber "submitted for review" state.
+ * A discriminated union (rather than `{ ok: boolean; pending?: boolean }`) makes
+ * the invalid `{ ok: true, pending: true }` combination unrepresentable.
  */
-interface ActionOutcome {
-  ok: boolean;
-  text: string;
-  pending?: boolean;
+type ActionOutcome =
+  | { status: "success"; text: string }
+  | { status: "pending"; text: string }
+  | { status: "error"; text: string };
+
+/**
+ * Maps a server action's `ActionState`-shaped result to an `ActionOutcome` for
+ * `runAction`'s shared success/error/pending-approval handling — the identical
+ * `isSuccess` / `approvalRequired` / else branching `handlePublish` and
+ * `handleUnpublish` both need, centralized so a third action doesn't hand-copy it
+ * again. `successText` may depend on the resolved data (e.g. unpublish's
+ * "Not currently published" vs "Unpublished from intranet"), so it accepts either
+ * a fixed string or a function of `result.data`.
+ */
+function mapActionResult<T>(
+  result: ActionState<T>,
+  opts: {
+    successText: string | ((data: T) => string);
+    failureFallback: string;
+  }
+): ActionOutcome {
+  if (result.isSuccess) {
+    const text =
+      typeof opts.successText === "function"
+        ? opts.successText(result.data)
+        : opts.successText;
+    return { status: "success", text };
+  }
+  // §26.4: an approval-required result is NOT a failure — surface it amber, like
+  // VisibilityChip, instead of red.
+  if (result.approvalRequired) {
+    return {
+      status: "pending",
+      text: result.message ?? "Submitted for approval.",
+    };
+  }
+  return { status: "error", text: result.message ?? opts.failureFallback };
 }
 
 export function useEditorActions({
@@ -66,17 +101,15 @@ export function useEditorActions({
 
   // Run a toolbar action with shared busy/feedback handling: blocks re-entry
   // while one is in flight, records success / error / pending-approval for the
-  // caption styling. A `pending` outcome is NOT an error — clear the error flag so
-  // the caption renders amber (review submitted), not red (failed).
+  // caption styling.
   const runAction = useCallback(
     async (run: () => Promise<ActionOutcome>) => {
       setBusy(true);
       try {
-        const { ok, text, pending } = await run();
-        setPendingApproval(pending ?? false);
-        // A pending-approval outcome is not a failure even though `ok` is false.
-        setActionError(!ok && !pending);
-        setMessage(text);
+        const outcome = await run();
+        setPendingApproval(outcome.status === "pending");
+        setActionError(outcome.status === "error");
+        setMessage(outcome.text);
       } finally {
         setBusy(false);
       }
@@ -93,10 +126,10 @@ export function useEditorActions({
     const body = editor.storage.markdown.getMarkdown();
     void runAction(async () => {
       const result = await snapshotDocumentAction(target, { body });
-      return {
-        ok: result.isSuccess,
-        text: result.isSuccess ? "Snapshot saved" : result.message ?? "Snapshot failed",
-      };
+      return mapActionResult(result, {
+        successText: "Snapshot saved",
+        failureFallback: "Snapshot failed",
+      });
     });
   }, [editor, idOrSlug, docNameRef, runAction]);
 
@@ -104,21 +137,13 @@ export function useEditorActions({
     const target = docNameRef.current ?? idOrSlug;
     void runAction(async () => {
       const result = await publishDocumentAction(target, { destination: "intranet" });
-      if (result.isSuccess) {
-        return { ok: true, text: "Published to intranet" };
-      }
-      // §26.4: a public-destination publish the caller can't authorize returns a
-      // pending-approval outcome (not a failure) — surface it amber, like
-      // VisibilityChip. `intranet` never trips this today; wired for future
-      // public-destination publish buttons.
-      if (result.approvalRequired) {
-        return {
-          ok: false,
-          pending: true,
-          text: result.message ?? "Submitted for approval.",
-        };
-      }
-      return { ok: false, text: result.message ?? "Publish failed" };
+      // §26.4: `intranet` never trips the public-publish gate today; wired for
+      // future public-destination publish buttons (mapActionResult surfaces an
+      // `approvalRequired` result as `pending`, not `error`).
+      return mapActionResult(result, {
+        successText: "Published to intranet",
+        failureFallback: "Publish failed",
+      });
     });
   }, [idOrSlug, docNameRef, runAction]);
 
@@ -138,26 +163,14 @@ export function useEditorActions({
     const target = docNameRef.current ?? idOrSlug;
     void runAction(async () => {
       const result = await unpublishDocumentAction(target, { destination: "intranet" });
-      if (result.isSuccess) {
-        return {
-          ok: true,
-          text: result.data.unpublished
-            ? "Unpublished from intranet"
-            : "Not currently published",
-        };
-      }
       // §26.4: taking a public destination offline needs the same authority as
-      // publishing it — an unauthorized caller gets a pending-approval outcome.
-      // `intranet` never trips this today; wired for future public-destination
-      // unpublish buttons (mirrors handlePublish).
-      if (result.approvalRequired) {
-        return {
-          ok: false,
-          pending: true,
-          text: result.message ?? "Submitted for approval.",
-        };
-      }
-      return { ok: false, text: result.message ?? "Unpublish failed" };
+      // publishing it — `intranet` never trips this today; wired for future
+      // public-destination unpublish buttons (mirrors handlePublish).
+      return mapActionResult(result, {
+        successText: (data) =>
+          data.unpublished ? "Unpublished from intranet" : "Not currently published",
+        failureFallback: "Unpublish failed",
+      });
     });
   }, [idOrSlug, docNameRef, runAction]);
 
