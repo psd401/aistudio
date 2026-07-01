@@ -121,20 +121,30 @@ async function loadPublishable(
 }
 
 /**
- * Whether a publish request is an ACTUAL public exposure that the §26.4 gate must
- * review. A `public_web` destination always is (its adapter is unimplemented today,
- * so there is no already-live state to compare). Widening visibility to `public`
- * only exposes when the object is not ALREADY public — re-saving already-public
- * content (visibility unchanged) is an idempotent no-op, not a new exposure, so it
- * must NOT trip the gate (spuriously throwing ApprovalRequiredError + emitting the
- * approval event for a non-admin owner who changed nothing).
+ * §26.4 — emit the approval-queue signal and throw `ApprovalRequiredError` for an
+ * unauthorized public-facing publish. Shared by the two gate sites (the pre-tx
+ * `public_web` destination branch and the in-tx visibility-widen branch) so the
+ * emit shape + message stay identical. `void` emit is fire-and-forget (best-effort;
+ * `emit` swallows its own errors and never rejects), safe even right before a throw
+ * — including inside a transaction, where the throw rolls the tx back.
  */
-function isPublicFacingPublish(
-  input: PublishInput,
-  currentLevel: VisibilityLevel
-): boolean {
-  if (input.destination === "public_web") return true;
-  return input.visibility?.level === "public" && currentLevel !== "public";
+function raisePublishApprovalRequired(
+  req: Requester,
+  objectId: string,
+  slug: string,
+  destination: PublishDestination
+): never {
+  void contentEvents.emit("content.public_publish_requested", {
+    objectId,
+    slug,
+    destination,
+    actorKind: actorKindOf(req),
+    agentLabel: req.kind === "user" ? null : req.agentLabel,
+  });
+  throw new ApprovalRequiredError(
+    "Publishing to a public destination requires approval",
+    { destination, objectId }
+  );
 }
 
 export const publishService = {
@@ -179,33 +189,23 @@ export const publishService = {
     }
     assertCanEdit(req, obj.ownerUserId);
 
-    // §26.4 — the public-publish gate. Targeting a public-facing destination, or
-    // widening visibility to `public`, requires `content:publish_public`:
-    // autonomous agents never hold it, under-scoped delegated agents lack it, and
-    // non-admin humans need the capability. When the caller is not authorized,
-    // emit the approval-queue signal and raise the structured ApprovalRequiredError
-    // (surfaces map it to 202 / `approval_required`) — never silently publish
-    // unreviewed content to families/the public. `isPublicFacingPublish` gates on
-    // an ACTUAL public exposure, not the target value alone (see its JSDoc: a no-op
-    // re-save of already-public content must not trip the gate).
-    if (
-      isPublicFacingPublish(input, obj.visibilityLevel) &&
-      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
-    ) {
-      // Fire-and-forget (best-effort, matches the audit-write pattern):
-      // `contentEvents.emit` swallows its own errors (`snsPublishBestEffort` never
-      // throws), so awaiting it only adds an SNS round-trip to the response path.
-      void contentEvents.emit("content.public_publish_requested", {
-        objectId,
-        slug: obj.slug,
-        destination: input.destination,
-        actorKind: actorKindOf(req),
-        agentLabel: req.kind === "user" ? null : req.agentLabel,
-      });
-      throw new ApprovalRequiredError(
-        "Publishing to a public destination requires approval",
-        { destination: input.destination, objectId }
-      );
+    // Whether this caller holds the §26.4 public-publish authority (pure, no IO).
+    const mayPublishPublic = canPublishPublic(
+      req,
+      opts.hasPublishPublicCapability ?? false
+    );
+
+    // §26.4 gate — PART 1 (destination), evaluated pre-transaction because it does
+    // NOT depend on the object's current visibility (a `public_web` destination is
+    // ALWAYS a public exposure) and so is race-free here. It runs BEFORE the
+    // adapter-not-implemented check below so an unauthorized caller gets the
+    // approval signal, not a "not yet available" error. PART 2 — widening
+    // visibility to `public` — DOES depend on the current level, so it is evaluated
+    // inside the transaction against the FOR-UPDATE-locked row (see below), closing
+    // the TOCTOU hole where a concurrent narrow (public → internal) between a
+    // pre-read and the locked write would skip the gate on a real widen-back.
+    if (input.destination === "public_web" && !mayPublishPublic) {
+      raisePublishApprovalRequired(req, objectId, obj.slug, input.destination);
     }
 
     // Nothing is live without a working head: the publication's
@@ -249,13 +249,31 @@ export const publishService = {
         // `loadPublishable` above, but re-select inside the tx (a concurrent delete
         // could have removed it between the load and this lock); a missing row 404s.
         const locked = await tx
-          .select({ id: contentObjects.id })
+          .select({
+            id: contentObjects.id,
+            visibilityLevel: contentObjects.visibilityLevel,
+          })
           .from(contentObjects)
           .where(eq(contentObjects.id, objectId))
           .for("update")
           .limit(1);
         if (!locked[0]) {
           throw new NotFoundError("Content not found", { objectId });
+        }
+
+        // §26.4 gate — PART 2 (visibility widen), evaluated HERE against the locked
+        // row's CURRENT visibility so it is race-free: a widen to `public` is gated
+        // iff the locked row is not ALREADY public. A concurrent narrow can no
+        // longer slip between the check and the widen (both hold this lock), so an
+        // unauthorized caller can never widen-back-to-public un-approved. A no-op
+        // re-save of already-public content is not a new exposure and passes.
+        // Throwing here rolls the transaction back, so nothing is widened/published.
+        if (
+          input.visibility?.level === "public" &&
+          locked[0].visibilityLevel !== "public" &&
+          !mayPublishPublic
+        ) {
+          raisePublishApprovalRequired(req, objectId, obj.slug, input.destination);
         }
 
         // Optionally widen visibility in the same tx so the status change and

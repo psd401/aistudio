@@ -36,8 +36,14 @@ import { authenticateRequest, createErrorResponse } from "./auth-middleware";
 import type { ApiAuthContext } from "./auth-middleware";
 import { checkRateLimit, createRateLimitResponse, addRateLimitHeaders, recordUsage } from "./rate-limiter";
 
-/** Resolved dynamic route params, e.g. `{ id: "abc", destination: "intranet" }`. */
-export type RouteParams = Record<string, string>;
+/**
+ * Resolved dynamic route params, e.g. `{ id: "abc", destination: "intranet" }`.
+ * Values are typed `string | undefined` (not `string`) so a handler reading a key
+ * that does not correspond to a real `[param]` segment — or any key on a
+ * non-dynamic route, which receives `{}` — is forced to null-check rather than
+ * getting a false `string`. The Atrium content routes all guard with `if (!id)`.
+ */
+export type RouteParams = Record<string, string | undefined>;
 
 type ApiRouteHandler = (
   request: NextRequest,

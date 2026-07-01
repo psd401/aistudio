@@ -211,13 +211,32 @@ describe("publishService.publish", () => {
   });
 
   it("throws ApprovalRequiredError when widening visibility to public without publish_public", async () => {
-    // Public-facing is destination OR a visibility widening to `public`.
+    // A visibility widen to `public` is gated INSIDE the transaction against the
+    // FOR-UPDATE-locked level (race-free). Seed the lock lookup with a non-public
+    // locked row so the widen is a genuine new exposure and the gate fires.
+    txResults = [[{ id: "o1", visibilityLevel: "internal" }]];
     await expect(
       publishService.publish(owner, "o1", {
         destination: "intranet",
         visibility: { level: "public" },
       })
     ).rejects.toThrow(ApprovalRequiredError);
+  });
+
+  it("does NOT gate a no-op re-publish of ALREADY-public content (idempotent, race-safe)", async () => {
+    // The locked row is already public → re-publishing with visibility.level 'public'
+    // changes nothing, so a non-admin owner without publish_public passes WITHOUT
+    // approval (the #1090 regression), and the check reads the level UNDER the lock.
+    txResults = [
+      [{ id: "o1", visibilityLevel: "public" }], // FOR UPDATE lock (already public)
+      [{ id: "pub1" }], // publication upsert RETURNING
+    ];
+    await expect(
+      publishService.publish(owner, "o1", {
+        destination: "intranet",
+        visibility: { level: "public" },
+      })
+    ).resolves.toEqual({ publicationId: "pub1", publishedVersionId: "v1" });
   });
 
   it("admin past the gate to an unimplemented public destination fails BEFORE any write (no visibility leak)", async () => {

@@ -228,11 +228,13 @@ export function canPublishPublic(
  *
  * Every content REST route and MCP handler that resolves this authority computes
  * the same `scopes.includes("content:publish_public")`; this is the single point
- * of truth so the scope string is not hand-typed at ~7 call sites (a typo would
- * silently fail-open — the gate would never see the scope). A `.includes` over the
- * exact string, so a session wildcard `["*"]` deliberately does NOT match: only an
- * explicitly-granted `content:publish_public` scope passes (admins still pass via
- * `req.isAdmin` inside the service).
+ * of truth so the scope string is not hand-typed at ~7 call sites. A typo at a
+ * call site would fail CLOSED (the scope would never be recognized, so an
+ * authorized caller is wrongly gated), which is safe but a silent, hard-to-spot
+ * bug — centralizing the literal removes that whole class of drift. A `.includes`
+ * over the exact string, so a session wildcard `["*"]` deliberately does NOT
+ * match: only an explicitly-granted `content:publish_public` scope passes (admins
+ * still pass via `req.isAdmin` inside the service).
  */
 export function hasPublishPublicScope(
   scopes: string[] | null | undefined

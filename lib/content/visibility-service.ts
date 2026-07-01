@@ -365,29 +365,6 @@ async function clearNonUserGrantsInTx(
     );
 }
 
-/**
- * Load an object's current visibility level, or null when the object is absent.
- * Used by `setLevel`'s §26.4 gate to distinguish a genuine widen-to-public (a new
- * exposure that needs review) from an idempotent re-save of already-public content
- * (unchanged level → no new exposure). A null result (absent object) is treated by
- * the caller as "not already public" — the transaction's FOR UPDATE guard then
- * surfaces the missing object as a clean 404.
- */
-async function currentVisibilityLevel(
-  objectId: string
-): Promise<VisibilityLevel | null> {
-  const rows = await executeQuery(
-    (db) =>
-      db
-        .select({ visibilityLevel: contentObjects.visibilityLevel })
-        .from(contentObjects)
-        .where(eq(contentObjects.id, objectId))
-        .limit(1),
-    "content.currentVisibilityLevel"
-  );
-  return rows[0]?.visibilityLevel ?? null;
-}
-
 /** Load the normalized grants for an object. */
 async function grantsFor(objectId: string): Promise<VisibilityGrant[]> {
   const rows = await executeQuery(
@@ -545,25 +522,48 @@ export const visibilityService = {
     visibility: VisibilityInput,
     opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<{ visibilityLevel: VisibilityLevel }> {
-    // §26.4 — gate on an ACTUAL public exposure, not the target value alone.
-    // Setting the level to `public` only exposes when the object is not ALREADY
-    // public: re-saving already-public content (level unchanged) by a non-admin
-    // owner is an idempotent no-op that must NOT spuriously throw
-    // `ApprovalRequiredError` + emit the approval event. Load the current level
-    // ONLY when the target is `public` (the sole gated case) so a private/group/
-    // internal write pays no extra read. A missing object here is not
-    // authoritative existence-masking — the callers already ran `canView` +
-    // `assertCanEdit` before calling; if the row was concurrently deleted, the
-    // FOR UPDATE guard inside the transaction below still 404s.
-    if (visibility.level === "public") {
-      const currentLevel = await currentVisibilityLevel(objectId);
-      const isNewExposure = currentLevel !== "public";
+    // Whether this caller holds the §26.4 public-publish authority (pure, no IO).
+    // The ACTUAL gate decision (is this a NEW public exposure?) is made INSIDE the
+    // transaction against the FOR-UPDATE-locked level — never against a pre-lock
+    // read. Deciding it before the lock is a TOCTOU hole: a concurrent narrow
+    // (public → internal) between the read and the locked write would leave the
+    // "already public → no-op" branch taken against a stale `public`, letting an
+    // unauthorized widen-back-to-public slip past approval.
+    const mayPublishPublic = canPublishPublic(
+      req,
+      opts.hasPublishPublicCapability ?? false
+    );
+    await executeTransaction(async (tx) => {
+      // Guard against a missing object inside the tx so the level write does not
+      // silently no-op (UPDATE ... WHERE id = <absent> affects zero rows). Lock
+      // the row FOR UPDATE so a concurrent delete cannot slip between this check
+      // and the setLevelInTx update, and read the CURRENT level under the same lock
+      // for the §26.4 gate below (race-free).
+      const rows = await tx
+        .select({
+          id: contentObjects.id,
+          visibilityLevel: contentObjects.visibilityLevel,
+        })
+        .from(contentObjects)
+        .where(eq(contentObjects.id, objectId))
+        .for("update")
+        .limit(1);
+      if (!rows[0]) {
+        throw new NotFoundError("Content not found", { objectId });
+      }
+
+      // §26.4 — widening to `public` is gated iff the locked row is not ALREADY
+      // public (a no-op re-save of already-public content is not a new exposure and
+      // passes). Same privilege boundary as `publishService.publish`'s widen; here
+      // it is race-free because the check reads the level under the FOR UPDATE lock
+      // held through the write. Throwing rolls the transaction back — nothing widens.
       if (
-        isNewExposure &&
-        !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
+        visibility.level === "public" &&
+        rows[0].visibilityLevel !== "public" &&
+        !mayPublishPublic
       ) {
-        // Fire-and-forget (best-effort, matches the audit-write pattern): `emit`
-        // swallows its own errors, so awaiting only adds an SNS round-trip.
+        // Fire-and-forget (best-effort): `emit` swallows its own errors and never
+        // rejects, so this detached promise cannot leave the tx in a bad state.
         void contentEvents.emit("content.public_publish_requested", {
           objectId,
           actorKind: actorKindOf(req),
@@ -574,21 +574,7 @@ export const visibilityService = {
           { objectId }
         );
       }
-    }
-    await executeTransaction(async (tx) => {
-      // Guard against a missing object inside the tx so the level write does not
-      // silently no-op (UPDATE ... WHERE id = <absent> affects zero rows). Lock
-      // the row FOR UPDATE so a concurrent delete cannot slip between this check
-      // and the setLevelInTx update.
-      const rows = await tx
-        .select({ id: contentObjects.id })
-        .from(contentObjects)
-        .where(eq(contentObjects.id, objectId))
-        .for("update")
-        .limit(1);
-      if (!rows[0]) {
-        throw new NotFoundError("Content not found", { objectId });
-      }
+
       await setLevelInTx(tx, objectId, visibility);
     }, "content.setLevel");
     return { visibilityLevel: visibility.level };
