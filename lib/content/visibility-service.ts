@@ -365,6 +365,29 @@ async function clearNonUserGrantsInTx(
     );
 }
 
+/**
+ * Load an object's current visibility level, or null when the object is absent.
+ * Used by `setLevel`'s §26.4 gate to distinguish a genuine widen-to-public (a new
+ * exposure that needs review) from an idempotent re-save of already-public content
+ * (unchanged level → no new exposure). A null result (absent object) is treated by
+ * the caller as "not already public" — the transaction's FOR UPDATE guard then
+ * surfaces the missing object as a clean 404.
+ */
+async function currentVisibilityLevel(
+  objectId: string
+): Promise<VisibilityLevel | null> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({ visibilityLevel: contentObjects.visibilityLevel })
+        .from(contentObjects)
+        .where(eq(contentObjects.id, objectId))
+        .limit(1),
+    "content.currentVisibilityLevel"
+  );
+  return rows[0]?.visibilityLevel ?? null;
+}
+
 /** Load the normalized grants for an object. */
 async function grantsFor(objectId: string): Promise<VisibilityGrant[]> {
   const rows = await executeQuery(
@@ -522,19 +545,35 @@ export const visibilityService = {
     visibility: VisibilityInput,
     opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<{ visibilityLevel: VisibilityLevel }> {
-    if (
-      visibility.level === "public" &&
-      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
-    ) {
-      await contentEvents.emit("content.public_publish_requested", {
-        objectId,
-        actorKind: actorKindOf(req),
-        agentLabel: req.kind === "user" ? null : req.agentLabel,
-      });
-      throw new ApprovalRequiredError(
-        "Widening visibility to public requires approval",
-        { objectId }
-      );
+    // §26.4 — gate on an ACTUAL public exposure, not the target value alone.
+    // Setting the level to `public` only exposes when the object is not ALREADY
+    // public: re-saving already-public content (level unchanged) by a non-admin
+    // owner is an idempotent no-op that must NOT spuriously throw
+    // `ApprovalRequiredError` + emit the approval event. Load the current level
+    // ONLY when the target is `public` (the sole gated case) so a private/group/
+    // internal write pays no extra read. A missing object here is not
+    // authoritative existence-masking — the callers already ran `canView` +
+    // `assertCanEdit` before calling; if the row was concurrently deleted, the
+    // FOR UPDATE guard inside the transaction below still 404s.
+    if (visibility.level === "public") {
+      const currentLevel = await currentVisibilityLevel(objectId);
+      const isNewExposure = currentLevel !== "public";
+      if (
+        isNewExposure &&
+        !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
+      ) {
+        // Fire-and-forget (best-effort, matches the audit-write pattern): `emit`
+        // swallows its own errors, so awaiting only adds an SNS round-trip.
+        void contentEvents.emit("content.public_publish_requested", {
+          objectId,
+          actorKind: actorKindOf(req),
+          agentLabel: req.kind === "user" ? null : req.agentLabel,
+        });
+        throw new ApprovalRequiredError(
+          "Widening visibility to public requires approval",
+          { objectId }
+        );
+      }
     }
     await executeTransaction(async (tx) => {
       // Guard against a missing object inside the tx so the level write does not

@@ -232,11 +232,13 @@ export const contentService = {
 
     // The §26.4 public-visibility gate, BEFORE any write. Emit the approval-queue
     // signal (parity with publish/set_visibility) then throw — nothing is created.
+    // Fire-and-forget (`void`, not `await`): `emit` swallows its own errors, so
+    // awaiting only adds an SNS round-trip to the response path.
     if (
       input.visibility?.level === "public" &&
       !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
     ) {
-      await contentEvents.emit("content.public_publish_requested", {
+      void contentEvents.emit("content.public_publish_requested", {
         objectId: "",
         destination: "create",
         actorKind: actorKindOf(req),
@@ -314,7 +316,7 @@ export const contentService = {
       // to "public" HERE without an explicit visibility, so emit the same
       // approval-queue signal before failing closed — otherwise SNS consumers
       // miss this denied-public-create case that Gate 1 covers.
-      await contentEvents.emit("content.public_publish_requested", {
+      void contentEvents.emit("content.public_publish_requested", {
         objectId: "",
         destination: "create",
         actorKind: actorKindOf(req),

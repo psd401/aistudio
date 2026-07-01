@@ -169,13 +169,27 @@ export const publishService = {
     // emit the approval-queue signal and raise the structured ApprovalRequiredError
     // (surfaces map it to 202 / `approval_required`) — never silently publish
     // unreviewed content to families/the public.
+    //
+    // Gate on an ACTUAL public exposure, not the target value alone: widening
+    // visibility to `public` only exposes when the object is not ALREADY public
+    // (`obj.visibilityLevel !== "public"`). Re-saving already-public content by a
+    // non-admin owner (visibility unchanged) is an idempotent no-op that must NOT
+    // spuriously throw `ApprovalRequiredError` + emit the approval event — a
+    // widen that changes nothing is not a new exposure to review. A `public_web`
+    // destination is always public-facing (its adapter is unimplemented today, so
+    // there is no already-live state to compare against).
     const isPublicFacing =
-      input.destination === "public_web" || input.visibility?.level === "public";
+      input.destination === "public_web" ||
+      (input.visibility?.level === "public" &&
+        obj.visibilityLevel !== "public");
     if (
       isPublicFacing &&
       !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
     ) {
-      await contentEvents.emit("content.public_publish_requested", {
+      // Fire-and-forget (best-effort, matches the audit-write pattern):
+      // `contentEvents.emit` swallows its own errors (`snsPublishBestEffort` never
+      // throws), so awaiting it only adds an SNS round-trip to the response path.
+      void contentEvents.emit("content.public_publish_requested", {
         objectId,
         slug: obj.slug,
         destination: input.destination,
@@ -344,8 +358,10 @@ export const publishService = {
 
     // Emit AFTER the commit + adapter side effect, exactly once per successful
     // publish (§27): re-index for retrieval, run connector pushes, notify. Best
-    // effort — a bus failure never rolls back the publish.
-    await contentEvents.emit("content.published", {
+    // effort — a bus failure never rolls back the publish. Fire-and-forget (`void`,
+    // not `await`): `emit` swallows its own errors, so awaiting only holds the
+    // response open for an SNS round-trip (matches the audit-write pattern).
+    void contentEvents.emit("content.published", {
       objectId,
       slug: obj.slug,
       versionId: publishedVersionId,
@@ -488,7 +504,8 @@ export const publishService = {
 
     // Emit after the commit + adapter teardown, only when a live publication was
     // actually removed (the `unpublished: false` no-op path returned above).
-    await contentEvents.emit("content.unpublished", {
+    // Fire-and-forget (`void`, not `await`): best-effort, never blocks the response.
+    void contentEvents.emit("content.unpublished", {
       objectId,
       slug: obj.slug,
       destination,
