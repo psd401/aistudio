@@ -107,7 +107,7 @@ async function fail(
       requestId: opts.requestId,
     });
   }
-  if (isApproval) {
+  if (err instanceof ApprovalRequiredError) {
     return ok({ status: "approval_required", message: err.message });
   }
   if (isContentError(err)) {
@@ -170,15 +170,22 @@ async function handleCreateDocument(
   const { req } = resolved;
   try {
     const collectionId = await resolveCollectionId(parsed.data.collection);
-    const created = await contentService.create(req, {
-      kind: "document",
-      title: parsed.data.title,
-      collectionId,
-      body: parsed.data.markdown,
-      bodyFormat: parsed.data.markdown ? "markdown" : undefined,
-      visibility: parsed.data.visibility,
-      tags: parsed.data.tags,
-    });
+    const hasPublishPublicCapability = context.scopes.includes(
+      "content:publish_public"
+    );
+    const created = await contentService.create(
+      req,
+      {
+        kind: "document",
+        title: parsed.data.title,
+        collectionId,
+        body: parsed.data.markdown,
+        bodyFormat: parsed.data.markdown ? "markdown" : undefined,
+        visibility: parsed.data.visibility,
+        tags: parsed.data.tags,
+      },
+      { hasPublishPublicCapability }
+    );
     await recordContentAudit({
       req,
       action: "create",
@@ -213,15 +220,22 @@ async function handleCreateArtifact(
   const { req } = resolved;
   try {
     const collectionId = await resolveCollectionId(parsed.data.collection);
-    const created = await contentService.create(req, {
-      kind: "artifact",
-      title: parsed.data.title,
-      collectionId,
-      body: parsed.data.code,
-      bodyFormat: parsed.data.bodyFormat,
-      visibility: parsed.data.visibility,
-      tags: parsed.data.tags,
-    });
+    const hasPublishPublicCapability = context.scopes.includes(
+      "content:publish_public"
+    );
+    const created = await contentService.create(
+      req,
+      {
+        kind: "artifact",
+        title: parsed.data.title,
+        collectionId,
+        body: parsed.data.code,
+        bodyFormat: parsed.data.bodyFormat,
+        visibility: parsed.data.visibility,
+        tags: parsed.data.tags,
+      },
+      { hasPublishPublicCapability }
+    );
     await recordContentAudit({
       req,
       action: "create",
@@ -423,14 +437,21 @@ async function handleSetVisibility(
   if ("result" in resolved) return resolved.result;
   const { req } = resolved;
   try {
-    // Load (enforces canView, 404-masks) then gate edit before mutating — the
-    // standalone setLevel does no permission check of its own.
+    // Load (enforces canView, 404-masks) then gate edit before mutating.
+    // Widening to `public` is additionally gated inside `setLevel` itself
+    // (§26.4) — same authority key as `publish_content`: an EXPLICIT
+    // content:publish_public scope, never the session wildcard.
     const obj = await contentService.get(req, parsed.data.id);
     assertCanEdit(req, obj.ownerUserId);
-    const result = await visibilityService.setLevel(obj.id, {
-      level: parsed.data.level,
-      grants: parsed.data.grants,
-    });
+    const hasPublishPublicCapability = context.scopes.includes(
+      "content:publish_public"
+    );
+    const result = await visibilityService.setLevel(
+      req,
+      obj.id,
+      { level: parsed.data.level, grants: parsed.data.grants },
+      { hasPublishPublicCapability }
+    );
     await recordContentAudit({
       req,
       action: "set_visibility",
@@ -441,6 +462,18 @@ async function handleSetVisibility(
     });
     return ok({ id: obj.id, level: result.visibilityLevel });
   } catch (err) {
+    if (err instanceof ApprovalRequiredError) {
+      await recordContentAudit({
+        req,
+        action: "set_visibility",
+        surface: "mcp",
+        objectId: parsed.data.id,
+        outcome: "approval_required",
+        error: err.message,
+        requestId: context.requestId,
+      });
+      return ok({ status: "approval_required", message: err.message });
+    }
     return fail(err, {
       req,
       action: "set_visibility",

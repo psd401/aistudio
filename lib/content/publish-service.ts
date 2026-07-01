@@ -355,7 +355,8 @@ export const publishService = {
   async unpublish(
     req: Requester,
     objectId: string,
-    destination: PublishDestination
+    destination: PublishDestination,
+    opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<{ unpublished: boolean }> {
     const log = createLogger({ action: "publish.unpublish" });
 
@@ -373,6 +374,20 @@ export const publishService = {
       throw new NotFoundError("Content not found", { objectId });
     }
     assertCanEdit(req, obj.ownerUserId);
+
+    // §26.4 — taking a public destination offline requires the same authority
+    // as putting it up in the first place. Without this, `content:publish_internal`
+    // alone could tear down already-live public content it could never have
+    // published, which is backwards from a review-safety standpoint.
+    if (
+      destination === "public_web" &&
+      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
+    ) {
+      throw new ApprovalRequiredError(
+        "Unpublishing from a public destination requires approval",
+        { destination, objectId }
+      );
+    }
 
     const adapter = adapters[destination];
 

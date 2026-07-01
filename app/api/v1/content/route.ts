@@ -18,6 +18,7 @@ import {
 } from "@/lib/api";
 import { z } from "zod";
 import {
+  ApprovalRequiredError,
   contentService,
   recordContentAudit,
   requesterFromApiAuth,
@@ -109,17 +110,25 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     return contentErrorToResponse(err, requestId);
   }
 
+  // Same authority key as publish/set_visibility: an EXPLICIT content:publish_public
+  // scope, never a session's wildcard ["*"] (admin humans pass via req.isAdmin).
+  const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
+
   try {
     const collectionId = await resolveCollectionId(input.collectionId);
-    const created = await contentService.create(req, {
-      kind: input.kind,
-      title: input.title,
-      collectionId,
-      body: input.body,
-      bodyFormat: input.bodyFormat,
-      visibility: input.visibility,
-      tags: input.tags,
-    });
+    const created = await contentService.create(
+      req,
+      {
+        kind: input.kind,
+        title: input.title,
+        collectionId,
+        body: input.body,
+        bodyFormat: input.bodyFormat,
+        visibility: input.visibility,
+        tags: input.tags,
+      },
+      { hasPublishPublicCapability }
+    );
     await recordContentAudit({
       req,
       action: "create",
@@ -135,6 +144,22 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       201
     );
   } catch (err) {
+    if (err instanceof ApprovalRequiredError) {
+      await recordContentAudit({
+        req,
+        action: "create",
+        surface: "rest",
+        outcome: "approval_required",
+        error: err.message,
+        requestId,
+      });
+      log.info("Public create requires approval", { title: input.title });
+      return createApiResponse(
+        { data: { status: "approval_required", message: err.message }, meta: { requestId } },
+        requestId,
+        202
+      );
+    }
     await recordContentAudit({
       req,
       action: "create",

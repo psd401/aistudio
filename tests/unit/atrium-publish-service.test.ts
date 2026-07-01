@@ -343,4 +343,28 @@ describe("publishService.unpublish", () => {
     expect(result).toEqual({ unpublished: true });
     expect(adapterUnpublishCalls).toBe(1);
   });
+
+  // §26.4 — taking a public destination offline requires the same authority as
+  // putting it up: content:publish_internal alone must not be enough to tear
+  // down already-live public_web content.
+  it("throws ApprovalRequiredError unpublishing public_web without publish_public, and never touches the tx", async () => {
+    await expect(
+      publishService.unpublish(owner, "o1", "public_web")
+    ).rejects.toThrow(ApprovalRequiredError);
+    expect(adapterUnpublishCalls).toBe(0);
+  });
+
+  it("allows unpublishing public_web for an admin", async () => {
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    const result = await publishService.unpublish(admin, "o1", "public_web");
+    expect(result).toEqual({ unpublished: true });
+  });
+
+  it("allows unpublishing public_web when the caller has an explicit publish_public capability", async () => {
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    const result = await publishService.unpublish(owner, "o1", "public_web", {
+      hasPublishPublicCapability: true,
+    });
+    expect(result).toEqual({ unpublished: true });
+  });
 });
