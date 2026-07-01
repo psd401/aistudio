@@ -152,8 +152,11 @@ async function resolveReq(
 // ============================================
 
 const createDocumentSchema = z.object({
-  title: z.string().min(1),
-  collection: z.string().min(1).optional(),
+  // Length caps mirror the REST createBodySchema (title→content_objects.title
+  // varchar(500), collection→200) so both surfaces reject oversized input at the
+  // schema boundary rather than only at the service/DB layer.
+  title: z.string().min(1).max(500),
+  collection: z.string().min(1).max(200).optional(),
   markdown: z.string().optional(),
   visibility: visibilityZ.optional(),
   tags: z.array(z.string()).optional(),
@@ -201,8 +204,9 @@ async function handleCreateDocument(
 }
 
 const createArtifactSchema = z.object({
-  title: z.string().min(1),
-  collection: z.string().min(1).optional(),
+  // Length caps mirror the REST createBodySchema (see createDocumentSchema).
+  title: z.string().min(1).max(500),
+  collection: z.string().min(1).max(200).optional(),
   code: z.string().min(1),
   bodyFormat: z.enum(["html", "jsx"]),
   visibility: visibilityZ.optional(),
@@ -327,9 +331,10 @@ async function handleListContent(
 
 const updateContentSchema = z.object({
   id: z.string().min(1),
-  title: z.string().optional(),
+  // title cap mirrors the REST PATCH schema (content_objects.title varchar(500)).
+  title: z.string().min(1).max(500).optional(),
   tags: z.array(z.string()).nullable().optional(),
-  collection: z.string().min(1).nullable().optional(),
+  collection: z.string().min(1).max(200).nullable().optional(),
   status: z.enum(["draft", "published", "archived"]).optional(),
 });
 
