@@ -8,13 +8,13 @@
         "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
         "models": [
           {
-            "id": "zai.glm-5",
-            "name": "GLM-5 (via Bedrock Mantle)",
+            "id": "anthropic.claude-sonnet-5",
+            "name": "Claude Sonnet 5 (via Bedrock Mantle)",
             "reasoning": false,
             "input": ["text"],
-            "contextWindow": 203000,
+            "contextWindow": 1000000,
             "maxTokens": 32768,
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+            "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 6 }
           }
         ]
       }
@@ -23,7 +23,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "amazon-bedrock-mantle/zai.glm-5"
+        "primary": "amazon-bedrock-mantle/anthropic.claude-sonnet-5"
       },
       "workspace": "/home/node/.openclaw",
       "heartbeat": {
@@ -32,7 +32,7 @@
     }
   },
   "tools": {
-    "profile": "full",
+    "toolSearch": true,
     "deny": ["cron", "nodes", "gateway"]
   },
   "skills": {
