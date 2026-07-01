@@ -1309,7 +1309,13 @@ async function invokeAgentCore(
       response: result,
       inputTokens: (metadata.input_tokens as number) || 0,
       outputTokens: (metadata.output_tokens as number) || 0,
-      model: (metadata.model as string) || 'kimi-k2.5',
+      // The wrapper (issue #1083) now always sends the real model id
+      // ("zai.glm-5") on success and null on error paths. The stale
+      // 'kimi-k2.5' fallback was dead code — the wrapper used to send the
+      // literal "default", which is truthy, so this branch never fired and
+      // every row was mislabeled. Fall back to 'unknown' only if the metadata
+      // is somehow missing the field.
+      model: (metadata.model as string) || 'unknown',
       latencyMs: (metadata.latency_ms as number) || 0,
       messages,
       toolCalls,

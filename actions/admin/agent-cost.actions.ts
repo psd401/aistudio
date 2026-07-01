@@ -20,8 +20,6 @@ export interface AgentCostSummary {
   totalUsd: number
   /** Per-day spend for charting */
   daily: Array<{ date: string; usd: number }>
-  /** Breakdown by model (usage type dimension) */
-  byModel: Array<{ model: string; usd: number }>
   /** Linear projection: avg daily spend × 30 */
   projectedMonthlyUsd: number
   /** Source window */
@@ -73,10 +71,20 @@ async function queryCost(params: CostQueryParams) {
 /**
  * Get agent platform cost summary from AWS Cost Explorer.
  *
- * Uses the `costCenter=ai-agents` tag applied to the AgentCore execution
- * role. Bedrock IAM cost allocation (issue #887) propagates this tag to
- * every Bedrock invocation under that role, so the Cost Explorer filter
- * catches per-user spend without per-user IAM roles.
+ * RECONCILIATION ONLY — this is NOT the model-cost source of truth (issue
+ * #1083). It surfaces AgentCore / infrastructure spend tagged
+ * `costCenter=ai-agents` on the execution role.
+ *
+ * It does NOT capture GLM-5 model spend: GLM-5 runs through Bedrock Mantle
+ * (`bedrock-mantle.us-east-1.api.aws`) authenticated by a SEPARATE IAM user's
+ * bearer token (`AWS_BEARER_TOKEN_BEDROCK`, IAM user `psd-agent-bedrock-<env>`),
+ * not the tagged AgentCore execution role — so that model spend never carries
+ * the `costCenter` tag and won't appear here. Model cost is computed from
+ * tokens × ai_models pricing in agent-cost-projection.actions.ts.
+ *
+ * Follow-ups to investigate: (a) activate the `costCenter` cost-allocation tag
+ * in Billing; (b) determine whether Bedrock Marketplace/Mantle usage is
+ * taggable at all. Until then, the token×pricing path is authoritative.
  */
 export async function getAgentCostSummary(
   range: CostDateRange = "30d"
@@ -93,19 +101,16 @@ export async function getAgentCostSummary(
     const end = new Date()
     const start = new Date(end.getTime() - days * 86400000)
 
-    const [daily, byModel] = await Promise.all([
-      queryCost({
-        start: isoDate(start),
-        end: isoDate(end),
-        granularity: "DAILY",
-      }),
-      queryCost({
-        start: isoDate(start),
-        end: isoDate(end),
-        granularity: "MONTHLY",
-        groupBy: [{ Type: "DIMENSION", Key: "USAGE_TYPE" }],
-      }),
-    ])
+    // Only the DAILY series is consumed by the reconciliation panel (daily /
+    // totalUsd / windowDays / projected). The prior USAGE_TYPE-grouped query
+    // built a `byModel` breakdown that nothing renders anymore (model cost is
+    // token×pricing now) — dropped to save an AWS Cost Explorer call per load
+    // (claude review round 2).
+    const daily = await queryCost({
+      start: isoDate(start),
+      end: isoDate(end),
+      granularity: "DAILY",
+    })
 
     const dailyPoints = (daily.ResultsByTime ?? []).map((p) => ({
       date: String(p.TimePeriod?.Start ?? ""),
@@ -113,25 +118,11 @@ export async function getAgentCostSummary(
     }))
 
     const totalUsd = dailyPoints.reduce((sum, p) => sum + p.usd, 0)
-
-    const modelMap = new Map<string, number>()
-    for (const bucket of byModel.ResultsByTime ?? []) {
-      for (const group of bucket.Groups ?? []) {
-        const key = group.Keys?.[0] ?? "unknown"
-        const amount = Number.parseFloat(group.Metrics?.UnblendedCost?.Amount ?? "0") || 0
-        modelMap.set(key, (modelMap.get(key) ?? 0) + amount)
-      }
-    }
-    const byModelList = Array.from(modelMap.entries())
-      .map(([model, usd]) => ({ model, usd }))
-      .sort((a, b) => b.usd - a.usd)
-
     const avgDaily = dailyPoints.length > 0 ? totalUsd / dailyPoints.length : 0
 
     const summary: AgentCostSummary = {
       totalUsd,
       daily: dailyPoints,
-      byModel: byModelList,
       projectedMonthlyUsd: avgDaily * 30,
       windowDays: days,
     }

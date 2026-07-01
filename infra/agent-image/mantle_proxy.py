@@ -41,6 +41,76 @@ def j(msg: str, **kw) -> str:
 
 
 UPSTREAM = "https://bedrock-mantle.us-east-1.api.aws"
+
+# ---------------------------------------------------------------------------
+# Cumulative token-usage accounting (issue #1083)
+#
+# The admin Agents dashboard needs real token counts + the real model id per
+# agent turn. OpenClaw does not surface usage on its WebSocket event stream
+# reliably, but Mantle's OpenAI-compatible responses DO carry a `usage` object
+# — streaming responses emit it in a final chunk when the request asks for
+# `stream_options.include_usage=true`, and non-streaming responses always
+# include it. This proxy already parses every upstream response, so it is the
+# clean capture point.
+#
+# We keep MODULE-LEVEL CUMULATIVE counters (never reset) plus the last model
+# id. agentcore_wrapper.py reads `/usage` once before adapter.process() and
+# once after, then takes the delta — that correctly sums a single turn's usage
+# across the many sub-calls a tool loop makes. This works because the proxy is
+# per-container = per-microVM = per-session and turns are serial, so no
+# concurrent turn can interleave its usage into another turn's delta window.
+#
+# Only the FINAL adopted upstream response (post-retry, post-rescue) is counted,
+# so a retried/degenerate first attempt does not double-count.
+# ---------------------------------------------------------------------------
+_usage_lock = asyncio.Lock()
+_cumulative_input_tokens = 0
+_cumulative_output_tokens = 0
+_last_model: Optional[str] = None
+_usage_events = 0  # count of upstream responses that carried a usage object
+
+
+def _extract_usage(parsed: dict) -> tuple[Optional[int], Optional[int]]:
+    """Pull (prompt_tokens, completion_tokens) from an OpenAI-style `usage`
+    object. Returns (None, None) when no usage is present. Accepts both the
+    OpenAI field names (prompt_tokens/completion_tokens) and the alternate
+    input_tokens/output_tokens spelling some gateways emit."""
+    if not isinstance(parsed, dict):
+        return None, None
+    usage = parsed.get("usage")
+    if not isinstance(usage, dict):
+        return None, None
+    pt = usage.get("prompt_tokens")
+    if not isinstance(pt, int):
+        pt = usage.get("input_tokens")
+    ct = usage.get("completion_tokens")
+    if not isinstance(ct, int):
+        ct = usage.get("output_tokens")
+    return (pt if isinstance(pt, int) else None,
+            ct if isinstance(ct, int) else None)
+
+
+def inject_include_usage(payload: dict) -> bool:
+    """When a request is streaming, ensure `stream_options.include_usage` is
+    true so Mantle emits a final usage chunk. Mutates `payload` in place.
+    Returns True if a change was made (caller must reserialize the body).
+
+    Non-streaming requests are untouched — their responses always carry usage.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if not payload.get("stream"):
+        return False
+    opts = payload.get("stream_options")
+    if not isinstance(opts, dict):
+        opts = {}
+        payload["stream_options"] = opts
+    if opts.get("include_usage") is True:
+        return False
+    opts["include_usage"] = True
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Tool-call-id repair for Kimi K2.5 on Bedrock Mantle
 #
@@ -239,6 +309,24 @@ async def handle_health(_request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
+async def handle_usage(_request: web.Request) -> web.Response:
+    """Return the cumulative token usage + last model id observed across all
+    Mantle calls this container has proxied (issue #1083).
+
+    agentcore_wrapper.py reads this once before adapter.process() and once
+    after, then takes the delta to get a single turn's usage. Counters are
+    monotonic and never reset; the delta is what matters, not the absolute.
+    """
+    async with _usage_lock:
+        payload = {
+            "input_tokens": _cumulative_input_tokens,
+            "output_tokens": _cumulative_output_tokens,
+            "model": _last_model,
+            "usage_events": _usage_events,
+        }
+    return web.json_response(payload)
+
+
 async def handle_proxy(request: web.Request) -> web.StreamResponse:
     path = request.match_info.get("path", "")
     url = f"{UPSTREAM}/{path}"
@@ -255,14 +343,20 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     except Exception:
         parsed = None
 
-    # REPAIR STEP: fix stripped tool_call_ids before anything else touches
-    # the body. Reserialize only if we actually rewrote fields — keeps the
-    # wire payload byte-identical when no repair is needed.
-    if isinstance(parsed, dict) and parsed.get("messages"):
-        rewrites = repair_tool_call_ids(parsed)
-        if rewrites:
+    # REQUEST-REWRITE STEP: two INDEPENDENT concerns, each with its own guard,
+    # before anything else touches the body. Reserialize only if we actually
+    # mutated the payload — keeps the wire body byte-identical otherwise.
+    #   (a) tool_call_id repair — needs a messages array to walk.
+    #   (b) include_usage injection — only needs `stream:true`; it must NOT be
+    #       gated on `messages` (a future change to the repair guard would
+    #       otherwise silently disable usage tracking). Decoupled per review.
+    if isinstance(parsed, dict):
+        rewrites = repair_tool_call_ids(parsed) if parsed.get("messages") else 0
+        usage_injected = inject_include_usage(parsed)
+        if rewrites or usage_injected:
             req_body = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
-            log.info(j("tool_call_id_repair", req_id=req_id, rewrites=rewrites))
+            log.info(j("request_rewritten", req_id=req_id, rewrites=rewrites,
+                       include_usage_injected=usage_injected))
 
     if parsed and isinstance(parsed, dict):
         summary = {
@@ -370,9 +464,12 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         chunks) so we can inspect the response and decide whether to retry
         before committing it to the client.
 
-        Returns (status, headers_dict, chunks_list, content_text, finish_reason).
-        `content_text` is the reassembled assistant delta text (from SSE `data:`
-        events when streaming), used to detect empty/degenerate outputs.
+        Returns (status, headers_dict, chunks_list, content_text, finish_reason,
+        usage_in, usage_out, model). `content_text` is the reassembled
+        assistant delta text (from SSE `data:` events when streaming), used to
+        detect empty/degenerate outputs. `usage_in`/`usage_out`/`model` are the
+        OpenAI usage + model id pulled from the response (None when absent) and
+        fed to the cumulative `/usage` counters by the caller.
         """
         body_to_send = body_override if body_override is not None else req_body
         async with ClientSession(timeout=timeout) as session:
@@ -393,6 +490,9 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 # Reassemble SSE content for streaming responses.
                 content = ""
                 finish = None
+                usage_in: Optional[int] = None
+                usage_out: Optional[int] = None
+                resp_model: Optional[str] = None
                 joined = b"".join(chunks).decode(errors="replace")
                 if "data:" in joined:
                     for line in joined.splitlines():
@@ -406,6 +506,20 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             d = json.loads(payload)
                         except Exception:
                             continue
+                        if isinstance(d, dict):
+                            # Usage + model can ride on ANY chunk — the final
+                            # usage chunk (stream_options.include_usage) carries
+                            # `usage` with an empty `choices: []`, while `model`
+                            # appears on every chunk. Capture both before the
+                            # empty-choices skip below.
+                            ui, uo = _extract_usage(d)
+                            if ui is not None:
+                                usage_in = ui
+                            if uo is not None:
+                                usage_out = uo
+                            m = d.get("model")
+                            if isinstance(m, str) and m:
+                                resp_model = m
                         # A present-but-empty `choices: []` (the usage chunk
                         # emitted for stream_options.include_usage, which OpenClaw
                         # 2026.6.11 now requests) makes `.get("choices", [{}])`
@@ -430,11 +544,16 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         # present-but-empty list must not be indexed (the prior
                         # `[{}]` default silently dropped content here under the
                         # except: pass).
-                        choices = d.get("choices") or []
-                        if choices:
-                            msg = choices[0].get("message", {})
-                            content = msg.get("content") or ""
-                            finish = choices[0].get("finish_reason")
+                        if isinstance(d, dict):
+                            usage_in, usage_out = _extract_usage(d)
+                            m = d.get("model")
+                            if isinstance(m, str) and m:
+                                resp_model = m
+                            choices = d.get("choices") or []
+                            if choices:
+                                msg = choices[0].get("message", {})
+                                content = msg.get("content") or ""
+                                finish = choices[0].get("finish_reason")
                     except Exception:
                         pass
                 log.info(j(
@@ -445,9 +564,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                     total_bytes=total,
                     content_len=len(content),
                     finish=finish,
+                    usage_in=usage_in,
+                    usage_out=usage_out,
+                    resp_model=resp_model,
                     elapsed_ms=int((time.time() - t0) * 1000),
                 ))
-                return status, up_headers, chunks, content, finish
+                return (status, up_headers, chunks, content, finish,
+                        usage_in, usage_out, resp_model)
 
     def is_retryable_failure(status: int, content: str, finish: Optional[str]) -> Optional[str]:
         """Classify the upstream response. Return a reason-string if the
@@ -531,7 +654,8 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
     try:
         # First attempt.
-        status, headers, chunks, content, finish = await fetch_upstream("first")
+        (status, headers, chunks, content, finish,
+         usage_in, usage_out, resp_model) = await fetch_upstream("first")
         reason = is_retryable_failure(status, content, finish)
         retry_attempts = 0
         # Up to 2 retries (3 total upstream calls). Stop as soon as one
@@ -553,16 +677,29 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                           attempt=retry_attempts,
                           first_content_len=len(content), first_finish=finish,
                           inject_reminder=bool(retry_body)))
-            status_r, headers_r, chunks_r, content_r, finish_r = await fetch_upstream(
+            (status_r, headers_r, chunks_r, content_r, finish_r,
+             usage_in_r, usage_out_r, resp_model_r) = await fetch_upstream(
                 f"retry{retry_attempts}", body_override=retry_body
             )
             reason_r = is_retryable_failure(status_r, content_r, finish_r)
-            # Always adopt the latest attempt's response — if it succeeds we
-            # use it directly; if it fails we still prefer it as the most
+            # Always adopt the latest attempt's response body — if it succeeds
+            # we use it directly; if it fails we still prefer it as the most
             # recent attempt before any rescue synthesis.
             status, headers, chunks, content, finish = (
                 status_r, headers_r, chunks_r, content_r, finish_r
             )
+            # Usage carry-forward: adopt the retry's usage ONLY when it actually
+            # reported usage — a retry whose response was differently-shaped (no
+            # `usage` object) must NOT discard the real, already-generated token
+            # count from the prior attempt (that would undercount cost). We take
+            # the latest NON-None value per field so the final billed usage is
+            # the freshest real number, not a null overwrite (review round 2).
+            if usage_in_r is not None:
+                usage_in = usage_in_r
+            if usage_out_r is not None:
+                usage_out = usage_out_r
+            if resp_model_r:
+                resp_model = resp_model_r
             if reason_r is None:
                 log.info(j("retry_succeeded", req_id=req_id,
                            attempt=retry_attempts,
@@ -606,6 +743,24 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                           synth_text_len=len(rescue_text),
                           retries_attempted=retry_attempts))
 
+        # Account the FINAL adopted response's usage into the cumulative
+        # counters so agentcore_wrapper's before/after `/usage` delta captures
+        # this turn's tokens. Rescue synthesis replaces the chunks but keeps the
+        # usage from the last real upstream attempt (usage_in/out unchanged),
+        # which is the right number to bill for the turn.
+        if usage_in is not None or usage_out is not None or resp_model:
+            global _cumulative_input_tokens, _cumulative_output_tokens
+            global _last_model, _usage_events
+            async with _usage_lock:
+                if isinstance(usage_in, int):
+                    _cumulative_input_tokens += usage_in
+                if isinstance(usage_out, int):
+                    _cumulative_output_tokens += usage_out
+                if resp_model:
+                    _last_model = resp_model
+                if usage_in is not None or usage_out is not None:
+                    _usage_events += 1
+
         # Forward the (possibly retried) response to the client.
         resp = web.StreamResponse(status=status, headers=headers)
         await resp.prepare(request)
@@ -642,6 +797,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 def main() -> None:
     app = web.Application(client_max_size=50 * 1024 * 1024)
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/usage", handle_usage)
     app.router.add_route("*", "/{path:.*}", handle_proxy)
     log.info(j("starting", host="127.0.0.1", port=18791, upstream=UPSTREAM))
     web.run_app(app, host="127.0.0.1", port=18791, access_log=None,
