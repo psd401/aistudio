@@ -22,14 +22,10 @@ import {
   contentObjects,
   contentVisibilityGrants,
 } from "@/lib/db/schema";
-import {
-  actorKindOf,
-  canPublishPublic,
-  principalOf,
-} from "./helpers";
+import { actorKindOf, canPublishPublic, principalOf } from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
-import { ApprovalRequiredError, NotFoundError, ValidationError } from "./errors";
 import { contentEvents } from "./events";
+import { ApprovalRequiredError, NotFoundError, ValidationError } from "./errors";
 import { GRANT_KIND_SET, POSITIVE_INT_RE, VISIBILITY_LEVEL_SET } from "./validators";
 import type {
   ContentObjectDTO,
@@ -514,12 +510,11 @@ export const visibilityService = {
    * already passed `assertCanEdit`. Does NOT change `status`. Returns the new
    * level so the surface can reflect it without a re-read.
    *
-   * §26.4 — widening to `public` is a public exposure and therefore runs the SAME
-   * gate as a `public_web` publish: without authority (`content:publish_public` /
-   * admin) it throws `ApprovalRequiredError` and emits the approval-queue event,
-   * so `set_visibility` cannot become a side door around `publish`. The caller
-   * passes `hasPublishPublicCapability` (the session's explicit capability); agent
-   * requesters are resolved from `req` alone.
+   * §26.4 — widening to `public` through this standalone path is the SAME
+   * privilege boundary as `publishService.publish`'s visibility widen, so it
+   * enforces the identical `canPublishPublic` gate (+ approval-queue event) —
+   * otherwise a `content:update`-only caller could reach "public" by calling
+   * `set_visibility` instead of `publish`.
    */
   async setLevel(
     req: Requester,
@@ -527,22 +522,18 @@ export const visibilityService = {
     visibility: VisibilityInput,
     opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<{ visibilityLevel: VisibilityLevel }> {
-    // Gate BEFORE the write. On rejection, emit the approval-queue signal (parity
-    // with the publish path) then throw `ApprovalRequiredError` — the object stays
-    // at its prior level. Non-public levels (private/group/internal) skip the gate.
     if (
       visibility.level === "public" &&
       !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
     ) {
       await contentEvents.emit("content.public_publish_requested", {
         objectId,
-        destination: "visibility",
         actorKind: actorKindOf(req),
         agentLabel: req.kind === "user" ? null : req.agentLabel,
       });
       throw new ApprovalRequiredError(
-        "Setting content to public visibility requires approval",
-        { level: visibility.level, objectId }
+        "Widening visibility to public requires approval",
+        { objectId }
       );
     }
     await executeTransaction(async (tx) => {

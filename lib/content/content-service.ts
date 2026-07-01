@@ -117,17 +117,27 @@ async function uniqueSlug(tx: DbTransaction, title: string): Promise<string> {
   throw new ConflictError("Could not allocate a unique slug", { base });
 }
 
-/** Resolve a collection's default visibility level, or null if no collection. */
-async function collectionDefault(
-  tx: DbTransaction,
+/**
+ * Resolve a collection's default visibility level, or null if no collection.
+ * Runs OUTSIDE the create transaction so `create()` can run its §26.4
+ * public-publish gate check before opening the transaction — mirroring
+ * `publishService.publish`, which resolves + gates entirely outside its
+ * transaction (never holds a pooled connection across an authorization
+ * decision that might itself branch into other I/O).
+ */
+async function collectionDefaultOutsideTx(
   collectionId: string | undefined
 ): Promise<VisibilityLevel | null> {
   if (!collectionId) return null;
-  const rows = await tx
-    .select({ level: contentCollections.defaultVisibilityLevel })
-    .from(contentCollections)
-    .where(eq(contentCollections.id, collectionId))
-    .limit(1);
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({ level: contentCollections.defaultVisibilityLevel })
+        .from(contentCollections)
+        .where(eq(contentCollections.id, collectionId))
+        .limit(1),
+    "content.create.collectionDefault"
+  );
   if (!rows[0]) {
     throw new ValidationError("Collection not found", { collectionId });
   }
@@ -259,38 +269,58 @@ export const contentService = {
       );
     }
 
+    const grants = input.visibility?.grants ?? [];
+    let visibilityLevel: VisibilityLevel =
+      input.visibility?.level ??
+      (await collectionDefaultOutsideTx(input.collectionId)) ??
+      "private";
+
+    // A collection whose default is `group` can't be satisfied at create time:
+    // the create surface (library "New doc/artifact", the dialog takes only a
+    // title) authors no grants, and a grantless `group` is invisible to all but
+    // owner/admin. Rather than BLOCK creation from a group-default section
+    // (every seeded group collection would 400), fall back to `private`
+    // (owner-only) when the level was INHERITED from the collection default and
+    // no grants were supplied; the author then sets group visibility + grants
+    // via the Phase 3 visibility editor. An EXPLICIT grantless group still
+    // fails (the pre-transaction guard above + the assert below) — only the
+    // silent collection-default inheritance is softened here.
+    if (
+      input.visibility?.level == null &&
+      visibilityLevel === "group" &&
+      grants.length === 0
+    ) {
+      visibilityLevel = "private";
+    }
+
+    // Validate the RESOLVED level + grants BEFORE the transaction so an invalid
+    // combination (e.g. an explicit `group` with no grants) fails without
+    // writing — and rolling back — an object row. The pre-transaction guard
+    // above only catches the explicit-`group` case.
+    visibilityService.assertWritableLevel(visibilityLevel, grants);
+
+    // §26.4 — creating directly at `public` (explicitly, or via a collection
+    // whose admin-set default is `public`) is the same privilege boundary as
+    // widening to public through `publish`/`set_visibility`; gate it the same
+    // way rather than letting a `content:create`-only caller reach "public"
+    // by skipping straight to creation.
+    if (
+      visibilityLevel === "public" &&
+      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
+    ) {
+      // No object exists yet to carry an id/slug on the approval-queue event
+      // (unlike `publish`/`setLevel`, which gate an already-persisted object) —
+      // surface the same structured error; the surface layer's audit write
+      // still records the attempted (denied) create.
+      throw new ApprovalRequiredError(
+        "Creating public content requires approval",
+        { title: input.title }
+      );
+    }
+
     const { object, version, s3Writes } = await executeTransaction(
       async (tx) => {
         const slug = await uniqueSlug(tx, input.title);
-        const grants = input.visibility?.grants ?? [];
-        let visibilityLevel: VisibilityLevel =
-          input.visibility?.level ??
-          (await collectionDefault(tx, input.collectionId)) ??
-          "private";
-
-        // A collection whose default is `group` can't be satisfied at create time:
-        // the create surface (library "New doc/artifact", the dialog takes only a
-        // title) authors no grants, and a grantless `group` is invisible to all but
-        // owner/admin. Rather than BLOCK creation from a group-default section
-        // (every seeded group collection would 400), fall back to `private`
-        // (owner-only) when the level was INHERITED from the collection default and
-        // no grants were supplied; the author then sets group visibility + grants
-        // via the Phase 3 visibility editor. An EXPLICIT grantless group still
-        // fails (the pre-transaction guard above + the assert below) — only the
-        // silent collection-default inheritance is softened here.
-        if (
-          input.visibility?.level == null &&
-          visibilityLevel === "group" &&
-          grants.length === 0
-        ) {
-          visibilityLevel = "private";
-        }
-
-        // Validate the RESOLVED level + grants BEFORE the INSERT so an invalid
-        // combination (e.g. an explicit `group` with no grants) fails without
-        // writing — and rolling back — an object row. The pre-transaction guard
-        // above only catches the explicit-`group` case.
-        visibilityService.assertWritableLevel(visibilityLevel, grants);
 
         // Translate a slug unique-violation that slips past uniqueSlug (a
         // concurrent create racing the SELECT) into a typed ConflictError.
@@ -484,7 +514,25 @@ export const contentService = {
       }
       setValues.collectionId = patch.collectionId ?? null;
     }
-    if (patch.status !== undefined) setValues.status = patch.status;
+    if (patch.status !== undefined) {
+      // "published" is NOT a plain metadata transition — it must go through
+      // `publishService.publish()`, which creates the `content_publications`
+      // row, calls the destination adapter, emits `content.published`, and
+      // enforces the §26.4 public-publish gate. Writing it directly here
+      // (content:update alone, no content:publish_internal/publish_public)
+      // would leave `status: "published"` with none of that: a caller could
+      // mark content "published" while it was never actually published
+      // anywhere, and — for a caller who otherwise couldn't pass the gate —
+      // outside the audited/gated flow entirely. "draft" and "archived"
+      // remain plain metadata transitions.
+      if (patch.status === "published") {
+        throw new ValidationError(
+          "Cannot set status to 'published' via update — use the publish endpoint/tool instead",
+          { status: patch.status }
+        );
+      }
+      setValues.status = patch.status;
+    }
 
     const rows = await executeQuery(
       (db) =>

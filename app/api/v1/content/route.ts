@@ -110,8 +110,8 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     return contentErrorToResponse(err, requestId);
   }
 
-  // §26.4 gate: creating directly at `public` requires the EXPLICIT
-  // content:publish_public scope (a session wildcard ["*"] must NOT auto-grant it).
+  // Same authority key as publish/set_visibility: an EXPLICIT content:publish_public
+  // scope, never a session's wildcard ["*"] (admin humans pass via req.isAdmin).
   const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
 
   try {
@@ -144,8 +144,6 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       201
     );
   } catch (err) {
-    // Creating public content the caller isn't authorized for is the §26.4
-    // approval signal (202), mirroring the publish/visibility routes.
     if (err instanceof ApprovalRequiredError) {
       await recordContentAudit({
         req,
@@ -155,7 +153,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
         error: err.message,
         requestId,
       });
-      log.info("Public content creation requires approval", { kind: input.kind });
+      log.info("Public create requires approval", { title: input.title });
       return createApiResponse(
         { data: { status: "approval_required", message: err.message }, meta: { requestId } },
         requestId,

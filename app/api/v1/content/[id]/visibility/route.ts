@@ -1,10 +1,12 @@
 /**
- * Atrium Content Visibility Endpoint (Issue #1055, Phase 5 §23)
+ * Atrium Content Visibility Endpoint (Issue #1055, Phase 5 §23, §26.4)
  * PATCH /api/v1/content/:id/visibility — set visibility level + group grants
  *
- * Mirrors the MCP set_visibility tool. The standalone setLevel does no permission
- * check, so the route loads the object (enforces canView, 404-masks) and gates
- * edit before mutating.
+ * Mirrors the MCP set_visibility tool. The route loads the object (enforces
+ * canView, 404-masks) and gates edit before mutating; widening to `public`
+ * additionally requires `content:publish_public` — enforced inside
+ * `visibilityService.setLevel` itself (§26.4), surfacing a structured 202
+ * `approval_required` here just like the publish endpoint.
  */
 
 import { NextRequest } from "next/server";
@@ -52,8 +54,8 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
     return contentErrorToResponse(err, requestId);
   }
 
-  // §26.4 gate: widening to `public` requires the EXPLICIT content:publish_public
-  // scope (a session wildcard ["*"] must NOT auto-grant it). setLevel enforces it.
+  // Same authority key as the publish endpoint: an EXPLICIT content:publish_public
+  // scope, never a session's wildcard ["*"] (admin humans pass via req.isAdmin).
   const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
 
   try {
@@ -79,8 +81,6 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
       requestId
     );
   } catch (err) {
-    // A public-widening the caller isn't authorized for is not an error but the
-    // §26.4 approval signal (202), mirroring the publish route.
     if (err instanceof ApprovalRequiredError) {
       await recordContentAudit({
         req,
@@ -91,7 +91,7 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
         error: err.message,
         requestId,
       });
-      log.info("Public visibility requires approval", { objectId: id });
+      log.info("Public visibility widen requires approval", { objectId: id });
       return createApiResponse(
         { data: { status: "approval_required", message: err.message }, meta: { requestId } },
         requestId,

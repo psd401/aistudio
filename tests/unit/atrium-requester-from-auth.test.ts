@@ -124,6 +124,48 @@ describe("requesterFromApiAuth", () => {
       requesterFromApiAuth({ userId: 999, scopes: [] })
     ).rejects.toThrow(/not found/);
   });
+
+  it("falls back to autonomous resolution when delegated_for is stale but oauthClientId matches an active agent", async () => {
+    userRows = []; // the delegated_for user id does not resolve
+    agentRows = [
+      { id: "agent-2", name: "stale-delegate-fallback", roleId: 4, roleName: "staff" },
+    ];
+    const req = await requesterFromApiAuth({
+      userId: 0,
+      scopes: ["content:create"],
+      oauthClientId: "client-ship",
+      delegatedForUserId: 999,
+    });
+    expect(req.kind).toBe("agent-autonomous");
+    if (req.kind !== "agent-autonomous") throw new Error("wrong kind");
+    expect(req.agentId).toBe("agent-2");
+  });
+
+  it("throws when delegated_for is stale and there is no oauthClientId to fall back to", async () => {
+    userRows = [];
+    await expect(
+      requesterFromApiAuth({
+        userId: 0,
+        scopes: ["content:create"],
+        delegatedForUserId: 999,
+      })
+    ).rejects.toThrow(/Delegated-for user not found/);
+  });
+
+  it("fails closed (does not fall back to the user branch) when oauthClientId has no active agent identity", async () => {
+    // A client-credentials token's oauthClientId with no matching ACTIVE
+    // agent_identities row (deactivated, or never registered) must be
+    // rejected outright — falling through to `userId` would silently
+    // re-resolve it as ATRIUM_SYSTEM_USER_ID, undoing a deliberate revocation.
+    agentRows = [];
+    await expect(
+      requesterFromApiAuth({
+        userId: 3,
+        scopes: ["content:update"],
+        oauthClientId: "client-deactivated",
+      })
+    ).rejects.toThrow(/No active agent identity/);
+  });
 });
 
 describe("buildDelegatedRequester grant-inheritance invariant", () => {

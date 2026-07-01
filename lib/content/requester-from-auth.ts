@@ -152,44 +152,69 @@ export async function requesterFromApiAuth(
   //    human's roles/org; scopes come from the token (gate `content:update` etc.).
   if (auth.delegatedForUserId != null) {
     const ctx = await loadUserContext(auth.delegatedForUserId);
-    if (!ctx) {
+    if (ctx) {
+      log.debug("Resolved agent-delegated requester", {
+        actingForUserId: auth.delegatedForUserId,
+        agentLabel: auth.oauthClientId,
+      });
+      return buildDelegatedRequester({
+        actingForUserId: auth.delegatedForUserId,
+        roles: ctx.roles,
+        building: ctx.building,
+        department: ctx.department,
+        gradeLevels: ctx.gradeLevels,
+        scopes: auth.scopes,
+        agentLabel: auth.oauthClientId ?? "delegated-agent",
+      });
+    }
+    // A stale/invalid `delegated_for` claim (e.g. the delegating human's
+    // account was deleted) on a token that ALSO carries an `oauthClientId` is
+    // not necessarily a dead token — it may still be a legitimate registered
+    // agent. Fall through to step 2 (autonomous) rather than hard-failing;
+    // only reject outright when there is no other identity to try.
+    if (!auth.oauthClientId) {
       // A token for a deleted/invalid human is an auth failure (403), not a 500.
       throw new ForbiddenError("Delegated-for user not found", {
         delegatedForUserId: auth.delegatedForUserId,
       });
     }
-    log.debug("Resolved agent-delegated requester", {
-      actingForUserId: auth.delegatedForUserId,
-      agentLabel: auth.oauthClientId,
-    });
-    return buildDelegatedRequester({
-      actingForUserId: auth.delegatedForUserId,
-      roles: ctx.roles,
-      building: ctx.building,
-      department: ctx.department,
-      gradeLevels: ctx.gradeLevels,
-      scopes: auth.scopes,
-      agentLabel: auth.oauthClientId ?? "delegated-agent",
-    });
+    log.warn(
+      "Delegated-for user not found; falling back to autonomous resolution",
+      {
+        delegatedForUserId: auth.delegatedForUserId,
+        oauthClientId: auth.oauthClientId,
+      }
+    );
   }
 
   // 2. Autonomous: the OIDC client is a registered service/skill identity.
+  //    `oauthClientId` is only ever populated for a machine (client-credentials)
+  //    JWT (see auth-middleware.ts) — a real human never carries one. If that
+  //    client has no ACTIVE agent identity (deactivated, or never registered),
+  //    fail closed here rather than falling through to step 3: step 3 resolves
+  //    `auth.userId`, which for a client-credentials token is always
+  //    `ATRIUM_SYSTEM_USER_ID` — silently re-resolving a revoked/unknown agent
+  //    as the system account would undo a deliberate deactivation instead of
+  //    blocking it.
   if (auth.oauthClientId) {
     const identity = await findAgentIdentity(auth.oauthClientId);
-    if (identity) {
-      log.debug("Resolved agent-autonomous requester", {
-        agentId: identity.id,
-        agentLabel: identity.name,
+    if (!identity) {
+      throw new ForbiddenError("No active agent identity for this client", {
+        oauthClientId: auth.oauthClientId,
       });
-      return {
-        kind: "agent-autonomous",
-        agentId: identity.id,
-        roleId: identity.roleId,
-        roles: identity.roleName ? [identity.roleName] : [],
-        scopes: auth.scopes,
-        agentLabel: identity.name,
-      };
     }
+    log.debug("Resolved agent-autonomous requester", {
+      agentId: identity.id,
+      agentLabel: identity.name,
+    });
+    return {
+      kind: "agent-autonomous",
+      agentId: identity.id,
+      roleId: identity.roleId,
+      roles: identity.roleName ? [identity.roleName] : [],
+      scopes: auth.scopes,
+      agentLabel: identity.name,
+    };
   }
 
   // 3. User: sk- key, session, or a human OIDC token acting as themselves.

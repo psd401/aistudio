@@ -674,9 +674,15 @@ session-cookie path for these endpoints. Every response carries `X-Request-Id` a
 | `content:publish_public` | Publish to a public-facing destination without approval |
 
 Staff API keys may hold up to `content:publish_internal`; `content:publish_public`
-is administrator-held. A public-facing publish requested without it is not rejected —
-it returns `202` with `data.status = "approval_required"` and enters the review queue
-(the §26.4 gate, see publish below).
+is administrator-held. A caller without it that requests a `public`-facing outcome is
+not rejected — it returns `202` with `data.status = "approval_required"` and enters
+the review queue (the §26.4 gate). This applies everywhere a request could reach
+`visibilityLevel: "public"` or take a `public_web` publication offline, not just the
+publish endpoint: `POST /content` (create at `visibility.level: "public"`),
+`PATCH /content/{id}/visibility` (widen to `public`), `POST /content/{id}/publish`
+(publish to `public_web`), and `DELETE /content/{id}/publish/{destination}`
+(unpublish from `public_web` — taking public content down needs the same authority
+as putting it up).
 
 **Content error codes** (in addition to the shared `INVALID_TOKEN`,
 `INSUFFICIENT_SCOPE`, `RATE_LIMIT_EXCEEDED`, and `INTERNAL_ERROR`):
@@ -817,6 +823,9 @@ internal reader `url` (`/c/{slug}`).
 **Response `400`** — Validation error, or `CONTENT_VALIDATION` (e.g. unknown collection slug).
 **Response `403`** — API key lacks `content:create`.
 **Response `409`** — `CONTENT_CONFLICT` (slug collision).
+**Response `202`** — approval required: `visibility.level: "public"` was requested (explicitly,
+or inherited from a collection whose default is `public`) without `content:publish_public`.
+Nothing is created; body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
 
 ---
 
@@ -958,6 +967,10 @@ curl -X PATCH -H "Authorization: Bearer sk-your-key" \
 
 **Response `403`** — `CONTENT_FORBIDDEN` (caller may not edit this object).
 **Response `404`** — `CONTENT_NOT_FOUND`.
+**Response `202`** — approval required: `level: "public"` was requested without
+`content:publish_public` — the same §26.4 gate `POST /content/{id}/publish` enforces,
+so a `content:update`-only caller cannot reach "public" through this endpoint either.
+Body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
 
 ---
 
@@ -1024,6 +1037,11 @@ is not live at the destination returns `unpublished: false` rather than erroring
 `{destination}` is one of `intranet`, `public_web`, `schoology`, `google`. Requires
 `content:publish_internal`.
 
+**Public-publish gate (§26.4):** taking `public_web` offline requires the same
+`content:publish_public` authority needed to publish it — `content:publish_internal`
+alone can publish/unpublish `intranet`/`schoology`/`google` but not tear down a live
+public destination.
+
 **Response `200`**
 
 ```json
@@ -1039,6 +1057,9 @@ is not live at the destination returns `unpublished: false` rather than erroring
 
 **Response `400`** — Invalid or missing destination.
 **Response `404`** — `CONTENT_NOT_FOUND`.
+**Response `202`** — approval required: unpublishing `public_web` was requested without
+`content:publish_public`. Body is
+`{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
 
 ---
 

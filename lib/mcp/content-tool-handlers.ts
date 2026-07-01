@@ -26,16 +26,21 @@ import {
   type Requester,
 } from "@/lib/content";
 import { contentDeepLink, resolveCollectionId } from "@/lib/content/surface-helpers";
-import {
-  restGrantSchema as grantZ,
-  restVisibilitySchema as visibilityZ,
-} from "@/lib/content/rest";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
 import type { McpToolContext, McpToolHandler, McpToolResult } from "./types";
 
-// Grant + visibility validation is single-sourced from `lib/content/rest.ts`
-// (`restGrantSchema` / `restVisibilitySchema`) so the MCP and REST surfaces cannot
-// drift — e.g. if `public` is ever restricted, only that one enum changes.
+// ============================================
+// Shared validation sub-schemas
+// ============================================
+
+const grantZ = z.object({
+  kind: z.enum(["role", "building", "department", "grade", "user"]),
+  value: z.string(),
+});
+const visibilityZ = z.object({
+  level: z.enum(["private", "group", "internal", "public"]),
+  grants: z.array(grantZ).optional(),
+});
 
 // ============================================
 // Result + error helpers
@@ -102,7 +107,7 @@ async function fail(
       requestId: opts.requestId,
     });
   }
-  if (isApproval) {
+  if (err instanceof ApprovalRequiredError) {
     return ok({ status: "approval_required", message: err.message });
   }
   if (isContentError(err)) {
@@ -432,9 +437,10 @@ async function handleSetVisibility(
   if ("result" in resolved) return resolved.result;
   const { req } = resolved;
   try {
-    // Load (enforces canView, 404-masks) then gate edit before mutating — the
-    // standalone setLevel enforces the §26.4 public-visibility gate internally, so
-    // pass the explicit capability (never the session wildcard) for the user path.
+    // Load (enforces canView, 404-masks) then gate edit before mutating.
+    // Widening to `public` is additionally gated inside `setLevel` itself
+    // (§26.4) — same authority key as `publish_content`: an EXPLICIT
+    // content:publish_public scope, never the session wildcard.
     const obj = await contentService.get(req, parsed.data.id);
     assertCanEdit(req, obj.ownerUserId);
     const hasPublishPublicCapability = context.scopes.includes(
@@ -456,6 +462,18 @@ async function handleSetVisibility(
     });
     return ok({ id: obj.id, level: result.visibilityLevel });
   } catch (err) {
+    if (err instanceof ApprovalRequiredError) {
+      await recordContentAudit({
+        req,
+        action: "set_visibility",
+        surface: "mcp",
+        objectId: parsed.data.id,
+        outcome: "approval_required",
+        error: err.message,
+        requestId: context.requestId,
+      });
+      return ok({ status: "approval_required", message: err.message });
+    }
     return fail(err, {
       req,
       action: "set_visibility",

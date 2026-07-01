@@ -148,8 +148,11 @@ describe("setVisibilityAction — write", () => {
     });
     expect(result.isSuccess).toBe(true);
     expect(setLevelMock).toHaveBeenCalledTimes(1);
-    // Signature is setLevel(req, objectId, visibility, opts): arg[1] is the
-    // RESOLVED uuid (not the input slug), arg[2] the visibility.
+    // First arg is the requester (§26.4 gate lives inside setLevel now); second
+    // is the RESOLVED uuid (not the input slug).
+    expect(setLevelMock.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ kind: "user", userId: 7 })
+    );
     expect(setLevelMock.mock.calls[0][1]).toBe("uuid-1");
     const visibility = setLevelMock.mock.calls[0][2] as {
       level: string;
@@ -176,7 +179,6 @@ describe("setVisibilityAction — write", () => {
     });
     // The forwarding contract: the level + grants reach setLevel unchanged...
     expect(setLevelMock).toHaveBeenCalledTimes(1);
-    // Signature is setLevel(req, objectId, visibility, opts): arg[2] is the visibility.
     const visibility = setLevelMock.mock.calls[0][2] as {
       level: string;
       grants: { kind: string; value: string }[];
