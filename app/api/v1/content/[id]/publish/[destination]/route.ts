@@ -14,7 +14,6 @@ import {
   requireScope,
   createApiResponse,
   createErrorResponse,
-  extractStringParam,
 } from "@/lib/api";
 import {
   ApprovalRequiredError,
@@ -38,14 +37,19 @@ const DESTINATIONS: PublishDestination[] = [
   "google",
 ];
 
-export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId) => {
+export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
   const scopeError = requireScope(auth, "content:publish_internal", requestId);
   if (scopeError) return scopeError;
 
   const log = createLogger({ requestId, route: "api.v1.content.unpublish" });
 
-  const id = extractStringParam(request.url, "content");
-  const destinationRaw = extractStringParam(request.url, "publish");
+  // Real Next.js route params (from [id]/publish/[destination]) — NOT parsed from
+  // the URL by segment name. `extractStringParam(url, "publish")` misparses when
+  // the id slug is literally "publish" (e.g. /content/publish/publish/schoology →
+  // it returns the "publish" path literal as the destination, a 400 that leaves
+  // the object un-unpublishable).
+  const id = params.id;
+  const destinationRaw = params.destination;
   if (!id) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Missing content id");
   }

@@ -12,7 +12,6 @@ import {
   requireScope,
   createApiResponse,
   createErrorResponse,
-  extractStringParam,
   parseRequestBody,
 } from "@/lib/api";
 import { z } from "zod";
@@ -36,11 +35,12 @@ const createVersionBodySchema = z.object({
 // GET — list versions
 // ============================================
 
-export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => {
+export const GET = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
   const scopeError = requireScope(auth, "content:read", requestId);
   if (scopeError) return scopeError;
 
-  const id = extractStringParam(request.url, "content");
+  // Real Next.js [id] route param — collision-free vs. parsing the URL by segment.
+  const id = params.id;
   if (!id) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Missing content id");
   }
@@ -63,13 +63,13 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
 // POST — create a new version
 // ============================================
 
-export const POST = withApiAuth(async (request: NextRequest, auth, requestId) => {
+export const POST = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
   const scopeError = requireScope(auth, "content:update", requestId);
   if (scopeError) return scopeError;
 
   const log = createLogger({ requestId, route: "api.v1.content.createVersion" });
 
-  const id = extractStringParam(request.url, "content");
+  const id = params.id;
   if (!id) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Missing content id");
   }
