@@ -10,7 +10,12 @@
  *
  * `busy` blocks re-entry while an action runs — a double-click can't fire two
  * publish/unpublish calls, whose nav-item side effects race outside the row lock.
- * `actionError` distinguishes a red error caption from a neutral success one.
+ * `actionError` distinguishes a red error caption from a neutral success one, and
+ * `pendingApproval` an amber "submitted for review" caption from either — mirroring
+ * `VisibilityChip`, so a §26.4 public publish/unpublish that returns
+ * `approvalRequired` is NOT shown as a failure. Latent today (the shipped editor
+ * pins `destination: "intranet"`, which never triggers the gate), but wired so any
+ * future public-destination button surfaces the pending-approval outcome correctly.
  */
 
 import { useCallback, useState, type RefObject } from "react";
@@ -30,10 +35,23 @@ interface UseEditorActionsParams {
 export interface EditorActions {
   message: string | null;
   actionError: boolean;
+  /** True when the last action returned a §26.4 pending-approval outcome. */
+  pendingApproval: boolean;
   busy: boolean;
   handleSnapshot: () => void;
   handlePublish: () => void;
   handleUnpublish: () => void;
+}
+
+/**
+ * The outcome of a toolbar action. `pending` (a §26.4 approval-required result) is
+ * neither success nor error: it is a distinct amber "submitted for review" state,
+ * so a caller must not collapse it into the `ok` boolean.
+ */
+interface ActionOutcome {
+  ok: boolean;
+  text: string;
+  pending?: boolean;
 }
 
 export function useEditorActions({
@@ -43,16 +61,21 @@ export function useEditorActions({
 }: UseEditorActionsParams): EditorActions {
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState(false);
   const [busy, setBusy] = useState(false);
 
   // Run a toolbar action with shared busy/feedback handling: blocks re-entry
-  // while one is in flight, records success vs. error for the caption styling.
+  // while one is in flight, records success / error / pending-approval for the
+  // caption styling. A `pending` outcome is NOT an error — clear the error flag so
+  // the caption renders amber (review submitted), not red (failed).
   const runAction = useCallback(
-    async (run: () => Promise<{ ok: boolean; text: string }>) => {
+    async (run: () => Promise<ActionOutcome>) => {
       setBusy(true);
       try {
-        const { ok, text } = await run();
-        setActionError(!ok);
+        const { ok, text, pending } = await run();
+        setPendingApproval(pending ?? false);
+        // A pending-approval outcome is not a failure even though `ok` is false.
+        setActionError(!ok && !pending);
         setMessage(text);
       } finally {
         setBusy(false);
@@ -81,12 +104,21 @@ export function useEditorActions({
     const target = docNameRef.current ?? idOrSlug;
     void runAction(async () => {
       const result = await publishDocumentAction(target, { destination: "intranet" });
-      return {
-        ok: result.isSuccess,
-        text: result.isSuccess
-          ? "Published to intranet"
-          : result.message ?? "Publish failed",
-      };
+      if (result.isSuccess) {
+        return { ok: true, text: "Published to intranet" };
+      }
+      // §26.4: a public-destination publish the caller can't authorize returns a
+      // pending-approval outcome (not a failure) — surface it amber, like
+      // VisibilityChip. `intranet` never trips this today; wired for future
+      // public-destination publish buttons.
+      if (result.approvalRequired) {
+        return {
+          ok: false,
+          pending: true,
+          text: result.message ?? "Submitted for approval.",
+        };
+      }
+      return { ok: false, text: result.message ?? "Publish failed" };
     });
   }, [idOrSlug, docNameRef, runAction]);
 
@@ -106,16 +138,36 @@ export function useEditorActions({
     const target = docNameRef.current ?? idOrSlug;
     void runAction(async () => {
       const result = await unpublishDocumentAction(target, { destination: "intranet" });
-      return {
-        ok: result.isSuccess,
-        text: result.isSuccess
-          ? result.data.unpublished
+      if (result.isSuccess) {
+        return {
+          ok: true,
+          text: result.data.unpublished
             ? "Unpublished from intranet"
-            : "Not currently published"
-          : result.message ?? "Unpublish failed",
-      };
+            : "Not currently published",
+        };
+      }
+      // §26.4: taking a public destination offline needs the same authority as
+      // publishing it — an unauthorized caller gets a pending-approval outcome.
+      // `intranet` never trips this today; wired for future public-destination
+      // unpublish buttons (mirrors handlePublish).
+      if (result.approvalRequired) {
+        return {
+          ok: false,
+          pending: true,
+          text: result.message ?? "Submitted for approval.",
+        };
+      }
+      return { ok: false, text: result.message ?? "Unpublish failed" };
     });
   }, [idOrSlug, docNameRef, runAction]);
 
-  return { message, actionError, busy, handleSnapshot, handlePublish, handleUnpublish };
+  return {
+    message,
+    actionError,
+    pendingApproval,
+    busy,
+    handleSnapshot,
+    handlePublish,
+    handleUnpublish,
+  };
 }
