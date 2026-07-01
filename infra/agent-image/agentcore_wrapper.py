@@ -53,6 +53,13 @@ logger = logging.getLogger("agentcore_wrapper")
 from harness_adapter import OpenClawAdapter
 import workspace_sync
 
+# The model the agent platform runs on today — used as the last-resort model-id
+# fallback for telemetry when neither the proxy, harness, nor caller supplied
+# one. Must match openclaw.json's provider model id and the ai_models pricing
+# row (migration 088); a mismatch silently yields $0 cost. Single source of
+# truth so the two fallbacks below don't drift (issue #1083, review round 2).
+DEFAULT_AGENT_MODEL_ID = "zai.glm-5"
+
 adapter = OpenClawAdapter()
 
 # Transparent logging proxy sitting between OpenClaw and Mantle.
@@ -573,7 +580,7 @@ def main():
             metadata: dict = {
                 "session_id": session_id,
                 "user_id": user_email,
-                "model": proxy_model or model_override or "zai.glm-5",
+                "model": proxy_model or model_override or DEFAULT_AGENT_MODEL_ID,
                 "input_tokens": proxy_in,
                 "output_tokens": proxy_out,
             }
@@ -589,7 +596,7 @@ def main():
                 # Real model id, in priority order: proxy-observed > harness-
                 # observed > caller override > the known default model. We
                 # never emit the literal "default" anymore (issue #1083).
-                "model": proxy_model or result.model or model_override or "zai.glm-5",
+                "model": proxy_model or result.model or model_override or DEFAULT_AGENT_MODEL_ID,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "latency_ms": result.latency_ms,

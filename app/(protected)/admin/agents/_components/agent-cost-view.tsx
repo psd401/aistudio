@@ -34,6 +34,8 @@ import type {
   AgentCostProjection,
   PricableModel,
 } from "@/actions/admin/agent-cost-projection.actions"
+import { AGENT_MODEL_LABEL } from "@/lib/agents/platform-model"
+import { formatUsd } from "@/lib/utils/format-currency"
 
 interface Props {
   /** Token×pricing actual cost (source of truth). */
@@ -50,14 +52,9 @@ interface Props {
   loading?: boolean
 }
 
-const usd = (n: number) =>
-  new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    // Agent spend can be sub-cent; show 4 decimals so small but real cost
-    // doesn't round to $0.00 and read as "free".
-    maximumFractionDigits: 4,
-  }).format(n)
+// Agent spend can be sub-cent; show 4 decimals so small but real cost doesn't
+// round to $0.00 and read as "free".
+const usd = (n: number) => formatUsd(n, 4)
 
 const fmtInt = (n: number) => new Intl.NumberFormat("en-US").format(n)
 
@@ -247,7 +244,9 @@ function ProjectionPanel({
             </TableHeader>
             <TableBody>
               <TableRow>
-                <TableCell className="font-medium">Actual (GLM-5)</TableCell>
+                <TableCell className="font-medium">
+                  Actual ({AGENT_MODEL_LABEL})
+                </TableCell>
                 <TableCell className="text-right">
                   {usd(projection.actualUsd)}
                 </TableCell>

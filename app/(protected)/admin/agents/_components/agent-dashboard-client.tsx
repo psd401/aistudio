@@ -198,14 +198,21 @@ function buildLoaders(
           ctx.setSelectedCandidate(candidate)
         }
       } else if (!models.isSuccess) {
+        // Surface the failure — silently emptying the candidate dropdown (and
+        // disabling projection) is indistinguishable from "no models yet"
+        // (claude review round 2, silent-failure-patterns).
         ctx.setPricableModels([])
+        ctx.showError("cost", models.message)
       }
 
       // Cost Explorer reconciliation (kept, relabeled in the UI).
       if (ce.isSuccess && ce.data) {
         ctx.setCostSummary(ce.data)
       } else {
+        // Same reasoning — a transient Cost Explorer failure must be visible,
+        // not silently rendered as an empty reconciliation panel.
         ctx.setCostSummary(null)
+        if (!ce.isSuccess) ctx.showError("cost", ce.message)
       }
 
       // Projection for the selected candidate (skip if none priced yet).

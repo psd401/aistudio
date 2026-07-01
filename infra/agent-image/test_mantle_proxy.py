@@ -169,6 +169,16 @@ class TestInjectIncludeUsage(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(payload["stream_options"], {"include_usage": True})
 
+    def test_injects_without_messages_array(self):
+        # Decoupled from the tool-call-id-repair guard (review round 2): usage
+        # injection must NOT require a `messages` array — a streaming request
+        # with no messages still gets include_usage so token tracking can't be
+        # silently disabled by a future change to the repair guard.
+        payload = {"stream": True}
+        changed = inject_include_usage(payload)
+        self.assertTrue(changed)
+        self.assertEqual(payload["stream_options"], {"include_usage": True})
+
 
 class TestUsageEndpoint(unittest.TestCase):
     """The /usage endpoint + the cumulative-counter delta contract the wrapper

@@ -37,6 +37,7 @@ import { sql, gte, inArray, eq, and, isNotNull, ne } from "drizzle-orm"
 import { agentMessages } from "@/lib/db/schema/tables/agent-messages"
 import { aiModels } from "@/lib/db/schema/tables/ai-models"
 import { getDateThreshold } from "@/lib/date-utils"
+import { AGENT_MODEL_ID } from "@/lib/agents/platform-model"
 import type { TelemetryDateRange } from "@/actions/admin/agent-telemetry.actions"
 
 // ============================================
@@ -391,7 +392,7 @@ export async function getPricableModels(): Promise<
               isNotNull(aiModels.inputCostPer1kTokens),
               isNotNull(aiModels.outputCostPer1kTokens),
               // Exclude the agent's own model from the candidate list.
-              ne(aiModels.modelId, "zai.glm-5")
+              ne(aiModels.modelId, AGENT_MODEL_ID)
             )
           )
           .orderBy(

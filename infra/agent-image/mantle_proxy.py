@@ -343,13 +343,15 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     except Exception:
         parsed = None
 
-    # REPAIR STEP: fix stripped tool_call_ids AND ensure streaming requests ask
-    # for usage, before anything else touches the body. Reserialize only if we
-    # actually mutated the payload — keeps the wire body byte-identical
-    # otherwise. Both mutations operate on `parsed`, so one reserialize covers
-    # both.
-    if isinstance(parsed, dict) and parsed.get("messages"):
-        rewrites = repair_tool_call_ids(parsed)
+    # REQUEST-REWRITE STEP: two INDEPENDENT concerns, each with its own guard,
+    # before anything else touches the body. Reserialize only if we actually
+    # mutated the payload — keeps the wire body byte-identical otherwise.
+    #   (a) tool_call_id repair — needs a messages array to walk.
+    #   (b) include_usage injection — only needs `stream:true`; it must NOT be
+    #       gated on `messages` (a future change to the repair guard would
+    #       otherwise silently disable usage tracking). Decoupled per review.
+    if isinstance(parsed, dict):
+        rewrites = repair_tool_call_ids(parsed) if parsed.get("messages") else 0
         usage_injected = inject_include_usage(parsed)
         if rewrites or usage_injected:
             req_body = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
@@ -680,17 +682,24 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 f"retry{retry_attempts}", body_override=retry_body
             )
             reason_r = is_retryable_failure(status_r, content_r, finish_r)
-            # Always adopt the latest attempt's response — if it succeeds we
-            # use it directly; if it fails we still prefer it as the most
-            # recent attempt before any rescue synthesis. Usage/model follow
-            # the adopted response so only the FINAL attempt is counted (no
-            # double-counting of a retried first attempt).
+            # Always adopt the latest attempt's response body — if it succeeds
+            # we use it directly; if it fails we still prefer it as the most
+            # recent attempt before any rescue synthesis.
             status, headers, chunks, content, finish = (
                 status_r, headers_r, chunks_r, content_r, finish_r
             )
-            usage_in, usage_out, resp_model = (
-                usage_in_r, usage_out_r, resp_model_r
-            )
+            # Usage carry-forward: adopt the retry's usage ONLY when it actually
+            # reported usage — a retry whose response was differently-shaped (no
+            # `usage` object) must NOT discard the real, already-generated token
+            # count from the prior attempt (that would undercount cost). We take
+            # the latest NON-None value per field so the final billed usage is
+            # the freshest real number, not a null overwrite (review round 2).
+            if usage_in_r is not None:
+                usage_in = usage_in_r
+            if usage_out_r is not None:
+                usage_out = usage_out_r
+            if resp_model_r:
+                resp_model = resp_model_r
             if reason_r is None:
                 log.info(j("retry_succeeded", req_id=req_id,
                            attempt=retry_attempts,
