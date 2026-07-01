@@ -10,6 +10,7 @@ import {
   IconCurrencyDollar,
 } from "@tabler/icons-react"
 import type { ActivityStats } from "@/actions/admin/activity-management.actions"
+import { formatUsd } from "@/lib/utils/format-currency"
 
 interface StatCardProps {
   label: string
@@ -64,14 +65,6 @@ interface ActivityStatsCardsProps {
   className?: string
 }
 
-function formatUsd(value: number): string {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(value)
-}
 
 export function ActivityStatsCards({
   stats,

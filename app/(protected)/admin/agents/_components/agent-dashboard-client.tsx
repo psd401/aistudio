@@ -60,6 +60,14 @@ import {
   type CostDateRange,
 } from "@/actions/admin/agent-cost.actions"
 import {
+  getAgentCostByModel,
+  getAgentCostProjection,
+  getPricableModels,
+  type AgentCostByModel,
+  type AgentCostProjection,
+  type PricableModel,
+} from "@/actions/admin/agent-cost-projection.actions"
+import {
   getTriageSummaryList,
   type TriageSummaryRow,
 } from "@/actions/admin/agent-triage.actions"
@@ -97,6 +105,9 @@ interface LoaderSetters {
   setFeedbackList: (v: FeedbackItem[]) => void
   setHealthSummary: (v: AgentHealthSummary | null) => void
   setCostSummary: (v: AgentCostSummary | null) => void
+  setCostByModel: (v: AgentCostByModel | null) => void
+  setPricableModels: (v: PricableModel[]) => void
+  setSelectedCandidate: (v: string | null) => void
   setPatterns: (v: AgentPatternsEnvelope) => void
   setRawSignals: (v: RawSignalsEnvelope | null) => void
   setTriageList: (v: TriageSummaryRow[]) => void
@@ -104,6 +115,10 @@ interface LoaderSetters {
 
 interface LoaderContext extends LoaderSetters {
   showError: (tab: string, message: string) => void
+  /** Candidate model currently selected for the projection panel. */
+  getSelectedCandidate: () => string | null
+  /** Version-guarded projection fetch — only the latest request writes state. */
+  runProjection: (range: TelemetryDateRange, candidate: string) => Promise<void>
 }
 
 function buildLoaders(
@@ -159,12 +174,66 @@ function buildLoaders(
       }
     },
     cost: async (range) => {
-      const r = await getAgentCostSummary(telemetryToCostRange(range))
-      if (r.isSuccess && r.data) {
-        ctx.setCostSummary(r.data)
+      // Token×pricing is the source of truth; Cost Explorer is reconciliation.
+      // Load actual cost, candidate models, and Cost Explorer in parallel.
+      const [byModel, models, ce] = await Promise.all([
+        getAgentCostByModel(range),
+        getPricableModels(),
+        getAgentCostSummary(telemetryToCostRange(range)),
+      ])
+
+      if (byModel.isSuccess && byModel.data) {
+        ctx.setCostByModel(byModel.data)
+      } else if (!byModel.isSuccess) {
+        ctx.setCostByModel(null)
+        ctx.showError("cost", byModel.message)
+      }
+
+      // Candidate list + default selection (first = cheapest blended).
+      let candidate = ctx.getSelectedCandidate()
+      if (models.isSuccess && models.data) {
+        ctx.setPricableModels(models.data)
+        // Reconcile the current selection against the refreshed list. The
+        // selected candidate can disappear — e.g. a model that was selected and
+        // has since been DEACTIVATED is now filtered out of getPricableModels.
+        // Keeping the stale id would let runProjection below price a model no
+        // longer in the dropdown (claude review, #1087). Fall back to the
+        // cheapest (first) candidate, or null when none are priced. This also
+        // covers the initial-load case where no candidate is selected yet.
+        const candidateStillListed =
+          !!candidate && models.data.some((m) => m.modelId === candidate)
+        if (!candidateStillListed) {
+          candidate = models.data.length > 0 ? models.data[0].modelId : null
+          ctx.setSelectedCandidate(candidate)
+        }
+      } else if (!models.isSuccess) {
+        // Surface the failure — silently emptying the candidate dropdown (and
+        // disabling projection) is indistinguishable from "no models yet"
+        // (claude review round 2, silent-failure-patterns).
+        ctx.setPricableModels([])
+        // Clear the stale selection too — otherwise `candidate` stays set to
+        // a model no longer in the (now-empty) list and runProjection below
+        // still fetches/displays a projection for it (claude review, #1087).
+        candidate = null
+        ctx.setSelectedCandidate(null)
+        ctx.showError("cost", models.message)
+      }
+
+      // Cost Explorer reconciliation (kept, relabeled in the UI).
+      if (ce.isSuccess && ce.data) {
+        ctx.setCostSummary(ce.data)
       } else {
+        // Same reasoning — a transient Cost Explorer failure must be visible,
+        // not silently rendered as an empty reconciliation panel.
         ctx.setCostSummary(null)
-        ctx.showError("cost", r.message)
+        if (!ce.isSuccess) ctx.showError("cost", ce.message)
+      }
+
+      // Projection for the selected candidate (skip if none priced yet).
+      // Routed through the version-guarded runProjection so a slower response
+      // here can't clobber a newer candidate selection (claude review, #1083).
+      if (candidate) {
+        await ctx.runProjection(range, candidate)
       }
     },
     patterns: async () => {
@@ -274,6 +343,11 @@ function DashboardTabs({
   feedbackList,
   healthSummary,
   costSummary,
+  costByModel,
+  projection,
+  pricableModels,
+  selectedCandidate,
+  onSelectCandidate,
   patterns,
   rawSignals,
   triageList,
@@ -289,6 +363,11 @@ function DashboardTabs({
   feedbackList: FeedbackItem[]
   healthSummary: AgentHealthSummary | null
   costSummary: AgentCostSummary | null
+  costByModel: AgentCostByModel | null
+  projection: AgentCostProjection | null
+  pricableModels: PricableModel[]
+  selectedCandidate: string | null
+  onSelectCandidate: (modelId: string) => void
   patterns: AgentPatternsEnvelope
   rawSignals: RawSignalsEnvelope | null
   triageList: TriageSummaryRow[]
@@ -336,10 +415,20 @@ function DashboardTabs({
       <TabsContent value="cost" className="mt-4">
         {dateRange === "all" && (
           <p className="text-sm text-muted-foreground mb-2">
-            Cost Explorer does not support &quot;All time&quot; — showing last 30 days instead.
+            The Cost Explorer reconciliation panel does not support &quot;All
+            time&quot; — it shows the last 30 days. The token×pricing view above
+            it respects the selected period.
           </p>
         )}
-        <AgentCostView data={costSummary} loading={tabLoading} />
+        <AgentCostView
+          costByModel={costByModel}
+          projection={projection}
+          pricableModels={pricableModels}
+          costExplorer={costSummary}
+          selectedCandidate={selectedCandidate}
+          onSelectCandidate={onSelectCandidate}
+          loading={tabLoading}
+        />
       </TabsContent>
 
       <TabsContent value="patterns" className="mt-4">
@@ -377,6 +466,87 @@ function DashboardTabs({
   )
 }
 
+/**
+ * Cost-tab state + the candidate-change handler, grouped into one hook so the
+ * main dashboard component stays readable. The projection re-fetches only when
+ * the admin picks a different candidate (the actual cost / Cost Explorer / token
+ * data don't change), so the candidate selector is cheap.
+ */
+function useCostTab(
+  dateRange: TelemetryDateRange,
+  showError: (tab: string, message: string) => void
+) {
+  const [costSummary, setCostSummary] = useState<AgentCostSummary | null>(null)
+  const [costByModel, setCostByModel] = useState<AgentCostByModel | null>(null)
+  const [projection, setProjection] = useState<AgentCostProjection | null>(null)
+  const [pricableModels, setPricableModels] = useState<PricableModel[]>([])
+  const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null)
+  // Mirror selectedCandidate in a ref so the (stable) cost loader can read the
+  // latest value without being recreated on every selection change. Synced via
+  // effect (never written during render) so React's ref rules are satisfied.
+  const selectedCandidateRef = useRef<string | null>(null)
+  useEffect(() => {
+    selectedCandidateRef.current = selectedCandidate
+  }, [selectedCandidate])
+
+  // Monotonic request token for projection fetches. Both the tab loader and the
+  // candidate selector fetch projections; if a user switches range then quickly
+  // picks a different candidate, two fetches can resolve out of order. Only the
+  // latest-issued request is allowed to write state (claude review, #1083).
+  const projectionVersionRef = useRef(0)
+
+  // Single guarded projection fetch used by BOTH the tab loader and the
+  // candidate selector, so there is one ordering authority.
+  const runProjection = useCallback(
+    async (range: TelemetryDateRange, candidate: string) => {
+      const version = ++projectionVersionRef.current
+      const proj = await getAgentCostProjection(range, [candidate])
+      // A newer request superseded us — drop this (stale) result.
+      if (version !== projectionVersionRef.current) return
+      if (proj.isSuccess && proj.data) {
+        setProjection(proj.data)
+      } else if (!proj.isSuccess) {
+        setProjection(null)
+        showError("cost", proj.message)
+      }
+    },
+    [showError]
+  )
+
+  const handleSelectCandidate = useCallback(
+    async (modelId: string) => {
+      setSelectedCandidate(modelId)
+      await runProjection(dateRange, modelId)
+    },
+    [dateRange, runProjection]
+  )
+
+  // Stable handle of just the setters + ref + runProjection, so the loader memo
+  // that consumes it doesn't re-run every render (state values live outside this
+  // object; runProjection only depends on the stable showError).
+  const loaderApi = useMemo(
+    () => ({
+      setCostSummary,
+      setCostByModel,
+      setPricableModels,
+      setSelectedCandidate,
+      selectedCandidateRef,
+      runProjection,
+    }),
+    [runProjection]
+  )
+
+  return {
+    costSummary,
+    costByModel,
+    projection,
+    pricableModels,
+    selectedCandidate,
+    handleSelectCandidate,
+    loaderApi,
+  }
+}
+
 export function AgentDashboardClient() {
   const { toast } = useToast()
   const [activeTab, setActiveTab] = useState<DashboardTab>("usage")
@@ -389,7 +559,6 @@ export function AgentDashboardClient() {
   const [guardrailEvents, setGuardrailEvents] = useState<GuardrailEvent[]>([])
   const [feedbackList, setFeedbackList] = useState<FeedbackItem[]>([])
   const [healthSummary, setHealthSummary] = useState<AgentHealthSummary | null>(null)
-  const [costSummary, setCostSummary] = useState<AgentCostSummary | null>(null)
   const [patterns, setPatterns] = useState<AgentPatternsEnvelope>({
     rows: [],
     lastScan: null,
@@ -413,31 +582,39 @@ export function AgentDashboardClient() {
     [toast]
   )
 
+  const cost = useCostTab(dateRange, showError)
+
   const loadStats = useCallback(
     async (range: TelemetryDateRange) => {
       const result = await getAgentTelemetryStats(range)
       if (result.isSuccess && result.data) {
         setStats(result.data)
       } else {
-        toast({
-          variant: "destructive",
-          title: "Error loading stats",
-          description: result.message,
-        })
+        showError("stats", result.message)
       }
     },
-    [toast]
+    [showError]
   )
 
-  // useState setters are stable so `[showError]` is the only real dep.
+  // `cost.loaderApi` is a stable memoized handle of the cost setters + ref, so
+  // along with the stable useState setters, `showError` and `cost.loaderApi`
+  // are the only deps. getSelectedCandidate reads the ref so the loader sees the
+  // latest candidate without re-memoizing.
+  const { loaderApi } = cost
   const loaders = useMemo(
     () => buildLoaders({
       setDailyUsage, setModelBreakdown, setUserUsage, setGuardrailEvents,
-      setFeedbackList, setHealthSummary, setCostSummary, setPatterns,
-      setRawSignals, setTriageList,
+      setFeedbackList, setHealthSummary,
+      setCostSummary: loaderApi.setCostSummary,
+      setCostByModel: loaderApi.setCostByModel,
+      setPricableModels: loaderApi.setPricableModels,
+      setSelectedCandidate: loaderApi.setSelectedCandidate,
+      setPatterns, setRawSignals, setTriageList,
       showError,
+      getSelectedCandidate: () => loaderApi.selectedCandidateRef.current,
+      runProjection: loaderApi.runProjection,
     }),
-    [showError]
+    [showError, loaderApi]
   )
 
   const loadTabData = useCallback(
@@ -467,15 +644,10 @@ export function AgentDashboardClient() {
   )
 
   useEffect(() => {
-    async function init() {
-      setLoading(true)
-      try {
-        await Promise.all([loadStats("30d"), loadTabData("usage", "30d")])
-      } finally {
-        setLoading(false)
-      }
-    }
-    init()
+    setLoading(true)
+    Promise.all([loadStats("30d"), loadTabData("usage", "30d")]).finally(() =>
+      setLoading(false)
+    )
   }, [loadStats, loadTabData])
 
   const handleDateRangeChange = useCallback(
@@ -529,7 +701,12 @@ export function AgentDashboardClient() {
         guardrailEvents={guardrailEvents}
         feedbackList={feedbackList}
         healthSummary={healthSummary}
-        costSummary={costSummary}
+        costSummary={cost.costSummary}
+        costByModel={cost.costByModel}
+        projection={cost.projection}
+        pricableModels={cost.pricableModels}
+        selectedCandidate={cost.selectedCandidate}
+        onSelectCandidate={cost.handleSelectCandidate}
         patterns={patterns}
         rawSignals={rawSignals}
         triageList={triageList}

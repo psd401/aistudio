@@ -83,6 +83,7 @@
     "085-atrium-content.sql",
     "086-atrium-doc-state.sql",
     "087-atrium-nav-content-uniqueness.sql",
+    "088-glm5-agent-pricing.sql",
     "090-atrium-content-audit.sql",
     "091-scheduled-execution-agent-identity.sql"
   ]
