@@ -202,6 +202,11 @@ function buildLoaders(
         // disabling projection) is indistinguishable from "no models yet"
         // (claude review round 2, silent-failure-patterns).
         ctx.setPricableModels([])
+        // Clear the stale selection too — otherwise `candidate` stays set to
+        // a model no longer in the (now-empty) list and runProjection below
+        // still fetches/displays a projection for it (claude review, #1087).
+        candidate = null
+        ctx.setSelectedCandidate(null)
         ctx.showError("cost", models.message)
       }
 
