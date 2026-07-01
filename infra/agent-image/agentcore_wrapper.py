@@ -586,10 +586,12 @@ def main():
             }
         else:
             reply_text = result.text or ""
-            # Proxy delta wins; harness value is the fallback when the proxy
-            # reported nothing (e.g. usage chunk missing on a rescued turn).
-            input_tokens = proxy_in or result.tokens_in
-            output_tokens = proxy_out or result.tokens_out
+            # Proxy delta wins; harness value is the fallback only when the
+            # proxy read was itself untrustworthy (not merely when it measured
+            # a real 0 — `or` would discard a trustworthy 0 and substitute the
+            # harness's possibly-wrong count, contradicting this comment).
+            input_tokens = proxy_in if usage_trustworthy else result.tokens_in
+            output_tokens = proxy_out if usage_trustworthy else result.tokens_out
             metadata = {
                 "session_id": session_id,
                 "user_id": user_email,
