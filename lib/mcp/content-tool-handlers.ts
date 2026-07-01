@@ -25,7 +25,11 @@ import {
   type ContentAuditAction,
   type Requester,
 } from "@/lib/content";
-import { contentDeepLink, resolveCollectionId } from "@/lib/content/surface-helpers";
+import {
+  assertContentAuthoringCapability,
+  contentDeepLink,
+  resolveCollectionId,
+} from "@/lib/content/surface-helpers";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
 import type { McpToolContext, McpToolHandler, McpToolResult } from "./types";
 
@@ -172,6 +176,8 @@ async function handleCreateDocument(
   if ("result" in resolved) return resolved.result;
   const { req } = resolved;
   try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(context);
     const collectionId = await resolveCollectionId(parsed.data.collection);
     const hasPublishPublicCapability = context.scopes.includes(
       "content:publish_public"
@@ -223,6 +229,8 @@ async function handleCreateArtifact(
   if ("result" in resolved) return resolved.result;
   const { req } = resolved;
   try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(context);
     const collectionId = await resolveCollectionId(parsed.data.collection);
     const hasPublishPublicCapability = context.scopes.includes(
       "content:publish_public"
@@ -348,6 +356,8 @@ async function handleUpdateContent(
   if ("result" in resolved) return resolved.result;
   const { req } = resolved;
   try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(context);
     // A null collection clears it; an omitted one leaves it unchanged.
     const collectionId =
       parsed.data.collection === undefined
@@ -397,6 +407,8 @@ async function handleCreateVersion(
   if ("result" in resolved) return resolved.result;
   const { req } = resolved;
   try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(context);
     const result = await contentService.createVersion(req, parsed.data.id, {
       body: parsed.data.body,
       bodyFormat: parsed.data.bodyFormat,
@@ -442,6 +454,8 @@ async function handleSetVisibility(
   if ("result" in resolved) return resolved.result;
   const { req } = resolved;
   try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(context);
     // Load (enforces canView, 404-masks) then gate edit before mutating.
     // Widening to `public` is additionally gated inside `setLevel` itself
     // (§26.4) — same authority key as `publish_content`: an EXPLICIT
@@ -495,6 +509,8 @@ async function handlePublishContent(
   const { req } = resolved;
   const destination = parsed.data.destination;
   try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(context);
     // The public-publish gate is keyed to authority: an API/MCP caller's EXPLICIT
     // content:publish_public scope. A session's wildcard ["*"] must NOT auto-grant
     // it (every logged-in human would otherwise bypass the gate) — admin humans

@@ -22,7 +22,11 @@ import {
   requesterFromApiAuth,
 } from "@/lib/content";
 import { contentErrorToResponse } from "@/lib/content/rest";
-import { contentDeepLink, resolveCollectionId } from "@/lib/content/surface-helpers";
+import {
+  assertContentAuthoringCapability,
+  contentDeepLink,
+  resolveCollectionId,
+} from "@/lib/content/surface-helpers";
 import { createLogger } from "@/lib/logger";
 
 const updateBodySchema = z.object({
@@ -86,6 +90,8 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
   }
 
   try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(auth);
     // null clears the collection; undefined leaves it unchanged.
     const collectionId =
       patch.collectionId === undefined

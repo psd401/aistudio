@@ -23,14 +23,24 @@ jest.mock("@/lib/db/schema", () => ({
 
 jest.mock("drizzle-orm", () => ({ eq: (...a: unknown[]) => a }));
 
-import { resolveCollectionId } from "@/lib/content/surface-helpers";
-import { ValidationError } from "@/lib/content/errors";
+const mockHasCapabilityAccess = jest.fn(async (..._args: unknown[]) => true);
+jest.mock("@/utils/roles", () => ({
+  hasCapabilityAccess: (...args: unknown[]) => mockHasCapabilityAccess(...args),
+}));
+
+import {
+  assertContentAuthoringCapability,
+  ATRIUM_CONTENT_CAPABILITY,
+  resolveCollectionId,
+} from "@/lib/content/surface-helpers";
+import { ForbiddenError, ValidationError } from "@/lib/content/errors";
 
 const UUID = "11111111-1111-1111-1111-111111111111";
 
 beforeEach(() => {
   queue = [];
   jest.clearAllMocks();
+  mockHasCapabilityAccess.mockResolvedValue(true);
 });
 
 describe("resolveCollectionId", () => {
@@ -65,5 +75,51 @@ describe("resolveCollectionId", () => {
   it("throws ValidationError when a slug matches nothing", async () => {
     queue = [[]];
     await expect(resolveCollectionId("nope")).rejects.toThrow(ValidationError);
+  });
+});
+
+describe("assertContentAuthoringCapability", () => {
+  const sub = "cognito-sub-123";
+
+  it("gates a session caller WITHOUT the atrium-content capability", async () => {
+    mockHasCapabilityAccess.mockResolvedValue(false);
+    await expect(
+      assertContentAuthoringCapability({ authType: "session", cognitoSub: sub })
+    ).rejects.toThrow(ForbiddenError);
+    expect(mockHasCapabilityAccess).toHaveBeenCalledWith(
+      ATRIUM_CONTENT_CAPABILITY,
+      sub
+    );
+  });
+
+  it("allows a session caller WITH the atrium-content capability", async () => {
+    mockHasCapabilityAccess.mockResolvedValue(true);
+    await expect(
+      assertContentAuthoringCapability({ authType: "session", cognitoSub: sub })
+    ).resolves.toBeUndefined();
+  });
+
+  it("does NOT gate an api_key caller (scoped by explicit grant), even without the capability", async () => {
+    mockHasCapabilityAccess.mockResolvedValue(false);
+    await expect(
+      assertContentAuthoringCapability({ authType: "api_key", cognitoSub: sub })
+    ).resolves.toBeUndefined();
+    expect(mockHasCapabilityAccess).not.toHaveBeenCalled();
+  });
+
+  it("does NOT gate a jwt (OIDC) caller, even without the capability", async () => {
+    mockHasCapabilityAccess.mockResolvedValue(false);
+    await expect(
+      assertContentAuthoringCapability({ authType: "jwt", cognitoSub: sub })
+    ).resolves.toBeUndefined();
+    expect(mockHasCapabilityAccess).not.toHaveBeenCalled();
+  });
+
+  it("does NOT gate an internal caller with no authType (agent runtime)", async () => {
+    mockHasCapabilityAccess.mockResolvedValue(false);
+    await expect(
+      assertContentAuthoringCapability({ cognitoSub: sub })
+    ).resolves.toBeUndefined();
+    expect(mockHasCapabilityAccess).not.toHaveBeenCalled();
   });
 });

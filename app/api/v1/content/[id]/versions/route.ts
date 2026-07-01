@@ -23,6 +23,7 @@ import {
   requesterFromApiAuth,
 } from "@/lib/content";
 import { contentErrorToResponse } from "@/lib/content/rest";
+import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
 import { createLogger } from "@/lib/logger";
 
 const createVersionBodySchema = z.object({
@@ -85,6 +86,8 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   }
 
   try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(auth);
     const result = await contentService.createVersion(req, id, {
       body: input.body,
       bodyFormat: input.bodyFormat,

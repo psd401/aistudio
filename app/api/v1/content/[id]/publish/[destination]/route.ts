@@ -23,6 +23,7 @@ import {
   requesterFromApiAuth,
 } from "@/lib/content";
 import { contentErrorToResponse, respondApprovalRequired } from "@/lib/content/rest";
+import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
 import { createLogger } from "@/lib/logger";
 
@@ -66,6 +67,8 @@ export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId) 
   const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
 
   try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(auth);
     const result = await publishService.unpublish(req, id, destination, {
       hasPublishPublicCapability,
     });

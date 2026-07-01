@@ -31,6 +31,7 @@ import {
   respondApprovalRequired,
   restVisibilitySchema,
 } from "@/lib/content/rest";
+import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
 import { createLogger } from "@/lib/logger";
 
 export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) => {
@@ -60,6 +61,8 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
   const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
 
   try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(auth);
     const obj = await contentService.get(req, id);
     assertCanEdit(req, obj.ownerUserId);
     const result = await visibilityService.setLevel(

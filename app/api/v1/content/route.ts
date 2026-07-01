@@ -28,7 +28,11 @@ import {
   respondApprovalRequired,
   restVisibilitySchema,
 } from "@/lib/content/rest";
-import { contentDeepLink, resolveCollectionId } from "@/lib/content/surface-helpers";
+import {
+  assertContentAuthoringCapability,
+  contentDeepLink,
+  resolveCollectionId,
+} from "@/lib/content/surface-helpers";
 import { createLogger } from "@/lib/logger";
 
 const listQuerySchema = z.object({
@@ -119,6 +123,9 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
 
   try {
+    // Session humans must ALSO hold the atrium-content capability (scope alone is
+    // the wildcard ["*"] for a session); sk-/OIDC callers are gated by scope.
+    await assertContentAuthoringCapability(auth);
     const collectionId = await resolveCollectionId(input.collectionId);
     const created = await contentService.create(
       req,

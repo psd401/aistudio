@@ -121,6 +121,17 @@ export interface McpToolContext {
   scopes: string[]
   requestId: string
   /**
+   * How the caller authenticated, when the tool is invoked through an
+   * authenticated HTTP request (`app/api/mcp/route.ts`). `"session"` means a
+   * browser session cookie (scopes `["*"]`) — a human whose content authoring
+   * must ALSO pass the `atrium-content` capability gate, exactly as the UI
+   * server actions require. `"api_key"`/`"jwt"` callers are gated by their
+   * explicit granular scopes. Absent for internal agent-runtime invocation
+   * (`lib/agents/tool-resolver.ts`), which is never a browser session and so is
+   * treated as non-session (no capability gate) by callers.
+   */
+  authType?: "session" | "api_key" | "jwt"
+  /**
    * The OIDC client id, when authenticated via an OAuth bearer token. Atrium
    * content tools use it to resolve an autonomous `agent_identities` caller
    * (§26). Absent for sk- key / session auth.

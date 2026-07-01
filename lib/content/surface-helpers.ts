@@ -9,7 +9,8 @@
 import { eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentCollections } from "@/lib/db/schema";
-import { ValidationError } from "./errors";
+import { hasCapabilityAccess } from "@/utils/roles";
+import { ForbiddenError, ValidationError } from "./errors";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -62,4 +63,44 @@ export async function resolveCollectionId(
 export function contentDeepLink(slug: string): string {
   const base = process.env.ATRIUM_PUBLIC_BASE_URL?.replace(/\/$/, "") ?? "";
   return `${base}/c/${slug}`;
+}
+
+/** The capability every Atrium authoring entry point (UI actions + agent surfaces) gates on. */
+export const ATRIUM_CONTENT_CAPABILITY = "atrium-content";
+
+/**
+ * Gate a CONTENT-AUTHORING call (create/update/version/visibility/publish) by the
+ * `atrium-content` feature capability — for SESSION callers only.
+ *
+ * A browser session gets `scopes: ["*"]` (`authenticateRequest`), which trivially
+ * satisfies every `requireScope("content:*")` check, so scope enforcement alone
+ * lets ANY logged-in user (e.g. a `student`, who does not hold `atrium-content`)
+ * author content through the REST v1 / MCP surfaces — bypassing the capability
+ * check that EVERY Atrium UI server action already enforces. This closes that
+ * gap by requiring the same capability for session-authenticated humans.
+ *
+ * `api_key` (`sk-`) and `jwt` (OIDC) callers are intentionally NOT gated here:
+ * their access is scoped by an explicitly granted `content:*` scope (issuing an
+ * sk- key with `content:create` is a deliberate authorization), and they carry no
+ * browser session / capability grants. Reads are never gated (a viewer only sees
+ * what `canView` admits regardless of capability).
+ */
+export async function assertContentAuthoringCapability(auth: {
+  authType?: "session" | "api_key" | "jwt";
+  cognitoSub: string;
+}): Promise<void> {
+  // Only browser sessions carry the wildcard ["*"] scope that bypasses granular
+  // scope checks; a missing authType is an internal (non-HTTP) caller — neither
+  // is gated on scope, so neither is a session and the gate does not apply.
+  if (auth.authType !== "session") return;
+  const allowed = await hasCapabilityAccess(
+    ATRIUM_CONTENT_CAPABILITY,
+    auth.cognitoSub
+  );
+  if (!allowed) {
+    throw new ForbiddenError(
+      "The atrium-content capability is required to author content",
+      { capability: ATRIUM_CONTENT_CAPABILITY }
+    );
+  }
 }

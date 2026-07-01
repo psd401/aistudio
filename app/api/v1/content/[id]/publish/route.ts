@@ -28,6 +28,7 @@ import {
   respondApprovalRequired,
   restVisibilitySchema,
 } from "@/lib/content/rest";
+import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
 import { createLogger } from "@/lib/logger";
 
 const publishBodySchema = z.object({
@@ -64,6 +65,8 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
 
   try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(auth);
     const result = await publishService.publish(
       req,
       id,
