@@ -38,6 +38,7 @@ import { agentMessages } from "@/lib/db/schema/tables/agent-messages"
 import { aiModels } from "@/lib/db/schema/tables/ai-models"
 import { getDateThreshold } from "@/lib/date-utils"
 import { AGENT_MODEL_ID } from "@/lib/agents/platform-model"
+import { exactTokenCostUsd } from "@/lib/costs/token-cost"
 import type { TelemetryDateRange } from "@/actions/admin/agent-telemetry.actions"
 
 // ============================================
@@ -167,7 +168,9 @@ export async function getAgentCostByModel(
             messageCount: sql<number>`COUNT(${agentMessages.id})`,
             inputTokens: sql<number>`COALESCE(SUM(${agentMessages.inputTokens}), 0)`,
             outputTokens: sql<number>`COALESCE(SUM(${agentMessages.outputTokens}), 0)`,
-            // Exact per-direction cost. Prices are per-1k-tokens, so /1000.
+            // Exact per-direction cost — the SQL mirror of exactTokenCostUsd
+            // (lib/costs/token-cost.ts); agent_messages stores the input/output
+            // split, so no blend is needed. Prices are per-1k-tokens, so /1000.
             // COALESCE each direction SEPARATELY: a model priced on only one
             // direction (e.g. input set, output NULL) must still count the
             // priced side. A single outer COALESCE would let the NULL side
@@ -323,8 +326,12 @@ export async function getAgentCostProjection(
       const pricingMissing = inputCost == null && outputCost == null
       const usd = pricingMissing
         ? 0
-        : (actualInputTokens * (inputCost ?? 0)) / 1000 +
-          (actualOutputTokens * (outputCost ?? 0)) / 1000
+        : exactTokenCostUsd(
+            actualInputTokens,
+            actualOutputTokens,
+            inputCost ?? 0,
+            outputCost ?? 0
+          )
       return {
         model: modelId,
         name: row?.name ? String(row.name) : modelId,
@@ -363,8 +370,9 @@ export async function getAgentCostProjection(
  * List models that have pricing and can be used as projection candidates.
  *
  * Excludes the agent's own model (zai.glm-5) — projecting GLM-5 onto GLM-5 is
- * meaningless. Returns text models with both input and output prices set,
- * sorted by blended cost so the cheapest alternatives surface first.
+ * meaningless. Returns ACTIVE models with both input and output prices set,
+ * sorted by blended cost so the cheapest alternatives surface first. Inactive
+ * models are excluded so a retired model with stale pricing can't be projected.
  */
 export async function getPricableModels(): Promise<
   ActionState<PricableModel[]>
@@ -389,6 +397,10 @@ export async function getPricableModels(): Promise<
           .from(aiModels)
           .where(
             and(
+              // Only active models are selectable elsewhere in the product;
+              // a deactivated/retired model with a stale pricing row must not
+              // appear as a live "compare to" candidate (claude review, #1087).
+              eq(aiModels.active, true),
               isNotNull(aiModels.inputCostPer1kTokens),
               isNotNull(aiModels.outputCostPer1kTokens),
               // Exclude the agent's own model from the candidate list.

@@ -527,6 +527,13 @@ def main():
         # point for GLM-5 token usage — OpenClaw's WS events don't surface it
         # reliably. Read in the executor so the (blocking) HTTP call doesn't
         # stall the event loop.
+        #
+        # ORDERING IS DELIBERATE — do NOT parallelize this baseline read with
+        # process_task to shave latency (a tempting "optimization"). adapter.
+        # process() drives Mantle calls that increment the proxy's cumulative
+        # counter; if the baseline snapshot races those calls it captures part
+        # of THIS turn's tokens, and `final − baseline` then under-counts. The
+        # baseline must be fully read before process_task is scheduled.
         usage_baseline = await loop.run_in_executor(None, read_proxy_usage)
         process_task = loop.run_in_executor(
             None, adapter.process, framed, session_id, model_override

@@ -93,12 +93,34 @@ export function AgentCostView({
 // ---------- Source of truth: token × pricing ----------
 
 function ModelCostPanel({ costByModel }: { costByModel: AgentCostByModel | null }) {
-  const totalUsd = costByModel?.totalUsd ?? 0
-  const windowDays = costByModel?.windowDays ?? null
-  const hasTokenData =
-    !!costByModel &&
-    costByModel.byModel.some((m) => m.inputTokens + m.outputTokens > 0)
-  const missing = costByModel?.modelsMissingPricing ?? []
+  // Distinguish a load FAILURE from a genuinely empty window. The client sets
+  // costByModel to null (and fires an error toast) ONLY when getAgentCostByModel
+  // threw; a successful-but-empty window is a real object with an empty byModel
+  // array. Collapsing both into "no usage" hides infra errors and reads as
+  // "$0 spend" — the null-for-both-error-and-empty anti-pattern called out in
+  // docs/guides/silent-failure-patterns.md. The sibling CostExplorerPanel below
+  // already draws this distinction (`if (!data)`); carry it here too.
+  if (!costByModel) {
+    return (
+      <div>
+        <h3 className="text-sm font-semibold mb-1">
+          Model cost (tokens × pricing)
+        </h3>
+        <Card>
+          <CardContent className="pt-6">
+            <EmptyRow text="Model cost data unavailable — the query failed to load (see the error notification). This is NOT a $0 reading; retry the range." />
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
+  const totalUsd = costByModel.totalUsd
+  const windowDays = costByModel.windowDays
+  const hasTokenData = costByModel.byModel.some(
+    (m) => m.inputTokens + m.outputTokens > 0
+  )
+  const missing = costByModel.modelsMissingPricing
 
   return (
     <div>
@@ -155,7 +177,7 @@ function ModelCostPanel({ costByModel }: { costByModel: AgentCostByModel | null 
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {costByModel!.byModel.map((m) => {
+                {costByModel.byModel.map((m) => {
                   const flagMissing =
                     m.pricingMissing && m.inputTokens + m.outputTokens > 0
                   return (
