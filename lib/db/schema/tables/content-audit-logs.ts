@@ -10,7 +10,7 @@
  * is nullable and has NO FK so the trail survives object deletion; `actor_user_id`
  * / `agent_id` ON DELETE SET NULL for the same reason.
  *
- * See migration 088 and docs/features/atrium-design-spec.md §27.
+ * See migration 090 and docs/features/atrium-design-spec.md §27.
  */
 
 import {

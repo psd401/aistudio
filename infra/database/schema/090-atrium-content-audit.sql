@@ -1,4 +1,4 @@
--- Migration 088: Atrium content audit log
+-- Migration 090: Atrium content audit log
 -- Part of #1055 (Epic #1059, Atrium Phase 5 — Agent access)
 --
 -- Every MCP/REST content mutation appends one row here: a complete external

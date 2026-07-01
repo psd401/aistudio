@@ -11,7 +11,7 @@ a running app + DB.
 
 ```bash
 bun run db:up                 # local PostgreSQL
-bun run db:reset && bun run db:seed   # migrations (incl. 088, 089) + test users
+bun run db:reset && bun run db:seed   # migrations (incl. 090, 091) + test users
 
 # Required for autonomous content ownership. MUST be a DEDICATED, NON-ADMIN,
 # non-interactive service account that NEVER authors content through the UI.

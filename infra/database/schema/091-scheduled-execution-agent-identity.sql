@@ -1,4 +1,4 @@
--- Migration 089: scheduled_executions agent service-identity
+-- Migration 091: scheduled_executions agent service-identity
 -- Part of #1055 (Epic #1059, Atrium Phase 5 — Agent access)
 --
 -- A scheduled Assistant Architect run is the autonomous production path (§25): it
