@@ -181,7 +181,10 @@ export async function buildAutonomousRequesterForIdentity(
     agentId: identity.id,
     roleId: identity.roleId,
     roles: identity.roleName ? [identity.roleName] : [],
-    scopes: identity.scopes,
+    // `agent_identities.scopes` is NOT NULL (text[].notNull), so this is never
+    // null in practice — but coalesce defensively so a malformed/legacy row (or a
+    // test double) can never make a downstream `req.scopes.includes(...)` throw.
+    scopes: identity.scopes ?? [],
     agentLabel: identity.name,
   };
 }

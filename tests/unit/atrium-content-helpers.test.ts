@@ -30,6 +30,7 @@ import {
   authorUserIdOf,
   canEdit,
   canPublishPublic,
+  hasPublishPublicScope,
   principalOf,
   scopesOf,
   slugCandidate,
@@ -245,6 +246,22 @@ describe("canPublishPublic (§26.4)", () => {
       scopes: ["content:publish_public"],
     };
     expect(canPublishPublic(withScope, true)).toBe(false);
+  });
+});
+
+describe("hasPublishPublicScope (REST/MCP scope check)", () => {
+  it("true only when the EXPLICIT content:publish_public scope is present", () => {
+    expect(hasPublishPublicScope(["content:create", "content:publish_public"])).toBe(true);
+    expect(hasPublishPublicScope(["content:create", "content:publish_internal"])).toBe(false);
+  });
+  it("does NOT treat a session wildcard as the scope (no fail-open)", () => {
+    // A session's ["*"] must not auto-grant the public-publish authority.
+    expect(hasPublishPublicScope(["*"])).toBe(false);
+  });
+  it("is null/undefined-safe: denies rather than throwing on a malformed context", () => {
+    expect(hasPublishPublicScope(null)).toBe(false);
+    expect(hasPublishPublicScope(undefined)).toBe(false);
+    expect(hasPublishPublicScope([])).toBe(false);
   });
 });
 

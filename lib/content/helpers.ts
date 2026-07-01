@@ -234,6 +234,11 @@ export function canPublishPublic(
  * explicitly-granted `content:publish_public` scope passes (admins still pass via
  * `req.isAdmin` inside the service).
  */
-export function hasPublishPublicScope(scopes: string[]): boolean {
-  return scopes.includes("content:publish_public");
+export function hasPublishPublicScope(
+  scopes: string[] | null | undefined
+): boolean {
+  // Null-safe: every call site passes a real `string[]` (auth/MCP `scopes`), but
+  // accepting null/undefined defensively means a malformed auth context can never
+  // turn this authority check into a runtime crash — it simply denies.
+  return scopes?.includes("content:publish_public") ?? false;
 }
