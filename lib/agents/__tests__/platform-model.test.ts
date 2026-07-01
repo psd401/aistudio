@@ -16,6 +16,14 @@ import { AGENT_MODEL_ID } from "@/lib/agents/platform-model"
  * (e.g. to glm-6) that updates one but not all silently re-introduces the exact
  * $0-cost bug #1083 fixed — agent_messages rows stop joining ai_models. This
  * test fails CI the moment any of the four drifts from AGENT_MODEL_ID.
+ *
+ * LIMITATION (claude review, #1087): the model id actually WRITTEN to
+ * agent_messages is whatever mantle_proxy.py extracts from the live Mantle
+ * response at runtime (falling back to DEFAULT_AGENT_MODEL_ID, which IS guarded
+ * below). A static test cannot assert what the upstream returns — if Mantle
+ * starts returning a differently-cased/renamed id, only production telemetry
+ * (a spike in pricingMissing rows) reveals it. These four static sites are the
+ * drift surface we can guard at build time.
  */
 
 const REPO_ROOT = resolve(__dirname, "../../..")

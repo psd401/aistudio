@@ -193,8 +193,17 @@ function buildLoaders(
       let candidate = ctx.getSelectedCandidate()
       if (models.isSuccess && models.data) {
         ctx.setPricableModels(models.data)
-        if (!candidate && models.data.length > 0) {
-          candidate = models.data[0].modelId
+        // Reconcile the current selection against the refreshed list. The
+        // selected candidate can disappear — e.g. a model that was selected and
+        // has since been DEACTIVATED is now filtered out of getPricableModels.
+        // Keeping the stale id would let runProjection below price a model no
+        // longer in the dropdown (claude review, #1087). Fall back to the
+        // cheapest (first) candidate, or null when none are priced. This also
+        // covers the initial-load case where no candidate is selected yet.
+        const candidateStillListed =
+          !!candidate && models.data.some((m) => m.modelId === candidate)
+        if (!candidateStillListed) {
+          candidate = models.data.length > 0 ? models.data[0].modelId : null
           ctx.setSelectedCandidate(candidate)
         }
       } else if (!models.isSuccess) {

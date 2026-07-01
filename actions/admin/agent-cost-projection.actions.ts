@@ -135,6 +135,25 @@ function rangeDays(range: TelemetryDateRange): number | null {
 /** Bound the candidate list so a malicious caller can't request 10k joins. */
 const MAX_CANDIDATES = 12
 
+/**
+ * Exact per-direction cost as a single reusable SQL fragment — the SQL mirror
+ * of exactTokenCostUsd (lib/costs/token-cost.ts). agent_messages stores the
+ * input/output split, so no blend is needed; prices are per-1k-tokens (÷1000).
+ *
+ * The per-direction COALESCE is load-bearing: a model priced on only ONE
+ * direction (e.g. input set, output NULL) must still count the priced side. A
+ * single outer COALESCE would let the NULL side poison the whole sum
+ * (X + NULL = NULL) and collapse a real cost to $0 (gemini review, #1083).
+ *
+ * Shared between getAgentCostByModel and getAgentCostProjection so a future
+ * pricing change (discount tier, rounding) can't be applied to only one of the
+ * two aggregation sites (claude review, #1087). Mirrors the countAsInt fragment
+ * pattern in lib/db/drizzle/helpers/pagination.ts.
+ */
+const perDirectionCostUsdSql = sql<string>`
+  COALESCE(SUM(${agentMessages.inputTokens}::numeric * ${aiModels.inputCostPer1kTokens} / 1000.0), 0)
+  + COALESCE(SUM(${agentMessages.outputTokens}::numeric * ${aiModels.outputCostPer1kTokens} / 1000.0), 0)`
+
 // ============================================
 // Actions
 // ============================================
@@ -146,6 +165,12 @@ const MAX_CANDIDATES = 12
  * no pricing row appears with usd=0 and pricingMissing=true (instead of being
  * dropped). Cost math is exact per-direction: input×inputPrice +
  * output×outputPrice, prices being per-1k-tokens.
+ *
+ * NOTE: agent_messages rows written before #1083 recorded a placeholder model
+ * id ("default" / "kimi-k2.5" / "unknown") with no ai_models pricing row, so
+ * that historical spend legitimately reports pricingMissing=true / $0. It is old
+ * data, not a pricing-config gap; pricing it would need a per-message cost
+ * snapshot or a one-time relabel (out of scope here). (claude review, #1087)
  */
 export async function getAgentCostByModel(
   range: TelemetryDateRange = "30d"
@@ -168,17 +193,8 @@ export async function getAgentCostByModel(
             messageCount: sql<number>`COUNT(${agentMessages.id})`,
             inputTokens: sql<number>`COALESCE(SUM(${agentMessages.inputTokens}), 0)`,
             outputTokens: sql<number>`COALESCE(SUM(${agentMessages.outputTokens}), 0)`,
-            // Exact per-direction cost — the SQL mirror of exactTokenCostUsd
-            // (lib/costs/token-cost.ts); agent_messages stores the input/output
-            // split, so no blend is needed. Prices are per-1k-tokens, so /1000.
-            // COALESCE each direction SEPARATELY: a model priced on only one
-            // direction (e.g. input set, output NULL) must still count the
-            // priced side. A single outer COALESCE would let the NULL side
-            // poison the whole sum (X + NULL = NULL) and collapse a real cost
-            // to $0 (gemini review, #1083).
-            usd: sql<string>`
-              COALESCE(SUM(${agentMessages.inputTokens}::numeric * ${aiModels.inputCostPer1kTokens} / 1000.0), 0)
-              + COALESCE(SUM(${agentMessages.outputTokens}::numeric * ${aiModels.outputCostPer1kTokens} / 1000.0), 0)`,
+            // Exact per-direction cost — see perDirectionCostUsdSql above.
+            usd: perDirectionCostUsdSql,
             // A pricing row matched iff input OR output price is non-null.
             hasPricing: sql<boolean>`bool_or(
               ${aiModels.inputCostPer1kTokens} IS NOT NULL
@@ -278,12 +294,8 @@ export async function getAgentCostProjection(
           .select({
             inputTokens: sql<number>`COALESCE(SUM(${agentMessages.inputTokens}), 0)`,
             outputTokens: sql<number>`COALESCE(SUM(${agentMessages.outputTokens}), 0)`,
-            // COALESCE each direction separately so a model priced on only one
-            // side doesn't collapse the whole actual cost to $0 (X + NULL =
-            // NULL). Same fix as getAgentCostByModel (gemini review, #1083).
-            actualUsd: sql<string>`
-              COALESCE(SUM(${agentMessages.inputTokens}::numeric * ${aiModels.inputCostPer1kTokens} / 1000.0), 0)
-              + COALESCE(SUM(${agentMessages.outputTokens}::numeric * ${aiModels.outputCostPer1kTokens} / 1000.0), 0)`,
+            // Exact per-direction cost — see perDirectionCostUsdSql above.
+            actualUsd: perDirectionCostUsdSql,
           })
           .from(agentMessages)
           .leftJoin(aiModels, eq(agentMessages.model, aiModels.modelId))
