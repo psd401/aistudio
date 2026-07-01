@@ -127,6 +127,7 @@ export async function getAIModels() {
           inputCostPer1kTokens: aiModels.inputCostPer1kTokens,
           outputCostPer1kTokens: aiModels.outputCostPer1kTokens,
           cachedInputCostPer1kTokens: aiModels.cachedInputCostPer1kTokens,
+          cacheWriteCostPer1kTokens: aiModels.cacheWriteCostPer1kTokens,
           pricingUpdatedAt: aiModels.pricingUpdatedAt,
           averageLatencyMs: aiModels.averageLatencyMs,
           maxConcurrency: aiModels.maxConcurrency,

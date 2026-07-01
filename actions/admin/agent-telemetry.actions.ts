@@ -49,6 +49,9 @@ export interface ModelBreakdownItem {
   model: string
   messageCount: number
   totalTokens: number
+  /** Bedrock prompt-caching split (issue #1089). 0 on non-caching models. */
+  cacheReadTokens: number
+  cacheWriteTokens: number
   avgLatencyMs: number
 }
 
@@ -368,6 +371,10 @@ export async function getAgentModelBreakdown(
             messageCount: count(agentMessages.id),
             totalTokens:
               sql<number>`COALESCE(SUM(${agentMessages.inputTokens} + ${agentMessages.outputTokens}), 0)`,
+            cacheReadTokens:
+              sql<number>`COALESCE(SUM(${agentMessages.cacheReadInputTokens}), 0)`,
+            cacheWriteTokens:
+              sql<number>`COALESCE(SUM(${agentMessages.cacheWriteInputTokens}), 0)`,
             avgLatencyMs:
               sql<number>`COALESCE(AVG(${agentMessages.latencyMs}), 0)`,
           })
@@ -384,6 +391,8 @@ export async function getAgentModelBreakdown(
       model: String(r.model),
       messageCount: Number(r.messageCount),
       totalTokens: Number(r.totalTokens),
+      cacheReadTokens: Number(r.cacheReadTokens),
+      cacheWriteTokens: Number(r.cacheWriteTokens),
       avgLatencyMs: Math.round(Number(r.avgLatencyMs)),
     }))
 

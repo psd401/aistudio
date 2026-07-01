@@ -5,15 +5,16 @@ import { AGENT_MODEL_ID } from "@/lib/agents/platform-model"
 /**
  * Drift guard (PR #1087 review finding #4).
  *
- * The agent-platform model id ("zai.glm-5") is declared independently in four
- * places across three deployables:
+ * The agent-platform model id ("anthropic.claude-sonnet-5" as of #1089;
+ * formerly "zai.glm-5") is declared independently in four places across three
+ * deployables:
  *   1. lib/agents/platform-model.ts            (Next app — AGENT_MODEL_ID)
  *   2. infra/agent-image/openclaw.json         (agent image — runtime model)
  *   3. infra/agent-image/agentcore_wrapper.py  (agent image — telemetry fallback)
- *   4. infra/database/schema/088-...sql         (DB — ai_models pricing row)
+ *   4. infra/database/schema/092-...sql         (DB — ai_models pricing row)
  *
  * There is no build-time shared constant across Python / TS / SQL, so a swap
- * (e.g. to glm-6) that updates one but not all silently re-introduces the exact
+ * (e.g. to a newer Sonnet) that updates one but not all silently re-introduces the exact
  * $0-cost bug #1083 fixed — agent_messages rows stop joining ai_models. This
  * test fails CI the moment any of the four drifts from AGENT_MODEL_ID.
  *
@@ -66,8 +67,8 @@ describe("agent platform model id consistency (#1083 / #1087 #4)", () => {
     expect(match?.[1]).toBe(AGENT_MODEL_ID)
   })
 
-  it("migration 088 seeds a pricing row for AGENT_MODEL_ID", () => {
-    const sql = read("infra/database/schema/088-glm5-agent-pricing.sql")
+  it("migration 092 seeds a pricing row for AGENT_MODEL_ID", () => {
+    const sql = read("infra/database/schema/092-agent-cache-tokens.sql")
     expect(sql).toContain(`'${AGENT_MODEL_ID}'`)
   })
 })

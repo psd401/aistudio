@@ -128,8 +128,11 @@ function ModelCostPanel({ costByModel }: { costByModel: AgentCostByModel | null 
       <p className="text-xs text-muted-foreground mb-3">
         Source of truth for model spend. Computed from the real token volume
         recorded per message multiplied by current{" "}
-        <code className="text-[11px]">ai_models</code> pricing. GLM-5 / Bedrock
-        Mantle spend does not flow through Cost Explorer, so this is the
+        <code className="text-[11px]">ai_models</code> pricing. Cost is{" "}
+        <span className="font-medium">cache-aware</span> (issue #1089): cache
+        reads are priced at the cached-input rate (~0.1&times; input) and cache
+        writes at the cache-write rate, on top of full-price input/output.
+        Bedrock Mantle spend does not flow through Cost Explorer, so this is the
         authoritative model-cost view.
       </p>
 
@@ -173,6 +176,8 @@ function ModelCostPanel({ costByModel }: { costByModel: AgentCostByModel | null 
                   <TableHead className="text-right">Messages</TableHead>
                   <TableHead className="text-right">Input tok</TableHead>
                   <TableHead className="text-right">Output tok</TableHead>
+                  <TableHead className="text-right">Cache read tok</TableHead>
+                  <TableHead className="text-right">Cache write tok</TableHead>
                   <TableHead className="text-right">Cost</TableHead>
                 </TableRow>
               </TableHeader>
@@ -194,6 +199,12 @@ function ModelCostPanel({ costByModel }: { costByModel: AgentCostByModel | null 
                       </TableCell>
                       <TableCell className="text-right">
                         {fmtInt(m.outputTokens)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {m.cacheReadTokens > 0 ? fmtInt(m.cacheReadTokens) : <Dash />}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {m.cacheWriteTokens > 0 ? fmtInt(m.cacheWriteTokens) : <Dash />}
                       </TableCell>
                       <TableCell className="text-right">
                         {m.pricingMissing ? <Dash /> : usd(m.usd)}
@@ -341,10 +352,11 @@ function ReconciliationPanel({
           Reconciliation only — NOT model cost. This panel reflects AgentCore /
           infrastructure spend tagged{" "}
           <code className="text-[11px]">costCenter=ai-agents</code> on the
-          execution role. GLM-5 model spend runs through Bedrock Mantle under a
-          separate IAM user&apos;s bearer token, so it does{" "}
-          <span className="font-medium">not</span> carry this tag and will not
-          appear here. Use the token×pricing view above for model cost.
+          execution role. The harness model spend (Claude Sonnet 5 as of #1089)
+          runs through Bedrock Mantle under a separate IAM user&apos;s bearer
+          token, so it does <span className="font-medium">not</span> carry this
+          tag and will not appear here. Use the token×pricing view above for
+          model cost.
         </p>
         <CostExplorerPanel data={costExplorer} />
       </CardContent>

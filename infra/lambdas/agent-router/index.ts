@@ -1105,6 +1105,9 @@ async function invokeAgentCore(
   response: string;
   inputTokens: number;
   outputTokens: number;
+  /** Bedrock prompt-caching token split (issue #1089). 0 on non-caching models. */
+  cacheReadInputTokens: number;
+  cacheWriteInputTokens: number;
   model: string | null;
   /** Wall-clock ms reported by the harness from chat.send to final. */
   latencyMs: number;
@@ -1157,6 +1160,8 @@ async function invokeAgentCore(
         'Your agent is not yet deployed. An administrator needs to push the agent image and deploy the AgentCore Runtime.',
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
       model: null,
       latencyMs: 0,
       messages: [],
@@ -1237,6 +1242,8 @@ async function invokeAgentCore(
           response: "I'm temporarily busy. Please try again in a moment.",
           inputTokens: 0,
           outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheWriteInputTokens: 0,
           model: null,
           latencyMs: 0,
           messages: [],
@@ -1248,6 +1255,8 @@ async function invokeAgentCore(
         response: 'I encountered an error processing your message. Please try again.',
         inputTokens: 0,
         outputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheWriteInputTokens: 0,
         model: null,
         latencyMs: 0,
         messages: [],
@@ -1309,6 +1318,10 @@ async function invokeAgentCore(
       response: result,
       inputTokens: (metadata.input_tokens as number) || 0,
       outputTokens: (metadata.output_tokens as number) || 0,
+      // Bedrock prompt-caching split (issue #1089); the wrapper sends 0 on
+      // GLM-5 and on any turn with no cache activity.
+      cacheReadInputTokens: (metadata.cache_read_input_tokens as number) || 0,
+      cacheWriteInputTokens: (metadata.cache_write_input_tokens as number) || 0,
       // The wrapper (issue #1083) now always sends the real model id
       // ("zai.glm-5") on success and null on error paths. The stale
       // 'kimi-k2.5' fallback was dead code — the wrapper used to send the
@@ -1329,6 +1342,8 @@ async function invokeAgentCore(
         "I'm temporarily unable to help. Please try again shortly.",
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
       model: null,
       latencyMs: 0,
       messages: [],
@@ -1459,6 +1474,9 @@ async function logTelemetry(
     model: string | null;
     inputTokens: number;
     outputTokens: number;
+    /** Bedrock prompt-caching split (issue #1089). Default 0 for callers that don't set it. */
+    cacheReadInputTokens?: number;
+    cacheWriteInputTokens?: number;
     latencyMs: number;
     guardrailBlocked: boolean;
     spaceName: string;
@@ -1495,6 +1513,10 @@ async function logTelemetry(
     const invokedBy = params.invokedBy ?? null;
     const agentOwnerId = params.agentOwnerId ?? null;
     const topic = params.topic ?? null;
+    // Bedrock prompt-caching split (issue #1089). Optional on the params, so
+    // default to 0 — GLM-5 rows and older callers record no cache activity.
+    const cacheReadTokens = params.cacheReadInputTokens ?? 0;
+    const cacheWriteTokens = params.cacheWriteInputTokens ?? 0;
 
     // Insert agent_messages first to get the id, then fan out to the
     // deep-telemetry tables. The session upsert is independent and can
@@ -1502,9 +1524,11 @@ async function logTelemetry(
     const [messageRow] = await Promise.all([
       sql<{ id: number }[]>`INSERT INTO agent_messages
           (user_id, session_id, model, input_tokens, output_tokens,
+           cache_read_input_tokens, cache_write_input_tokens,
            latency_ms, guardrail_blocked, space_name, invoked_by, agent_owner_id, topic, created_at)
           VALUES (${params.userId}, ${params.sessionId}, ${params.model},
                   ${params.inputTokens}, ${params.outputTokens},
+                  ${cacheReadTokens}, ${cacheWriteTokens},
                   ${params.latencyMs}, ${params.guardrailBlocked},
                   ${params.spaceName}, ${invokedBy}, ${agentOwnerId}, ${topic}, NOW())
           RETURNING id`,
@@ -2487,6 +2511,8 @@ async function processRecord(
           model: agentResult.model,
           inputTokens: agentResult.inputTokens,
           outputTokens: agentResult.outputTokens,
+          cacheReadInputTokens: agentResult.cacheReadInputTokens,
+          cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
           latencyMs,
           guardrailBlocked: false, // Always false here — blocked messages return early above
           spaceName,
@@ -2604,6 +2630,8 @@ async function processRecord(
       model: agentResult.model,
       inputTokens: agentResult.inputTokens,
       outputTokens: agentResult.outputTokens,
+      cacheReadInputTokens: agentResult.cacheReadInputTokens,
+      cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
       latencyMs,
       // Preserve the guardrail signal for telemetry — the message was not
       // blocked, but we record whether it would have been under the old

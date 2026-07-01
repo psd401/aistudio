@@ -44,6 +44,15 @@ export function exactTokenCostUsd(
   )
 }
 
+// Cache-aware cost (issue #1089) is computed in SQL, not here: the agent-cost
+// aggregation runs inside the query (perDirectionCostUsdSql in
+// actions/admin/agent-cost-projection.actions.ts) and adds two Bedrock
+// prompt-caching directions on top of exactTokenCostUsd — cache-READ tokens at
+// the cached-input rate (~0.1x input) and cache-WRITE tokens at the cache-write
+// rate (2x input at 1h TTL), against the DE-CACHED billable input so the terms
+// don't double-count. There is no TS mirror because no call site needs the
+// split outside the SQL aggregation.
+
 /**
  * Estimated cost when only a single total-token count is known. `inputWeight`
  * is the assumed fraction of tokens that are input (default 0.5 = even split);

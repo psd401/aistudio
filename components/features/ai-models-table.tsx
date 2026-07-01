@@ -146,6 +146,24 @@ const ModelForm = React.memo(function ModelForm({
     }
   };
 
+  const handleCacheWriteCostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    // Empty input sets null in database (not empty string)
+    if (!value) {
+      setModelData({ ...modelData, cacheWriteCostPer1kTokens: null });
+      return;
+    }
+    // Validate entire string is a valid decimal number
+    const numericPattern = /^-?\d*\.?\d+$/;
+    if (!numericPattern.test(value)) {
+      return;
+    }
+    const parsed = Number.parseFloat(value);
+    if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
+      setModelData({ ...modelData, cacheWriteCostPer1kTokens: value });
+    }
+  };
+
   // Performance field handlers with validation
   const handleLatencyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
@@ -380,6 +398,17 @@ const ModelForm = React.memo(function ModelForm({
                 placeholder="0.000000"
               />
             </div>
+            <div className="space-y-2">
+              <label htmlFor="model-cache-write-cost" className="text-sm font-medium">Cache Write Cost per 1K tokens ($)</label>
+              <Input
+                id="model-cache-write-cost"
+                type="number"
+                step="0.000001"
+                value={modelData.cacheWriteCostPer1kTokens?.toString() || ''}
+                onChange={handleCacheWriteCostChange}
+                placeholder="0.000000"
+              />
+            </div>
           </div>
         </CollapsibleContent>
       </Collapsible>
@@ -549,6 +578,7 @@ type ModelFormData = {
   inputCostPer1kTokens: string | null;
   outputCostPer1kTokens: string | null;
   cachedInputCostPer1kTokens: string | null;
+  cacheWriteCostPer1kTokens: string | null;
   // Performance fields
   averageLatencyMs: number | null;
   maxConcurrency: number | null;
@@ -574,6 +604,7 @@ const emptyModel: ModelFormData = {
   inputCostPer1kTokens: null,
   outputCostPer1kTokens: null,
   cachedInputCostPer1kTokens: null,
+  cacheWriteCostPer1kTokens: null,
   // Performance fields
   averageLatencyMs: null,
   maxConcurrency: null,
@@ -797,6 +828,7 @@ export const AiModelsTable = React.memo(function AiModelsTable({
       inputCostPer1kTokens: model.inputCostPer1kTokens || null,
       outputCostPer1kTokens: model.outputCostPer1kTokens || null,
       cachedInputCostPer1kTokens: model.cachedInputCostPer1kTokens || null,
+      cacheWriteCostPer1kTokens: model.cacheWriteCostPer1kTokens || null,
       // Performance fields
       averageLatencyMs: model.averageLatencyMs || null,
       maxConcurrency: model.maxConcurrency || null,
@@ -1001,20 +1033,23 @@ export const AiModelsTable = React.memo(function AiModelsTable({
       inputCostPer1kTokens: modelData.inputCostPer1kTokens,
       outputCostPer1kTokens: modelData.outputCostPer1kTokens,
       cachedInputCostPer1kTokens: modelData.cachedInputCostPer1kTokens,
+      cacheWriteCostPer1kTokens: modelData.cacheWriteCostPer1kTokens,
       pricingUpdatedAt: (() => {
         // Check if any pricing field has actually changed from the existing model
         if (editingModel) {
           const pricingChanged = 
             editingModel.inputCostPer1kTokens !== modelData.inputCostPer1kTokens ||
             editingModel.outputCostPer1kTokens !== modelData.outputCostPer1kTokens ||
-            editingModel.cachedInputCostPer1kTokens !== modelData.cachedInputCostPer1kTokens;
+            editingModel.cachedInputCostPer1kTokens !== modelData.cachedInputCostPer1kTokens ||
+            editingModel.cacheWriteCostPer1kTokens !== modelData.cacheWriteCostPer1kTokens;
           return pricingChanged ? new Date() : editingModel.pricingUpdatedAt;
         } else {
           // For new models, set timestamp if any pricing field has a value (including 0)
           const hasPricing = 
             modelData.inputCostPer1kTokens !== null ||
             modelData.outputCostPer1kTokens !== null ||
-            modelData.cachedInputCostPer1kTokens !== null;
+            modelData.cachedInputCostPer1kTokens !== null ||
+            modelData.cacheWriteCostPer1kTokens !== null;
           return hasPricing ? new Date() : null;
         }
       })(),
