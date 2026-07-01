@@ -21,6 +21,9 @@ import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { agentIdentities, oauthClients, roles, userRoles } from "@/lib/db/schema";
 import { hashArgon2 } from "@/lib/api-keys/argon2-loader";
 import type { ApiScope } from "@/lib/api-keys/scopes";
+// Standalone TS script: use the shared scriptLogger (structured, level-aware)
+// rather than console.* — matching scripts/db/*.ts and the CLAUDE.md logging rule.
+import { scriptLogger as log } from "./db/script-logger";
 
 interface SeedAgent {
   name: string;
@@ -59,7 +62,7 @@ async function existingIdentity(name: string) {
 async function seedAgent(agent: SeedAgent, roleId: number | null): Promise<void> {
   const existing = await existingIdentity(agent.name);
   if (existing?.oauthClientId) {
-    console.log(`✓ ${agent.name}: already bound to client ${existing.oauthClientId} — skipping`);
+    log.success(`${agent.name}: already bound to client ${existing.oauthClientId} — skipping`);
     return;
   }
 
@@ -113,9 +116,9 @@ async function seedAgent(agent: SeedAgent, roleId: number | null): Promise<void>
     }
   }, "seedAtriumAgents.seed");
 
-  console.log(`+ ${agent.name}: created client ${clientId}`);
-  console.log(`    client_id:     ${clientId}`);
-  console.log(`    client_secret: ${clientSecret}   <-- STORE NOW; not recoverable`);
+  log.info(`+ ${agent.name}: created client ${clientId}`);
+  log.info(`    client_id:     ${clientId}`);
+  log.info(`    client_secret: ${clientSecret}   <-- STORE NOW; not recoverable`);
 }
 
 /**
@@ -127,8 +130,8 @@ async function seedAgent(agent: SeedAgent, roleId: number | null): Promise<void>
 async function warnIfSystemUserIsAdmin(): Promise<void> {
   const id = Number.parseInt(process.env.ATRIUM_SYSTEM_USER_ID ?? "", 10);
   if (!Number.isInteger(id) || id <= 0) {
-    console.warn(
-      "⚠ ATRIUM_SYSTEM_USER_ID is not set — autonomous-agent content has no owner " +
+    log.warn(
+      "ATRIUM_SYSTEM_USER_ID is not set — autonomous-agent content has no owner " +
         "until you set it (to a DEDICATED non-admin service account)."
     );
     return;
@@ -144,8 +147,8 @@ async function warnIfSystemUserIsAdmin(): Promise<void> {
     "seedAtriumAgents.systemUserAdminCheck"
   );
   if (rows[0]) {
-    console.error(
-      `❌ SECURITY: ATRIUM_SYSTEM_USER_ID=${id} is an ADMINISTRATOR. Repoint it at a ` +
+    log.error(
+      `SECURITY: ATRIUM_SYSTEM_USER_ID=${id} is an ADMINISTRATOR. Repoint it at a ` +
         "dedicated NON-ADMIN service account before using autonomous agents."
     );
   }
@@ -155,18 +158,18 @@ async function main(): Promise<void> {
   await warnIfSystemUserIsAdmin();
   const roleId = await staffRoleId();
   if (roleId == null) {
-    console.warn("⚠ no 'staff' role found; seeding identities with null role (visibility = role-empty)");
+    log.warn("no 'staff' role found; seeding identities with null role (visibility = role-empty)");
   }
   for (const agent of SEED_AGENTS) {
     await seedAgent(agent, roleId);
   }
-  console.log("\nDone. Bind these client_id/secret pairs to your agent runtimes and");
-  console.log("ensure ATRIUM_SYSTEM_USER_ID is set so autonomous content has an owner.");
+  log.info("Done. Bind these client_id/secret pairs to your agent runtimes and");
+  log.info("ensure ATRIUM_SYSTEM_USER_ID is set so autonomous content has an owner.");
 }
 
 main()
   .then(() => process.exit(0))
   .catch((err) => {
-    console.error("seed-atrium-agents failed:", err);
+    log.error("seed-atrium-agents failed", { error: err instanceof Error ? err.message : String(err) });
     process.exit(1);
   });

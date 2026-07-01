@@ -23,7 +23,11 @@ import {
   recordContentAudit,
   requesterFromApiAuth,
 } from "@/lib/content";
-import { contentErrorToResponse, restVisibilitySchema } from "@/lib/content/rest";
+import {
+  contentErrorToResponse,
+  respondApprovalRequired,
+  restVisibilitySchema,
+} from "@/lib/content/rest";
 import { contentDeepLink, resolveCollectionId } from "@/lib/content/surface-helpers";
 import { createLogger } from "@/lib/logger";
 
@@ -145,20 +149,12 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     );
   } catch (err) {
     if (err instanceof ApprovalRequiredError) {
-      await recordContentAudit({
+      log.info("Public create requires approval", { title: input.title });
+      return respondApprovalRequired(err, {
         req,
         action: "create",
-        surface: "rest",
-        outcome: "approval_required",
-        error: err.message,
         requestId,
       });
-      log.info("Public create requires approval", { title: input.title });
-      return createApiResponse(
-        { data: { status: "approval_required", message: err.message }, meta: { requestId } },
-        requestId,
-        202
-      );
     }
     await recordContentAudit({
       req,

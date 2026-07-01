@@ -22,7 +22,7 @@ import {
   recordContentAudit,
   requesterFromApiAuth,
 } from "@/lib/content";
-import { contentErrorToResponse } from "@/lib/content/rest";
+import { contentErrorToResponse, respondApprovalRequired } from "@/lib/content/rest";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
 import { createLogger } from "@/lib/logger";
 
@@ -82,22 +82,14 @@ export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId) 
     return createApiResponse({ data: { id, destination, ...result }, meta: { requestId } }, requestId);
   } catch (err) {
     if (err instanceof ApprovalRequiredError) {
-      await recordContentAudit({
+      log.info("Public unpublish requires approval", { objectId: id, destination });
+      return respondApprovalRequired(err, {
         req,
         action: "unpublish",
-        surface: "rest",
         objectId: id,
         destination,
-        outcome: "approval_required",
-        error: err.message,
         requestId,
       });
-      log.info("Public unpublish requires approval", { objectId: id, destination });
-      return createApiResponse(
-        { data: { status: "approval_required", message: err.message }, meta: { requestId } },
-        requestId,
-        202
-      );
     }
     await recordContentAudit({
       req,

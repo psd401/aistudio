@@ -28,6 +28,7 @@ import {
 } from "@/lib/content";
 import {
   contentErrorToResponse,
+  respondApprovalRequired,
   restVisibilitySchema,
 } from "@/lib/content/rest";
 import { createLogger } from "@/lib/logger";
@@ -82,21 +83,13 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
     );
   } catch (err) {
     if (err instanceof ApprovalRequiredError) {
-      await recordContentAudit({
+      log.info("Public visibility widen requires approval", { objectId: id });
+      return respondApprovalRequired(err, {
         req,
         action: "set_visibility",
-        surface: "rest",
         objectId: id,
-        outcome: "approval_required",
-        error: err.message,
         requestId,
       });
-      log.info("Public visibility widen requires approval", { objectId: id });
-      return createApiResponse(
-        { data: { status: "approval_required", message: err.message }, meta: { requestId } },
-        requestId,
-        202
-      );
     }
     await recordContentAudit({
       req,

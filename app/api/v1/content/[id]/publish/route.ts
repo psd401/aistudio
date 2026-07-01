@@ -25,6 +25,7 @@ import {
 } from "@/lib/content";
 import {
   contentErrorToResponse,
+  respondApprovalRequired,
   restVisibilitySchema,
 } from "@/lib/content/rest";
 import { createLogger } from "@/lib/logger";
@@ -94,28 +95,17 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     // The §26.4 gate: an unauthorized public publish is not an error but a
     // structured approval signal (202) that drives the review queue.
     if (err instanceof ApprovalRequiredError) {
-      await recordContentAudit({
-        req,
-        action: "publish",
-        surface: "rest",
-        objectId: id,
-        destination: input.destination,
-        outcome: "approval_required",
-        error: err.message,
-        requestId,
-      });
       log.info("Public publish requires approval", {
         objectId: id,
         destination: input.destination,
       });
-      return createApiResponse(
-        {
-          data: { status: "approval_required", message: err.message },
-          meta: { requestId },
-        },
+      return respondApprovalRequired(err, {
+        req,
+        action: "publish",
+        objectId: id,
+        destination: input.destination,
         requestId,
-        202
-      );
+      });
     }
     await recordContentAudit({
       req,

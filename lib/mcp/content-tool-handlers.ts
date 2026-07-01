@@ -462,18 +462,9 @@ async function handleSetVisibility(
     });
     return ok({ id: obj.id, level: result.visibilityLevel });
   } catch (err) {
-    if (err instanceof ApprovalRequiredError) {
-      await recordContentAudit({
-        req,
-        action: "set_visibility",
-        surface: "mcp",
-        objectId: parsed.data.id,
-        outcome: "approval_required",
-        error: err.message,
-        requestId: context.requestId,
-      });
-      return ok({ status: "approval_required", message: err.message });
-    }
+    // fail() already maps ApprovalRequiredError to an audited
+    // ok({ status: "approval_required" }) result (its §26.4 branch), so route the
+    // catch through it rather than inlining a second copy that could drift.
     return fail(err, {
       req,
       action: "set_visibility",

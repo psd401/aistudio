@@ -8,8 +8,11 @@
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { createErrorResponse } from "@/lib/api/auth-middleware";
-import { isContentError } from "./errors";
+import { createApiResponse, createErrorResponse } from "@/lib/api/auth-middleware";
+import { recordContentAudit, type ContentAuditAction } from "./audit";
+import { ApprovalRequiredError, isContentError } from "./errors";
+import type { PublishDestination } from "./publish-adapters/types";
+import type { Requester } from "./types";
 
 /** Map a thrown error to the v1 error envelope, honoring `ContentError.status`. */
 export function contentErrorToResponse(
@@ -30,6 +33,46 @@ export function contentErrorToResponse(
     500,
     "INTERNAL_ERROR",
     err instanceof Error ? err.message : "Internal error"
+  );
+}
+
+/**
+ * The §26.4 approval signal, single-sourced for every REST content route.
+ *
+ * A public-facing create/publish/visibility change by a caller lacking
+ * `content:publish_public` is NOT an error but a structured **202
+ * `approval_required`** that drives the review queue. Every REST route surfaces
+ * it identically: record the `approval_required` audit row, then return the 202
+ * envelope. Centralizing it here (rather than hand-rolling the same block in each
+ * route) means the approval-response contract has ONE definition to change.
+ */
+export async function respondApprovalRequired(
+  err: ApprovalRequiredError,
+  ctx: {
+    req: Requester;
+    action: ContentAuditAction;
+    objectId?: string | null;
+    destination?: PublishDestination;
+    requestId: string;
+  }
+): Promise<NextResponse> {
+  await recordContentAudit({
+    req: ctx.req,
+    action: ctx.action,
+    surface: "rest",
+    objectId: ctx.objectId ?? null,
+    destination: ctx.destination,
+    outcome: "approval_required",
+    error: err.message,
+    requestId: ctx.requestId,
+  });
+  return createApiResponse(
+    {
+      data: { status: "approval_required", message: err.message },
+      meta: { requestId: ctx.requestId },
+    },
+    ctx.requestId,
+    202
   );
 }
 
