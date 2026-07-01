@@ -474,6 +474,26 @@ export const contentService = {
     return { ...obj, version };
   },
 
+  /**
+   * Lean load for an EDIT gate (no current-version join): resolve the object,
+   * enforce existence-masking (404 before 403) then the edit gate, and return the
+   * object. Used by the `set_visibility` surfaces, which only need `ownerUserId`
+   * and the resolved id before `visibilityService.setLevel` re-selects the row
+   * `FOR UPDATE` — so the version load that `get()` does would be wasted here.
+   */
+  async loadForEdit(
+    req: Requester,
+    idOrSlug: string
+  ): Promise<ContentObjectDTO> {
+    const obj = await loadByIdOrSlug(idOrSlug);
+    if (!obj) throw new NotFoundError("Content not found", { idOrSlug });
+    // 404 (not 403) on a non-viewable object to avoid leaking existence, BEFORE
+    // the edit-permission check.
+    await assertViewable(req, obj, idOrSlug);
+    assertCanEdit(req, obj.ownerUserId);
+    return obj;
+  },
+
   /** Permission-pushed list of objects visible to the requester. */
   async list(req: Requester, filter: ListFilter = {}): Promise<ContentObjectDTO[]> {
     return visibilityService.listVisible(req, filter);

@@ -25,6 +25,7 @@ import {
 } from "@/lib/content";
 import {
   contentErrorToResponse,
+  resolveRestRequester,
   respondApprovalRequired,
   restVisibilitySchema,
 } from "@/lib/content/rest";
@@ -111,12 +112,9 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   if (parsedBody instanceof Response) return parsedBody;
   const input = parsedBody.data;
 
-  let req;
-  try {
-    req = await requesterFromApiAuth(auth);
-  } catch (err) {
-    return contentErrorToResponse(err, requestId);
-  }
+  const resolved = await resolveRestRequester(auth, requestId);
+  if ("response" in resolved) return resolved.response;
+  const { req } = resolved;
 
   // Same authority key as publish/set_visibility: an EXPLICIT content:publish_public
   // scope, never a session's wildcard ["*"] (admin humans pass via req.isAdmin).
@@ -140,7 +138,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       },
       { hasPublishPublicCapability }
     );
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "create",
       surface: "rest",
@@ -163,7 +161,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
         requestId,
       });
     }
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "create",
       surface: "rest",

@@ -20,9 +20,12 @@ import {
   ApprovalRequiredError,
   publishService,
   recordContentAudit,
-  requesterFromApiAuth,
 } from "@/lib/content";
-import { contentErrorToResponse, respondApprovalRequired } from "@/lib/content/rest";
+import {
+  contentErrorToResponse,
+  resolveRestRequester,
+  respondApprovalRequired,
+} from "@/lib/content/rest";
 import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
 import { createLogger } from "@/lib/logger";
@@ -55,12 +58,9 @@ export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId) 
   }
   const destination = destinationRaw as PublishDestination;
 
-  let req;
-  try {
-    req = await requesterFromApiAuth(auth);
-  } catch (err) {
-    return contentErrorToResponse(err, requestId);
-  }
+  const resolved = await resolveRestRequester(auth, requestId);
+  if ("response" in resolved) return resolved.response;
+  const { req } = resolved;
 
   // Same authority key as publish/set_visibility/create: an EXPLICIT
   // content:publish_public scope, never a session's wildcard ["*"].
@@ -72,7 +72,7 @@ export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId) 
     const result = await publishService.unpublish(req, id, destination, {
       hasPublishPublicCapability,
     });
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "unpublish",
       surface: "rest",
@@ -94,7 +94,7 @@ export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId) 
         requestId,
       });
     }
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "unpublish",
       surface: "rest",

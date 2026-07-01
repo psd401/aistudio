@@ -11,6 +11,10 @@ import { z } from "zod";
 import { createApiResponse, createErrorResponse } from "@/lib/api/auth-middleware";
 import { recordContentAudit, type ContentAuditAction } from "./audit";
 import { ApprovalRequiredError, isContentError } from "./errors";
+import {
+  requesterFromApiAuth,
+  type RequesterAuthInput,
+} from "./requester-from-auth";
 import type { PublishDestination } from "./publish-adapters/types";
 import type { Requester } from "./types";
 
@@ -37,6 +41,24 @@ export function contentErrorToResponse(
 }
 
 /**
+ * Resolve a REST caller into a content `Requester`, or an error `Response`. The
+ * mutating content routes share this instead of hand-rolling the same try/catch
+ * (mirrors the MCP-side `resolveReq`). A resolution failure (e.g. a token for a
+ * deleted user, or a deactivated agent) maps through `contentErrorToResponse` to
+ * the v1 envelope (403/…), never a raw 500.
+ */
+export async function resolveRestRequester(
+  auth: RequesterAuthInput,
+  requestId: string
+): Promise<{ req: Requester } | { response: NextResponse }> {
+  try {
+    return { req: await requesterFromApiAuth(auth) };
+  } catch (err) {
+    return { response: contentErrorToResponse(err, requestId) };
+  }
+}
+
+/**
  * The §26.4 approval signal, single-sourced for every REST content route.
  *
  * A public-facing create/publish/visibility change by a caller lacking
@@ -46,7 +68,7 @@ export function contentErrorToResponse(
  * envelope. Centralizing it here (rather than hand-rolling the same block in each
  * route) means the approval-response contract has ONE definition to change.
  */
-export async function respondApprovalRequired(
+export function respondApprovalRequired(
   err: ApprovalRequiredError,
   ctx: {
     req: Requester;
@@ -55,8 +77,10 @@ export async function respondApprovalRequired(
     destination?: PublishDestination;
     requestId: string;
   }
-): Promise<NextResponse> {
-  await recordContentAudit({
+): NextResponse {
+  // Best-effort audit, fire-and-forget: it swallows its own errors and must not
+  // add a DB round-trip to the response (long-lived ECS process completes it).
+  void recordContentAudit({
     req: ctx.req,
     action: ctx.action,
     surface: "rest",

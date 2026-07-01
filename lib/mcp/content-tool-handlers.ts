@@ -15,7 +15,6 @@
 import { z } from "zod";
 import {
   ApprovalRequiredError,
-  assertCanEdit,
   contentService,
   isContentError,
   publishService,
@@ -93,7 +92,7 @@ async function fail(
 ): Promise<McpToolResult> {
   const isApproval = err instanceof ApprovalRequiredError;
   if (opts.req) {
-    await recordContentAudit({
+    void recordContentAudit({
       req: opts.req,
       action: opts.action,
       surface: "mcp",
@@ -200,7 +199,7 @@ async function createContent(
       },
       { hasPublishPublicCapability }
     );
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "create",
       surface: "mcp",
@@ -363,7 +362,7 @@ async function handleUpdateContent(
       collectionId,
       status: parsed.data.status,
     });
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "update",
       surface: "mcp",
@@ -406,7 +405,7 @@ async function handleCreateVersion(
       bodyFormat: parsed.data.bodyFormat,
       summary: parsed.data.summary,
     });
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "create_version",
       surface: "mcp",
@@ -448,12 +447,11 @@ async function handleSetVisibility(
   try {
     // Session humans must also hold the atrium-content capability (see helper).
     await assertContentAuthoringCapability(context);
-    // Load (enforces canView, 404-masks) then gate edit before mutating.
-    // Widening to `public` is additionally gated inside `setLevel` itself
-    // (§26.4) — same authority key as `publish_content`: an EXPLICIT
-    // content:publish_public scope, never the session wildcard.
-    const obj = await contentService.get(req, parsed.data.id);
-    assertCanEdit(req, obj.ownerUserId);
+    // Lean load: existence-mask (404) + edit gate, no version join (setLevel
+    // re-selects the row FOR UPDATE). Widening to `public` is additionally gated
+    // inside `setLevel` itself (§26.4) — same authority key as `publish_content`:
+    // an EXPLICIT content:publish_public scope, never the session wildcard.
+    const obj = await contentService.loadForEdit(req, parsed.data.id);
     const hasPublishPublicCapability = context.scopes.includes(
       "content:publish_public"
     );
@@ -463,7 +461,7 @@ async function handleSetVisibility(
       { level: parsed.data.level, grants: parsed.data.grants },
       { hasPublishPublicCapability }
     );
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "set_visibility",
       surface: "mcp",
@@ -516,7 +514,7 @@ async function handlePublishContent(
       { destination },
       { hasPublishPublicCapability }
     );
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "publish",
       surface: "mcp",

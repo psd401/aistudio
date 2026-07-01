@@ -21,7 +21,7 @@ import {
   recordContentAudit,
   requesterFromApiAuth,
 } from "@/lib/content";
-import { contentErrorToResponse } from "@/lib/content/rest";
+import { contentErrorToResponse, resolveRestRequester } from "@/lib/content/rest";
 import {
   assertContentAuthoringCapability,
   contentDeepLink,
@@ -82,12 +82,9 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
   if (parsedBody instanceof Response) return parsedBody;
   const patch = parsedBody.data;
 
-  let req;
-  try {
-    req = await requesterFromApiAuth(auth);
-  } catch (err) {
-    return contentErrorToResponse(err, requestId);
-  }
+  const resolved = await resolveRestRequester(auth, requestId);
+  if ("response" in resolved) return resolved.response;
+  const { req } = resolved;
 
   try {
     // Session humans must also hold the atrium-content capability (see helper).
@@ -105,7 +102,7 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
       collectionId,
       status: patch.status,
     });
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "update",
       surface: "rest",
@@ -116,7 +113,7 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
     log.info("Updated content via REST", { objectId: id });
     return createApiResponse({ data: updated, meta: { requestId } }, requestId);
   } catch (err) {
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "update",
       surface: "rest",

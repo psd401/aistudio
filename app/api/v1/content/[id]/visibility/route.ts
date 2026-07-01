@@ -20,14 +20,13 @@ import {
 } from "@/lib/api";
 import {
   ApprovalRequiredError,
-  assertCanEdit,
   contentService,
   recordContentAudit,
-  requesterFromApiAuth,
   visibilityService,
 } from "@/lib/content";
 import {
   contentErrorToResponse,
+  resolveRestRequester,
   respondApprovalRequired,
   restVisibilitySchema,
 } from "@/lib/content/rest";
@@ -49,12 +48,9 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
   if (parsedBody instanceof Response) return parsedBody;
   const input = parsedBody.data;
 
-  let req;
-  try {
-    req = await requesterFromApiAuth(auth);
-  } catch (err) {
-    return contentErrorToResponse(err, requestId);
-  }
+  const resolved = await resolveRestRequester(auth, requestId);
+  if ("response" in resolved) return resolved.response;
+  const { req } = resolved;
 
   // Same authority key as the publish endpoint: an EXPLICIT content:publish_public
   // scope, never a session's wildcard ["*"] (admin humans pass via req.isAdmin).
@@ -63,15 +59,16 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
   try {
     // Session humans must also hold the atrium-content capability (see helper).
     await assertContentAuthoringCapability(auth);
-    const obj = await contentService.get(req, id);
-    assertCanEdit(req, obj.ownerUserId);
+    // Lean load: existence-mask (404) + edit gate, no version join (setLevel
+    // re-selects the row FOR UPDATE).
+    const obj = await contentService.loadForEdit(req, id);
     const result = await visibilityService.setLevel(
       req,
       obj.id,
       { level: input.level, grants: input.grants },
       { hasPublishPublicCapability }
     );
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "set_visibility",
       surface: "rest",
@@ -94,7 +91,7 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
         requestId,
       });
     }
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "set_visibility",
       surface: "rest",

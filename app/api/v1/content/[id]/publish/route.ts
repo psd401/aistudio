@@ -21,10 +21,10 @@ import {
   ApprovalRequiredError,
   publishService,
   recordContentAudit,
-  requesterFromApiAuth,
 } from "@/lib/content";
 import {
   contentErrorToResponse,
+  resolveRestRequester,
   respondApprovalRequired,
   restVisibilitySchema,
 } from "@/lib/content/rest";
@@ -51,12 +51,9 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   if (parsedBody instanceof Response) return parsedBody;
   const input = parsedBody.data;
 
-  let req;
-  try {
-    req = await requesterFromApiAuth(auth);
-  } catch (err) {
-    return contentErrorToResponse(err, requestId);
-  }
+  const resolved = await resolveRestRequester(auth, requestId);
+  if ("response" in resolved) return resolved.response;
+  const { req } = resolved;
 
   // The public-publish gate keys off authority. For an API caller that is the
   // token's EXPLICIT content:publish_public scope. A session's wildcard ["*"]
@@ -73,7 +70,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       { destination: input.destination, visibility: input.visibility },
       { hasPublishPublicCapability }
     );
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "publish",
       surface: "rest",
@@ -110,7 +107,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
         requestId,
       });
     }
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "publish",
       surface: "rest",

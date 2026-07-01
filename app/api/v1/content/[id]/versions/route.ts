@@ -22,7 +22,7 @@ import {
   recordContentAudit,
   requesterFromApiAuth,
 } from "@/lib/content";
-import { contentErrorToResponse } from "@/lib/content/rest";
+import { contentErrorToResponse, resolveRestRequester } from "@/lib/content/rest";
 import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
 import { createLogger } from "@/lib/logger";
 
@@ -78,12 +78,9 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   if (parsedBody instanceof Response) return parsedBody;
   const input = parsedBody.data;
 
-  let req;
-  try {
-    req = await requesterFromApiAuth(auth);
-  } catch (err) {
-    return contentErrorToResponse(err, requestId);
-  }
+  const resolved = await resolveRestRequester(auth, requestId);
+  if ("response" in resolved) return resolved.response;
+  const { req } = resolved;
 
   try {
     // Session humans must also hold the atrium-content capability (see helper).
@@ -93,7 +90,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       bodyFormat: input.bodyFormat,
       summary: input.summary,
     });
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "create_version",
       surface: "rest",
@@ -104,7 +101,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     log.info("Created version via REST", { objectId: id, versionId: result.version?.id });
     return createApiResponse({ data: result, meta: { requestId } }, requestId, 201);
   } catch (err) {
-    await recordContentAudit({
+    void recordContentAudit({
       req,
       action: "create_version",
       surface: "rest",
