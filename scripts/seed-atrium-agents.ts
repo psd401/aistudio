@@ -16,9 +16,9 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
-import { agentIdentities, oauthClients, roles } from "@/lib/db/schema";
+import { agentIdentities, oauthClients, roles, userRoles } from "@/lib/db/schema";
 import { hashArgon2 } from "@/lib/api-keys/argon2-loader";
 import type { ApiScope } from "@/lib/api-keys/scopes";
 
@@ -118,7 +118,41 @@ async function seedAgent(agent: SeedAgent, roleId: number | null): Promise<void>
   console.log(`    client_secret: ${clientSecret}   <-- STORE NOW; not recoverable`);
 }
 
+/**
+ * Warn if ATRIUM_SYSTEM_USER_ID (when set) points at an administrator. A
+ * client-credentials token is stamped sub=this id, so an admin here means
+ * autonomous agents could edit that account's content + pass admin gates on
+ * non-content endpoints. It must be a dedicated non-admin service account.
+ */
+async function warnIfSystemUserIsAdmin(): Promise<void> {
+  const id = Number.parseInt(process.env.ATRIUM_SYSTEM_USER_ID ?? "", 10);
+  if (!Number.isInteger(id) || id <= 0) {
+    console.warn(
+      "⚠ ATRIUM_SYSTEM_USER_ID is not set — autonomous-agent content has no owner " +
+        "until you set it (to a DEDICATED non-admin service account)."
+    );
+    return;
+  }
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({ id: roles.id })
+        .from(userRoles)
+        .innerJoin(roles, eq(userRoles.roleId, roles.id))
+        .where(and(eq(userRoles.userId, id), eq(roles.name, "administrator")))
+        .limit(1),
+    "seedAtriumAgents.systemUserAdminCheck"
+  );
+  if (rows[0]) {
+    console.error(
+      `❌ SECURITY: ATRIUM_SYSTEM_USER_ID=${id} is an ADMINISTRATOR. Repoint it at a ` +
+        "dedicated NON-ADMIN service account before using autonomous agents."
+    );
+  }
+}
+
 async function main(): Promise<void> {
+  await warnIfSystemUserIsAdmin();
   const roleId = await staffRoleId();
   if (roleId == null) {
     console.warn("⚠ no 'staff' role found; seeding identities with null role (visibility = role-empty)");

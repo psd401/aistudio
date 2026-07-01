@@ -12,8 +12,16 @@ a running app + DB.
 ```bash
 bun run db:up                 # local PostgreSQL
 bun run db:reset && bun run db:seed   # migrations (incl. 088, 089) + test users
-# Required for autonomous content ownership:
-export ATRIUM_SYSTEM_USER_ID=<a real users.id, e.g. the seeded admin>
+
+# Required for autonomous content ownership. MUST be a DEDICATED, NON-ADMIN,
+# non-interactive service account that NEVER authors content through the UI.
+# ⚠ Do NOT use an admin (or any real human) account: a client-credentials token
+# is stamped sub = ATRIUM_SYSTEM_USER_ID, so (a) an autonomous agent with
+# content:update could edit that account's own content (it owns via the same id),
+# and (b) admin-gated non-content endpoints (e.g. /api/v1/assistants) that check
+# isAdminByUserId(auth.userId) would treat the machine token as an admin.
+export ATRIUM_SYSTEM_USER_ID=<a dedicated non-admin users.id>
+
 # Optional — without it, events no-op (debug log only):
 # export ATRIUM_EVENTS_TOPIC_ARN=arn:aws:sns:...:aistudio-dev-atrium-content-events
 bun run dev:local

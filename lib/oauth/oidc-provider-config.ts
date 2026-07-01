@@ -26,6 +26,52 @@ interface OidcProviderOptions {
 
 let providerInstance: InstanceType<typeof Provider> | null = null
 
+/**
+ * Security guard (#1055): a client-credentials token is stamped
+ * `sub = ATRIUM_SYSTEM_USER_ID`. If that account is an administrator, the machine
+ * token would (a) let an autonomous agent with `content:update` edit the account's
+ * OWN content (it owns via the same id) and (b) pass `isAdminByUserId(auth.userId)`
+ * on admin-gated non-content endpoints (e.g. /api/v1/assistants). Log LOUDLY at
+ * init so an operator repoints it at a dedicated non-admin service account. Not a
+ * hard failure — that would break all OAuth (incl. interactive login) on a
+ * misconfig; the error log is the alarm.
+ */
+async function warnIfSystemUserIsAdmin(
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const raw = process.env.ATRIUM_SYSTEM_USER_ID
+  const id = Number.parseInt(raw ?? "", 10)
+  if (!Number.isInteger(id) || id <= 0) return
+  try {
+    const { executeQuery } = await import("@/lib/db/drizzle-client")
+    const { and, eq } = await import("drizzle-orm")
+    const { userRoles, roles } = await import("@/lib/db/schema")
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select({ id: roles.id })
+          .from(userRoles)
+          .innerJoin(roles, eq(userRoles.roleId, roles.id))
+          .where(and(eq(userRoles.userId, id), eq(roles.name, "administrator")))
+          .limit(1),
+      "oidc.systemUserAdminGuard"
+    )
+    if (rows[0]) {
+      log.error(
+        "SECURITY: ATRIUM_SYSTEM_USER_ID points at an ADMINISTRATOR account. " +
+          "Client-credentials tokens are stamped sub=this id, so autonomous agents " +
+          "could edit that account's content and pass admin gates on non-content " +
+          "endpoints. Use a dedicated NON-ADMIN service account.",
+        { systemUserId: id }
+      )
+    }
+  } catch (err) {
+    log.warn("Could not verify ATRIUM_SYSTEM_USER_ID admin status", {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
 export async function getOidcProvider(
   options?: OidcProviderOptions
 ): Promise<InstanceType<typeof Provider>> {
@@ -58,6 +104,9 @@ export async function getOidcProvider(
     kid: jwk.kid,
     jwtTokens: canIssueJwtTokens,
   })
+
+  // One-time (cached provider) security check for the client-credentials sub.
+  await warnIfSystemUserIsAdmin(log)
 
   const provider = new Provider(issuer, {
     // ==========================================

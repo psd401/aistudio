@@ -40,7 +40,13 @@ const ScheduledExecuteRequestSchema = z.object({
     ),
   userId: z.number().positive(),
   triggeredBy: z.enum(['eventbridge', 'manual']),
-  scheduledAt: z.string()
+  scheduledAt: z.string(),
+  // Atrium Phase 5 (#1055): the autonomous agent identity a schedule requests to
+  // run as (from scheduled_executions.agent_identity_id, forwarded by the
+  // schedule-executor Lambda). Accepted here so it is NOT silently stripped by
+  // Zod; honoring it (running content authoring under an agent-autonomous
+  // Requester) is tracked follow-up — see the warning at the destructure below.
+  agentIdentityId: z.string().uuid().nullable().optional()
 });
 
 interface ChainPrompt {
@@ -207,7 +213,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { scheduleId, toolId, inputs, userId, triggeredBy, scheduledAt } = validationResult.data;
+    const { scheduleId, toolId, inputs, userId, triggeredBy, scheduledAt, agentIdentityId } = validationResult.data;
+
+    // Atrium Phase 5 (#1055): service-identity execution is groundwork only — the
+    // column + Lambda forwarding land in this PR, but running the assistant under
+    // an agent-autonomous Requester (so its content authoring is system-owned +
+    // scope-bounded) is not yet wired. Surface this LOUDLY rather than silently
+    // executing as the owning user, so an operator who set agent_identity_id gets
+    // a signal it had no effect.
+    if (agentIdentityId) {
+      log.warn(
+        'Scheduled run requested an agent service-identity, but service-identity ' +
+        'execution is not yet implemented; running under the owning user instead',
+        { scheduleId, userId, agentIdentityId }
+      );
+    }
 
     log.info('Scheduled execution request parsed', sanitizeForLogging({
       scheduleId,
