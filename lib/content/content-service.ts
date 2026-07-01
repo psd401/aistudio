@@ -487,7 +487,25 @@ export const contentService = {
       }
       setValues.collectionId = patch.collectionId ?? null;
     }
-    if (patch.status !== undefined) setValues.status = patch.status;
+    if (patch.status !== undefined) {
+      // "published" is NOT a plain metadata transition — it must go through
+      // `publishService.publish()`, which creates the `content_publications`
+      // row, calls the destination adapter, emits `content.published`, and
+      // enforces the §26.4 public-publish gate. Writing it directly here
+      // (content:update alone, no content:publish_internal/publish_public)
+      // would leave `status: "published"` with none of that: a caller could
+      // mark content "published" while it was never actually published
+      // anywhere, and — for a caller who otherwise couldn't pass the gate —
+      // outside the audited/gated flow entirely. "draft" and "archived"
+      // remain plain metadata transitions.
+      if (patch.status === "published") {
+        throw new ValidationError(
+          "Cannot set status to 'published' via update — use the publish endpoint/tool instead",
+          { status: patch.status }
+        );
+      }
+      setValues.status = patch.status;
+    }
 
     const rows = await executeQuery(
       (db) =>
