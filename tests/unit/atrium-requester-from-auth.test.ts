@@ -57,6 +57,19 @@ import {
 } from "@/lib/content/requester-from-auth";
 import { principalOf } from "@/lib/content/helpers";
 
+// The autonomous-vs-human discriminator keys off ATRIUM_SYSTEM_USER_ID: a
+// client-credentials (machine) token's sub === this id; a human's is their own.
+// Pin it to 3 so the "deactivated machine token" test (userId 3) fails closed
+// while a human token (any other userId) resolves as a user.
+const ORIGINAL_SYSTEM_USER_ID = process.env.ATRIUM_SYSTEM_USER_ID;
+beforeAll(() => {
+  process.env.ATRIUM_SYSTEM_USER_ID = "3";
+});
+afterAll(() => {
+  if (ORIGINAL_SYSTEM_USER_ID === undefined) delete process.env.ATRIUM_SYSTEM_USER_ID;
+  else process.env.ATRIUM_SYSTEM_USER_ID = ORIGINAL_SYSTEM_USER_ID;
+});
+
 beforeEach(() => {
   agentRows = [];
   userRows = [{ building: "High School", department: null, gradeLevels: null }];
@@ -152,11 +165,12 @@ describe("requesterFromApiAuth", () => {
     ).rejects.toThrow(/Delegated-for user not found/);
   });
 
-  it("fails closed (does not fall back to the user branch) when oauthClientId has no active agent identity", async () => {
+  it("fails closed for a MACHINE token (sub === system user) whose agent identity is inactive", async () => {
     // A client-credentials token's oauthClientId with no matching ACTIVE
-    // agent_identities row (deactivated, or never registered) must be
-    // rejected outright — falling through to `userId` would silently
-    // re-resolve it as ATRIUM_SYSTEM_USER_ID, undoing a deliberate revocation.
+    // agent_identities row (deactivated, or never registered) must be rejected
+    // outright — falling through to `userId` (=== ATRIUM_SYSTEM_USER_ID here)
+    // would silently re-resolve it as the system account, undoing a deliberate
+    // revocation. userId 3 === the pinned ATRIUM_SYSTEM_USER_ID.
     agentRows = [];
     await expect(
       requesterFromApiAuth({
@@ -165,6 +179,25 @@ describe("requesterFromApiAuth", () => {
         oauthClientId: "client-deactivated",
       })
     ).rejects.toThrow(/No active agent identity/);
+  });
+
+  it("resolves a HUMAN OIDC token (sub !== system user) as a user even though it carries an oauthClientId", async () => {
+    // verifyJwtToken populates oauthClientId from client_id/azp for EVERY JWT, so
+    // a human authorization-code/PKCE login carries one whose client is NOT a
+    // registered agent. Its sub is the human's own id (42, not the system user 3),
+    // so it must resolve as that `user` — not be denied with a spurious 403.
+    agentRows = []; // the human's OAuth client is not a registered agent
+    userRows = [{ building: "Middle School", department: null, gradeLevels: null }];
+    roleRows = [{ name: "staff" }];
+    const req = await requesterFromApiAuth({
+      userId: 42,
+      scopes: ["content:create"],
+      oauthClientId: "client-human-pkce-app",
+    });
+    expect(req.kind).toBe("user");
+    if (req.kind !== "user") throw new Error("wrong kind");
+    expect(req.userId).toBe(42);
+    expect(req.isAdmin).toBe(false);
   });
 });
 

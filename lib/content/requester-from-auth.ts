@@ -24,6 +24,7 @@ import { agentIdentities, roles, users } from "@/lib/db/schema";
 import { getUserRoles } from "@/lib/db/user-roles";
 import { createLogger } from "@/lib/logger";
 import { ForbiddenError } from "./errors";
+import { systemUserIdOrNull } from "./helpers";
 import type { Requester } from "./types";
 
 const ADMIN_ROLE = "administrator";
@@ -188,33 +189,47 @@ export async function requesterFromApiAuth(
   }
 
   // 2. Autonomous: the OIDC client is a registered service/skill identity.
-  //    `oauthClientId` is only ever populated for a machine (client-credentials)
-  //    JWT (see auth-middleware.ts) — a real human never carries one. If that
-  //    client has no ACTIVE agent identity (deactivated, or never registered),
-  //    fail closed here rather than falling through to step 3: step 3 resolves
-  //    `auth.userId`, which for a client-credentials token is always
-  //    `ATRIUM_SYSTEM_USER_ID` — silently re-resolving a revoked/unknown agent
-  //    as the system account would undo a deliberate deactivation instead of
-  //    blocking it.
+  //    NOTE `oauthClientId` is NOT machine-only — `verifyJwtToken` populates it
+  //    from `client_id`/`azp` for EVERY verified JWT (see auth-middleware.ts), so
+  //    a human authorization-code/PKCE login carries one too. Distinguish the two
+  //    by the token subject: a client-credentials (machine) token's `sub` is
+  //    `ATRIUM_SYSTEM_USER_ID` (so `auth.userId` === the system user), a human's
+  //    is their own user id.
   if (auth.oauthClientId) {
     const identity = await findAgentIdentity(auth.oauthClientId);
-    if (!identity) {
+    if (identity) {
+      log.debug("Resolved agent-autonomous requester", {
+        agentId: identity.id,
+        agentLabel: identity.name,
+      });
+      return {
+        kind: "agent-autonomous",
+        agentId: identity.id,
+        roleId: identity.roleId,
+        roles: identity.roleName ? [identity.roleName] : [],
+        scopes: auth.scopes,
+        agentLabel: identity.name,
+      };
+    }
+    // No ACTIVE agent identity for this client id. Two very different callers land
+    // here and must be handled differently:
+    const systemUserId = systemUserIdOrNull();
+    if (systemUserId != null && auth.userId === systemUserId) {
+      // A machine (client-credentials) token whose agent was deactivated or never
+      // registered — its `sub` is the system user. Fail closed rather than fall
+      // through to step 3, which would resolve it AS the system account and
+      // silently undo a deliberate deactivation.
       throw new ForbiddenError("No active agent identity for this client", {
         oauthClientId: auth.oauthClientId,
       });
     }
-    log.debug("Resolved agent-autonomous requester", {
-      agentId: identity.id,
-      agentLabel: identity.name,
+    // Otherwise this is a human's OIDC (authorization-code/PKCE) token whose
+    // OAuth client simply is not a registered agent — resolve them as the `user`
+    // their `sub` names (per this resolver's documented contract), NOT a 403.
+    log.debug("OAuth client is not a registered agent; resolving as human user", {
+      oauthClientId: auth.oauthClientId,
+      userId: auth.userId,
     });
-    return {
-      kind: "agent-autonomous",
-      agentId: identity.id,
-      roleId: identity.roleId,
-      roles: identity.roleName ? [identity.roleName] : [],
-      scopes: auth.scopes,
-      agentLabel: identity.name,
-    };
   }
 
   // 3. User: sk- key, session, or a human OIDC token acting as themselves.

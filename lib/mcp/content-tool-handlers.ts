@@ -30,21 +30,14 @@ import {
   contentDeepLink,
   resolveCollectionId,
 } from "@/lib/content/surface-helpers";
+// Reuse the REST-side schemas verbatim so MCP and REST validate the same grant /
+// visibility contract from ONE definition (they were byte-identical copies).
+import {
+  restGrantSchema as grantZ,
+  restVisibilitySchema as visibilityZ,
+} from "@/lib/content/rest";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
 import type { McpToolContext, McpToolHandler, McpToolResult } from "./types";
-
-// ============================================
-// Shared validation sub-schemas
-// ============================================
-
-const grantZ = z.object({
-  kind: z.enum(["role", "building", "department", "grade", "user"]),
-  value: z.string(),
-});
-const visibilityZ = z.object({
-  level: z.enum(["private", "group", "internal", "public"]),
-  grants: z.array(grantZ).optional(),
-});
 
 // ============================================
 // Result + error helpers
