@@ -20,18 +20,31 @@ import unittest
 # real package. The stub objects are never invoked by the pure functions.
 if "aiohttp" not in sys.modules:
     _aiohttp = types.ModuleType("aiohttp")
+
+    class _FakeJsonResponse:
+        """Minimal stand-in for aiohttp.web.json_response — records the payload
+        so tests can assert on the /usage body."""
+
+        def __init__(self, payload):
+            self.payload = payload
+
     _aiohttp.web = types.SimpleNamespace(
         Request=object, Response=object, StreamResponse=object,
-        Application=object, json_response=lambda *a, **k: None,
+        Application=object,
+        json_response=lambda payload, *a, **k: _FakeJsonResponse(payload),
         run_app=lambda *a, **k: None,
     )
     _aiohttp.ClientSession = object
     _aiohttp.ClientTimeout = object
     sys.modules["aiohttp"] = _aiohttp
 
+import asyncio  # noqa: E402
+
+import mantle_proxy  # noqa: E402
 from mantle_proxy import (  # noqa: E402
     _extract_usage,
     inject_include_usage,
+    handle_usage,
 )
 
 
@@ -155,6 +168,63 @@ class TestInjectIncludeUsage(unittest.TestCase):
         changed = inject_include_usage(payload)
         self.assertTrue(changed)
         self.assertEqual(payload["stream_options"], {"include_usage": True})
+
+
+class TestUsageEndpoint(unittest.TestCase):
+    """The /usage endpoint + the cumulative-counter delta contract the wrapper
+    relies on (a before/after delta captures ONE turn's usage; the counters are
+    monotonic and only the final adopted upstream response is ever added)."""
+
+    def setUp(self):
+        # Reset module counters so tests are independent.
+        mantle_proxy._cumulative_input_tokens = 0
+        mantle_proxy._cumulative_output_tokens = 0
+        mantle_proxy._last_model = None
+        mantle_proxy._usage_events = 0
+
+    def _usage_body(self):
+        resp = asyncio.run(handle_usage(None))
+        return resp.payload
+
+    def test_reports_zero_initially(self):
+        body = self._usage_body()
+        self.assertEqual(body["input_tokens"], 0)
+        self.assertEqual(body["output_tokens"], 0)
+        self.assertIsNone(body["model"])
+        self.assertEqual(body["usage_events"], 0)
+
+    def test_reflects_cumulative_counters_and_last_model(self):
+        mantle_proxy._cumulative_input_tokens = 1500
+        mantle_proxy._cumulative_output_tokens = 320
+        mantle_proxy._last_model = "zai.glm-5"
+        mantle_proxy._usage_events = 2
+        body = self._usage_body()
+        self.assertEqual(body["input_tokens"], 1500)
+        self.assertEqual(body["output_tokens"], 320)
+        self.assertEqual(body["model"], "zai.glm-5")
+        self.assertEqual(body["usage_events"], 2)
+
+    def test_before_after_delta_captures_one_turn(self):
+        # Simulate a turn made of several Mantle sub-calls (tool loop): each
+        # adopted response adds its usage to the monotonic counters. The
+        # wrapper's baseline/final delta must equal ONLY this turn's usage,
+        # never the container's lifetime total.
+        # Prior turns already ran:
+        mantle_proxy._cumulative_input_tokens = 10000
+        mantle_proxy._cumulative_output_tokens = 4000
+        baseline = self._usage_body()
+
+        # This turn's sub-calls add 1200 in / 300 out total.
+        mantle_proxy._cumulative_input_tokens += 800
+        mantle_proxy._cumulative_output_tokens += 200
+        mantle_proxy._cumulative_input_tokens += 400
+        mantle_proxy._cumulative_output_tokens += 100
+        final = self._usage_body()
+
+        self.assertEqual(final["input_tokens"] - baseline["input_tokens"], 1200)
+        self.assertEqual(final["output_tokens"] - baseline["output_tokens"], 300)
+        # Prior-turn totals are NOT in the delta.
+        self.assertEqual(baseline["input_tokens"], 10000)
 
 
 if __name__ == "__main__":

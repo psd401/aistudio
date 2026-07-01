@@ -167,12 +167,14 @@ export async function getAgentCostByModel(
             inputTokens: sql<number>`COALESCE(SUM(${agentMessages.inputTokens}), 0)`,
             outputTokens: sql<number>`COALESCE(SUM(${agentMessages.outputTokens}), 0)`,
             // Exact per-direction cost. Prices are per-1k-tokens, so /1000.
-            // NULL pricing (no join match) makes the whole product NULL; the
-            // COALESCE pins it to 0 and `hasPricing` below flags it.
-            usd: sql<string>`COALESCE(
-              SUM(${agentMessages.inputTokens}::numeric * ${aiModels.inputCostPer1kTokens} / 1000.0)
-              + SUM(${agentMessages.outputTokens}::numeric * ${aiModels.outputCostPer1kTokens} / 1000.0)
-            , 0)`,
+            // COALESCE each direction SEPARATELY: a model priced on only one
+            // direction (e.g. input set, output NULL) must still count the
+            // priced side. A single outer COALESCE would let the NULL side
+            // poison the whole sum (X + NULL = NULL) and collapse a real cost
+            // to $0 (gemini review, #1083).
+            usd: sql<string>`
+              COALESCE(SUM(${agentMessages.inputTokens}::numeric * ${aiModels.inputCostPer1kTokens} / 1000.0), 0)
+              + COALESCE(SUM(${agentMessages.outputTokens}::numeric * ${aiModels.outputCostPer1kTokens} / 1000.0), 0)`,
             // A pricing row matched iff input OR output price is non-null.
             hasPricing: sql<boolean>`bool_or(
               ${aiModels.inputCostPer1kTokens} IS NOT NULL
@@ -185,7 +187,10 @@ export async function getAgentCostByModel(
             threshold ? gte(agentMessages.createdAt, threshold) : undefined
           )
           .groupBy(sql`COALESCE(${agentMessages.model}, 'unknown')`)
-          .orderBy(sql`SUM(${agentMessages.inputTokens} + ${agentMessages.outputTokens}) DESC`),
+          // COALESCE inside the SUM: input_tokens/output_tokens are NOT NULL
+          // (schema default 0), but coalescing is defensive and keeps NULL rows
+          // from floating to the top under DESC (gemini review, #1083).
+          .orderBy(sql`SUM(COALESCE(${agentMessages.inputTokens}, 0) + COALESCE(${agentMessages.outputTokens}, 0)) DESC`),
       "agentCost.byModel"
     )
 
@@ -269,10 +274,12 @@ export async function getAgentCostProjection(
           .select({
             inputTokens: sql<number>`COALESCE(SUM(${agentMessages.inputTokens}), 0)`,
             outputTokens: sql<number>`COALESCE(SUM(${agentMessages.outputTokens}), 0)`,
-            actualUsd: sql<string>`COALESCE(
-              SUM(${agentMessages.inputTokens}::numeric * ${aiModels.inputCostPer1kTokens} / 1000.0)
-              + SUM(${agentMessages.outputTokens}::numeric * ${aiModels.outputCostPer1kTokens} / 1000.0)
-            , 0)`,
+            // COALESCE each direction separately so a model priced on only one
+            // side doesn't collapse the whole actual cost to $0 (X + NULL =
+            // NULL). Same fix as getAgentCostByModel (gemini review, #1083).
+            actualUsd: sql<string>`
+              COALESCE(SUM(${agentMessages.inputTokens}::numeric * ${aiModels.inputCostPer1kTokens} / 1000.0), 0)
+              + COALESCE(SUM(${agentMessages.outputTokens}::numeric * ${aiModels.outputCostPer1kTokens} / 1000.0), 0)`,
           })
           .from(agentMessages)
           .leftJoin(aiModels, eq(agentMessages.model, aiModels.modelId))

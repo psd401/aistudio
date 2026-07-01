@@ -55,6 +55,7 @@ jest.mock("@/lib/error-utils", () => ({
 import {
   getAgentCostByModel,
   getAgentCostProjection,
+  getPricableModels,
 } from "@/actions/admin/agent-cost-projection.actions"
 
 beforeEach(() => {
@@ -257,5 +258,53 @@ describe("getAgentCostProjection", () => {
     if (!res.isSuccess || !res.data) throw new Error("expected success")
     expect(res.data.candidates).toHaveLength(1)
     expect(res.data.candidates[0].model).toBe("valid-model")
+  })
+})
+
+describe("getPricableModels", () => {
+  it("maps rows to typed candidates (numeric coercion of pricing strings)", async () => {
+    // The SQL WHERE excludes zai.glm-5 and NULL-priced rows and sorts by
+    // blended cost; this test verifies the JS-side row -> PricableModel mapping
+    // and the string->number coercion of numeric columns.
+    queryResults = [
+      [
+        {
+          modelId: "gemini-3-flash-preview",
+          name: "Gemini 3 Flash",
+          provider: "google",
+          inputCost: "0.000500",
+          outputCost: "0.003000",
+        },
+        {
+          modelId: "us.anthropic.claude-opus-4-7",
+          name: "Claude Opus 4.7",
+          provider: "amazon-bedrock",
+          inputCost: "0.005000",
+          outputCost: "0.025000",
+        },
+      ],
+    ]
+    const res = await getPricableModels()
+    if (!res.isSuccess || !res.data) throw new Error("expected success")
+
+    expect(res.data).toHaveLength(2)
+    // No zai.glm-5 in the result (excluded by the query).
+    expect(res.data.some((m) => m.modelId === "zai.glm-5")).toBe(false)
+    // Pricing strings coerced to numbers.
+    expect(res.data[0]).toEqual({
+      modelId: "gemini-3-flash-preview",
+      name: "Gemini 3 Flash",
+      provider: "google",
+      inputCostPer1kTokens: 0.0005,
+      outputCostPer1kTokens: 0.003,
+    })
+    expect(typeof res.data[1].inputCostPer1kTokens).toBe("number")
+  })
+
+  it("returns an empty list when no models are priced", async () => {
+    queryResults = [[]]
+    const res = await getPricableModels()
+    if (!res.isSuccess || !res.data) throw new Error("expected success")
+    expect(res.data).toEqual([])
   })
 })

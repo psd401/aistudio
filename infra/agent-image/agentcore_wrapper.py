@@ -102,13 +102,17 @@ def start_mantle_proxy() -> None:
 
 def read_proxy_usage() -> dict:
     """Read cumulative token usage from the Mantle proxy's /usage endpoint
-    (issue #1083). Returns a dict with input_tokens / output_tokens / model,
-    or zeros when the proxy is unreachable / not yet emitting usage.
+    (issue #1083). Returns a dict with input_tokens / output_tokens / model and
+    an `ok` flag — `ok=False` (with zeros) when the proxy is unreachable / not
+    answering, so the caller can tell "genuinely 0" from "read failed".
 
     The wrapper calls this immediately before and after adapter.process() and
     takes the delta — that sums a single turn's usage across all the Mantle
     sub-calls a tool loop makes, since the proxy is per-container = per-session
-    and turns are serial. Never raises: telemetry must never break a chat turn.
+    and turns are serial. The `ok` flag matters for the BASELINE read: if the
+    baseline failed (ok=False) we cannot trust the delta (final − 0 would
+    over-count every prior turn), so the caller falls back to the harness
+    numbers. Never raises: telemetry must never break a chat turn.
     """
     import urllib.request
     import urllib.error
@@ -118,16 +122,17 @@ def read_proxy_usage() -> dict:
             "http://127.0.0.1:18791/usage", timeout=2
         ) as r:
             if r.status != 200:
-                return {"input_tokens": 0, "output_tokens": 0, "model": None}
+                return {"input_tokens": 0, "output_tokens": 0, "model": None, "ok": False}
             data = json.loads(r.read().decode("utf-8"))
         return {
             "input_tokens": int(data.get("input_tokens") or 0),
             "output_tokens": int(data.get("output_tokens") or 0),
             "model": data.get("model"),
+            "ok": True,
         }
     except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
         logger.warning("read_proxy_usage failed: %s", str(exc)[:200])
-        return {"input_tokens": 0, "output_tokens": 0, "model": None}
+        return {"input_tokens": 0, "output_tokens": 0, "model": None, "ok": False}
 
 
 # Track which workspace prefix this microVM is currently serving so we can
@@ -534,15 +539,32 @@ def main():
         # Take the post-turn usage delta from the Mantle proxy (issue #1083).
         # This is the authoritative token source: the proxy reads every
         # OpenAI-compatible response's `usage` object, whereas the harness
-        # adapter's WS-event extraction frequently yields 0. We prefer the
-        # proxy delta and fall back to the harness numbers only when the proxy
-        # delta is 0 (proxy unreachable / pre-#1083 image). The proxy also
+        # adapter's WS-event extraction frequently yields 0. The proxy also
         # carries the real model id (e.g. "zai.glm-5") so we never record the
         # literal "default".
+        #
+        # The delta is only trustworthy when BOTH reads succeeded — if the
+        # BASELINE read failed (ok=False), `final − 0` would over-count every
+        # prior turn in this microVM, so we discard the proxy delta and fall
+        # back to the harness numbers. The model id is still usable from a
+        # successful final read regardless.
         usage_final = await loop.run_in_executor(None, read_proxy_usage)
-        proxy_in = max(0, usage_final["input_tokens"] - usage_baseline["input_tokens"])
-        proxy_out = max(0, usage_final["output_tokens"] - usage_baseline["output_tokens"])
-        proxy_model = usage_final.get("model")
+        usage_trustworthy = usage_baseline.get("ok") and usage_final.get("ok")
+        if usage_trustworthy:
+            proxy_in = max(0, usage_final["input_tokens"] - usage_baseline["input_tokens"])
+            proxy_out = max(0, usage_final["output_tokens"] - usage_baseline["output_tokens"])
+        else:
+            proxy_in = 0
+            proxy_out = 0
+            # Emit a distinct signal so a telemetry GAP (proxy read failed) is
+            # distinguishable in logs from a turn that genuinely used 0 tokens.
+            # Without this, a lost read looks identical to real-zero usage.
+            logger.warning(
+                "proxy usage read degraded — falling back to harness tokens "
+                "(baseline_ok=%s final_ok=%s session=%s)",
+                usage_baseline.get("ok"), usage_final.get("ok"), session_id,
+            )
+        proxy_model = usage_final.get("model") if usage_final.get("ok") else None
 
         # Adapter contract: TurnResult preferred; legacy str still
         # accepted so older adapters keep working during a phased rollout.

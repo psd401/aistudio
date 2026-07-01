@@ -106,7 +106,6 @@ interface LoaderSetters {
   setHealthSummary: (v: AgentHealthSummary | null) => void
   setCostSummary: (v: AgentCostSummary | null) => void
   setCostByModel: (v: AgentCostByModel | null) => void
-  setProjection: (v: AgentCostProjection | null) => void
   setPricableModels: (v: PricableModel[]) => void
   setSelectedCandidate: (v: string | null) => void
   setPatterns: (v: AgentPatternsEnvelope) => void
@@ -118,6 +117,8 @@ interface LoaderContext extends LoaderSetters {
   showError: (tab: string, message: string) => void
   /** Candidate model currently selected for the projection panel. */
   getSelectedCandidate: () => string | null
+  /** Version-guarded projection fetch — only the latest request writes state. */
+  runProjection: (range: TelemetryDateRange, candidate: string) => Promise<void>
 }
 
 function buildLoaders(
@@ -208,15 +209,10 @@ function buildLoaders(
       }
 
       // Projection for the selected candidate (skip if none priced yet).
+      // Routed through the version-guarded runProjection so a slower response
+      // here can't clobber a newer candidate selection (claude review, #1083).
       if (candidate) {
-        const proj = await getAgentCostProjection(range, [candidate])
-        if (proj.isSuccess && proj.data) {
-          ctx.setProjection(proj.data)
-        } else if (!proj.isSuccess) {
-          ctx.setProjection(null)
-        }
-      } else {
-        ctx.setProjection(null)
+        await ctx.runProjection(range, candidate)
       }
     },
     patterns: async () => {
@@ -472,10 +468,20 @@ function useCostTab(
     selectedCandidateRef.current = selectedCandidate
   }, [selectedCandidate])
 
-  const handleSelectCandidate = useCallback(
-    async (modelId: string) => {
-      setSelectedCandidate(modelId)
-      const proj = await getAgentCostProjection(dateRange, [modelId])
+  // Monotonic request token for projection fetches. Both the tab loader and the
+  // candidate selector fetch projections; if a user switches range then quickly
+  // picks a different candidate, two fetches can resolve out of order. Only the
+  // latest-issued request is allowed to write state (claude review, #1083).
+  const projectionVersionRef = useRef(0)
+
+  // Single guarded projection fetch used by BOTH the tab loader and the
+  // candidate selector, so there is one ordering authority.
+  const runProjection = useCallback(
+    async (range: TelemetryDateRange, candidate: string) => {
+      const version = ++projectionVersionRef.current
+      const proj = await getAgentCostProjection(range, [candidate])
+      // A newer request superseded us — drop this (stale) result.
+      if (version !== projectionVersionRef.current) return
       if (proj.isSuccess && proj.data) {
         setProjection(proj.data)
       } else if (!proj.isSuccess) {
@@ -483,21 +489,30 @@ function useCostTab(
         showError("cost", proj.message)
       }
     },
-    [dateRange, showError]
+    [showError]
   )
 
-  // Stable handle of just the setters + ref, so the loader memo that consumes
-  // it doesn't re-run every render (state values live outside this object).
+  const handleSelectCandidate = useCallback(
+    async (modelId: string) => {
+      setSelectedCandidate(modelId)
+      await runProjection(dateRange, modelId)
+    },
+    [dateRange, runProjection]
+  )
+
+  // Stable handle of just the setters + ref + runProjection, so the loader memo
+  // that consumes it doesn't re-run every render (state values live outside this
+  // object; runProjection only depends on the stable showError).
   const loaderApi = useMemo(
     () => ({
       setCostSummary,
       setCostByModel,
-      setProjection,
       setPricableModels,
       setSelectedCandidate,
       selectedCandidateRef,
+      runProjection,
     }),
-    []
+    [runProjection]
   )
 
   return {
@@ -571,12 +586,12 @@ export function AgentDashboardClient() {
       setFeedbackList, setHealthSummary,
       setCostSummary: loaderApi.setCostSummary,
       setCostByModel: loaderApi.setCostByModel,
-      setProjection: loaderApi.setProjection,
       setPricableModels: loaderApi.setPricableModels,
       setSelectedCandidate: loaderApi.setSelectedCandidate,
       setPatterns, setRawSignals, setTriageList,
       showError,
       getSelectedCandidate: () => loaderApi.selectedCandidateRef.current,
+      runProjection: loaderApi.runProjection,
     }),
     [showError, loaderApi]
   )
