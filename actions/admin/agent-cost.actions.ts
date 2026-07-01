@@ -75,7 +75,8 @@ async function queryCost(params: CostQueryParams) {
  * #1083). It surfaces AgentCore / infrastructure spend tagged
  * `costCenter=ai-agents` on the execution role.
  *
- * It does NOT capture GLM-5 model spend: GLM-5 runs through Bedrock Mantle
+ * It does NOT capture the harness model spend: the agent model (Claude Sonnet
+ * 5 as of #1089; formerly GLM-5) runs through Bedrock Mantle
  * (`bedrock-mantle.us-east-1.api.aws`) authenticated by a SEPARATE IAM user's
  * bearer token (`AWS_BEARER_TOKEN_BEDROCK`, IAM user `psd-agent-bedrock-<env>`),
  * not the tagged AgentCore execution role — so that model spend never carries

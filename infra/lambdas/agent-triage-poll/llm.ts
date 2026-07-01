@@ -8,9 +8,10 @@
  * the small prompt we send. Annual cost projection at 1000 users ≈
  * $900/yr in the worst case — well under what SaneBox costs at scale.
  *
- * Why not the agent's main model: the agent runs glm-5 (per the
- * Mantle proxy logs). That's a much heavier model and we'd pay 10-20x
- * per classification. Triage is a hot path that needs to be tiny.
+ * Why not the agent's main model: the agent harness runs Claude Sonnet 5
+ * (Bedrock Mantle, per #1089; formerly GLM-5). That's a much heavier model
+ * and we'd pay 10-20x per classification. Triage is a hot path that needs to
+ * be tiny, so it keeps its own lightweight Nova classifier.
  *
  * Fail-safe: if Bedrock returns garbage or the response can't be parsed,
  * we default to `later` (the lowest-noise classification). The user can

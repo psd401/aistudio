@@ -160,4 +160,54 @@ test.describe('Agent Dashboard — Admin', () => {
       .filter({ hasText: /Refresh/i })
     await expect(refreshButton).toBeVisible({ timeout: 10000 })
   })
+
+  // admin-agents-cache-cost (issue #1089): the Cost tab's token×pricing view is
+  // the source-of-truth model-cost panel. After the GLM-5 -> Sonnet 5 migration
+  // it must render the Bedrock cache-read / cache-write token columns and a
+  // cache-aware cost figure.
+  test('cost tab renders cache-aware model cost with cache token columns', async ({
+    page,
+  }, testInfo) => {
+    await page.waitForSelector('[role="tab"][aria-selected="true"]', {
+      timeout: 10000,
+    })
+    await page.locator('[role="tab"]').filter({ hasText: 'Cost' }).click()
+
+    // Source-of-truth panel heading always renders on the Cost tab.
+    const panelHeading = page
+      .locator('text=/Model cost \(tokens × pricing\)/i')
+      .first()
+    await expect(panelHeading).toBeVisible({ timeout: 15000 })
+
+    // The cache-aware cost figure is documented in the panel description — it
+    // renders regardless of whether there is token data in the window.
+    await expect(
+      page.locator('text=/cache-aware/i').first()
+    ).toBeVisible({ timeout: 10000 })
+
+    // When there is recorded token usage, the by-model table renders the
+    // cache-read + cache-write columns; otherwise the empty state shows.
+    // Either satisfies the CI-safe assertion; both are valid renders.
+    const cacheReadHeader = page
+      .locator('th')
+      .filter({ hasText: /Cache read tok/i })
+      .first()
+    const emptyState = page
+      .locator('text=/No token usage recorded/i')
+      .first()
+    await expect(cacheReadHeader.or(emptyState)).toBeVisible({ timeout: 10000 })
+
+    if (await cacheReadHeader.isVisible().catch(() => false)) {
+      // Data present — assert BOTH cache columns exist alongside the cost col.
+      await expect(
+        page.locator('th').filter({ hasText: /Cache write tok/i }).first()
+      ).toBeVisible()
+    }
+
+    // Visual evidence for the PR (screenshot_dir default = .verification).
+    await page.screenshot({
+      path: `.verification/admin-agents-cache-cost-${testInfo.project.name}.png`,
+      fullPage: true,
+    })
+  })
 })
