@@ -17,6 +17,7 @@ import {
   parseRequestBody,
 } from "@/lib/api";
 import {
+  ApprovalRequiredError,
   assertCanEdit,
   contentService,
   recordContentAudit,
@@ -51,13 +52,19 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
     return contentErrorToResponse(err, requestId);
   }
 
+  // §26.4 gate: widening to `public` requires the EXPLICIT content:publish_public
+  // scope (a session wildcard ["*"] must NOT auto-grant it). setLevel enforces it.
+  const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
+
   try {
     const obj = await contentService.get(req, id);
     assertCanEdit(req, obj.ownerUserId);
-    const result = await visibilityService.setLevel(obj.id, {
-      level: input.level,
-      grants: input.grants,
-    });
+    const result = await visibilityService.setLevel(
+      req,
+      obj.id,
+      { level: input.level, grants: input.grants },
+      { hasPublishPublicCapability }
+    );
     await recordContentAudit({
       req,
       action: "set_visibility",
@@ -72,6 +79,25 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
       requestId
     );
   } catch (err) {
+    // A public-widening the caller isn't authorized for is not an error but the
+    // §26.4 approval signal (202), mirroring the publish route.
+    if (err instanceof ApprovalRequiredError) {
+      await recordContentAudit({
+        req,
+        action: "set_visibility",
+        surface: "rest",
+        objectId: id,
+        outcome: "approval_required",
+        error: err.message,
+        requestId,
+      });
+      log.info("Public visibility requires approval", { objectId: id });
+      return createApiResponse(
+        { data: { status: "approval_required", message: err.message }, meta: { requestId } },
+        requestId,
+        202
+      );
+    }
     await recordContentAudit({
       req,
       action: "set_visibility",

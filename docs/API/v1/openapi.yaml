@@ -1177,6 +1177,12 @@ paths:
         Creates a document or artifact. Does NOT publish it. When `body` is
         supplied, an initial version (v1) is snapshotted. Mirrors the MCP
         `create_document` / `create_artifact` tools. Requires `content:create`.
+
+        **Public-visibility gate (§26.4):** creating an object directly at
+        `visibility.level = "public"` without `content:publish_public` is NOT an
+        error — it returns **HTTP 202** with `data.status = "approval_required"`
+        and nothing is created, so `create` cannot be a side door around the
+        publish approval gate.
       security:
         - BearerAuth: []
       requestBody:
@@ -1192,6 +1198,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ContentObjectResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "202":
+          description: |
+            Approval required — creation at `public` visibility was requested
+            without `content:publish_public`. Nothing was created; the request is
+            queued for human review.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentApprovalRequiredResponse"
           headers:
             X-Request-Id:
               $ref: "#/components/headers/X-Request-Id"
@@ -1404,6 +1428,12 @@ paths:
         route loads the object (enforcing view permission, 404-masked) and gates
         edit before mutating. Mirrors the MCP `set_visibility` tool. Requires
         `content:update`.
+
+        **Public-visibility gate (§26.4):** widening to `level = "public"` without
+        `content:publish_public` is NOT an error — it returns **HTTP 202** with
+        `data.status = "approval_required"`, the object stays at its prior level,
+        and the request is queued for review, so `set_visibility` cannot be a side
+        door around the publish approval gate.
       security:
         - BearerAuth: []
       requestBody:
@@ -1419,6 +1449,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ContentVisibilityResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "202":
+          description: |
+            Approval required — widening to `public` was requested without
+            `content:publish_public`. The level is unchanged; the request is queued
+            for human review.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentApprovalRequiredResponse"
           headers:
             X-Request-Id:
               $ref: "#/components/headers/X-Request-Id"

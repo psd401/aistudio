@@ -126,7 +126,15 @@ export async function setVisibilityAction(
     //
     // Target the resolved UUID (the input may be a slug) so a slug change between
     // load and write cannot retarget a different object.
-    const result = await visibilityService.setLevel(obj.id, { level, grants });
+    // §26.4 gate: widening to `public` requires authority. Mirroring the UI
+    // publish-document action, the capability flag is left at its default (false),
+    // so a non-admin UI user setting `public` hits the approval gate (admins pass
+    // via `req.isAdmin` inside setLevel); it throws ApprovalRequiredError otherwise,
+    // which handleError maps to the standard action-state error envelope.
+    const result = await visibilityService.setLevel(requester, obj.id, {
+      level,
+      grants,
+    });
 
     timer({ status: "success" });
     log.info("Visibility updated", {

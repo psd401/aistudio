@@ -26,21 +26,16 @@ import {
   type Requester,
 } from "@/lib/content";
 import { contentDeepLink, resolveCollectionId } from "@/lib/content/surface-helpers";
+import {
+  restGrantSchema as grantZ,
+  restVisibilitySchema as visibilityZ,
+} from "@/lib/content/rest";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
 import type { McpToolContext, McpToolHandler, McpToolResult } from "./types";
 
-// ============================================
-// Shared validation sub-schemas
-// ============================================
-
-const grantZ = z.object({
-  kind: z.enum(["role", "building", "department", "grade", "user"]),
-  value: z.string(),
-});
-const visibilityZ = z.object({
-  level: z.enum(["private", "group", "internal", "public"]),
-  grants: z.array(grantZ).optional(),
-});
+// Grant + visibility validation is single-sourced from `lib/content/rest.ts`
+// (`restGrantSchema` / `restVisibilitySchema`) so the MCP and REST surfaces cannot
+// drift — e.g. if `public` is ever restricted, only that one enum changes.
 
 // ============================================
 // Result + error helpers
@@ -170,15 +165,22 @@ async function handleCreateDocument(
   const { req } = resolved;
   try {
     const collectionId = await resolveCollectionId(parsed.data.collection);
-    const created = await contentService.create(req, {
-      kind: "document",
-      title: parsed.data.title,
-      collectionId,
-      body: parsed.data.markdown,
-      bodyFormat: parsed.data.markdown ? "markdown" : undefined,
-      visibility: parsed.data.visibility,
-      tags: parsed.data.tags,
-    });
+    const hasPublishPublicCapability = context.scopes.includes(
+      "content:publish_public"
+    );
+    const created = await contentService.create(
+      req,
+      {
+        kind: "document",
+        title: parsed.data.title,
+        collectionId,
+        body: parsed.data.markdown,
+        bodyFormat: parsed.data.markdown ? "markdown" : undefined,
+        visibility: parsed.data.visibility,
+        tags: parsed.data.tags,
+      },
+      { hasPublishPublicCapability }
+    );
     await recordContentAudit({
       req,
       action: "create",
@@ -213,15 +215,22 @@ async function handleCreateArtifact(
   const { req } = resolved;
   try {
     const collectionId = await resolveCollectionId(parsed.data.collection);
-    const created = await contentService.create(req, {
-      kind: "artifact",
-      title: parsed.data.title,
-      collectionId,
-      body: parsed.data.code,
-      bodyFormat: parsed.data.bodyFormat,
-      visibility: parsed.data.visibility,
-      tags: parsed.data.tags,
-    });
+    const hasPublishPublicCapability = context.scopes.includes(
+      "content:publish_public"
+    );
+    const created = await contentService.create(
+      req,
+      {
+        kind: "artifact",
+        title: parsed.data.title,
+        collectionId,
+        body: parsed.data.code,
+        bodyFormat: parsed.data.bodyFormat,
+        visibility: parsed.data.visibility,
+        tags: parsed.data.tags,
+      },
+      { hasPublishPublicCapability }
+    );
     await recordContentAudit({
       req,
       action: "create",
@@ -424,13 +433,19 @@ async function handleSetVisibility(
   const { req } = resolved;
   try {
     // Load (enforces canView, 404-masks) then gate edit before mutating — the
-    // standalone setLevel does no permission check of its own.
+    // standalone setLevel enforces the §26.4 public-visibility gate internally, so
+    // pass the explicit capability (never the session wildcard) for the user path.
     const obj = await contentService.get(req, parsed.data.id);
     assertCanEdit(req, obj.ownerUserId);
-    const result = await visibilityService.setLevel(obj.id, {
-      level: parsed.data.level,
-      grants: parsed.data.grants,
-    });
+    const hasPublishPublicCapability = context.scopes.includes(
+      "content:publish_public"
+    );
+    const result = await visibilityService.setLevel(
+      req,
+      obj.id,
+      { level: parsed.data.level, grants: parsed.data.grants },
+      { hasPublishPublicCapability }
+    );
     await recordContentAudit({
       req,
       action: "set_visibility",

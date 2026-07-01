@@ -24,10 +24,12 @@ import {
   agentIdOf,
   assertCanCreate,
   assertCanEdit,
+  canPublishPublic,
   slugCandidate,
   slugifyTitle,
   systemUserId,
 } from "./helpers";
+import { contentEvents } from "./events";
 import {
   objectSelectFields,
   rowToObjectDTO,
@@ -35,7 +37,13 @@ import {
 } from "./mappers";
 import { snapshotInTx, versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
-import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "./errors";
+import {
+  ApprovalRequiredError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from "./errors";
 import type {
   ContentObjectDTO,
   ContentObjectWithVersion,
@@ -180,10 +188,19 @@ export const contentService = {
   /**
    * Create a content object. When `input.body` is supplied, an initial version
    * (v1) is snapshotted in the same transaction and becomes the object's head.
+   *
+   * §26.4 — creating an object directly at `visibility.level === "public"` is a
+   * public exposure and runs the SAME gate as a `public_web` publish: without
+   * authority (`content:publish_public` / admin) it throws `ApprovalRequiredError`
+   * and emits the approval-queue event, so `create` cannot become a side door
+   * around `publish`. The caller passes `hasPublishPublicCapability` (the session's
+   * explicit capability); agent requesters are resolved from `req` alone. A
+   * collection default is never `public`, so only an explicit `public` input gates.
    */
   async create(
     req: Requester,
-    input: CreateObjectInput
+    input: CreateObjectInput,
+    opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<ContentObjectWithVersion> {
     assertCanCreate(req);
 
@@ -201,6 +218,24 @@ export const contentService = {
       throw new ValidationError("kind must be 'document' or 'artifact'", {
         kind: input.kind,
       });
+    }
+
+    // The §26.4 public-visibility gate, BEFORE any write. Emit the approval-queue
+    // signal (parity with publish/set_visibility) then throw — nothing is created.
+    if (
+      input.visibility?.level === "public" &&
+      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
+    ) {
+      await contentEvents.emit("content.public_publish_requested", {
+        objectId: "",
+        destination: "create",
+        actorKind: actorKindOf(req),
+        agentLabel: req.kind === "user" ? null : req.agentLabel,
+      });
+      throw new ApprovalRequiredError(
+        "Creating public content requires approval",
+        { level: input.visibility.level }
+      );
     }
 
     const ownerUserId = ownerFor(req);
