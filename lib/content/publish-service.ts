@@ -37,6 +37,7 @@ import {
   assertCanEdit,
   authorUserIdOf,
   canPublishPublic,
+  raisePublishApprovalRequired,
 } from "./helpers";
 import { visibilityService } from "./visibility-service";
 import { contentEvents } from "./events";
@@ -120,32 +121,11 @@ async function loadPublishable(
   return rows[0] ?? null;
 }
 
-/**
- * §26.4 — emit the approval-queue signal and throw `ApprovalRequiredError` for an
- * unauthorized public-facing publish. Shared by the two gate sites (the pre-tx
- * `public_web` destination branch and the in-tx visibility-widen branch) so the
- * emit shape + message stay identical. `void` emit is fire-and-forget (best-effort;
- * `emit` swallows its own errors and never rejects), safe even right before a throw
- * — including inside a transaction, where the throw rolls the tx back.
- */
-function raisePublishApprovalRequired(
-  req: Requester,
-  objectId: string,
-  slug: string,
-  destination: PublishDestination
-): never {
-  void contentEvents.emit("content.public_publish_requested", {
-    objectId,
-    slug,
-    destination,
-    actorKind: actorKindOf(req),
-    agentLabel: req.kind === "user" ? null : req.agentLabel,
-  });
-  throw new ApprovalRequiredError(
-    "Publishing to a public destination requires approval",
-    { destination, objectId }
-  );
-}
+// §26.4 — this publish path's two gate sites (the pre-tx `public_web` destination
+// branch and the in-tx visibility-widen branch, below) both raise via the shared
+// `raisePublishApprovalRequired` (in `./helpers`, also used by
+// `visibilityService.setLevel`) so the message + emitted event shape stay
+// identical across every §26.4 gate site.
 
 export const publishService = {
   /**
@@ -205,7 +185,12 @@ export const publishService = {
     // the TOCTOU hole where a concurrent narrow (public → internal) between a
     // pre-read and the locked write would skip the gate on a real widen-back.
     if (input.destination === "public_web" && !mayPublishPublic) {
-      raisePublishApprovalRequired(req, objectId, obj.slug, input.destination);
+      raisePublishApprovalRequired(
+        req,
+        "Publishing to a public destination requires approval",
+        { objectId, slug: obj.slug, destination: input.destination },
+        { destination: input.destination, objectId }
+      );
     }
 
     // Nothing is live without a working head: the publication's
@@ -273,7 +258,12 @@ export const publishService = {
           locked[0].visibilityLevel !== "public" &&
           !mayPublishPublic
         ) {
-          raisePublishApprovalRequired(req, objectId, obj.slug, input.destination);
+          raisePublishApprovalRequired(
+            req,
+            "Publishing to a public destination requires approval",
+            { objectId, slug: obj.slug, destination: input.destination },
+            { destination: input.destination, objectId }
+          );
         }
 
         // Optionally widen visibility in the same tx so the status change and

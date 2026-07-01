@@ -22,10 +22,13 @@ import {
   contentObjects,
   contentVisibilityGrants,
 } from "@/lib/db/schema";
-import { actorKindOf, canPublishPublic, principalOf } from "./helpers";
+import {
+  canPublishPublic,
+  principalOf,
+  raisePublishApprovalRequired,
+} from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
-import { contentEvents } from "./events";
-import { ApprovalRequiredError, NotFoundError, ValidationError } from "./errors";
+import { NotFoundError, ValidationError } from "./errors";
 import { GRANT_KIND_SET, POSITIVE_INT_RE, VISIBILITY_LEVEL_SET } from "./validators";
 import type {
   ContentObjectDTO,
@@ -562,15 +565,13 @@ export const visibilityService = {
         rows[0].visibilityLevel !== "public" &&
         !mayPublishPublic
       ) {
-        // Fire-and-forget (best-effort): `emit` swallows its own errors and never
-        // rejects, so this detached promise cannot leave the tx in a bad state.
-        void contentEvents.emit("content.public_publish_requested", {
-          objectId,
-          actorKind: actorKindOf(req),
-          agentLabel: req.kind === "user" ? null : req.agentLabel,
-        });
-        throw new ApprovalRequiredError(
+        // Shared with `publishService`'s visibility-widen gate (`./helpers`) so the
+        // emitted event shape + fail-closed behavior stay identical across every
+        // §26.4 gate site.
+        raisePublishApprovalRequired(
+          req,
           "Widening visibility to public requires approval",
+          { objectId },
           { objectId }
         );
       }

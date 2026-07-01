@@ -221,6 +221,9 @@ describe("publishService.publish", () => {
         visibility: { level: "public" },
       })
     ).rejects.toThrow(ApprovalRequiredError);
+    // The gate must reject BEFORE the widen is written — a reorder that ran
+    // setLevelInTx first would still throw here but would have already widened.
+    expect(setLevelInTxCalls).toBe(0);
   });
 
   it("does NOT gate a no-op re-publish of ALREADY-public content (idempotent, race-safe)", async () => {

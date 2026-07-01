@@ -8,7 +8,9 @@
  */
 
 import { ErrorFactories } from "@/lib/error-utils";
-import { ForbiddenError } from "./errors";
+import { ApprovalRequiredError, ForbiddenError } from "./errors";
+import { contentEvents } from "./events";
+import type { PublishDestination } from "./publish-adapters/types";
 import type { Principal, Requester } from "./types";
 
 /**
@@ -243,4 +245,41 @@ export function hasPublishPublicScope(
   // accepting null/undefined defensively means a malformed auth context can never
   // turn this authority check into a runtime crash — it simply denies.
   return scopes?.includes("content:publish_public") ?? false;
+}
+
+/**
+ * §26.4 — emit the approval-queue signal and throw `ApprovalRequiredError` for an
+ * unauthorized public exposure. Shared by every §26.4 gate site (`publishService`'s
+ * pre-tx destination check + in-tx visibility-widen check, and
+ * `visibilityService.setLevel`'s in-tx widen check) so the emitted event shape and
+ * fail-closed behavior stay identical everywhere this security boundary is
+ * enforced — a future gate site cannot drift by hand-rolling its own emit-then-throw.
+ *
+ * `eventPayload`/`errorContext` are passed through as-is (rather than derived from
+ * a single shape) because callers intentionally differ: `publishService` includes
+ * `slug`/`destination` in the emitted event (readable in the approval-queue UI)
+ * but only `destination`/`objectId` in the thrown error's `details`, while
+ * `visibilityService.setLevel` has no destination concept and passes `objectId`
+ * alone to both.
+ *
+ * `void` emit is fire-and-forget (best-effort; `emit` swallows its own errors and
+ * never rejects), safe even right before a throw — including inside a
+ * transaction, where the throw rolls the tx back.
+ */
+export function raisePublishApprovalRequired(
+  req: Requester,
+  message: string,
+  eventPayload: {
+    objectId: string;
+    slug?: string;
+    destination?: PublishDestination;
+  },
+  errorContext: Record<string, unknown>
+): never {
+  void contentEvents.emit("content.public_publish_requested", {
+    ...eventPayload,
+    actorKind: actorKindOf(req),
+    agentLabel: req.kind === "user" ? null : req.agentLabel,
+  });
+  throw new ApprovalRequiredError(message, errorContext);
 }
