@@ -91,9 +91,11 @@ export function withApiAuth(
       return response;
     }
 
-    // Step 3: Execute handler
+    // Step 3: Execute handler. Both the try (success) and catch (500) branches
+    // assign `response` + `statusCode`, so no initializer is needed — and a `= 200`
+    // default would be dead (never read before reassignment: no-useless-assignment).
     let response: NextResponse;
-    let statusCode = 200;
+    let statusCode: number;
 
     try {
       // Resolve Next's dynamic route params (a Promise in the App Router) once and

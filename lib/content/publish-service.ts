@@ -120,6 +120,23 @@ async function loadPublishable(
   return rows[0] ?? null;
 }
 
+/**
+ * Whether a publish request is an ACTUAL public exposure that the §26.4 gate must
+ * review. A `public_web` destination always is (its adapter is unimplemented today,
+ * so there is no already-live state to compare). Widening visibility to `public`
+ * only exposes when the object is not ALREADY public — re-saving already-public
+ * content (visibility unchanged) is an idempotent no-op, not a new exposure, so it
+ * must NOT trip the gate (spuriously throwing ApprovalRequiredError + emitting the
+ * approval event for a non-admin owner who changed nothing).
+ */
+function isPublicFacingPublish(
+  input: PublishInput,
+  currentLevel: VisibilityLevel
+): boolean {
+  if (input.destination === "public_web") return true;
+  return input.visibility?.level === "public" && currentLevel !== "public";
+}
+
 export const publishService = {
   /**
    * Publish (or republish) an object's working head to a destination. Idempotent
@@ -168,22 +185,11 @@ export const publishService = {
     // non-admin humans need the capability. When the caller is not authorized,
     // emit the approval-queue signal and raise the structured ApprovalRequiredError
     // (surfaces map it to 202 / `approval_required`) — never silently publish
-    // unreviewed content to families/the public.
-    //
-    // Gate on an ACTUAL public exposure, not the target value alone: widening
-    // visibility to `public` only exposes when the object is not ALREADY public
-    // (`obj.visibilityLevel !== "public"`). Re-saving already-public content by a
-    // non-admin owner (visibility unchanged) is an idempotent no-op that must NOT
-    // spuriously throw `ApprovalRequiredError` + emit the approval event — a
-    // widen that changes nothing is not a new exposure to review. A `public_web`
-    // destination is always public-facing (its adapter is unimplemented today, so
-    // there is no already-live state to compare against).
-    const isPublicFacing =
-      input.destination === "public_web" ||
-      (input.visibility?.level === "public" &&
-        obj.visibilityLevel !== "public");
+    // unreviewed content to families/the public. `isPublicFacingPublish` gates on
+    // an ACTUAL public exposure, not the target value alone (see its JSDoc: a no-op
+    // re-save of already-public content must not trip the gate).
     if (
-      isPublicFacing &&
+      isPublicFacingPublish(input, obj.visibilityLevel) &&
       !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
     ) {
       // Fire-and-forget (best-effort, matches the audit-write pattern):
