@@ -19,6 +19,7 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { publishService } from "@/lib/content/publish-service";
+import { ApprovalRequiredError } from "@/lib/content/errors";
 import { assertGrantKind, assertLevel } from "@/lib/content/validators";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
@@ -105,6 +106,19 @@ export async function publishDocumentAction(
     return createSuccess(result, "Document published");
   } catch (error) {
     timer({ status: "error" });
+    // §26.4 gate: a public-destination publish without approval is a
+    // pending-approval outcome (approval-queue event emitted), not a failure.
+    // Surface it distinctly (defensive — the shipped editor only publishes to
+    // intranet today, but the action accepts public destinations).
+    if (error instanceof ApprovalRequiredError) {
+      log.info("Publish requires approval", { requestId });
+      return {
+        isSuccess: false,
+        approvalRequired: true,
+        message:
+          "Publishing to this destination requires administrator approval — your request has been submitted for review.",
+      };
+    }
     return handleError(error, "Failed to publish document", {
       context: "publishDocumentAction",
       requestId,

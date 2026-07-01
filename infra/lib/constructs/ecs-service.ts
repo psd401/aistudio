@@ -33,6 +33,13 @@ export interface EcsServiceConstructProps {
    * frame-src from it (no build-time NEXT_PUBLIC value required).
    */
   atriumSandboxOrigin: string;
+  /**
+   * Atrium content events SNS topic ARN (#1055). Injected as
+   * `ATRIUM_EVENTS_TOPIC_ARN`; the task role is granted `sns:Publish` on it. The
+   * app's events publisher is best-effort and no-ops when unset, so this is
+   * optional for back-compat with deployments before the events stack lands.
+   */
+  atriumEventsTopicArn?: string;
   enableContainerInsights?: boolean;
   enableFargateSpot?: boolean;
   /**
@@ -564,6 +571,26 @@ export class EcsServiceConstruct extends Construct {
       },
     });
 
+    // Atrium content events (#1055): grant the app task role sns:Publish on the
+    // content events topic so lib/content/events.ts can emit. Tag-conditioned to
+    // the environment, mirroring ServiceRoleFactory.buildSNSAccessPolicy. Only
+    // added when a topic ARN is wired (back-compat with pre-events deployments).
+    if (props.atriumEventsTopicArn) {
+      this.taskRole.addToPolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['sns:Publish'],
+          resources: [props.atriumEventsTopicArn],
+          conditions: {
+            StringEquals: {
+              'aws:ResourceTag/Environment': environment,
+              'aws:ResourceTag/ManagedBy': 'cdk',
+            },
+          },
+        })
+      );
+    }
+
     // Task Definition
     const cpu = environment === 'prod' ? 1024 : 512; // 1 vCPU prod, 0.5 dev
     const memory = environment === 'prod' ? 2048 : 1024; // 2GB prod, 1GB dev
@@ -704,6 +731,9 @@ export class EcsServiceConstruct extends Construct {
         // from it and pass it down as a prop, and the middleware builds the CSP
         // frame-src from it at request time. Sourced from AtriumSandboxStack.
         ATRIUM_SANDBOX_ORIGIN: props.atriumSandboxOrigin,
+        // Atrium content events SNS topic (#1055). The app publishes content
+        // lifecycle events here; the publisher no-ops when this is empty.
+        ATRIUM_EVENTS_TOPIC_ARN: props.atriumEventsTopicArn ?? '',
       },
       // Secrets injected from Secrets Manager at runtime
       secrets: {

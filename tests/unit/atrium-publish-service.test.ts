@@ -7,8 +7,10 @@
  *  - object exists but not viewable         -> NotFoundError (404, NOT 403 —
  *                                              existence masking for private ids)
  *  - viewable but not editable              -> ForbiddenError (via assertCanEdit)
- *  - destination public_web                 -> ForbiddenError (later phase)
- *  - unimplemented destination (schoology)  -> ValidationError (adapter throws)
+ *  - public-facing publish, caller lacks publish_public -> ApprovalRequiredError
+ *                                              (§26.4 gate); an admin passes it
+ *  - unimplemented destination (schoology)  -> ValidationError, hard-blocked
+ *                                              BEFORE the tx (no partial write)
  *  - no working head (currentVersionId null) -> ValidationError
  *  - happy path                              -> resolves with ids; applyGrants is
  *                                              only called for group visibility
@@ -134,11 +136,17 @@ const chainProxy = new Proxy(chain, chainHandler);
 const txStub = chainProxy;
 
 import { publishService } from "@/lib/content/publish-service";
-import { ForbiddenError, NotFoundError, ValidationError } from "@/lib/content/errors";
+import {
+  ApprovalRequiredError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from "@/lib/content/errors";
 import type { Requester } from "@/lib/content/types";
 
 const owner: Requester = { kind: "user", userId: 7, roles: ["staff"], isAdmin: false };
 const stranger: Requester = { kind: "user", userId: 99, roles: ["staff"], isAdmin: false };
+const admin: Requester = { kind: "user", userId: 1, roles: ["administrator"], isAdmin: true };
 
 beforeEach(() => {
   publishableRows = [
@@ -193,20 +201,56 @@ describe("publishService.publish", () => {
     ).rejects.toThrow(ForbiddenError);
   });
 
-  it("throws ForbiddenError for the public_web destination (later phase)", async () => {
+  it("throws ApprovalRequiredError for public_web when the caller lacks publish_public (§26.4 gate)", async () => {
+    // The owner is a non-admin staff user with no publish_public capability, so
+    // the public-publish gate blocks them with a structured approval signal
+    // (surfaces map it to 202 / approval_required), not a hard 403.
     await expect(
       publishService.publish(owner, "o1", { destination: "public_web" })
-    ).rejects.toThrow(ForbiddenError);
+    ).rejects.toThrow(ApprovalRequiredError);
   });
 
-  it("throws ValidationError for an unimplemented destination (schoology)", async () => {
-    // The tx (lock select -> upsert RETURNING) runs and commits FIRST; the
-    // not-implemented schoology adapter then throws when called after the tx.
-    // tx queue: FOR UPDATE lock row, then the publication upsert RETURNING id.
+  it("throws ApprovalRequiredError when widening visibility to public without publish_public", async () => {
+    // Public-facing is destination OR a visibility widening to `public`.
+    await expect(
+      publishService.publish(owner, "o1", {
+        destination: "intranet",
+        visibility: { level: "public" },
+      })
+    ).rejects.toThrow(ApprovalRequiredError);
+  });
+
+  it("admin past the gate to an unimplemented public destination fails BEFORE any write (no visibility leak)", async () => {
+    // An admin passes canPublishPublic, so the §26.4 gate does NOT fire. But
+    // public_web is a not-yet-implemented adapter, so the publish must be blocked
+    // BEFORE the transaction — NOT proceed through it and only fail at the adapter
+    // afterward. Regression guard for the leak where the tx committed
+    // visibilityLevel="public" (world-readable via canView) before the adapter
+    // threw, leaving the object public despite the publish "failing". Queue tx
+    // results so that IF the tx wrongly ran, it would not crash for the wrong
+    // reason — the assertions below prove it never ran.
+    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    await expect(
+      publishService.publish(admin, "o1", {
+        destination: "public_web",
+        visibility: { level: "public" },
+      })
+    ).rejects.toThrow(ValidationError);
+    // The exact leak this fix closes: visibility was NEVER widened in a tx...
+    expect(setLevelInTxCalls).toBe(0);
+    // ...and the (no-op) adapter side effect never ran either.
+    expect(adapterPublishCalls).toBe(0);
+  });
+
+  it("throws ValidationError for an unimplemented destination (schoology), before the tx", async () => {
+    // schoology is not public-facing (no gate), but its adapter is not yet
+    // implemented, so the publish is hard-blocked BEFORE the transaction runs.
     txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
     await expect(
       publishService.publish(owner, "o1", { destination: "schoology" })
     ).rejects.toThrow(ValidationError);
+    expect(setLevelInTxCalls).toBe(0);
+    expect(adapterPublishCalls).toBe(0);
   });
 
   it("throws ValidationError when there is no working head", async () => {
@@ -312,5 +356,29 @@ describe("publishService.unpublish", () => {
     const result = await publishService.unpublish(owner, "o1", "intranet");
     expect(result).toEqual({ unpublished: true });
     expect(adapterUnpublishCalls).toBe(1);
+  });
+
+  // §26.4 — taking a public destination offline requires the same authority as
+  // putting it up: content:publish_internal alone must not be enough to tear
+  // down already-live public_web content.
+  it("throws ApprovalRequiredError unpublishing public_web without publish_public, and never touches the tx", async () => {
+    await expect(
+      publishService.unpublish(owner, "o1", "public_web")
+    ).rejects.toThrow(ApprovalRequiredError);
+    expect(adapterUnpublishCalls).toBe(0);
+  });
+
+  it("allows unpublishing public_web for an admin", async () => {
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    const result = await publishService.unpublish(admin, "o1", "public_web");
+    expect(result).toEqual({ unpublished: true });
+  });
+
+  it("allows unpublishing public_web when the caller has an explicit publish_public capability", async () => {
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    const result = await publishService.unpublish(owner, "o1", "public_web", {
+      hasPublishPublicCapability: true,
+    });
+    expect(result).toEqual({ unpublished: true });
   });
 });

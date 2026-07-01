@@ -22,9 +22,10 @@ import {
   contentObjects,
   contentVisibilityGrants,
 } from "@/lib/db/schema";
-import { principalOf } from "./helpers";
+import { actorKindOf, canPublishPublic, principalOf } from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
-import { NotFoundError, ValidationError } from "./errors";
+import { contentEvents } from "./events";
+import { ApprovalRequiredError, NotFoundError, ValidationError } from "./errors";
 import { GRANT_KIND_SET, POSITIVE_INT_RE, VISIBILITY_LEVEL_SET } from "./validators";
 import type {
   ContentObjectDTO,
@@ -508,11 +509,33 @@ export const visibilityService = {
    * The object must exist (404 otherwise) and the caller is expected to have
    * already passed `assertCanEdit`. Does NOT change `status`. Returns the new
    * level so the surface can reflect it without a re-read.
+   *
+   * §26.4 — widening to `public` through this standalone path is the SAME
+   * privilege boundary as `publishService.publish`'s visibility widen, so it
+   * enforces the identical `canPublishPublic` gate (+ approval-queue event) —
+   * otherwise a `content:update`-only caller could reach "public" by calling
+   * `set_visibility` instead of `publish`.
    */
   async setLevel(
+    req: Requester,
     objectId: string,
-    visibility: VisibilityInput
+    visibility: VisibilityInput,
+    opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<{ visibilityLevel: VisibilityLevel }> {
+    if (
+      visibility.level === "public" &&
+      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
+    ) {
+      await contentEvents.emit("content.public_publish_requested", {
+        objectId,
+        actorKind: actorKindOf(req),
+        agentLabel: req.kind === "user" ? null : req.agentLabel,
+      });
+      throw new ApprovalRequiredError(
+        "Widening visibility to public requires approval",
+        { objectId }
+      );
+    }
     await executeTransaction(async (tx) => {
       // Guard against a missing object inside the tx so the level write does not
       // silently no-op (UPDATE ... WHERE id = <absent> affects zero rows). Lock

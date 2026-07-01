@@ -22,6 +22,7 @@ export interface FrontendStackEcsProps extends cdk.StackProps {
   documentsBucketName?: string; // Optional for backward compatibility
   agentWorkspaceBucketName?: string; // Optional for backward compatibility (#925)
   atriumSandboxOrigin?: string; // Optional; falls back to SSM (#1052)
+  atriumEventsTopicArn?: string; // Optional; SNS topic for content events (#1055)
   /**
    * If true, will look up existing VPC from database stack.
    * If false, will create a new VPC for ECS (not recommended - prefer VPC sharing)
@@ -81,6 +82,14 @@ export class FrontendStackEcs extends cdk.Stack {
     const atriumSandboxOrigin = props.atriumSandboxOrigin ||
       ssm.StringParameter.valueForStringParameter(
         this, `/aistudio/${environment}/atrium-sandbox-origin`
+      );
+
+    // Atrium content events SNS topic ARN (#1055) — prefer the cross-stack prop
+    // from AtriumEventsStack; fall back to the SSM param it publishes. Injected
+    // as ATRIUM_EVENTS_TOPIC_ARN; the app's events publisher no-ops if unset.
+    const atriumEventsTopicArn = props.atriumEventsTopicArn ||
+      ssm.StringParameter.valueForStringParameter(
+        this, `/aistudio/${environment}/atrium-events-topic-arn`
       );
 
     // ============================================================================
@@ -171,6 +180,7 @@ export class FrontendStackEcs extends cdk.Stack {
       documentsBucketName,
       agentWorkspaceBucketName,
       atriumSandboxOrigin,
+      atriumEventsTopicArn,
       enableContainerInsights: true,
       enableFargateSpot: true, // Enable Fargate Spot for cost optimization
       spotRatio: environment === 'prod' ? 50 : 100, // 50% Spot in prod, 100% in dev

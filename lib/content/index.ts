@@ -20,6 +20,22 @@ export { s3Store } from "./storage/s3-store";
 export { renderMarkdownToHtml } from "./render/markdown-render";
 export { sanitizeHtml } from "./render/html-sanitize";
 
+export { contentEvents } from "./events";
+export type { ContentEventType, ContentEventPayload } from "./events";
+export { recordContentAudit } from "./audit";
+export type {
+  ContentAuditAction,
+  ContentAuditSurface,
+  ContentAuditOutcome,
+  ContentAuditEntry,
+} from "./audit";
+
+export {
+  requesterFromApiAuth,
+  buildDelegatedRequester,
+} from "./requester-from-auth";
+export type { RequesterAuthInput } from "./requester-from-auth";
+
 export {
   ContentError,
   ForbiddenError,

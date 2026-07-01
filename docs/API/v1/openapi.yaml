@@ -77,6 +77,8 @@ tags:
     description: Real-time voice conversations via WebSocket with Gemini Live API
   - name: Tools
     description: Tool catalog inspection — versions, deprecation state, and metadata
+  - name: Content
+    description: Atrium content objects — versions, visibility, and publishing (Issue #1055)
 
 # ============================================
 # Paths
@@ -1100,6 +1102,528 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  # ============================================
+  # Atrium Content (Issue #1055, Phase 5)
+  # ============================================
+
+  /content:
+    get:
+      operationId: listContent
+      tags: [Content]
+      summary: List visible content
+      description: |
+        Returns content objects the authenticated caller may view
+        (permission-filtered server-side). Mirrors the MCP `list_content` tool.
+        Requires the `content:read` scope.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: kind
+          in: query
+          description: Filter by content kind
+          schema:
+            type: string
+            enum: [document, artifact]
+        - name: collection
+          in: query
+          description: Collection slug or UUID to scope the listing
+          schema:
+            type: string
+            maxLength: 200
+        - name: tag
+          in: query
+          description: Filter by a single tag (exact match)
+          schema:
+            type: string
+            maxLength: 100
+        - name: status
+          in: query
+          description: Filter by lifecycle status
+          schema:
+            type: string
+            enum: [draft, published, archived]
+      responses:
+        "200":
+          description: List of visible content objects
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentListResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createContent
+      tags: [Content]
+      summary: Create a content object
+      description: |
+        Creates a document or artifact. Does NOT publish it. When `body` is
+        supplied, an initial version (v1) is snapshotted. Mirrors the MCP
+        `create_document` / `create_artifact` tools. Requires `content:create`.
+
+        **Public-publish gate (§26.4):** creating directly at `visibility.level:
+        "public"` (explicitly, or via a collection whose default visibility is
+        `public`) without `content:publish_public` is NOT an error — it returns
+        **HTTP 202** with `data.status = "approval_required"` and nothing is
+        created, mirroring the same gate on publish/set-visibility.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateContentRequest"
+      responses:
+        "201":
+          description: Content object created (includes current version and reader `url`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentObjectResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "202":
+          description: |
+            Approval required — creating public content was requested without
+            `content:publish_public`. Nothing was created; the request is
+            queued for human review.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentApprovalRequiredResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /content/{id}:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+
+    get:
+      operationId: getContent
+      tags: [Content]
+      summary: Get a content object
+      description: |
+        Returns a single content object joined with its current version and the
+        internal reader `url`. View permission is enforced server-side; objects
+        the caller may not view return `404` (not `403`). Mirrors the MCP
+        `get_content` tool. Requires `content:read`.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Content object with current version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentObjectResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    patch:
+      operationId: updateContent
+      tags: [Content]
+      summary: Update content metadata
+      description: |
+        Updates object metadata only — `title`, `tags`, `collectionId`, and
+        `status`. Body changes go through the versions endpoint. `collectionId`
+        accepts a slug or UUID; `null` clears the collection, `null` tags clears
+        all tags. Mirrors the MCP `update_content` tool. Requires `content:update`.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateContentRequest"
+      responses:
+        "200":
+          description: Updated content object metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentMetadataResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /content/{id}/versions:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+
+    get:
+      operationId: listContentVersions
+      tags: [Content]
+      summary: List content versions
+      description: |
+        Returns the object's versions, newest first. View permission is enforced
+        (404-masked) before the list is exposed. Requires `content:read`.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: List of versions (newest first)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentVersionListResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createContentVersion
+      tags: [Content]
+      summary: Create a content version
+      description: |
+        Snapshots a new version from `body` (with an optional change `summary`)
+        and makes it the object's current version. Mirrors the MCP `create_version`
+        tool. Requires `content:update`.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateVersionRequest"
+      responses:
+        "201":
+          description: Version created (returns the object with its new current version)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentObjectResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /content/{id}/visibility:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+
+    patch:
+      operationId: setContentVisibility
+      tags: [Content]
+      summary: Set content visibility
+      description: |
+        Sets the visibility `level` and (for `group`) the widening `grants`. The
+        route loads the object (enforcing view permission, 404-masked) and gates
+        edit before mutating. Mirrors the MCP `set_visibility` tool. Requires
+        `content:update`.
+
+        **Public-publish gate (§26.4):** widening to `level: "public"` without
+        `content:publish_public` is NOT an error — it returns **HTTP 202** with
+        `data.status = "approval_required"`, the same gate `POST /content/{id}/publish`
+        enforces (a `content:update`-only caller cannot reach "public" through
+        this endpoint either).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContentVisibility"
+      responses:
+        "200":
+          description: Visibility updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentVisibilityResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "202":
+          description: |
+            Approval required — widening to `public` was requested without
+            `content:publish_public`. The request is queued for human review.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentApprovalRequiredResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /content/{id}/publish:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+
+    post:
+      operationId: publishContent
+      tags: [Content]
+      summary: Publish a content object
+      description: |
+        Publishes the object's current version to a destination. Mirrors the MCP
+        `publish_content` tool. Requires `content:publish_internal`.
+
+        **Public-publish gate (§26.4):** a public-facing destination/visibility
+        requested by a caller lacking `content:publish_public` is NOT an error —
+        it returns **HTTP 202** with `data.status = "approval_required"` and the
+        request enters the review queue instead of publishing.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishContentRequest"
+      responses:
+        "200":
+          description: Published to the destination
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentPublishResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "202":
+          description: |
+            Approval required — a public publish was requested without
+            `content:publish_public`. The request is queued for human review.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentApprovalRequiredResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /content/{id}/publish/{destination}:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+      - $ref: "#/components/parameters/publishDestinationPath"
+
+    delete:
+      operationId: unpublishContent
+      tags: [Content]
+      summary: Unpublish a content object
+      description: |
+        Removes the object's live publication at a destination. Idempotent:
+        unpublishing an object that is not live there returns `unpublished: false`
+        rather than erroring. Requires `content:publish_internal`.
+
+        **Public-publish gate (§26.4):** taking down `public_web` requires the
+        same `content:publish_public` authority needed to publish it in the
+        first place — `content:publish_internal` alone is not enough. Without
+        it this returns **HTTP 202** with `data.status = "approval_required"`.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Unpublish result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentUnpublishResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "202":
+          description: |
+            Approval required — unpublishing `public_web` was requested without
+            `content:publish_public`. The request is queued for human review.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentApprovalRequiredResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 # ============================================
 # Components
 # ============================================
@@ -1168,6 +1692,24 @@ components:
       description: Opaque pagination cursor from a previous response's `meta.nextCursor`
       schema:
         type: string
+
+    contentIdPath:
+      name: id
+      in: path
+      required: true
+      description: Content object UUID
+      schema:
+        type: string
+        format: uuid
+
+    publishDestinationPath:
+      name: destination
+      in: path
+      required: true
+      description: Publish destination
+      schema:
+        type: string
+        enum: [intranet, public_web, schoology, google]
 
   # ---- Headers ----
   headers:
@@ -1716,6 +2258,406 @@ components:
             requestId:
               type: string
 
+    # -- Atrium Content (Issue #1055, Phase 5) --
+    ContentVisibility:
+      type: object
+      required: [level]
+      description: |
+        Visibility level plus optional group grants. `grants` is only meaningful
+        when `level` is `group`; each grant widens visibility along one dimension.
+      properties:
+        level:
+          type: string
+          enum: [private, group, internal, public]
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/VisibilityGrant"
+
+    VisibilityGrant:
+      type: object
+      required: [kind, value]
+      properties:
+        kind:
+          type: string
+          enum: [role, building, department, grade, user]
+        value:
+          type: string
+
+    ContentObject:
+      type: object
+      description: A serialized Atrium content object (timestamps are ISO-8601 strings).
+      required:
+        - id
+        - kind
+        - title
+        - slug
+        - ownerUserId
+        - createdByActor
+        - collectionId
+        - visibilityLevel
+        - currentVersionId
+        - tags
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [document, artifact]
+        title:
+          type: string
+        slug:
+          type: string
+        ownerUserId:
+          type: integer
+        createdByActor:
+          type: string
+          enum: [human, agent]
+        createdByAgentId:
+          type: string
+          nullable: true
+        collectionId:
+          type: string
+          format: uuid
+          nullable: true
+        visibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        currentVersionId:
+          type: string
+          format: uuid
+          nullable: true
+        sourceRef:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Provenance reference for content created from another source.
+        tags:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [draft, published, archived]
+        indexedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ContentVersion:
+      type: object
+      description: A serialized content version.
+      required:
+        - id
+        - objectId
+        - versionNumber
+        - authorActor
+        - bodyFormat
+        - bodyLocation
+      properties:
+        id:
+          type: string
+          format: uuid
+        objectId:
+          type: string
+          format: uuid
+        versionNumber:
+          type: integer
+        authorActor:
+          type: string
+          enum: [human, agent]
+        authorUserId:
+          type: integer
+          nullable: true
+        authorAgentId:
+          type: string
+          nullable: true
+        bodyFormat:
+          type: string
+          enum: [markdown, html, jsx]
+        bodyLocation:
+          type: string
+          description: Storage pointer (e.g. S3 key) for the version body.
+        bodyInline:
+          type: string
+          nullable: true
+          description: |
+            Raw inline body for small artifacts. SECURITY: untrusted code — only
+            render in a code editor or the cross-origin sandboxed iframe, never via
+            `dangerouslySetInnerHTML`.
+        renderLocation:
+          type: string
+          nullable: true
+        proofDocRef:
+          type: string
+          nullable: true
+        summary:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ContentObjectWithVersion:
+      description: |
+        A content object joined with its current version. The internal reader deep
+        link (`url`, `/c/{slug}`) is present on create and get responses; it is
+        omitted on the create-version response.
+      allOf:
+        - $ref: "#/components/schemas/ContentObject"
+        - type: object
+          properties:
+            version:
+              oneOf:
+                - $ref: "#/components/schemas/ContentVersion"
+                - type: "null"
+              description: Current version, or null when the object has no version yet.
+            url:
+              type: string
+              description: Internal reader deep link (`/c/{slug}`).
+
+    CreateContentRequest:
+      type: object
+      required: [kind, title]
+      properties:
+        kind:
+          type: string
+          enum: [document, artifact]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        collectionId:
+          type: string
+          minLength: 1
+          description: Collection slug or UUID; resolved to a collection id server-side.
+        body:
+          type: string
+          description: Initial body (markdown for a document, code for an artifact). When omitted, no v1 is created.
+        bodyFormat:
+          type: string
+          enum: [markdown, html, jsx]
+        visibility:
+          $ref: "#/components/schemas/ContentVisibility"
+        tags:
+          type: array
+          items:
+            type: string
+
+    UpdateContentRequest:
+      type: object
+      description: Metadata-only patch. Body changes go through the versions endpoint.
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        tags:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: Replaces all tags; `null` clears them.
+        collectionId:
+          type: string
+          nullable: true
+          description: Collection slug or UUID; `null` clears the collection.
+        status:
+          type: string
+          enum: [draft, published, archived]
+
+    CreateVersionRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          minLength: 1
+        bodyFormat:
+          type: string
+          enum: [markdown, html, jsx]
+        summary:
+          type: string
+          maxLength: 2000
+
+    PublishContentRequest:
+      type: object
+      required: [destination]
+      properties:
+        destination:
+          type: string
+          enum: [intranet, public_web, schoology, google]
+        visibility:
+          $ref: "#/components/schemas/ContentVisibility"
+
+    ContentListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContentObject"
+        meta:
+          type: object
+          required: [requestId, count]
+          properties:
+            requestId:
+              type: string
+            count:
+              type: integer
+
+    ContentObjectResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ContentObjectWithVersion"
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    ContentMetadataResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ContentObject"
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    ContentVersionListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContentVersion"
+        meta:
+          type: object
+          required: [requestId, count]
+          properties:
+            requestId:
+              type: string
+            count:
+              type: integer
+
+    ContentVisibilityResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [id, visibility]
+          properties:
+            id:
+              type: string
+              format: uuid
+            visibility:
+              type: object
+              required: [visibilityLevel]
+              properties:
+                visibilityLevel:
+                  type: string
+                  enum: [private, group, internal, public]
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    ContentPublishResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [id, destination, publishedVersionId]
+          properties:
+            id:
+              type: string
+              format: uuid
+            destination:
+              type: string
+              enum: [intranet, public_web, schoology, google]
+            publishedVersionId:
+              type: string
+              format: uuid
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    ContentApprovalRequiredResponse:
+      type: object
+      description: |
+        Returned with HTTP 202 when a public-facing publish is requested by a
+        caller lacking `content:publish_public` (the §26.4 approval gate). The
+        request is queued for human review rather than published.
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [status, message]
+          properties:
+            status:
+              type: string
+              enum: [approval_required]
+            message:
+              type: string
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    ContentUnpublishResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [id, destination, unpublished]
+          properties:
+            id:
+              type: string
+              format: uuid
+            destination:
+              type: string
+              enum: [intranet, public_web, schoology, google]
+            unpublished:
+              type: boolean
+              description: "`false` when the object was not live at the destination (idempotent no-op); `true` when an active publication was removed."
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
     # -- Tool catalog version (Issue #927) --
     ToolVersion:
       type: object
@@ -1846,6 +2788,21 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+
+    ContentConflict:
+      description: A uniqueness or version race (slug collision, version-number conflict)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: CONTENT_CONFLICT
+              message: Conflict
+            requestId: req_abc123
       headers:
         X-Request-Id:
           $ref: "#/components/headers/X-Request-Id"

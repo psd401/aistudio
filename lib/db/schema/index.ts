@@ -190,6 +190,7 @@ export * from "./tables/content-visibility-grants";
 export * from "./tables/content-publications";
 export * from "./tables/agent-identities";
 export * from "./tables/content-index-links";
+export * from "./tables/content-audit-logs";
 // Phase 1 (#1051): live collaborative document state (Yjs CRDT)
 export * from "./tables/atrium-doc-state";
 

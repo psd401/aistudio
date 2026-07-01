@@ -198,6 +198,19 @@ export function assertCanEdit(req: Requester, ownerUserId: number): void {
  * may publish publicly. Autonomous agents never hold it. Phase 0 exposes this
  * predicate for the contract; the publish service that uses it lands in Phase 5/7.
  */
+/**
+ * The §26.4 authority check: may this requester publish/expose content publicly?
+ *
+ * NOTE `hasPublishPublicCapability` is consulted ONLY for `user`-kind requesters
+ * (a human whose capability the surface resolved from their role). The other kinds
+ * derive their own authority and IGNORE the parameter:
+ *  - `agent-delegated` re-reads `content:publish_public` from its OWN token scopes
+ *    (so a delegated agent can never exceed what its token was granted, regardless
+ *    of what a surface computed), and
+ *  - `agent-autonomous` can NEVER publish public (returns false unconditionally).
+ * Call sites compute the boolean uniformly for all kinds for simplicity; it is
+ * authoritative only for the `user` branch. Do NOT assume it gates the others.
+ */
 export function canPublishPublic(
   req: Requester,
   hasPublishPublicCapability: boolean

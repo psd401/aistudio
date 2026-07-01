@@ -136,6 +136,57 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "mcp:get_decision_graph",
     internalScopes: ["mcp:get_decision_graph"],
   },
+  // Atrium content tools (Phase 5, Issue #1055). MCP-only catalog entries (the
+  // REST surface is hand-documented in docs/API/v1/openapi.yaml, not generated
+  // here). Mutations are `destructive` so an agent loop confirms before writing.
+  // The internal surface is exposed so scheduled/agentic runs (§25) can resolve
+  // them, gated by the content scope.
+  create_document: {
+    identifier: "content.create_document",
+    requiredScope: "content:create",
+    internalScopes: ["content:create"],
+    destructive: true,
+  },
+  create_artifact: {
+    identifier: "content.create_artifact",
+    requiredScope: "content:create",
+    internalScopes: ["content:create"],
+    destructive: true,
+  },
+  get_content: {
+    identifier: "content.get",
+    requiredScope: "content:read",
+    internalScopes: ["content:read"],
+  },
+  list_content: {
+    identifier: "content.list",
+    requiredScope: "content:read",
+    internalScopes: ["content:read"],
+  },
+  update_content: {
+    identifier: "content.update",
+    requiredScope: "content:update",
+    internalScopes: ["content:update"],
+    destructive: true,
+  },
+  create_version: {
+    identifier: "content.create_version",
+    requiredScope: "content:update",
+    internalScopes: ["content:update"],
+    destructive: true,
+  },
+  set_visibility: {
+    identifier: "content.set_visibility",
+    requiredScope: "content:update",
+    internalScopes: ["content:update"],
+    destructive: true,
+  },
+  publish_content: {
+    identifier: "content.publish",
+    requiredScope: "content:publish_internal",
+    internalScopes: ["content:publish_internal"],
+    destructive: true,
+  },
 };
 
 /**
