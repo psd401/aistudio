@@ -17,6 +17,14 @@ let agentRows: Array<{
   roleId: number | null;
   roleName: string | null;
 }> = [];
+// The by-id lookup carries the identity's OWN scopes (a scheduled run has no token).
+let agentByIdRows: Array<{
+  id: string;
+  name: string;
+  roleId: number | null;
+  roleName: string | null;
+  scopes: string[];
+}> = [];
 let userRows: Array<{
   building: string | null;
   department: string | null;
@@ -27,6 +35,7 @@ let roleRows: Array<{ name: string }> = [];
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: jest.fn(async (_fn: unknown, label: string) => {
     if (label === "atrium.requesterFromAuth.findAgent") return agentRows;
+    if (label === "atrium.requesterFromAuth.findAgentById") return agentByIdRows;
     if (label === "atrium.requesterFromAuth.loadUser") return userRows;
     if (label === "getUserRoles") return roleRows;
     return [];
@@ -40,6 +49,7 @@ jest.mock("@/lib/db/schema", () => ({
     roleId: "roleId",
     oauthClientId: "oauthClientId",
     isActive: "isActive",
+    scopes: "scopes",
   },
   roles: { id: "id", name: "name" },
   users: { id: "id", building: "building", department: "department", gradeLevels: "gradeLevels" },
@@ -54,6 +64,7 @@ jest.mock("drizzle-orm", () => ({
 import {
   requesterFromApiAuth,
   buildDelegatedRequester,
+  buildAutonomousRequesterForIdentity,
 } from "@/lib/content/requester-from-auth";
 import { principalOf } from "@/lib/content/helpers";
 
@@ -72,6 +83,7 @@ afterAll(() => {
 
 beforeEach(() => {
   agentRows = [];
+  agentByIdRows = [];
   userRows = [{ building: "High School", department: null, gradeLevels: null }];
   roleRows = [{ name: "staff" }];
   jest.clearAllMocks();
@@ -198,6 +210,52 @@ describe("requesterFromApiAuth", () => {
     if (req.kind !== "user") throw new Error("wrong kind");
     expect(req.userId).toBe(42);
     expect(req.isAdmin).toBe(false);
+  });
+});
+
+describe("buildAutonomousRequesterForIdentity (scheduled-run identity path)", () => {
+  it("builds an agent-autonomous requester from an active identity id, scopes from the row", async () => {
+    // A scheduled run carries no token, so the identity's authority is its OWN
+    // scopes column — not an OAuth token's scopes.
+    agentByIdRows = [
+      {
+        id: "agent-9",
+        name: "ship-reporter",
+        roleId: 5,
+        roleName: "staff",
+        scopes: ["content:create", "content:publish_internal"],
+      },
+    ];
+    const req = await buildAutonomousRequesterForIdentity("agent-9");
+    expect(req.kind).toBe("agent-autonomous");
+    if (req.kind !== "agent-autonomous") throw new Error("wrong kind");
+    expect(req.agentId).toBe("agent-9");
+    expect(req.roleId).toBe(5);
+    expect(req.roles).toEqual(["staff"]);
+    // Scopes come from the identity row, NOT a token.
+    expect(req.scopes).toEqual(["content:create", "content:publish_internal"]);
+    // The identity never carries content:publish_public (public-publish is human-held).
+    expect(req.scopes).not.toContain("content:publish_public");
+    expect(req.agentLabel).toBe("ship-reporter");
+  });
+
+  it("fails closed (throws) when the identity id is missing or inactive", async () => {
+    // No matching ACTIVE row (deactivated or unknown id) → throw, so a scheduled run
+    // aborts rather than silently running as the owning user with human authority.
+    agentByIdRows = [];
+    await expect(
+      buildAutonomousRequesterForIdentity("deactivated-agent")
+    ).rejects.toThrow(/No active agent identity/);
+  });
+
+  it("yields an empty roles array when the identity has no role", async () => {
+    agentByIdRows = [
+      { id: "agent-x", name: "role-less", roleId: null, roleName: null, scopes: ["content:create"] },
+    ];
+    const req = await buildAutonomousRequesterForIdentity("agent-x");
+    if (req.kind !== "agent-autonomous") throw new Error("wrong kind");
+    expect(req.roles).toEqual([]);
+    expect(req.roleId).toBeNull();
   });
 });
 

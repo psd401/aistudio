@@ -339,8 +339,10 @@ export const versionService = {
     await flushSnapshotWrites(s3Writes);
 
     // Emit after the row commits + blobs flush (§27): drives re-index of the new
-    // head. Best-effort — never rolls back a committed version.
-    await contentEvents.emit("content.version_created", {
+    // head. Best-effort — never rolls back a committed version. Fire-and-forget
+    // (`void`, not `await`): `emit` swallows its own errors, so awaiting only holds
+    // the response open for an SNS round-trip (matches the audit-write pattern).
+    void contentEvents.emit("content.version_created", {
       objectId: obj.id,
       versionId: version.id,
       actorKind: actorKindOf(req),

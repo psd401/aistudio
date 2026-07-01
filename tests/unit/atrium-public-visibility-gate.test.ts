@@ -11,9 +11,11 @@
  *
  * These tests prove the gate now fires on BOTH paths for callers WITHOUT
  * `content:publish_public`, and that authorized callers (admin / explicit
- * capability / delegated-with-grant) still pass. The gate runs BEFORE any DB
- * write, so the DB layer is mocked to fail loudly if it is reached on a rejected
- * request (asserting "nothing was written").
+ * capability / delegated-with-grant) still pass. On the `create` path the gate
+ * runs BEFORE any DB write (`executeTransactionCalls` stays 0 on rejection). On
+ * the `setLevel` path the gate runs INSIDE the transaction against the
+ * FOR-UPDATE-locked row (race-free — see #1090), so a rejection still opens a
+ * transaction; `txUpdateCalls` instead asserts the row UPDATE itself never runs.
  */
 
 // --- mocks (hoisted above imports by jest) ---
@@ -30,10 +32,18 @@ let executeQueryResults: unknown[] = [];
 // lets an ALLOWED (gate-passing) setLevel run its FOR UPDATE lookup + UPDATE
 // against a deterministic in-memory result instead of a real DB.
 let txResults: unknown[] = [];
+// Counts calls to `tx.update(...)` specifically — distinct from the FOR UPDATE
+// `.limit()` lock read — so a rejected gate can assert the row write itself
+// never ran, not just that `.limit()` (also used by the lock read) was called.
+let txUpdateCalls = 0;
 const txChain: Record<string, unknown> = {};
 const txProxy: unknown = new Proxy(txChain, {
   get(_t, prop: string | symbol) {
     if (prop === "then") return undefined;
+    if (prop === "update") {
+      txUpdateCalls += 1;
+      return () => txProxy;
+    }
     if (prop === "returning" || prop === "limit") {
       return () => (txResults.length ? txResults.shift() : []);
     }
@@ -130,6 +140,7 @@ const delegatedWithGrant: Requester = {
 beforeEach(() => {
   executeTransactionCalls = 0;
   executeQueryCalls = 0;
+  txUpdateCalls = 0;
   emitCalls = [];
   txResults = [];
   executeQueryResults = [];
@@ -235,33 +246,57 @@ describe("§26.4 gate — contentService.create with visibility.level = 'public'
 });
 
 describe("§26.4 gate — visibilityService.setLevel to 'public'", () => {
+  // The gate now runs INSIDE the transaction against the FOR-UPDATE-locked row
+  // (race-free), so a REJECTED widen still OPENS a transaction, reads the locked
+  // level, then throws ApprovalRequiredError — which rolls the tx back (nothing is
+  // written). Each rejected case seeds the lock lookup with a NON-public locked row
+  // so the gate is reached (a public locked row would be an idempotent no-op).
   it("REJECTS a non-admin user without publish_public (ApprovalRequiredError, no write)", async () => {
+    txResults = [[{ id: "o1", visibilityLevel: "internal" }]];
     await expect(
       visibilityService.setLevel(staffUser, "o1", { level: "public" })
     ).rejects.toThrow(ApprovalRequiredError);
-    expect(executeTransactionCalls).toBe(0); // level unchanged
     expect(emitCalls.map((c) => c.type)).toContain(
       "content.public_publish_requested"
     );
+    // The gate must reject before the row UPDATE — a reorder that ran
+    // setLevelInTx first would still throw here but would have already written.
+    expect(txUpdateCalls).toBe(0);
   });
 
   it("REJECTS an autonomous agent widening to public", async () => {
+    txResults = [[{ id: "o1", visibilityLevel: "internal" }]];
     await expect(
       visibilityService.setLevel(autonomousAgent, "o1", { level: "public" })
     ).rejects.toThrow(ApprovalRequiredError);
-    expect(executeTransactionCalls).toBe(0);
+    expect(txUpdateCalls).toBe(0);
   });
 
   it("REJECTS a delegated agent lacking the publish_public grant", async () => {
+    txResults = [[{ id: "o1", visibilityLevel: "internal" }]];
     await expect(
       visibilityService.setLevel(delegatedNoGrant, "o1", { level: "public" })
     ).rejects.toThrow(ApprovalRequiredError);
-    expect(executeTransactionCalls).toBe(0);
+    expect(txUpdateCalls).toBe(0);
+  });
+
+  it("does NOT gate a no-op re-save of ALREADY-public content (idempotent, race-safe)", async () => {
+    // The locked row is already public → widening to public changes nothing, so a
+    // non-admin owner without publish_public must pass WITHOUT approval (the exact
+    // regression #1090 fixes), and the check reads the level UNDER the lock.
+    txResults = [[{ id: "o1", visibilityLevel: "public" }]];
+    await expect(
+      visibilityService.setLevel(staffUser, "o1", { level: "public" })
+    ).resolves.toEqual({ visibilityLevel: "public" });
+    expect(
+      emitCalls.some((c) => c.type === "content.public_publish_requested")
+    ).toBe(false);
   });
 
   it("ALLOWS an admin to widen to public (proceeds to the write path)", async () => {
-    // Admin passes the gate; the write runs against the mocked tx (row present).
-    txResults = [[{ id: "o1" }]]; // FOR UPDATE lock finds the row
+    // Admin passes the gate; the write runs against the mocked tx. The locked row
+    // is currently internal (a genuine widen), and admin authority skips the gate.
+    txResults = [[{ id: "o1", visibilityLevel: "internal" }]];
     await expect(
       visibilityService.setLevel(adminUser, "o1", { level: "public" })
     ).resolves.toEqual({ visibilityLevel: "public" });
@@ -273,7 +308,7 @@ describe("§26.4 gate — visibilityService.setLevel to 'public'", () => {
   });
 
   it("ALLOWS a user WITH the explicit publish_public capability", async () => {
-    txResults = [[{ id: "o1" }]];
+    txResults = [[{ id: "o1", visibilityLevel: "internal" }]];
     await expect(
       visibilityService.setLevel(
         staffUser,
@@ -285,7 +320,7 @@ describe("§26.4 gate — visibilityService.setLevel to 'public'", () => {
   });
 
   it("does NOT gate a non-public setLevel (group/internal pass the gate)", async () => {
-    txResults = [[{ id: "o1" }]];
+    txResults = [[{ id: "o1", visibilityLevel: "private" }]];
     await expect(
       visibilityService.setLevel(staffUser, "o1", { level: "internal" })
     ).resolves.toEqual({ visibilityLevel: "internal" });

@@ -16,6 +16,7 @@ import { z } from "zod";
 import {
   ApprovalRequiredError,
   contentService,
+  hasPublishPublicScope,
   isContentError,
   publishService,
   recordContentAudit,
@@ -183,9 +184,7 @@ async function createContent(
     // Session humans must also hold the atrium-content capability (see helper).
     await assertContentAuthoringCapability(context);
     const collectionId = await resolveCollectionId(common.collection);
-    const hasPublishPublicCapability = context.scopes.includes(
-      "content:publish_public"
-    );
+    const hasPublishPublicCapability = hasPublishPublicScope(context.scopes);
     const created = await contentService.create(
       req,
       {
@@ -452,9 +451,7 @@ async function handleSetVisibility(
     // inside `setLevel` itself (§26.4) — same authority key as `publish_content`:
     // an EXPLICIT content:publish_public scope, never the session wildcard.
     const obj = await contentService.loadForEdit(req, parsed.data.id);
-    const hasPublishPublicCapability = context.scopes.includes(
-      "content:publish_public"
-    );
+    const hasPublishPublicCapability = hasPublishPublicScope(context.scopes);
     const result = await visibilityService.setLevel(
       req,
       obj.id,
@@ -505,9 +502,7 @@ async function handlePublishContent(
     // content:publish_public scope. A session's wildcard ["*"] must NOT auto-grant
     // it (every logged-in human would otherwise bypass the gate) — admin humans
     // still pass via req.isAdmin inside the service.
-    const hasPublishPublicCapability = context.scopes.includes(
-      "content:publish_public"
-    );
+    const hasPublishPublicCapability = hasPublishPublicScope(context.scopes);
     const result = await publishService.publish(
       req,
       parsed.data.id,

@@ -19,6 +19,7 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { publishService } from "@/lib/content/publish-service";
+import { ApprovalRequiredError } from "@/lib/content/errors";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
@@ -74,6 +75,21 @@ export async function unpublishDocumentAction(
     return createSuccess(result, "Document unpublished");
   } catch (error) {
     timer({ status: "error" });
+    // §26.4 gate: taking a public destination offline without authority is a
+    // pending-approval outcome (approval-queue event emitted in the service), not a
+    // failure — surface it distinctly so the editor can show an amber "submitted
+    // for review" caption, mirroring publishDocumentAction. Defensive: the shipped
+    // editor only unpublishes from `intranet` (which never trips the gate), but the
+    // service accepts public destinations.
+    if (error instanceof ApprovalRequiredError) {
+      log.info("Unpublish requires approval", { requestId });
+      return {
+        isSuccess: false,
+        approvalRequired: true,
+        message:
+          "Unpublishing from this destination requires administrator approval — your request has been submitted for review.",
+      };
+    }
     return handleError(error, "Failed to unpublish document", {
       context: "unpublishDocumentAction",
       requestId,

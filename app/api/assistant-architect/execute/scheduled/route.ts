@@ -9,6 +9,8 @@ import { promptResults, scheduledExecutions } from '@/lib/db/schema';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
+import { buildAutonomousRequesterForIdentity } from '@/lib/content';
+import type { Requester } from '@/lib/content/types';
 import type { StreamRequest } from '@/lib/streaming/types';
 import type { UIMessage } from 'ai';
 import jwt from 'jsonwebtoken';
@@ -69,6 +71,14 @@ interface PromptExecutionContext {
   userCognitoSub: string;
   assistantOwnerSub?: string;
   userId: number;
+  /**
+   * The autonomous agent Requester the run executes as (§25 service identity),
+   * when the schedule specified an `agent_identity_id`. Null = the run authors any
+   * Atrium content as the owning user. Threaded here so the content-authoring tools
+   * (a later wiring) resolve their write permission from the identity's scopes, not
+   * the user's full human authority.
+   */
+  agentRequester: Requester | null;
 }
 
 /**
@@ -110,6 +120,54 @@ function validateInternalRequest(req: NextRequest): { scheduleId: string; execut
   } catch (error) {
     log.warn('JWT verification failed', { error: error instanceof Error ? error.message : String(error) });
     return null;
+  }
+}
+
+/**
+ * Resolve the service-identity Requester for a scheduled run (§25). Returns the
+ * `agent-autonomous` Requester when `agentIdentityId` is set and active, `null`
+ * when the schedule runs as the owning user (no identity), or an error `Response`
+ * (HTTP 422) when a requested identity is missing/inactive — the run FAILS CLOSED
+ * rather than silently executing with the user's authority.
+ *
+ * Extracted from `POST` to keep that handler within the complexity/line budget.
+ */
+async function resolveScheduledAgentRequester(
+  agentIdentityId: string | null | undefined,
+  ctx: { scheduleId: number; userId: number; requestId: string; timer: ReturnType<typeof startTimer>; log: ReturnType<typeof createLogger> }
+): Promise<{ requester: Requester | null } | { errorResponse: Response }> {
+  if (!agentIdentityId) return { requester: null };
+  try {
+    const requester = await buildAutonomousRequesterForIdentity(agentIdentityId);
+    ctx.log.info('Scheduled run resolved to an agent service-identity', {
+      scheduleId: ctx.scheduleId,
+      userId: ctx.userId,
+      agentIdentityId,
+      agentLabel:
+        requester.kind === 'agent-autonomous' ? requester.agentLabel : undefined,
+    });
+    return { requester };
+  } catch (identityError) {
+    ctx.log.error('Scheduled run requested an inactive/unknown agent identity; aborting', {
+      scheduleId: ctx.scheduleId,
+      userId: ctx.userId,
+      agentIdentityId,
+      error:
+        identityError instanceof Error ? identityError.message : String(identityError),
+    });
+    ctx.timer({ status: 'error', reason: 'invalid_agent_identity' });
+    return {
+      errorResponse: new Response(
+        JSON.stringify({
+          error: 'Invalid agent identity',
+          message:
+            'The schedule references an agent identity that is not active. ' +
+            'Re-activate it or clear the identity to run as the owning user.',
+          requestId: ctx.requestId,
+        }),
+        { status: 422, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
   }
 }
 
@@ -215,19 +273,21 @@ export async function POST(req: NextRequest) {
 
     const { scheduleId, toolId, inputs, userId, triggeredBy, scheduledAt, agentIdentityId } = validationResult.data;
 
-    // Atrium Phase 5 (#1055): service-identity execution is groundwork only — the
-    // column + Lambda forwarding land in this PR, but running the assistant under
-    // an agent-autonomous Requester (so its content authoring is system-owned +
-    // scope-bounded) is not yet wired. Surface this LOUDLY rather than silently
-    // executing as the owning user, so an operator who set agent_identity_id gets
-    // a signal it had no effect.
-    if (agentIdentityId) {
-      log.warn(
-        'Scheduled run requested an agent service-identity, but service-identity ' +
-        'execution is not yet implemented; running under the owning user instead',
-        { scheduleId, userId, agentIdentityId }
-      );
-    }
+    // Atrium Phase 5 (#1055, §25): resolve the schedule's optional agent service
+    // identity into an `agent-autonomous` Requester so any Atrium content the run
+    // authors is system-owned, agent-stamped, and bounded by the identity's OWN
+    // scopes (never the user's full human authority). Fails CLOSED — a
+    // missing/inactive identity aborts the run (422) instead of silently running as
+    // the owning user. See `resolveScheduledAgentRequester`.
+    const agentResolution = await resolveScheduledAgentRequester(agentIdentityId, {
+      scheduleId,
+      userId,
+      requestId,
+      timer,
+      log,
+    });
+    if ('errorResponse' in agentResolution) return agentResolution.errorResponse;
+    const agentRequester = agentResolution.requester;
 
     log.info('Scheduled execution request parsed', sanitizeForLogging({
       scheduleId,
@@ -357,7 +417,11 @@ export async function POST(req: NextRequest) {
       executionId,
       userCognitoSub,
       assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
-      userId
+      userId,
+      // The resolved service-identity Requester (null when the schedule runs as the
+      // owning user). Threaded so the content-authoring tool wiring reads its write
+      // authority from the identity's scopes.
+      agentRequester
     };
 
     try {
@@ -548,6 +612,18 @@ export async function POST(req: NextRequest) {
 }
 
 /**
+ * A stable label for the identity a run authors content AS — an autonomous service
+ * identity (§25) when one was resolved, otherwise the owning user. Kept as a small
+ * helper so the caller stays within the complexity budget.
+ */
+function describeWriteIdentity(context: PromptExecutionContext): string {
+  const req = context.agentRequester;
+  return req?.kind === 'agent-autonomous'
+    ? `agent:${req.agentId}`
+    : `user:${context.userId}`;
+}
+
+/**
  * Execute prompt chain server-side without SSE
  * Collects complete response in memory
  */
@@ -560,7 +636,10 @@ async function executePromptChainServerSide(
 ) {
   log.info('Starting server-side prompt chain execution', {
     promptCount: prompts.length,
-    executionId: context.executionId
+    executionId: context.executionId,
+    // Record the effective write identity for the run so the audit trail shows
+    // whether content was authored as a bounded service identity (§25) or the user.
+    writeIdentity: describeWriteIdentity(context)
   });
 
   for (const prompt of prompts) {

@@ -13,12 +13,12 @@ import {
   requireScope,
   createApiResponse,
   createErrorResponse,
-  extractStringParam,
   parseRequestBody,
 } from "@/lib/api";
 import { z } from "zod";
 import {
   ApprovalRequiredError,
+  hasPublishPublicScope,
   publishService,
   recordContentAudit,
 } from "@/lib/content";
@@ -36,13 +36,14 @@ const publishBodySchema = z.object({
   visibility: restVisibilitySchema.optional(),
 });
 
-export const POST = withApiAuth(async (request: NextRequest, auth, requestId) => {
+export const POST = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
   const scopeError = requireScope(auth, "content:publish_internal", requestId);
   if (scopeError) return scopeError;
 
   const log = createLogger({ requestId, route: "api.v1.content.publish" });
 
-  const id = extractStringParam(request.url, "content");
+  // Real Next.js [id] route param — collision-free vs. parsing the URL by segment.
+  const id = params.id;
   if (!id) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Missing content id");
   }
@@ -59,7 +60,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   // token's EXPLICIT content:publish_public scope. A session's wildcard ["*"]
   // must NOT auto-grant it (every logged-in human would otherwise bypass the
   // gate) — admin humans still pass via req.isAdmin inside the service.
-  const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
+  const hasPublishPublicCapability = hasPublishPublicScope(auth.scopes);
 
   try {
     // Session humans must also hold the atrium-content capability (see helper).

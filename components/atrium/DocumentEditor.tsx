@@ -184,6 +184,7 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
   const {
     message,
     actionError,
+    pendingApproval,
     busy,
     handleSnapshot,
     handlePublish,
@@ -205,10 +206,18 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
       </div>
       {message && (
         <p
+          // A pending-approval outcome is announced as a status (not an error) and
+          // styled amber — distinct from the red error and the neutral success
+          // captions, mirroring VisibilityChip's §26.4 pending notice.
           aria-live="polite"
+          role={pendingApproval ? "status" : undefined}
           className={cn(
             "text-xs",
-            actionError ? "text-destructive" : "text-muted-foreground"
+            actionError
+              ? "text-destructive"
+              : pendingApproval
+                ? "text-amber-600"
+                : "text-muted-foreground"
           )}
         >
           {message}

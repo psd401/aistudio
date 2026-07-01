@@ -21,6 +21,7 @@ import {
   oauthRefreshTokens,
 } from "@/lib/db/schema"
 import { createLogger } from "@/lib/logger"
+import { systemUserIdOrNull } from "@/lib/content/helpers"
 import { createHash } from "node:crypto"
 
 // ============================================
@@ -316,13 +317,16 @@ class DrizzleAdapter implements Adapter {
     const accountUserId = Number.parseInt(payload.accountId as string, 10)
     let userId = accountUserId
     if (Number.isNaN(userId)) {
-      const sysId = Number.parseInt(process.env.ATRIUM_SYSTEM_USER_ID ?? "", 10)
-      if (Number.isNaN(sysId)) {
-        // Operator misconfiguration (missing env var), not a type check —
-        // prefer-type-error's heuristic misreads the surrounding isNaN guard.
-        // eslint-disable-next-line unicorn/prefer-type-error
+      // Validate via the shared `systemUserIdOrNull()` (requires
+      // Number.isInteger(id) && id > 0) rather than a bare `!Number.isNaN(parseInt)`
+      // — the latter accepts `-1`, `1.5` (parseInt truncates → 1), and trailing
+      // garbage ("3abc"), any of which would insert a bogus owner id. A null here
+      // is an operator misconfiguration (missing/invalid env var), not bad client
+      // input, so surface it as a clear error.
+      const sysId = systemUserIdOrNull()
+      if (sysId == null) {
         throw new Error(
-          "Cannot persist a user-less access token (client_credentials) without ATRIUM_SYSTEM_USER_ID"
+          "Cannot persist a user-less access token (client_credentials) without a valid ATRIUM_SYSTEM_USER_ID (positive integer)"
         )
       }
       userId = sysId

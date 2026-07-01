@@ -22,10 +22,13 @@ import {
   contentObjects,
   contentVisibilityGrants,
 } from "@/lib/db/schema";
-import { actorKindOf, canPublishPublic, principalOf } from "./helpers";
+import {
+  canPublishPublic,
+  principalOf,
+  raisePublishApprovalRequired,
+} from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
-import { contentEvents } from "./events";
-import { ApprovalRequiredError, NotFoundError, ValidationError } from "./errors";
+import { NotFoundError, ValidationError } from "./errors";
 import { GRANT_KIND_SET, POSITIVE_INT_RE, VISIBILITY_LEVEL_SET } from "./validators";
 import type {
   ContentObjectDTO,
@@ -522,27 +525,28 @@ export const visibilityService = {
     visibility: VisibilityInput,
     opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<{ visibilityLevel: VisibilityLevel }> {
-    if (
-      visibility.level === "public" &&
-      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
-    ) {
-      await contentEvents.emit("content.public_publish_requested", {
-        objectId,
-        actorKind: actorKindOf(req),
-        agentLabel: req.kind === "user" ? null : req.agentLabel,
-      });
-      throw new ApprovalRequiredError(
-        "Widening visibility to public requires approval",
-        { objectId }
-      );
-    }
+    // Whether this caller holds the §26.4 public-publish authority (pure, no IO).
+    // The ACTUAL gate decision (is this a NEW public exposure?) is made INSIDE the
+    // transaction against the FOR-UPDATE-locked level — never against a pre-lock
+    // read. Deciding it before the lock is a TOCTOU hole: a concurrent narrow
+    // (public → internal) between the read and the locked write would leave the
+    // "already public → no-op" branch taken against a stale `public`, letting an
+    // unauthorized widen-back-to-public slip past approval.
+    const mayPublishPublic = canPublishPublic(
+      req,
+      opts.hasPublishPublicCapability ?? false
+    );
     await executeTransaction(async (tx) => {
       // Guard against a missing object inside the tx so the level write does not
       // silently no-op (UPDATE ... WHERE id = <absent> affects zero rows). Lock
       // the row FOR UPDATE so a concurrent delete cannot slip between this check
-      // and the setLevelInTx update.
+      // and the setLevelInTx update, and read the CURRENT level under the same lock
+      // for the §26.4 gate below (race-free).
       const rows = await tx
-        .select({ id: contentObjects.id })
+        .select({
+          id: contentObjects.id,
+          visibilityLevel: contentObjects.visibilityLevel,
+        })
         .from(contentObjects)
         .where(eq(contentObjects.id, objectId))
         .for("update")
@@ -550,6 +554,28 @@ export const visibilityService = {
       if (!rows[0]) {
         throw new NotFoundError("Content not found", { objectId });
       }
+
+      // §26.4 — widening to `public` is gated iff the locked row is not ALREADY
+      // public (a no-op re-save of already-public content is not a new exposure and
+      // passes). Same privilege boundary as `publishService.publish`'s widen; here
+      // it is race-free because the check reads the level under the FOR UPDATE lock
+      // held through the write. Throwing rolls the transaction back — nothing widens.
+      if (
+        visibility.level === "public" &&
+        rows[0].visibilityLevel !== "public" &&
+        !mayPublishPublic
+      ) {
+        // Shared with `publishService`'s visibility-widen gate (`./helpers`) so the
+        // emitted event shape + fail-closed behavior stay identical across every
+        // §26.4 gate site.
+        raisePublishApprovalRequired(
+          req,
+          "Widening visibility to public requires approval",
+          { objectId },
+          { objectId }
+        );
+      }
+
       await setLevelInTx(tx, objectId, visibility);
     }, "content.setLevel");
     return { visibilityLevel: visibility.level };

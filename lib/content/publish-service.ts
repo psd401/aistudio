@@ -37,6 +37,7 @@ import {
   assertCanEdit,
   authorUserIdOf,
   canPublishPublic,
+  raisePublishApprovalRequired,
 } from "./helpers";
 import { visibilityService } from "./visibility-service";
 import { contentEvents } from "./events";
@@ -120,6 +121,12 @@ async function loadPublishable(
   return rows[0] ?? null;
 }
 
+// §26.4 — this publish path's two gate sites (the pre-tx `public_web` destination
+// branch and the in-tx visibility-widen branch, below) both raise via the shared
+// `raisePublishApprovalRequired` (in `./helpers`, also used by
+// `visibilityService.setLevel`) so the message + emitted event shape stay
+// identical across every §26.4 gate site.
+
 export const publishService = {
   /**
    * Publish (or republish) an object's working head to a destination. Idempotent
@@ -162,28 +169,26 @@ export const publishService = {
     }
     assertCanEdit(req, obj.ownerUserId);
 
-    // §26.4 — the public-publish gate. Targeting a public-facing destination, or
-    // widening visibility to `public`, requires `content:publish_public`:
-    // autonomous agents never hold it, under-scoped delegated agents lack it, and
-    // non-admin humans need the capability. When the caller is not authorized,
-    // emit the approval-queue signal and raise the structured ApprovalRequiredError
-    // (surfaces map it to 202 / `approval_required`) — never silently publish
-    // unreviewed content to families/the public.
-    const isPublicFacing =
-      input.destination === "public_web" || input.visibility?.level === "public";
-    if (
-      isPublicFacing &&
-      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
-    ) {
-      await contentEvents.emit("content.public_publish_requested", {
-        objectId,
-        slug: obj.slug,
-        destination: input.destination,
-        actorKind: actorKindOf(req),
-        agentLabel: req.kind === "user" ? null : req.agentLabel,
-      });
-      throw new ApprovalRequiredError(
+    // Whether this caller holds the §26.4 public-publish authority (pure, no IO).
+    const mayPublishPublic = canPublishPublic(
+      req,
+      opts.hasPublishPublicCapability ?? false
+    );
+
+    // §26.4 gate — PART 1 (destination), evaluated pre-transaction because it does
+    // NOT depend on the object's current visibility (a `public_web` destination is
+    // ALWAYS a public exposure) and so is race-free here. It runs BEFORE the
+    // adapter-not-implemented check below so an unauthorized caller gets the
+    // approval signal, not a "not yet available" error. PART 2 — widening
+    // visibility to `public` — DOES depend on the current level, so it is evaluated
+    // inside the transaction against the FOR-UPDATE-locked row (see below), closing
+    // the TOCTOU hole where a concurrent narrow (public → internal) between a
+    // pre-read and the locked write would skip the gate on a real widen-back.
+    if (input.destination === "public_web" && !mayPublishPublic) {
+      raisePublishApprovalRequired(
+        req,
         "Publishing to a public destination requires approval",
+        { objectId, slug: obj.slug, destination: input.destination },
         { destination: input.destination, objectId }
       );
     }
@@ -229,13 +234,36 @@ export const publishService = {
         // `loadPublishable` above, but re-select inside the tx (a concurrent delete
         // could have removed it between the load and this lock); a missing row 404s.
         const locked = await tx
-          .select({ id: contentObjects.id })
+          .select({
+            id: contentObjects.id,
+            visibilityLevel: contentObjects.visibilityLevel,
+          })
           .from(contentObjects)
           .where(eq(contentObjects.id, objectId))
           .for("update")
           .limit(1);
         if (!locked[0]) {
           throw new NotFoundError("Content not found", { objectId });
+        }
+
+        // §26.4 gate — PART 2 (visibility widen), evaluated HERE against the locked
+        // row's CURRENT visibility so it is race-free: a widen to `public` is gated
+        // iff the locked row is not ALREADY public. A concurrent narrow can no
+        // longer slip between the check and the widen (both hold this lock), so an
+        // unauthorized caller can never widen-back-to-public un-approved. A no-op
+        // re-save of already-public content is not a new exposure and passes.
+        // Throwing here rolls the transaction back, so nothing is widened/published.
+        if (
+          input.visibility?.level === "public" &&
+          locked[0].visibilityLevel !== "public" &&
+          !mayPublishPublic
+        ) {
+          raisePublishApprovalRequired(
+            req,
+            "Publishing to a public destination requires approval",
+            { objectId, slug: obj.slug, destination: input.destination },
+            { destination: input.destination, objectId }
+          );
         }
 
         // Optionally widen visibility in the same tx so the status change and
@@ -344,8 +372,10 @@ export const publishService = {
 
     // Emit AFTER the commit + adapter side effect, exactly once per successful
     // publish (§27): re-index for retrieval, run connector pushes, notify. Best
-    // effort — a bus failure never rolls back the publish.
-    await contentEvents.emit("content.published", {
+    // effort — a bus failure never rolls back the publish. Fire-and-forget (`void`,
+    // not `await`): `emit` swallows its own errors, so awaiting only holds the
+    // response open for an SNS round-trip (matches the audit-write pattern).
+    void contentEvents.emit("content.published", {
       objectId,
       slug: obj.slug,
       versionId: publishedVersionId,
@@ -488,7 +518,8 @@ export const publishService = {
 
     // Emit after the commit + adapter teardown, only when a live publication was
     // actually removed (the `unpublished: false` no-op path returned above).
-    await contentEvents.emit("content.unpublished", {
+    // Fire-and-forget (`void`, not `await`): best-effort, never blocks the response.
+    void contentEvents.emit("content.unpublished", {
       objectId,
       slug: obj.slug,
       destination,
