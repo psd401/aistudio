@@ -220,3 +220,20 @@ export function canPublishPublic(
     return req.scopes.includes("content:publish_public");
   return false;
 }
+
+/**
+ * Whether an authenticated API/MCP caller's token scopes include the EXPLICIT
+ * `content:publish_public` scope — the value the REST/MCP surfaces pass to the
+ * service's §26.4 gate as `hasPublishPublicCapability`.
+ *
+ * Every content REST route and MCP handler that resolves this authority computes
+ * the same `scopes.includes("content:publish_public")`; this is the single point
+ * of truth so the scope string is not hand-typed at ~7 call sites (a typo would
+ * silently fail-open — the gate would never see the scope). A `.includes` over the
+ * exact string, so a session wildcard `["*"]` deliberately does NOT match: only an
+ * explicitly-granted `content:publish_public` scope passes (admins still pass via
+ * `req.isAdmin` inside the service).
+ */
+export function hasPublishPublicScope(scopes: string[]): boolean {
+  return scopes.includes("content:publish_public");
+}

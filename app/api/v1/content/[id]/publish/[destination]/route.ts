@@ -18,6 +18,7 @@ import {
 } from "@/lib/api";
 import {
   ApprovalRequiredError,
+  hasPublishPublicScope,
   publishService,
   recordContentAudit,
 } from "@/lib/content";
@@ -64,7 +65,7 @@ export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId) 
 
   // Same authority key as publish/set_visibility/create: an EXPLICIT
   // content:publish_public scope, never a session's wildcard ["*"].
-  const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
+  const hasPublishPublicCapability = hasPublishPublicScope(auth.scopes);
 
   try {
     // Session humans must also hold the atrium-content capability (see helper).

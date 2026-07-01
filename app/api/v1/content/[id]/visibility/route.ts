@@ -21,6 +21,7 @@ import {
 import {
   ApprovalRequiredError,
   contentService,
+  hasPublishPublicScope,
   recordContentAudit,
   visibilityService,
 } from "@/lib/content";
@@ -54,7 +55,7 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId) =
 
   // Same authority key as the publish endpoint: an EXPLICIT content:publish_public
   // scope, never a session's wildcard ["*"] (admin humans pass via req.isAdmin).
-  const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
+  const hasPublishPublicCapability = hasPublishPublicScope(auth.scopes);
 
   try {
     // Session humans must also hold the atrium-content capability (see helper).

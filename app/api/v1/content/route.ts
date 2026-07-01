@@ -20,6 +20,7 @@ import { z } from "zod";
 import {
   ApprovalRequiredError,
   contentService,
+  hasPublishPublicScope,
   recordContentAudit,
   requesterFromApiAuth,
 } from "@/lib/content";
@@ -118,7 +119,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
 
   // Same authority key as publish/set_visibility: an EXPLICIT content:publish_public
   // scope, never a session's wildcard ["*"] (admin humans pass via req.isAdmin).
-  const hasPublishPublicCapability = auth.scopes.includes("content:publish_public");
+  const hasPublishPublicCapability = hasPublishPublicScope(auth.scopes);
 
   try {
     // Session humans must ALSO hold the atrium-content capability (scope alone is

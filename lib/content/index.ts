@@ -51,6 +51,7 @@ export {
   assertCanEdit,
   canEdit,
   canPublishPublic,
+  hasPublishPublicScope,
   principalOf,
   slugifyTitle,
 } from "./helpers";
