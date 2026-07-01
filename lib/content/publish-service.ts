@@ -71,6 +71,7 @@ export interface PublishInput {
  */
 const notImplemented = (destination: PublishDestination): PublishAdapter => ({
   destination,
+  implemented: false,
   async publish(): Promise<{ externalRef: string | null }> {
     throw new ValidationError(
       `Publishing to '${destination}' is not implemented in Phase 1`,
@@ -199,6 +200,23 @@ export const publishService = {
     const publishedBy = authorUserIdOf(req);
 
     const adapter = adapters[input.destination];
+
+    // A destination whose adapter is not yet implemented (public_web/schoology/
+    // google — later phases) must fail BEFORE the transaction. Otherwise the
+    // status/visibility widening below commits, then the post-commit adapter call
+    // throws, and the object is left flagged `public` (canView treats
+    // visibilityLevel === "public" as world-readable regardless of publication
+    // status) with no live publication — a "failed" publish that silently exposed
+    // the content. Blocking here writes nothing. This runs AFTER the §26.4 gate so
+    // an unauthorized caller still gets the approval signal, not this error. (When
+    // a real external adapter lands, its runtime failures will instead need
+    // compensating revert of the committed status/visibility.)
+    if (adapter.implemented === false) {
+      throw new ValidationError(
+        `Publishing to '${input.destination}' is not yet available`,
+        { destination: input.destination }
+      );
+    }
 
     const publicationId = await executeTransaction(
       async (tx: DbTransaction) => {

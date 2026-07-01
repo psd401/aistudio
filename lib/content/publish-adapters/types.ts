@@ -56,6 +56,15 @@ export interface PublishAdapter {
   destination: PublishDestination;
 
   /**
+   * `false` for a not-yet-implemented destination stub (public_web/schoology/
+   * google land in later phases). The publish service checks this BEFORE its
+   * status/visibility transaction so an unimplemented destination fails without
+   * committing anything (see publish-service). Omitted/undefined means the
+   * adapter is live.
+   */
+  implemented?: boolean;
+
+  /**
    * Make `versionId` of object `objectId` live at this destination. `slug` is the
    * object's URL slug (the reader/public address); `title` and `collectionId`
    * let a destination place the object in its information architecture (the

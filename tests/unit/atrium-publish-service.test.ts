@@ -9,7 +9,8 @@
  *  - viewable but not editable              -> ForbiddenError (via assertCanEdit)
  *  - public-facing publish, caller lacks publish_public -> ApprovalRequiredError
  *                                              (§26.4 gate); an admin passes it
- *  - unimplemented destination (schoology)  -> ValidationError (adapter throws)
+ *  - unimplemented destination (schoology)  -> ValidationError, hard-blocked
+ *                                              BEFORE the tx (no partial write)
  *  - no working head (currentVersionId null) -> ValidationError
  *  - happy path                              -> resolves with ids; applyGrants is
  *                                              only called for group visibility
@@ -219,24 +220,37 @@ describe("publishService.publish", () => {
     ).rejects.toThrow(ApprovalRequiredError);
   });
 
-  it("lets an admin past the public_web gate (then hits the not-yet-implemented adapter)", async () => {
-    // An admin passes canPublishPublic, so the gate does NOT fire; the publish
-    // proceeds through the tx and only fails at the public_web adapter, which is
-    // still a later-phase no-op-throw. Proves the gate is conditional, not blanket.
+  it("admin past the gate to an unimplemented public destination fails BEFORE any write (no visibility leak)", async () => {
+    // An admin passes canPublishPublic, so the §26.4 gate does NOT fire. But
+    // public_web is a not-yet-implemented adapter, so the publish must be blocked
+    // BEFORE the transaction — NOT proceed through it and only fail at the adapter
+    // afterward. Regression guard for the leak where the tx committed
+    // visibilityLevel="public" (world-readable via canView) before the adapter
+    // threw, leaving the object public despite the publish "failing". Queue tx
+    // results so that IF the tx wrongly ran, it would not crash for the wrong
+    // reason — the assertions below prove it never ran.
     txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
     await expect(
-      publishService.publish(admin, "o1", { destination: "public_web" })
+      publishService.publish(admin, "o1", {
+        destination: "public_web",
+        visibility: { level: "public" },
+      })
     ).rejects.toThrow(ValidationError);
+    // The exact leak this fix closes: visibility was NEVER widened in a tx...
+    expect(setLevelInTxCalls).toBe(0);
+    // ...and the (no-op) adapter side effect never ran either.
+    expect(adapterPublishCalls).toBe(0);
   });
 
-  it("throws ValidationError for an unimplemented destination (schoology)", async () => {
-    // The tx (lock select -> upsert RETURNING) runs and commits FIRST; the
-    // not-implemented schoology adapter then throws when called after the tx.
-    // tx queue: FOR UPDATE lock row, then the publication upsert RETURNING id.
+  it("throws ValidationError for an unimplemented destination (schoology), before the tx", async () => {
+    // schoology is not public-facing (no gate), but its adapter is not yet
+    // implemented, so the publish is hard-blocked BEFORE the transaction runs.
     txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
     await expect(
       publishService.publish(owner, "o1", { destination: "schoology" })
     ).rejects.toThrow(ValidationError);
+    expect(setLevelInTxCalls).toBe(0);
+    expect(adapterPublishCalls).toBe(0);
   });
 
   it("throws ValidationError when there is no working head", async () => {

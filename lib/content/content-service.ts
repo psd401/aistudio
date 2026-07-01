@@ -308,6 +308,18 @@ export const contentService = {
       visibilityLevel === "public" &&
       !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
     ) {
+      // Parity with Gate 1 (explicit `input.visibility.level === "public"`): a
+      // collection whose admin-set default is `public` (e.g. the seeded
+      // `public-site` collection, default_visibility_level = 'public') resolves
+      // to "public" HERE without an explicit visibility, so emit the same
+      // approval-queue signal before failing closed — otherwise SNS consumers
+      // miss this denied-public-create case that Gate 1 covers.
+      await contentEvents.emit("content.public_publish_requested", {
+        objectId: "",
+        destination: "create",
+        actorKind: actorKindOf(req),
+        agentLabel: req.kind === "user" ? null : req.agentLabel,
+      });
       // No object exists yet to carry an id/slug on the approval-queue event
       // (unlike `publish`/`setLevel`, which gate an already-persisted object) —
       // surface the same structured error; the surface layer's audit write

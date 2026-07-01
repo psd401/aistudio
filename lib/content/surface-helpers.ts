@@ -84,6 +84,15 @@ export const ATRIUM_CONTENT_CAPABILITY = "atrium-content";
  * sk- key with `content:create` is a deliberate authorization), and they carry no
  * browser session / capability grants. Reads are never gated (a viewer only sees
  * what `canView` admits regardless of capability).
+ *
+ * NOTE on the capabilities-vs-scopes separation: CLAUDE.md says do NOT gate
+ * API/MCP endpoints with `hasCapabilityAccess()`. This is a deliberate, bounded
+ * exception scoped to the ONE case that rule can't cover: a browser session on an
+ * API/MCP surface authenticates with the wildcard `["*"]` scope, so `requireScope`
+ * is a no-op for it and scopes provide NO gating at all. The capability check is
+ * applied ONLY to that session path (the `authType !== "session"` early-return
+ * keeps every genuine api_key/jwt/MCP-token caller purely scope-gated). Do NOT
+ * extend this to non-session callers — that WOULD violate the separation.
  */
 export async function assertContentAuthoringCapability(auth: {
   authType?: "session" | "api_key" | "jwt";

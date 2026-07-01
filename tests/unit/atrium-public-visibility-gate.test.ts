@@ -20,6 +20,10 @@
 
 let executeTransactionCalls = 0;
 let executeQueryCalls = 0;
+// A queue of canned executeQuery results (e.g. the collection-default lookup);
+// each call shifts the next, falling back to [] — lets a test drive
+// `collectionDefaultOutsideTx` to a specific default_visibility_level.
+let executeQueryResults: unknown[] = [];
 
 // A chainable tx proxy: awaited terminals `.limit()` / `.returning()` yield the
 // next queued result; every other builder method keeps the chain fluent. This
@@ -48,7 +52,7 @@ jest.mock("@/lib/db/drizzle-client", () => ({
   ),
   executeQuery: jest.fn(async () => {
     executeQueryCalls += 1;
-    return [];
+    return executeQueryResults.length ? executeQueryResults.shift() : [];
   }),
 }));
 
@@ -128,6 +132,7 @@ beforeEach(() => {
   executeQueryCalls = 0;
   emitCalls = [];
   txResults = [];
+  executeQueryResults = [];
   jest.clearAllMocks();
 });
 
@@ -193,6 +198,26 @@ describe("§26.4 gate — contentService.create with visibility.level = 'public'
     await expect(
       contentService.create(delegatedWithGrant, publicDoc)
     ).rejects.not.toThrow(ApprovalRequiredError);
+  });
+
+  it("REJECTS + emits the approval event when a COLLECTION DEFAULT resolves to public (Gate 2, no explicit visibility)", async () => {
+    // The seeded `public-site` collection has default_visibility_level = 'public',
+    // so a create into it with NO explicit visibility resolves to "public" via the
+    // collection default (Gate 2) rather than the explicit path (Gate 1). Both
+    // gates must behave identically: fail closed AND emit the approval-queue signal
+    // (regression for the Gate-2 path that previously threw WITHOUT emitting).
+    executeQueryResults = [[{ level: "public" }]]; // collection-default lookup -> public
+    await expect(
+      contentService.create(staffUser, {
+        kind: "document",
+        title: "Doc into the public-site collection",
+        collectionId: "col-public-site",
+      })
+    ).rejects.toThrow(ApprovalRequiredError);
+    expect(executeTransactionCalls).toBe(0); // nothing created
+    expect(emitCalls.map((c) => c.type)).toContain(
+      "content.public_publish_requested"
+    );
   });
 
   it("does NOT gate a non-public create (internal level passes the gate)", async () => {
