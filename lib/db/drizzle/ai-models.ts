@@ -71,6 +71,9 @@ export interface AIModelData {
   inputCostPer1kTokens?: string | null;
   outputCostPer1kTokens?: string | null;
   cachedInputCostPer1kTokens?: string | null;
+  // Cache-WRITE rate (migration 092, issue #1089). Pairs with the cache-read
+  // rate above so an admin can price a caching-capable model end-to-end.
+  cacheWriteCostPer1kTokens?: string | null;
   pricingUpdatedAt?: Date | null;
   averageLatencyMs?: number | null;
   maxConcurrency?: number | null;
@@ -92,6 +95,8 @@ export interface AIModelUpdateData {
   inputCostPer1kTokens?: string | null;
   outputCostPer1kTokens?: string | null;
   cachedInputCostPer1kTokens?: string | null;
+  // Cache-WRITE rate (migration 092, issue #1089).
+  cacheWriteCostPer1kTokens?: string | null;
   pricingUpdatedAt?: Date | null;
   averageLatencyMs?: number | null;
   maxConcurrency?: number | null;
@@ -323,6 +328,7 @@ export async function createAIModel(modelData: AIModelData) {
           inputCostPer1kTokens: modelData.inputCostPer1kTokens,
           outputCostPer1kTokens: modelData.outputCostPer1kTokens,
           cachedInputCostPer1kTokens: modelData.cachedInputCostPer1kTokens,
+          cacheWriteCostPer1kTokens: modelData.cacheWriteCostPer1kTokens,
           pricingUpdatedAt: modelData.pricingUpdatedAt,
           averageLatencyMs: modelData.averageLatencyMs,
           maxConcurrency: modelData.maxConcurrency,

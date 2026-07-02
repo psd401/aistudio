@@ -230,6 +230,9 @@ export async function POST(request: Request) {
       inputCostPer1kTokens: body.inputCostPer1kTokens || undefined,
       outputCostPer1kTokens: body.outputCostPer1kTokens || undefined,
       cachedInputCostPer1kTokens: body.cachedInputCostPer1kTokens || undefined,
+      // Cache-WRITE rate (issue #1089) — without this the create path silently
+      // drops the admin form's cache-write price (update persists it via spread).
+      cacheWriteCostPer1kTokens: body.cacheWriteCostPer1kTokens || undefined,
       pricingUpdatedAt: body.pricingUpdatedAt ? new Date(body.pricingUpdatedAt) : undefined,
       // Performance fields
       averageLatencyMs: body.averageLatencyMs || undefined,
