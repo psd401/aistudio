@@ -227,9 +227,13 @@ COPY openclaw.json /home/node/.openclaw/openclaw.json
 # for now — until we confirm `config validate` needs no live runtime env, we
 # only echo a marker on nonzero so a false-positive can't block the build. Read
 # the `[config-validate]` lines in the build log; harden to fatal once trusted.
-RUN HOME=/home/node openclaw config validate 2>&1 | sed 's/^/[config-validate] /'; \
-    HOME=/home/node openclaw config validate >/dev/null 2>&1 \
-      || echo "[config-validate] NONZERO EXIT — inspect openclaw.json before deploying"
+RUN HOME=/home/node openclaw config validate >/tmp/config-validate.log 2>&1; \
+    STATUS=$?; \
+    sed 's/^/[config-validate] /' /tmp/config-validate.log; \
+    rm -f /tmp/config-validate.log; \
+    if [ "$STATUS" -ne 0 ]; then \
+      echo "[config-validate] NONZERO EXIT — inspect openclaw.json before deploying"; \
+    fi
 # OpenClaw auto-injects SOUL.md as the system prompt every turn.
 # NOTE: Do NOT put HTML comments or TODO notes in this file — they are
 # visible to the LLM. Keep roadmap notes here in the Dockerfile instead.
