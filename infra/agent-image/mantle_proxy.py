@@ -853,7 +853,45 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                    body_size=len(req_body) if req_body else 0))
 
     if req_body:
-        body_str = req_body.decode(errors="replace")
+        # Redact tool_result CONTENT from the LOGGED body only — the forwarded
+        # wire body (req_body) is untouched. Sensitive tool output (Plaud
+        # transcripts, fetched records) must never land in CloudWatch; tool_use
+        # (the call + args) stays visible for debugging. Best-effort: any shape
+        # surprise falls back to the raw body.
+        def _redact_tool_results(p):
+            if not isinstance(p, dict) or not isinstance(p.get("messages"), list):
+                return None
+            red = dict(p)
+            new_msgs = []
+            for m in p["messages"]:
+                if isinstance(m, dict) and isinstance(m.get("content"), list):
+                    nm = dict(m)
+                    nc = []
+                    for b in m["content"]:
+                        if isinstance(b, dict) and b.get("type") == "tool_result":
+                            nb = dict(b)
+                            payload = nb.get("content")
+                            n = len(json.dumps(payload, ensure_ascii=False)) if payload is not None else 0
+                            nb["content"] = f"[tool_result content redacted — {n} chars]"
+                            nc.append(nb)
+                        else:
+                            nc.append(b)
+                    nm["content"] = nc
+                    new_msgs.append(nm)
+                else:
+                    new_msgs.append(m)
+            red["messages"] = new_msgs
+            return red
+
+        try:
+            _redacted = _redact_tool_results(parsed)
+        except Exception:
+            _redacted = None
+        body_str = (
+            json.dumps(_redacted, ensure_ascii=False)
+            if _redacted is not None
+            else req_body.decode(errors="replace")
+        )
         total_len = len(body_str)
         # Log the body as a sequence of numbered chunks. The offline
         # reassembly rule is: concat `part 0..N-1` where N == n_parts.
@@ -878,7 +916,10 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         # Parallel path: emit each message individually so we can reason
         # about role/content/tool_call structure without reassembling.
         if isinstance(parsed, dict) and isinstance(parsed.get("messages"), list):
-            for idx, msg in enumerate(parsed["messages"]):
+            # Use the tool_result-redacted messages (see _redacted above) so the
+            # per-message log never carries raw tool output either.
+            _log_msgs = (_redacted or parsed).get("messages", [])
+            for idx, msg in enumerate(_log_msgs):
                 # Shrink any single message to 8KB. We want shape visibility,
                 # not the full tool output blob.
                 m_json = json.dumps(msg, ensure_ascii=False)
