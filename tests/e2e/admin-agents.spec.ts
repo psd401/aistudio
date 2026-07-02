@@ -1,3 +1,4 @@
+import { mkdir } from 'node:fs/promises'
 import { test, expect } from './fixtures'
 
 /**
@@ -205,6 +206,9 @@ test.describe('Agent Dashboard — Admin', () => {
     }
 
     // Visual evidence for the PR (screenshot_dir default = .verification).
+    // Ensure the dir exists first — a clean CI workspace has no .verification/
+    // and the screenshot write would otherwise fail (copilot #1092 review).
+    await mkdir('.verification', { recursive: true })
     await page.screenshot({
       path: `.verification/admin-agents-cache-cost-${testInfo.project.name}.png`,
       fullPage: true,

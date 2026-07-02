@@ -86,13 +86,21 @@ def _extract_usage(
     (input_tokens/output_tokens + cache_read_input_tokens/
     cache_creation_input_tokens).
 
-    IMPORTANT — de-caching (issue #1089): OpenClaw talks to Mantle over the
-    OpenAI-completions API, whose `prompt_tokens` is the TOTAL prompt and
-    INCLUDES the cached reads/writes. Recording that total as billable input and
-    ALSO pricing cache_read/cache_write separately would double-count the cached
-    tokens. So we return `billable_input = total - cache_read - cache_write`,
-    i.e. the tokens actually charged at the full input rate. With no caching
-    (GLM-5) cache_read/write are 0 and this reduces to the old behaviour.
+    IMPORTANT — de-caching (issue #1089): the two usage shapes count input
+    tokens DIFFERENTLY, so cache subtraction must be shape-aware:
+
+      * OpenAI shape (`prompt_tokens`): the TOTAL prompt, which INCLUDES the
+        cached reads/writes. Recording that total as billable input AND pricing
+        cache_read/cache_write separately would double-count, so we de-cache:
+        `billable_input = prompt_tokens - cache_read - cache_write`.
+      * Anthropic shape (`input_tokens`): ALREADY the de-cached, full-rate input
+        — `cache_read_input_tokens` and `cache_creation_input_tokens` are
+        counted SEPARATELY, not inside `input_tokens`. Subtracting again would
+        undercount and clamp to 0 on cache-hit turns (chatgpt-codex #1092
+        review), so we use `input_tokens` verbatim.
+
+    With no caching (GLM-5) cache_read/write are 0 and both branches reduce to
+    the old behaviour.
     """
     if not isinstance(parsed, dict):
         return None, None, 0, 0
@@ -100,9 +108,10 @@ def _extract_usage(
     if not isinstance(usage, dict):
         return None, None, 0, 0
 
-    total_input = usage.get("prompt_tokens")
-    if not isinstance(total_input, int):
-        total_input = usage.get("input_tokens")
+    # Track WHICH field the input count came from — only the OpenAI total gets
+    # de-cached below (the Anthropic field is already billable).
+    prompt_tokens = usage.get("prompt_tokens")
+    input_tokens = usage.get("input_tokens")
 
     ct = usage.get("completion_tokens")
     if not isinstance(ct, int):
@@ -122,8 +131,12 @@ def _extract_usage(
         cache_write = usage.get("cache_write_input_tokens")
     cache_write = cache_write if isinstance(cache_write, int) and cache_write > 0 else 0
 
-    if isinstance(total_input, int):
-        billable_input = max(0, total_input - cache_read - cache_write)
+    if isinstance(prompt_tokens, int):
+        # OpenAI total includes cache read/write — de-cache to billable input.
+        billable_input = max(0, prompt_tokens - cache_read - cache_write)
+    elif isinstance(input_tokens, int):
+        # Anthropic input_tokens is already the de-cached billable input.
+        billable_input = input_tokens
     else:
         billable_input = None
 

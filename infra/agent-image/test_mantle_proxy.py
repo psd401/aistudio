@@ -60,7 +60,11 @@ from mantle_proxy import (  # noqa: E402
 class TestExtractUsage(unittest.TestCase):
     """_extract_usage now returns a 4-tuple:
     (billable_input, completion, cache_read, cache_write). billable_input is the
-    DE-CACHED input (total minus cache reads/writes) so cost isn't double-counted."""
+    full-rate input, computed shape-aware: the OpenAI `prompt_tokens` TOTAL is
+    de-cached (minus cache read/write), while the Anthropic `input_tokens` field
+    is used verbatim because it is ALREADY the non-cached input (cache read/write
+    are reported separately, not inside it). This avoids both double-counting
+    (OpenAI) and undercounting (Anthropic)."""
 
     def test_openai_field_names_no_cache(self):
         # No caching: billable == prompt_tokens, cache split 0.
@@ -140,6 +144,10 @@ class TestExtractUsage(unittest.TestCase):
         )
 
     def test_cache_write_alt_spelling(self):
+        # Anthropic shape (no prompt_tokens): input_tokens is ALREADY the
+        # de-cached billable input, so it must NOT be reduced by the cache-write
+        # count. billable=800 verbatim, cache_write=300 reported separately
+        # (chatgpt-codex #1092 review — subtracting here undercounted/clamped).
         self.assertEqual(
             _extract_usage({
                 "usage": {
@@ -148,7 +156,23 @@ class TestExtractUsage(unittest.TestCase):
                     "cache_write_input_tokens": 300,
                 }
             }),
-            (500, 10, 0, 300),
+            (800, 10, 0, 300),
+        )
+
+    def test_anthropic_input_tokens_not_de_cached_on_cache_hit(self):
+        # Regression for the #1092 de-caching bug: with the Anthropic shape and a
+        # large cache read, subtracting cache tokens from input_tokens would
+        # clamp billable to 0. input_tokens (5) is already billable; cache_read
+        # (2000) is separate.
+        self.assertEqual(
+            _extract_usage({
+                "usage": {
+                    "input_tokens": 5,
+                    "output_tokens": 12,
+                    "cache_read_input_tokens": 2000,
+                }
+            }),
+            (5, 12, 2000, 0),
         )
 
     def test_de_cache_never_negative(self):

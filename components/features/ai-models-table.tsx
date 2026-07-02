@@ -99,7 +99,11 @@ const ModelForm = React.memo(function ModelForm({
       return;
     }
     // Validate entire string is a valid decimal number (prevents "0.00abc" type inputs)
-    const numericPattern = /^-?\d*\.?\d+$/;
+    // Allow intermediate typing states like "0." (trailing dot) — a strict
+    // \d+ tail rejects the keystroke before the fraction and blocks decimal
+    // entry (gemini #1092 review). parseFloat + the range guard below reject
+    // any genuinely-invalid value.
+    const numericPattern = /^-?\d*\.?\d*$/;
     if (!numericPattern.test(value)) {
       // Silently reject invalid inputs (don't update state)
       return;
@@ -118,7 +122,11 @@ const ModelForm = React.memo(function ModelForm({
       return;
     }
     // Validate entire string is a valid decimal number
-    const numericPattern = /^-?\d*\.?\d+$/;
+    // Allow intermediate typing states like "0." (trailing dot) — a strict
+    // \d+ tail rejects the keystroke before the fraction and blocks decimal
+    // entry (gemini #1092 review). parseFloat + the range guard below reject
+    // any genuinely-invalid value.
+    const numericPattern = /^-?\d*\.?\d*$/;
     if (!numericPattern.test(value)) {
       return;
     }
@@ -136,7 +144,11 @@ const ModelForm = React.memo(function ModelForm({
       return;
     }
     // Validate entire string is a valid decimal number
-    const numericPattern = /^-?\d*\.?\d+$/;
+    // Allow intermediate typing states like "0." (trailing dot) — a strict
+    // \d+ tail rejects the keystroke before the fraction and blocks decimal
+    // entry (gemini #1092 review). parseFloat + the range guard below reject
+    // any genuinely-invalid value.
+    const numericPattern = /^-?\d*\.?\d*$/;
     if (!numericPattern.test(value)) {
       return;
     }
@@ -154,7 +166,11 @@ const ModelForm = React.memo(function ModelForm({
       return;
     }
     // Validate entire string is a valid decimal number
-    const numericPattern = /^-?\d*\.?\d+$/;
+    // Allow intermediate typing states like "0." (trailing dot) — a strict
+    // \d+ tail rejects the keystroke before the fraction and blocks decimal
+    // entry (gemini #1092 review). parseFloat + the range guard below reject
+    // any genuinely-invalid value.
+    const numericPattern = /^-?\d*\.?\d*$/;
     if (!numericPattern.test(value)) {
       return;
     }
