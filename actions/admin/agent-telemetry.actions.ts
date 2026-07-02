@@ -20,6 +20,24 @@ import { agentFeedback } from "@/lib/db/schema/tables/agent-feedback"
 import { getDateThreshold } from "@/lib/date-utils"
 
 // ============================================
+// Shared SQL
+// ============================================
+
+/**
+ * Total token VOLUME a turn actually processed, as one reusable fragment so the
+ * four telemetry aggregations can't drift (stats card, daily trend, model
+ * breakdown, per-user usage).
+ *
+ * Includes the Bedrock prompt-caching split (issue #1089/#1092): since
+ * mantle_proxy.py now records `input_tokens` DE-CACHED (billable input only),
+ * a plain `input_tokens + output_tokens` sum under-reports real volume by the
+ * cached prefix on cache-hit turns. The true total is
+ * `billable_input + cache_read + cache_write + output`. cache_read/write default
+ * 0, so pre-caching (GLM-5) rows are unchanged.
+ */
+const totalTokensWithCacheSql = sql<number>`COALESCE(SUM(${agentMessages.inputTokens} + ${agentMessages.cacheReadInputTokens} + ${agentMessages.cacheWriteInputTokens} + ${agentMessages.outputTokens}), 0)`
+
+// ============================================
 // Types
 // ============================================
 
@@ -48,6 +66,7 @@ export interface DailyUsagePoint {
 export interface ModelBreakdownItem {
   model: string
   messageCount: number
+  /** Full volume incl. cached tokens — see totalTokensWithCacheSql (#1089/#1092). */
   totalTokens: number
   /** Bedrock prompt-caching split (issue #1089). 0 on non-caching models. */
   cacheReadTokens: number
@@ -158,7 +177,7 @@ export async function getAgentTelemetryStats(
             .select({
               totalMessages: count(agentMessages.id),
               totalTokens:
-                sql<number>`COALESCE(SUM(${agentMessages.inputTokens} + ${agentMessages.outputTokens}), 0)`,
+                totalTokensWithCacheSql,
               avgLatencyMs:
                 sql<number>`COALESCE(AVG(${agentMessages.latencyMs}), 0)`,
             })
@@ -310,7 +329,7 @@ export async function getAgentDailyUsage(
             date: sql<string>`TO_CHAR(DATE_TRUNC('day', ${agentMessages.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`,
             messages: count(agentMessages.id),
             tokens:
-              sql<number>`COALESCE(SUM(${agentMessages.inputTokens} + ${agentMessages.outputTokens}), 0)`,
+              totalTokensWithCacheSql,
             sessions:
               sql<number>`COUNT(DISTINCT ${agentMessages.sessionId})`,
           })
@@ -370,7 +389,7 @@ export async function getAgentModelBreakdown(
             model: sql<string>`COALESCE(${agentMessages.model}, 'unknown')`,
             messageCount: count(agentMessages.id),
             totalTokens:
-              sql<number>`COALESCE(SUM(${agentMessages.inputTokens} + ${agentMessages.outputTokens}), 0)`,
+              totalTokensWithCacheSql,
             cacheReadTokens:
               sql<number>`COALESCE(SUM(${agentMessages.cacheReadInputTokens}), 0)`,
             cacheWriteTokens:
@@ -434,7 +453,7 @@ export async function getAgentUserUsage(
             userId: agentMessages.userId,
             messageCount: count(agentMessages.id),
             totalTokens:
-              sql<number>`COALESCE(SUM(${agentMessages.inputTokens} + ${agentMessages.outputTokens}), 0)`,
+              totalTokensWithCacheSql,
             sessionCount:
               sql<number>`COUNT(DISTINCT ${agentMessages.sessionId})`,
             lastActive: pgTimestampAsText(sql`MAX(${agentMessages.createdAt})`),
