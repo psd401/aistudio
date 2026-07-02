@@ -14,6 +14,22 @@ export async function gotoNexus(page: Page): Promise<void> {
   }
 }
 
+// Navigate directly to an existing conversation via /nexus?id=<id> — a full page
+// load (not client-side routing) exercises ConversationInitializer's initial-mount
+// fetch path. Throws with a targeted error if redirected to auth.
+export async function gotoNexusConversation(page: Page, conversationId: string): Promise<void> {
+  await page.goto(`/nexus?id=${conversationId}`)
+  try {
+    await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10_000 })
+  } catch {
+    const url = page.url()
+    if (url.includes('/auth/signin') || url.includes('/sign-in') || url.includes('/login')) {
+      throw new Error(`gotoNexusConversation: unauthenticated — redirected to ${url}`)
+    }
+    throw new Error(`gotoNexusConversation: nexus shell not found within 10s. Current URL: ${url}`)
+  }
+}
+
 // Fill and send a message via the composer.
 export async function sendMessage(page: Page, message: string): Promise<void> {
   const input = page.locator('[aria-label="Message input"]')
