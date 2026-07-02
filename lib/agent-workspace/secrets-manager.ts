@@ -57,6 +57,23 @@ export interface PlaudTokenData {
   obtained_at: string
 }
 
+/**
+ * Write a plain string value to an existing secret. Used to auto-populate the
+ * Plaud OAuth client_id after Dynamic Client Registration (no manual step). The
+ * secret is created empty by CDK; this fills it. No-op in local dev.
+ */
+export async function putSecretString(secretId: string, value: string): Promise<void> {
+  if (process.env.NODE_ENV === "development") {
+    log.info("Local dev mode — skipping secret write", { secretId })
+    return
+  }
+  const { PutSecretValueCommand } = await import("@aws-sdk/client-secrets-manager")
+  const client = await getSecretsManagerClient()
+  await client.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: value }))
+  _secretCache.delete(secretId)
+  log.info("Secret value written", { secretId })
+}
+
 export function plaudSecretId(ownerEmail: string): string {
   if (!SAFE_EMAIL_RE.test(ownerEmail)) {
     throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
