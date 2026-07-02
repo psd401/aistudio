@@ -55,10 +55,13 @@ import workspace_sync
 
 # The model the agent platform runs on today — used as the last-resort model-id
 # fallback for telemetry when neither the proxy, harness, nor caller supplied
-# one. Must match openclaw.json's provider model id and the ai_models pricing
-# row (migration 088); a mismatch silently yields $0 cost. Single source of
-# truth so the two fallbacks below don't drift (issue #1083, review round 2).
-DEFAULT_AGENT_MODEL_ID = "zai.glm-5"
+# one. Must match the id the proxy records + an ai_models pricing row
+# (migration 092); a mismatch silently yields $0 cost. Single source of truth so
+# the two fallbacks below don't drift (issue #1083, review round 2).
+# Switched GLM-5 -> Claude Sonnet 5 for #1089. Bedrock Mantle's Anthropic
+# Messages endpoint echoes the bare `claude-sonnet-5` on the response (verified),
+# so that is the id the proxy records — use it here too so the fallback matches.
+DEFAULT_AGENT_MODEL_ID = "claude-sonnet-5"
 
 adapter = OpenClawAdapter()
 
@@ -129,17 +132,26 @@ def read_proxy_usage() -> dict:
             "http://127.0.0.1:18791/usage", timeout=2
         ) as r:
             if r.status != 200:
-                return {"input_tokens": 0, "output_tokens": 0, "model": None, "ok": False}
+                return {"input_tokens": 0, "output_tokens": 0,
+                        "cache_read_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "model": None, "ok": False}
             data = json.loads(r.read().decode("utf-8"))
         return {
             "input_tokens": int(data.get("input_tokens") or 0),
             "output_tokens": int(data.get("output_tokens") or 0),
+            # Bedrock prompt-caching split (issue #1089). Older proxy images
+            # (pre-#1089) omit these keys — default to 0 so a mixed rollout
+            # never KeyErrors.
+            "cache_read_input_tokens": int(data.get("cache_read_input_tokens") or 0),
+            "cache_write_input_tokens": int(data.get("cache_write_input_tokens") or 0),
             "model": data.get("model"),
             "ok": True,
         }
     except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
         logger.warning("read_proxy_usage failed: %s", str(exc)[:200])
-        return {"input_tokens": 0, "output_tokens": 0, "model": None, "ok": False}
+        return {"input_tokens": 0, "output_tokens": 0,
+                "cache_read_input_tokens": 0, "cache_write_input_tokens": 0,
+                "model": None, "ok": False}
 
 
 # Track which workspace prefix this microVM is currently serving so we can
@@ -567,9 +579,18 @@ def main():
         if usage_trustworthy:
             proxy_in = max(0, usage_final["input_tokens"] - usage_baseline["input_tokens"])
             proxy_out = max(0, usage_final["output_tokens"] - usage_baseline["output_tokens"])
+            # Bedrock prompt-caching split (issue #1089) — same before/after
+            # delta as input/output. Zero on GLM-5 (no caching) and any turn
+            # with no cache activity.
+            proxy_cache_read = max(0, usage_final["cache_read_input_tokens"]
+                                   - usage_baseline["cache_read_input_tokens"])
+            proxy_cache_write = max(0, usage_final["cache_write_input_tokens"]
+                                    - usage_baseline["cache_write_input_tokens"])
         else:
             proxy_in = 0
             proxy_out = 0
+            proxy_cache_read = 0
+            proxy_cache_write = 0
             # Emit a distinct signal so a telemetry GAP (proxy read failed) is
             # distinguishable in logs from a turn that genuinely used 0 tokens.
             # Without this, a lost read looks identical to real-zero usage.
@@ -590,6 +611,10 @@ def main():
                 "model": proxy_model or model_override or DEFAULT_AGENT_MODEL_ID,
                 "input_tokens": proxy_in,
                 "output_tokens": proxy_out,
+                # Cache tokens come only from the proxy delta (the harness has
+                # no cache numbers), so they're 0 when the delta is untrusted.
+                "cache_read_input_tokens": proxy_cache_read,
+                "cache_write_input_tokens": proxy_cache_write,
             }
         else:
             reply_text = result.text or ""
@@ -608,6 +633,10 @@ def main():
                 "model": proxy_model or result.model or model_override or DEFAULT_AGENT_MODEL_ID,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                # Bedrock prompt-caching split (issue #1089). Proxy-only; 0 when
+                # the proxy delta was untrusted or the model doesn't cache.
+                "cache_read_input_tokens": proxy_cache_read if usage_trustworthy else 0,
+                "cache_write_input_tokens": proxy_cache_write if usage_trustworthy else 0,
                 "latency_ms": result.latency_ms,
                 # Deep-telemetry payload: per-turn messages + tool calls.
                 # The router reads these and inserts into

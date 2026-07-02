@@ -1,18 +1,19 @@
 "use server"
 
 /**
- * Agent platform cost — token×pricing source of truth (issue #1083).
+ * Agent platform cost — token×pricing source of truth (issue #1083, cache-aware #1089).
  *
- * The AWS Cost Explorer path (agent-cost.actions.ts) cannot attribute GLM-5 /
- * Bedrock Mantle spend because Mantle runs through a separate IAM user's bearer
- * token, not the tagged AgentCore execution role — so that panel is now a
- * reconciliation-only view. THIS file is the authoritative model-cost answer:
- * it multiplies the real per-model token volume recorded in agent_messages by
+ * The AWS Cost Explorer path (agent-cost.actions.ts) cannot attribute the
+ * harness model's Bedrock Mantle spend because Mantle runs through a separate
+ * IAM user's bearer token, not the tagged AgentCore execution role — so that
+ * panel is now a reconciliation-only view. THIS file is the authoritative
+ * model-cost answer: it multiplies the real per-model token volume recorded in
+ * agent_messages (input/output plus the cache-read/cache-write split, #1089) by
  * the pricing rows in ai_models.
  *
  * Two questions the dashboard exists to answer:
- *   1. How much is GLM-5 actually costing?      → getAgentCostByModel
- *   2. What would a different model cost?        → getAgentCostProjection
+ *   1. How much is the agent (Claude Sonnet 5) actually costing? → getAgentCostByModel
+ *   2. What would a different model cost?                        → getAgentCostProjection
  *
  * Pricing is computed ON READ (tokens × current ai_models pricing). No cost
  * snapshot column / migration is needed for V1. The trade-off: a price change
@@ -46,12 +47,19 @@ import type { TelemetryDateRange } from "@/actions/admin/agent-telemetry.actions
 // ============================================
 
 export interface ModelCostItem {
-  /** The model id recorded on agent_messages.model (e.g. "zai.glm-5"). */
+  /** The model id recorded on agent_messages.model (e.g. "anthropic.claude-sonnet-5"). */
   model: string
   messageCount: number
   inputTokens: number
   outputTokens: number
-  /** Actual cost = inputTokens×inputPrice + outputTokens×outputPrice. */
+  /** Bedrock prompt-caching split (issue #1089). 0 on non-caching models (GLM-5). */
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  /**
+   * Cache-aware actual cost (issue #1089):
+   *   input×inputPrice + output×outputPrice
+   *   + cacheRead×cachedInputPrice + cacheWrite×cacheWritePrice.
+   */
   usd: number
   /** True when no ai_models pricing row matched this model id (usd is 0). */
   pricingMissing: boolean
@@ -77,10 +85,19 @@ export interface ProjectionItem {
 }
 
 export interface AgentCostProjection {
-  /** Actual token volume the projection is computed against. */
+  /**
+   * Full prompt input-token volume the candidate projection is priced against:
+   * de-cached billable input + cache-read + cache-write (the whole prompt a
+   * non-caching candidate would reprocess), NOT just the billable input. See
+   * the projection query for why (#1089/#1092).
+   */
   actualInputTokens: number
   actualOutputTokens: number
-  /** Actual cost on the model(s) actually used, for side-by-side comparison. */
+  /**
+   * Actual cost on the model(s) actually used, priced cache-aware (billable
+   * input at full rate + cache read/write at their discounted rates), for
+   * side-by-side comparison against the no-caching candidate projections.
+   */
   actualUsd: number
   /** One row per requested candidate model. */
   candidates: ProjectionItem[]
@@ -136,14 +153,22 @@ function rangeDays(range: TelemetryDateRange): number | null {
 const MAX_CANDIDATES = 12
 
 /**
- * Exact per-direction cost as a single reusable SQL fragment — the SQL mirror
- * of exactTokenCostUsd (lib/costs/token-cost.ts). agent_messages stores the
- * input/output split, so no blend is needed; prices are per-1k-tokens (÷1000).
+ * Cache-aware per-direction cost as a single reusable SQL fragment — the SQL
+ * mirror of exactTokenCostUsd (lib/costs/token-cost.ts). agent_messages stores
+ * the input/output/cache-read/cache-write split, so no blend is needed; prices
+ * are per-1k-tokens (÷1000).
  *
- * The per-direction COALESCE is load-bearing: a model priced on only ONE
- * direction (e.g. input set, output NULL) must still count the priced side. A
- * single outer COALESCE would let the NULL side poison the whole sum
- * (X + NULL = NULL) and collapse a real cost to $0 (gemini review, #1083).
+ * Four priced directions (issue #1089): full-price input, output, cache-READ
+ * (~0.1× input, column cached_input_cost_per_1k_tokens) and cache-WRITE (2×
+ * input at 1h TTL, column cache_write_cost_per_1k_tokens). Note input_tokens is
+ * already the DE-CACHED billable input (mantle_proxy.py subtracts cache tokens
+ * from the OpenAI prompt_tokens total), so the four terms don't double-count.
+ *
+ * The per-direction COALESCE is load-bearing: a model priced on only SOME
+ * directions (e.g. GLM-5 has input/output set but cache rates NULL) must still
+ * count the priced sides. A single outer COALESCE would let any NULL side
+ * poison the whole sum (X + NULL = NULL) and collapse a real cost to $0 (gemini
+ * review, #1083). GLM-5's cache tokens are 0 anyway, so its cache terms are 0.
  *
  * Shared between getAgentCostByModel and getAgentCostProjection so a future
  * pricing change (discount tier, rounding) can't be applied to only one of the
@@ -152,7 +177,9 @@ const MAX_CANDIDATES = 12
  */
 const perDirectionCostUsdSql = sql<string>`
   COALESCE(SUM(${agentMessages.inputTokens}::numeric * ${aiModels.inputCostPer1kTokens} / 1000.0), 0)
-  + COALESCE(SUM(${agentMessages.outputTokens}::numeric * ${aiModels.outputCostPer1kTokens} / 1000.0), 0)`
+  + COALESCE(SUM(${agentMessages.outputTokens}::numeric * ${aiModels.outputCostPer1kTokens} / 1000.0), 0)
+  + COALESCE(SUM(${agentMessages.cacheReadInputTokens}::numeric * ${aiModels.cachedInputCostPer1kTokens} / 1000.0), 0)
+  + COALESCE(SUM(${agentMessages.cacheWriteInputTokens}::numeric * ${aiModels.cacheWriteCostPer1kTokens} / 1000.0), 0)`
 
 // ============================================
 // Actions
@@ -193,7 +220,9 @@ export async function getAgentCostByModel(
             messageCount: sql<number>`COUNT(${agentMessages.id})`,
             inputTokens: sql<number>`COALESCE(SUM(${agentMessages.inputTokens}), 0)`,
             outputTokens: sql<number>`COALESCE(SUM(${agentMessages.outputTokens}), 0)`,
-            // Exact per-direction cost — see perDirectionCostUsdSql above.
+            cacheReadTokens: sql<number>`COALESCE(SUM(${agentMessages.cacheReadInputTokens}), 0)`,
+            cacheWriteTokens: sql<number>`COALESCE(SUM(${agentMessages.cacheWriteInputTokens}), 0)`,
+            // Cache-aware per-direction cost — see perDirectionCostUsdSql above.
             usd: perDirectionCostUsdSql,
             // A pricing row matched iff input OR output price is non-null.
             hasPricing: sql<boolean>`bool_or(
@@ -222,6 +251,8 @@ export async function getAgentCostByModel(
         messageCount: Number(r.messageCount) || 0,
         inputTokens: Number(r.inputTokens) || 0,
         outputTokens: Number(r.outputTokens) || 0,
+        cacheReadTokens: Number(r.cacheReadTokens) || 0,
+        cacheWriteTokens: Number(r.cacheWriteTokens) || 0,
         usd,
         pricingMissing,
       }
@@ -292,7 +323,17 @@ export async function getAgentCostProjection(
       (db) =>
         db
           .select({
-            inputTokens: sql<number>`COALESCE(SUM(${agentMessages.inputTokens}), 0)`,
+            // FULL prompt token volume a candidate model would reprocess:
+            // de-cached billable input + cache-read + cache-write. Post-#1089,
+            // input_tokens alone EXCLUDES the cached tokens, so pricing a
+            // (non-caching) candidate on it would undercount the prompt it must
+            // actually process every turn — making alternatives look ~1000× too
+            // cheap on cache-hit windows (chatgpt-codex #1092 review). We assume
+            // NO caching benefit for candidates (the conservative direction: it
+            // can only overstate a caching-capable candidate, never falsely
+            // cheapen a switch). cache_read/write default 0, so pre-caching rows
+            // reduce to plain input_tokens.
+            promptInputTokens: sql<number>`COALESCE(SUM(${agentMessages.inputTokens} + ${agentMessages.cacheReadInputTokens} + ${agentMessages.cacheWriteInputTokens}), 0)`,
             outputTokens: sql<number>`COALESCE(SUM(${agentMessages.outputTokens}), 0)`,
             // Exact per-direction cost — see perDirectionCostUsdSql above.
             actualUsd: perDirectionCostUsdSql,
@@ -305,7 +346,7 @@ export async function getAgentCostProjection(
       "agentCost.projectionTotals"
     )
 
-    const actualInputTokens = Number(totals?.inputTokens) || 0
+    const actualInputTokens = Number(totals?.promptInputTokens) || 0
     const actualOutputTokens = Number(totals?.outputTokens) || 0
     const actualUsd = Number(totals?.actualUsd) || 0
 
@@ -381,10 +422,12 @@ export async function getAgentCostProjection(
 /**
  * List models that have pricing and can be used as projection candidates.
  *
- * Excludes the agent's own model (zai.glm-5) — projecting GLM-5 onto GLM-5 is
- * meaningless. Returns ACTIVE models with both input and output prices set,
- * sorted by blended cost so the cheapest alternatives surface first. Inactive
- * models are excluded so a retired model with stale pricing can't be projected.
+ * Excludes the agent's own model (AGENT_MODEL_ID, anthropic.claude-sonnet-5) —
+ * projecting the harness model onto itself is meaningless. Returns ACTIVE models
+ * with both input and output prices set, sorted by blended cost so the cheapest
+ * alternatives surface first. Inactive models are excluded so a retired model
+ * with stale pricing can't be projected (the harness Sonnet 5 row is inactive,
+ * so it's excluded here too).
  */
 export async function getPricableModels(): Promise<
   ActionState<PricableModel[]>

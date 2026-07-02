@@ -1,21 +1,23 @@
 import { readFileSync } from "fs"
 import { join, resolve } from "path"
-import { AGENT_MODEL_ID } from "@/lib/agents/platform-model"
+import { AGENT_MODEL_ID, AGENT_REQUEST_MODEL_ID } from "@/lib/agents/platform-model"
 
 /**
  * Drift guard (PR #1087 review finding #4).
  *
- * The agent-platform model id ("zai.glm-5") is declared independently in four
- * places across three deployables:
- *   1. lib/agents/platform-model.ts            (Next app — AGENT_MODEL_ID)
- *   2. infra/agent-image/openclaw.json         (agent image — runtime model)
- *   3. infra/agent-image/agentcore_wrapper.py  (agent image — telemetry fallback)
- *   4. infra/database/schema/088-...sql         (DB — ai_models pricing row)
+ * The agent-platform model id is declared independently across three
+ * deployables. As of #1089 (Sonnet 5 over Mantle's Anthropic Messages API) the
+ * REQUEST id and the RECORDED id DIFFER, so there are two constants:
+ *   - AGENT_REQUEST_MODEL_ID ("anthropic.claude-sonnet-5") — what OpenClaw SENDS:
+ *       1. infra/agent-image/openclaw.json         (agent image — runtime model)
+ *   - AGENT_MODEL_ID ("claude-sonnet-5") — what Mantle RECORDS + we price:
+ *       2. infra/agent-image/agentcore_wrapper.py  (agent image — telemetry fallback)
+ *       3. infra/database/schema/092-...sql         (DB — ai_models pricing row)
  *
  * There is no build-time shared constant across Python / TS / SQL, so a swap
- * (e.g. to glm-6) that updates one but not all silently re-introduces the exact
+ * (e.g. to a newer Sonnet) that updates one but not all silently re-introduces the exact
  * $0-cost bug #1083 fixed — agent_messages rows stop joining ai_models. This
- * test fails CI the moment any of the four drifts from AGENT_MODEL_ID.
+ * test fails CI the moment any of these drifts.
  *
  * LIMITATION (claude review, #1087): the model id actually WRITTEN to
  * agent_messages is whatever mantle_proxy.py extracts from the live Mantle
@@ -47,27 +49,30 @@ describe("agent platform model id consistency (#1083 / #1087 #4)", () => {
     read("infra/agent-image/openclaw.json")
   ) as OpenClawConfig
 
-  it("openclaw.json declares AGENT_MODEL_ID as a provider model", () => {
+  it("openclaw.json declares AGENT_REQUEST_MODEL_ID as a provider model", () => {
     const ids = Object.values(openclaw.models.providers).flatMap((p) =>
       (p.models ?? []).map((m) => m.id)
     )
-    expect(ids).toContain(AGENT_MODEL_ID)
+    expect(ids).toContain(AGENT_REQUEST_MODEL_ID)
   })
 
-  it("openclaw.json default agent model resolves to AGENT_MODEL_ID", () => {
+  it("openclaw.json default agent model resolves to AGENT_REQUEST_MODEL_ID", () => {
     // primary is "<provider>/<modelId>"
     const primary = openclaw.agents.defaults.model.primary
-    expect(primary.endsWith(`/${AGENT_MODEL_ID}`)).toBe(true)
+    expect(primary.endsWith(`/${AGENT_REQUEST_MODEL_ID}`)).toBe(true)
   })
 
-  it("agentcore_wrapper.py DEFAULT_AGENT_MODEL_ID matches AGENT_MODEL_ID", () => {
+  it("agentcore_wrapper.py DEFAULT_AGENT_MODEL_ID matches AGENT_MODEL_ID (recorded id)", () => {
     const py = read("infra/agent-image/agentcore_wrapper.py")
     const match = py.match(/DEFAULT_AGENT_MODEL_ID\s*=\s*["']([^"']+)["']/)
     expect(match?.[1]).toBe(AGENT_MODEL_ID)
   })
 
-  it("migration 088 seeds a pricing row for AGENT_MODEL_ID", () => {
-    const sql = read("infra/database/schema/088-glm5-agent-pricing.sql")
+  it("migration 092 seeds pricing rows for BOTH the recorded and request ids", () => {
+    const sql = read("infra/database/schema/092-agent-cache-tokens.sql")
+    // Recorded id (what agent_messages.model actually contains) must be priced.
     expect(sql).toContain(`'${AGENT_MODEL_ID}'`)
+    // Request id seeded as an alias too (defensive, in case Mantle ever echoes it).
+    expect(sql).toContain(`'${AGENT_REQUEST_MODEL_ID}'`)
   })
 })

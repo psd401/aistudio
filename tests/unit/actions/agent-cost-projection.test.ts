@@ -151,7 +151,9 @@ describe("getAgentCostProjection", () => {
   it("projects actual token volume onto a priced candidate", async () => {
     // First query: actual totals. Second: candidate pricing rows.
     queryResults = [
-      [{ inputTokens: 100000, outputTokens: 20000, actualUsd: "0.164" }],
+      // promptInputTokens = de-cached billable input + cache read/write (the full
+      // prompt a non-caching candidate reprocesses); see the projection query.
+      [{ promptInputTokens: 100000, outputTokens: 20000, actualUsd: "0.164" }],
       [
         {
           modelId: "us.anthropic.claude-opus-4-7",
@@ -180,7 +182,9 @@ describe("getAgentCostProjection", () => {
 
   it("flags a candidate with no pricing row instead of implying $0", async () => {
     queryResults = [
-      [{ inputTokens: 100000, outputTokens: 20000, actualUsd: "0.164" }],
+      // promptInputTokens = de-cached billable input + cache read/write (the full
+      // prompt a non-caching candidate reprocesses); see the projection query.
+      [{ promptInputTokens: 100000, outputTokens: 20000, actualUsd: "0.164" }],
       [], // no pricing rows returned for the requested candidate
     ]
 
@@ -197,7 +201,7 @@ describe("getAgentCostProjection", () => {
 
   it("handles a candidate priced on only one direction", async () => {
     queryResults = [
-      [{ inputTokens: 100000, outputTokens: 20000, actualUsd: "0" }],
+      [{ promptInputTokens: 100000, outputTokens: 20000, actualUsd: "0" }],
       [
         {
           modelId: "input-only",
@@ -219,7 +223,7 @@ describe("getAgentCostProjection", () => {
     // Only the totals query runs; no second query is staged, and the action
     // must not call executeQuery a second time.
     queryResults = [
-      [{ inputTokens: 50, outputTokens: 10, actualUsd: "0" }],
+      [{ promptInputTokens: 50, outputTokens: 10, actualUsd: "0" }],
     ]
     const res = await getAgentCostProjection("30d", [])
     if (!res.isSuccess || !res.data) throw new Error("expected success")
@@ -233,7 +237,7 @@ describe("getAgentCostProjection", () => {
     const withDupes = [...many, "model-0", "model-1"]
 
     queryResults = [
-      [{ inputTokens: 1000, outputTokens: 1000, actualUsd: "0" }],
+      [{ promptInputTokens: 1000, outputTokens: 1000, actualUsd: "0" }],
       // Pricing query returns nothing; we only assert the candidate count.
       [],
     ]
@@ -244,7 +248,7 @@ describe("getAgentCostProjection", () => {
 
   it("ignores non-string candidate entries", async () => {
     queryResults = [
-      [{ inputTokens: 1000, outputTokens: 1000, actualUsd: "0" }],
+      [{ promptInputTokens: 1000, outputTokens: 1000, actualUsd: "0" }],
       [],
     ]
     const res = await getAgentCostProjection("30d", [
