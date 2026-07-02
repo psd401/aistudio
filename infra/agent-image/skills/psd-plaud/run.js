@@ -36,8 +36,9 @@ const {
 
 async function main() {
   const args = parseArgs(process.argv);
-  // First non-flag token is the subcommand.
-  const sub = process.argv.slice(2).find((a) => !a.startsWith('--'));
+  // The subcommand is the first positional. parseArgs consumes flag values, so
+  // args._[0] is the real subcommand (not a --flag's value).
+  const sub = args._[0];
 
   if (args.help || !sub) {
     process.stdout.write(
