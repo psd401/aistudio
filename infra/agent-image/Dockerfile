@@ -205,6 +205,20 @@ RUN mkdir -p /home/node/.openclaw/memory
 #   translation layer entirely. Result: we own no per-model format adapter
 #   code; any Bedrock model works by changing the `id` below.
 #
+#   agents.defaults.memorySearch — embedding provider for semantic search over
+#   the agent's local ~/.openclaw/memory/ files. OpenClaw's default provider is
+#   "openai", but this container provisions NO OpenAI key (it reaches models
+#   only through Bedrock Mantle), so memory indexing fails at runtime with
+#   `No API key found for provider "openai"`. We pin provider=bedrock +
+#   model=amazon.titan-embed-text-v2:0 (the documented Bedrock embedding
+#   default) so indexing works out-of-the-box. Bedrock embeddings use the
+#   standard AWS SDK credential chain (the AgentCore IAM role) — NO API key and
+#   NO dependency on the inlined Mantle bearer token. The IAM path is already
+#   provisioned in agent-platform-stack.ts: `InvokeBedrockModels`
+#   (bedrock:InvokeModel on foundation-model/*, which covers the titan embed
+#   model) and `BedrockEmbeddingsViaBearerToken` (bedrock:CallWithBearerToken).
+#   No IAM change and no new Docker layer — the COPY below already ships it.
+#
 #   plugins.entries.active-memory — blocking memory sub-agent that runs before
 #   every main reply, shares the inherited session model, and its failure
 #   cascades to the main reply as `surface_error`. Config rationale:
