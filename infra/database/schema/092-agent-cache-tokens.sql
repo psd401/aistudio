@@ -17,10 +17,13 @@
 -- Then it seeds pricing for Claude Sonnet 5, the new harness model. The model_id
 -- MUST exactly match the string the wrapper records on agent_messages.model or
 -- every cost calc silently resolves to $0 (see migration 088 / silent-failure-
--- patterns.md). openclaw.json sends `anthropic.claude-sonnet-5`; Bedrock Mantle
--- may echo the region inference-profile form `us.anthropic.claude-sonnet-5`
--- instead, so we seed BOTH ids with identical pricing to eliminate the mismatch
--- risk regardless of which the proxy observes.
+-- patterns.md). The request sends `anthropic.claude-sonnet-5`, but Bedrock
+-- Mantle's Anthropic Messages endpoint ECHOES the response model as the bare
+-- `claude-sonnet-5` (VERIFIED by probing the live endpoint) — and that response
+-- id is what the proxy records. We therefore seed ALL THREE forms with identical
+-- pricing (`claude-sonnet-5` = the observed record; `anthropic.claude-sonnet-5`
+-- and `us.anthropic.claude-sonnet-5` = request/inference-profile aliases) to
+-- eliminate the mismatch risk regardless of which id the proxy observes.
 --
 -- Pricing (Standard AWS Bedrock Claude Sonnet 5, per #1089 planning assumption):
 --   Input:       $3.00 / 1M tokens = 0.003000 / 1k
@@ -109,6 +112,47 @@ INSERT INTO ai_models (
   'amazon-bedrock',
   'us.anthropic.claude-sonnet-5',
   'Claude Sonnet 5 via Bedrock Mantle, region inference-profile id -- cost-attribution alias for anthropic.claude-sonnet-5 in case the proxy records the profile-form model id. Not exposed in user-facing model pickers.',
+  32768,
+  false,
+  false,
+  false,
+  0.003000,
+  0.015000,
+  0.000300,
+  0.006000,
+  CURRENT_TIMESTAMP
+)
+ON CONFLICT (model_id) DO UPDATE SET
+  input_cost_per_1k_tokens = EXCLUDED.input_cost_per_1k_tokens,
+  output_cost_per_1k_tokens = EXCLUDED.output_cost_per_1k_tokens,
+  cached_input_cost_per_1k_tokens = EXCLUDED.cached_input_cost_per_1k_tokens,
+  cache_write_cost_per_1k_tokens = EXCLUDED.cache_write_cost_per_1k_tokens,
+  pricing_updated_at = EXCLUDED.pricing_updated_at,
+  description = EXCLUDED.description;
+
+-- 3c. Same pricing keyed by the BARE `claude-sonnet-5` id -- this is the model
+--     id Bedrock Mantle's Anthropic Messages endpoint returns on the response
+--     `model` field (VERIFIED live), so it is the id the proxy actually records
+--     on agent_messages.model. This is the PRIMARY cost-attribution row.
+INSERT INTO ai_models (
+  name,
+  provider,
+  model_id,
+  description,
+  max_tokens,
+  active,
+  nexus_enabled,
+  architect_enabled,
+  input_cost_per_1k_tokens,
+  output_cost_per_1k_tokens,
+  cached_input_cost_per_1k_tokens,
+  cache_write_cost_per_1k_tokens,
+  pricing_updated_at
+) VALUES (
+  'Claude Sonnet 5 (Bedrock Mantle)',
+  'amazon-bedrock',
+  'claude-sonnet-5',
+  'Claude Sonnet 5 via Bedrock Mantle Anthropic Messages API -- the caching-capable model powering the AI Studio agent platform (Google Chat agents) as of #1089. This bare id is what Mantle echoes on the response and what the proxy records for cost attribution. Not exposed in user-facing model pickers.',
   32768,
   false,
   false,

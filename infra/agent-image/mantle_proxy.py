@@ -304,6 +304,179 @@ def inject_cache_breakpoints(payload: dict) -> int:
     return placed
 
 
+# ---------------------------------------------------------------------------
+# Anthropic Messages path (issue #1089 — CORRECTED handoff)
+#
+# Bedrock Mantle does NOT serve Claude on the OpenAI-completions endpoint
+# (`/v1/chat/completions` returns 400 "does not support the '/v1/chat/completions'
+# API"). Claude is served on the Anthropic Messages endpoint
+# `https://bedrock-mantle.<region>.api.aws/anthropic/v1/messages`. OpenClaw is
+# therefore configured with `api: "anthropic-messages"` (openclaw.json), so it
+# sends NATIVE Anthropic Messages requests here. This proxy branch:
+#   * injects `cache_control` in the ANTHROPIC shape (top-level `system` +
+#     last message content block) — verified to cache on this endpoint
+#     (cache_creation on turn 1 → cache_read on turn 2), and
+#   * parses the Anthropic SSE stream (message_start / content_block_delta /
+#     message_delta) for usage.
+# The OpenAI-only request-shaping (thinking:disabled, stream_options,
+# OpenAI-format cache injection) is NOT applied here — it would 400 a native
+# Anthropic request.
+# ---------------------------------------------------------------------------
+
+
+def _is_anthropic_messages_path(path: str) -> bool:
+    """True when the forwarded path targets Mantle's Anthropic Messages API
+    (e.g. `anthropic/v1/messages`). OpenClaw's `anthropic-messages` provider
+    hits `<baseUrl>/v1/messages`, and our baseUrl ends in `/anthropic`, so the
+    proxy path is `anthropic/v1/messages`."""
+    if not isinstance(path, str):
+        return False
+    p = path.lstrip("/")
+    return p.startswith("anthropic/") or p.endswith("/v1/messages") or p == "v1/messages"
+
+
+def _cache_ctrl() -> dict:
+    return {"type": "ephemeral", "ttl": CACHE_TTL}
+
+
+def inject_anthropic_cache_breakpoints(payload: dict) -> int:
+    """Inject up to two `cache_control` breakpoints into a native Anthropic
+    Messages request so the byte-stable prefix is cached across turns
+    (issue #1089). Mutates `payload` in place; returns breakpoints placed.
+
+    Placement (Anthropic render order is tools -> system -> messages):
+      1. Last block of the top-level `system` (the big fixed prefix: SOUL +
+         rules + tool guidance). This is the highest-yield breakpoint.
+      2. Last content block of the last message (multi-turn prefix reuse).
+    Verified against Mantle: a 2014-token system block wrote the cache on the
+    first call and read it on the second.
+    """
+    if not isinstance(payload, dict):
+        return 0
+    placed = 0
+
+    # 1. system — string or list-of-blocks.
+    system = payload.get("system")
+    if isinstance(system, str) and system.strip():
+        payload["system"] = [
+            {"type": "text", "text": system, "cache_control": _cache_ctrl()}
+        ]
+        placed += 1
+    elif isinstance(system, list) and system:
+        for block in reversed(system):
+            if isinstance(block, dict):
+                block["cache_control"] = _cache_ctrl()
+                placed += 1
+                break
+
+    # 2. last message's last cacheable content block.
+    messages = payload.get("messages")
+    if isinstance(messages, list) and messages:
+        last = messages[-1]
+        if isinstance(last, dict):
+            content = last.get("content")
+            if isinstance(content, str) and content.strip():
+                last["content"] = [
+                    {"type": "text", "text": content, "cache_control": _cache_ctrl()}
+                ]
+                placed += 1
+            elif isinstance(content, list) and content:
+                for block in reversed(content):
+                    if isinstance(block, dict) and block.get("type") in (
+                        "text", "tool_result", "tool_use", "image", "document"
+                    ):
+                        block["cache_control"] = _cache_ctrl()
+                        placed += 1
+                        break
+
+    return placed
+
+
+def _parse_anthropic_stream(joined: str):
+    """Parse an Anthropic Messages SSE stream. Returns
+    (content, stop_reason, usage_in, usage_out, cache_read, cache_write, model).
+
+    Event shapes (verified against Mantle):
+      message_start  -> {"message":{"model","usage":{input_tokens,
+                          cache_creation_input_tokens, cache_read_input_tokens}}}
+      content_block_delta -> {"delta":{"type":"text_delta","text":"..."}}
+      message_delta  -> {"usage":{output_tokens, ...}, "delta":{"stop_reason"}}
+    Usage is merged across message_start (input + cache) and message_delta
+    (output, and a repeat of input/cache on Mantle) taking the latest non-None.
+    """
+    content = ""
+    stop_reason = None
+    usage_in = usage_out = None
+    cache_read = cache_write = 0
+    model = None
+    for line in joined.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            d = json.loads(payload)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        t = d.get("type")
+        if t == "message_start":
+            msg = d.get("message") or {}
+            if isinstance(msg, dict):
+                if isinstance(msg.get("model"), str):
+                    model = msg["model"]
+                ui, uo, cr, cw = _extract_usage(msg)
+                if ui is not None:
+                    usage_in = ui
+                if uo is not None:
+                    usage_out = uo
+                if cr:
+                    cache_read = cr
+                if cw:
+                    cache_write = cw
+        elif t == "content_block_delta":
+            delta = d.get("delta") or {}
+            if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                content += delta.get("text", "") or ""
+        elif t == "message_delta":
+            ui, uo, cr, cw = _extract_usage(d)
+            if ui is not None:
+                usage_in = ui
+            if uo is not None:
+                usage_out = uo
+            if cr:
+                cache_read = cr
+            if cw:
+                cache_write = cw
+            dd = d.get("delta") or {}
+            if isinstance(dd, dict) and dd.get("stop_reason"):
+                stop_reason = dd["stop_reason"]
+    return content, stop_reason, usage_in, usage_out, cache_read, cache_write, model
+
+
+def _parse_anthropic_response(joined: str):
+    """Parse an Anthropic Messages response (streaming SSE or non-streaming
+    JSON). Same 7-tuple as _parse_anthropic_stream."""
+    if "data:" in joined:
+        return _parse_anthropic_stream(joined)
+    try:
+        d = json.loads(joined)
+    except Exception:
+        return "", None, None, None, 0, 0, None
+    if not isinstance(d, dict):
+        return "", None, None, None, 0, 0, None
+    content = ""
+    for block in d.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            content += block.get("text", "") or ""
+    ui, uo, cr, cw = _extract_usage(d)
+    model = d.get("model") if isinstance(d.get("model"), str) else None
+    return content, d.get("stop_reason"), ui, uo, cr, cw, model
+
+
 def detect_trailing_prefill(payload: dict) -> bool:
     """Sonnet 5 400s on a last-assistant-turn prefill. OpenClaw's tool loop
     should never send one (the last turn is user/tool), but detect it so a
@@ -569,24 +742,35 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     #   (b) include_usage injection — only needs `stream:true`; it must NOT be
     #       gated on `messages` (a future change to the repair guard would
     #       otherwise silently disable usage tracking). Decoupled per review.
+    # The Anthropic Messages path (Claude Sonnet 5, issue #1089) needs
+    # DIFFERENT handling than the OpenAI-completions path: OpenClaw sends a
+    # native Anthropic request, so we inject cache_control in the Anthropic
+    # shape and apply NONE of the OpenAI-only shaping (thinking:disabled,
+    # stream_options, OpenAI-format cache injection) which would 400 it.
+    is_anthropic = _is_anthropic_messages_path(path)
     if isinstance(parsed, dict):
-        rewrites = repair_tool_call_ids(parsed) if parsed.get("messages") else 0
-        usage_injected = inject_include_usage(parsed)
-        # Sonnet 5 request-shaping + Bedrock cache breakpoints (issue #1089).
-        # Both are no-ops for non-Anthropic models, so GLM-5 traffic is
-        # untouched. Prefill detection is observability-only (non-destructive).
-        sonnet_changes = shape_request_for_sonnet(parsed)
-        cache_breakpoints = inject_cache_breakpoints(parsed)
-        if detect_trailing_prefill(parsed):
-            log.warning(j("sonnet_trailing_prefill_detected", req_id=req_id,
-                          note="last message is an assistant prefill; Sonnet 5 "
-                               "may 400 on Bedrock"))
-        if rewrites or usage_injected or sonnet_changes or cache_breakpoints:
-            req_body = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
-            log.info(j("request_rewritten", req_id=req_id, rewrites=rewrites,
-                       include_usage_injected=usage_injected,
-                       sonnet_changes=sonnet_changes,
-                       cache_breakpoints=cache_breakpoints))
+        if is_anthropic:
+            cache_breakpoints = inject_anthropic_cache_breakpoints(parsed)
+            if cache_breakpoints:
+                req_body = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
+                log.info(j("request_rewritten_anthropic", req_id=req_id,
+                           cache_breakpoints=cache_breakpoints))
+        else:
+            rewrites = repair_tool_call_ids(parsed) if parsed.get("messages") else 0
+            usage_injected = inject_include_usage(parsed)
+            # Legacy OpenAI-completions request-shaping (GLM-5/Kimi). No-op for
+            # non-Anthropic models; Anthropic traffic never reaches this branch.
+            sonnet_changes = shape_request_for_sonnet(parsed)
+            cache_breakpoints = inject_cache_breakpoints(parsed)
+            if detect_trailing_prefill(parsed):
+                log.warning(j("sonnet_trailing_prefill_detected", req_id=req_id,
+                              note="last message is an assistant prefill"))
+            if rewrites or usage_injected or sonnet_changes or cache_breakpoints:
+                req_body = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
+                log.info(j("request_rewritten", req_id=req_id, rewrites=rewrites,
+                           include_usage_injected=usage_injected,
+                           sonnet_changes=sonnet_changes,
+                           cache_breakpoints=cache_breakpoints))
 
     if parsed and isinstance(parsed, dict):
         summary = {
@@ -728,7 +912,11 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 cache_write = 0
                 resp_model: Optional[str] = None
                 joined = b"".join(chunks).decode(errors="replace")
-                if "data:" in joined:
+                if is_anthropic:
+                    # Native Anthropic Messages response (streaming or JSON).
+                    (content, finish, usage_in, usage_out,
+                     cache_read, cache_write, resp_model) = _parse_anthropic_response(joined)
+                elif "data:" in joined:
                     for line in joined.splitlines():
                         line = line.strip()
                         if not line.startswith("data: "):
@@ -896,7 +1084,11 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         # First attempt.
         (status, headers, chunks, content, finish,
          usage_in, usage_out, cache_read, cache_write, resp_model) = await fetch_upstream("first")
-        reason = is_retryable_failure(status, content, finish)
+        # The native Anthropic path (Sonnet 5) does not use the OpenAI-shaped
+        # empty-relay/degeneracy retry+rescue — that was a GLM-5/Kimi workaround
+        # and its detectors assume the OpenAI response shape. We forward the
+        # response through and only account usage.
+        reason = None if is_anthropic else is_retryable_failure(status, content, finish)
         retry_attempts = 0
         # Up to 2 retries (3 total upstream calls). Stop as soon as one
         # succeeds. The retry body carries the empty-relay reminder only

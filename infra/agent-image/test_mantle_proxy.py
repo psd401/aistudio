@@ -54,6 +54,10 @@ from mantle_proxy import (  # noqa: E402
     detect_trailing_prefill,
     handle_usage,
     CACHE_TTL,
+    _is_anthropic_messages_path,
+    inject_anthropic_cache_breakpoints,
+    _parse_anthropic_stream,
+    _parse_anthropic_response,
 )
 
 
@@ -407,6 +411,94 @@ class TestUsageEndpoint(unittest.TestCase):
             final["cache_read_input_tokens"] - baseline["cache_read_input_tokens"],
             32000,
         )
+
+
+class TestAnthropicPathDetection(unittest.TestCase):
+    def test_detects_anthropic_messages_path(self):
+        self.assertTrue(_is_anthropic_messages_path("anthropic/v1/messages"))
+        self.assertTrue(_is_anthropic_messages_path("/anthropic/v1/messages"))
+        self.assertTrue(_is_anthropic_messages_path("v1/messages"))
+
+    def test_rejects_openai_completions_path(self):
+        self.assertFalse(_is_anthropic_messages_path("v1/chat/completions"))
+        self.assertFalse(_is_anthropic_messages_path("chat/completions"))
+        self.assertFalse(_is_anthropic_messages_path(""))
+
+
+class TestInjectAnthropicCacheBreakpoints(unittest.TestCase):
+    def test_string_system_becomes_cached_block(self):
+        p = {"system": "big fixed prefix", "messages": [{"role": "user", "content": "hi"}]}
+        placed = inject_anthropic_cache_breakpoints(p)
+        self.assertEqual(placed, 2)  # system + last message
+        self.assertIsInstance(p["system"], list)
+        self.assertEqual(p["system"][0]["cache_control"], {"type": "ephemeral", "ttl": CACHE_TTL})
+        # last message string content also converted + cached
+        self.assertIsInstance(p["messages"][0]["content"], list)
+        self.assertEqual(
+            p["messages"][0]["content"][0]["cache_control"], {"type": "ephemeral", "ttl": CACHE_TTL}
+        )
+
+    def test_list_system_caches_last_block(self):
+        p = {"system": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}
+        placed = inject_anthropic_cache_breakpoints(p)
+        self.assertEqual(placed, 1)
+        self.assertNotIn("cache_control", p["system"][0])
+        self.assertIn("cache_control", p["system"][1])
+
+    def test_no_system_no_messages_is_noop(self):
+        self.assertEqual(inject_anthropic_cache_breakpoints({}), 0)
+        self.assertEqual(inject_anthropic_cache_breakpoints({"system": ""}), 0)
+
+
+class TestParseAnthropicStream(unittest.TestCase):
+    STREAM = (
+        'event: message_start\n'
+        'data: {"type":"message_start","message":{"model":"claude-sonnet-5",'
+        '"usage":{"input_tokens":12,"cache_creation_input_tokens":30,'
+        '"cache_read_input_tokens":2000}}}\n\n'
+        'event: content_block_delta\n'
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}\n\n'
+        'event: content_block_delta\n'
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"lo"}}\n\n'
+        'event: message_delta\n'
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+        '"usage":{"input_tokens":12,"cache_creation_input_tokens":30,'
+        '"cache_read_input_tokens":2000,"output_tokens":7}}\n\n'
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+
+    def test_parses_content_usage_and_cache(self):
+        content, stop, ui, uo, cr, cw, model = _parse_anthropic_stream(self.STREAM)
+        self.assertEqual(content, "Hello")
+        self.assertEqual(stop, "end_turn")
+        # input_tokens is already de-cached on the Anthropic shape -> used as-is
+        self.assertEqual(ui, 12)
+        self.assertEqual(uo, 7)
+        self.assertEqual(cr, 2000)  # cache_read
+        self.assertEqual(cw, 30)    # cache_creation
+        self.assertEqual(model, "claude-sonnet-5")
+
+
+class TestParseAnthropicResponse(unittest.TestCase):
+    def test_non_streaming_json(self):
+        body = (
+            '{"model":"claude-sonnet-5","content":[{"type":"text","text":"Pong!"}],'
+            '"stop_reason":"end_turn","usage":{"input_tokens":8,'
+            '"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":13}}'
+        )
+        content, stop, ui, uo, cr, cw, model = _parse_anthropic_response(body)
+        self.assertEqual(content, "Pong!")
+        self.assertEqual(stop, "end_turn")
+        self.assertEqual(ui, 8)
+        self.assertEqual(uo, 13)
+        self.assertEqual(cr, 0)
+        self.assertEqual(cw, 0)
+        self.assertEqual(model, "claude-sonnet-5")
+
+    def test_streaming_dispatch(self):
+        # Delegates to the stream parser when SSE data lines are present.
+        content, *_ = _parse_anthropic_response(TestParseAnthropicStream.STREAM)
+        self.assertEqual(content, "Hello")
 
 
 if __name__ == "__main__":

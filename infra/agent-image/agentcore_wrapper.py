@@ -55,11 +55,13 @@ import workspace_sync
 
 # The model the agent platform runs on today — used as the last-resort model-id
 # fallback for telemetry when neither the proxy, harness, nor caller supplied
-# one. Must match openclaw.json's provider model id and the ai_models pricing
-# row (migration 092); a mismatch silently yields $0 cost. Single source of
-# truth so the two fallbacks below don't drift (issue #1083, review round 2).
-# Switched GLM-5 -> Claude Sonnet 5 for #1089.
-DEFAULT_AGENT_MODEL_ID = "anthropic.claude-sonnet-5"
+# one. Must match the id the proxy records + an ai_models pricing row
+# (migration 092); a mismatch silently yields $0 cost. Single source of truth so
+# the two fallbacks below don't drift (issue #1083, review round 2).
+# Switched GLM-5 -> Claude Sonnet 5 for #1089. Bedrock Mantle's Anthropic
+# Messages endpoint echoes the bare `claude-sonnet-5` on the response (verified),
+# so that is the id the proxy records — use it here too so the fallback matches.
+DEFAULT_AGENT_MODEL_ID = "claude-sonnet-5"
 
 adapter = OpenClawAdapter()
 
