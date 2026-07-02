@@ -223,14 +223,16 @@ RUN mkdir -p /home/node/.openclaw/memory
 #       are set explicitly on the AgentCore Runtime (runtimeEnvVars in
 #       agent-platform-stack.ts) so this call can resolve an endpoint.
 #     • Auth: hydrate_bedrock_api_key() exports AWS_BEARER_TOKEN_BEDROCK
-#       process-wide (agentcore_wrapper.py), so the SDK auto-selects Bedrock
-#       bearer-token auth for this call — authorized by the shared
-#       BedrockApiUser's `bedrock:CallWithBearerToken` grant
-#       (`BedrockEmbeddingsViaBearerToken` in agent-platform-stack.ts; see the
-#       memory_search rationale comment beside it). The `InvokeModel` on
-#       foundation-model/* grants (BedrockApiUser `InvokeBedrockModels` and the
-#       execution role `BedrockModelInvocation`) also cover the titan model if a
-#       SigV4 path is taken instead. Either auth path is already granted.
+#       process-wide (agentcore_wrapper.py). OpenClaw's memory_search relies on
+#       that hydrated Bedrock token (per the authoritative memory_search
+#       rationale comment at agent-platform-stack.ts:502-510), so this call is
+#       authorized by the shared BedrockApiUser's `bedrock:CallWithBearerToken`
+#       grant (`BedrockEmbeddingsViaBearerToken`), NOT the execution role. If a
+#       SigV4 path is used instead, the `InvokeModel` on foundation-model/*
+#       grants (BedrockApiUser `InvokeBedrockModels` and the execution role
+#       `BedrockModelInvocation`) cover the titan model. Either path is already
+#       granted. (Exact auth-selection internals are OpenClaw's; not asserted
+#       here beyond the token dependency the existing grant already documents.)
 #   No IAM change and no new Docker layer — the COPY below already ships it.
 #
 #   plugins.entries.active-memory — blocking memory sub-agent that runs before
