@@ -24,10 +24,17 @@ Manager — never a shared account.
 | `list` | List recent recordings | `--page` `--page-size` `--query` `--from` `--to` |
 | `search` | List recordings matching a keyword | `--query <kw>` (required) |
 | `file` | One recording's metadata + audio URL | `--id <id>` |
-| `transcript` | Full transcript of a recording | `--id <id>` |
-| `summary` | AI summary / action items / topics | `--id <id>` |
+| **`digest`** | **DEFAULT for content.** Records-safe summary of a recording | `--id <id>` `--profiles` `--output` `--length` |
+| `transcript` | RAW transcript (explicit, sensitive) | `--id <id>` |
+| `summary` | Plaud's own AI note for the recording | `--id <id>` |
 | `whoami` | The connected Plaud account | — |
 | `tools` | Introspect the live MCP tool schema | — |
+
+**Use `digest`, not `transcript`, to answer questions about a recording's
+content.** `digest` fetches the transcript and summarizes it *inside the skill*
+(via `psd-summarize`, excluding student/personnel content) so the raw transcript
+never enters your context, the chat, memory, or logs. Only reach for
+`transcript` when the user explicitly needs the raw text.
 
 ## Auth flow (chat → browser, one time per user)
 
@@ -46,12 +53,16 @@ Manager — never a shared account.
 - **Errors:** exit 12 (MCP/upstream), 14 (rate-limited) — report the error;
   do not improvise around it.
 
-## Privacy
+## Privacy (records-safe by design)
 
-Transcript/summary **content is redacted from AI Studio's logs and telemetry**
-(the harness marks psd-plaud tool output as sensitive) but is still passed to
-the model so you can summarize or answer questions about it. Keep it that way —
-do not echo raw transcripts into any other logged surface.
+- **Prefer `digest`.** It summarizes the transcript in-skill (student/personnel
+  content excluded) so the raw transcript never enters your context, the chat,
+  memory, or logs — the district retains a records-safe summary, not raw text.
+- If you must use raw `transcript`, that content is also redacted from AI
+  Studio's logs/telemetry as a backstop — but do not paste raw transcripts into
+  memory, other skills, or the chat reply. Summarize instead.
+- Summarization reduces but does not guarantee removal of sensitive content;
+  for high-stakes records, tell the user to review.
 
 ## Notes
 

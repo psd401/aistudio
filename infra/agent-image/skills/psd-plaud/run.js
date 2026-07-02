@@ -10,8 +10,13 @@
  *   list      [--page N] [--page-size N] [--query kw] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
  *   search    --query <keyword>            (alias for list with a keyword)
  *   file      --id <id>                    (recording metadata + audio URL)
- *   transcript --id <id>                   (full transcript)
- *   summary   --id <id>                    (AI note: summary / action items / topics)
+ *   digest    --id <id> [--profiles a,b] [--output ...] [--length ...]
+ *                                          (DEFAULT for content: records-safe
+ *                                          summary; the raw transcript is
+ *                                          summarized in-skill and never enters
+ *                                          the agent context/logs)
+ *   transcript --id <id>                   (RAW transcript — explicit, sensitive)
+ *   summary   --id <id>                    (Plaud's own AI note for the recording)
  *   whoami                                 (current Plaud account)
  *   tools                                  (introspect the live MCP tool schema)
  *
@@ -26,7 +31,7 @@
 'use strict';
 
 const {
-  fail, validateUserEmail, parseArgs, callTool, listTools,
+  fail, validateUserEmail, parseArgs, callTool, digestRecording, listTools,
 } = require('./common');
 
 async function main() {
@@ -36,7 +41,7 @@ async function main() {
 
   if (args.help || !sub) {
     process.stdout.write(
-      'Usage: run.js --user <email> <list|search|file|transcript|summary|whoami|tools> [flags]\n'
+      'Usage: run.js --user <email> <list|search|file|digest|transcript|summary|whoami|tools> [flags]\n'
     );
     process.exit(sub ? 0 : 1);
   }
@@ -73,6 +78,16 @@ async function main() {
       break;
     }
 
+    case 'digest': {
+      if (!args.id || args.id === true) fail('digest requires --id <recording-id>');
+      await digestRecording(userEmail, args.id, {
+        profiles: typeof args.profiles === 'string' ? args.profiles : undefined,
+        output: typeof args.output === 'string' ? args.output : undefined,
+        length: typeof args.length === 'string' ? args.length : undefined,
+      });
+      break;
+    }
+
     case 'transcript': {
       if (!args.id || args.id === true) fail('transcript requires --id <recording-id>');
       await callTool('get_transcript', { id: args.id }, userEmail);
@@ -86,7 +101,7 @@ async function main() {
     }
 
     default:
-      fail(`Unknown subcommand "${sub}". Try: list, search, file, transcript, summary, whoami, tools.`);
+      fail(`Unknown subcommand "${sub}". Try: list, search, file, digest, transcript, summary, whoami, tools.`);
   }
 }
 

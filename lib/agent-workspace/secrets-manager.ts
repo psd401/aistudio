@@ -43,6 +43,87 @@ export function workspaceSecretId(
   return `psd-agent-creds/${environment}/user/${ownerEmail}/google-workspace${suffix}`
 }
 
+/**
+ * Plaud per-user OAuth token slot.
+ *   Path: psd-agent-creds/{env}/user/{email}/plaud
+ * Written by the /agent-connect-plaud callback; read headlessly by the
+ * psd-plaud skill. Covered by the existing psd-agent-creds/{env}/* IAM grants
+ * (no new IAM). Record shape below.
+ */
+export interface PlaudTokenData {
+  refresh_token: string
+  client_id: string
+  scope?: string
+  obtained_at: string
+}
+
+export function plaudSecretId(ownerEmail: string): string {
+  if (!SAFE_EMAIL_RE.test(ownerEmail)) {
+    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
+  }
+  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  return `psd-agent-creds/${environment}/user/${ownerEmail}/plaud`
+}
+
+/**
+ * Store the Plaud refresh token. Create-or-put with the same concurrency
+ * handling as storeRefreshToken. No-op in local dev. Returns the real ARN.
+ */
+export async function storePlaudRefreshToken(
+  ownerEmail: string,
+  tokenData: PlaudTokenData
+): Promise<string | null> {
+  const secretId = plaudSecretId(ownerEmail)
+  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  if (process.env.NODE_ENV === "development") {
+    log.info("Local dev mode — skipping Plaud secret write", { secretId })
+    return null
+  }
+  const {
+    PutSecretValueCommand,
+    CreateSecretCommand,
+    DescribeSecretCommand,
+    ResourceNotFoundException,
+  } = await import("@aws-sdk/client-secrets-manager")
+  const client = await getSecretsManagerClient()
+  const secretString = JSON.stringify(tokenData)
+  try {
+    const putResp = await client.send(
+      new PutSecretValueCommand({ SecretId: secretId, SecretString: secretString })
+    )
+    log.info("Plaud refresh token stored", { secretId })
+    return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+  } catch (error) {
+    if (error instanceof ResourceNotFoundException) {
+      try {
+        const createResp = await client.send(
+          new CreateSecretCommand({
+            Name: secretId,
+            SecretString: secretString,
+            Description: `Plaud refresh token for ${ownerEmail}`,
+            Tags: [
+              { Key: "Environment", Value: environment },
+              { Key: "ManagedBy", Value: "aistudio" },
+              { Key: "OwnerEmail", Value: ownerEmail },
+            ],
+          })
+        )
+        log.info("Plaud refresh token secret created", { secretId })
+        return createResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+      } catch (createError) {
+        if (createError instanceof Error && createError.name === "ResourceExistsException") {
+          const putResp = await client.send(
+            new PutSecretValueCommand({ SecretId: secretId, SecretString: secretString })
+          )
+          return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+        }
+        throw createError
+      }
+    }
+    throw error
+  }
+}
+
 // Module-scoped client — reuses the HTTP connection pool across calls.
 // Lazily initialized on first non-dev invocation.
 let _smClient: InstanceType<typeof import("@aws-sdk/client-secrets-manager").SecretsManagerClient> | null = null

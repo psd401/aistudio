@@ -86,6 +86,7 @@
     "088-glm5-agent-pricing.sql",
     "090-atrium-content-audit.sql",
     "091-scheduled-execution-agent-identity.sql",
-    "092-agent-cache-tokens.sql"
+    "092-agent-cache-tokens.sql",
+    "093-agent-workspace-plaud.sql"
   ]
 }

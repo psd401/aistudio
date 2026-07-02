@@ -248,11 +248,12 @@ async function mcpPost(accessToken, message, sessionId) {
 }
 
 /**
- * One MCP tool call, end to end: auth (refresh-or-mint) → initialize handshake
- * → tools/call. Writes the tool result to stdout on success; emits needs-auth
- * (exit 10) when unauthorized; structured error + non-zero exit otherwise.
+ * Core: auth (refresh-or-mint) → initialize handshake → tools/call. Returns the
+ * parsed MCP result object. Emits needs-auth (exit 10) when unauthorized, a
+ * structured error + non-zero exit on failure. Does NOT write to stdout — so
+ * callers that must keep content OUT of the agent's context (digest) can use it.
  */
-async function callTool(toolName, toolArgs, ownerEmail) {
+async function invokeTool(toolName, toolArgs, ownerEmail) {
   const record = await getUserPlaudRecord(ownerEmail);
   if (!record || !record.refresh_token) {
     await emitNeedsAuthAndExit(ownerEmail, 'no Plaud token stored for this user yet');
@@ -273,7 +274,7 @@ async function callTool(toolName, toolArgs, ownerEmail) {
 
   // 1. initialize handshake (captures the session id if the server is stateful)
   const initId = ++_rpcId;
-  let initResp = await mcpPost(auth.access_token, {
+  const initResp = await mcpPost(auth.access_token, {
     jsonrpc: '2.0', id: initId, method: 'initialize',
     params: {
       protocolVersion: MCP_PROTOCOL_VERSION,
@@ -287,7 +288,6 @@ async function callTool(toolName, toolArgs, ownerEmail) {
     fail(`Plaud MCP initialize HTTP ${initResp.status}: ${t.slice(0, 400)}`, 12);
   }
   const sessionId = initResp.headers.get('mcp-session-id') || null;
-  // Drain the initialize body (result not needed) and send the initialized note.
   await initResp.text().catch(() => '');
   try {
     await mcpPost(auth.access_token,
@@ -318,10 +318,53 @@ async function callTool(toolName, toolArgs, ownerEmail) {
     emit({ status: 'mcp-error', tool: toolName, jsonrpc_error: msg.error });
     process.exit(12);
   }
-  // MCP tools/call result: { content: [...], isError? }. Emit as-is; run.js
-  // is responsible for surfacing text content to the model.
-  process.stdout.write(JSON.stringify(msg.result ?? null) + '\n');
   return msg.result ?? null;
+}
+
+/** Invoke a tool and write the raw result to stdout (surfaced to the model). */
+async function callTool(toolName, toolArgs, ownerEmail) {
+  const result = await invokeTool(toolName, toolArgs, ownerEmail);
+  process.stdout.write(JSON.stringify(result) + '\n');
+  return result;
+}
+
+/** Concatenate the text blocks of an MCP tools/call result. */
+function extractTextFromResult(result) {
+  const content = result && Array.isArray(result.content) ? result.content : [];
+  return content
+    .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
+    .map((p) => p.text)
+    .join('\n')
+    .trim();
+}
+
+/**
+ * digest — fetch a recording's transcript and return ONLY a records-safe
+ * summary. The raw transcript is fetched here and piped to psd-summarize on
+ * stdin; it NEVER touches this skill's stdout, so it never enters the agent's
+ * context, chat, memory, logs, or telemetry. This is the DEFAULT way to get
+ * recording content (raw `transcript` is the explicit exception).
+ */
+async function digestRecording(ownerEmail, id, opts) {
+  const result = await invokeTool('get_transcript', { id }, ownerEmail);
+  const transcript = extractTextFromResult(result);
+  if (!transcript) {
+    emit({ status: 'empty', message: 'No transcript text is available for this recording.' });
+    process.exit(0);
+  }
+  const { spawnSync } = require('node:child_process');
+  const args = ['/opt/psd-skills/psd-summarize/run.js', '--context', 'Plaud voice recording transcript'];
+  if (opts.profiles) args.push('--profiles', opts.profiles);
+  if (opts.output) args.push('--output', opts.output);
+  if (opts.length) args.push('--length', opts.length);
+  const res = spawnSync('node', args, {
+    input: transcript, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  });
+  if (res.status !== 0) {
+    fail(`summarization failed (exit ${res.status}): ${(res.stderr || '').slice(0, 300)}`, 12);
+  }
+  // psd-summarize emits {status:'ok', summary}. Only the summary leaves here.
+  process.stdout.write((res.stdout || '').trim() + '\n');
 }
 
 /** List the server's tools (for `tools` subcommand / schema introspection). */
@@ -360,6 +403,6 @@ async function listTools(ownerEmail) {
 module.exports = {
   fail, emit, parseArgs, validateUserEmail,
   getUserPlaudRecord, refreshPlaudAccessToken, mintConsentUrl,
-  emitNeedsAuthAndExit, callTool, listTools, plaudTokenSecretId,
+  emitNeedsAuthAndExit, callTool, digestRecording, listTools, plaudTokenSecretId,
   PLAUD_MCP_URL,
 };
