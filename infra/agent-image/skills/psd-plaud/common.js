@@ -30,12 +30,21 @@
 'use strict';
 
 // Reuse psd-workspace's already-installed AWS SDK copy (keeps image file-count
-// flat — same rationale as psd-data). This skill ships no node_modules.
+// flat — same rationale as psd-data). This skill ships no node_modules. Falls
+// back to a bare require so the skill is loadable/testable outside the
+// container (e.g. from the repo tree) as well.
+function requireSecretsManager() {
+  try {
+    return require('/opt/psd-skills/psd-workspace/node_modules/@aws-sdk/client-secrets-manager');
+  } catch {
+    return require('@aws-sdk/client-secrets-manager');
+  }
+}
 const {
   SecretsManagerClient,
   GetSecretValueCommand,
   PutSecretValueCommand,
-} = require('/opt/psd-skills/psd-workspace/node_modules/@aws-sdk/client-secrets-manager');
+} = requireSecretsManager();
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
@@ -63,13 +72,16 @@ function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
-// Same argv parser convention as psd-data/psd-workspace.
+// argv parser. Unlike psd-workspace (which has no bare subcommand), psd-plaud
+// takes a positional subcommand (`whoami`, `list`, …), so positionals are
+// COLLECTED into args._ rather than rejected. Flag VALUES are consumed via the
+// i++ below, so args._[0] is always the real subcommand — not a flag's value.
 function parseArgs(argv) {
-  const args = {};
+  const args = { _: [] };
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') { args.help = true; continue; }
-    if (!arg.startsWith('--')) fail(`Unexpected positional argument: ${arg}`);
+    if (!arg.startsWith('--')) { args._.push(arg); continue; }
     const key = arg.slice(2).replace(/-/g, '_');
     const next = argv[i + 1];
     if (next === undefined || next.startsWith('--')) { args[key] = true; }

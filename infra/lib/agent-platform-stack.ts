@@ -544,16 +544,15 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(googleOAuthClientSecret).add('ManagedBy', 'cdk');
 
     // Plaud OAuth client (public, PKCE) for the /agent-connect-plaud consent
-    // flow + the psd-plaud skill. Plaud's MCP server supports Dynamic Client
-    // Registration, so the client_id is obtained by POSTing to
-    // https://mcp.plaud.ai/register with redirect_uri = <app>/agent-connect-plaud/callback,
-    // then stored here (public client — no client_secret):
-    //   aws secretsmanager put-secret-value \
-    //     --secret-id psd-agent/<env>/plaud-oauth-client \
-    //     --secret-string '{"client_id":"..."}'
+    // flow + the psd-plaud skill. Created EMPTY — the app auto-registers a
+    // client via Plaud's Dynamic Client Registration on first consent (using
+    // its own issuer URL as redirect_uri, so it's always correct per env) and
+    // writes the client_id here. No manual step. See ensurePlaudClientId in
+    // actions/agent-plaud.actions.ts; the ECS task role is granted PutSecretValue
+    // on this specific secret in ecs-service.ts.
     const plaudOAuthClientSecret = new secretsmanager.Secret(this, 'PlaudOAuthClientSecret', {
       secretName: `psd-agent/${environment}/plaud-oauth-client`,
-      description: `Plaud OAuth public client_id (DCR) for agent consent flow + psd-plaud skill.`,
+      description: `Plaud OAuth public client_id — auto-registered by the app (DCR) on first consent.`,
     });
     cdk.Tags.of(plaudOAuthClientSecret).add('Environment', environment);
     cdk.Tags.of(plaudOAuthClientSecret).add('ManagedBy', 'cdk');

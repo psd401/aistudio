@@ -23,11 +23,12 @@ import { executeQuery } from "@/lib/db/drizzle-client"
 import { and, eq, isNull, sql } from "drizzle-orm"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces"
 import { verifyConsentToken } from "@/lib/agent-workspace/consent-token"
-import { getSecretJson, storePlaudRefreshToken } from "@/lib/agent-workspace/secrets-manager"
+import { getSecretJson, putSecretString, storePlaudRefreshToken } from "@/lib/agent-workspace/secrets-manager"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 
 const PLAUD_AUTHORIZE_URL = process.env.PLAUD_AUTHORIZE_URL ?? "https://mcp.plaud.ai/authorize"
 const PLAUD_TOKEN_URL = process.env.PLAUD_TOKEN_URL ?? "https://mcp.plaud.ai/token"
+const PLAUD_REGISTER_URL = process.env.PLAUD_REGISTER_URL ?? "https://mcp.plaud.ai/register"
 const PLAUD_OAUTH_SECRET_ID =
   process.env.PLAUD_OAUTH_SECRET_ID ?? `psd-agent/${process.env.ENVIRONMENT ?? "dev"}/plaud-oauth-client`
 
@@ -35,12 +36,89 @@ function plaudRedirectUri(): string {
   return `${getIssuerUrl()}/agent-connect-plaud/callback`
 }
 
-async function getPlaudClientId(): Promise<string | null> {
+/**
+ * Return the Plaud OAuth client_id, auto-registering one via Dynamic Client
+ * Registration and storing it if the secret is empty. Fully automatic — no
+ * manual step. The redirect_uri is derived from the app's OWN issuer
+ * (getIssuerUrl), so it is always correct for this environment. The client is
+ * public (PKCE, no secret). Reuses the same Secrets Manager write path the
+ * consent flow already uses to store tokens.
+ */
+async function ensurePlaudClientId(
+  log: ReturnType<typeof createLogger>
+): Promise<string | null> {
   try {
-    const creds = await getSecretJson(PLAUD_OAUTH_SECRET_ID)
-    const clientId = creds?.client_id
-    return typeof clientId === "string" && clientId && clientId !== "PLACEHOLDER" ? clientId : null
-  } catch {
+    const creds = await getSecretJson<{ client_id?: string }>(PLAUD_OAUTH_SECRET_ID)
+    if (creds) {
+      const existing = creds.client_id
+      if (typeof existing === "string" && existing && existing !== "PLACEHOLDER") {
+        return existing
+      }
+    }
+  } catch (err) {
+    // A transient/permission error is NOT the same as "secret is empty" — proceeding
+    // to register here could overwrite a valid client_id for existing users. Bail out.
+    log.error("Failed to read Plaud OAuth secret — not registering a new client", {
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return null
+  }
+  try {
+    const resp = await fetch(PLAUD_REGISTER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_name: "PSD AI Studio Agent",
+        redirect_uris: [plaudRedirectUri()],
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+      }),
+      signal: AbortSignal.timeout(10000),
+    })
+    const data = (await resp.json().catch(() => ({}))) as {
+      client_id?: string
+      error?: string
+      error_description?: string
+    }
+    if (!resp.ok || !data.client_id) {
+      log.error("Plaud Dynamic Client Registration failed", {
+        status: resp.status,
+        error: data.error,
+        errorDescription: data.error_description,
+      })
+      return null
+    }
+
+    // Guard against a concurrent first-time consent racing us to register+store a
+    // different client: if the secret now holds a client_id we didn't just write,
+    // defer to it instead of overwriting — keeps every in-flight authorize URL
+    // consistent with what the callback will read back.
+    try {
+      const raceCreds = await getSecretJson<{ client_id?: string }>(PLAUD_OAUTH_SECRET_ID)
+      const winner = raceCreds?.client_id
+      if (typeof winner === "string" && winner && winner !== "PLACEHOLDER") {
+        log.info("Plaud OAuth client registered concurrently by another request — using it", {})
+        return winner
+      }
+    } catch {
+      // ignore — fall through and store our own registration
+    }
+
+    await putSecretString(
+      PLAUD_OAUTH_SECRET_ID,
+      JSON.stringify({
+        client_id: data.client_id,
+        redirect_uri: plaudRedirectUri(),
+        registered_at: new Date().toISOString(),
+      })
+    )
+    log.info("Plaud OAuth client auto-registered", { redirectUri: plaudRedirectUri() })
+    return data.client_id
+  } catch (err) {
+    log.error("Plaud Dynamic Client Registration error", {
+      error: err instanceof Error ? err.message : String(err),
+    })
     return null
   }
 }
@@ -76,7 +154,7 @@ export async function verifyPlaudConsentAndGetOAuthUrl(
       return createSuccess({ valid: false, error: "This consent link is invalid or for a different flow." })
     }
 
-    const clientId = await getPlaudClientId()
+    const clientId = await ensurePlaudClientId(log)
     if (!clientId) {
       timer({ status: "error" })
       log.error("Plaud OAuth client_id not configured")
@@ -181,7 +259,7 @@ export async function handlePlaudCallback(
       return createSuccess({ success: false, error: "This consent link has already been used or has expired. Ask your agent for a new one." })
     }
 
-    const clientId = await getPlaudClientId()
+    const clientId = await ensurePlaudClientId(log)
     if (!clientId) {
       timer({ status: "error" })
       return createSuccess({ success: false, error: "Plaud integration is not configured yet." })

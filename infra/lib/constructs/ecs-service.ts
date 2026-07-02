@@ -386,6 +386,18 @@ export class EcsServiceConstruct extends Construct {
                 `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent/${environment}/*`,
               ],
             }),
+            // Write ONLY the Plaud OAuth client_id secret. The /agent-connect-plaud
+            // flow auto-registers a Plaud OAuth client via Dynamic Client
+            // Registration (using the app's own issuer URL as redirect_uri) and
+            // stores the client_id here on first use — no manual step. Scoped to
+            // just this secret so the app can't overwrite google-oauth-client etc.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:PutSecretValue'],
+              resources: [
+                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent/${environment}/plaud-oauth-client-*`,
+              ],
+            }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [
