@@ -1509,7 +1509,6 @@ async function logTelemetry(
 
   try {
     const sql = await getDbClient();
-    const totalTokens = params.inputTokens + params.outputTokens;
     const invokedBy = params.invokedBy ?? null;
     const agentOwnerId = params.agentOwnerId ?? null;
     const topic = params.topic ?? null;
@@ -1517,6 +1516,12 @@ async function logTelemetry(
     // default to 0 — GLM-5 rows and older callers record no cache activity.
     const cacheReadTokens = params.cacheReadInputTokens ?? 0;
     const cacheWriteTokens = params.cacheWriteInputTokens ?? 0;
+    // Session total is true VOLUME processed, so it must include the cached
+    // prefix (#1089/#1092): input_tokens is now the DE-CACHED billable input,
+    // so add cache read/write back or agent_sessions.total_tokens under-reports
+    // on cache-hit turns. cache tokens are 0 on GLM-5 / non-caching turns.
+    const totalTokens =
+      params.inputTokens + params.outputTokens + cacheReadTokens + cacheWriteTokens;
 
     // Insert agent_messages first to get the id, then fan out to the
     // deep-telemetry tables. The session upsert is independent and can
@@ -2448,8 +2453,12 @@ async function processRecord(
         }
       ).finally(() => releaseSessionLock(crossSessionId, crossLockToken, log));
 
-      // Token alerting
-      const totalTokens = agentResult.inputTokens + agentResult.outputTokens;
+      // Token alerting — total VOLUME processed incl. the cached prefix
+      // (#1089/#1092): a large cached-context turn is still a heavy turn worth
+      // flagging, and input_tokens is de-cached, so add cache read/write back.
+      const totalTokens =
+        agentResult.inputTokens + agentResult.outputTokens +
+        agentResult.cacheReadInputTokens + agentResult.cacheWriteInputTokens;
       if (totalTokens > TOKEN_LIMIT) {
         log.warn('Token usage exceeds alerting threshold (cross-user)', {
           invoker: senderEmail,
@@ -2581,7 +2590,12 @@ async function processRecord(
   // The response is still delivered — this is for monitoring/alerting.
   // Hard enforcement requires pre-invocation token estimation via session
   // tracking in DynamoDB, which is planned for Phase 2.
-  const totalTokens = agentResult.inputTokens + agentResult.outputTokens;
+  // Total VOLUME processed incl. the cached prefix (#1089/#1092): input_tokens
+  // is de-cached billable input, so add cache read/write back for an accurate
+  // heavy-turn signal.
+  const totalTokens =
+    agentResult.inputTokens + agentResult.outputTokens +
+    agentResult.cacheReadInputTokens + agentResult.cacheWriteInputTokens;
   if (totalTokens > TOKEN_LIMIT) {
     log.warn('Token usage exceeds alerting threshold', {
       inputTokens: agentResult.inputTokens,
