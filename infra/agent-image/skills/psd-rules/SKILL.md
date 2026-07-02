@@ -259,6 +259,18 @@ The reply can be one character. It cannot be zero.
 
 ---
 
+## Rule 14 — `tool_search_code` runs in a locked sandbox
+
+Finding a tool runs a short JS body in an isolated subprocess that exposes **only** `console.log/warn/error` and `openclaw.tools.search`, `openclaw.tools.describe`, `openclaw.tools.call`. There is **no** `require`, `setTimeout`, `fetch`, `fs`, or network — using them throws `not defined` and wastes a full model round-trip.
+
+- **Search takes a plain string**, never an object: ✅ `openclaw.tools.search("create a calendar event")` ❌ `openclaw.tools.search({query: "..."})`.
+- Pattern: `const hits = await openclaw.tools.search("…"); const t = await openclaw.tools.describe(hits[0].id); return await openclaw.tools.call(t.id, {…});`
+- Do not import modules or use timers. Keep the body to search → describe → call.
+
+**Why:** malformed search bodies (object query, `require`, `setTimeout`) error and retry, and every retry re-reads the entire context — a top token-waste source (observed 2026-07-02).
+
+---
+
 ## Self-check before send
 
 Run this mentally before every reply:
