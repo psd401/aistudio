@@ -449,6 +449,30 @@ class TestInjectAnthropicCacheBreakpoints(unittest.TestCase):
         self.assertEqual(inject_anthropic_cache_breakpoints({}), 0)
         self.assertEqual(inject_anthropic_cache_breakpoints({"system": ""}), 0)
 
+    def test_normalizes_openclaw_5m_blocks_to_1h_without_adding(self):
+        # OpenClaw injects its OWN cache_control at 5m. Anthropic 400s if a 1h
+        # block comes after a 5m block, so we must upgrade OpenClaw's blocks in
+        # place to 1h and NOT add a second block (regression for the live 400:
+        # "a ttl='1h' cache_control block must not come after a ttl='5m'").
+        p = {
+            "system": [
+                {"type": "text", "text": "base",
+                 "cache_control": {"type": "ephemeral", "ttl": "5m"}},
+                {"type": "text", "text": "more"},
+            ],
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "hi",
+                 "cache_control": {"type": "ephemeral", "ttl": "5m"}}]}],
+            "tools": [{"name": "t", "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
+        }
+        placed = inject_anthropic_cache_breakpoints(p)
+        self.assertEqual(placed, 3)  # 3 existing blocks normalized (tools+system+msg)
+        self.assertEqual(p["system"][0]["cache_control"]["ttl"], CACHE_TTL)
+        # No NEW block added onto the un-cached trailing system block.
+        self.assertNotIn("cache_control", p["system"][1])
+        self.assertEqual(p["messages"][0]["content"][0]["cache_control"]["ttl"], CACHE_TTL)
+        self.assertEqual(p["tools"][0]["cache_control"]["ttl"], CACHE_TTL)
+
 
 class TestParseAnthropicStream(unittest.TestCase):
     STREAM = (

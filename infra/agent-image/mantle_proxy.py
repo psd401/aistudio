@@ -339,23 +339,66 @@ def _cache_ctrl() -> dict:
     return {"type": "ephemeral", "ttl": CACHE_TTL}
 
 
-def inject_anthropic_cache_breakpoints(payload: dict) -> int:
-    """Inject up to two `cache_control` breakpoints into a native Anthropic
-    Messages request so the byte-stable prefix is cached across turns
-    (issue #1089). Mutates `payload` in place; returns breakpoints placed.
+def _normalize_cache_ttl(payload: dict, ttl: str) -> int:
+    """Rewrite the `ttl` of EVERY existing `cache_control` block in an Anthropic
+    request (tools -> system -> messages order) to `ttl`. Returns the count of
+    cache_control blocks found. Mutates in place.
 
-    Placement (Anthropic render order is tools -> system -> messages):
-      1. Last block of the top-level `system` (the big fixed prefix: SOUL +
-         rules + tool guidance). This is the highest-yield breakpoint.
-      2. Last content block of the last message (multi-turn prefix reuse).
-    Verified against Mantle: a 2014-token system block wrote the cache on the
-    first call and read it on the second.
+    WHY (issue #1089, 2nd validation miss): OpenClaw's `anthropic-messages`
+    provider ALREADY injects its own `cache_control` blocks — with a 5-minute
+    TTL. Anthropic REJECTS a request where a 1h block comes after a 5m block
+    ("a ttl='1h' cache_control block must not come after a ttl='5m'..."). So we
+    do NOT add our own blocks on top of OpenClaw's; we upgrade OpenClaw's blocks
+    in place to our 1h TTL. Uniform TTL => no ordering conflict, and we still get
+    the long cache window #1089 wants.
+    """
+    count = 0
+
+    def bump(blocks) -> None:
+        nonlocal count
+        if not isinstance(blocks, list):
+            return
+        for b in blocks:
+            if isinstance(b, dict) and isinstance(b.get("cache_control"), dict):
+                b["cache_control"]["ttl"] = ttl
+                count += 1
+
+    # tools: each tool def may carry a cache_control.
+    for t in payload.get("tools") or []:
+        if isinstance(t, dict) and isinstance(t.get("cache_control"), dict):
+            t["cache_control"]["ttl"] = ttl
+            count += 1
+    # system: list-of-blocks form.
+    bump(payload.get("system"))
+    # messages: each message's content-block array.
+    for m in payload.get("messages") or []:
+        if isinstance(m, dict):
+            bump(m.get("content"))
+    return count
+
+
+def inject_anthropic_cache_breakpoints(payload: dict) -> int:
+    """Ensure the byte-stable prefix of a native Anthropic Messages request is
+    cached at our 1h TTL (issue #1089). Mutates `payload` in place; returns the
+    number of cache_control breakpoints in effect.
+
+    Two cases:
+      * OpenClaw already placed cache_control blocks (it does, at 5m) -> we only
+        NORMALIZE their TTL to 1h (see _normalize_cache_ttl). We must NOT add our
+        own blocks on top, or Anthropic 400s on the mixed-TTL ordering rule.
+      * OpenClaw placed none -> we add our own on the last `system` block (the
+        big fixed prefix) and the last message content block.
     """
     if not isinstance(payload, dict):
         return 0
-    placed = 0
 
-    # 1. system — string or list-of-blocks.
+    # Prefer normalizing OpenClaw's own breakpoints to 1h.
+    existing = _normalize_cache_ttl(payload, CACHE_TTL)
+    if existing:
+        return existing
+
+    # Fallback: OpenClaw placed no cache_control -> add our own.
+    placed = 0
     system = payload.get("system")
     if isinstance(system, str) and system.strip():
         payload["system"] = [
@@ -369,7 +412,6 @@ def inject_anthropic_cache_breakpoints(payload: dict) -> int:
                 placed += 1
                 break
 
-    # 2. last message's last cacheable content block.
     messages = payload.get("messages")
     if isinstance(messages, list) and messages:
         last = messages[-1]
