@@ -259,20 +259,18 @@ The reply can be one character. It cannot be zero.
 
 ---
 
+## Rule 14 — `tool_search_code` runs in a locked sandbox
+
+Finding a tool runs a short JS body in an isolated subprocess that exposes **only** `console.log/warn/error` and `openclaw.tools.search`, `openclaw.tools.describe`, `openclaw.tools.call`. There is **no** `require`, `setTimeout`, `fetch`, `fs`, or network — using them throws `not defined` and wastes a full model round-trip.
+
+- **Search takes a plain string**, never an object: ✅ `openclaw.tools.search("create a calendar event")` ❌ `openclaw.tools.search({query: "..."})`.
+- Pattern: `const hits = await openclaw.tools.search("…"); if (!hits.length) return "No tools found"; const t = await openclaw.tools.describe(hits[0].id); return await openclaw.tools.call(t.id, {…});`
+- Do not import modules or use timers. Keep the body to search → describe → call.
+
+**Why:** malformed search bodies (object query, `require`, `setTimeout`) error and retry, and every retry re-reads the entire context — a top token-waste source (observed 2026-07-02).
+
+---
+
 ## Self-check before send
 
-Run this mentally before every reply:
-
-1. ✅ Stripped all "Let me…" / "Now let me…" sentences?
-2. ✅ All URLs from skill output, not constructed by me?
-3. ✅ Cited memory files for past-facts, or admitted I don't know?
-4. ✅ Did the work now (or scheduled it), not an empty promise?
-5. ✅ Reply length proportional to information density?
-6. ✅ Updated the memory files this turn?
-7. ✅ For any task a skill covers, called the skill — not replicated it in Bash?
-8. ✅ If the last tool result had a `url`, is that exact URL on its own line? (Prose ≠ URL.)
-9. ✅ If I couldn't fulfill any part, called `psd-failure-report` before sending?
-10. ✅ Is the user-visible text **non-empty**? (Even one emoji counts.)
-11. ✅ Any non-reversible `gh` / `git push` this turn? If yes, did the user authorize it this same turn?
-
-If any answer is "no" — fix the reply before sending.
+Before every reply, confirm: no "Let me…"/scratchpad (R1); every URL is from a skill, and any `url` field is on its own line (R2/R9); no fabricated facts or outcomes (R3); did the work now, not an empty promise (R4); reply length matches information density and memory files updated (R5/R7); for any task a skill covers, called the skill (R9); called `psd-failure-report` if any part failed (R11); user-visible text is non-empty (R12); no non-reversible `gh`/`git push` unless the user authorized it this same turn (R13). If any is "no," fix the reply first.
