@@ -1,7 +1,7 @@
 ---
 name: psd-image-gen
 summary: Generate images with OpenAI gpt-image-2 — shared API key, district-funded.
-description: Generates an image from a text prompt via OpenAI's gpt-image-2 model, uploads the PNG to a public-by-link S3 prefix, and returns an unsigned HTTPS URL the agent can surface in chat. Uses a shared (district-funded) OpenAI API key from Secrets Manager — usage costs accrue centrally. Restricted by the `skill.image-gen` capability; users without the capability will be refused at invocation time (the skill remains visible in the catalog until OpenClaw supports per-session filtering). Output includes the URL, model, and resolved size; never the API key.
+description: Generate an image from a text prompt (OpenAI gpt-image-2) and return a shareable HTTPS URL. Use for image generation — "make/create/generate a picture or image", logos, illustrations, visuals.
 allowed-tools: Bash(node:*)
 ---
 
