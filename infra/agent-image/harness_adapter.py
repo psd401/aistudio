@@ -395,14 +395,18 @@ class OpenClawAdapter(HarnessAdapter):
                                 raw_a = ws.recv()
                             except websocket.WebSocketTimeoutException:
                                 break
-                            msg_a = json.loads(raw_a)
-                            if (msg_a.get("type") == "res"
-                                    and msg_a.get("id") == abort_id):
-                                logger.info(
-                                    "pre-send chat.abort ack: ok=%s",
-                                    msg_a.get("ok"),
-                                )
-                                break
+                            try:
+                                msg_a = json.loads(raw_a)
+                                if (isinstance(msg_a, dict)
+                                        and msg_a.get("type") == "res"
+                                        and msg_a.get("id") == abort_id):
+                                    logger.info(
+                                        "pre-send chat.abort ack: ok=%s",
+                                        msg_a.get("ok"),
+                                    )
+                                    break
+                            except (json.JSONDecodeError, ValueError):
+                                continue
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "pre-send chat.abort failed (continuing): %s",
@@ -817,7 +821,28 @@ class OpenClawAdapter(HarnessAdapter):
                 raw_event_samples[0] if raw_event_samples else "",
             )
             if response_text:
-                return _result(_format_for_chat(response_text.strip()))
+                record_failure(
+                    source="harness",
+                    severity="warn",
+                    error_class="ChatDeadlineExpiredPartial",
+                    error_message=(
+                        f"chat deadline expired with partial response "
+                        f"(last_state={last_state})"
+                    ),
+                    session_id=session_id,
+                    model=observed_model or model_override,
+                    context={
+                        "phase": "deadline",
+                        "last_state": last_state,
+                        "event_counts": event_counts,
+                        "first_events": first_event_types,
+                    },
+                )
+                return _result(
+                    _format_for_chat(response_text.strip()),
+                    failed=True,
+                    error_class="ChatDeadlineExpiredPartial",
+                )
             record_failure(
                 source="harness",
                 severity="error",
