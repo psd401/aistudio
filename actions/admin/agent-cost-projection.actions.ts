@@ -85,10 +85,19 @@ export interface ProjectionItem {
 }
 
 export interface AgentCostProjection {
-  /** Actual token volume the projection is computed against. */
+  /**
+   * Full prompt input-token volume the candidate projection is priced against:
+   * de-cached billable input + cache-read + cache-write (the whole prompt a
+   * non-caching candidate would reprocess), NOT just the billable input. See
+   * the projection query for why (#1089/#1092).
+   */
   actualInputTokens: number
   actualOutputTokens: number
-  /** Actual cost on the model(s) actually used, for side-by-side comparison. */
+  /**
+   * Actual cost on the model(s) actually used, priced cache-aware (billable
+   * input at full rate + cache read/write at their discounted rates), for
+   * side-by-side comparison against the no-caching candidate projections.
+   */
   actualUsd: number
   /** One row per requested candidate model. */
   candidates: ProjectionItem[]
@@ -314,7 +323,17 @@ export async function getAgentCostProjection(
       (db) =>
         db
           .select({
-            inputTokens: sql<number>`COALESCE(SUM(${agentMessages.inputTokens}), 0)`,
+            // FULL prompt token volume a candidate model would reprocess:
+            // de-cached billable input + cache-read + cache-write. Post-#1089,
+            // input_tokens alone EXCLUDES the cached tokens, so pricing a
+            // (non-caching) candidate on it would undercount the prompt it must
+            // actually process every turn — making alternatives look ~1000× too
+            // cheap on cache-hit windows (chatgpt-codex #1092 review). We assume
+            // NO caching benefit for candidates (the conservative direction: it
+            // can only overstate a caching-capable candidate, never falsely
+            // cheapen a switch). cache_read/write default 0, so pre-caching rows
+            // reduce to plain input_tokens.
+            promptInputTokens: sql<number>`COALESCE(SUM(${agentMessages.inputTokens} + ${agentMessages.cacheReadInputTokens} + ${agentMessages.cacheWriteInputTokens}), 0)`,
             outputTokens: sql<number>`COALESCE(SUM(${agentMessages.outputTokens}), 0)`,
             // Exact per-direction cost — see perDirectionCostUsdSql above.
             actualUsd: perDirectionCostUsdSql,
@@ -327,7 +346,7 @@ export async function getAgentCostProjection(
       "agentCost.projectionTotals"
     )
 
-    const actualInputTokens = Number(totals?.inputTokens) || 0
+    const actualInputTokens = Number(totals?.promptInputTokens) || 0
     const actualOutputTokens = Number(totals?.outputTokens) || 0
     const actualUsd = Number(totals?.actualUsd) || 0
 

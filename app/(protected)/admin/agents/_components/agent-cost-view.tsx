@@ -244,7 +244,9 @@ function ProjectionPanel({
           What the same token volume (
           {projection ? fmtInt(projection.actualInputTokens) : "0"} in /{" "}
           {projection ? fmtInt(projection.actualOutputTokens) : "0"} out) would
-          cost on a different model.
+          cost on a different model. Input counts the full prompt including
+          cached tokens (a non-caching model reprocesses all of them), so this
+          assumes no caching on the candidate.
         </p>
 
         <div className="flex items-center gap-2">
