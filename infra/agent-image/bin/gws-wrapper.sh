@@ -8,7 +8,7 @@
 # Rationale: the ONLY sanctioned path to Google Workspace is the psd-workspace
 # skill —
 #     node /opt/psd-skills/psd-workspace/run.js --user <email> \
-#          --command "gws <subcommand> ..." [--scope user|agent]
+#          --command "<gws subcommand> ..." [--scope user|agent]
 # run.js/common.js are the only place that (a) injects the per-user OAuth
 # access token and (b) enforces the Phase 1 hard gates (no send, no delete, no
 # permission changes) plus marker/audit injection. run.js reaches the real
@@ -71,7 +71,7 @@ All Google Workspace access must go through the psd-workspace skill, which
 injects the OAuth token and enforces the Phase 1 safety gates:
 
   node /opt/psd-skills/psd-workspace/run.js --user <caller-email> \
-       --command "gws <subcommand> ..." [--scope user|agent]
+       --command "<gws subcommand> ..." [--scope user|agent]
 
 A bare `gws` has no credentials (it will 401) and bypasses the send/delete/
 permission-change gates. If you were about to report "no Workspace
