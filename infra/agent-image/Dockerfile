@@ -211,12 +211,26 @@ RUN mkdir -p /home/node/.openclaw/memory
 #   only through Bedrock Mantle), so memory indexing fails at runtime with
 #   `No API key found for provider "openai"`. We pin provider=bedrock +
 #   model=amazon.titan-embed-text-v2:0 (the documented Bedrock embedding
-#   default) so indexing works out-of-the-box. Bedrock embeddings use the
-#   standard AWS SDK credential chain (the AgentCore IAM role) — NO API key and
-#   NO dependency on the inlined Mantle bearer token. The IAM path is already
-#   provisioned in agent-platform-stack.ts: `InvokeBedrockModels`
-#   (bedrock:InvokeModel on foundation-model/*, which covers the titan embed
-#   model) and `BedrockEmbeddingsViaBearerToken` (bedrock:CallWithBearerToken).
+#   default) so indexing works out-of-the-box. `provider: bedrock` is OpenClaw's
+#   NATIVE Bedrock provider — distinct from the amazon-bedrock-mantle localhost
+#   proxy used for chat — so it calls bedrock-runtime.<region>.amazonaws.com
+#   directly via the AWS SDK (no baseUrl/region key in the config). Two runtime
+#   dependencies follow from that, both already satisfied by the stack:
+#     • Region: the AWS SDK needs AWS_REGION, which AgentCore does NOT inject
+#       into the microVM (see agentcore_wrapper.py / workspace_sync.py, which
+#       hardcode a `|| us-east-1` fallback for exactly this reason). OpenClaw's
+#       vendored binary has no such fallback, so AWS_REGION/AWS_DEFAULT_REGION
+#       are set explicitly on the AgentCore Runtime (runtimeEnvVars in
+#       agent-platform-stack.ts) so this call can resolve an endpoint.
+#     • Auth: hydrate_bedrock_api_key() exports AWS_BEARER_TOKEN_BEDROCK
+#       process-wide (agentcore_wrapper.py), so the SDK auto-selects Bedrock
+#       bearer-token auth for this call — authorized by the shared
+#       BedrockApiUser's `bedrock:CallWithBearerToken` grant
+#       (`BedrockEmbeddingsViaBearerToken` in agent-platform-stack.ts; see the
+#       memory_search rationale comment beside it). The `InvokeModel` on
+#       foundation-model/* grants (BedrockApiUser `InvokeBedrockModels` and the
+#       execution role `BedrockModelInvocation`) also cover the titan model if a
+#       SigV4 path is taken instead. Either auth path is already granted.
 #   No IAM change and no new Docker layer — the COPY below already ships it.
 #
 #   plugins.entries.active-memory — blocking memory sub-agent that runs before
