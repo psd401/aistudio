@@ -48,11 +48,20 @@ async function ensurePlaudClientId(
   log: ReturnType<typeof createLogger>
 ): Promise<string | null> {
   try {
-    const creds = await getSecretJson(PLAUD_OAUTH_SECRET_ID)
-    const existing = creds?.client_id
-    if (typeof existing === "string" && existing && existing !== "PLACEHOLDER") return existing
-  } catch {
-    // secret empty/unreadable — register below
+    const creds = await getSecretJson<{ client_id?: string }>(PLAUD_OAUTH_SECRET_ID)
+    if (creds) {
+      const existing = creds.client_id
+      if (typeof existing === "string" && existing && existing !== "PLACEHOLDER") {
+        return existing
+      }
+    }
+  } catch (err) {
+    // A transient/permission error is NOT the same as "secret is empty" — proceeding
+    // to register here could overwrite a valid client_id for existing users. Bail out.
+    log.error("Failed to read Plaud OAuth secret — not registering a new client", {
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return null
   }
   try {
     const resp = await fetch(PLAUD_REGISTER_URL, {
@@ -65,12 +74,37 @@ async function ensurePlaudClientId(
         response_types: ["code"],
         token_endpoint_auth_method: "none",
       }),
+      signal: AbortSignal.timeout(10000),
     })
-    const data = (await resp.json().catch(() => ({}))) as { client_id?: string }
+    const data = (await resp.json().catch(() => ({}))) as {
+      client_id?: string
+      error?: string
+      error_description?: string
+    }
     if (!resp.ok || !data.client_id) {
-      log.error("Plaud Dynamic Client Registration failed", { status: resp.status })
+      log.error("Plaud Dynamic Client Registration failed", {
+        status: resp.status,
+        error: data.error,
+        errorDescription: data.error_description,
+      })
       return null
     }
+
+    // Guard against a concurrent first-time consent racing us to register+store a
+    // different client: if the secret now holds a client_id we didn't just write,
+    // defer to it instead of overwriting — keeps every in-flight authorize URL
+    // consistent with what the callback will read back.
+    try {
+      const raceCreds = await getSecretJson<{ client_id?: string }>(PLAUD_OAUTH_SECRET_ID)
+      const winner = raceCreds?.client_id
+      if (typeof winner === "string" && winner && winner !== "PLACEHOLDER") {
+        log.info("Plaud OAuth client registered concurrently by another request — using it", {})
+        return winner
+      }
+    } catch {
+      // ignore — fall through and store our own registration
+    }
+
     await putSecretString(
       PLAUD_OAUTH_SECRET_ID,
       JSON.stringify({

@@ -64,7 +64,11 @@ export interface PlaudTokenData {
  */
 export async function putSecretString(secretId: string, value: string): Promise<void> {
   if (process.env.NODE_ENV === "development") {
-    log.info("Local dev mode — skipping secret write", { secretId })
+    // Cache in-memory so repeated local requests (e.g. re-registering the Plaud
+    // OAuth client) reuse the same value instead of hitting the network again —
+    // AWS writes stay disabled.
+    _secretCache.set(secretId, { value, cachedAt: Date.now() })
+    log.info("Local dev mode — caching secret value in memory, not writing to AWS", { secretId })
     return
   }
   const { PutSecretValueCommand } = await import("@aws-sdk/client-secrets-manager")
