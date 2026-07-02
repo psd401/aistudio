@@ -266,13 +266,19 @@ COPY MEMORY.md /home/node/.openclaw/MEMORY.md
 # Loaded via openclaw.json skills.load.extraDirs. Install dependencies at
 # build time so the agent container starts fast.
 COPY skills /opt/psd-skills
-RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund
+# Skill dependencies. Consolidated into a SINGLE RUN (was 7 separate RUNs) to
+# stay well under AgentCore's Firecracker overlay-mount layer ceiling — the base
+# image sits at the edge (53 layers) and a 54th layer fails to mount with
+# "Failed to mount overlay: No such file or directory" (agent outage 2026-07-02,
+# caused by adding the gws-wrapper COPY at 53). Absolute `cd` paths so the chain
+# is independent of prior CWD. Keep new skills in this RUN, not new RUNs.
+RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund
 # chat-card has zero npm deps. chat-chart's npm install is paired with the
 # matplotlib install above — both stay disabled until we figure out the
 # AgentCore overlay-mount failure. With both off the image boots cleanly
