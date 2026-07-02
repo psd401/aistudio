@@ -827,7 +827,14 @@ export class AgentPlatformStack extends cdk.Stack {
         'bedrock:ApplyGuardrail',
         'bedrock:GetGuardrail',
       ],
-      resources: [props.guardrailArn],
+      // The guardrail uses cross-region inference (guardrails-stack.ts
+      // crossRegionConfig), so ApplyGuardrail authorizes against BOTH the
+      // guardrail ARN AND the system-defined guardrail-profile ARN. Granting
+      // only the guardrail ARN yields AccessDenied on every call.
+      resources: [
+        props.guardrailArn,
+        `arn:aws:bedrock:${this.region}:${this.account}:guardrail-profile/us.guardrail.v1:0`,
+      ],
     }));
 
     // DynamoDB read/write — agent container accesses USERS_TABLE and SIGNALS_TABLE
@@ -1034,7 +1041,14 @@ export class AgentPlatformStack extends cdk.Stack {
             sid: 'GuardrailsInvoke',
             effect: iam.Effect.ALLOW,
             actions: ['bedrock:ApplyGuardrail', 'bedrock:GetGuardrail'],
-            resources: [props.guardrailArn],
+            // Cross-region inference (guardrails-stack.ts crossRegionConfig)
+            // makes ApplyGuardrail authorize against BOTH the guardrail ARN
+            // and the system-defined guardrail-profile ARN. Omitting the
+            // profile ARN caused AccessDenied on 100% of router turns.
+            resources: [
+              props.guardrailArn,
+              `arn:aws:bedrock:${this.region}:${this.account}:guardrail-profile/us.guardrail.v1:0`,
+            ],
           })],
         }),
         // AgentCore session invoke

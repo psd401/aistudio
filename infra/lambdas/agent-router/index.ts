@@ -1124,6 +1124,20 @@ async function invokeAgentCore(
     started_at: string;
     finished_at: string;
   }>;
+  /**
+   * True when this turn is an error/degraded return rather than a real answer
+   * (harness-reported via metadata.failed, or a router-side invocation error).
+   * The caller flags these instead of logging a clean "Message processed".
+   */
+  failed?: boolean;
+  /** Short class for the failure (e.g. OpenClawChatError, AgentCoreHttpError). */
+  errorClass?: string;
+  /**
+   * Which layer detected the failure. 'harness' failures are already recorded
+   * in agent_failures by the container, so the router only logs them; 'router'
+   * failures are recorded by the caller (nothing else saw them).
+   */
+  errorSource?: 'harness' | 'router';
 }> {
   // Resolve the AgentCore Runtime ID — check env var, then module-level cache,
   // then SSM. Cached at module scope with TTL to avoid redundant SSM API calls
@@ -1166,6 +1180,9 @@ async function invokeAgentCore(
       latencyMs: 0,
       messages: [],
       toolCalls: [],
+      failed: true,
+      errorClass: 'AgentNotDeployed',
+      errorSource: 'router',
     };
   }
 
@@ -1261,6 +1278,9 @@ async function invokeAgentCore(
         latencyMs: 0,
         messages: [],
         toolCalls: [],
+        failed: true,
+        errorClass: `AgentCoreHttpError_${response.status}`,
+        errorSource: 'router',
       };
     }
 
@@ -1332,6 +1352,13 @@ async function invokeAgentCore(
       latencyMs: (metadata.latency_ms as number) || 0,
       messages,
       toolCalls,
+      // Harness-reported error turn (e.g. OpenClaw session-init conflict). The
+      // container already wrote the agent_failures row; the caller only logs
+      // this so it isn't recorded as a clean success.
+      failed: metadata.failed === true,
+      errorClass:
+        typeof metadata.error_class === 'string' ? metadata.error_class : undefined,
+      errorSource: metadata.failed === true ? 'harness' : undefined,
     };
   } catch (error) {
     log.error('AgentCore invocation error', {
@@ -1348,6 +1375,10 @@ async function invokeAgentCore(
       latencyMs: 0,
       messages: [],
       toolCalls: [],
+      failed: true,
+      errorClass:
+        error instanceof Error ? error.name || 'AgentCoreInvocationError' : 'AgentCoreInvocationError',
+      errorSource: 'router',
     };
   }
 }
@@ -1681,6 +1712,53 @@ async function recordFailure(
       originalSeverity: params.severity,
     });
   }
+}
+
+/**
+ * Observe a failed agent turn without changing the user-facing behavior (the
+ * error text is still delivered to Chat by the caller). Fixes the gap where a
+ * 0-token error turn — e.g. an OpenClaw session-init conflict — was logged as a
+ * clean "Message processed" success and left no alertable signal.
+ *
+ * Harness-origin failures (errorSource === 'harness') are already persisted in
+ * agent_failures by the container, so we only log them here to avoid a
+ * double-counted row. Router-origin failures (invocation errors) are persisted
+ * here since nothing else recorded them. Returns whether the turn was failed so
+ * the caller can suppress its success log.
+ */
+async function flagFailedTurn(
+  agentResult: {
+    failed?: boolean;
+    errorClass?: string;
+    errorSource?: 'harness' | 'router';
+    response: string;
+    model: string | null;
+  },
+  ctx: { userId: string; sessionId: string; latencyMs: number },
+  log: ReturnType<typeof createLogger>,
+): Promise<boolean> {
+  if (!agentResult.failed) return false;
+  log.warn('Agent returned an error turn', {
+    errorClass: agentResult.errorClass ?? 'unknown',
+    errorSource: agentResult.errorSource ?? 'unknown',
+    latencyMs: ctx.latencyMs,
+  });
+  if (agentResult.errorSource === 'router') {
+    await recordFailure(
+      {
+        source: 'router',
+        severity: 'error',
+        userId: ctx.userId,
+        sessionId: ctx.sessionId,
+        model: agentResult.model,
+        errorClass: agentResult.errorClass ?? 'AgentCoreError',
+        errorMessage: agentResult.response,
+        context: { phase: 'agentcore_invoke' },
+      },
+      log,
+    );
+  }
+  return true;
 }
 
 function classifyError(err: unknown): { errorClass: string; message: string; stack: string | null } {
@@ -2534,13 +2612,20 @@ async function processRecord(
         log
       );
 
-      log.info('Cross-user invocation processed', {
-        invoker: senderEmail,
-        agentOwner: targetUser.email,
-        model: agentResult.model,
-        source: crossUserInvocation.source,
-        latencyMs,
-      });
+      const crossTurnFailed = await flagFailedTurn(
+        agentResult,
+        { userId: senderEmail, sessionId: crossSessionId, latencyMs },
+        log,
+      );
+      if (!crossTurnFailed) {
+        log.info('Cross-user invocation processed', {
+          invoker: senderEmail,
+          agentOwner: targetUser.email,
+          model: agentResult.model,
+          source: crossUserInvocation.source,
+          latencyMs,
+        });
+      }
       return;
     }
   }
@@ -2659,11 +2744,18 @@ async function processRecord(
     log
   );
 
-  log.info('Message processed', {
-    sender: senderName,
-    model: agentResult.model,
-    latencyMs,
-    inputTokens: agentResult.inputTokens,
-    outputTokens: agentResult.outputTokens,
-  });
+  const turnFailed = await flagFailedTurn(
+    agentResult,
+    { userId: senderEmail, sessionId, latencyMs },
+    log,
+  );
+  if (!turnFailed) {
+    log.info('Message processed', {
+      sender: senderName,
+      model: agentResult.model,
+      latencyMs,
+      inputTokens: agentResult.inputTokens,
+      outputTokens: agentResult.outputTokens,
+    });
+  }
 }

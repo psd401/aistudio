@@ -643,6 +643,13 @@ def main():
                 # agent_message_content + agent_tool_invocations.
                 "messages": result.messages,
                 "tool_calls": result.tool_calls,
+                # Error-turn signal (harness_adapter TurnResult.failed). The
+                # router reads metadata.failed so a 0-token error turn (e.g. an
+                # OpenClaw session-init conflict) is flagged, not logged as a
+                # clean "Message processed" success. The harness already wrote
+                # the agent_failures row for these.
+                "failed": result.failed,
+                "error_class": result.error_class,
             }
 
         logger.info(

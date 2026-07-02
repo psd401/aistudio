@@ -98,8 +98,15 @@ RUN set -eux; \
     uv --version
 
 # Google Workspace CLI (#912) — Rust single binary invoked by the psd-workspace
-# skill. ARM64 matches AgentCore runtime. The skill passes OAuth access tokens
-# via the GOOGLE_ACCESS_TOKEN env var.
+# skill. ARM64 matches AgentCore runtime. run.js/common.js authenticate each
+# call by exporting the per-user OAuth access token as GOOGLE_WORKSPACE_CLI_TOKEN
+# (gws ignores GOOGLE_ACCESS_TOKEN — see common.js execGws).
+#
+# The real binary is installed as /usr/local/bin/gws.real and a refuse-by-default
+# wrapper is installed as /usr/local/bin/gws. Every `gws` from the agent's exec
+# tool resolves the wrapper first; run.js reaches gws.real directly. See
+# bin/gws-wrapper.sh for rationale (incident: 2026-07-01 — bare `gws chat spaces
+# list` → 401 → wrong "no credentials" answer + Phase 1 gate-bypass surface).
 #
 # Pinned version + SHA256 come from the official release's .sha256 sidecar.
 # When bumping, run:
@@ -107,14 +114,21 @@ RUN set -eux; \
 # and paste the hex digest into GWS_SHA256 below.
 ARG GWS_VERSION=0.22.5
 ARG GWS_SHA256=94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0
+# COPY --chmod so the wrapper mode lands in one layer (layer count is
+# load-bearing for AgentCore's Firecracker snapshotter — see gh install below).
+COPY --chmod=755 bin/gws-wrapper.sh /usr/local/bin/gws
+# Install the real gws binary as /usr/local/bin/gws.real. The final
+# `gws --version` verifies the wrapper delegates introspection to it.
 RUN set -eux; \
     curl -fsSL -o /tmp/gws.tar.gz \
       "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz"; \
     echo "${GWS_SHA256}  /tmp/gws.tar.gz" | sha256sum -c -; \
-    tar -xzf /tmp/gws.tar.gz -C /usr/local/bin --strip-components=0 ./gws; \
+    tar -xzf /tmp/gws.tar.gz -C /tmp --strip-components=0 ./gws; \
+    mv /tmp/gws /usr/local/bin/gws.real; \
     rm /tmp/gws.tar.gz; \
-    chmod +x /usr/local/bin/gws; \
-    gws --version
+    chmod +x /usr/local/bin/gws.real; \
+    /usr/local/bin/gws.real --version; \
+    /usr/local/bin/gws --version
 
 # GitHub CLI (#965 follow-on) — single Go binary so the agent can read PRs,
 # issues, and run gh-api calls without us shipping a custom skill. ARM64

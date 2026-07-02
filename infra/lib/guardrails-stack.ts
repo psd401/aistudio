@@ -278,7 +278,14 @@ export class GuardrailsStack extends cdk.Stack {
             'bedrock:ApplyGuardrail',
             'bedrock:GetGuardrail',
           ],
-          resources: [this.guardrail.attrGuardrailArn],
+          // Cross-region inference (crossRegionConfig above) makes
+          // ApplyGuardrail authorize against BOTH the guardrail ARN and the
+          // system-defined guardrail-profile ARN. Consumers of this policy
+          // (e.g. the ECS frontend) otherwise get AccessDenied on the profile.
+          resources: [
+            this.guardrail.attrGuardrailArn,
+            `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail-profile/us.guardrail.v1:0`,
+          ],
         }),
         // Comprehend PII detection (requires wildcard - AWS limitation)
         new iam.PolicyStatement({

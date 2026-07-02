@@ -47,6 +47,12 @@ class TurnResult:
     latency_ms: int = 0
     messages: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
     tool_calls: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    # Set True when this turn is an error/degraded return (session conflict,
+    # deadline, empty response, WS failure) rather than a real answer. The
+    # wrapper forwards this to the router (metadata.failed) so a 0-token error
+    # turn is no longer logged as a clean "Message processed" success.
+    failed: bool = False
+    error_class: Optional[str] = None
 
 
 def _format_for_chat(text: str) -> str:
@@ -352,6 +358,57 @@ class OpenClawAdapter(HarnessAdapter):
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("tools.catalog probe failed: %s", str(exc)[:200])
 
+                # Step 2.5: Defensively abort any lingering reply session for
+                # this sessionKey before sending (#session-conflict fix).
+                #
+                # OpenClaw keys its server-side reply session on sessionKey,
+                # which we reuse across turns (the stable AgentCore session_id).
+                # A prior turn's reply session can survive that turn's
+                # ws.close() and then reject the next chat.send with "reply
+                # session initialization conflicted" — observed 2026-07-01,
+                # where every follow-up turn returned "I encountered an error."
+                # The router already serializes turns per session (a DynamoDB
+                # session lock; see agent-router waitForSessionLock), so no
+                # legitimate work for this sessionKey is active here — a
+                # pre-send chat.abort is therefore safe and clears the wedged
+                # state. chat.abort takes `sessionKey` per the OpenClaw gateway
+                # protocol (sessions.reset would additionally wipe stored
+                # conversation state, so we deliberately do NOT use it here).
+                # Kill switch: OPENCLAW_PRESEND_ABORT=0.
+                if os.environ.get("OPENCLAW_PRESEND_ABORT", "1") != "0":
+                    try:
+                        abort_id = str(uuid.uuid4())
+                        ws.send(json.dumps({
+                            "type": "req",
+                            "id": abort_id,
+                            "method": "chat.abort",
+                            "params": {"sessionKey": session_id or "default"},
+                        }))
+                        # Drain until the abort ack (bounded ~5s). Any
+                        # intervening `aborted` chat event for the stale session
+                        # is consumed here so it can't leak into the chat.send
+                        # event loop below. The main loop resets settimeout(60).
+                        ws.settimeout(5)
+                        abort_deadline = time.time() + 5
+                        while time.time() < abort_deadline:
+                            try:
+                                raw_a = ws.recv()
+                            except websocket.WebSocketTimeoutException:
+                                break
+                            msg_a = json.loads(raw_a)
+                            if (msg_a.get("type") == "res"
+                                    and msg_a.get("id") == abort_id):
+                                logger.info(
+                                    "pre-send chat.abort ack: ok=%s",
+                                    msg_a.get("ok"),
+                                )
+                                break
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "pre-send chat.abort failed (continuing): %s",
+                            str(exc)[:200],
+                        )
+
                 # Step 3: Send chat message
                 #
                 # sessionKey MUST be per-invocation caller, not "global".
@@ -600,10 +657,28 @@ class OpenClawAdapter(HarnessAdapter):
                             break
 
                         elif state == "error":
+                            err_msg = payload.get("errorMessage", "unknown")
                             logger.error(
                                 "chat event error: %s | full_payload=%s",
-                                payload.get("errorMessage", "unknown"),
+                                err_msg,
                                 json.dumps(payload)[:800],
+                            )
+                            # Previously returned silently — no failure signal.
+                            # This is where OpenClaw's "reply session
+                            # initialization conflicted" surfaces, so recording
+                            # it is what makes the session-conflict class of
+                            # failure visible in agent_failures / the alarm.
+                            record_failure(
+                                source="harness",
+                                severity="error",
+                                error_class="OpenClawChatError",
+                                error_message=str(err_msg),
+                                session_id=session_id,
+                                model=observed_model or model_override,
+                                context={
+                                    "phase": "chat_event_error",
+                                    "last_state": last_state,
+                                },
                             )
                             err_text = (
                                 _format_for_chat(response_text)
@@ -618,6 +693,8 @@ class OpenClawAdapter(HarnessAdapter):
                                 latency_ms=int((time.time() - chat_send_at) * 1000),
                                 messages=messages_log,
                                 tool_calls=tool_calls,
+                                failed=True,
+                                error_class="OpenClawChatError",
                             )
 
                         elif state == "aborted":
@@ -637,12 +714,24 @@ class OpenClawAdapter(HarnessAdapter):
                         if not msg.get("ok"):
                             error = msg.get("error", {})
                             logger.error("chat.send error: %s", json.dumps(error)[:500])
+                            # Previously returned silently — no failure signal.
+                            record_failure(
+                                source="harness",
+                                severity="error",
+                                error_class="OpenClawChatSendError",
+                                error_message=json.dumps(error)[:2000],
+                                session_id=session_id,
+                                model=observed_model or model_override,
+                                context={"phase": "chat_send_res"},
+                            )
                             return TurnResult(
                                 text="I encountered an error processing your message.",
                                 model=observed_model,
                                 latency_ms=int((time.time() - chat_send_at) * 1000),
                                 messages=messages_log,
                                 tool_calls=tool_calls,
+                                failed=True,
+                                error_class="OpenClawChatSendError",
                             )
                         res_payload = msg.get("payload", {})
                         # Final res may carry the authoritative usage object.
@@ -684,11 +773,18 @@ class OpenClawAdapter(HarnessAdapter):
                 model=observed_model,
                 messages=messages_log,
                 tool_calls=tool_calls,
+                failed=True,
+                error_class="WebSocketError",
             )
 
         latency_ms = int((time.time() - chat_send_at) * 1000)
 
-        def _result(text: str) -> TurnResult:
+        def _result(
+            text: str,
+            *,
+            failed: bool = False,
+            error_class: Optional[str] = None,
+        ) -> TurnResult:
             assistant = text or ""
             log = list(messages_log)
             if assistant:
@@ -701,6 +797,8 @@ class OpenClawAdapter(HarnessAdapter):
                 latency_ms=latency_ms,
                 messages=log,
                 tool_calls=tool_calls,
+                failed=failed,
+                error_class=error_class,
             )
 
         if not got_final:
@@ -739,7 +837,9 @@ class OpenClawAdapter(HarnessAdapter):
             )
             return _result(
                 "I wasn't able to finish responding in time — the agent "
-                "stalled. Please try again in a moment."
+                "stalled. Please try again in a moment.",
+                failed=True,
+                error_class="ChatDeadlineExpired",
             )
 
         logger.info(
@@ -772,7 +872,11 @@ class OpenClawAdapter(HarnessAdapter):
                 "first_events": first_event_types,
             },
         )
-        return _result("I processed your message but had no response.")
+        return _result(
+            "I processed your message but had no response.",
+            failed=True,
+            error_class="EmptyAgentResponse",
+        )
 
     @staticmethod
     def _extract_text(content) -> str:
