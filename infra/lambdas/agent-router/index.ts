@@ -1265,6 +1265,9 @@ async function invokeAgentCore(
           latencyMs: 0,
           messages: [],
           toolCalls: [],
+          failed: true,
+          errorClass: `AgentCoreThrottled_${response.status}`,
+          errorSource: 'router',
         };
       }
 
