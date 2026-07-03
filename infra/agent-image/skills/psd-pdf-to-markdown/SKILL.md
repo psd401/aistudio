@@ -67,7 +67,7 @@ A single JSON object on stdout:
 ## Errors
 
 - **`bad_args`** — missing/invalid input flag, non-PDF file, or a refused `--url`.
-- **`forbidden`** — `--url` resolved to a non-public address (SSRF guard).
+- **`forbidden`** — `--url` resolved to a non-public address (SSRF guard), or `--s3-key` was outside the caller's own `public-images/<email>/` prefix.
 - **`misconfigured`** — `WORKSPACE_BUCKET` unset for an `--s3-key` request.
 - **`upstream_error`** — the URL fetch or S3 download failed.
 - **`convert_error`** — the PDF could not be parsed (corrupt or unsupported).
