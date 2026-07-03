@@ -20,17 +20,20 @@ three ways (exactly one):
 | Flag | Source | Use when |
 |------|--------|----------|
 | `--url <https>` | A public http(s) URL | The user pasted or linked a PDF URL |
-| `--s3-key <key>` | An object in the workspace S3 bucket | The PDF was placed in the workspace bucket |
+| `--s3-key <key>` | The caller's own `public-images/<email>/` prefix (requires `--user`) | The PDF is in the caller's workspace prefix |
 | `--path <path>` | A file already in the container/workspace | Another step already fetched the PDF |
 
 `--url` is SSRF-guarded: only http/https, and the host must resolve to a public address
-(loopback/link-local/private/metadata targets are refused).
+(loopback/link-local/private/metadata targets are refused; redirects are re-validated).
+`--s3-key` is scoped to the caller's own `public-images/<email>/` namespace (so it requires
+`--user` and cannot read another user's objects). Input is validated by the `%PDF-` magic
+header regardless of source.
 
 ## Usage
 
 ```bash
 python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py --url "https://example.com/report.pdf"
-python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py --s3-key "inbox/report.pdf"
+python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py --user <email> --s3-key "public-images/<email>/report.pdf"
 python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py --path "/home/node/workspace/report.pdf"
 ```
 

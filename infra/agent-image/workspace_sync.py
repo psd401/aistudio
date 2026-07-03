@@ -94,6 +94,11 @@ _SKIP_RELATIVE_PREFIXES = (
     "skills/psd-freshservice/",
     "skills/psd-github/",
     "skills/psd-html-artifact/",
+    # psd-html-output was REMOVED from the image (superseded by psd-html-artifact),
+    # but its skip entry is intentionally retained: stale objects may linger in
+    # some users' pre-separation S3 prefixes, and skipping the pull keeps the
+    # deleted skill from being resurrected under ~/.openclaw/skills/ on sync.
+    "skills/psd-html-output/",
     "skills/psd-image-gen/",
     "skills/psd-redrover/",
     "skills/psd-rules/",

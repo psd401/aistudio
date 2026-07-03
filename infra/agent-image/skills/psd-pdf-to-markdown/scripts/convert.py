@@ -50,6 +50,13 @@ PREVIEW_CHARS = 2000
 # Cap fetched/opened PDFs so a runaway download can't exhaust container disk.
 MAX_PDF_BYTES = 100 * 1024 * 1024
 
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def _valid_email(email):
+    """Caller identity used to scope --s3-key access; reject '/' (S3 key sep)."""
+    return bool(email) and bool(_EMAIL_RE.match(email)) and "/" not in email
+
 
 def _fail(message, code="error"):
     print(json.dumps({"status": "error", "error": code, "message": message}))
@@ -116,10 +123,17 @@ def _download_url(url: str, dest: Path) -> None:
         _fail(f"failed to fetch --url: {exc}", "upstream_error")
 
 
-def _download_s3(key: str, dest: Path) -> None:
+def _download_s3(key: str, dest: Path, user_email: str) -> None:
     bucket = os.environ.get("WORKSPACE_BUCKET")
     if not bucket:
         _fail("WORKSPACE_BUCKET env var not set — cannot read --s3-key", "misconfigured")
+    # The shared AgentCore execution role can GetObject anywhere in the workspace
+    # bucket, so scope --s3-key to the caller's own public-images/<email>/ prefix
+    # to prevent reading another user's objects (IDOR). Reject path traversal too.
+    norm = key.lstrip("/")
+    allowed = f"public-images/{user_email}/"
+    if ".." in norm.split("/") or not norm.startswith(allowed):
+        _fail(f"--s3-key must be under {allowed} (the caller's own prefix)", "forbidden")
     region = os.environ.get("AWS_REGION", "us-east-1")
     try:
         import boto3  # baked into the container venv
@@ -127,9 +141,9 @@ def _download_s3(key: str, dest: Path) -> None:
         _fail("boto3 not available in the runtime", "misconfigured")
     s3 = boto3.client("s3", region_name=region)
     try:
-        s3.download_file(bucket, key, str(dest))
+        s3.download_file(bucket, norm, str(dest))
     except Exception as exc:  # botocore ClientError etc.
-        _fail(f"failed to download s3://{bucket}/{key}: {exc}", "upstream_error")
+        _fail(f"failed to download s3://{bucket}/{norm}: {exc}", "upstream_error")
 
 
 def parse_pages(spec: str):
@@ -183,8 +197,10 @@ def main():
             source = args.url
             stem = Path(urlparse(args.url).path).stem or "document"
         elif args.s3_key:
+            if not _valid_email(args.user):
+                _fail("--s3-key requires --user (caller email) for access scoping", "bad_args")
             local = Path(tmp) / "input.pdf"
-            _download_s3(args.s3_key, local)
+            _download_s3(args.s3_key, local, args.user)
             source = f"s3://{os.environ.get('WORKSPACE_BUCKET', '')}/{args.s3_key}"
             stem = Path(args.s3_key).stem or "document"
         else:

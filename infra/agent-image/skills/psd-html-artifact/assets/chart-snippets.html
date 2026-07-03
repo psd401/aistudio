@@ -49,7 +49,11 @@ svg{display:block;width:100%;height:auto;overflow:visible}
 </style>
 </head>
 <body>
-<!-- the data travels with the file -->
+<!-- The data travels with the file. If you TEMPLATE dynamic data into this
+     block, JSON-encode it and escape every "<" as its JSON unicode form (a
+     backslash followed by u003c) so a value like "</script>" cannot close this
+     tag early at HTML-parse time — that runs in the HTML parser, before any
+     JS-level esc(). JSON.parse restores the characters, so the data is intact. -->
 <script type="application/json" id="data">
 {
   "kpis":[
