@@ -67,4 +67,6 @@ A single JSON object on stdout:
 - **`forbidden`** — `--url` resolved to a non-public address (SSRF guard).
 - **`misconfigured`** — `WORKSPACE_BUCKET` unset for an `--s3-key` request.
 - **`upstream_error`** — the URL fetch or S3 download failed.
+- **`convert_error`** — the PDF could not be parsed (corrupt or unsupported).
+- **`too_large`** — the input exceeds 100 MB.
 - **`empty_output`** — no extractable text (likely a scanned PDF needing OCR).

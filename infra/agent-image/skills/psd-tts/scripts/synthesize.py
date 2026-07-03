@@ -87,12 +87,14 @@ def synthesize(text, voice, engine, region):
     audio = bytearray()
     chunks = chunk_text(text)
     for chunk in chunks:
+        # No explicit SampleRate: let Polly pick the engine default (24 kHz for
+        # generative/neural/long-form, 22.05 kHz for standard). Hardcoding 24000
+        # would reject --engine standard, which does not support that rate.
         resp = polly.synthesize_speech(
             Text=chunk,
             OutputFormat="mp3",
             VoiceId=voice,
             Engine=engine,
-            SampleRate="24000",
         )
         stream = resp.get("AudioStream")
         if stream is None:
@@ -164,7 +166,10 @@ def main():
     if not audio:
         _fail("no audio was produced", "upstream_error")
 
-    url, key = upload_mp3(audio, args.user, region)
+    try:
+        url, key = upload_mp3(audio, args.user, region)
+    except Exception as exc:  # botocore ClientError, network failure, etc.
+        _fail(f"failed to upload audio to S3: {exc}", "upstream_error")
     _emit({
         "status": "ok",
         "url": url,

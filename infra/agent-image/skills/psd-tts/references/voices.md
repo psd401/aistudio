@@ -37,7 +37,8 @@ The original, least natural engine. Avoid unless a specific legacy voice is requ
 
 ## Notes
 
-- `OutputFormat` is fixed to `mp3` at 24 kHz in this skill.
+- `OutputFormat` is fixed to `mp3`; the sample rate is Polly's engine default
+  (24 kHz for generative/neural/long-form, 22.05 kHz for standard) — not overridden.
 - Character limits per synthesize call: 6,000 total / 3,000 billable. The skill chunks
   longer text at sentence boundaries (~2,800 chars/chunk) and concatenates the MP3s.
 - SSML is not exposed in v1; input is treated as plain text.
