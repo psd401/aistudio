@@ -29,6 +29,10 @@
       "contextTokens": 100000,
       "heartbeat": {
         "every": "0m"
+      },
+      "memorySearch": {
+        "provider": "bedrock",
+        "model": "amazon.titan-embed-text-v2:0"
       }
     }
   },

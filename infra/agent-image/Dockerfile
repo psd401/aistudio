@@ -205,6 +205,36 @@ RUN mkdir -p /home/node/.openclaw/memory
 #   translation layer entirely. Result: we own no per-model format adapter
 #   code; any Bedrock model works by changing the `id` below.
 #
+#   agents.defaults.memorySearch — embedding provider for semantic search over
+#   the agent's local ~/.openclaw/memory/ files. OpenClaw's default provider is
+#   "openai", but this container provisions NO OpenAI key (it reaches models
+#   only through Bedrock Mantle), so memory indexing fails at runtime with
+#   `No API key found for provider "openai"`. We pin provider=bedrock +
+#   model=amazon.titan-embed-text-v2:0 (the documented Bedrock embedding
+#   default) so indexing works out-of-the-box. `provider: bedrock` is OpenClaw's
+#   NATIVE Bedrock provider — distinct from the amazon-bedrock-mantle localhost
+#   proxy used for chat — so it calls bedrock-runtime.<region>.amazonaws.com
+#   directly via the AWS SDK (no baseUrl/region key in the config). Two runtime
+#   dependencies follow from that, both already satisfied by the stack:
+#     • Region: the AWS SDK needs AWS_REGION, which AgentCore does NOT inject
+#       into the microVM (see agentcore_wrapper.py / workspace_sync.py, which
+#       hardcode a `|| us-east-1` fallback for exactly this reason). OpenClaw's
+#       vendored binary has no such fallback, so AWS_REGION/AWS_DEFAULT_REGION
+#       are set explicitly on the AgentCore Runtime (runtimeEnvVars in
+#       agent-platform-stack.ts) so this call can resolve an endpoint.
+#     • Auth: hydrate_bedrock_api_key() exports AWS_BEARER_TOKEN_BEDROCK
+#       process-wide (agentcore_wrapper.py). OpenClaw's memory_search relies on
+#       that hydrated Bedrock token (per the authoritative memory_search
+#       rationale comment at agent-platform-stack.ts:502-510), so this call is
+#       authorized by the shared BedrockApiUser's `bedrock:CallWithBearerToken`
+#       grant (`BedrockEmbeddingsViaBearerToken`), NOT the execution role. If a
+#       SigV4 path is used instead, the `InvokeModel` on foundation-model/*
+#       grants (BedrockApiUser `InvokeBedrockModels` and the execution role
+#       `BedrockModelInvocation`) cover the titan model. Either path is already
+#       granted. (Exact auth-selection internals are OpenClaw's; not asserted
+#       here beyond the token dependency the existing grant already documents.)
+#   No IAM change and no new Docker layer — the COPY below already ships it.
+#
 #   plugins.entries.active-memory — blocking memory sub-agent that runs before
 #   every main reply, shares the inherited session model, and its failure
 #   cascades to the main reply as `surface_error`. Config rationale:

@@ -1201,6 +1201,19 @@ export class AgentPlatformStack extends cdk.Stack {
     // microVMs whose env snapshot pre-dates the new config.
     const runtimeEnvVars: Record<string, string> = {
       ENVIRONMENT: environment,
+      // AgentCore does NOT inject AWS_REGION into the microVM environment, and
+      // the AWS SDK requires a region for Bedrock/Secrets Manager/etc. The
+      // Python wrapper and every in-image skill compensate with a hardcoded
+      // `|| us-east-1` fallback (see agentcore_wrapper.py, workspace_sync.py),
+      // but the vendored OpenClaw binary has no such fallback: its native
+      // `bedrock` memorySearch provider (openclaw.json agents.defaults.
+      // memorySearch) calls bedrock-runtime.<region>.amazonaws.com directly and
+      // would fail region resolution without this. Set to this.region so the
+      // SDK region matches the region the Bedrock IAM grants are scoped to
+      // (arn:aws:bedrock:<region>::foundation-model/*). No-op for existing
+      // components (this.region is already their hardcoded default).
+      AWS_REGION: this.region,
+      AWS_DEFAULT_REGION: this.region,
       WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
       USERS_TABLE: this.usersTable.tableName,
       SIGNALS_TABLE: this.signalsTable.tableName,
