@@ -777,6 +777,21 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
     }));
 
+    // Amazon Polly text-to-speech (psd-tts skill). Polly is NOT Bedrock — it
+    // authenticates via this execution role's standard SigV4 credential chain,
+    // NOT the AWS_BEARER_TOKEN_BEDROCK token used for model invocation. The
+    // skill uses only the synchronous SynthesizeSpeech API (it chunks long text
+    // and concatenates the MP3s), so we grant exactly that action and nothing
+    // else. SynthesizeSpeech does not support resource-level permissions, so the
+    // resource must be '*'. Synthesized MP3s are written to the workspace bucket
+    // by the skill using the S3WorkspaceAccess grant above (public-images/ prefix).
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'PollyTextToSpeech',
+      effect: iam.Effect.ALLOW,
+      actions: ['polly:SynthesizeSpeech'],
+      resources: ['*'],
+    }));
+
     // Read the Bedrock API key secret at container startup so the wrapper
     // can expose it to OpenClaw as AWS_BEARER_TOKEN_BEDROCK.
     this.bedrockApiKeySecret.grantRead(this.agentCoreExecutionRole);

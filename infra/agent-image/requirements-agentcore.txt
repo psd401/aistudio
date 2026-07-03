@@ -1,34 +1,3 @@
-# requirements-agentcore.txt — hash-pinned dependency closure for the
-# bedrock-agentcore SDK, installed into /opt/agentcore-venv (see Dockerfile).
-#
-# WHY HASHES: the agent container holds IAM reach to psd-agent-creds/${env}/*
-# and psd-agent/${env}/* secrets, so any build-time dependency substitution is
-# a real compromise vector. `pip install --require-hashes` is all-or-nothing:
-# the full transitive closure must be present and hashed, and pip aborts the
-# build on any mismatch — making the image build itself the supply-chain test.
-#
-# Top-level inputs (see requirements-agentcore.in next to this file):
-#   bedrock-agentcore==1.15.1   (latest as of 2026-06-25; official AWS SDK,
-#                                github.com/aws/bedrock-agentcore-sdk-python)
-#   websocket-client>=1.7.0  boto3>=1.34.0  aiohttp>=3.9.0
-#
-# REGENERATE after any version bump (do NOT hand-edit hashes):
-#   uv pip compile --universal --generate-hashes --python-version 3.11 \
-#     --no-annotate --no-header requirements-agentcore.in -o requirements-agentcore.txt
-#
-# VERIFY with the LITERAL production installer before merge. The Dockerfile
-# installs via `pip install --require-hashes` (not uv), so validate with the
-# same tool on the target runtime (Python 3.11, aarch64-linux) — a base-image
-# python/pip change can shift wheel-tag resolution and should fail here, not in
-# the build:
-#   python3 -m venv /tmp/verify-venv && \
-#     /tmp/verify-venv/bin/pip install --no-cache-dir --require-hashes \
-#       -r requirements-agentcore.txt --dry-run
-#
-# API compatibility with agentcore_wrapper.py confirmed for 1.15.1:
-#   bedrock_agentcore.runtime.BedrockAgentCoreApp, @app.entrypoint(payload,
-#   context), context.session_id, async-generator -> text/event-stream SSE.
-
 aiohappyeyeballs==2.6.2 \
     --hash=sha256:4708045e2d7a6c6bdf8aafa8ed39649eaf926a4543b54560659129e3365953c4 \
     --hash=sha256:e202810ee718bd01fc6ef49e8ea53d023d5cb6b581076d7925aa499fa55dbe64
@@ -712,6 +681,20 @@ pydantic-core==2.46.4 \
     --hash=sha256:fc010ab034c8c7452522748bf937df58020d256ccae0874463d1f4d01758af8e \
     --hash=sha256:fc3e9034a63de20e15e8ade85358bc6efc614008cab72898b4b4952bea0509ff \
     --hash=sha256:fd8b3d9fd264be37976686c7f65cd52a83f5e84f4bfd2adf9c1d469676bbb6ae
+pymupdf==1.28.0 \
+    --hash=sha256:44f0973f5e5edbaec95bc34b64e71d1959d4ee90b1328de1b4f4f5b4fa78673f \
+    --hash=sha256:47a5c29ed4eb0744de9c4e37bb49b1259b18d4d75fcc8a7c130f7c9fa15956f6 \
+    --hash=sha256:4d61ec323a706e153a12e262e51febfb43eeaa20977785ace135d18d48bcdc83 \
+    --hash=sha256:4d692dcf44d3566ae96bc6f6346c6ad432274a29ba617bf7a9fe18009e24adb4 \
+    --hash=sha256:74c6d00ba2a9aad3a635db73b07c15db462b480741d831a34a75a56535ebc22b \
+    --hash=sha256:892b89ba88e8f98b53133b62877a9dc9b5e7dc6a4aeb837b612db56a8d2e03ac \
+    --hash=sha256:b3e1399c7a64c6914239116a369efcdaac4cfb9e838bde2656d7accc4a85c72d \
+    --hash=sha256:caea2b3b67347fd79e5d15ed7929b0e886aac594ea228073b6d39de0078189da \
+    --hash=sha256:e01e90fd86abfeb37ceb921eddb951f988a11d45ff6ce6b7664f2039849068ec \
+    --hash=sha256:e53f3567403a92da15caa9e7ae0164327fff48817e9f40175367fb9de524258d
+pymupdf4llm==0.3.4 \
+    --hash=sha256:0517492f82af978541162ade20fc54649cdca52acd478e33b97cb6171d69956f \
+    --hash=sha256:48d396a5fb3c14351493c7f1dd25b2a843efdbdc4526e489ee100643a2cebec1
 python-dateutil==2.9.0.post0 \
     --hash=sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3 \
     --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
@@ -724,6 +707,9 @@ six==1.17.0 \
 starlette==1.3.1 \
     --hash=sha256:05d0213193f2fbaae60e2ecb593b4add4262ad4e46536b54abe36f11a71724e0 \
     --hash=sha256:c7372aae11c3c3f26a42df7bd626cec2f47d03483d261d369516a615a53714c6
+tabulate==0.10.0 \
+    --hash=sha256:e2cfde8f79420f6deeffdeda9aaec3b6bc5abce947655d17ac662b126e48a60d \
+    --hash=sha256:f0b0622e567335c8fabaaa659f1b33bcb6ddfe2e496071b743aa113f8774f2d3
 typing-extensions==4.15.0 \
     --hash=sha256:0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466 \
     --hash=sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548
