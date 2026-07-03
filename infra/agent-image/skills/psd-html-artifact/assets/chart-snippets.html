@@ -82,7 +82,10 @@ svg{display:block;width:100%;height:auto;overflow:visible}
 
 <script>
 const DATA = JSON.parse(document.getElementById('data').textContent);
-const fmt = n => n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':''+n;
+const fmt = n => { n = Number(n); return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':''+n; };
+// Escape DATA-derived text before interpolating it into innerHTML/SVG so a
+// copied artifact stays XSS-safe even if the agent fills DATA with user text.
+const esc = v => String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 const ns='http://www.w3.org/2000/svg';
 
 /* ---------- KPI cards with sparkline ---------- */
@@ -96,8 +99,8 @@ function sparkline(vals,w=120,h=28){
 document.getElementById('kpis').innerHTML = DATA.kpis.map(k=>{
   const up=k.deltaPct>=0, good = k.label.includes('response') ? !up : up; // lower response time is good
   return `<div class="kpi">
-    <div class="label">${k.label}</div>
-    <div class="val">${fmt(k.val)}${k.unit?`<span style="font-size:.5em;color:var(--muted)"> ${k.unit}</span>`:''}</div>
+    <div class="label">${esc(k.label)}</div>
+    <div class="val">${fmt(k.val)}${k.unit?`<span style="font-size:.5em;color:var(--muted)"> ${esc(k.unit)}</span>`:''}</div>
     <div class="delta ${good?'up':'down'}">${up?'▲':'▼'} ${Math.abs(k.deltaPct)}% <span style="color:var(--muted);font-weight:400">vs prior</span></div>
     ${sparkline(k.spark)}
   </div>`;
@@ -108,13 +111,13 @@ function barChart(el,data,{w=680,h=300,pad=36}={}){
   const max=Math.max(...data.map(d=>d.value)), bw=(w-pad)/data.length;
   const y=v=>h-pad-(v/max)*(h-pad-10);
   const ticks=4, grid=Array.from({length:ticks+1},(_,i)=>Math.round(max*i/ticks));
-  let s=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Tickets by category: ${data.map(d=>d.name+' '+d.value).join(', ')}">`;
+  let s=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Tickets by category: ${esc(data.map(d=>d.name+' '+d.value).join(', '))}">`;
   s+=`<g class="axis">`+grid.map(g=>`<line class="gridline" x1="${pad}" x2="${w}" y1="${y(g)}" y2="${y(g)}"/><text x="${pad-6}" y="${y(g)+3}" text-anchor="end">${fmt(g)}</text>`).join('')+`</g>`;
   s+=data.map((d,i)=>{
     const bx=pad+i*bw+bw*0.15, bwid=bw*0.7, by=y(d.value), bh=h-pad-by, hl=i===0?'hl':'';
     return `<g class="grow"><rect class="bar ${hl}" x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${bwid.toFixed(1)}" height="${bh.toFixed(1)}" rx="3"/></g>
-      <text class="barlabel" x="${(bx+bwid/2).toFixed(1)}" y="${(by-5).toFixed(1)}" text-anchor="middle">${d.value}</text>
-      <text class="axis" x="${(bx+bwid/2).toFixed(1)}" y="${h-pad+14}" text-anchor="middle" style="font-size:10px;fill:var(--muted)">${d.name}</text>`;
+      <text class="barlabel" x="${(bx+bwid/2).toFixed(1)}" y="${(by-5).toFixed(1)}" text-anchor="middle">${esc(d.value)}</text>
+      <text class="axis" x="${(bx+bwid/2).toFixed(1)}" y="${h-pad+14}" text-anchor="middle" style="font-size:10px;fill:var(--muted)">${esc(d.name)}</text>`;
   }).join('');
   s+=`</svg>`; el.innerHTML=s;
 }
@@ -127,12 +130,12 @@ function lineChart(el,data,target,{w=680,h=300,pad=40}={}){
   const line=data.map((d,i)=>`${i?'L':'M'}${x(i).toFixed(1)},${y(d.value).toFixed(1)}`).join(' ');
   const area=`M${x(0).toFixed(1)},${(h-pad).toFixed(1)} `+data.map((d,i)=>`L${x(i).toFixed(1)},${y(d.value).toFixed(1)}`).join(' ')+` L${x(data.length-1).toFixed(1)},${(h-pad).toFixed(1)} Z`;
   const ticks=4, grid=Array.from({length:ticks+1},(_,i)=>Math.round(max*i/ticks));
-  let s=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Monthly volume from ${data[0].month} ${data[0].value} to ${data.at(-1).month} ${data.at(-1).value}, target ${target}">`;
+  let s=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Monthly volume from ${esc(data[0].month)} ${esc(data[0].value)} to ${esc(data.at(-1).month)} ${esc(data.at(-1).value)}, target ${esc(target)}">`;
   s+=`<defs><linearGradient id="af" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--accent)" stop-opacity="0.18"/><stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>`;
   s+=`<g class="axis">`+grid.map(g=>`<line class="gridline" x1="${pad}" x2="${w-16}" y1="${y(g)}" y2="${y(g)}"/><text x="${pad-6}" y="${y(g)+3}" text-anchor="end">${fmt(g)}</text>`).join('')+`</g>`;
   s+=`<line class="refline" x1="${pad}" x2="${w-16}" y1="${y(target)}" y2="${y(target)}"/><text class="axis" x="${w-16}" y="${y(target)-5}" text-anchor="end" style="fill:var(--neg)">target ${fmt(target)}</text>`;
   s+=`<path d="${area}" fill="url(#af)"/><path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round"/>`;
-  s+=data.map((d,i)=>`<text class="axis" x="${x(i).toFixed(1)}" y="${h-pad+14}" text-anchor="middle">${d.month}</text>`).join('');
+  s+=data.map((d,i)=>`<text class="axis" x="${x(i).toFixed(1)}" y="${h-pad+14}" text-anchor="middle">${esc(d.month)}</text>`).join('');
   const last=data.at(-1);
   s+=`<circle cx="${x(data.length-1).toFixed(1)}" cy="${y(last.value).toFixed(1)}" r="3.5" fill="var(--accent)"/>`;
   s+=`<text class="series-label" x="${x(data.length-1).toFixed(1)}" y="${(y(last.value)-9).toFixed(1)}" text-anchor="end" fill="var(--accent)">${fmt(last.value)}</text>`;
