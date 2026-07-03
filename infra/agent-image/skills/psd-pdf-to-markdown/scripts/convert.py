@@ -14,7 +14,7 @@ Usage (exactly one input source):
   optional:
     --out /tmp/report.md         # default: /tmp/<stem>.md
     --pages "0,5-10"             # 0-based page selection
-    --user name@psd401.net       # only used to scope an --s3 upload of large output
+    --user name@psd401.net       # REQUIRED with --s3-key (scopes access to your own prefix)
 
 Output: a single JSON object on stdout. For small results the full Markdown is
 inlined under "markdown"; for large results only a "preview" is inlined and the
@@ -38,6 +38,7 @@ import re
 import socket
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
@@ -75,8 +76,37 @@ def strip_image_references(markdown: str) -> str:
     return markdown.strip()
 
 
+def _ip_is_public(ip_str: str) -> bool:
+    """False for loopback/link-local/private/reserved/multicast/unspecified IPs."""
+    ip = ipaddress.ip_address(ip_str)
+    return not (
+        ip.is_loopback or ip.is_link_local or ip.is_private
+        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+    )
+
+
+class _BlockedAddress(OSError):
+    """Raised by the patched resolver when a host resolves to a non-public IP."""
+
+
+_REAL_GETADDRINFO = socket.getaddrinfo
+
+
+def _guarded_getaddrinfo(host, *args, **kwargs):
+    """Validate IPs at the SAME resolution urllib uses to connect, closing the
+    DNS-rebinding TOCTOU: a pre-check plus urllib's own second resolution could
+    otherwise differ (short-TTL record flips public -> private between them)."""
+    infos = _REAL_GETADDRINFO(host, *args, **kwargs)
+    for info in infos:
+        if not _ip_is_public(info[4][0]):
+            raise _BlockedAddress(f"host {host} resolves to a non-public address ({info[4][0]})")
+    return infos
+
+
 def _guard_public_url(url: str) -> None:
-    """Reject non-http(s) schemes and hosts that resolve to internal ranges."""
+    """Reject non-http(s) schemes and hosts that resolve to internal ranges.
+    This is the early/defense-in-depth check; _guarded_getaddrinfo closes the
+    TOCTOU on the actual connect."""
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         _fail(f"--url must be http(s), got scheme '{parsed.scheme}'", "bad_args")
@@ -85,18 +115,18 @@ def _guard_public_url(url: str) -> None:
         _fail("--url has no host", "bad_args")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        infos = _REAL_GETADDRINFO(host, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
         _fail(f"--url host does not resolve: {host} ({exc})", "bad_args")
     for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved or ip.is_multicast:
-            _fail(f"--url host {host} resolves to a non-public address ({ip}) — refused", "forbidden")
+        if not _ip_is_public(info[4][0]):
+            _fail(f"--url host {host} resolves to a non-public address ({info[4][0]}) — refused", "forbidden")
 
 
 class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Re-validate every redirect hop so a 30x to a loopback/link-local/private/
-    metadata host cannot bypass the initial SSRF check."""
+    """Re-validate the scheme of every redirect hop so a 30x to file:// etc.
+    can't slip past; IP validation for each hop is handled by the patched
+    resolver active during the fetch."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _guard_public_url(newurl)
@@ -107,8 +137,13 @@ def _download_url(url: str, dest: Path) -> None:
     _guard_public_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "psd-pdf-to-markdown/1.0"})
     opener = urllib.request.build_opener(_GuardedRedirectHandler)
+    # Pin resolution for the duration of the fetch so the IPs urllib actually
+    # connects to (initial request AND every redirect) are the validated ones,
+    # not a second independent lookup. Safe to patch the module global: this is
+    # a single-shot, single-threaded CLI process, and it is restored in finally.
+    socket.getaddrinfo = _guarded_getaddrinfo
     try:
-        with opener.open(req, timeout=30) as resp:  # noqa: S310 (host guarded initially + per redirect)
+        with opener.open(req, timeout=30) as resp:  # noqa: S310 (scheme+IP guarded per resolution)
             total = 0
             with open(dest, "wb") as fh:
                 while True:
@@ -119,8 +154,16 @@ def _download_url(url: str, dest: Path) -> None:
                     if total > MAX_PDF_BYTES:
                         _fail(f"--url body exceeds {MAX_PDF_BYTES} bytes", "too_large")
                     fh.write(chunk)
+    except urllib.error.URLError as exc:
+        if isinstance(getattr(exc, "reason", None), _BlockedAddress):
+            _fail(f"{exc.reason} — refused", "forbidden")
+        _fail(f"failed to fetch --url: {exc}", "upstream_error")
+    except _BlockedAddress as exc:
+        _fail(f"{exc} — refused", "forbidden")
     except OSError as exc:
         _fail(f"failed to fetch --url: {exc}", "upstream_error")
+    finally:
+        socket.getaddrinfo = _REAL_GETADDRINFO
 
 
 def _download_s3(key: str, dest: Path, user_email: str) -> None:
@@ -181,7 +224,7 @@ def main():
     src.add_argument("--path", help="Path to a PDF already in the container/workspace")
     parser.add_argument("--out", help="Output .md path (default: /tmp/<stem>.md)")
     parser.add_argument("--pages", help='0-based page selection, e.g. "0,5-10"')
-    parser.add_argument("--user", help="Caller email (reserved for future --s3 upload of large output)")
+    parser.add_argument("--user", help="Caller email; REQUIRED with --s3-key (scopes S3 access to your own public-images/<email>/ prefix)")
     args = parser.parse_args()
 
     try:

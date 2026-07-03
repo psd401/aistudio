@@ -1,3 +1,35 @@
+# requirements-agentcore.txt — hash-pinned dependency closure for the
+# bedrock-agentcore SDK + skill deps, installed into /opt/agentcore-venv (see Dockerfile).
+#
+# WHY HASHES: the agent container holds IAM reach to psd-agent-creds/${env}/*
+# and psd-agent/${env}/* secrets, so any build-time dependency substitution is
+# a real compromise vector. `pip install --require-hashes` is all-or-nothing:
+# the full transitive closure must be present and hashed, and pip aborts the
+# build on any mismatch — making the image build itself the supply-chain test.
+#
+# Top-level inputs (see requirements-agentcore.in next to this file):
+#   bedrock-agentcore==1.15.1   (official AWS SDK, github.com/aws/bedrock-agentcore-sdk-python)
+#   websocket-client>=1.7.0  boto3>=1.34.0  aiohttp>=3.9.0
+#   pymupdf4llm>=0.0.17,<1.0    (psd-pdf-to-markdown; pinned pre-1.0 to avoid the
+#                                1.x onnxruntime/numpy ML stack — see the .in comment)
+#
+# REGENERATE after any version bump (do NOT hand-edit hashes). NOTE: `-o` OVERWRITES
+# this whole file, INCLUDING this header — re-prepend this block afterward:
+#   uv pip compile --universal --generate-hashes --python-version 3.11 \
+#     --no-annotate --no-header requirements-agentcore.in -o requirements-agentcore.txt
+#
+# VERIFY with the LITERAL production installer before merge. The Dockerfile
+# installs via `pip install --require-hashes` (not uv), so validate with the
+# same tool on the target runtime (Python 3.11, aarch64-linux) — a base-image
+# python/pip change can shift wheel-tag resolution and should fail here, not in
+# the build:
+#   python3 -m venv /tmp/verify-venv && \
+#     /tmp/verify-venv/bin/pip install --no-cache-dir --require-hashes \
+#       -r requirements-agentcore.txt --dry-run
+#
+# API compatibility with agentcore_wrapper.py confirmed for 1.15.1:
+#   bedrock_agentcore.runtime.BedrockAgentCoreApp, @app.entrypoint(payload,
+#   context), context.session_id, async-generator -> text/event-stream SSE.
 aiohappyeyeballs==2.6.2 \
     --hash=sha256:4708045e2d7a6c6bdf8aafa8ed39649eaf926a4543b54560659129e3365953c4 \
     --hash=sha256:e202810ee718bd01fc6ef49e8ea53d023d5cb6b581076d7925aa499fa55dbe64
