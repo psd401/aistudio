@@ -65,6 +65,20 @@ export function contentDeepLink(slug: string): string {
   return `${base}/c/${slug}`;
 }
 
+/**
+ * The PUBLIC (anonymous) reader link for a content object at `/p/[slug]` — the
+ * `external_ref` the `public_web` publish adapter records and the URL a
+ * public-web publication is served at (Phase 7, #1057). Built from
+ * `ATRIUM_PUBLIC_BASE_URL` (the same base the internal deep link uses); the
+ * §33 #7 decision serves `public_web` via the authenticated-but-anonymous Next
+ * public route rather than a separate CloudFront/S3 static export, so the base is
+ * the app origin and the path segment (`/p/` vs `/c/`) is the only difference.
+ */
+export function publicReaderLink(slug: string): string {
+  const base = process.env.ATRIUM_PUBLIC_BASE_URL?.replace(/\/$/, "") ?? "";
+  return `${base}/p/${slug}`;
+}
+
 /** The capability every Atrium authoring entry point (UI actions + agent surfaces) gates on. */
 export const ATRIUM_CONTENT_CAPABILITY = "atrium-content";
 

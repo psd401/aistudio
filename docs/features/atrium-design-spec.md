@@ -1485,7 +1485,7 @@ PROOF_DOC_STORE_MODE=            # "postgres" (default) | "s3"
 ```
 
 ### 30.2 CDK additions (`infra/`)
-- **S3:** an `atrium/` prefix on the existing content bucket; a separate public prefix/distribution (CloudFront) for `public_web`.
+- **S3:** an `atrium/` prefix on the existing content bucket. *(§33 #7 RESOLVED in Phase 7 (#1057): `public_web` is served by the anonymous Next reader route `/p/[slug]` on the existing ECS frontend, so NO separate public prefix/CloudFront distribution is provisioned in v1 — the public reader renders on demand from the same S3 source + sandbox the internal reader uses. A static-export CDN behind `ATRIUM_PUBLIC_BASE_URL` remains a future optimization.)*
 - **Sandbox origin:** a distinct subdomain/distribution serving the static artifact host page with the locked CSP (no app cookies in scope).
 - **Events:** an SNS topic (`atrium-content-events`) or EventBridge bus; subscriptions for the retrieval indexer (Lambda or in-app worker) and notifiers; a DLQ.
 - **IAM:** the app task role gets `s3:GetObject/PutObject` on the `atrium/*` prefix and `sns:Publish` on the topic. No new public bucket ACLs — serve public via CloudFront OAC.
@@ -1547,7 +1547,7 @@ MCP content tools (§24) + `/v1/content` (§23) + skill/scheduled-run wiring (§
 Index-on-publish via the repository pipeline (§16.1), permission-aware `search` (§16.2), whole-object injection, assistant retrieval scoping (§16.4).
 
 **Phase 7 — Publishing connectors**
-`public_web` (CloudFront/S3 public route + sandbox), then `schoology` and `google` adapters over `connector-service` and existing OAuth connectors, all behind the public-publish gate.
+`public_web` (the anonymous Next reader route `/p/[slug]` + the same artifact sandbox — §33 #7 resolved to the Next route, no net-new CloudFront/S3), then `schoology` and `google` adapters (v1 connector stubs, to be finished over `connector-service` + existing OAuth connectors), all behind the public-publish gate (`isPublicDestination`).
 
 **Phase 8 — OKF interoperability** *(post-spec addendum, §36)*
 `okf` export adapter (§36.2) + OKF import service (§36.3) + MCP/REST parity (§36.4). Boundary serialization only — no change to the content model. Sequence **last**: depends on Phase 6 (`getContextDocument` whole-object bodies) and Phase 7 (publish-adapter breadth). Export enforces `canView` per object and routes public/anonymous bundles through the §26.4 gate.
@@ -1560,7 +1560,7 @@ Index-on-publish via the repository pipeline (§16.1), permission-aware `search`
 4. **Retrieval index** — reuse `knowledge_repositories`/`repository_item_chunks` with a system repository per collection (recommended) vs a dedicated content index; confirm how `repository_access` vs `content_visibility_grants` are reconciled (this spec filters by `canView` at query time regardless).
 5. **Service identity mechanism** — OIDC client-credentials + `agent_identities` (recommended) vs Cognito app clients.
 6. **Artifact JSX rendering** — whether to support `jsx` artifacts (needs an in-sandbox transform/runtime) in v1 or start HTML/JS-only and add JSX later. Recommended: HTML/JS first.
-7. **Public hosting** — CloudFront + S3 static export vs an authenticated-but-anonymous Next public route for `public_web`.
+7. **Public hosting** — CloudFront + S3 static export vs an authenticated-but-anonymous Next public route for `public_web`. **RESOLVED (Phase 7, #1057): the authenticated-but-anonymous Next public route** (`app/(public)/p/[slug]/page.tsx`, in `PUBLIC_PATHS`). It reuses the existing render pipeline + artifact sandbox unchanged, needs no net-new CloudFront/S3 distribution, and enforces the same permission boundary as the rest of the content layer (strict `visibility_level='public'` + a live `public_web` publication). A static-export CDN remains a future optimization behind the same `ATRIUM_PUBLIC_BASE_URL` — only the `public_web` adapter body would change; the reader route and `external_ref` contract stay identical.
 8. **Naming** — §34.
 
 ## 34. Naming

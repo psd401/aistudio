@@ -117,6 +117,47 @@ jest.mock("@/lib/content/publish-adapters/intranet", () => ({
   },
 }));
 
+// The public_web adapter (Phase 7, #1057) is LIVE and reader-backed: it returns
+// the anonymous reader URL to persist as external_ref. Mock it (instead of loading
+// the real module, which pulls surface-helpers → @/utils/roles) and record the
+// slug it received + the ref it returned so the happy-path assertions can verify
+// the ref round-trips.
+const PUBLIC_WEB_REF = "https://pub.example/p/s1";
+let publicWebPublishCalls = 0;
+let lastPublicWebSlug: string | null = null;
+jest.mock("@/lib/content/publish-adapters/public-web", () => ({
+  publicWebAdapter: {
+    destination: "public_web",
+    publish: jest.fn(async ({ slug }: { slug: string }) => {
+      publicWebPublishCalls += 1;
+      lastPublicWebSlug = slug;
+      return { externalRef: PUBLIC_WEB_REF };
+    }),
+  },
+}));
+
+// Schoology/Google are governed connector STUBS (implemented: false); their
+// publish throws BEFORE the tx. Mock them so the registry resolves without loading
+// the real modules and so the stub-throw path is deterministic.
+jest.mock("@/lib/content/publish-adapters/schoology", () => ({
+  schoologyAdapter: {
+    destination: "schoology",
+    implemented: false,
+    publish: jest.fn(async () => {
+      throw new Error("schoology stub should never run");
+    }),
+  },
+}));
+jest.mock("@/lib/content/publish-adapters/google", () => ({
+  googleAdapter: {
+    destination: "google",
+    implemented: false,
+    publish: jest.fn(async () => {
+      throw new Error("google stub should never run");
+    }),
+  },
+}));
+
 // A chainable tx stub. The TERMINAL builder methods `.limit()` and `.returning()`
 // each shift the next queued result off `txResults` (in call order): a `.limit()`
 // terminates a SELECT (the FOR UPDATE lock, the live-publication lookup), and a
@@ -144,6 +185,7 @@ const chainProxy = new Proxy(chain, chainHandler);
 const txStub = chainProxy;
 
 import { publishService } from "@/lib/content/publish-service";
+import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   ApprovalRequiredError,
   ForbiddenError,
@@ -151,6 +193,8 @@ import {
   ValidationError,
 } from "@/lib/content/errors";
 import type { Requester } from "@/lib/content/types";
+
+const executeQueryMock = executeQuery as unknown as jest.Mock;
 
 const owner: Requester = { kind: "user", userId: 7, roles: ["staff"], isAdmin: false };
 const stranger: Requester = { kind: "user", userId: 99, roles: ["staff"], isAdmin: false };
@@ -173,6 +217,8 @@ beforeEach(() => {
   lastSetLevelExtraSet = null;
   adapterPublishCalls = 0;
   adapterUnpublishCalls = 0;
+  publicWebPublishCalls = 0;
+  lastPublicWebSlug = null;
   txResults = [];
   jest.clearAllMocks();
 });
@@ -250,37 +296,76 @@ describe("publishService.publish", () => {
     ).resolves.toEqual({ publicationId: "pub1", publishedVersionId: "v1" });
   });
 
-  it("admin past the gate to an unimplemented public destination fails BEFORE any write (no visibility leak)", async () => {
+  it("admin past the gate to an unimplemented (stub) public destination fails BEFORE any write (no visibility leak)", async () => {
     // An admin passes canPublishPublic, so the §26.4 gate does NOT fire. But
-    // public_web is a not-yet-implemented adapter, so the publish must be blocked
-    // BEFORE the transaction — NOT proceed through it and only fail at the adapter
-    // afterward. Regression guard for the leak where the tx committed
+    // schoology is a not-yet-implemented connector stub, so the publish must be
+    // blocked BEFORE the transaction — NOT proceed through it and only fail at the
+    // adapter afterward. Regression guard for the leak where the tx committed
     // visibilityLevel="public" (world-readable via canView) before the adapter
     // threw, leaving the object public despite the publish "failing". Queue tx
     // results so that IF the tx wrongly ran, it would not crash for the wrong
-    // reason — the assertions below prove it never ran.
+    // reason — the assertions below prove it never ran. (public_web is now LIVE, so
+    // a stub destination is used to preserve this exact regression guard.)
     txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
     await expect(
       publishService.publish(admin, "o1", {
-        destination: "public_web",
+        destination: "schoology",
         visibility: { level: "public" },
       })
     ).rejects.toThrow(ValidationError);
     // The exact leak this fix closes: visibility was NEVER widened in a tx...
     expect(setLevelInTxCalls).toBe(0);
-    // ...and the (no-op) adapter side effect never ran either.
+    // ...and no adapter side effect ran either.
+    expect(adapterPublishCalls).toBe(0);
+    expect(publicWebPublishCalls).toBe(0);
+  });
+
+  it("gates schoology/google behind the §26.4 public gate for an unauthorized caller (Phase 7)", async () => {
+    // Phase 7 (#1057): schoology & google are PUBLIC (family-facing) destinations
+    // now, so a non-admin owner without publish_public is routed through the
+    // approval gate — BEFORE the not-implemented check — exactly like public_web.
+    for (const destination of ["schoology", "google"] as const) {
+      await expect(
+        publishService.publish(owner, "o1", { destination })
+      ).rejects.toThrow(ApprovalRequiredError);
+    }
+    expect(setLevelInTxCalls).toBe(0);
     expect(adapterPublishCalls).toBe(0);
   });
 
-  it("throws ValidationError for an unimplemented destination (schoology), before the tx", async () => {
-    // schoology is not public-facing (no gate), but its adapter is not yet
-    // implemented, so the publish is hard-blocked BEFORE the transaction runs.
-    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
-    await expect(
-      publishService.publish(owner, "o1", { destination: "schoology" })
-    ).rejects.toThrow(ValidationError);
+  it("an authorized caller (admin) past the gate hits the stub ValidationError BEFORE the tx (no write)", async () => {
+    // An admin passes the §26.4 gate, then the schoology/google connector STUB
+    // (implemented: false) blocks BEFORE the transaction — no publication row and
+    // no visibility widen is written for a not-yet-wired connector.
+    for (const destination of ["schoology", "google"] as const) {
+      txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+      await expect(
+        publishService.publish(admin, "o1", { destination })
+      ).rejects.toThrow(ValidationError);
+    }
     expect(setLevelInTxCalls).toBe(0);
     expect(adapterPublishCalls).toBe(0);
+  });
+
+  it("publishes public_web LIVE for an admin, runs the adapter, and persists its external_ref (Phase 7)", async () => {
+    // public_web is now a live reader-backed adapter. An admin passes the gate;
+    // the publish commits, the adapter returns the anonymous reader URL, and the
+    // service persists it as external_ref via a follow-up UPDATE.
+    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    const result = await publishService.publish(admin, "o1", {
+      destination: "public_web",
+    });
+    expect(result).toEqual({ publicationId: "pub1", publishedVersionId: "v1" });
+    // The public_web adapter ran with the object's slug and returned the URL.
+    expect(publicWebPublishCalls).toBe(1);
+    expect(lastPublicWebSlug).toBe("s1");
+    // The returned external_ref is persisted via a dedicated UPDATE (labelled), so
+    // the publication row records WHERE the version went live.
+    expect(
+      executeQueryMock.mock.calls.some(
+        (call: unknown[]) => call[1] === "publish.persistExternalRef"
+      )
+    ).toBe(true);
   });
 
   it("throws ValidationError when there is no working head", async () => {
@@ -410,5 +495,16 @@ describe("publishService.unpublish", () => {
       hasPublishPublicCapability: true,
     });
     expect(result).toEqual({ unpublished: true });
+  });
+
+  // Phase 7 (#1057): schoology & google are public-facing, so unpublishing them
+  // requires the same §26.4 authority as public_web.
+  it("throws ApprovalRequiredError unpublishing schoology/google without publish_public", async () => {
+    for (const destination of ["schoology", "google"] as const) {
+      await expect(
+        publishService.unpublish(owner, "o1", destination)
+      ).rejects.toThrow(ApprovalRequiredError);
+    }
+    expect(adapterUnpublishCalls).toBe(0);
   });
 });

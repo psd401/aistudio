@@ -26,6 +26,35 @@ export type PublishDestination =
   | "schoology"
   | "google";
 
+/**
+ * The destinations that expose content to a PUBLIC / family-facing audience and
+ * therefore require the §26.4 `content:publish_public` authority (Phase 7, #1057).
+ *
+ * `intranet` is the ONLY internal-audience destination (`content:publish_internal`
+ * suffices for it). `public_web` renders at an anonymous reader route; `schoology`
+ * / `google` push into external family-facing systems (§26.2 — "publish to
+ * public_web / family-facing destinations"). All three are the highest-governance
+ * paths: an unauthorized caller (including EVERY autonomous agent) is routed
+ * through the approval gate before the destination adapter ever runs.
+ *
+ * Single source of truth so the publish service, unpublish path, and any future
+ * gate site classify destinations identically rather than hand-listing them.
+ */
+export const PUBLIC_DESTINATIONS: readonly PublishDestination[] = [
+  "public_web",
+  "schoology",
+  "google",
+];
+
+/**
+ * Whether publishing to (or unpublishing from) `destination` requires the §26.4
+ * public-publish authority. `intranet` → false; every destination in
+ * `PUBLIC_DESTINATIONS` → true.
+ */
+export function isPublicDestination(destination: PublishDestination): boolean {
+  return PUBLIC_DESTINATIONS.includes(destination);
+}
+
 /** A publish request's destination target. */
 export interface PublishTarget {
   destination: PublishDestination;
