@@ -126,8 +126,9 @@ async function loadPublishable(
  * Post-commit publish side effects, both best-effort: a successful publish has
  * already committed, so neither a retrieval-index failure nor an event-bus
  * hiccup may roll it back. Extracted from `publish` so the method stays within
- * the length budget; the sequencing is unchanged — the retrieval index (§16.1,
- * so a successful publish guarantees "published content is indexed") is awaited,
+ * the length budget; the sequencing is unchanged — the retrieval index (§16.1)
+ * is awaited so indexing happens inline on the publish path (its failure is
+ * caught + logged, NOT an invariant — a later re-publish/re-index retries it),
  * then the `content.published` event (§27: connector pushes, notifications) is
  * emitted fire-and-forget (`void`), since `emit` swallows its own errors and
  * awaiting would only hold the response open for an SNS round-trip.

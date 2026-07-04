@@ -33,6 +33,9 @@ let txResults: unknown[] = [];
 let txUpdateCalls = 0;
 let insertedTables: unknown[] = [];
 let insertedChunkPayload: Array<Record<string, unknown>> | null = null;
+// Non-array insert payloads (repository_items, content_index_links) so tests can
+// assert the repository_items.type mapping (document -> "document", artifact -> "text").
+let insertedRows: Array<Record<string, unknown>> = [];
 
 const shiftTx = () => (txResults.length ? txResults.shift() : []);
 const txChain: Record<string, unknown> = {};
@@ -52,6 +55,8 @@ const txProxy: unknown = new Proxy(txChain, {
           values: (v: unknown) => {
             if (Array.isArray(v)) {
               insertedChunkPayload = v as Array<Record<string, unknown>>;
+            } else {
+              insertedRows.push(v as Record<string, unknown>);
             }
             return { then: undefined, returning: () => shiftTx() };
           },
@@ -203,6 +208,7 @@ beforeEach(() => {
   txUpdateCalls = 0;
   insertedTables = [];
   insertedChunkPayload = null;
+  insertedRows = [];
   jest.clearAllMocks();
 });
 
@@ -285,6 +291,16 @@ describe("§16.4 assistant scoping — narrows candidates BEFORE canView", () =>
     );
     expect(hits).toHaveLength(0);
   });
+
+  it("fails closed (returns []) when the assistant is not found", async () => {
+    loadAssistantScopeResult = []; // no such assistant
+    const hits = await retrievalService.searchForAssistant(
+      staffUser,
+      99999,
+      "playbook"
+    );
+    expect(hits).toHaveLength(0);
+  });
 });
 
 describe("§16.3 whole-object injection — getContextDocument", () => {
@@ -332,6 +348,23 @@ describe("§16.1 indexObject — published content is indexed", () => {
     expect(txUpdateCalls).toBeGreaterThan(0); // content_objects.indexed_at stamped
     // sanity: the stamped table is content_objects (imported to keep the ref used)
     expect(contentObjects).toBeDefined();
+    // A document maps to repository_items.type = "document".
+    const itemRow = insertedRows.find((r) => "type" in r);
+    expect(itemRow?.type).toBe("document");
+  });
+
+  it("maps an ARTIFACT to repository_items.type = 'text' (CHECK allows only document|url|text)", async () => {
+    // Regression: `type: obj.kind` would insert "artifact", violating the
+    // repository_items.type CHECK — and because publish swallows index errors,
+    // the artifact would publish but silently never index.
+    loadedObject = { ...groupStaffDoc, kind: "artifact" };
+    txResults = [[], [{ id: 101 }]];
+
+    await retrievalService.indexObject("obj-1");
+
+    const itemRow = insertedRows.find((r) => "type" in r);
+    expect(itemRow?.type).toBe("text");
+    expect(insertedChunkPayload!.length).toBeGreaterThan(0);
   });
 
   it("is a no-op for an object that is not published", async () => {

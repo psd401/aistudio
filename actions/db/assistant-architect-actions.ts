@@ -56,7 +56,7 @@ import {
 } from "@/lib/db/drizzle";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
-import { navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities } from "@/lib/db/schema";
+import { navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities, type AssistantRetrievalScope } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -664,6 +664,8 @@ type AssistantArchitectBaseUpdates = Partial<{
   imagePath: string | null;
   isParallel: boolean;
   timeoutSeconds: number | null;
+  // Retrieval scoping (Atrium Phase 6, Issue #1056)
+  retrievalScope: AssistantRetrievalScope | null;
   // Agentic mode (Issue #926)
   mode: "prompt_chain" | "agentic";
   agentEnabledTools: string[];
@@ -693,6 +695,10 @@ function buildAssistantArchitectBaseUpdates(
   // consistency with the fields above (an explicit `undefined` means "not set").
   if (data.isParallel !== undefined) updateData.isParallel = Boolean(data.isParallel);
   if (data.timeoutSeconds !== undefined) updateData.timeoutSeconds = data.timeoutSeconds as number | null;
+  // Retrieval scoping (Atrium Phase 6, Issue #1056) — persist an explicitly
+  // provided scope (including `null` to clear it) so action-layer updates are
+  // not silently stripped.
+  if (data.retrievalScope !== undefined) updateData.retrievalScope = data.retrievalScope;
 
   return updateData;
 }

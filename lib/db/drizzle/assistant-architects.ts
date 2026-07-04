@@ -120,6 +120,8 @@ export interface AssistantArchitectData {
   agentTimeoutSeconds?: number;
   agentCostCapCents?: number | null;
   agentMaxRequestsPerHour?: number | null;
+  // Retrieval scoping (Atrium Phase 6, Issue #1056)
+  retrievalScope?: AssistantRetrievalScope | null;
 }
 
 export interface AssistantArchitectUpdateData {
@@ -137,6 +139,8 @@ export interface AssistantArchitectUpdateData {
   agentTimeoutSeconds?: number;
   agentCostCapCents?: number | null;
   agentMaxRequestsPerHour?: number | null;
+  // Retrieval scoping (Atrium Phase 6, Issue #1056)
+  retrievalScope?: AssistantRetrievalScope | null;
 }
 
 export interface AssistantArchitectWithCreator {
@@ -418,6 +422,9 @@ export async function createAssistantArchitect(data: AssistantArchitectData) {
             : {}),
           ...(data.agentMaxRequestsPerHour !== undefined
             ? { agentMaxRequestsPerHour: data.agentMaxRequestsPerHour }
+            : {}),
+          ...(data.retrievalScope !== undefined
+            ? { retrievalScope: data.retrievalScope }
             : {}),
         })
         .returning(),

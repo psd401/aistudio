@@ -160,6 +160,14 @@ async function indexObject(objectId: string): Promise<void> {
   // transaction, never inside one, so a slow provider call never holds a DB
   // transaction open.
   const embeddings = await generateEmbeddings(chunks);
+  // Fail loudly on a provider count mismatch rather than writing chunks with
+  // `undefined` embeddings (which `vectorSearch`'s `embedding IS NOT NULL`
+  // filter would silently drop). Publish catches + logs this best-effort.
+  if (embeddings.length !== chunks.length) {
+    throw new Error(
+      `Embedding count mismatch for ${obj.id}: ${embeddings.length} embeddings for ${chunks.length} chunks`
+    );
+  }
   const grants = await visibilityService.grantsFor(obj.id);
 
   // Filterable retrieval metadata mirror (§16.1). This is NEVER the source of
@@ -175,6 +183,13 @@ async function indexObject(objectId: string): Promise<void> {
   };
 
   const repositoryId = await getAtriumRepositoryId();
+
+  // `repository_items.type` has a CHECK constraint (document | url | text). An
+  // Atrium artifact is indexed as its extracted source *text*, so map it to
+  // "text" (documents keep "document"). Without this, an artifact insert
+  // violates the constraint and — because publish treats indexing as a swallowed
+  // best-effort side effect — the artifact would publish but never get indexed.
+  const repositoryItemType = obj.kind === "document" ? "document" : "text";
 
   await executeTransaction(async (tx: DbTransaction) => {
     const existingLink = await tx
@@ -206,7 +221,7 @@ async function indexObject(objectId: string): Promise<void> {
         .insert(repositoryItems)
         .values({
           repositoryId,
-          type: obj.kind,
+          type: repositoryItemType,
           name: obj.title,
           source: `atrium:${obj.slug}`,
           metadata,
@@ -384,7 +399,12 @@ async function searchForAssistant(
         .limit(1),
     "retrieval.loadAssistantScope"
   );
-  const scope = rows[0]?.retrievalScope ?? undefined;
+  // Fail closed on an unknown assistant: return nothing rather than silently
+  // running an UNSCOPED search. `canView` still gates every hit, so this is not
+  // the security boundary — but a missing/invalid assistant id should not widen
+  // beyond the assistant's intended scope.
+  if (rows.length === 0) return [];
+  const scope = rows[0].retrievalScope ?? undefined;
   return search(req, query, scope, opts);
 }
 
