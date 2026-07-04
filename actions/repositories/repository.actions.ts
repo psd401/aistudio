@@ -18,6 +18,7 @@ import {
   revokeAccessById,
   getUserAccessibleRepositories
 } from "@/lib/db/drizzle"
+import { assertNotSystemManagedRepository } from "@/lib/repositories/system-repo-guard"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq } from "drizzle-orm"
 import { repositoryAccess } from "@/lib/db/schema"
@@ -238,13 +239,7 @@ export async function updateRepository(
     // A system-managed repository (the Atrium retrieval index, #1056) is
     // immutable through the generic API — masked as not-found so its `isPublic`
     // / `metadata` (and thus the system-managed guard) cannot be flipped.
-    const existingRepo = await getRepositoryById(input.id)
-    if (!existingRepo || isSystemManagedRepository(existingRepo)) {
-      log.warn("Repository update denied - not found or system-managed", {
-        repositoryId: input.id
-      })
-      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", input.id)
-    }
+    await assertNotSystemManagedRepository(input.id)
 
     // Check if any fields provided
     if (!hasRepositoryUpdates(input)) {
@@ -332,6 +327,10 @@ export async function deleteRepository(
       })
       throw ErrorFactories.authzOwnerRequired("delete repository")
     }
+
+    // Never delete a system-managed repo (the Atrium index, #1056) through the
+    // generic API — it would destroy the retrieval index out-of-band.
+    await assertNotSystemManagedRepository(id)
 
     // First, get all document items to delete from S3
     log.debug("Fetching document items for deletion")

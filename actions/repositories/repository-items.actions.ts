@@ -9,10 +9,12 @@ import {
   getRepositoryItems,
   getRepositoryItemChunks,
   deleteRepositoryItem,
-  updateRepositoryItemStatus,
-  getRepositoryById,
-  isSystemManagedRepository
+  updateRepositoryItemStatus
 } from "@/lib/db/drizzle"
+import {
+  assertNotSystemManagedRepository,
+  assertItemNotInSystemManagedRepository
+} from "@/lib/repositories/system-repo-guard"
 import { type ActionState } from "@/types/actions-types"
 import { hasCapabilityAccess } from "@/utils/roles"
 import {
@@ -747,6 +749,10 @@ export async function removeRepositoryItem(
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
 
+    // Never mutate a system-managed repo's items (the Atrium index, #1056)
+    // through the generic API — deleting one would desync the retrieval index.
+    await assertNotSystemManagedRepository(itemRaw.repositoryId)
+
     // Convert to action type
     const item: RepositoryItem = {
       id: itemRaw.id,
@@ -851,14 +857,8 @@ export async function listRepositoryItems(
 
     // System-managed repositories (e.g. the Atrium retrieval index, #1056) are
     // governed by a finer-grained permission model and must not be read through
-    // the generic repository API — mask as not-found.
-    const listRepo = await getRepositoryById(repositoryId)
-    if (!listRepo || isSystemManagedRepository(listRepo)) {
-      log.warn("List items denied - repository not found or system-managed", {
-        repositoryId
-      })
-      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", repositoryId)
-    }
+    // the generic repository API.
+    await assertNotSystemManagedRepository(repositoryId)
 
     // Fetch repository items via Drizzle
     log.debug("Fetching repository items from database", { repositoryId })
@@ -933,14 +933,8 @@ export async function searchRepositoryItems(
 
     // System-managed repositories (e.g. the Atrium retrieval index, #1056) are
     // governed by a finer-grained permission model and must not be read through
-    // the generic repository API — mask as not-found.
-    const searchRepo = await getRepositoryById(repositoryId)
-    if (!searchRepo || isSystemManagedRepository(searchRepo)) {
-      log.warn("Search denied - repository not found or system-managed", {
-        repositoryId
-      })
-      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", repositoryId)
-    }
+    // the generic repository API.
+    await assertNotSystemManagedRepository(repositoryId)
 
     // Search in item names via Drizzle
     log.debug("Searching item names", { repositoryId, query })
@@ -1061,6 +1055,12 @@ export async function getItemChunks(
       })
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
+
+    // A chunk read is a DIRECT read of raw indexed text. If the item belongs to
+    // a system-managed repo (the Atrium index, #1056), refuse — its per-object
+    // visibility is enforced by retrievalService/canView, never repository-level
+    // access, so returning chunk content here would leak restricted Atrium text.
+    await assertItemNotInSystemManagedRepository(itemId)
 
     // Fetch chunks via Drizzle
     log.debug("Fetching chunks from database", { itemId })
@@ -1190,6 +1190,11 @@ export async function getDocumentDownloadUrl(
       log.warn("Item not found for download URL", { itemId })
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
+
+    // A download URL is a content-access path. Refuse items in a system-managed
+    // repo (the Atrium index, #1056) — its per-object visibility is enforced by
+    // retrievalService/canView, not repository-level access.
+    await assertNotSystemManagedRepository(itemRaw.repositoryId)
 
     // Convert to action type
     const item: RepositoryItem = mapToRepositoryItem(itemRaw)
