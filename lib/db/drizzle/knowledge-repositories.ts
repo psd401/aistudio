@@ -45,17 +45,6 @@ import {
   users,
   userRoles,
 } from "@/lib/db/schema";
-
-/**
- * SQL predicate that EXCLUDES system-managed repositories (e.g. the Atrium
- * retrieval index, Issue #1056) from a query. System-managed repositories hold
- * content governed by a finer-grained permission model (`visibilityService.canView`)
- * than repository-level access, so they must never be returned by the generic
- * repository access-check queries — otherwise `repository-tools` /
- * `retrieveKnowledgeForPrompt` could search the shared index and bypass
- * `canView`. `IS DISTINCT FROM` handles a NULL `metadata` correctly.
- */
-const EXCLUDE_SYSTEM_MANAGED: SQL = sql`(${knowledgeRepositories.metadata} ->> 'systemManaged') IS DISTINCT FROM 'true'`;
 import type {
   SelectKnowledgeRepository,
   SelectRepositoryItem,
@@ -68,6 +57,17 @@ import { createLogger, sanitizeForLogging } from "@/lib/logger";
 // ============================================
 // Constants
 // ============================================
+
+/**
+ * SQL predicate that EXCLUDES system-managed repositories (e.g. the Atrium
+ * retrieval index, Issue #1056) from a query. System-managed repositories hold
+ * content governed by a finer-grained permission model (`visibilityService.canView`)
+ * than repository-level access, so they must never be returned by the generic
+ * repository access-check queries — otherwise `repository-tools` /
+ * `retrieveKnowledgeForPrompt` could search the shared index and bypass
+ * `canView`. `IS DISTINCT FROM` handles a NULL `metadata` correctly.
+ */
+const EXCLUDE_SYSTEM_MANAGED: SQL = sql`(${knowledgeRepositories.metadata} ->> 'systemManaged') IS DISTINCT FROM 'true'`;
 
 /**
  * Maximum number of chunks that can be inserted in a single batch operation
