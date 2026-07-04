@@ -9,7 +9,9 @@ import {
   deleteRepository,
   getRepositoryItems,
   getRepositoryItemById,
-  deleteRepositoryItem
+  deleteRepositoryItem,
+  getRepositoryById,
+  isSystemManagedRepository
 } from "@/lib/db/drizzle"
 import {
   handleError,
@@ -55,6 +57,25 @@ async function requireAdminSession(log?: ReturnType<typeof createLogger>) {
 }
 
 /**
+ * Throw `dbRecordNotFound` if the repository is missing OR system-managed (the
+ * Atrium retrieval index, #1056). System-managed repos are not readable/editable
+ * through the generic admin path — their content is governed by per-object
+ * `visibilityService.canView`, and editing them (e.g. flipping `isPublic`) would
+ * reopen the shared-index bypass the system-managed guards close. Masked as
+ * not-found so the id is not enumerable.
+ */
+async function assertGenericRepository(
+  id: number,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const repo = await getRepositoryById(id)
+  if (!repo || isSystemManagedRepository(repo)) {
+    log.warn("Repository not found or system-managed", { repositoryId: id })
+    throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
+  }
+}
+
+/**
  * Admin function to list all repositories with owner information
  */
 export async function listAllRepositories(): Promise<ActionState<RepositoryWithOwner[]>> {
@@ -68,7 +89,12 @@ export async function listAllRepositories(): Promise<ActionState<RepositoryWithO
     await requireAdminSession(log)
 
     log.debug("Fetching all repositories from database")
-    const repositoriesRaw = await getAllRepositoriesWithOwner()
+    // Exclude system-managed repositories (the Atrium retrieval index, #1056):
+    // their content is governed by per-object `canView`, so they must not be
+    // browsable / editable through the generic repository admin UI.
+    const repositoriesRaw = (await getAllRepositoriesWithOwner()).filter(
+      repo => !isSystemManagedRepository(repo)
+    )
 
     // Convert to expected type
     const repositories: RepositoryWithOwner[] = repositoriesRaw.map(repo => ({
@@ -137,6 +163,12 @@ export async function adminUpdateRepository(
       log.warn("No fields provided for update")
       return { isSuccess: false, message: "No fields to update" }
     }
+
+    // A system-managed repository (the Atrium retrieval index, #1056) is
+    // immutable through this generic admin path: editing it (e.g. flipping
+    // `isPublic` to true, or stripping the `systemManaged` flag) would reopen the
+    // shared-index bypass the system-managed guards close.
+    await assertGenericRepository(input.id, log)
 
     log.info("Updating repository in database (admin)", {
       repositoryId: input.id
@@ -284,6 +316,11 @@ export async function adminGetRepositoryItems(
     log.info("Admin action started: Getting repository items", { repositoryId })
     
     await requireAdminSession(log)
+
+    // System-managed repositories (the Atrium retrieval index, #1056) are not
+    // browsable through the generic admin UI — their per-object visibility is
+    // enforced by `retrievalService`, not repository-level access.
+    await assertGenericRepository(repositoryId, log)
 
     log.debug("Fetching repository items from database (admin)", { repositoryId })
     const itemsRaw = await getRepositoryItems(repositoryId)

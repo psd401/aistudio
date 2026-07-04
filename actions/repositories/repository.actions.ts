@@ -235,6 +235,17 @@ export async function updateRepository(
       throw ErrorFactories.authzOwnerRequired("modify repository")
     }
 
+    // A system-managed repository (the Atrium retrieval index, #1056) is
+    // immutable through the generic API — masked as not-found so its `isPublic`
+    // / `metadata` (and thus the system-managed guard) cannot be flipped.
+    const existingRepo = await getRepositoryById(input.id)
+    if (!existingRepo || isSystemManagedRepository(existingRepo)) {
+      log.warn("Repository update denied - not found or system-managed", {
+        repositoryId: input.id
+      })
+      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", input.id)
+    }
+
     // Check if any fields provided
     if (!hasRepositoryUpdates(input)) {
       log.warn("No fields provided for update")
