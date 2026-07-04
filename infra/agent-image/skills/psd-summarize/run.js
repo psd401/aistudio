@@ -151,6 +151,7 @@ async function main() {
         Authorization: `Bearer ${BEARER}`,
       },
       body: JSON.stringify({
+        anthropic_version: 'bedrock-2023-05-31',
         model: MODEL_ID,
         max_tokens: 2000,
         system,

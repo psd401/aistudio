@@ -330,6 +330,21 @@ async function invokeTool(toolName, toolArgs, ownerEmail) {
     emit({ status: 'mcp-error', tool: toolName, jsonrpc_error: msg.error });
     process.exit(12);
   }
+  // Per the MCP spec, a tool-level failure is a JSON-RPC SUCCESS whose result
+  // carries isError:true with the error text in result.content — it is NOT
+  // surfaced via the top-level msg.error field checked above. Without this
+  // guard the error text flows back to callers (e.g. digestRecording pipes it
+  // into psd-summarize) as if it were real tool content.
+  if (msg.result && msg.result.isError) {
+    // Truncate like the HTTP-failure branches above — this text originates
+    // from the upstream MCP server, and digestRecording calls invokeTool
+    // specifically so raw tool content never reaches stdout uncontrolled;
+    // an error payload shouldn't be a wider bypass of that than a real HTTP
+    // failure already is.
+    const detail = extractTextFromResult(msg.result);
+    emit({ status: 'mcp-error', tool: toolName, tool_error: detail ? detail.slice(0, 400) : null });
+    process.exit(12);
+  }
   return msg.result ?? null;
 }
 
@@ -358,7 +373,7 @@ function extractTextFromResult(result) {
  * recording content (raw `transcript` is the explicit exception).
  */
 async function digestRecording(ownerEmail, id, opts) {
-  const result = await invokeTool('get_transcript', { id }, ownerEmail);
+  const result = await invokeTool('get_transcript', { file_id: id }, ownerEmail);
   const transcript = extractTextFromResult(result);
   if (!transcript) {
     emit({ status: 'empty', message: 'No transcript text is available for this recording.' });
