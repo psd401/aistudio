@@ -90,6 +90,10 @@ export async function retrieveKnowledgeForPrompt(
         SELECT DISTINCT r.id, r.name
         FROM knowledge_repositories r
         WHERE r.id = ANY(CAST(${repositoryIds} AS integer[]))
+        -- Never RAG over system-managed repos (the Atrium retrieval index,
+        -- #1056): their content is governed by per-object canView, not
+        -- repository-level access. Atrium reads must go through retrievalService.
+        AND (r.metadata->>'systemManaged') IS DISTINCT FROM 'true'
         AND (
           r.is_public = true
           OR r.owner_id = (SELECT id FROM users WHERE cognito_sub = ${userCognitoSub})

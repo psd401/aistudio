@@ -16,6 +16,8 @@ export type { CollectionTreeNode } from "./collection-service";
 export { navItemService } from "./nav-item-service";
 export type { NavObject } from "./nav-item-service";
 export { publishService } from "./publish-service";
+export { retrievalService } from "./retrieval-service";
+export type { RetrievalScope, RetrievalHit } from "./retrieval-service";
 export { s3Store } from "./storage/s3-store";
 export { renderMarkdownToHtml } from "./render/markdown-render";
 export { sanitizeHtml } from "./render/html-sanitize";

@@ -70,6 +70,14 @@ jest.mock("drizzle-orm", () => ({
   eq: (...a: unknown[]) => a,
 }));
 
+// publish-service now calls retrievalService.indexObject after a successful
+// publish (Phase 6, §16.1). Stub it so this suite doesn't drag in the embedding
+// / vector-search stack (ai-helpers → provider-factory → settings-manager);
+// the index wiring itself is covered by atrium-retrieval-permission-aware.test.ts.
+jest.mock("@/lib/content/retrieval-service", () => ({
+  retrievalService: { indexObject: jest.fn(async () => undefined) },
+}));
+
 jest.mock("@/lib/content/visibility-service", () => ({
   visibilityService: {
     canView: jest.fn(async () => canViewResult),
