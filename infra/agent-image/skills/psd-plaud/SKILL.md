@@ -67,5 +67,7 @@ never enters your context, the chat, memory, or logs. Only reach for
 ## Notes
 
 - Read-only. There is no create/delete/share path.
-- Tool names/arg shapes follow Plaud's documented MCP tools; if a call fails on
-  an argument, run `tools` to see the live schema.
+- `file`/`digest`/`transcript`/`summary` call Plaud's MCP tools with the
+  recording id under the `file_id` argument key (confirmed live against
+  Plaud's MCP server) — not `id`. If a call still fails on an argument, run
+  `tools` to see the live schema.

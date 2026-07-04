@@ -22,10 +22,11 @@
  *
  * Exit codes: 0 ok · 1 usage · 10 needs-auth · 12 mcp/upstream error · 14 rate-limited.
  *
- * NOTE: the exact MCP tool names/arg keys are the documented ones
- * (list_files/get_file/get_note/get_transcript/get_current_user). Run
- * `tools` once after the first user authorizes to confirm arg shapes, then
- * pin them here if they differ.
+ * NOTE: tool names are list_files/get_file/get_note/get_transcript/
+ * get_current_user. get_file/get_note/get_transcript take the recording id
+ * under the `file_id` argument key (confirmed live against Plaud's MCP
+ * server) — list_files takes no id. Run `tools` if a call ever fails on an
+ * argument to re-confirm the live schema.
  */
 
 'use strict';
@@ -75,7 +76,7 @@ async function main() {
 
     case 'file': {
       if (!args.id || args.id === true) fail('file requires --id <recording-id>');
-      await callTool('get_file', { id: args.id }, userEmail);
+      await callTool('get_file', { file_id: args.id }, userEmail);
       break;
     }
 
@@ -91,13 +92,13 @@ async function main() {
 
     case 'transcript': {
       if (!args.id || args.id === true) fail('transcript requires --id <recording-id>');
-      await callTool('get_transcript', { id: args.id }, userEmail);
+      await callTool('get_transcript', { file_id: args.id }, userEmail);
       break;
     }
 
     case 'summary': {
       if (!args.id || args.id === true) fail('summary requires --id <recording-id>');
-      await callTool('get_note', { id: args.id }, userEmail);
+      await callTool('get_note', { file_id: args.id }, userEmail);
       break;
     }
 
@@ -106,4 +107,8 @@ async function main() {
   }
 }
 
-main().catch((err) => fail(err instanceof Error ? err.message : String(err)));
+if (require.main === module) {
+  main().catch((err) => fail(err instanceof Error ? err.message : String(err)));
+}
+
+module.exports = { main };
