@@ -474,6 +474,7 @@ export async function getAssistantArchitectsAction(): Promise<
           agentTimeoutSeconds: architect.agentTimeoutSeconds,
           agentCostCapCents: architect.agentCostCapCents,
           agentMaxRequestsPerHour: architect.agentMaxRequestsPerHour,
+          retrievalScope: architect.retrievalScope,
           inputFields,
           prompts: transformedPrompts,
           creator: architect.creator ? {

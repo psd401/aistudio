@@ -40,6 +40,7 @@ import {
   raisePublishApprovalRequired,
 } from "./helpers";
 import { visibilityService } from "./visibility-service";
+import { retrievalService } from "./retrieval-service";
 import { contentEvents } from "./events";
 import { NotFoundError, ValidationError, ApprovalRequiredError } from "./errors";
 import type { PublishAdapter, PublishDestination } from "./publish-adapters/types";
@@ -119,6 +120,45 @@ async function loadPublishable(
     "publish.loadPublishable"
   );
   return rows[0] ?? null;
+}
+
+/**
+ * Post-commit publish side effects, both best-effort: a successful publish has
+ * already committed, so neither a retrieval-index failure nor an event-bus
+ * hiccup may roll it back. Extracted from `publish` so the method stays within
+ * the length budget; the sequencing is unchanged — the retrieval index (§16.1,
+ * so a successful publish guarantees "published content is indexed") is awaited,
+ * then the `content.published` event (§27: connector pushes, notifications) is
+ * emitted fire-and-forget (`void`), since `emit` swallows its own errors and
+ * awaiting would only hold the response open for an SNS round-trip.
+ */
+async function runPublishSideEffects(args: {
+  req: Requester;
+  objectId: string;
+  slug: string;
+  publishedVersionId: string;
+  destination: PublishDestination;
+  log: ReturnType<typeof createLogger>;
+}): Promise<void> {
+  const { req, objectId, slug, publishedVersionId, destination, log } = args;
+  try {
+    await retrievalService.indexObject(objectId);
+  } catch (indexError) {
+    log.warn("Failed to index published content for retrieval", {
+      objectId,
+      error:
+        indexError instanceof Error ? indexError.message : String(indexError),
+    });
+  }
+
+  void contentEvents.emit("content.published", {
+    objectId,
+    slug,
+    versionId: publishedVersionId,
+    destination,
+    actorKind: actorKindOf(req),
+    agentLabel: req.kind === "user" ? null : req.agentLabel,
+  });
 }
 
 // §26.4 — this publish path's two gate sites (the pre-tx `public_web` destination
@@ -370,18 +410,15 @@ export const publishService = {
       publishedVersionId,
     });
 
-    // Emit AFTER the commit + adapter side effect, exactly once per successful
-    // publish (§27): re-index for retrieval, run connector pushes, notify. Best
-    // effort — a bus failure never rolls back the publish. Fire-and-forget (`void`,
-    // not `await`): `emit` swallows its own errors, so awaiting only holds the
-    // response open for an SNS round-trip (matches the audit-write pattern).
-    void contentEvents.emit("content.published", {
+    // After-commit side effects (retrieval index §16.1 + `content.published`
+    // event §27), both best-effort so neither can roll back the committed publish.
+    await runPublishSideEffects({
+      req,
       objectId,
       slug: obj.slug,
-      versionId: publishedVersionId,
+      publishedVersionId,
       destination: input.destination,
-      actorKind: actorKindOf(req),
-      agentLabel: req.kind === "user" ? null : req.agentLabel,
+      log,
     });
 
     return { publicationId, publishedVersionId };
