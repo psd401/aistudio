@@ -12,7 +12,7 @@ import {
   deleteRepositoryItem,
   isSystemManagedRepository
 } from "@/lib/db/drizzle"
-import { assertNotSystemManagedRepository } from "@/lib/repositories/system-repo-guard"
+import { assertNotSystemManagedRepository } from "@/lib/repositories/repository-access-guard"
 import {
   handleError,
   ErrorFactories,

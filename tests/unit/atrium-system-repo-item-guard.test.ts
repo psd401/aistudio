@@ -1,17 +1,21 @@
 /**
- * Security regression (round-5 review): `getItemChunks(itemId)` returned raw
- * `repository_item_chunks.content` after only a generic capability check — and
- * it is keyed by ITEM id, so the repositoryId-based guards did not cover it.
- * Since Atrium chunks live in the shared table, that was a direct read of
- * restricted Atrium text (Issue #1056, spec §16.2).
+ * Security regression: repository read actions keyed by ITEM id must enforce
+ * per-repository authorization.
  *
- * Covers the shared guards (`assertNotSystemManagedRepository`,
- * `assertItemNotInSystemManagedRepository`) directly, plus the `getItemChunks`
- * wiring (no chunk read occurs for a system-managed item).
+ * `getItemChunks(itemId)` returned raw `repository_item_chunks.content` after
+ * only a generic capability check — keyed by item id, so neither the ownership
+ * checks nor the repositoryId-based guards covered it. Any capability holder
+ * could read another repository's chunks (generic IDOR), and once Atrium content
+ * was indexed into the shared table, restricted Atrium text (Issue #1056).
+ *
+ * Covers the shared guards (`assertRepositoryReadAccess`,
+ * `assertItemRepositoryReadAccess`, `assertNotSystemManagedRepository`) directly,
+ * plus the `getItemChunks` wiring (no chunk read for an inaccessible item).
  */
 
-let repoById: Record<number, unknown> = {};
+let accessibleRepoIds: Set<number> = new Set();
 let itemById: Record<number, unknown> = {};
+let repoById: Record<number, unknown> = {};
 
 jest.mock("@/lib/auth/server-session", () => ({
   getServerSession: jest.fn(async () => ({ sub: "user-1" })),
@@ -21,8 +25,6 @@ jest.mock("@/utils/roles", () => ({
   hasRole: jest.fn(async () => true),
 }));
 jest.mock("next/cache", () => ({ revalidatePath: jest.fn() }));
-// Heavy side-effect modules repository-items.actions.ts imports — stub them so
-// the suite doesn't drag in the AWS SDK / processing pipeline.
 jest.mock("@/lib/aws/s3-client", () => ({
   uploadDocument: jest.fn(), deleteDocument: jest.fn(),
 }));
@@ -35,13 +37,16 @@ jest.mock("./../../actions/repositories/repository-permissions", () => ({
 }));
 
 jest.mock("@/lib/db/drizzle", () => ({
-  getRepositoryById: jest.fn(async (id: number) => repoById[id] ?? null),
+  getAccessibleRepositoriesByCognitoSub: jest.fn(async (ids: number[]) =>
+    ids.map((id) => ({ id, name: "r", isAccessible: accessibleRepoIds.has(id) }))
+  ),
   getRepositoryItemById: jest.fn(async (id: number) => itemById[id] ?? null),
-  getRepositoryItemChunks: jest.fn(async () => [
-    { id: 1, itemId: 5, content: "restricted staff text", embedding: null, metadata: {}, chunkIndex: 0, tokens: null, createdAt: new Date(0) },
-  ]),
+  getRepositoryById: jest.fn(async (id: number) => repoById[id] ?? null),
   isSystemManagedRepository: (repo: { metadata?: unknown } | null | undefined) =>
     (repo?.metadata as Record<string, unknown> | null | undefined)?.systemManaged === true,
+  getRepositoryItemChunks: jest.fn(async () => [
+    { id: 1, itemId: 5, content: "restricted text", embedding: null, metadata: {}, chunkIndex: 0, tokens: null, createdAt: new Date(0) },
+  ]),
   // other barrel exports repository-items.actions imports
   createRepositoryItem: jest.fn(),
   getRepositoryItems: jest.fn(async () => []),
@@ -50,50 +55,57 @@ jest.mock("@/lib/db/drizzle", () => ({
 }));
 
 import {
+  assertRepositoryReadAccess,
+  assertItemRepositoryReadAccess,
   assertNotSystemManagedRepository,
-  assertItemNotInSystemManagedRepository,
-} from "@/lib/repositories/system-repo-guard";
+} from "@/lib/repositories/repository-access-guard";
 import { getItemChunks } from "@/actions/repositories/repository-items.actions";
 import { getRepositoryItemChunks } from "@/lib/db/drizzle";
 
 const getChunksMock = getRepositoryItemChunks as jest.Mock;
 
-const SYSTEM_REPO = { id: 9, metadata: { systemManaged: true } };
-const NORMAL_REPO = { id: 3, metadata: null };
-
 beforeEach(() => {
-  repoById = { 9: SYSTEM_REPO, 3: NORMAL_REPO };
+  accessibleRepoIds = new Set([3]); // repo 3 accessible; repo 9 not
   itemById = {
-    5: { id: 5, repositoryId: 9, name: "atrium chunk" }, // in system repo
-    6: { id: 6, repositoryId: 3, name: "normal doc" },    // in normal repo
+    5: { id: 5, repositoryId: 9 }, // in an inaccessible repo
+    6: { id: 6, repositoryId: 3 }, // in an accessible repo
+  };
+  repoById = {
+    9: { id: 9, metadata: { systemManaged: true } },
+    3: { id: 3, metadata: null },
   };
   getChunksMock.mockClear();
 });
 
-describe("shared system-managed guards", () => {
-  it("assertNotSystemManagedRepository throws for a system repo, resolves for a normal one", async () => {
-    await expect(assertNotSystemManagedRepository(9)).rejects.toBeDefined();
-    await expect(assertNotSystemManagedRepository(3)).resolves.toBeUndefined();
-    await expect(assertNotSystemManagedRepository(404)).rejects.toBeDefined(); // missing
+describe("shared repository-access guards", () => {
+  it("assertRepositoryReadAccess throws for an inaccessible repo, resolves for an accessible one", async () => {
+    await expect(assertRepositoryReadAccess(3, "user-1")).resolves.toBeUndefined();
+    await expect(assertRepositoryReadAccess(9, "user-1")).rejects.toBeDefined();
   });
 
-  it("assertItemNotInSystemManagedRepository throws for an item in a system repo", async () => {
-    await expect(assertItemNotInSystemManagedRepository(5)).rejects.toBeDefined(); // system
-    await expect(assertItemNotInSystemManagedRepository(6)).resolves.toBeUndefined(); // normal
-    await expect(assertItemNotInSystemManagedRepository(404)).rejects.toBeDefined(); // missing item
+  it("assertItemRepositoryReadAccess throws for an item in an inaccessible repo", async () => {
+    await expect(assertItemRepositoryReadAccess(6, "user-1")).resolves.toBeUndefined(); // repo 3
+    await expect(assertItemRepositoryReadAccess(5, "user-1")).rejects.toBeDefined();    // repo 9
+    await expect(assertItemRepositoryReadAccess(404, "user-1")).rejects.toBeDefined();  // missing item
+  });
+
+  it("assertNotSystemManagedRepository throws for a system repo, resolves for a normal one", async () => {
+    await expect(assertNotSystemManagedRepository(9)).rejects.toBeDefined(); // system
+    await expect(assertNotSystemManagedRepository(3)).resolves.toBeUndefined(); // normal
+    await expect(assertNotSystemManagedRepository(404)).rejects.toBeDefined(); // missing
   });
 });
 
-describe("getItemChunks — no raw chunk read for a system-managed item", () => {
-  it("REFUSES to return chunks for an item in the Atrium system repo", async () => {
-    const result = await getItemChunks(5);
+describe("getItemChunks — no raw chunk read for an inaccessible item", () => {
+  it("REFUSES to return chunks for an item the caller cannot access", async () => {
+    const result = await getItemChunks(5); // repo 9, not accessible
     expect(result.isSuccess).toBe(false);
     // The safety guarantee: the chunk content query never ran.
     expect(getChunksMock).not.toHaveBeenCalled();
   });
 
-  it("ALLOWS reading chunks for an item in a normal repository", async () => {
-    const result = await getItemChunks(6);
+  it("ALLOWS reading chunks for an item in an accessible repository", async () => {
+    const result = await getItemChunks(6); // repo 3, accessible
     expect(result.isSuccess).toBe(true);
     expect(getChunksMock).toHaveBeenCalledWith(6);
   });

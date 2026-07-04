@@ -1,29 +1,29 @@
 /**
- * Security regression: the generic repository actions must refuse to read a
- * SYSTEM-MANAGED repository (the Atrium retrieval index, Issue #1056).
+ * Security regression: the generic `searchRepository` action must enforce
+ * per-repository authorization before searching a repo's chunks.
  *
- * Atrium content is stored in the shared `repository_items` table but governed
- * by a finer-grained permission model (per-hit `visibilityService.canView`,
- * §16.2). The generic `searchRepository` action enforces NO repository-level
- * authorization, so without this guard any authenticated user could pass the
- * Atrium repo's (guessable, sequential) integer id and vector-search every
- * indexed chunk — retrieving `content` for objects they cannot `canView`,
- * bypassing the entire safety boundary this feature builds. (Round-2 PR review
- * finding on #1108.)
+ * Historically it checked ONLY `getServerSession()` — any authenticated user
+ * could pass an arbitrary (sequential, guessable) `repositoryId` and vector/
+ * keyword search a private repository they don't own and have no
+ * `repository_access` grant for, retrieving raw chunk `content` (a generic
+ * IDOR). Worse, once Atrium content was indexed into the shared tables (Issue
+ * #1056), the same hole exposed restricted Atrium content, bypassing the §16.2
+ * `canView` boundary. The fix requires access via
+ * `getAccessibleRepositoriesByCognitoSub` (public / owner / grant), which also
+ * EXCLUDES system-managed repos — so one check closes both the IDOR and Atrium
+ * isolation.
  *
- * Exercises the REAL `isSystemManagedRepository` (via requireActual) while
- * mocking only `getRepositoryById` + the auth/search IO boundaries.
+ * Exercises the REAL `assertRepositoryReadAccess` guard while mocking only the
+ * access query + auth/search IO boundaries.
  */
 
-let repoResult: unknown = null;
+// Whether the requested repo resolves as accessible for the caller.
+let accessible = false;
 
 jest.mock("@/lib/auth/server-session", () => ({
   getServerSession: jest.fn(async () => ({ sub: "user-123" })),
 }));
 
-// Mocks are created INSIDE the factories (retrieved via the imported module
-// below) so the hoisted jest.mock calls don't dereference an outer `const`
-// before its declaration line runs (TDZ).
 jest.mock("@/lib/repositories/search-service", () => {
   const hit = { chunkId: 1, itemId: 1, itemName: "x", content: "secret", similarity: 0.9, chunkIndex: 0, metadata: {} };
   return {
@@ -33,18 +33,20 @@ jest.mock("@/lib/repositories/search-service", () => {
   };
 });
 
-// Keep the REAL isSystemManagedRepository (pure); override only getRepositoryById.
-jest.mock("@/lib/db/drizzle/knowledge-repositories", () => {
-  const actual = jest.requireActual("@/lib/db/drizzle/knowledge-repositories");
-  return {
-    __esModule: true,
-    ...actual,
-    getRepositoryById: jest.fn(async () => repoResult),
-  };
-});
+// The access guard resolves accessibility via getAccessibleRepositoriesByCognitoSub.
+// A system-managed / private-unowned repo resolves isAccessible:false (the SQL
+// EXCLUDE_SYSTEM_MANAGED + access predicate handle both — modeled here by `accessible`).
+jest.mock("@/lib/db/drizzle", () => ({
+  getAccessibleRepositoriesByCognitoSub: jest.fn(async (ids: number[]) =>
+    ids.map((id) => ({ id, name: "r", isAccessible: accessible }))
+  ),
+  // imported by the guard module but not exercised on the read path
+  getRepositoryById: jest.fn(),
+  getRepositoryItemById: jest.fn(),
+  isSystemManagedRepository: jest.fn(() => false),
+}));
 
 import { searchRepository } from "@/actions/repositories/search.actions";
-import { isSystemManagedRepository } from "@/lib/db/drizzle/knowledge-repositories";
 import {
   vectorSearch,
   keywordSearch,
@@ -56,47 +58,27 @@ const keywordSearchMock = keywordSearch as jest.Mock;
 const hybridSearchMock = hybridSearch as jest.Mock;
 
 beforeEach(() => {
-  repoResult = null;
+  accessible = false;
   vectorSearchMock.mockClear();
   keywordSearchMock.mockClear();
   hybridSearchMock.mockClear();
 });
 
-describe("isSystemManagedRepository (pure)", () => {
-  it("is true only when metadata.systemManaged === true", () => {
-    expect(isSystemManagedRepository({ metadata: { systemManaged: true } })).toBe(true);
-    expect(isSystemManagedRepository({ metadata: { systemManaged: false } })).toBe(false);
-    expect(isSystemManagedRepository({ metadata: {} })).toBe(false);
-    expect(isSystemManagedRepository({ metadata: null })).toBe(false);
-    expect(isSystemManagedRepository(null)).toBe(false);
-    expect(isSystemManagedRepository(undefined)).toBe(false);
-  });
-});
-
-describe("searchRepository — system-managed repository guard", () => {
-  it("REFUSES a system-managed (Atrium) repository without searching", async () => {
-    repoResult = { id: 7, name: "Atrium Content Index", metadata: { systemManaged: true } };
+describe("searchRepository — per-repository authorization", () => {
+  it("REFUSES an inaccessible / system-managed repository without searching", async () => {
+    accessible = false;
 
     const result = await searchRepository({ query: "secret", repositoryId: 7 });
 
     expect(result.isSuccess).toBe(false);
-    // Masked as not-found so the id is not enumerable.
-    expect(result.message).toMatch(/not found/i);
     // The safety boundary: no search ran, so no chunk content leaked.
     expect(vectorSearchMock).not.toHaveBeenCalled();
     expect(keywordSearchMock).not.toHaveBeenCalled();
     expect(hybridSearchMock).not.toHaveBeenCalled();
   });
 
-  it("REFUSES a non-existent repository", async () => {
-    repoResult = null;
-    const result = await searchRepository({ query: "secret", repositoryId: 999 });
-    expect(result.isSuccess).toBe(false);
-    expect(hybridSearchMock).not.toHaveBeenCalled();
-  });
-
-  it("ALLOWS a normal (non-system) repository to be searched", async () => {
-    repoResult = { id: 3, name: "My Docs", metadata: null };
+  it("ALLOWS a repository the caller can access", async () => {
+    accessible = true;
 
     const result = await searchRepository({ query: "secret", repositoryId: 3 });
 

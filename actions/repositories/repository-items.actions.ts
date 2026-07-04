@@ -12,9 +12,10 @@ import {
   updateRepositoryItemStatus
 } from "@/lib/db/drizzle"
 import {
-  assertNotSystemManagedRepository,
-  assertItemNotInSystemManagedRepository
-} from "@/lib/repositories/system-repo-guard"
+  assertRepositoryReadAccess,
+  assertItemRepositoryReadAccess,
+  assertNotSystemManagedRepository
+} from "@/lib/repositories/repository-access-guard"
 import { type ActionState } from "@/types/actions-types"
 import { hasCapabilityAccess } from "@/utils/roles"
 import {
@@ -855,10 +856,11 @@ export async function listRepositoryItems(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
-    // System-managed repositories (e.g. the Atrium retrieval index, #1056) are
-    // governed by a finer-grained permission model and must not be read through
-    // the generic repository API.
-    await assertNotSystemManagedRepository(repositoryId)
+    // Per-repository authorization: the caller must be able to access this
+    // repository (public / owner / grant). Also excludes system-managed repos
+    // (the Atrium index, #1056). Closes the IDOR where any capability holder
+    // could list a private repo they don't own.
+    await assertRepositoryReadAccess(repositoryId, session.sub)
 
     // Fetch repository items via Drizzle
     log.debug("Fetching repository items from database", { repositoryId })
@@ -931,10 +933,9 @@ export async function searchRepositoryItems(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
-    // System-managed repositories (e.g. the Atrium retrieval index, #1056) are
-    // governed by a finer-grained permission model and must not be read through
-    // the generic repository API.
-    await assertNotSystemManagedRepository(repositoryId)
+    // Per-repository authorization (public / owner / grant); also excludes
+    // system-managed repos (#1056). Closes the IDOR on item search.
+    await assertRepositoryReadAccess(repositoryId, session.sub)
 
     // Search in item names via Drizzle
     log.debug("Searching item names", { repositoryId, query })
@@ -1056,11 +1057,12 @@ export async function getItemChunks(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
-    // A chunk read is a DIRECT read of raw indexed text. If the item belongs to
-    // a system-managed repo (the Atrium index, #1056), refuse — its per-object
-    // visibility is enforced by retrievalService/canView, never repository-level
-    // access, so returning chunk content here would leak restricted Atrium text.
-    await assertItemNotInSystemManagedRepository(itemId)
+    // A chunk read is a DIRECT read of raw indexed text. Require access to the
+    // item's repository (public / owner / grant) — closes the IDOR where any
+    // capability holder could read another repo's chunks by item id. Also
+    // excludes system-managed repos (the Atrium index, #1056), whose per-object
+    // visibility is enforced by retrievalService/canView, not repo-level access.
+    await assertItemRepositoryReadAccess(itemId, session.sub)
 
     // Fetch chunks via Drizzle
     log.debug("Fetching chunks from database", { itemId })
@@ -1191,10 +1193,10 @@ export async function getDocumentDownloadUrl(
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
 
-    // A download URL is a content-access path. Refuse items in a system-managed
-    // repo (the Atrium index, #1056) — its per-object visibility is enforced by
-    // retrievalService/canView, not repository-level access.
-    await assertNotSystemManagedRepository(itemRaw.repositoryId)
+    // A download URL is a content-access path. Require access to the item's
+    // repository (public / owner / grant) — closes the IDOR by item id. Also
+    // excludes system-managed repos (the Atrium index, #1056).
+    await assertRepositoryReadAccess(itemRaw.repositoryId, session.sub)
 
     // Convert to action type
     const item: RepositoryItem = mapToRepositoryItem(itemRaw)

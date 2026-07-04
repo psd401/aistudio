@@ -9,7 +9,6 @@ import {
   updateRepository as drizzleUpdateRepository,
   deleteRepository as drizzleDeleteRepository,
   getRepositoryById,
-  isSystemManagedRepository,
   getRepositoriesByOwnerId,
   getRepositoryItems,
   getRepositoryAccessList,
@@ -18,7 +17,7 @@ import {
   revokeAccessById,
   getUserAccessibleRepositories
 } from "@/lib/db/drizzle"
-import { assertNotSystemManagedRepository } from "@/lib/repositories/system-repo-guard"
+import { assertNotSystemManagedRepository, assertRepositoryReadAccess } from "@/lib/repositories/repository-access-guard"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq } from "drizzle-orm"
 import { repositoryAccess } from "@/lib/db/schema"
@@ -481,13 +480,16 @@ export async function getRepository(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // Per-repository authorization: the caller must be able to access this
+    // repository (public / owner / grant). Closes the IDOR where any capability
+    // holder could read any repo's details by id, and excludes system-managed
+    // repos (the Atrium index, #1056) which the access model filters out.
+    await assertRepositoryReadAccess(id, session.sub)
+
     log.debug("Fetching repository from database", { repositoryId: id })
     const resultRaw = await getRepositoryById(id)
 
-    // Mask system-managed repositories (e.g. the Atrium retrieval index, #1056)
-    // as not-found: their content is governed by a finer-grained permission model
-    // and must be read only through its own service, never the generic API.
-    if (!resultRaw || isSystemManagedRepository(resultRaw)) {
+    if (!resultRaw) {
       log.warn("Repository not found", { repositoryId: id })
       throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
     }
