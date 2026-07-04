@@ -9,6 +9,7 @@ import {
   updateRepository as drizzleUpdateRepository,
   deleteRepository as drizzleDeleteRepository,
   getRepositoryById,
+  isSystemManagedRepository,
   getRepositoriesByOwnerId,
   getRepositoryItems,
   getRepositoryAccessList,
@@ -473,7 +474,10 @@ export async function getRepository(
     log.debug("Fetching repository from database", { repositoryId: id })
     const resultRaw = await getRepositoryById(id)
 
-    if (!resultRaw) {
+    // Mask system-managed repositories (e.g. the Atrium retrieval index, #1056)
+    // as not-found: their content is governed by a finer-grained permission model
+    // and must be read only through its own service, never the generic API.
+    if (!resultRaw || isSystemManagedRepository(resultRaw)) {
       log.warn("Repository not found", { repositoryId: id })
       throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
     }

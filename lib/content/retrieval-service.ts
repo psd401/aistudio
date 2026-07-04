@@ -107,6 +107,15 @@ async function getAtriumRepositoryId(): Promise<number> {
             "System-managed retrieval index for published Atrium content (Phase 6, Issue #1056). Do not edit directly.",
           ownerId: systemUserId(),
           isPublic: false,
+          // Flag this repo as system-managed so the GENERIC repository actions
+          // (searchRepository/getRepository/listRepositoryItems) refuse to read
+          // it. Atrium content is governed by a finer-grained permission model
+          // (per-hit `canView`, §16.2) than repository-level access — without
+          // this flag, `searchRepository` (which enforces no repo-level authz)
+          // would let any authenticated user search the shared index directly
+          // and bypass `canView`. All Atrium reads must go through
+          // `retrievalService` (Issue #1056 review finding).
+          metadata: { systemManaged: true, purpose: "atrium-retrieval" },
         })
         .returning({ id: knowledgeRepositories.id }),
     "retrieval.createAtriumRepository"

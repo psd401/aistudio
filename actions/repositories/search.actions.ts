@@ -14,6 +14,7 @@ import {
   sanitizeForLogging
 } from "@/lib/logger"
 import { vectorSearch, keywordSearch, hybridSearch, SearchResult } from "@/lib/repositories/search-service"
+import { getRepositoryById, isSystemManagedRepository } from "@/lib/db/drizzle/knowledge-repositories"
 
 export interface SearchRepositoryParams {
   query: string
@@ -48,6 +49,23 @@ export async function searchRepository(
     }
 
     log.debug("User authenticated", { userId: session.sub })
+
+    // System-managed repositories (e.g. the Atrium retrieval index, #1056) hold
+    // content governed by a finer-grained permission model than repository-level
+    // access (every hit is filtered by `visibilityService.canView`). This generic
+    // action enforces no repo-level authz, so it must refuse a system-managed id —
+    // otherwise any authenticated user could search the shared index directly and
+    // bypass `canView`. Mask as not-found so the id is not enumerable.
+    const repository = await getRepositoryById(repositoryId)
+    if (!repository || isSystemManagedRepository(repository)) {
+      log.warn("Search denied - repository not found or system-managed", {
+        repositoryId,
+      })
+      return {
+        isSuccess: false,
+        message: "Repository not found",
+      }
+    }
 
     if (!query || query.trim().length === 0) {
       log.warn("Empty search query provided")

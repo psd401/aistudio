@@ -301,6 +301,56 @@ describe("§16.4 assistant scoping — narrows candidates BEFORE canView", () =>
     );
     expect(hits).toHaveLength(0);
   });
+
+  it("excludes a hit whose tags do not intersect the scope's tags", async () => {
+    // Doc is tagged ["guide"]; scope requires ["policy"] — no overlap → excluded.
+    loadAssistantScopeResult = [{ retrievalScope: { tags: ["policy"] } }];
+    const hits = await retrievalService.searchForAssistant(
+      staffUser,
+      42,
+      "playbook"
+    );
+    expect(hits).toHaveLength(0);
+  });
+
+  it("includes a hit when at least one scope tag intersects the doc's tags", async () => {
+    loadAssistantScopeResult = [
+      { retrievalScope: { tags: ["policy", "guide"] } },
+    ];
+    const hits = await retrievalService.searchForAssistant(
+      staffUser,
+      42,
+      "playbook"
+    );
+    expect(hits).toHaveLength(1);
+  });
+
+  it("excludes a public doc when maxVisibilityLevel caps exposure at group", async () => {
+    // maxVisibilityLevel ranks private<group<internal<public; a `public` doc
+    // exceeds a `group` cap and is excluded (even though canView would allow it).
+    loadedObject = { ...groupStaffDoc, visibilityLevel: "public" };
+    loadAssistantScopeResult = [
+      { retrievalScope: { maxVisibilityLevel: "group" } },
+    ];
+    const hits = await retrievalService.searchForAssistant(
+      staffUser,
+      42,
+      "playbook"
+    );
+    expect(hits).toHaveLength(0);
+  });
+
+  it("includes a group doc when maxVisibilityLevel cap is internal", async () => {
+    loadAssistantScopeResult = [
+      { retrievalScope: { maxVisibilityLevel: "internal" } },
+    ];
+    const hits = await retrievalService.searchForAssistant(
+      staffUser,
+      42,
+      "playbook"
+    );
+    expect(hits).toHaveLength(1);
+  });
 });
 
 describe("§16.3 whole-object injection — getContextDocument", () => {

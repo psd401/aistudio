@@ -36,6 +36,13 @@ export type AssistantArchitectMode = "prompt_chain" | "agentic";
 export interface AssistantRetrievalScope {
   collectionId?: string | null;
   tags?: string[];
+  /**
+   * Caps how BROADLY EXPOSED a candidate may be, ranked private < group <
+   * internal < public. A cap of `internal` admits private/group/internal but
+   * excludes `public` (the most broadly exposed tier) — i.e. it is an upper
+   * bound on exposure, not a floor on restriction. `canView` still enforces
+   * per-requester access on top of this narrowing.
+   */
   maxVisibilityLevel?: "private" | "group" | "internal" | "public";
 }
 

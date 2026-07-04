@@ -152,6 +152,24 @@ export interface RepositoryWithAccess {
 // ============================================
 
 /**
+ * Whether a repository is system-managed (e.g. the Atrium retrieval index,
+ * Issue #1056). System-managed repositories hold content governed by a
+ * FINER-GRAINED permission model than repository-level access — every Atrium
+ * hit is filtered by `visibilityService.canView` (spec §16.2). They must NOT be
+ * reachable through the generic repository read/search actions, which enforce
+ * only repository-level access (or, for `searchRepository`, none), or a caller
+ * could bypass `canView` by searching the shared `repository_items` index
+ * directly. Atrium's own `retrievalService.search` queries the index by id and
+ * re-checks `canView`, so it is unaffected by this guard.
+ */
+export function isSystemManagedRepository(
+  repo: Pick<SelectKnowledgeRepository, "metadata"> | null | undefined
+): boolean {
+  const metadata = repo?.metadata as Record<string, unknown> | null | undefined;
+  return metadata?.systemManaged === true;
+}
+
+/**
  * Get a repository by ID
  */
 export async function getRepositoryById(

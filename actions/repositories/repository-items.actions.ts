@@ -9,7 +9,9 @@ import {
   getRepositoryItems,
   getRepositoryItemChunks,
   deleteRepositoryItem,
-  updateRepositoryItemStatus
+  updateRepositoryItemStatus,
+  getRepositoryById,
+  isSystemManagedRepository
 } from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
 import { hasCapabilityAccess } from "@/utils/roles"
@@ -847,6 +849,17 @@ export async function listRepositoryItems(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // System-managed repositories (e.g. the Atrium retrieval index, #1056) are
+    // governed by a finer-grained permission model and must not be read through
+    // the generic repository API — mask as not-found.
+    const listRepo = await getRepositoryById(repositoryId)
+    if (!listRepo || isSystemManagedRepository(listRepo)) {
+      log.warn("List items denied - repository not found or system-managed", {
+        repositoryId
+      })
+      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", repositoryId)
+    }
+
     // Fetch repository items via Drizzle
     log.debug("Fetching repository items from database", { repositoryId })
     const itemsRaw = await getRepositoryItems(repositoryId)
@@ -916,6 +929,17 @@ export async function searchRepositoryItems(
         repositoryId
       })
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
+    }
+
+    // System-managed repositories (e.g. the Atrium retrieval index, #1056) are
+    // governed by a finer-grained permission model and must not be read through
+    // the generic repository API — mask as not-found.
+    const searchRepo = await getRepositoryById(repositoryId)
+    if (!searchRepo || isSystemManagedRepository(searchRepo)) {
+      log.warn("Search denied - repository not found or system-managed", {
+        repositoryId
+      })
+      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", repositoryId)
     }
 
     // Search in item names via Drizzle
