@@ -1,0 +1,9 @@
+{
+  "name": "psd-html-artifact",
+  "version": "1.0.0",
+  "description": "OpenClaw skill: deliver self-contained HTML artifacts to the workspace S3 public-images/ prefix and return an unsigned shareable URL",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0"
+  }
+}

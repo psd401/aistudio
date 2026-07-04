@@ -1549,6 +1549,9 @@ Index-on-publish via the repository pipeline (§16.1), permission-aware `search`
 **Phase 7 — Publishing connectors**
 `public_web` (CloudFront/S3 public route + sandbox), then `schoology` and `google` adapters over `connector-service` and existing OAuth connectors, all behind the public-publish gate.
 
+**Phase 8 — OKF interoperability** *(post-spec addendum, §36)*
+`okf` export adapter (§36.2) + OKF import service (§36.3) + MCP/REST parity (§36.4). Boundary serialization only — no change to the content model. Sequence **last**: depends on Phase 6 (`getContextDocument` whole-object bodies) and Phase 7 (publish-adapter breadth). Export enforces `canView` per object and routes public/anonymous bundles through the §26.4 gate.
+
 ## 33. Open decisions to confirm during build
 
 1. **Proof `doc-store` interface** — confirm the exact `DocStore` contract against `proof-sdk`; decide whether `doc-server` runs in-process or as a sidecar, and whether the CRDT snapshot lives in a `proof_doc_state` table or S3 (`PROOF_DOC_STORE_MODE`). No Yjs/CRDT is in the tree today; Proof supplies its own.
@@ -1578,7 +1581,8 @@ lib/content/
   publish-service.ts  retrieval-service.ts  events.ts  errors.ts  types.ts
   storage/        s3-store.ts  proof-store.ts
   render/         markdown-render.ts
-  publish-adapters/  types.ts  intranet.ts  public-web.ts  schoology.ts  google.ts
+  publish-adapters/  types.ts  intranet.ts  public-web.ts  schoology.ts  google.ts  okf.ts   # §36 export
+  okf/            export.ts  import.ts  frontmatter.ts   # §36 OKF (de)serialization
 actions/db/atrium/                           # server actions wrapping the services
   create-content.ts  snapshot-document.ts  create-version.ts  publish.ts  set-visibility.ts
 app/api/v1/content/
@@ -1598,7 +1602,7 @@ infra/                                        # S3 prefix, sandbox origin, SNS t
 ```
 
 ### 35.2 Enum reference
-`content_kind`(document|artifact) · `content_status`(draft|published|archived) · `actor_kind`(human|agent) · `visibility_level`(private|group|internal|public) · `grant_kind`(role|building|department|grade|user) · `body_format`(markdown|html|jsx) · `publish_destination`(intranet|public_web|schoology|google) · `publication_status`(live|scheduled|unpublished|failed) · `agent_identity_kind`(service|skill) · `navigation_type` += content
+`content_kind`(document|artifact) · `content_status`(draft|published|archived) · `actor_kind`(human|agent) · `visibility_level`(private|group|internal|public) · `grant_kind`(role|building|department|grade|user) · `body_format`(markdown|html|jsx) · `publish_destination`(intranet|public_web|schoology|google|**okf** — §36) · `publication_status`(live|scheduled|unpublished|failed) · `agent_identity_kind`(service|skill) · `navigation_type` += content
 
 ### 35.3 Scope reference
 `content:create` · `content:update` · `content:publish_internal` · `content:publish_public` (human-held; withheld from autonomous agents)
@@ -1613,6 +1617,82 @@ infra/                                        # S3 prefix, sandbox origin, SNS t
 - **Delegated agent** — acts on behalf of a user, inheriting their permissions.
 - **Autonomous agent** — a service/skill identity with its own role and scopes; cannot publish publicly.
 - **Provenance** — recorded human/agent authorship; the green/violet rail (docs) or per-version author (artifacts).
+
+---
+
+## 36. OKF interoperability (Phase 8)
+
+> **Post-spec addendum.** Added after §§0–35 were written; tracked as Epic #1059 Phase 8 (issue #1103). Depends on Phase 6 (§16.3 whole-object bodies) and Phase 7 (publish-adapter breadth); ships last.
+
+[Open Knowledge Format (OKF)](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing) is a portable serialization for agent context: a directory of markdown files with YAML frontmatter, where each file is a *concept*, markdown links form the graph, and two reserved filenames carry structure — `index.md` (navigation) and `log.md` (change history). Its stance is **"format, not platform"** — no SDK, no runtime, no accounts — so any producer's knowledge is consumable by any agent without translation.
+
+Atrium already **stores everything OKF serializes.** OKF is therefore a *boundary serialization* — a read/write shape at the edge, not a change to the `lib/content/` model (§4 remains the source of truth). This phase adds **export** (a collection → an OKF bundle) and **import** (an OKF bundle → content objects), nothing more.
+
+### 36.1 Model mapping
+
+A content object maps to one OKF concept file. The `type` frontmatter field is required by OKF; every other field is optional and emitted only when present. Fields verified against the schema (§7–§9):
+
+| OKF frontmatter | Atrium source |
+|---|---|
+| `type` *(required)* | `content_objects.kind` (`document` \| `artifact`) |
+| `title` | `content_objects.title` |
+| `description` | `content_versions.summary` (head version) |
+| `resource` | `content_publications.external_ref` (a prior publication URL, if the object is already published elsewhere) |
+| `tags` | `content_objects.tags` (`text[]`) |
+| `timestamp` | `content_objects.updated_at` |
+| *body markdown* | head version body — documents via §16.3 `getContextDocument` (the `context.md` whole-object read); artifacts emit their code in a fenced block |
+
+Structure maps to the filesystem:
+- The `content_collections` subtree (self-referential tree, §8) → a directory tree.
+- One `index.md` per collection — an OKF navigation file linking its child concepts (mirrors the intranet collection view, §21).
+- `content_versions` history for an object → its `log.md` (version number, author actor, summary, timestamp) — the immutable version list is already the change log.
+
+Round-trip preserves object **metadata + body**, not editor-internal state: OKF's flat concept model cannot carry per-character document provenance or live artifact sandbox state. That loss is expected and documented, not a defect.
+
+### 36.2 Export — an `okf` publish destination
+
+Export is modeled as a new `publish_destination = 'okf'` adapter (`lib/content/publish-adapters/okf.ts`) implementing the §15.1 `PublishAdapter` interface (`destination` + `publish()` + `unpublish()`), so it inherits the §15.3 publish-service pipeline, the `content_publications` row, and — critically — the §26.4 public-publish gate. The adapter's `publish()` serializes the collection subtree (via `lib/content/okf/export.ts` + `frontmatter.ts`) to a bundle and returns its location as `external_ref` (an S3 key / URL, §36.5).
+
+**Permission boundary (the one security-critical surface).** A bundle is portable files that escape `canView` the moment they are written. Therefore export MUST:
+1. Filter **every** object in the subtree through `visibilityService.canView(req, obj)` (§12) — the same predicate that gates reads. An object the requester cannot view is omitted from the bundle entirely; a bundle requested by a student identity contains no staff-only concepts.
+2. Route any bundle whose scope is `public`/anonymous through the §26.4 gate: only a caller holding `content:publish_public` (human or delegated) may produce a public bundle; autonomous agents are structurally blocked and receive `approval_required`.
+
+Export writes a `content_audit_logs` row (§27) recording requester, collection, object count, and visibility tier.
+
+### 36.3 Import — a content service, not a destination
+
+Import (`lib/content/okf/import.ts`) parses a bundle (frontmatter + body + the `index.md` tree + `log.md`) and creates/updates content through `contentService`/`versionService`/`collectionService` — the same API every other surface uses (§22). It reconstructs the collection tree from the directory layout and `index.md`, then writes each concept as a content object + head version. Imported content is **agent-authored**: versions carry `actor_kind = agent` provenance (§11), never fabricated human authorship. Import writes a `content_audit_logs` row per run.
+
+Import is *not* a `publish_destination` — it is inbound, so it has no adapter; it is a plain service invoked by the MCP tool / REST endpoint.
+
+### 36.4 Surfaces (MCP + REST parity)
+
+Per §22 (parity), both directions are exposed at both surfaces, gated by content scopes (§26.2):
+- **MCP** (§24): `export_okf` (collection → bundle) and `import_okf` (bundle → collection).
+- **REST v1** (§23): `POST /v1/content/export/okf` and `POST /v1/content/import/okf`; update `docs/API/v1/openapi.yaml` + `context-graph.md`.
+
+Export requires a read scope + (for public bundles) `content:publish_public`; import requires `content:create`.
+
+### 36.5 Enum, migration, transport
+
+- Add `okf` to `publish_destination` (`lib/db/schema/enums.ts`) via a `010+` migration: `ALTER TYPE publish_destination ADD VALUE 'okf'`. The enum is master-owned (created in a `085+` Atrium migration, not an immutable 001–005 type owned by `postgres`), so `ADD VALUE` succeeds under the migration role.
+- **Bundle transport (open decision, §33):** a bundle is a directory of files. Persist/return it as (a) a `.zip`/tar at an S3 key with a presigned URL in `external_ref` *(recommended)*, or (b) an unpacked S3 prefix. Confirm during build; the model layer is transport-agnostic.
+
+### 36.6 Acceptance (Phase 8)
+
+- [ ] `export_okf` produces a v0.1-valid bundle: one `.md`/object with `type` frontmatter, collection tree → directories, an `index.md` per collection, version history → `log.md`; frontmatter maps per §36.1.
+- [ ] Export enforces `canView`: a student-identity bundle excludes staff-only objects (integration test).
+- [ ] Public/anonymous export is blocked without `content:publish_public` (autonomous agent → `approval_required`).
+- [ ] Round-trip: export → `import_okf` into a fresh collection → object metadata + body preserved; imported objects carry `actor_kind = agent` provenance.
+- [ ] MCP + REST parity for export **and** import; a `content_audit_logs` row per run.
+- [ ] `bun run lint` + `bun run typecheck` pass.
+
+### 36.7 Non-goals (Phase 8)
+
+- Rewriting the content model to be OKF-native — OKF stays a boundary serialization.
+- Auto-generating bundles from non-Atrium sources (the BigQuery enrichment-agent equivalent).
+- Resolving OKF `resource` links to live external systems.
+- OKF over the Schoology/Google destinations — this is a standalone bundle format, not a connector target.
 
 ---
 

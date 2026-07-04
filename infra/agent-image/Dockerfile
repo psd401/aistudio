@@ -320,6 +320,7 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-html-artifact && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund
 # chat-card has zero npm deps. chat-chart's npm install is paired with the
