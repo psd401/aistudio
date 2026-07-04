@@ -336,7 +336,13 @@ async function invokeTool(toolName, toolArgs, ownerEmail) {
   // guard the error text flows back to callers (e.g. digestRecording pipes it
   // into psd-summarize) as if it were real tool content.
   if (msg.result && msg.result.isError) {
-    emit({ status: 'mcp-error', tool: toolName, tool_error: extractTextFromResult(msg.result) || msg.result });
+    // Truncate like the HTTP-failure branches above — this text originates
+    // from the upstream MCP server, and digestRecording calls invokeTool
+    // specifically so raw tool content never reaches stdout uncontrolled;
+    // an error payload shouldn't be a wider bypass of that than a real HTTP
+    // failure already is.
+    const detail = extractTextFromResult(msg.result);
+    emit({ status: 'mcp-error', tool: toolName, tool_error: detail ? detail.slice(0, 400) : null });
     process.exit(12);
   }
   return msg.result ?? null;
