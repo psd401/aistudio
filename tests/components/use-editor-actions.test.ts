@@ -60,7 +60,7 @@ describe("useEditorActions — publish", () => {
     });
 
     const { result } = setup();
-    act(() => result.current.handlePublish());
+    act(() => result.current.handlePublish("intranet"));
 
     await waitFor(() => expect(result.current.busy).toBe(false));
     expect(result.current.pendingApproval).toBe(true);
@@ -72,19 +72,19 @@ describe("useEditorActions — publish", () => {
     mockPublish.mockResolvedValue({ isSuccess: true, data: {} });
 
     const { result } = setup();
-    act(() => result.current.handlePublish());
+    act(() => result.current.handlePublish("intranet"));
 
     await waitFor(() => expect(result.current.busy).toBe(false));
     expect(result.current.pendingApproval).toBe(false);
     expect(result.current.actionError).toBe(false);
-    expect(result.current.message).toBe("Published to intranet");
+    expect(result.current.message).toBe("Published to the intranet");
   });
 
   it("sets actionError on a genuine publish failure", async () => {
     mockPublish.mockResolvedValue({ isSuccess: false, message: "Publish failed" });
 
     const { result } = setup();
-    act(() => result.current.handlePublish());
+    act(() => result.current.handlePublish("intranet"));
 
     await waitFor(() => expect(result.current.busy).toBe(false));
     expect(result.current.actionError).toBe(true);
@@ -106,7 +106,7 @@ describe("useEditorActions — unpublish", () => {
     });
 
     const { result } = setup();
-    act(() => result.current.handleUnpublish());
+    act(() => result.current.handleUnpublish("intranet"));
 
     await waitFor(() => expect(result.current.busy).toBe(false));
     expect(result.current.pendingApproval).toBe(true);
@@ -120,11 +120,11 @@ describe("useEditorActions — unpublish", () => {
     });
 
     const { result } = setup();
-    act(() => result.current.handleUnpublish());
+    act(() => result.current.handleUnpublish("intranet"));
 
     await waitFor(() => expect(result.current.busy).toBe(false));
     expect(result.current.actionError).toBe(false);
     expect(result.current.pendingApproval).toBe(false);
-    expect(result.current.message).toBe("Not currently published");
+    expect(result.current.message).toBe("Not currently published there");
   });
 });

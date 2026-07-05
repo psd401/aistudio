@@ -47,7 +47,9 @@ export async function listContentVersionsAction(
   const log = createLogger({ requestId, action: "listContentVersionsAction" });
 
   try {
-    log.info("Action started: list content versions", { idOrSlug });
+    log.info("Action started: list content versions", {
+      idOrSlug: sanitizeForLogging(idOrSlug),
+    });
 
     // Read path: like listVersionsAction, NOT capability-gated — visibility is
     // bounded entirely by canView (contentService.get 404-masks).
@@ -94,7 +96,7 @@ export async function rollbackVersionAction(
   try {
     log.info("Action started: rollback version", {
       idOrSlug: sanitizeForLogging(idOrSlug),
-      toVersionId,
+      toVersionId: sanitizeForLogging(toVersionId),
     });
 
     if (!idOrSlug) {
