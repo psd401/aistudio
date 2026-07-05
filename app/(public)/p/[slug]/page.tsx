@@ -42,6 +42,7 @@
  * `public_web` publication that authorized it).
  */
 
+import { cache } from "react";
 import { notFound } from "next/navigation";
 import { and, eq } from "drizzle-orm";
 import type { Metadata } from "next";
@@ -74,13 +75,18 @@ interface PublicReaderPageProps {
  * public_web publication, or a non-public object) — the single "may this be shown
  * on the public route?" decision, shared by the page and metadata so the strict
  * public gate is applied exactly once and identically in both.
+ *
+ * Wrapped in React `cache` so the (up to two) DB reads run once per request even
+ * though both `generateMetadata` and the page component call it with the same slug.
  */
-async function loadPublicObject(slug: string): Promise<{
+const loadPublicObject = cache(async (
+  slug: string
+): Promise<{
   id: string;
   kind: "document" | "artifact";
   title: string;
   publishedVersionId: string;
-} | null> {
+} | null> => {
   const [obj] = await executeQuery(
     (db) =>
       db
@@ -127,7 +133,7 @@ async function loadPublicObject(slug: string): Promise<{
     title: obj.title,
     publishedVersionId: publication.publishedVersionId,
   };
-}
+});
 
 /**
  * Page metadata. The title is resolved ONLY for an object that passes the public
@@ -196,7 +202,10 @@ export default async function PublicReaderPage({
           src={getArtifactSandboxRenderUrl()}
           className="atrium-artifact-preview"
         />
-        <ProvenanceFooter objectId={published.id} />
+        <ProvenanceFooter
+          objectId={published.id}
+          publishedVersionId={published.publishedVersionId}
+        />
       </main>
     );
   }
@@ -235,7 +244,10 @@ export default async function PublicReaderPage({
         className="atrium-content"
         dangerouslySetInnerHTML={{ __html: html }}
       />
-      <ProvenanceFooter objectId={published.id} />
+      <ProvenanceFooter
+          objectId={published.id}
+          publishedVersionId={published.publishedVersionId}
+        />
     </main>
   );
 }

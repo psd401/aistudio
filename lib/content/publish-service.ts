@@ -176,9 +176,10 @@ async function runPublishSideEffects(args: {
  *     Google) failing to notify the destination, OR the `intranet` adapter's
  *     post-commit nav-item write (`ensureNavItem`) failing — flip the row to
  *     `failed` so a retry re-runs the adapter, and re-throw so the caller sees the
- *     failure. `public_web` is the only adapter that does no I/O here and so never
- *     reaches this branch; Schoology/Google stubs throw BEFORE the tx and never
- *     reach it either.
+ *     failure. `public_web` DOES run here, but only computes a URL string (no
+ *     I/O), so it never throws and thus never reaches this compensation branch;
+ *     the Schoology/Google stubs throw BEFORE the tx and so never reach
+ *     `runPublishAdapter` at all.
  *  2. External-ref recording: persist the adapter's returned `external_ref` (the
  *     `public_web` reader URL, a future connector resource id, …) so the row
  *     records WHERE the version went live. Skipped when the adapter has no
@@ -590,13 +591,31 @@ export const publishService = {
           .set({ status: "unpublished", updatedAt: new Date() })
           .where(eq(contentPublications.id, pub[0].id));
 
-        // Revert the object to draft so it no longer reads as published. Visibility
-        // is intentionally NOT narrowed here — unpublishing removes the live
-        // surface, not the grant set; a later republish reuses the same visibility.
-        await tx
-          .update(contentObjects)
-          .set({ status: "draft", updatedAt: new Date() })
-          .where(eq(contentObjects.id, objectId));
+        // Revert the object to draft ONLY when no OTHER destination is still live.
+        // With `public_web` now a live adapter (Phase 7, #1057), an object can be
+        // live on several destinations at once (e.g. `intranet` + `public_web`);
+        // unpublishing one destination must NOT mark the object a draft while
+        // another reader route still serves it. The row just flipped to
+        // `unpublished` above is excluded by the `status = 'live'` filter.
+        // Visibility is intentionally NOT narrowed here — unpublishing removes the
+        // live surface, not the grant set; a later republish reuses the same
+        // visibility.
+        const stillLive = await tx
+          .select({ id: contentPublications.id })
+          .from(contentPublications)
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.status, "live")
+            )
+          )
+          .limit(1);
+        if (!stillLive[0]) {
+          await tx
+            .update(contentObjects)
+            .set({ status: "draft", updatedAt: new Date() })
+            .where(eq(contentObjects.id, objectId));
+        }
 
         return pub[0].externalRef;
       },

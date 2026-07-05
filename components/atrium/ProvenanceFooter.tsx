@@ -7,21 +7,37 @@
  * version was human-reviewed (a `human` author), plus the head version number.
  *
  * Provenance is a per-version property (`content_versions.author_actor`), so the
- * footer reflects the whole history of the object, not just the live version: a
- * document drafted by an agent and then edited by a human shows BOTH badges.
+ * footer reflects the authorship history of the PUBLISHED lineage: a document
+ * drafted by an agent and then edited by a human before publication shows BOTH
+ * badges.
+ *
+ * Scope (Phase 7, #1057): when `publishedVersionId` is supplied (the reader routes
+ * always render one specific published version), the summary is bounded to versions
+ * up to and including that version's number. This is required on the ANONYMOUS
+ * public reader (`/p/[slug]`): without the bound, a draft `v3` created after the
+ * published `v2` would leak its version number and author badges to the public via
+ * `MAX`/`BOOL_OR` over the whole object. The internal reader passes it too, so both
+ * describe the version being read, not unpublished future drafts. Omitting the prop
+ * falls back to whole-object history (unbounded).
  *
  * The badge `data-author` values ("agent" / "human") are the exact tokens the
  * shared stylesheet styles (`styles/atrium-content.css` — provenance palette:
  * purple = agent, green = human). Keep them in sync with that CSS.
  */
 
-import { eq, sql } from "drizzle-orm";
+import { and, eq, lte, sql } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentVersions } from "@/lib/db/schema";
 
 interface ProvenanceFooterProps {
   /** The `content_objects.id` (UUID) whose version history is summarized. */
   objectId: string;
+  /**
+   * The `content_versions.id` (UUID) being rendered. When present, the summary is
+   * bounded to versions with `version_number <=` this version's number, so drafts
+   * created after publication are never reflected (critical on the public reader).
+   */
+  publishedVersionId?: string;
 }
 
 /**
@@ -31,7 +47,18 @@ interface ProvenanceFooterProps {
  */
 export async function ProvenanceFooter({
   objectId,
+  publishedVersionId,
 }: ProvenanceFooterProps): Promise<React.JSX.Element> {
+  // Bound the summary to the published lineage when the rendered version is known:
+  // version_number <= (the published version's number). Excludes post-publication
+  // drafts so they never surface on a reader (see the public-leak note above).
+  const versionBound = publishedVersionId
+    ? lte(
+        contentVersions.versionNumber,
+        sql<number>`(SELECT ${contentVersions.versionNumber} FROM ${contentVersions} WHERE ${contentVersions.id} = ${publishedVersionId})`
+      )
+    : undefined;
+
   // Aggregate query: only three facts needed, not every row. MAX + BOOL_OR avoids
   // loading the full version history on objects with many versions.
   const [agg] = await executeQuery(
@@ -46,7 +73,7 @@ export async function ProvenanceFooter({
             sql<boolean>`BOOL_OR(${contentVersions.authorActor} = 'human')`.as("human_reviewed"),
         })
         .from(contentVersions)
-        .where(eq(contentVersions.objectId, objectId)),
+        .where(and(eq(contentVersions.objectId, objectId), versionBound)),
     "atrium.provenanceFooter"
   );
 

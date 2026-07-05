@@ -210,7 +210,10 @@ export default async function ReaderPage({
           <h1 className="text-3xl font-semibold">{published.title}</h1>
         </header>
         <ArtifactSandbox code={code} src={getArtifactSandboxRenderUrl()} className="atrium-artifact-preview" />
-        <ProvenanceFooter objectId={published.id} />
+        <ProvenanceFooter
+          objectId={published.id}
+          publishedVersionId={published.publishedVersionId}
+        />
       </main>
     );
   }
@@ -249,7 +252,10 @@ export default async function ReaderPage({
         className="atrium-content"
         dangerouslySetInnerHTML={{ __html: html }}
       />
-      <ProvenanceFooter objectId={published.id} />
+      <ProvenanceFooter
+          objectId={published.id}
+          publishedVersionId={published.publishedVersionId}
+        />
     </main>
   );
 }

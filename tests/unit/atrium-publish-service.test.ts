@@ -182,6 +182,11 @@ let txResults: unknown[] = [];
 function nextResult(): unknown {
   return txResults.shift() ?? [];
 }
+// Records the payload of every `.set({...})` executed inside the transaction (in
+// call order) so a test can assert WHICH updates ran — e.g. that unpublishing one
+// destination flips the publication to `unpublished` but only downgrades the object
+// to `draft` when no other destination is still live (Phase 7, #1057).
+let txSetPayloads: Array<Record<string, unknown>> = [];
 const chain: Record<string, unknown> = {};
 const chainHandler: ProxyHandler<Record<string, unknown>> = {
   get(_t, prop: string | symbol) {
@@ -192,6 +197,12 @@ const chainHandler: ProxyHandler<Record<string, unknown>> = {
     // `.limit()` and `.returning()` are the awaited terminals — each yields the
     // next queued result so SELECTs and the upsert RETURNING are deterministic.
     if (prop === "returning" || prop === "limit") return () => nextResult();
+    // `.set(payload)` records the update payload, then stays fluent.
+    if (prop === "set")
+      return (payload: Record<string, unknown>) => {
+        txSetPayloads.push(payload);
+        return chainProxy;
+      };
     return () => chainProxy;
   },
 };
@@ -257,6 +268,7 @@ beforeEach(() => {
   publicWebPublishCalls = 0;
   lastPublicWebSlug = null;
   lastSetPayload = null;
+  txSetPayloads = [];
   txResults = [];
   jest.clearAllMocks();
 });
@@ -548,5 +560,36 @@ describe("publishService.unpublish", () => {
       ).rejects.toThrow(ApprovalRequiredError);
     }
     expect(adapterUnpublishCalls).toBe(0);
+  });
+
+  // Phase 7 (#1057): public_web is now a live adapter, so an object can be live on
+  // multiple destinations at once. Unpublishing one must NOT downgrade the object
+  // to draft while another destination still serves it.
+  it("does NOT revert the object to draft when another destination is still live", async () => {
+    // tx queue: FOR UPDATE lock, the live public_web row being torn down, then the
+    // "any other destination still live?" check returns a row (intranet live).
+    txResults = [
+      [{ id: "o1" }],
+      [{ id: "pub1", externalRef: null }],
+      [{ id: "pub-intranet" }],
+    ];
+    const result = await publishService.unpublish(admin, "o1", "public_web");
+    expect(result).toEqual({ unpublished: true });
+    const statuses = txSetPayloads.map((p) => p.status);
+    // The publication was flipped to unpublished, but the object status was NOT
+    // downgraded to draft (intranet remains live).
+    expect(statuses).toContain("unpublished");
+    expect(statuses).not.toContain("draft");
+  });
+
+  it("reverts the object to draft when the unpublished destination was the last live one", async () => {
+    // tx queue: FOR UPDATE lock, the live row being torn down, then the
+    // "any other destination still live?" check returns [] (none remain).
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
+    const result = await publishService.unpublish(admin, "o1", "public_web");
+    expect(result).toEqual({ unpublished: true });
+    const statuses = txSetPayloads.map((p) => p.status);
+    expect(statuses).toContain("unpublished");
+    expect(statuses).toContain("draft");
   });
 });
