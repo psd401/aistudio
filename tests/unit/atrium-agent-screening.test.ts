@@ -152,12 +152,23 @@ describe("screenAgentBodyForWrite (the content-service write gate)", () => {
     expect(checkInputSafetyMock).not.toHaveBeenCalled();
   });
 
-  it("never screens a delegated agent (records as 'human' per actorKindOf)", async () => {
-    checkResult = { allowed: false };
+  it("SCREENS a delegated agent — machine authorship, not provenance, gates screening", async () => {
+    // A delegated agent records provenance as the human it acts for
+    // (actorKindOf → 'human'), but it is still a machine generating content, so
+    // §28.3 must apply. Guardrails blocks here → the write is rejected.
+    checkResult = { allowed: false, blockedMessage: "Nope." };
     await expect(
       screenAgentBodyForWrite(delegatedAgent, "# anything", "obj-1")
+    ).rejects.toThrow(/Content blocked by safety policy/);
+    expect(checkInputSafetyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows a clean delegated-agent body (screened and passed)", async () => {
+    checkResult = { allowed: true };
+    await expect(
+      screenAgentBodyForWrite(delegatedAgent, "# clean", "obj-1")
     ).resolves.toBeUndefined();
-    expect(checkInputSafetyMock).not.toHaveBeenCalled();
+    expect(checkInputSafetyMock).toHaveBeenCalledTimes(1);
   });
 
   it("skips screening for a missing or whitespace-only body", async () => {

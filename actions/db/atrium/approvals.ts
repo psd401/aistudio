@@ -285,14 +285,13 @@ export async function approvePublishRequestAction(
       );
     }
 
-    // Replay FIRST: if the recorded action cannot be applied, the row must stay
-    // pending (the error propagates before the status write below).
-    const replayed = await replayApprovedRequest(requester, request, log);
-
-    // Conditional on still-pending so a concurrent decision cannot be
-    // overwritten. Zero rows here means another admin decided mid-replay — the
-    // replay already happened, so log it rather than pretend it did not.
-    const updated = await executeQuery(
+    // CLAIM FIRST (atomic compare-and-set pending→approved) so the replay side
+    // effect runs AT MOST ONCE and can never race a concurrent deny. The prior
+    // ordering (replay, then conditional mark) let a deny land mid-replay: the
+    // publish still went live while the row ended up `denied`. Here, whichever
+    // decider flips the row out of `pending` first wins; the loser sees zero
+    // rows and aborts WITHOUT replaying.
+    const claimed = await executeQuery(
       (db) =>
         db
           .update(contentPublishRequests)
@@ -310,10 +309,45 @@ export async function approvePublishRequestAction(
             )
           )
           .returning({ id: contentPublishRequests.id }),
-      "atrium.approvals.markApproved"
+      "atrium.approvals.claimApprove"
     );
-    if (updated.length === 0) {
-      log.warn("Request was decided concurrently after replay", { id });
+    if (claimed.length === 0) {
+      throw ErrorFactories.invalidInput(
+        "id",
+        id,
+        "request has already been decided"
+      );
+    }
+
+    // Replay the recorded action as the approving admin. If it fails, REVERT the
+    // claim to `pending` so the request stays actionable (retry or deny) rather
+    // than stuck `approved` with nothing published. A process crash mid-replay
+    // leaves the row `approved` but not live — a visible, admin-recoverable state
+    // (re-trigger the publish), never a denied-but-published one.
+    let replayed: boolean;
+    try {
+      replayed = await replayApprovedRequest(requester, request, log);
+    } catch (replayError) {
+      await executeQuery(
+        (db) =>
+          db
+            .update(contentPublishRequests)
+            .set({
+              status: "pending",
+              decidedByUserId: null,
+              decidedAt: null,
+              decisionNote: null,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(contentPublishRequests.id, id),
+                eq(contentPublishRequests.status, "approved")
+              )
+            ),
+        "atrium.approvals.revertClaimOnReplayFailure"
+      );
+      throw replayError;
     }
 
     timer({ status: "success" });

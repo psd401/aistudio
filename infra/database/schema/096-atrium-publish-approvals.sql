@@ -77,14 +77,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_cpr_pending
   WHERE status = 'pending';
 
 -- Export requests have object_id NULL (unique indexes treat NULLs as distinct),
--- so dedupe them on the collection they bundle instead.
+-- so dedupe them on the collection they bundle instead. COALESCE(..., '') so a
+-- request whose context lacks collectionId (a NULL key, which a unique index also
+-- treats as distinct) still dedupes against other missing-collectionId exports
+-- instead of bypassing the dedupe entirely.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_cpr_pending_export
-  ON content_publish_requests ((context->>'collectionId'), request_kind, destination)
+  ON content_publish_requests (COALESCE(context->>'collectionId', ''), request_kind, destination)
   WHERE status = 'pending' AND object_id IS NULL;
 
 -- Queue listing: pending-first pages ordered by age.
 CREATE INDEX IF NOT EXISTS idx_cpr_status_created
   ON content_publish_requests (status, created_at);
+
+-- FK-column indexes: the approvals queue left-joins users on requested_by_user_id
+-- for the requester display; these back that join and the requester/decider/agent
+-- lookups (and the ON DELETE SET NULL cascades) as the queue grows.
+CREATE INDEX IF NOT EXISTS idx_cpr_requested_by_user_id
+  ON content_publish_requests (requested_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_cpr_decided_by_user_id
+  ON content_publish_requests (decided_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_cpr_requested_by_agent_id
+  ON content_publish_requests (requested_by_agent_id);
 
 -- updated_at trigger (CLAUDE.md: tables with updated_at MUST have the trigger).
 DROP TRIGGER IF EXISTS update_content_publish_requests_updated_at ON content_publish_requests;

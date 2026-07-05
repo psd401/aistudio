@@ -20,7 +20,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -114,17 +114,20 @@ function LibraryFilters({
 
 export function LibraryView(): React.JSX.Element {
   const router = useRouter();
-
-  const [collectionId, setCollectionId] = useState<string | null>(null);
+  const searchParams = useSearchParams();
 
   // Deep-link support: the reader's collection sidebar links to
-  // `/atrium?collection=<id>`. Read the param ONCE on mount (post-hydration, so
-  // SSR/client first paint match); the subsequent state change re-runs `load`
-  // with the section filter — the reqSeq guard drops the raced unfiltered page.
-  useEffect(() => {
-    const fromUrl = new URLSearchParams(window.location.search).get("collection");
-    if (fromUrl) setCollectionId(fromUrl);
-  }, []);
+  // `/atrium?collection=<id>`. Seed the section filter from the URL on the FIRST
+  // render via `useSearchParams` (it returns the param on both the SSR pass — the
+  // page is force-dynamic — and on client hydration, so server and client agree
+  // and there is no hydration mismatch). Seeding at init makes the very first
+  // `fetchPage` ALREADY filtered instead of firing an unfiltered page-1 request
+  // that the reqSeq guard then has to discard (the content flash + wasted round
+  // trip on every reader→library deep link). Mount-once semantics are preserved:
+  // as with the prior effect, a later `?collection=` change is not re-read.
+  const [collectionId, setCollectionId] = useState<string | null>(
+    () => searchParams.get("collection") || null
+  );
   const [kind, setKind] = useState<KindFilter>("all");
   const [tag, setTag] = useState("");
   // Debounced copy of `tag`: the tag filter is a SERVER round-trip (unlike the

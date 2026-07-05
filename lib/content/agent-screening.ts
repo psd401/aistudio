@@ -21,7 +21,7 @@
  */
 
 import { createLogger } from "@/lib/logger";
-import { actorKindOf } from "./helpers";
+import { isAgentRequester } from "./helpers";
 import { ValidationError } from "./errors";
 import type { Requester } from "./types";
 
@@ -106,9 +106,16 @@ export async function screenAgentContent(
 /**
  * The §28.3 gate for the content-service write paths (`contentService.create`,
  * `versionService.snapshot`): screens the body ONLY when the requester writes as
- * an agent (`actorKindOf(req) === "agent"`, i.e. autonomous — delegated agents
- * record as the human they act for) and a non-empty body is present. Both kinds
- * of body screen as text: a document's markdown AND an artifact's code.
+ * an AGENT — autonomous OR delegated (`isAgentRequester`) — and a non-empty body
+ * is present. Both kinds of body screen as text: a document's markdown AND an
+ * artifact's code.
+ *
+ * NOTE this keys off `isAgentRequester`, NOT `actorKindOf`: a delegated agent
+ * records provenance as the human it acts for (`actorKindOf → 'human'`), but it
+ * is still a machine generating content, so it MUST be screened. Screening is a
+ * property of machine authorship, not provenance attribution — otherwise a
+ * delegated-identity caller could write unscreened content through
+ * `create`/`snapshot` while the agent-bridge route screens unconditionally.
  *
  * Human authors: zero behavior change — this returns without touching the
  * safety stack (the lazy import never even runs).
@@ -124,7 +131,7 @@ export async function screenAgentBodyForWrite(
   body: string | undefined,
   objectId: string | null
 ): Promise<void> {
-  if (actorKindOf(req) !== "agent") return;
+  if (!isAgentRequester(req)) return;
   if (typeof body !== "string" || body.trim().length === 0) return;
 
   const verdict = await screenAgentContent(body, objectId);

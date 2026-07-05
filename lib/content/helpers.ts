@@ -100,6 +100,19 @@ export function actorKindOf(req: Requester): "human" | "agent" {
   return req.kind === "agent-autonomous" ? "agent" : "human";
 }
 
+/**
+ * Whether the requester is a MACHINE writer (autonomous OR delegated), regardless
+ * of how the content is ATTRIBUTED. This is deliberately distinct from
+ * `actorKindOf`: a delegated agent records provenance as the human it acts for
+ * (`actorKindOf → 'human'`), but it is still an agent generating content, so
+ * content-safety screening (§28.3) must apply to it. Screening keys off machine
+ * authorship, not provenance attribution — a human typing in the editor is never
+ * screened, but any agent-authored write (autonomous or delegated) is.
+ */
+export function isAgentRequester(req: Requester): boolean {
+  return req.kind === "agent-autonomous" || req.kind === "agent-delegated";
+}
+
 /** The autonomous agent identity id for a requester, or null. */
 export function agentIdOf(req: Requester): string | null {
   return req.kind === "agent-autonomous" ? req.agentId : null;

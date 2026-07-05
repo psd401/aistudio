@@ -94,7 +94,10 @@ beforeEach(() => {
   executeQueryMock.mockClear();
   queryResults.clear();
   queryResults.set("atrium.approvals.load", [{ ...BASE_ROW }]);
-  queryResults.set("atrium.approvals.markApproved", [{ id: "req-1" }]);
+  // Claim-first: the atomic pending→approved compare-and-set. A non-empty result
+  // means THIS caller won the claim; [] means it was decided concurrently.
+  queryResults.set("atrium.approvals.claimApprove", [{ id: "req-1" }]);
+  queryResults.set("atrium.approvals.revertClaimOnReplayFailure", []);
   queryResults.set("atrium.approvals.markDenied", [{ id: "req-1" }]);
 });
 
@@ -132,7 +135,7 @@ describe("approvePublishRequestAction — replay", () => {
       destination: "intranet",
       visibility: { level: "public" },
     });
-    expect(labelCalls("atrium.approvals.markApproved")).toBe(1);
+    expect(labelCalls("atrium.approvals.claimApprove")).toBe(1);
   });
 
   it("replays a public-destination publish WITHOUT inventing a visibility widen", async () => {
@@ -183,14 +186,28 @@ describe("approvePublishRequestAction — replay", () => {
     expect(result.data.replayed).toBe(false);
     expect(publishMock).not.toHaveBeenCalled();
     expect(setLevelMock).not.toHaveBeenCalled();
-    expect(labelCalls("atrium.approvals.markApproved")).toBe(1);
+    expect(labelCalls("atrium.approvals.claimApprove")).toBe(1);
   });
 
-  it("surfaces a replay failure and leaves the row pending (no status write)", async () => {
+  it("surfaces a replay failure and REVERTS the claim so the row stays actionable", async () => {
     publishMock.mockRejectedValue(new Error("adapter not available"));
     const result = await approvePublishRequestAction("req-1");
     expect(result.isSuccess).toBe(false);
-    expect(labelCalls("atrium.approvals.markApproved")).toBe(0);
+    // Claim-first: the row was claimed (1) then reverted to pending (1) when the
+    // replay threw — never left stuck `approved` with nothing published.
+    expect(labelCalls("atrium.approvals.claimApprove")).toBe(1);
+    expect(labelCalls("atrium.approvals.revertClaimOnReplayFailure")).toBe(1);
+  });
+
+  it("aborts WITHOUT replaying when the row was decided concurrently (claim wins nothing)", async () => {
+    // loadRequest still sees a stale `pending` row, but a concurrent deny/approve
+    // already flipped it: the atomic claim returns zero rows, so we must abort
+    // BEFORE the publish side effect — the fix for the deny-races-replay window.
+    queryResults.set("atrium.approvals.claimApprove", []);
+    const result = await approvePublishRequestAction("req-1");
+    expect(result.isSuccess).toBe(false);
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(setLevelMock).not.toHaveBeenCalled();
   });
 
   it("rejects a malformed destination instead of casting it into the service", async () => {
@@ -200,7 +217,9 @@ describe("approvePublishRequestAction — replay", () => {
     const result = await approvePublishRequestAction("req-1");
     expect(result.isSuccess).toBe(false);
     expect(publishMock).not.toHaveBeenCalled();
-    expect(labelCalls("atrium.approvals.markApproved")).toBe(0);
+    // The claim happened before the destination was validated in replay, so it is
+    // reverted rather than never-written.
+    expect(labelCalls("atrium.approvals.revertClaimOnReplayFailure")).toBe(1);
   });
 
   it("errors on an already-decided request without replaying", async () => {
