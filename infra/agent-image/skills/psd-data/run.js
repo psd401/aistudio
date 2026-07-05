@@ -38,6 +38,7 @@ const {
   parseArgs,
   validateUserEmail,
   callMcp,
+  findUnqualifiedNumericCasts,
 } = require('./common');
 
 function usage() {
@@ -169,6 +170,15 @@ async function main() {
     case 'query': {
       const reason = requireArg(args, 'reason');
       const sql = requireArg(args, 'sql');
+      const unqualifiedCasts = findUnqualifiedNumericCasts(sql);
+      if (unqualifiedCasts.length > 0) {
+        fail(
+          `SQL contains unqualified NUMERIC/DECIMAL cast(s): ${unqualifiedCasts.join(', ')}. ` +
+            'The psd-data-mcp server rejects casts without explicit precision, which drops ' +
+            'that column from the result set (and any CSV export). Add precision, e.g. ' +
+            'CAST(col AS NUMERIC(10,2)) or col::NUMERIC(10,2), then retry.'
+        );
+      }
       const toolArgs = { reason, sql_query: sql };
       // parseArgs returns the string "false" for `--flag false`, which is
       // truthy. Explicitly convert to boolean so --export false / --view-results false work.
@@ -248,6 +258,10 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  fail(err instanceof Error ? err.message : String(err), 2);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    fail(err instanceof Error ? err.message : String(err), 2);
+  });
+}
+
+module.exports = { main };

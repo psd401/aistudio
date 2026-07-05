@@ -131,7 +131,14 @@ intent in plain English; do not pad with fluff.
 - Only `SELECT` queries are accepted; DDL / DML are rejected
 - Row-level security rewrites your query — do not write your own access
   filters; let the server do it
-- Casts to `NUMERIC` / `DECIMAL` without precision are rejected
+- **Always specify precision on `NUMERIC`/`DECIMAL` casts** — e.g.
+  `CAST(score AS NUMERIC(10,2))` or `score::NUMERIC(10,2)`, never bare
+  `CAST(score AS NUMERIC)` or `score::NUMERIC`. The server rejects
+  unqualified casts, which **silently drops that column** from the result
+  set and any `--export` CSV — the column looks blank/missing, not
+  errored. The skill validates this client-side and fails fast with the
+  offending fragment if you forget; if you ever see a numeric column
+  missing from an export, check your SQL for a bare cast first.
 
 ### Lessons
 

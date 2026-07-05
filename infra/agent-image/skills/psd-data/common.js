@@ -23,11 +23,20 @@
 // Load the AWS SDK from psd-workspace's already-installed copy. Both skills
 // would otherwise install the same `@aws-sdk/client-secrets-manager` tree;
 // importing absolutely keeps the image file-count identical to a no-psd-data
-// build. See Dockerfile for the rationale.
+// build. See Dockerfile for the rationale. Falls back to a bare require so
+// the skill is loadable/testable outside the container (e.g. from the repo
+// tree), matching the pattern in psd-plaud/common.js.
+function requireSecretsManager() {
+  try {
+    return require('/opt/psd-skills/psd-workspace/node_modules/@aws-sdk/client-secrets-manager');
+  } catch {
+    return require('@aws-sdk/client-secrets-manager');
+  }
+}
 const {
   SecretsManagerClient,
   GetSecretValueCommand,
-} = require('/opt/psd-skills/psd-workspace/node_modules/@aws-sdk/client-secrets-manager');
+} = requireSecretsManager();
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
@@ -51,6 +60,31 @@ function fail(message, code = 1) {
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
+}
+
+// psd-data-mcp rejects NUMERIC/DECIMAL casts that don't specify precision
+// (see SKILL.md's "Hard rules"). Matching on the `AS <TYPE>)` / `::<TYPE>`
+// boundary — rather than trying to parse the whole CAST(...) expression —
+// keeps this robust against nested parens in the casted expression itself
+// (e.g. `CAST(ROUND(x, 2) AS NUMERIC)`).
+const UNQUALIFIED_CAST_RE = /\bAS\s+(NUMERIC|DECIMAL)\s*\)/gi;
+const UNQUALIFIED_SHORTHAND_RE = /::\s*(NUMERIC|DECIMAL)\b(?!\s*\()/gi;
+
+/**
+ * Scan a SQL string for NUMERIC/DECIMAL casts with no explicit precision —
+ * the pattern the MCP server silently rejects, which is the confirmed
+ * trigger for numeric columns disappearing from query results/CSV exports
+ * (FS#162394 / issue #1106). Returns the matched fragments (empty if none).
+ */
+function findUnqualifiedNumericCasts(sql) {
+  if (typeof sql !== 'string') return [];
+  const matches = [];
+  UNQUALIFIED_CAST_RE.lastIndex = 0;
+  let m;
+  while ((m = UNQUALIFIED_CAST_RE.exec(sql))) matches.push(m[0].trim());
+  UNQUALIFIED_SHORTHAND_RE.lastIndex = 0;
+  while ((m = UNQUALIFIED_SHORTHAND_RE.exec(sql))) matches.push(m[0].trim());
+  return matches;
 }
 
 /**
@@ -366,5 +400,6 @@ module.exports = {
   emitNeedsAuthAndExit,
   callMcp,
   cognitoRefreshSecretId,
+  findUnqualifiedNumericCasts,
   PSD_DATA_MCP_URL,
 };
