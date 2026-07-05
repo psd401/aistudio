@@ -13,11 +13,7 @@
  */
 
 import type { BodyFormat, ContentKind } from "../types";
-import {
-  OKF_VERSION,
-  okfTypeForKind,
-  type OkfFrontmatter,
-} from "./profile";
+import { okfTypeForKind, type OkfFrontmatter } from "./profile";
 import { serializeConceptFile } from "./frontmatter";
 
 /** The loaded fields a single object contributes to its concept file. */
@@ -132,9 +128,4 @@ export function buildLogFile(title: string, entries: LogEntry[]): string {
     lines.push(`- v${e.versionNumber} · ${e.authorActor} · ${when}${summary}`);
   }
   return `${lines.join("\n")}\n`;
-}
-
-/** A short human-readable header for the bundle root's `index.md` note. */
-export function bundleBanner(rootName: string): string {
-  return `> OKF v${OKF_VERSION} bundle exported from Atrium — "${rootName}".`;
 }
