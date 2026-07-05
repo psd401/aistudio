@@ -155,6 +155,22 @@ class PeriodicPushLifecycleTests(unittest.TestCase):
             workspace_sync.start_periodic_push("p", interval_s=60)
             self.assertIs(workspace_sync._periodic_thread, t1)  # no second thread
 
+    def test_stop_joins_thread_before_returning(self):
+        # gemini-code-assist review: stop_periodic_push signaled the thread to
+        # stop but never joined it, so a caller could observe _periodic_thread
+        # as None while the old thread was still mid-push_workspace(),
+        # potentially racing a freshly started replacement thread.
+        with mock.patch.object(workspace_sync, "push_workspace", return_value=0):
+            workspace_sync.start_periodic_push("p", interval_s=0.01)
+            t1 = workspace_sync._periodic_thread
+            self.assertTrue(t1.is_alive())
+
+            workspace_sync.stop_periodic_push()
+            # If stop_periodic_push joined (rather than just signaling), the
+            # thread must already be dead the instant it returns — no separate
+            # join() call needed here.
+            self.assertFalse(t1.is_alive(), "thread still alive immediately after stop_periodic_push() returned")
+
 
 if __name__ == "__main__":
     unittest.main()

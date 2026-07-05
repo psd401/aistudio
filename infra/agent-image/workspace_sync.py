@@ -338,10 +338,15 @@ def start_periodic_push(prefix: str, interval_s: int = 120) -> None:
 
 
 def stop_periodic_push() -> None:
-    """Signal the periodic push thread to stop and reset state so a later
-    start_periodic_push() can cleanly restart it."""
+    """Signal the periodic push thread to stop, join it, and reset state so a
+    later start_periodic_push() can cleanly restart it. Joining (bounded by a
+    timeout so shutdown can't hang forever) avoids a window where the old
+    thread is still mid-push_workspace() concurrently with a freshly started
+    replacement thread (gemini-code-assist review)."""
     global _periodic_thread
     stop = _periodic_stop
     if stop is not None:
         stop.set()
+    if _periodic_thread is not None and _periodic_thread.is_alive():
+        _periodic_thread.join(timeout=15)
     _periodic_thread = None
