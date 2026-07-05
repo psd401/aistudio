@@ -38,7 +38,21 @@ let lastSetLevelExtraSet: unknown = null;
 let canViewResult = true;
 
 jest.mock("@/lib/db/drizzle-client", () => ({
-  executeQuery: jest.fn(async () => publishableRows),
+  // Runs the query builder against a recording proxy (`setRecorder`) so the
+  // post-commit `.set({ externalRef })` UPDATE (persist-external-ref) payload can
+  // be asserted, then resolves to `publishableRows` exactly as before —
+  // loadPublishable is unaffected; only side-effect capture is added.
+  executeQuery: jest.fn(async (cb?: (db: unknown) => unknown) => {
+    if (typeof cb === "function") {
+      try {
+        cb(setRecorder);
+      } catch {
+        // A builder against a fluent proxy never throws; guard defensively so a
+        // future callback shape can't break the (unchanged) return value.
+      }
+    }
+    return publishableRows;
+  }),
   executeTransaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
     cb(txStub)
   ),
@@ -184,6 +198,29 @@ const chainHandler: ProxyHandler<Record<string, unknown>> = {
 const chainProxy = new Proxy(chain, chainHandler);
 const txStub = chainProxy;
 
+// A recording proxy for `executeQuery` builders (which run OUTSIDE the tx, e.g.
+// the persist-external-ref UPDATE). Every builder method stays fluent; `.set`
+// additionally captures its payload so a test can assert the exact value that
+// round-trips into `.set({ externalRef })` — not merely that the labelled call
+// happened. Only the persist-external-ref UPDATE (and, on failure, mark-failed)
+// call `.set` via executeQuery, so `lastSetPayload` unambiguously holds the last
+// such payload.
+let lastSetPayload: Record<string, unknown> | null = null;
+const setRecorder: unknown = new Proxy(
+  {},
+  {
+    get(_t, prop: string | symbol) {
+      if (prop === "then") return undefined;
+      if (prop === "set")
+        return (payload: Record<string, unknown>) => {
+          lastSetPayload = payload;
+          return setRecorder;
+        };
+      return () => setRecorder;
+    },
+  }
+);
+
 import { publishService } from "@/lib/content/publish-service";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
@@ -219,6 +256,7 @@ beforeEach(() => {
   adapterUnpublishCalls = 0;
   publicWebPublishCalls = 0;
   lastPublicWebSlug = null;
+  lastSetPayload = null;
   txResults = [];
   jest.clearAllMocks();
 });
@@ -366,6 +404,10 @@ describe("publishService.publish", () => {
         (call: unknown[]) => call[1] === "publish.persistExternalRef"
       )
     ).toBe(true);
+    // And the EXACT ref the adapter returned round-trips into the UPDATE payload
+    // (not merely that the labelled call fired) — guards a future regression that
+    // persists a wrong/stale value.
+    expect(lastSetPayload?.externalRef).toBe(PUBLIC_WEB_REF);
   });
 
   it("throws ValidationError when there is no working head", async () => {

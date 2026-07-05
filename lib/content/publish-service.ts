@@ -172,10 +172,13 @@ async function runPublishSideEffects(args: {
  * The publication row was already committed as `status: "live"`. This runs the
  * destination adapter AFTER the transaction (external IO inside a tx is a
  * drizzle-client anti-pattern) with two guarantees:
- *  1. Compensation: if the adapter throws (a real non-no-op adapter — Schoology/
- *     Google — failing to notify the destination), flip the row to `failed` so a
- *     retry re-runs the adapter, and re-throw so the caller sees the failure. The
- *     intranet adapter is a no-op and cannot reach this path.
+ *  1. Compensation: if the adapter throws — a real external adapter (Schoology/
+ *     Google) failing to notify the destination, OR the `intranet` adapter's
+ *     post-commit nav-item write (`ensureNavItem`) failing — flip the row to
+ *     `failed` so a retry re-runs the adapter, and re-throw so the caller sees the
+ *     failure. `public_web` is the only adapter that does no I/O here and so never
+ *     reaches this branch; Schoology/Google stubs throw BEFORE the tx and never
+ *     reach it either.
  *  2. External-ref recording: persist the adapter's returned `external_ref` (the
  *     `public_web` reader URL, a future connector resource id, …) so the row
  *     records WHERE the version went live. Skipped when the adapter has no
