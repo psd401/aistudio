@@ -12,11 +12,23 @@ import sys
 import unittest
 from unittest import mock
 
-for _m in ("harness_adapter", "workspace_sync", "bedrock_agentcore"):
-    sys.modules.setdefault(_m, mock.MagicMock())
+_STUB_MODULES = ("harness_adapter", "workspace_sync", "bedrock_agentcore")
+_stubbed_by_us = [_m for _m in _STUB_MODULES if _m not in sys.modules]
+for _m in _stubbed_by_us:
+    sys.modules[_m] = mock.MagicMock()
 sys.path.insert(0, __import__("os").path.dirname(__file__))
 
 import agentcore_wrapper  # noqa: E402
+
+# agentcore_wrapper already captured its own references to the stubbed
+# modules above (`from harness_adapter import OpenClawAdapter`, `import
+# workspace_sync`), so it's safe to remove the sys.modules entries now.
+# Leaving them in place would make later test modules discovered in the same
+# process (e.g. test_harness_adapter.py, test_workspace_sync.py) resolve
+# `import harness_adapter` / `import workspace_sync` to these MagicMocks
+# instead of the real modules under test.
+for _m in _stubbed_by_us:
+    del sys.modules[_m]
 
 _safe = agentcore_wrapper._safe_header_value
 
