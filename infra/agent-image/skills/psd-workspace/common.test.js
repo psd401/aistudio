@@ -65,6 +65,15 @@ test('REV-COR-350: positive control — "reply"/"from:" as a search value is sti
   assert.equal(enforcePhase1Gates("gmail users messages list --query 'reply'", userCtx).allowed, true);
 });
 
+test('REV-COR-350: "gmail" and a bare send-like word as unquoted query content on an unrelated service is not blocked', () => {
+  // Bare (unquoted) query words split into separate tokens by splitCommand, so
+  // "gmail" can land several tokens deep as ordinary argument content rather
+  // than the gmail service selector (which only ever appears at index 0, or
+  // index 1 after a `gws` prefix). detectGmailSendHelper must not treat this
+  // as the send/reply/forward helper form (gemini-code-assist review).
+  assert.equal(enforcePhase1Gates('drive files list --query gmail send', userCtx).allowed, true);
+});
+
 // ---------------------------------------------------------------------------
 // Share-to-caller exception must still work and must read the executed --json
 // ---------------------------------------------------------------------------

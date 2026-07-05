@@ -337,7 +337,11 @@ const GMAIL_SEND_HELPER_REASON =
 function detectGmailSendHelper(tokens) {
   const lower = tokens.map((t) => t.toLowerCase());
   const gmailIdx = lower.indexOf('gmail');
-  if (gmailIdx === -1) return null;
+  // `gmail` must be the service name — at index 0, or index 1 after a `gws`
+  // program-token prefix. A later occurrence is argument content (e.g. a
+  // `--query "gmail send"` value split into bare tokens), not the service
+  // selector, and must not be treated as one (gemini-code-assist review).
+  if (gmailIdx === -1 || gmailIdx > 1) return null;
   if (lower.some((t) => GMAIL_PLUS_SEND_HELPERS.has(t))) return GMAIL_SEND_HELPER_REASON;
   const verb = lower[gmailIdx + 1];
   if (verb && GMAIL_BARE_SEND_HELPERS.has(verb)) return GMAIL_SEND_HELPER_REASON;
