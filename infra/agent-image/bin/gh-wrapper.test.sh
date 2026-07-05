@@ -66,6 +66,14 @@ refuse_case "alias set"                         alias set m 'pr merge'
 refuse_case "alias set --shell"                 alias set x --shell 'echo hi'
 refuse_case "alias import"                       alias import -
 
+# --- gemini-code-assist review: graphql mutation hidden in a file/stdin field ---
+# The literal-argv scan for "mutation" can't see inside a file or stdin the
+# query is read from, so a mutation could hide there undetected — refuse any
+# graphql field value of the form name=@source instead.
+refuse_case "api graphql mutation via stdin field"  api graphql -f 'query=@-'
+refuse_case "api graphql mutation via file field"   api graphql -f 'query=@mutation.graphql'
+refuse_case "api graphql mutation via -F stdin"     api graphql -F 'query=@-'
+
 # --- allowed: reads + reversible + deeper sub-resources ---
 allow_case "api GET repos"                       api GET /repos/o/r
 allow_case "api list pulls"                       api /repos/o/r/pulls
@@ -90,6 +98,28 @@ if grep -q '^aliases:' "$WORK/ghcfg/config.yml"; then
   fail=$((fail+1)); echo "FAIL alias-strip: aliases: still present in config"
 elif grep -q 'git_protocol: https' "$WORK/ghcfg/config.yml" && grep -q 'editor: vim' "$WORK/ghcfg/config.yml"; then
   pass=$((pass+1)); echo "ok   alias-strip: aliases removed, other config preserved"
+else
+  fail=$((fail+1)); echo "FAIL alias-strip: non-alias config was damaged"
+fi
+
+# --- gemini-code-assist review: blank line / comment inside the aliases
+# block must not prematurely end the strip, leaving a later alias intact ---
+mkdir -p "$WORK/ghcfg2"
+cat > "$WORK/ghcfg2/config.yml" <<'EOF'
+git_protocol: https
+aliases:
+    m: pr merge
+
+    # a comment inside the aliases block
+    co: pr checkout
+editor: vim
+EOF
+rm -f "$WORK/last_args"
+GH_REAL="$STUB" GH_CONFIG_DIR="$WORK/ghcfg2" bash "$WRAPPER" co >/dev/null 2>&1
+if grep -q '^aliases:' "$WORK/ghcfg2/config.yml" || grep -q 'co: pr checkout' "$WORK/ghcfg2/config.yml"; then
+  fail=$((fail+1)); echo "FAIL alias-strip: alias after blank/comment line survived"
+elif grep -q 'git_protocol: https' "$WORK/ghcfg2/config.yml" && grep -q 'editor: vim' "$WORK/ghcfg2/config.yml"; then
+  pass=$((pass+1)); echo "ok   alias-strip: blank/comment mid-block does not resurrect stripping"
 else
   fail=$((fail+1)); echo "FAIL alias-strip: non-alias config was damaged"
 fi

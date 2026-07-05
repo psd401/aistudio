@@ -93,9 +93,12 @@ if [ -f "$GH_CFG" ] && grep -q '^aliases:' "$GH_CFG"; then
   _gh_tmp="$(mktemp 2>/dev/null || echo '')"
   if [ -n "$_gh_tmp" ]; then
     # Drop the `aliases:` key and its indented children; keep everything else.
+    # Blank lines and comments inside the block must not reset `skip` early —
+    # otherwise an alias entry following one is left un-stripped (blocklist
+    # bypass) (REV-review: gemini-code-assist high-priority).
     awk '
       /^aliases:[[:space:]]*$/ { skip=1; next }
-      skip==1 && /^[[:space:]]/ { next }
+      skip==1 && (/^[[:space:]]/ || /^$/ || /^#/) { next }
       skip==1 { skip=0 }
       { print }
     ' "$GH_CFG" > "$_gh_tmp" && cat "$_gh_tmp" > "$GH_CFG"
@@ -147,6 +150,13 @@ if [ "${tokens[0]:-}" = "api" ]; then
       for arg in "$@"; do
         case "$arg" in
           *[Mm]utation*) refuse "gh api graphql (mutation)" ;;
+          # A field value of the form `name=@file` or `name=@-` (gh's syntax
+          # for "read this field from a file / stdin") is opaque to the
+          # literal-argv mutation scan above — the actual query text never
+          # appears in argv, so a mutation could hide inside a piped-in or
+          # on-disk template and slip past unnoticed. Refuse rather than let
+          # an unscannable body through (review: gemini-code-assist high-priority).
+          *=@*) refuse "gh api graphql (field value from file/stdin)" ;;
         esac
       done
       break
