@@ -154,9 +154,20 @@ test("handles '' escaped quotes inside string literals without breaking scan pos
   expect(found).toEqual(['CAST(score AS NUMERIC)']);
 });
 
-test('handles backslash-escaped quotes inside string literals without breaking scan position', () => {
+test("handles backslash-escaped quotes inside E'' string literals without breaking scan position", () => {
   const found = findUnqualifiedNumericCasts(
-    "SELECT CAST(score AS NUMERIC), 'it\\'s CAST(x AS NUMERIC) here' AS label FROM t"
+    "SELECT CAST(score AS NUMERIC), E'it\\'s CAST(x AS NUMERIC) here' AS label FROM t"
+  );
+  expect(found).toEqual(['CAST(score AS NUMERIC)']);
+});
+
+test('does not let a backslash swallow a real cast in a standard (non-E) string literal', () => {
+  // Under Postgres's default standard_conforming_strings=on, a plain '...'
+  // literal does NOT treat backslash as an escape — only '' (doubled quote)
+  // does. So 'a\' terminates at that quote, and the CAST below is live SQL
+  // that must still be flagged, not swallowed as if it were inside a string.
+  const found = findUnqualifiedNumericCasts(
+    "SELECT 1 WHERE x = 'a\\' AND CAST(score AS NUMERIC) FROM t"
   );
   expect(found).toEqual(['CAST(score AS NUMERIC)']);
 });

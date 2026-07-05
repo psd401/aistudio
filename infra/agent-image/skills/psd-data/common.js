@@ -77,8 +77,10 @@ const UNQUALIFIED_SHORTHAND_RE = /::\s*(NUMERIC|DECIMAL)\b(?!\s*\()/gi;
 // original string) so neither regex above fires on SQL text that merely
 // *mentions* a cast inside a literal or a comment, e.g.
 // `WHERE note LIKE '%CAST(x AS NUMERIC)%'` or `-- CAST(x AS NUMERIC)`.
-// Handles '' and backslash as escaped quotes inside strings; does not
-// handle dollar-quoted strings (rare in this context).
+// Handles '' doubled-quote escapes in all string literals, and backslash
+// escapes only inside E'...' literals (matching Postgres's actual
+// standard_conforming_strings=on semantics); does not handle dollar-quoted
+// strings (rare in this context).
 function blankStringLiterals(sql) {
   let out = '';
   let i = 0;
@@ -112,11 +114,23 @@ function blankStringLiterals(sql) {
     }
 
     if (ch === "'") {
+      // Postgres only applies backslash-escaping inside E'...' literals
+      // (standard_conforming_strings = on, the default, makes backslash a
+      // plain character in a bare '...' literal — only '' doubling escapes
+      // a quote). Detect the E prefix so a plain '...' literal containing a
+      // stray backslash-quote sequence terminates where Postgres would
+      // actually terminate it, rather than swallowing the rest of the SQL.
+      const prevChar = sql[i - 1];
+      const prevPrevChar = sql[i - 2];
+      const isEscapeString =
+        prevChar !== undefined &&
+        /[eE]/.test(prevChar) &&
+        (prevPrevChar === undefined || !/[A-Za-z0-9_]/.test(prevPrevChar));
       out += ' ';
       i++;
       while (i < sql.length) {
         const curr = sql[i];
-        if (curr === '\\') {
+        if (isEscapeString && curr === '\\') {
           out += '  ';
           i += 2;
         } else if (curr === "'" && sql[i + 1] === "'") {
