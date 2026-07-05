@@ -984,7 +984,7 @@ Publish the object's current version to a destination. Requires `content:publish
 
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
-| `destination` | `intranet` \| `public_web` \| `schoology` \| `google` | yes | — |
+| `destination` | `intranet` \| `public_web` \| `schoology` \| `google` \| `okf` | yes | `okf` serializes the single object to a portable OKF concept bundle in S3 (internal-publish authority) |
 | `visibility` | object | no | Optional visibility to apply alongside the publish |
 
 **Public-publish gate (§26.4):** if `destination`/`visibility` is public-facing and
@@ -1034,7 +1034,7 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 Unpublish the object from a destination. **Idempotent:** unpublishing an object that
 is not live at the destination returns `unpublished: false` rather than erroring.
-`{destination}` is one of `intranet`, `public_web`, `schoology`, `google`. Requires
+`{destination}` is one of `intranet`, `public_web`, `schoology`, `google`, `okf`. Requires
 `content:publish_internal`.
 
 **Public-publish gate (§26.4):** taking any public-facing destination
@@ -1130,7 +1130,7 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 **Response `202`** (approval required — public bundle without `content:publish_public`)
 Body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
-**Response `403`** — API key lacks `content:read`. **Response `404`** — `CONTENT_NOT_FOUND` (collection).
+**Response `403`** — API key lacks `content:read`. **Response `400`** — `CONTENT_VALIDATION` (unresolvable `collectionId`). **Response `404`** — `CONTENT_NOT_FOUND` (a root collection the caller cannot enter is masked as not-found).
 
 ---
 

@@ -1500,6 +1500,10 @@ paths:
         Publishes the object's current version to a destination. Mirrors the MCP
         `publish_content` tool. Requires `content:publish_internal`.
 
+        The `okf` destination (Phase 8) serializes the single object to a portable
+        Open Knowledge Format concept bundle in S3 (internal-publish authority — not
+        a public destination); for a whole collection use `POST /content/export/okf`.
+
         **Public-publish gate (§26.4):** a public-facing destination/visibility
         requested by a caller lacking `content:publish_public` is NOT an error —
         it returns **HTTP 202** with `data.status = "approval_required"` and the
@@ -1837,7 +1841,7 @@ components:
       description: Publish destination
       schema:
         type: string
-        enum: [intranet, public_web, schoology, google]
+        enum: [intranet, public_web, schoology, google, okf]
 
   # ---- Headers ----
   headers:
@@ -2625,7 +2629,7 @@ components:
       properties:
         destination:
           type: string
-          enum: [intranet, public_web, schoology, google]
+          enum: [intranet, public_web, schoology, google, okf]
         visibility:
           $ref: "#/components/schemas/ContentVisibility"
 
@@ -2727,7 +2731,7 @@ components:
               format: uuid
             destination:
               type: string
-              enum: [intranet, public_web, schoology, google]
+              enum: [intranet, public_web, schoology, google, okf]
             publishedVersionId:
               type: string
               format: uuid
@@ -2775,7 +2779,7 @@ components:
               format: uuid
             destination:
               type: string
-              enum: [intranet, public_web, schoology, google]
+              enum: [intranet, public_web, schoology, google, okf]
             unpublished:
               type: boolean
               description: "`false` when the object was not live at the destination (idempotent no-op); `true` when an active publication was removed."
@@ -2863,6 +2867,8 @@ components:
         files:
           type: array
           minItems: 1
+          maxItems: 1000
+          description: "Bundle files. Request-size safety bounds: at most 1000 files, each `path` ≤ 1024 chars and `content` ≤ 5,000,000 chars (oversize → 400)."
           items:
             $ref: "#/components/schemas/OkfFile"
         targetCollectionId:

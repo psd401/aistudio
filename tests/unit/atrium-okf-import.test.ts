@@ -37,9 +37,11 @@ jest.mock("@/lib/db/schema", () => ({
 }));
 
 import { contentService } from "@/lib/content/content-service";
+import { executeQuery } from "@/lib/db/drizzle-client";
 import { okfImportService, ATRIUM_IMPORT_AGENT_ID } from "@/lib/content/okf/import";
 
 const createMock = contentService.create as jest.Mock;
+const executeQueryMock = executeQuery as jest.Mock;
 import { buildConceptFile, type ConceptSource } from "@/lib/content/okf/serialize";
 import { serializeFrontmatter } from "@/lib/content/okf/frontmatter";
 import { OKF_INDEX_FILE } from "@/lib/content/okf/profile";
@@ -67,6 +69,20 @@ const docSource: ConceptSource = {
 describe("okfImportService.importBundle — provenance + safe defaults", () => {
   beforeEach(() => {
     createMock.mockClear();
+    executeQueryMock.mockClear();
+  });
+
+  it("reconstructs every ancestor collection for a nested concept path", async () => {
+    // Bundle with a deeply nested file but NO file directly in the intermediate
+    // `math/` dir — every ancestor collection must still be created (math + algebra).
+    await okfImportService.importBundle(userCaller, {
+      files: [{ path: "math/algebra/equations.md", content: buildConceptFile(docSource) }],
+    });
+    // createCollection is issued for the root ("") + "math" + "math/algebra" = 3.
+    expect(executeQueryMock).toHaveBeenCalledTimes(3);
+    // The concept lands in the deepest reconstructed collection.
+    const [, input] = createMock.mock.calls[0];
+    expect(input.collectionId).toBe("coll-new");
   });
 
   it("writes imported objects as the atrium-importer agent (actor_kind='agent')", async () => {
@@ -114,6 +130,27 @@ describe("okfImportService.importBundle — provenance + safe defaults", () => {
     expect(input.kind).toBe("artifact");
     expect(input.body).toBe("<h1>Hello</h1>");
     expect(input.bodyFormat).toBe("html");
+  });
+
+  it("extracts a tilde-fenced (~~~) artifact body from another producer", async () => {
+    const content = [
+      '---',
+      'type: "artifact"',
+      'title: "Tilde Widget"',
+      '---',
+      '',
+      '~~~jsx',
+      '<Widget/>',
+      '~~~',
+    ].join("\n");
+    await okfImportService.importBundle(userCaller, {
+      files: [{ path: "tilde.md", content }],
+      targetCollectionId: "target-coll",
+    });
+    const [, input] = createMock.mock.calls[0];
+    expect(input.kind).toBe("artifact");
+    expect(input.body).toBe("<Widget/>");
+    expect(input.bodyFormat).toBe("jsx");
   });
 
   it("skips reserved OKF files (index.md / log.md) as concepts", async () => {

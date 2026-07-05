@@ -27,14 +27,15 @@
  * row (§27).
  */
 
-import { and, asc, eq, isNotNull } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
-import { contentCollections, contentPublications } from "@/lib/db/schema";
+import { contentPublications } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
 import { canPublishPublic, raisePublishApprovalRequired } from "../helpers";
 import { visibilityService } from "../visibility-service";
 import { versionService } from "../version-service";
 import { retrievalService } from "../retrieval-service";
+import { collectionService, type CollectionTreeNode } from "../collection-service";
 import { s3Store } from "../storage/s3-store";
 import { NotFoundError } from "../errors";
 import type { ContentObjectDTO, Requester } from "../types";
@@ -90,45 +91,58 @@ interface CollectionRow {
   parentId: string | null;
 }
 
-/** Load every collection (id, name, slug, parent) ordered for a stable tree. */
-async function loadAllCollections(): Promise<CollectionRow[]> {
-  return executeQuery(
-    (db) =>
-      db
-        .select({
-          id: contentCollections.id,
-          name: contentCollections.name,
-          slug: contentCollections.slug,
-          parentId: contentCollections.parentId,
-        })
-        .from(contentCollections)
-        .orderBy(asc(contentCollections.position), asc(contentCollections.name)),
-    "okf.export.loadCollections"
-  );
+/** Find a collection node by id anywhere in a visibility-filtered tree. */
+function findNode(
+  nodes: CollectionTreeNode[],
+  id: string
+): CollectionTreeNode | null {
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    const found = findNode(node.children, id);
+    if (found) return found;
+  }
+  return null;
 }
 
-/** The root collection + every descendant, in a stable pre-order. */
-function collectSubtree(
-  rootId: string,
-  all: CollectionRow[]
-): CollectionRow[] {
-  const byParent = new Map<string | null, CollectionRow[]>();
+/**
+ * Flatten the visibility-filtered subtree rooted at `rootNode` into a pre-order
+ * list + lookups. **This is the P1 permission fix (chatgpt-codex review):** the
+ * subtree is taken from `collectionService.tree(req)` — the SAME visibility filter
+ * the reader sidebar uses (§21) — so a collection the requester cannot ENTER is
+ * absent entirely. Without this, the export walked EVERY descendant of
+ * `content_collections` and emitted `index.md`/`log.md`/child links for private/
+ * group sections, leaking their names + slugs to a `content:read` caller.
+ */
+function flattenVisibleSubtree(rootNode: CollectionTreeNode): {
+  subtree: CollectionRow[];
+  byId: Map<string, CollectionRow>;
+  childrenByParent: Map<string, CollectionRow[]>;
+} {
+  const subtree: CollectionRow[] = [];
   const byId = new Map<string, CollectionRow>();
-  for (const c of all) {
-    byId.set(c.id, c);
-    const siblings = byParent.get(c.parentId) ?? [];
-    siblings.push(c);
-    byParent.set(c.parentId, siblings);
-  }
-  const root = byId.get(rootId);
-  if (!root) return [];
-  const ordered: CollectionRow[] = [];
-  const walk = (node: CollectionRow) => {
-    ordered.push(node);
-    for (const child of byParent.get(node.id) ?? []) walk(child);
+  const childrenByParent = new Map<string, CollectionRow[]>();
+  const walk = (node: CollectionTreeNode) => {
+    const row: CollectionRow = {
+      id: node.id,
+      name: node.name,
+      slug: node.slug,
+      parentId: node.parentId,
+    };
+    subtree.push(row);
+    byId.set(row.id, row);
+    childrenByParent.set(
+      node.id,
+      node.children.map((c) => ({
+        id: c.id,
+        name: c.name,
+        slug: c.slug,
+        parentId: c.parentId,
+      }))
+    );
+    for (const child of node.children) walk(child);
   };
-  walk(root);
-  return ordered;
+  walk(rootNode);
+  return { subtree, byId, childrenByParent };
 }
 
 /**
@@ -402,29 +416,24 @@ export const okfExportService = {
       assertPublicExportAllowed(req, rootCollectionId, input);
     }
 
-    const all = await loadAllCollections();
-    const byId = new Map(all.map((c) => [c.id, c]));
-    if (!byId.has(rootCollectionId)) {
+    // Walk the requester-VISIBLE collection tree (the reader sidebar's filter, §21),
+    // NOT every row in content_collections — so a section the requester cannot enter
+    // is never named in the bundle (P1 fix). A root the requester cannot enter is
+    // absent from the tree and 404s (existence-masking, consistent with content reads).
+    const tree = await collectionService.tree(req);
+    const rootNode = findNode(tree, rootCollectionId);
+    if (!rootNode) {
       throw new NotFoundError("Collection not found", { rootCollectionId });
     }
-    const subtree = collectSubtree(rootCollectionId, all);
-    const subtreeIds = new Set(subtree.map((c) => c.id));
-    const childrenByParent = new Map<string | null, CollectionRow[]>();
-    for (const c of all) {
-      const siblings = childrenByParent.get(c.parentId) ?? [];
-      siblings.push(c);
-      childrenByParent.set(c.parentId, siblings);
-    }
+    const { subtree, byId, childrenByParent } = flattenVisibleSubtree(rootNode);
 
     const files: OkfFile[] = [];
     let objectCount = 0;
 
     for (const collection of subtree) {
       const dir = collectionDir(collection, rootCollectionId, byId);
-      // Child collections KEPT in the bundle are only those in the subtree.
-      const childCollections = (childrenByParent.get(collection.id) ?? []).filter(
-        (c) => subtreeIds.has(c.id)
-      );
+      // Every child in the visible tree is already enterable — no further filter.
+      const childCollections = childrenByParent.get(collection.id) ?? [];
       const section = await buildSection(
         req,
         collection,

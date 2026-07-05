@@ -19,6 +19,7 @@ import { z } from "zod";
 import { okfImportService, recordContentAudit } from "@/lib/content";
 import {
   contentErrorToResponse,
+  okfImportFilesSchema,
   resolveRestRequester,
 } from "@/lib/content/rest";
 import {
@@ -28,9 +29,7 @@ import {
 import { createLogger } from "@/lib/logger";
 
 const importBodySchema = z.object({
-  files: z
-    .array(z.object({ path: z.string().min(1), content: z.string() }))
-    .min(1),
+  files: okfImportFilesSchema,
   targetCollectionId: z.string().min(1).max(200).optional(),
 });
 

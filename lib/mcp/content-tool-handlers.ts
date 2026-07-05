@@ -23,6 +23,7 @@ import {
   publishService,
   recordContentAudit,
   requesterFromApiAuth,
+  ValidationError,
   visibilityService,
   type ContentAuditAction,
   type Requester,
@@ -35,6 +36,7 @@ import {
 // Reuse the REST-side schemas verbatim so MCP and REST validate the same grant /
 // visibility contract from ONE definition (they were byte-identical copies).
 import {
+  okfImportFilesSchema,
   restGrantSchema as grantZ,
   restVisibilitySchema as visibilityZ,
 } from "@/lib/content/rest";
@@ -484,7 +486,7 @@ async function handleSetVisibility(
 
 const publishContentSchema = z.object({
   id: z.string().min(1),
-  destination: z.enum(["intranet", "public_web", "schoology", "google"]),
+  destination: z.enum(["intranet", "public_web", "schoology", "google", "okf"]),
 });
 
 async function handlePublishContent(
@@ -555,9 +557,13 @@ async function handleExportOkf(
     // canView filter is in the service). A `public` audience is gated by §26.4
     // inside okfExportService via this authority flag (an EXPLICIT
     // content:publish_public scope; a session wildcard does NOT satisfy it).
+    //
+    // `resolveCollectionId` THROWS `ValidationError` for an unresolvable id (caught
+    // by `fail` below → structured error); the `!collectionId` guard only handles
+    // the impossible empty-input case (zod `.min(1)` rejects it) for the type checker.
     const collectionId = await resolveCollectionId(parsed.data.collectionId);
     if (!collectionId) {
-      return failRead(new Error("Collection not found"));
+      return failRead(new ValidationError("Collection not found"));
     }
     const hasPublishPublicCapability = hasPublishPublicScope(context.scopes);
     const result = await okfExportService.exportCollection(req, collectionId, {
@@ -593,9 +599,7 @@ async function handleExportOkf(
 }
 
 const importOkfSchema = z.object({
-  files: z
-    .array(z.object({ path: z.string().min(1), content: z.string() }))
-    .min(1),
+  files: okfImportFilesSchema,
   targetCollectionId: z.string().min(1).max(200).optional(),
 });
 

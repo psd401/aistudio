@@ -32,7 +32,9 @@ import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers"
 import { createLogger } from "@/lib/logger";
 
 const publishBodySchema = z.object({
-  destination: z.enum(["intranet", "public_web", "schoology", "google"]),
+  // `okf` serializes the single object to a portable OKF concept bundle in S3
+  // (Phase 8, #1103) — internal-publish authority, not a public destination.
+  destination: z.enum(["intranet", "public_web", "schoology", "google", "okf"]),
   visibility: restVisibilitySchema.optional(),
 });
 

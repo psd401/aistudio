@@ -112,8 +112,10 @@ export const okfAdapter: PublishAdapter = {
       files,
     };
 
-    // versionId is a uuid (safe segment); scope the key by object id.
-    const key = s3Store.okfBundleKey(objectId, versionId);
+    // Scope the bundle key by collection id (the documented `okfBundleKey`
+    // convention), falling back to the object id for a collection-less object.
+    // versionId is a uuid — a safe key segment.
+    const key = s3Store.okfBundleKey(obj.collectionId ?? objectId, versionId);
     await s3Store.putText(key, JSON.stringify(bundle), "application/json", "attachment");
     const url = await s3Store.signedReadUrl(key);
     log.info("Published single-object OKF concept bundle", { objectId, key });

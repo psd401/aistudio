@@ -9,32 +9,31 @@
  *    `content:publish_public` (a non-admin human, or ANY autonomous agent) is
  *    blocked with ApprovalRequiredError before any object is read; a public bundle
  *    additionally carries only `visibility_level = 'public'` objects.
+ *  - **collection-name boundary (P1, chatgpt-codex review):** the subtree comes
+ *    from `collectionService.tree(req)` (the visibility-filtered reader tree), so a
+ *    section the requester cannot enter is NEVER named in the bundle.
  */
 
 // --- mocks (hoisted) ---
 
-const rootCollectionRow = { id: "root", name: "Root", slug: "root", parentId: null };
-let collectionsRows: Array<{ id: string; name: string; slug: string; parentId: string | null }> = [
-  rootCollectionRow,
-];
+// The visibility-filtered collection tree the export walks. Set per test; a
+// non-visible section is simply absent from it (that IS the P1 guarantee).
+type TreeNode = { id: string; name: string; slug: string; parentId: string | null; children: TreeNode[]; visibleObjectCount: number };
+let visibleTree: TreeNode[] = [];
+function node(id: string, over: Partial<TreeNode> = {}): TreeNode {
+  return { id, name: id, slug: id, parentId: null, children: [], visibleObjectCount: 0, ...over };
+}
+
+jest.mock("@/lib/content/collection-service", () => ({
+  collectionService: { tree: jest.fn(async () => visibleTree) },
+}));
 
 jest.mock("@/lib/db/drizzle-client", () => ({
-  // loadAllCollections → the collection rows; priorPublication (and anything
-  // else) → empty. Keyed on the operation label so the two reads are distinct.
-  executeQuery: jest.fn(async (_cb: unknown, label?: string) => {
-    if (label === "okf.export.loadCollections") return collectionsRows;
-    return [];
-  }),
+  // Only priorPublication reads via executeQuery now → empty.
+  executeQuery: jest.fn(async () => []),
 }));
 
 jest.mock("@/lib/db/schema", () => ({
-  contentCollections: {
-    id: "id",
-    name: "name",
-    slug: "slug",
-    parentId: "parentId",
-    position: "position",
-  },
   contentPublications: {
     objectId: "objectId",
     status: "status",
@@ -88,6 +87,7 @@ jest.mock("@/lib/content/events", () => ({
 import { okfExportService } from "@/lib/content/okf/export";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { retrievalService } from "@/lib/content/retrieval-service";
+import { collectionService } from "@/lib/content/collection-service";
 import { s3Store } from "@/lib/content/storage/s3-store";
 import { contentEvents } from "@/lib/content/events";
 import { ApprovalRequiredError, NotFoundError } from "@/lib/content/errors";
@@ -95,6 +95,7 @@ import type { Requester } from "@/lib/content/types";
 
 const listVisibleMock = visibilityService.listVisible as jest.Mock;
 const getContextDocumentMock = retrievalService.getContextDocument as jest.Mock;
+const treeMock = collectionService.tree as jest.Mock;
 const putTextMock = s3Store.putText as jest.Mock;
 const emitMock = contentEvents.emit as jest.Mock;
 
@@ -135,10 +136,12 @@ function objectDTO(over: Partial<Record<string, unknown>> = {}): Record<string, 
 
 describe("okfExportService.exportCollection — permission boundary", () => {
   beforeEach(() => {
-    collectionsRows = [rootCollectionRow];
+    // Default: a single visible root collection (no children).
+    visibleTree = [node("root", { name: "Root", slug: "root" })];
     visibleObjects = [];
     listVisibleMock.mockClear();
     getContextDocumentMock.mockClear();
+    treeMock.mockClear();
     putTextMock.mockClear();
     emitMock.mockClear();
   });
@@ -160,6 +163,30 @@ describe("okfExportService.exportCollection — permission boundary", () => {
     // Bundle was persisted to S3; its location is returned.
     expect(putTextMock).toHaveBeenCalled();
     expect(result.url).toBe("https://signed/bundle");
+  });
+
+  it("only names collections the requester can enter (P1 — no hidden-section leak)", async () => {
+    // The visibility-filtered tree contains root + one enterable child ("math").
+    // A private sibling the requester cannot enter is simply ABSENT from the tree,
+    // so it can never be named in the bundle.
+    visibleTree = [
+      node("root", {
+        name: "Root",
+        slug: "root",
+        children: [node("math", { name: "Mathematics", slug: "math", parentId: "root" })],
+      }),
+    ];
+    visibleObjects = [];
+    const result = await okfExportService.exportCollection(staffUser, "root");
+    const paths = result.bundle.files.map((f) => f.path);
+    expect(paths).toContain("index.md");
+    expect(paths).toContain("math/index.md");
+    // The root index links only the visible child, never a hidden section.
+    const rootIndex = result.bundle.files.find((f) => f.path === "index.md")!.content;
+    expect(rootIndex).toContain("Mathematics");
+    expect(rootIndex).not.toContain("secret");
+    // Only the two visible collections are counted.
+    expect(result.bundle.collectionCount).toBe(2);
   });
 
   it("blocks a public bundle for a non-admin human lacking content:publish_public", async () => {
@@ -205,8 +232,8 @@ describe("okfExportService.exportCollection — permission boundary", () => {
     expect(result.bundle.objectCount).toBe(1);
   });
 
-  it("404s an unknown root collection", async () => {
-    collectionsRows = [rootCollectionRow];
+  it("404s a root collection the requester cannot enter (absent from the visible tree)", async () => {
+    visibleTree = [node("root", { name: "Root", slug: "root" })];
     await expect(
       okfExportService.exportCollection(staffUser, "missing")
     ).rejects.toBeInstanceOf(NotFoundError);

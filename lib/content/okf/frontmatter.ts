@@ -55,13 +55,23 @@ export function serializeFrontmatter(fm: OkfFrontmatter): string {
 function parseScalar(raw: string): string {
   const value = raw.trim();
   if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-    return value
-      .slice(1, -1)
-      .replace(/\\n/g, "\n")
-      .replace(/\\r/g, "\r")
-      .replace(/\\t/g, "\t")
-      .replace(/\\"/g, '"')
-      .replace(/\\\\/g, "\\");
+    // SINGLE-PASS unescape: a chained `.replace()` corrupts sequences like `\\n`
+    // (an escaped backslash followed by n) — the `\\n` pass would consume the
+    // second backslash + n as a newline. One regex over `\X` escapes consumes the
+    // backslash + escaped char atomically, so each escape is handled exactly once.
+    return value.slice(1, -1).replace(/\\(.)/g, (_m, ch: string) => {
+      switch (ch) {
+        case "n":
+          return "\n";
+        case "r":
+          return "\r";
+        case "t":
+          return "\t";
+        // `\"`, `\\`, and any other `\X` collapse to the escaped char verbatim.
+        default:
+          return ch;
+      }
+    });
   }
   if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
     // YAML single-quoted: the only escape is a doubled quote.
@@ -75,8 +85,17 @@ function parseFlowSequence(inner: string): string[] {
   const items: string[] = [];
   let current = "";
   let quote: '"' | "'" | null = null;
+  let escaped = false;
   for (const ch of inner) {
-    if (quote) {
+    if (quote === '"' && escaped) {
+      // The previous char was a backslash inside a double-quoted item: this char
+      // (e.g. an escaped `\"`) is literal and cannot close the quote.
+      current += ch;
+      escaped = false;
+    } else if (quote === '"' && ch === "\\") {
+      current += ch;
+      escaped = true;
+    } else if (quote) {
       current += ch;
       if (ch === quote) quote = null;
     } else if (ch === '"' || ch === "'") {
@@ -99,8 +118,9 @@ function parseFlowSequence(inner: string): string[] {
  * whole document as body.
  */
 function splitFrontmatter(md: string): { fmLines: string[]; body: string } {
-  // Normalize CRLF so the fence match is newline-agnostic.
-  const normalized = md.replace(/\r\n/g, "\n");
+  // Strip a leading BOM (Windows/editor-generated files) then normalize CRLF, so
+  // the opening-fence match is newline-agnostic and not defeated by a U+FEFF.
+  const normalized = md.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
   if (!normalized.startsWith(`${FRONTMATTER_FENCE}\n`) && normalized !== FRONTMATTER_FENCE) {
     return { fmLines: [], body: md };
   }

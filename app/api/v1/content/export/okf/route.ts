@@ -56,12 +56,16 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   const hasPublishPublicCapability = hasPublishPublicScope(auth.scopes);
 
   try {
+    // `resolveCollectionId` THROWS `ValidationError` (400 CONTENT_VALIDATION) for an
+    // unresolvable slug/id — caught below and mapped to a 400, consistent with every
+    // other content route. This guard only handles the impossible empty-input case
+    // (zod `.min(1)` already rejects it), so it too returns a 400, never a 404.
     const collectionId = await resolveCollectionId(input.collectionId);
     if (!collectionId) {
       return createErrorResponse(
         requestId,
-        404,
-        "CONTENT_NOT_FOUND",
+        400,
+        "VALIDATION_ERROR",
         "Collection not found"
       );
     }

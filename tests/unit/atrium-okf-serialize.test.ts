@@ -52,6 +52,23 @@ describe("OKF frontmatter (de)serialization", () => {
     expect(frontmatter.timestamp).toBe("2026-07-05T12:00:00.000Z");
   });
 
+  it("round-trips a literal backslash sequence without corrupting the escape (single-pass unescape)", () => {
+    // Title contains a literal backslash + n (NOT a newline) plus a quote — a
+    // chained-.replace() unescaper would corrupt the `\\n` into `\` + newline.
+    const fm = { type: "document", title: 'path\\name and a "q"', tags: ['a"b', "c\\d"] };
+    const { frontmatter } = parseFrontmatter(serializeFrontmatter(fm));
+    expect(frontmatter.title).toBe('path\\name and a "q"');
+    expect(frontmatter.tags).toEqual(['a"b', "c\\d"]);
+  });
+
+  it("strips a leading BOM so a Windows-generated bundle still parses frontmatter", () => {
+    const md = "\uFEFF---\ntype: document\ntitle: BOM Doc\n---\n\nBody";
+    const concept = parseConceptFile(md);
+    expect(concept.frontmatter.type).toBe("document");
+    expect(concept.frontmatter.title).toBe("BOM Doc");
+    expect(concept.body).toBe("Body");
+  });
+
   it("tolerates other producers: unquoted scalars and block sequences", () => {
     const md = [
       "---",

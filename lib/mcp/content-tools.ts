@@ -161,14 +161,14 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "publish_content",
     description:
-      "Publish a content object to a destination. Public destinations require the human-held content:publish_public; without it the call returns a structured approval_required signal.",
+      "Publish a content object to a destination. Public destinations require the human-held content:publish_public; without it the call returns a structured approval_required signal. 'okf' serializes the single object to a portable Open Knowledge Format concept bundle in S3 (internal-publish authority).",
     inputSchema: {
       type: "object",
       properties: {
         id: { type: "string", description: "Object id" },
         destination: {
           type: "string",
-          enum: ["intranet", "public_web", "schoology", "google"],
+          enum: ["intranet", "public_web", "schoology", "google", "okf"],
           description: "Publish destination",
         },
       },

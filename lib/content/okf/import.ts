@@ -191,7 +191,9 @@ async function reconstructCollections(
 
 /** Split an artifact concept body (a fenced code block) into code + format. */
 function extractArtifactBody(body: string): { code: string; bodyFormat: BodyFormat } {
-  const match = /^\s*(`{3,})([A-Za-z]*)\r?\n([\s\S]*?)\r?\n\1\s*$/.exec(body.trim());
+  // Accept backtick OR tilde fences (CommonMark / other OKF producers use both);
+  // `\1` requires the closing fence to match the opening run character + length.
+  const match = /^\s*([`~]{3,})([A-Za-z]*)\r?\n([\s\S]*?)\r?\n\1\s*$/.exec(body.trim());
   if (match) {
     const lang = match[2].toLowerCase();
     return { code: match[3], bodyFormat: lang === "jsx" ? "jsx" : "html" };
@@ -282,8 +284,18 @@ export const okfImportService = {
       throw new ValidationError("OKF bundle contains no concept files");
     }
 
-    // Every directory referenced by any file needs a collection.
-    const dirs = new Set<string>(input.files.map((f) => dirOf(f.path)));
+    // Every directory referenced by any file needs a collection — INCLUDING every
+    // ancestor. A bundle with `math/algebra/x.md` but no file directly in `math/`
+    // (another producer may omit intermediate index.md files) must still create the
+    // `math` collection, or `math/algebra` would be mis-parented / flattened.
+    const dirs = new Set<string>([""]);
+    for (const file of input.files) {
+      let dir = dirOf(file.path);
+      while (dir !== "") {
+        dirs.add(dir);
+        dir = parentDir(dir);
+      }
+    }
     const { map: dirToCollection, created } = await reconstructCollections(
       dirs,
       fileMap,
