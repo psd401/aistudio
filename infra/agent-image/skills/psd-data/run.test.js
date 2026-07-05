@@ -34,6 +34,12 @@ common.callMcp = async (method, params, ownerEmail) => {
 
 const { main } = require('./run');
 
+// require() caches modules process-wide; clear run.js's entry now that
+// `main` has been extracted so a later require('./run') elsewhere in this
+// test process re-evaluates against the real (unstubbed) common.callMcp
+// instead of silently reusing this stub.
+delete require.cache[require.resolve('./run')];
+
 common.callMcp = originalCallMcp;
 
 const EMAIL = 'teacher@psd401.net';
