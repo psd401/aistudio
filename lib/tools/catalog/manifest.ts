@@ -187,6 +187,20 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     internalScopes: ["content:publish_internal"],
     destructive: true,
   },
+  // OKF interoperability (Phase 8, #1103, §36.4). Export is a read/serialization
+  // (content:read; the §26.4 public gate is enforced in okfExportService, not by a
+  // scope here). Import CREATES content, so it is destructive + content:create.
+  export_okf: {
+    identifier: "content.export_okf",
+    requiredScope: "content:read",
+    internalScopes: ["content:read"],
+  },
+  import_okf: {
+    identifier: "content.import_okf",
+    requiredScope: "content:create",
+    internalScopes: ["content:create"],
+    destructive: true,
+  },
 };
 
 /**

@@ -25,7 +25,11 @@ export type ContentAuditAction =
   | "create_version"
   | "set_visibility"
   | "publish"
-  | "unpublish";
+  | "unpublish"
+  // OKF interoperability (Phase 8, #1103, §36.4). `export_okf` serializes a
+  // collection to a portable bundle; `import_okf` writes a bundle into content.
+  | "export_okf"
+  | "import_okf";
 
 export type ContentAuditSurface = "mcp" | "rest";
 export type ContentAuditOutcome = "ok" | "error" | "approval_required";

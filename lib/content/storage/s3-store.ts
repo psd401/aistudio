@@ -105,6 +105,17 @@ export const s3Store = {
   },
 
   /**
+   * Build the S3 key for an exported OKF bundle (Phase 8, §36.5). Bundles live
+   * under `atrium/okf/{collectionId}/{exportId}.json` — collection-scoped rather
+   * than object-scoped (a bundle is a collection subtree, not a single object).
+   */
+  okfBundleKey(collectionId: string, exportId: string): string {
+    assertSafeSegment(collectionId, "collectionId");
+    assertSafeSegment(exportId, "exportId");
+    return `${ATRIUM_PREFIX}/okf/${collectionId}/${exportId}.json`;
+  },
+
+  /**
    * Write a text body to S3 at the given key.
    *
    * `contentDisposition` should be `"attachment"` for any key that holds active

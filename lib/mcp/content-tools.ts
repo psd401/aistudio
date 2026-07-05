@@ -31,6 +31,11 @@ export const CONTENT_TOOL_SCOPE_MAP: Record<string, ApiScope> = {
   // enforced in publishService, which raises approval_required without the
   // human-held content:publish_public.
   publish_content: "content:publish_internal",
+  // OKF interoperability (Phase 8, §36.4). Export is a read/serialization
+  // (content:read); a `public` audience additionally needs content:publish_public
+  // (the §26.4 gate is enforced in okfExportService). Import creates content.
+  export_okf: "content:read",
+  import_okf: "content:create",
 };
 
 export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
@@ -168,6 +173,48 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
         },
       },
       required: ["id", "destination"],
+    },
+  },
+  {
+    name: "export_okf",
+    description:
+      "Export a collection subtree as a portable Open Knowledge Format (OKF v0.1) bundle: one markdown-with-frontmatter concept file per content object, an index.md per collection, and a log.md change history. Every object is filtered by the caller's view permission. A 'public' audience produces an anonymous-safe (public-visibility-only) bundle and requires content:publish_public — without it the call returns a structured approval_required signal. Returns the bundle files inline plus its S3 location.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        collectionId: {
+          type: "string",
+          description: "Root collection slug or id to export",
+        },
+        audience: {
+          type: "string",
+          enum: ["internal", "public"],
+          description:
+            "'internal' (default) scopes the bundle to what you can view; 'public' produces an anonymous-safe bundle (public content only) and needs content:publish_public",
+        },
+      },
+      required: ["collectionId"],
+    },
+  },
+  {
+    name: "import_okf",
+    description:
+      "Import an Open Knowledge Format bundle (the { files: [{ path, content }] } shape export_okf returns) into Atrium content. Reconstructs the collection tree from the bundle directories and creates one content object per concept file. Imported objects are agent-authored (actor_kind='agent') and created private + draft. Returns the created object + collection ids.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        files: {
+          type: "array",
+          items: { type: "object" },
+          description: "Bundle files: [{ path: string, content: string }]",
+        },
+        targetCollectionId: {
+          type: "string",
+          description:
+            "Existing collection slug or id to import the bundle root INTO (optional; a fresh root collection is created when omitted)",
+        },
+      },
+      required: ["files"],
     },
   },
 ];

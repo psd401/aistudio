@@ -2,9 +2,10 @@
  * Registry-parity tests for the Atrium content MCP tools (Issue #1055, §24).
  *
  * Guards the wiring invariants that a typo would otherwise leak to runtime: every
- * content tool is listed, scoped, and has a handler; the set is exactly the eight
+ * content tool is listed, scoped, and has a handler; the set is exactly the ten
  * atomic primitives (no generate_and_publish); publish maps to publish_internal
- * (the gate, not the scope, blocks public).
+ * (the gate, not the scope, blocks public). The set includes the Phase 8 OKF
+ * interoperability tools (export_okf / import_okf, #1103).
  */
 
 // The handlers module imports the content barrel, which transitively pulls the
@@ -30,10 +31,12 @@ const EXPECTED = [
   "create_version",
   "set_visibility",
   "publish_content",
+  "export_okf",
+  "import_okf",
 ] as const;
 
 describe("Atrium MCP content tools registry", () => {
-  it("exposes exactly the eight atomic primitives (no generate_and_publish)", () => {
+  it("exposes exactly the ten atomic primitives (no generate_and_publish)", () => {
     const names = CONTENT_MCP_TOOLS.map((t) => t.name).sort();
     expect(names).toEqual([...EXPECTED].sort());
     expect(names).not.toContain("generate_and_publish");
@@ -57,6 +60,10 @@ describe("Atrium MCP content tools registry", () => {
     // Public publishing is gated in publishService (§26.4), NOT by a separate
     // tool scope — the tool requires only the internal-publish scope.
     expect(CONTENT_TOOL_SCOPE_MAP.publish_content).toBe("content:publish_internal");
+    // OKF export is a read/serialization (the §26.4 public-bundle gate is enforced
+    // in okfExportService, not by a distinct tool scope); import creates content.
+    expect(CONTENT_TOOL_SCOPE_MAP.export_okf).toBe("content:read");
+    expect(CONTENT_TOOL_SCOPE_MAP.import_okf).toBe("content:create");
   });
 
   it("every tool input schema declares a type and properties", () => {

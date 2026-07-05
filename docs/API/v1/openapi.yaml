@@ -1627,6 +1627,131 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /content/export/okf:
+    post:
+      operationId: exportOkf
+      tags: [Content]
+      summary: Export a collection as an OKF bundle
+      description: |
+        Serializes a `content_collections` subtree to a portable **Open Knowledge
+        Format (OKF v0.1)** bundle: one markdown-with-YAML-frontmatter concept file
+        per content object, an `index.md` per collection, and a `log.md` change
+        history (spec §36). Mirrors the MCP `export_okf` tool. Requires
+        `content:read`.
+
+        **Permission-at-export (the security-critical surface):** every object is
+        filtered by the caller's view permission (`visibilityService.canView`,
+        pushed into SQL) — a bundle requested by a student identity contains no
+        staff-only concept.
+
+        **Public bundles (§26.4 gate):** `audience: "public"` produces an
+        anonymous-safe bundle (only `visibility_level = 'public'` objects) and
+        requires `content:publish_public`. Without it — including for EVERY
+        autonomous agent — this returns **HTTP 202** with
+        `data.status = "approval_required"` and the request enters the review queue.
+
+        The bundle is returned inline (`data.files`) and also persisted to S3; a
+        presigned `data.location` URL points at the stored JSON.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OkfExportRequest"
+      responses:
+        "200":
+          description: The OKF bundle
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkfExportResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "202":
+          description: |
+            Approval required — a public bundle was requested without
+            `content:publish_public`. The request is queued for human review.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentApprovalRequiredResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /content/import/okf:
+    post:
+      operationId: importOkf
+      tags: [Content]
+      summary: Import an OKF bundle into content
+      description: |
+        Imports an OKF bundle (the `{ files: [{ path, content }] }` shape
+        `export_okf` returns) into Atrium content (spec §36.3). Reconstructs the
+        collection tree from the bundle directories and creates one content object
+        per concept file. Mirrors the MCP `import_okf` tool. Requires
+        `content:create`.
+
+        **Provenance:** imported objects are **agent-authored**
+        (`actor_kind = 'agent'`, attributed to the seeded `atrium-importer`
+        identity) and created **private + draft** — never fabricated human
+        authorship, never pre-widened. The triggering caller is recorded in the
+        audit trail.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OkfImportRequest"
+      responses:
+        "201":
+          description: Imported objects + reconstructed collections
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkfImportResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 # ============================================
 # Components
 # ============================================
@@ -2654,6 +2779,128 @@ components:
             unpublished:
               type: boolean
               description: "`false` when the object was not live at the destination (idempotent no-op); `true` when an active publication was removed."
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    # -- OKF interoperability (Phase 8, Issue #1103, §36) --
+    OkfFile:
+      type: object
+      description: One file in an OKF bundle — an OKF-relative path + its markdown content.
+      required: [path, content]
+      properties:
+        path:
+          type: string
+          description: POSIX-relative path within the bundle (e.g. `sub/concept-slug.md`).
+          example: "mathematics/fractions.md"
+        content:
+          type: string
+          description: The file's markdown content (concept frontmatter+body, or a reserved `index.md`/`log.md`).
+
+    OkfExportRequest:
+      type: object
+      required: [collectionId]
+      properties:
+        collectionId:
+          type: string
+          description: Root collection slug or id to export.
+        audience:
+          type: string
+          enum: [internal, public]
+          default: internal
+          description: |
+            `internal` (default) scopes the bundle to what the caller can view.
+            `public` produces an anonymous-safe bundle (only `visibility_level =
+            'public'` objects) and requires `content:publish_public` (§26.4).
+
+    OkfExportResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [okfVersion, files, objectCount, collectionCount]
+          properties:
+            okfVersion:
+              type: string
+              example: "0.1"
+            generator:
+              type: string
+              example: "psd-aistudio-atrium/okf-exporter@0.1"
+            rootCollectionId:
+              type: string
+              format: uuid
+              nullable: true
+            audience:
+              type: string
+              enum: [internal, public]
+            objectCount:
+              type: integer
+            collectionCount:
+              type: integer
+            files:
+              type: array
+              items:
+                $ref: "#/components/schemas/OkfFile"
+            location:
+              type: string
+              nullable: true
+              description: Presigned URL of the persisted bundle JSON in S3 (null when persistence failed).
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    OkfImportRequest:
+      type: object
+      required: [files]
+      properties:
+        files:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/OkfFile"
+        targetCollectionId:
+          type: string
+          description: Existing collection slug or id to import the bundle root INTO (a fresh root collection is created when omitted).
+
+    OkfImportResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [collectionsCreated, objectCount, objects]
+          properties:
+            rootCollectionId:
+              type: string
+              format: uuid
+              nullable: true
+            collectionsCreated:
+              type: integer
+            objectCount:
+              type: integer
+            objects:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  slug:
+                    type: string
+                  title:
+                    type: string
+                  collectionId:
+                    type: string
+                    format: uuid
+                    nullable: true
         meta:
           type: object
           required: [requestId]

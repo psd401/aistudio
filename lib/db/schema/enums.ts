@@ -153,12 +153,19 @@ export const bodyFormatEnum = pgEnum("body_format", ["markdown", "html", "jsx"])
 /**
  * Publish destination — where content is surfaced.
  * Used in: content_publications.destination
+ *
+ * `okf` (Phase 8, Issue #1103, §36) is the Open Knowledge Format export
+ * destination — a portable markdown+frontmatter bundle, not a live reader/connector.
+ * Added via migration 095 (`ALTER TYPE publish_destination ADD VALUE 'okf'`); the
+ * enum is master-owned (created in the 085 Atrium migration), so `ADD VALUE`
+ * succeeds under the migration role.
  */
 export const publishDestinationEnum = pgEnum("publish_destination", [
   "intranet",
   "public_web",
   "schoology",
   "google",
+  "okf",
 ]);
 
 /**
