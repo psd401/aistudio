@@ -11,14 +11,15 @@
  * drafted by an agent and then edited by a human before publication shows BOTH
  * badges.
  *
- * Scope (Phase 7, #1057): when `publishedVersionId` is supplied (the reader routes
- * always render one specific published version), the summary is bounded to versions
- * up to and including that version's number. This is required on the ANONYMOUS
- * public reader (`/p/[slug]`): without the bound, a draft `v3` created after the
- * published `v2` would leak its version number and author badges to the public via
- * `MAX`/`BOOL_OR` over the whole object. The internal reader passes it too, so both
- * describe the version being read, not unpublished future drafts. Omitting the prop
- * falls back to whole-object history (unbounded).
+ * Scope (Phase 7, #1057): when `publishedVersionNumber` is supplied (the reader
+ * routes always render one specific published version, whose number they already
+ * hold), the summary is bounded to versions up to and including that number. This
+ * is required on the ANONYMOUS public reader (`/p/[slug]`): without the bound, a
+ * draft `v3` created after the published `v2` would leak its version number and
+ * author badges to the public via `MAX`/`BOOL_OR` over the whole object. The
+ * internal reader passes it too, so both describe the version being read, not
+ * unpublished future drafts. Omitting the prop falls back to whole-object history
+ * (unbounded).
  *
  * The badge `data-author` values ("agent" / "human") are the exact tokens the
  * shared stylesheet styles (`styles/atrium-content.css` — provenance palette:
@@ -33,11 +34,12 @@ interface ProvenanceFooterProps {
   /** The `content_objects.id` (UUID) whose version history is summarized. */
   objectId: string;
   /**
-   * The `content_versions.id` (UUID) being rendered. When present, the summary is
-   * bounded to versions with `version_number <=` this version's number, so drafts
-   * created after publication are never reflected (critical on the public reader).
+   * The `version_number` of the version being rendered. When present, the summary
+   * is bounded to versions with `version_number <=` this number, so drafts created
+   * after publication are never reflected (critical on the public reader). The
+   * reader routes already hold this number, so no id→number subquery is needed.
    */
-  publishedVersionId?: string;
+  publishedVersionNumber?: number;
 }
 
 /**
@@ -47,17 +49,15 @@ interface ProvenanceFooterProps {
  */
 export async function ProvenanceFooter({
   objectId,
-  publishedVersionId,
+  publishedVersionNumber,
 }: ProvenanceFooterProps): Promise<React.JSX.Element> {
   // Bound the summary to the published lineage when the rendered version is known:
-  // version_number <= (the published version's number). Excludes post-publication
+  // version_number <= the published version's number. Excludes post-publication
   // drafts so they never surface on a reader (see the public-leak note above).
-  const versionBound = publishedVersionId
-    ? lte(
-        contentVersions.versionNumber,
-        sql<number>`(SELECT ${contentVersions.versionNumber} FROM ${contentVersions} WHERE ${contentVersions.id} = ${publishedVersionId})`
-      )
-    : undefined;
+  const versionBound =
+    publishedVersionNumber !== undefined
+      ? lte(contentVersions.versionNumber, publishedVersionNumber)
+      : undefined;
 
   // Aggregate query: only three facts needed, not every row. MAX + BOOL_OR avoids
   // loading the full version history on objects with many versions.

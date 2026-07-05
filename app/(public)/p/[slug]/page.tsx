@@ -202,10 +202,7 @@ export default async function PublicReaderPage({
           src={getArtifactSandboxRenderUrl()}
           className="atrium-artifact-preview"
         />
-        <ProvenanceFooter
-          objectId={published.id}
-          publishedVersionId={published.publishedVersionId}
-        />
+        <ProvenanceFooter objectId={published.id} publishedVersionNumber={version.versionNumber} />
       </main>
     );
   }
@@ -244,10 +241,7 @@ export default async function PublicReaderPage({
         className="atrium-content"
         dangerouslySetInnerHTML={{ __html: html }}
       />
-      <ProvenanceFooter
-          objectId={published.id}
-          publishedVersionId={published.publishedVersionId}
-        />
+      <ProvenanceFooter objectId={published.id} publishedVersionNumber={version.versionNumber} />
     </main>
   );
 }
