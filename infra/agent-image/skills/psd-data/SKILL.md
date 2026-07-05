@@ -36,7 +36,7 @@ You do not handle authentication directly. The skill:
 |------|---------|----------------|
 | 0 | Success — JSON-RPC result on stdout | Use the result |
 | 1 | Config / usage error | Surface the error, do not retry |
-| 1 (unqualified `NUMERIC`/`DECIMAL` cast) | `query`/`call` rejected your SQL client-side, before it reached the server | This one **is** safe to self-correct: add precision to the flagged cast (e.g. `NUMERIC(10,2)`) and retry the same call immediately — unlike other exit-1 errors, this isn't a malformed invocation |
+| 1 | Unqualified `NUMERIC`/`DECIMAL` cast — `query`/`call` rejected your SQL client-side, before it reached the server | This one **is** safe to self-correct: add precision to the flagged cast (e.g. `NUMERIC(10,2)`) and retry the same call immediately — unlike other exit-1 errors, this isn't a malformed invocation |
 | 10 | needs-auth: no token, or token revoked | Paste `consent_chat_hyperlink` on its own line |
 | 12 | Upstream MCP error (JSON-RPC error or unexpected HTTP) | Surface the error verbatim |
 | 13 | Forbidden: user not in `userpermissions` table | Tell the user to ping the data team |
