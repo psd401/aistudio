@@ -294,7 +294,12 @@ function parseDate(dateArg) {
   // local getters — a silent off-by-one on both the query window and the label.
   // Appending T00:00:00 parses as local midnight, preserving the requested day
   // (mirrors the psd-freshservice fix). See REV-COR-331.
-  const d = new Date(`${dateArg}T00:00:00`);
+  // Only do this for an unambiguous YYYY-MM-DD value — appending T00:00:00 to
+  // any other format (MM/DD/YYYY, "Month DD, YYYY", ...) produces an invalid
+  // date string in Node's parser (gemini-code-assist review).
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(dateArg)
+    ? new Date(`${dateArg}T00:00:00`)
+    : new Date(dateArg);
   if (isNaN(d.getTime())) {
     fail(`Could not parse date: ${dateArg}`, 'bad_args');
   }

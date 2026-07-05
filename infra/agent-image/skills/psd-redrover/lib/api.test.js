@@ -24,6 +24,14 @@ test('explicit-date label names the requested calendar day', () => {
   assert.match(parseDate('2026-01-15').label, /Thursday/);
 });
 
+test('non-ISO date format (MM/DD/YYYY) parses instead of producing Invalid Date (gemini-code-assist review)', () => {
+  // `new Date('01/15/2026')` already parses as LOCAL time in Node, so this
+  // format must NOT go through the `${dateArg}T00:00:00` YYYY-MM-DD path —
+  // appending T00:00:00 to a non-ISO string produces Invalid Date.
+  const r = parseDate('01/15/2026');
+  assert.strictEqual(r.date, '2026-01-15');
+});
+
 test('today branch is unchanged (local now)', () => {
   const now = new Date();
   const r = parseDate('today');
