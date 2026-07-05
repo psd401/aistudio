@@ -1721,6 +1721,12 @@ paths:
         identity) and created **private + draft** — never fabricated human
         authorship, never pre-widened. The triggering caller is recorded in the
         audit trail.
+
+        **Retry semantics:** import is additive and NOT transactional. A run that
+        fails partway leaves the already-created private/draft content in place, and
+        a retry re-imports the whole bundle as new objects (no dedup). For
+        idempotency, import into a fresh `targetCollectionId` and delete that partial
+        collection before retrying.
       security:
         - BearerAuth: []
       requestBody:

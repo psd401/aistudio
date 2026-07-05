@@ -1150,6 +1150,13 @@ Import an OKF bundle into content. Requires `content:create`.
 created **private + draft** — never fabricated human authorship, never pre-widened.
 The triggering caller is recorded in the audit trail.
 
+**Retry semantics (not transactional):** import is additive and not wrapped in a
+single transaction (`contentService.create` does its own tx + post-commit S3 IO
+per object). A run that fails partway leaves the already-created private/draft
+content in place, and a retry re-imports the whole bundle as **new** objects (no
+path/`sourceRef` dedup; slugs auto-suffix). For idempotency, import into a fresh
+`targetCollectionId` and, on failure, delete that partial collection before retrying.
+
 **Response `201`**
 
 ```json

@@ -19,6 +19,19 @@
  * Imported objects are created **private + draft** (owner = the §26.5 system user):
  * inbound external content must not land pre-widened. A human/agent publishes or
  * widens it afterward through the normal gated paths.
+ *
+ * ## Retry / partial-failure semantics (NOT transactional)
+ * Import is deliberately **additive and NOT wrapped in a single transaction**:
+ * each object is created via `contentService.create`, which runs its own DB
+ * transaction AND does S3 body IO *after* that transaction commits (the drizzle
+ * anti-pattern is external IO inside a tx; a single tx over up to
+ * `OKF_IMPORT_MAX_FILES` creates would also pin a pooled connection far too long).
+ * Consequently, if a run fails partway, the collections + objects already created
+ * are **left in place** (they are valid private/draft content), and there is no
+ * dedup on path/`sourceRef` — a client **retry re-imports the whole bundle as new
+ * objects** (unique slugs are auto-suffixed). Callers that need idempotency should
+ * import into a fresh `targetCollectionId` and treat a failed run as "delete the
+ * partial target collection, then retry". Documented on the REST/MCP surfaces.
  */
 
 import { executeQuery } from "@/lib/db/drizzle-client";
