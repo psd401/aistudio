@@ -69,3 +69,9 @@ test('undefined still paginates the full roster', async () => {
 test('non-array, non-null argument throws (type guard preserved)', async () => {
   await assert.rejects(() => fetchAgentMap('key', 123), /must be an array/);
 });
+
+test('null/undefined responder ids (unassigned tickets) are filtered out, not fetched (gemini-code-assist review)', async () => {
+  const map = await fetchAgentMap('key', [123, null, undefined, 123]);
+  assert.deepStrictEqual(calls, ['/agents/123'], `expected only /agents/123, saw ${JSON.stringify(calls)}`);
+  assert.strictEqual(map.__partialNames, false);
+});
