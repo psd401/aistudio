@@ -13,7 +13,6 @@ import {
   withApiAuth,
   requireScope,
   createApiResponse,
-  createErrorResponse,
   parseRequestBody,
 } from "@/lib/api";
 import { z } from "zod";
@@ -56,19 +55,11 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   const hasPublishPublicCapability = hasPublishPublicScope(auth.scopes);
 
   try {
-    // `resolveCollectionId` THROWS `ValidationError` (400 CONTENT_VALIDATION) for an
-    // unresolvable slug/id — caught below and mapped to a 400, consistent with every
-    // other content route. This guard only handles the impossible empty-input case
-    // (zod `.min(1)` already rejects it), so it too returns a 400, never a 404.
+    // `resolveCollectionId` THROWS `ValidationError` (→ 400) for an unresolvable
+    // slug/id — caught below and mapped consistently with every other content route.
+    // The required overload guarantees a defined id for a zod-validated `.min(1)`
+    // input, so no `undefined` narrowing is needed here.
     const collectionId = await resolveCollectionId(input.collectionId);
-    if (!collectionId) {
-      return createErrorResponse(
-        requestId,
-        400,
-        "VALIDATION_ERROR",
-        "Collection not found"
-      );
-    }
     const result = await okfExportService.exportCollection(req, collectionId, {
       audience: input.audience,
       hasPublishPublicCapability,

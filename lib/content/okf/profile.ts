@@ -92,20 +92,14 @@ export interface OkfConcept {
 }
 
 /**
- * Map an Atrium `content_kind` to the OKF `type` frontmatter field. The identity
- * mapping (document→"document", artifact→"artifact") is deliberate: OKF's `type`
- * is an open string, so preserving the Atrium grain makes the bundle round-trip
- * losslessly through `kindForOkfType`.
- */
-export function okfTypeForKind(kind: ContentKind): string {
-  return kind;
-}
-
-/**
  * Map an OKF `type` back to an Atrium `content_kind` on import. Only the two grains
  * Atrium understands round-trip to their kind; any other producer's `type`
  * (OKF is cross-vendor) is imported as a `document` — the safe default that stores
  * the concept's markdown as a readable body rather than rejecting the bundle.
+ *
+ * The forward direction (`kind` → OKF `type`) is the identity mapping and is inlined
+ * at its one call site (`serialize.ts` `conceptFrontmatter`): OKF's `type` is an open
+ * string, so preserving the Atrium grain (document/artifact) round-trips losslessly.
  */
 export function kindForOkfType(type: string | undefined): ContentKind {
   return type === "artifact" ? "artifact" : "document";

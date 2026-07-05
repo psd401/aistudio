@@ -97,28 +97,23 @@ const isUniqueViolation = (error: unknown): boolean =>
   "code" in error &&
   (error as { code?: string }).code === "23505";
 
-/** Directory of a bundle path (no trailing slash; "" for the root). */
+/**
+ * The directory portion of a slash-path — everything before the last "/", or "" when
+ * top-level. Works on a file path (`a/b.md` → `a`) AND on a directory key, where it
+ * yields the parent directory (`sub/deep` → `sub`, `sub` → "").
+ */
 function dirOf(path: string): string {
   const idx = path.lastIndexOf("/");
   return idx === -1 ? "" : path.slice(0, idx);
 }
 
-/** Basename of a bundle path. */
+/**
+ * The last segment of a slash-path — the basename of a file (`a/b.md` → `b.md`) or a
+ * directory's own name (`sub/deep` → `deep`).
+ */
 function baseOf(path: string): string {
   const idx = path.lastIndexOf("/");
   return idx === -1 ? path : path.slice(idx + 1);
-}
-
-/** The parent directory of a directory key ("sub/deep" → "sub", "sub" → ""). */
-function parentDir(dir: string): string {
-  const idx = dir.lastIndexOf("/");
-  return idx === -1 ? "" : dir.slice(0, idx);
-}
-
-/** The last path segment of a directory key ("sub/deep" → "deep"). */
-function lastSegment(dir: string): string {
-  const idx = dir.lastIndexOf("/");
-  return idx === -1 ? dir : dir.slice(idx + 1);
 }
 
 /** Insert one collection, retrying with a `-N` slug suffix on a unique collision. */
@@ -193,8 +188,8 @@ async function reconstructCollections(
       }
       continue;
     }
-    const parentId = map.get(parentDir(dir)) ?? targetCollectionId ?? null;
-    const segment = lastSegment(dir);
+    const parentId = map.get(dirOf(dir)) ?? targetCollectionId ?? null;
+    const segment = baseOf(dir);
     const name = indexTitle(fileMap, dir) ?? segment;
     map.set(dir, await createCollection(name, segment, parentId));
     created++;
@@ -306,7 +301,7 @@ export const okfImportService = {
       let dir = dirOf(file.path);
       while (dir !== "") {
         dirs.add(dir);
-        dir = parentDir(dir);
+        dir = dirOf(dir);
       }
     }
     const { map: dirToCollection, created } = await reconstructCollections(

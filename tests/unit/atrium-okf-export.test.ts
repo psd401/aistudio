@@ -238,4 +238,21 @@ describe("okfExportService.exportCollection — permission boundary", () => {
       okfExportService.exportCollection(staffUser, "missing")
     ).rejects.toBeInstanceOf(NotFoundError);
   });
+
+  it("disambiguates concept filenames colliding with reserved and each other (no duplicate paths)", async () => {
+    // A slug of literally "index" is renamed off the reserved index.md; a real
+    // "index-concept" slug in the same directory then takes a `-2` suffix so no two
+    // concepts (and neither reserved file) ever share a bundle `path`.
+    visibleObjects = [
+      objectDTO({ id: "a", slug: "index", title: "A" }),
+      objectDTO({ id: "b", slug: "index-concept", title: "B" }),
+    ];
+    const result = await okfExportService.exportCollection(staffUser, "root");
+    const paths = result.bundle.files.map((f) => f.path);
+    expect(paths).toContain("index.md"); // reserved navigation file, still distinct
+    expect(paths).toContain("index-concept.md"); // the renamed "index" slug
+    expect(paths).toContain("index-concept-2.md"); // the real "index-concept" slug
+    // Invariant: every path in the bundle is unique.
+    expect(new Set(paths).size).toBe(paths.length);
+  });
 });

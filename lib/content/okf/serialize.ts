@@ -12,8 +12,8 @@
  * unit-testable without a DB.
  */
 
-import type { BodyFormat, ContentKind } from "../types";
-import { okfTypeForKind, type OkfFrontmatter } from "./profile";
+import type { BodyFormat, ContentKind, ContentVersionDTO } from "../types";
+import type { OkfFrontmatter } from "./profile";
 import { serializeConceptFile } from "./frontmatter";
 
 /** The loaded fields a single object contributes to its concept file. */
@@ -56,7 +56,9 @@ function conceptBody(source: ConceptSource): string {
 /** Build the OKF frontmatter for a concept, omitting every absent optional field. */
 export function conceptFrontmatter(source: ConceptSource): OkfFrontmatter {
   return {
-    type: okfTypeForKind(source.kind),
+    // OKF `type` is an open string; the Atrium kind (document/artifact) maps to it
+    // by identity so the bundle round-trips losslessly through `kindForOkfType`.
+    type: source.kind,
     title: source.title,
     description: source.summary ?? undefined,
     resource: source.resource ?? undefined,
@@ -113,6 +115,20 @@ export interface LogEntry {
   summary: string | null;
   /** ISO-8601 created timestamp. */
   createdAt: string | null;
+}
+
+/**
+ * Project a version list to the `log.md` entry fields. Shared by both OKF export
+ * paths — the collection exporter (`./export`) and the single-object publish adapter
+ * (`../publish-adapters/okf`) — so the version→entry mapping lives in exactly one place.
+ */
+export function toLogEntries(versions: ContentVersionDTO[]): LogEntry[] {
+  return versions.map((v) => ({
+    versionNumber: v.versionNumber,
+    authorActor: v.authorActor,
+    summary: v.summary,
+    createdAt: v.createdAt,
+  }));
 }
 
 /**

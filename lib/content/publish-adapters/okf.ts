@@ -32,7 +32,12 @@ import {
   type OkfBundle,
   type OkfFile,
 } from "../okf/profile";
-import { buildConceptFile, buildLogFile, type ConceptSource } from "../okf/serialize";
+import {
+  buildConceptFile,
+  buildLogFile,
+  toLogEntries,
+  type ConceptSource,
+} from "../okf/serialize";
 import type { PublishAdapter } from "./types";
 
 const log = createLogger({ module: "atrium-okf-adapter" });
@@ -89,15 +94,7 @@ export const okfAdapter: PublishAdapter = {
       { path: conceptFileName(slug), content: buildConceptFile(source) },
       {
         path: OKF_LOG_FILE,
-        content: buildLogFile(
-          title,
-          versions.map((v) => ({
-            versionNumber: v.versionNumber,
-            authorActor: v.authorActor,
-            summary: v.summary,
-            createdAt: v.createdAt,
-          }))
-        ),
+        content: buildLogFile(title, toLogEntries(versions)),
       },
     ];
 

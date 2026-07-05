@@ -53,6 +53,7 @@ import {
   buildConceptFile,
   buildIndexFile,
   buildLogFile,
+  toLogEntries,
   type ConceptSource,
   type IndexLink,
   type LogEntry,
@@ -235,13 +236,7 @@ async function loadConceptSource(
 
 /** Build an object's `log.md` change-history entries from its version list. */
 async function loadLogEntries(objectId: string): Promise<LogEntry[]> {
-  const versions = await versionService.list(objectId);
-  return versions.map((v) => ({
-    versionNumber: v.versionNumber,
-    authorActor: v.authorActor,
-    summary: v.summary,
-    createdAt: v.createdAt,
-  }));
+  return toLogEntries(await versionService.list(objectId));
 }
 
 /** The bundle-relative directory for a collection (root → "", nested by slug). */
@@ -260,13 +255,22 @@ function collectionDir(
 }
 
 /**
- * Guard an object slug against colliding with a reserved OKF filename
- * (`index.md` / `log.md`). A slug of literally "index" or "log" is legal but would
- * overwrite the directory's navigation/history file.
+ * Assign an object's concept filename, unique WITHIN its collection directory.
+ * Guards two collisions: (a) a slug of literally "index"/"log" would overwrite the
+ * reserved `index.md`/`log.md` navigation/history files (renamed to `${slug}-concept`),
+ * and (b) any two slugs that map to the same filename — including a renamed "index"
+ * clashing with a real "index-concept" slug — get a `-N` suffix. `taken` is seeded by
+ * the caller with the reserved names and mutated as each name is assigned, so no two
+ * files in one directory ever share a `path`.
  */
-function conceptFile(slug: string): string {
-  if (slug === "index" || slug === "log") return conceptFileName(`${slug}-concept`);
-  return conceptFileName(slug);
+function assignConceptFile(slug: string, taken: Set<string>): string {
+  const base = slug === "index" || slug === "log" ? `${slug}-concept` : slug;
+  let candidate = conceptFileName(base);
+  for (let n = 2; taken.has(candidate); n++) {
+    candidate = conceptFileName(`${base}-${n}`);
+  }
+  taken.add(candidate);
+  return candidate;
 }
 
 /** Assemble one collection directory's files (index.md, log.md, concept files). */
@@ -279,9 +283,12 @@ function buildCollectionFiles(
   const files: OkfFile[] = [];
   const conceptLinks: IndexLink[] = [];
   const logSections: string[] = [];
+  // Seed with the reserved filenames so a concept can never collide with them, and
+  // track every assigned name so two concepts in this directory can't collide either.
+  const takenNames = new Set<string>([OKF_INDEX_FILE, OKF_LOG_FILE]);
 
   for (const { obj, source, log } of concepts) {
-    const fileName = conceptFile(obj.slug);
+    const fileName = assignConceptFile(obj.slug, takenNames);
     files.push({ path: `${dir}${fileName}`, content: buildConceptFile(source) });
     conceptLinks.push({ title: obj.title, href: fileName });
     logSections.push(buildLogFile(obj.title, log));

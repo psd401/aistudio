@@ -139,7 +139,9 @@ describe("OKF concept builder — mapping table (§36.1)", () => {
     expect(concept.frontmatter.title).toBe("Fractions Unit");
     expect(concept.frontmatter.description).toBe("A summary of the unit");
     expect(concept.frontmatter.tags).toEqual(["math", "grade-5"]);
-    expect(concept.body.trim()).toBe("# Fractions\n\nContent here.");
+    // Exact (no `.trim()`): the parser strips the serializer's injected leading + trailing
+    // blank lines, so a round-tripped document body matches its source byte-for-byte.
+    expect(concept.body).toBe("# Fractions\n\nContent here.");
   });
 
   it("fences an artifact body and escalates the fence past inner backticks", () => {
@@ -199,6 +201,6 @@ describe("OKF concept file serialize/parse symmetry", () => {
     };
     const round = parseConceptFile(serializeConceptFile(fm, "The body."));
     expect(round.frontmatter).toMatchObject(fm);
-    expect(round.body.trim()).toBe("The body.");
+    expect(round.body).toBe("The body.");
   });
 });

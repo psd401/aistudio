@@ -138,9 +138,13 @@ function splitFrontmatter(md: string): { fmLines: string[]; body: string } {
     return { fmLines: [], body: md };
   }
   const fmLines = lines.slice(1, closeIdx);
-  // Body starts after the closing fence; drop a single leading blank line.
+  // Body starts after the closing fence. `serializeConceptFile` wraps the body as
+  // `\n${body}\n`, so drop BOTH the leading blank separator and the single trailing
+  // blank line it injected — otherwise every round-tripped/imported body would gain a
+  // spurious trailing newline versus the source it was serialized from.
   const bodyLines = lines.slice(closeIdx + 1);
   if (bodyLines[0] === "") bodyLines.shift();
+  if (bodyLines[bodyLines.length - 1] === "") bodyLines.pop();
   return { fmLines, body: bodyLines.join("\n") };
 }
 

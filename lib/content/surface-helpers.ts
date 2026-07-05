@@ -42,7 +42,17 @@ async function collectionIdByColumn(
  * the INSERT and surface as an opaque FK-violation 500 instead of a 400. A
  * uuid-shaped input is tried as an id first, then as a slug (a slug can itself be
  * uuid-shaped) — mirroring `loadByIdOrSlug`.
+ *
+ * Overloads: a REQUIRED (non-empty) argument always resolves to a `string` — the
+ * function only returns `undefined` for a falsy input, and either resolves or
+ * throws otherwise — so a caller passing a zod-validated `.min(1)` id needs no
+ * `undefined` narrowing. Passing an optional/nullable value keeps the
+ * `string | undefined` result.
  */
+export function resolveCollectionId(collection: string): Promise<string>;
+export function resolveCollectionId(
+  collection?: string | null
+): Promise<string | undefined>;
 export async function resolveCollectionId(
   collection?: string | null
 ): Promise<string | undefined> {

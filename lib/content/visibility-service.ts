@@ -668,7 +668,12 @@ export const visibilityService = {
           .select(objectSelectFields)
           .from(o)
           .where(and(...filters))
-          .orderBy(desc(o.updatedAt))
+          // `id` is the deterministic tiebreaker: `updated_at` alone is not unique
+          // (a bulk import stamps many rows at once), and Postgres gives no stable
+          // order for ties — so sequential offset pages could re-return or skip a
+          // straddling row. The unique PK makes offset pagination (e.g. the OKF
+          // exporter's page loop) safe.
+          .orderBy(desc(o.updatedAt), desc(o.id))
           .limit(limit)
           .offset(offset),
       "content.listVisible"

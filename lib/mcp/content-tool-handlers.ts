@@ -23,7 +23,6 @@ import {
   publishService,
   recordContentAudit,
   requesterFromApiAuth,
-  ValidationError,
   visibilityService,
   type ContentAuditAction,
   type Requester,
@@ -558,13 +557,10 @@ async function handleExportOkf(
     // inside okfExportService via this authority flag (an EXPLICIT
     // content:publish_public scope; a session wildcard does NOT satisfy it).
     //
-    // `resolveCollectionId` THROWS `ValidationError` for an unresolvable id (caught
-    // by `fail` below → structured error); the `!collectionId` guard only handles
-    // the impossible empty-input case (zod `.min(1)` rejects it) for the type checker.
+    // `resolveCollectionId` THROWS for an unresolvable id (caught by `fail` below →
+    // structured error); its required overload guarantees a defined id for the
+    // zod-validated `.min(1)` input, so no `undefined` narrowing is needed.
     const collectionId = await resolveCollectionId(parsed.data.collectionId);
-    if (!collectionId) {
-      return failRead(new ValidationError("Collection not found"));
-    }
     const hasPublishPublicCapability = hasPublishPublicScope(context.scopes);
     const result = await okfExportService.exportCollection(req, collectionId, {
       audience: parsed.data.audience,
