@@ -44,13 +44,20 @@ export type AgentScreenVerdict =
  * `ValidationError` via `screenAgentBodyForWrite`).
  *
  * `objectId` is a correlation ref for logs/guardrail session scoping; pass null
- * on create paths where no object exists yet.
+ * on create paths where no object exists yet. `requestId` (optional) threads the
+ * caller's request correlation onto the security-relevant blocked/degraded log
+ * lines — callers without one (e.g. `versionService.snapshot`) omit it and get
+ * an uncorrelated module logger, exactly as before.
  */
 export async function screenAgentContent(
   text: string,
-  objectId: string | null
+  objectId: string | null,
+  requestId?: string
 ): Promise<AgentScreenVerdict> {
-  const log = createLogger({ module: "atrium-agent-screening" });
+  const log = createLogger({
+    module: "atrium-agent-screening",
+    ...(requestId ? { requestId } : {}),
+  });
   // Lazy import (see module JSDoc): keeps the Bedrock stack out of the static
   // import graph of the content services.
   const { getContentSafetyService, getPIITokenizationService } = await import(
@@ -129,12 +136,13 @@ export async function screenAgentContent(
 export async function screenAgentBodyForWrite(
   req: Requester,
   body: string | undefined,
-  objectId: string | null
+  objectId: string | null,
+  requestId?: string
 ): Promise<void> {
   if (!isAgentRequester(req)) return;
   if (typeof body !== "string" || body.trim().length === 0) return;
 
-  const verdict = await screenAgentContent(body, objectId);
+  const verdict = await screenAgentContent(body, objectId, requestId);
   if (!verdict.allowed) {
     throw new ValidationError(
       verdict.reason === "blocked"

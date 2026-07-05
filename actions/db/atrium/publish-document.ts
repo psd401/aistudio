@@ -22,49 +22,25 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { publishService } from "@/lib/content/publish-service";
-import { ApprovalRequiredError, ValidationError } from "@/lib/content/errors";
-import { assertGrantKind, assertLevel } from "@/lib/content/validators";
+import { ApprovalRequiredError } from "@/lib/content/errors";
+import {
+  assertEditorDestination,
+  assertGrantKind,
+  assertLevel,
+} from "@/lib/content/validators";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
 
 /**
- * The destinations the in-app editor surface may publish to / unpublish from.
- * Deliberately EXCLUDES `okf` (the Phase 8 portable-bundle export is an API/MCP
- * surface by design, not an editor button) — so this is a runtime-validated
- * subset of the service's `PublishDestination`, mirrored in
- * `unpublish-document.ts` and the `EditorToolbar` picker.
+ * The editor destination union (excludes `okf` — API/MCP-only by design),
+ * re-exported from its canonical home in `lib/content/validators.ts` (which
+ * derives it from the adapter registry's `PUBLISH_DESTINATIONS`) so existing
+ * consumers (`unpublish-document.ts`, the `EditorToolbar` picker) keep their
+ * import path. Type-only, so it is erased and legal in a "use server" module.
  */
-const EDITOR_PUBLISH_DESTINATIONS = [
-  "intranet",
-  "public_web",
-  "schoology",
-  "google",
-] as const;
-
-export type EditorPublishDestination =
-  (typeof EDITOR_PUBLISH_DESTINATIONS)[number];
-
-/**
- * Narrow a widened `string` destination (the action input contract) to an
- * editor-publishable destination, throwing a ValidationError (400) on anything
- * else — including `okf`, which is a valid SERVICE destination but not an
- * editor one. Mirrors `assertLevel`/`assertGrantKind`: a bare `as` cast would
- * let an unexpected value through to the adapter registry.
- */
-function assertEditorDestination(
-  destination: string
-): EditorPublishDestination {
-  if (
-    !(EDITOR_PUBLISH_DESTINATIONS as readonly string[]).includes(destination)
-  ) {
-    throw new ValidationError(`Invalid publish destination: ${destination}`, {
-      destination,
-    });
-  }
-  return destination as EditorPublishDestination;
-}
+export type { EditorPublishDestination } from "@/lib/content/validators";
 
 export async function publishDocumentAction(
   objectId: string,
@@ -125,7 +101,7 @@ export async function publishDocumentAction(
 
     // Narrow the widened `string` destination at runtime BEFORE it reaches the
     // service's adapter registry (rejects `okf` and any unexpected value).
-    const destination = assertEditorDestination(input.destination);
+    const destination = assertEditorDestination(input.destination, "publish");
 
     // `input.visibility` carries a widened `level` and `grant.kind` (plain
     // `string`). `assertLevel` / `assertGrantKind` narrow each via a RUNTIME

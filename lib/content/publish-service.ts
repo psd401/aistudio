@@ -702,6 +702,91 @@ export const publishService = {
   },
 
   /**
+   * Take an object OFFLINE at every destination — the archive cascade (#1059).
+   *
+   * Archiving is a removal, so unlike `unpublish` this is NOT §26.4-gated: pulling
+   * public content DOWN is always the safe direction, and the caller
+   * (`contentService.update` on the archived transition) has already run
+   * `assertCanEdit`. It flips every live `content_publications` row for the object
+   * to `unpublished` in one FOR-UPDATE-locked transaction, then runs each
+   * destination adapter's teardown (e.g. the intranet nav-item hide) post-commit.
+   *
+   * Without this, an archived object stayed reachable at its permanent public /
+   * intranet reader URL (both readers gate only on a live publication, never on
+   * `status`), directly contradicting the "hidden" archive affordance. The object's
+   * status is set to `archived` by the caller; this method never touches status.
+   * Idempotent: no live publication → no-op.
+   */
+  async retractAllForArchive(objectId: string): Promise<void> {
+    const log = createLogger({ action: "publish.retractAllForArchive" });
+
+    const torn = await executeTransaction(
+      async (tx: DbTransaction) => {
+        const locked = await tx
+          .select({ id: contentObjects.id })
+          .from(contentObjects)
+          .where(eq(contentObjects.id, objectId))
+          .for("update")
+          .limit(1);
+        if (!locked[0]) {
+          throw new NotFoundError("Content not found", { objectId });
+        }
+        const live = await tx
+          .select({
+            destination: contentPublications.destination,
+            externalRef: contentPublications.externalRef,
+          })
+          .from(contentPublications)
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.status, "live")
+            )
+          );
+        if (live.length === 0) return [];
+        await tx
+          .update(contentPublications)
+          .set({ status: "unpublished", updatedAt: new Date() })
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.status, "live")
+            )
+          );
+        return live;
+      },
+      "publish.retractAllForArchive"
+    );
+
+    // Adapter teardown AFTER the commit (secondary IO). Best-effort PER
+    // destination: the publication is already flipped `unpublished`, so the live
+    // reader surface is gone regardless of a nav-hide failure — log and continue
+    // so one failing destination cannot leave the others' teardown unrun.
+    for (const pub of torn) {
+      const adapter = adapters[pub.destination as PublishDestination];
+      if (!adapter?.unpublish) continue;
+      try {
+        await adapter.unpublish({ objectId, externalRef: pub.externalRef });
+      } catch (adapterError) {
+        log.warn("Archive teardown failed for a destination", {
+          objectId,
+          destination: pub.destination,
+          error:
+            adapterError instanceof Error
+              ? adapterError.message
+              : String(adapterError),
+        });
+      }
+    }
+    if (torn.length > 0) {
+      log.info("Retracted all live publications for archive", {
+        objectId,
+        destinations: torn.map((p) => p.destination),
+      });
+    }
+  },
+
+  /**
    * The current publication for an object at a destination, or null when it has
    * never been published there.
    */

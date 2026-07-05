@@ -155,14 +155,16 @@ async function loadEditableObject(
 }
 
 /** Screen agent markdown via the shared §28.3 core (`lib/content/agent-screening`
- * — guardrails fail-closed + PII telemetry, logging included). This wrapper only
- * maps the verdict to HTTP: 422 for blocked content, 503 for a degraded
- * (unavailable) screening evaluation. Returns null to proceed. */
+ * — guardrails fail-closed + PII telemetry, logging included). `requestId` threads
+ * this request's correlation onto the core's blocked/degraded log lines. This
+ * wrapper only maps the verdict to HTTP: 422 for blocked content, 503 for a
+ * degraded (unavailable) screening evaluation. Returns null to proceed. */
 async function screenAgentMarkdown(
   markdown: string,
-  objectId: string
+  objectId: string,
+  requestId: string
 ): Promise<NextResponse | null> {
-  const verdict = await screenAgentContent(markdown, objectId);
+  const verdict = await screenAgentContent(markdown, objectId, requestId);
   if (verdict.allowed) return null;
   if (verdict.reason === "blocked") {
     return NextResponse.json(
@@ -238,7 +240,7 @@ async function postHandler(
     // withDocumentLock ensures only one screen→apply sequence runs per objectId at
     // a time within this ECS task. See the _docLocks comment for cross-task scope.
     const lockResult = await withDocumentLock(loaded.obj.id, async () => {
-      const blocked = await screenAgentMarkdown(markdown, loaded.obj.id);
+      const blocked = await screenAgentMarkdown(markdown, loaded.obj.id, requestId);
       if (blocked) return blocked;
       await applyAgentEdit({ objectId: loaded.obj.id, markdown, agentId, mode });
       return null;

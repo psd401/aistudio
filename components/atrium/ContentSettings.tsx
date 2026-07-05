@@ -333,7 +333,7 @@ export function ContentSettings({
         nextStatus === "archived" &&
         typeof window !== "undefined" &&
         !window.confirm(
-          "Archive this content? It will be hidden from the library (you can restore it later)."
+          "Archive this content? It will be taken offline everywhere it is published (intranet and public web) and hidden from the library. You can restore and republish it later."
         )
       ) {
         return;

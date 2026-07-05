@@ -46,6 +46,7 @@ import {
 } from "@/lib/db/schema";
 import { publishService } from "@/lib/content/publish-service";
 import { visibilityService } from "@/lib/content/visibility-service";
+import { isPublishDestination } from "@/lib/content/validators";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
 import type { Requester } from "@/lib/content/types";
 import type { ActionState } from "@/types";
@@ -85,25 +86,24 @@ async function requireAdminRequester(
 }
 
 /**
- * The destinations `publishService.publish` accepts. Local runtime narrowing for
- * the value read back out of the stored jsonb context — a bare `as` cast would
- * let a corrupted/legacy row reach the service and the DB enum.
+ * Runtime narrowing for the destination read back out of the stored jsonb
+ * context — a bare `as` cast would let a corrupted/legacy row reach the service
+ * and the DB enum. The membership test is the shared `isPublishDestination`
+ * guard (`lib/content/validators.ts`, derived from the canonical
+ * `PUBLISH_DESTINATIONS` list — the FULL set including `okf`); only the error
+ * shape (`ErrorFactories.invalidInput`) stays local to this action surface.
  */
-const PUBLISH_DESTINATION_SET: ReadonlySet<string> = new Set<PublishDestination>(
-  ["intranet", "public_web", "schoology", "google", "okf"]
-);
-
 function assertPublishDestination(
   value: string | undefined
 ): PublishDestination {
-  if (!value || !PUBLISH_DESTINATION_SET.has(value)) {
+  if (!value || !isPublishDestination(value)) {
     throw ErrorFactories.invalidInput(
       "destination",
       value ?? null,
       "unknown publish destination"
     );
   }
-  return value as PublishDestination;
+  return value;
 }
 
 /**

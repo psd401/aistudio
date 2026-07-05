@@ -617,13 +617,19 @@ export const contentService = {
     // RETURNING yields no row, so surface a clean NotFoundError, not a TypeError.
     if (!rows[0]) throw new NotFoundError("Content not found", { id });
 
-    // Retrieval-index pruning (§16): archived content must stop surfacing as
-    // assistant context, so an archive write prunes the object's index entry
-    // (repository_item + chunks + link, indexed_at cleared). Runs on EVERY
-    // archived-status write, not just the first transition — removeFromIndex is
-    // an idempotent no-op when unindexed, and re-triggering lets a re-save
-    // retry a previously failed prune.
     if (patch.status === "archived") {
+      // Archived content must not remain reachable at a live reader URL. Both
+      // readers gate on a live `content_publications` row (never on `status`), so
+      // archiving MUST also take the object offline at every destination — a
+      // takedown (no §26.4 gate; assertCanEdit already ran). This is awaited and
+      // its failure surfaces: leaving archived content publicly live is the exact
+      // exposure the archive affordance promises it prevents.
+      const { publishService } = await import("./publish-service");
+      await publishService.retractAllForArchive(existing.id);
+      // Retrieval-index pruning (§16): archived content must also stop surfacing
+      // as assistant context. Best-effort + idempotent (a re-save retries a
+      // previously failed prune); runs on every archived write, not just the
+      // first transition.
       await pruneRetrievalIndexBestEffort(existing.id);
     }
     return rowToObjectDTO(rows[0] as ObjectRowAsText);

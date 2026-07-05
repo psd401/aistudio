@@ -7,14 +7,14 @@
  *  - `screenAgentContent`: blocked → blocked verdict (guardrails message
  *    surfaced), degraded → FAIL-CLOSED degraded verdict, allowed → PII detected
  *    + logged (telemetry only, non-fatal on detector failure).
- *  - `screenAgentBodyForWrite` (the content-service write gate): screens ONLY
- *    autonomous-agent requesters with a non-empty body; human and delegated
- *    requesters never touch the safety stack (zero behavior change); blocked /
- *    degraded content throws a fail-closed `ValidationError` with the bridge's
- *    user-facing semantics.
+ *  - `screenAgentBodyForWrite` (the content-service write gate): screens any
+ *    AGENT requester — autonomous OR delegated (`isAgentRequester`) — with a
+ *    non-empty body; a human author never touches the safety stack (zero
+ *    behavior change); blocked / degraded content throws a fail-closed
+ *    `ValidationError` with the bridge's user-facing semantics.
  *
  * Only the lazily-imported `@/lib/safety` boundary is mocked; the REAL
- * `actorKindOf` helper runs so the actor-kind gate is exercised, not stubbed.
+ * `isAgentRequester` helper runs so the machine-authorship gate is exercised.
  */
 
 interface FakeSafetyResult {
@@ -46,6 +46,11 @@ jest.mock("@/lib/safety", () => ({
   }),
 }));
 
+// `@/lib/logger` is mocked GLOBALLY in jest.setup.js (createLogger is already a
+// jest.fn there) — the requestId-correlation tests below assert on its context
+// arg to verify the security-relevant blocked/degraded log lines carry the
+// caller's requestId.
+
 import {
   screenAgentContent,
   screenAgentBodyForWrite,
@@ -53,7 +58,11 @@ import {
   AGENT_SCREEN_DEGRADED_MESSAGE,
 } from "@/lib/content/agent-screening";
 import { ValidationError } from "@/lib/content/errors";
+import { createLogger } from "@/lib/logger";
 import type { Requester } from "@/lib/content/types";
+
+// The globally mocked createLogger (see jest.setup.js), typed for assertions.
+const createLoggerMock = createLogger as unknown as jest.Mock;
 
 const humanUser: Requester = {
   kind: "user",
@@ -84,6 +93,7 @@ beforeEach(() => {
   piiThrows = false;
   checkInputSafetyMock.mockClear();
   detectPIIMock.mockClear();
+  createLoggerMock.mockClear();
 });
 
 describe("screenAgentContent", () => {
@@ -140,6 +150,36 @@ describe("screenAgentContent", () => {
     piiThrows = true;
     const verdict = await screenAgentContent("clean text", null);
     expect(verdict).toEqual({ allowed: true });
+  });
+
+  it("threads the caller's requestId onto the screening logger for a blocked write", async () => {
+    checkResult = { allowed: false, blockedMessage: "Nope." };
+    const verdict = await screenAgentContent("bad text", "obj-1", "req-abc123");
+    // The verdict is unchanged by the correlation param…
+    expect(verdict).toEqual({
+      allowed: false,
+      reason: "blocked",
+      message: "Nope.",
+    });
+    // …but the security-relevant "blocked" log line is request-correlated.
+    expect(createLoggerMock).toHaveBeenCalledWith({
+      module: "atrium-agent-screening",
+      requestId: "req-abc123",
+    });
+  });
+
+  it("omits requestId from the logger context when none is provided (today's behavior)", async () => {
+    checkResult = { allowed: true, degraded: true };
+    const verdict = await screenAgentContent("any text", "obj-1");
+    expect(verdict).toEqual({
+      allowed: false,
+      reason: "degraded",
+      message: AGENT_SCREEN_DEGRADED_MESSAGE,
+    });
+    // Exact-match: no `requestId` key sneaks in when the caller has none.
+    expect(createLoggerMock).toHaveBeenCalledWith({
+      module: "atrium-agent-screening",
+    });
   });
 });
 
@@ -199,5 +239,16 @@ describe("screenAgentBodyForWrite (the content-service write gate)", () => {
     await expect(
       screenAgentBodyForWrite(autonomousAgent, "# any", "obj-1")
     ).rejects.toThrow(/Safety screening unavailable/);
+  });
+
+  it("passes an optional requestId through to the screening logger without changing the verdict", async () => {
+    checkResult = { allowed: false, blockedMessage: "Nope." };
+    await expect(
+      screenAgentBodyForWrite(autonomousAgent, "# bad", "obj-1", "req-write-9")
+    ).rejects.toThrow(/Content blocked by safety policy/);
+    expect(createLoggerMock).toHaveBeenCalledWith({
+      module: "atrium-agent-screening",
+      requestId: "req-write-9",
+    });
   });
 });

@@ -22,41 +22,12 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { publishService } from "@/lib/content/publish-service";
-import { ApprovalRequiredError, ValidationError } from "@/lib/content/errors";
+import { ApprovalRequiredError } from "@/lib/content/errors";
+import { assertEditorDestination } from "@/lib/content/validators";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
-import type { EditorPublishDestination } from "./publish-document";
-
-/**
- * The editor-unpublishable destinations — the same subset the publish action
- * accepts (see `EDITOR_PUBLISH_DESTINATIONS` in `publish-document.ts`; `okf` is
- * API/MCP-only by design). Kept as a local literal (a "use server" module may
- * only export async functions, so the array cannot be imported from the sibling
- * action) with the shared `EditorPublishDestination` type enforcing that the
- * two lists cannot drift without a compile error.
- */
-const EDITOR_UNPUBLISH_DESTINATIONS: readonly EditorPublishDestination[] = [
-  "intranet",
-  "public_web",
-  "schoology",
-  "google",
-];
-
-/** Runtime-narrow a widened `string` destination; mirrors publish-document. */
-function assertEditorDestination(
-  destination: string
-): EditorPublishDestination {
-  if (
-    !(EDITOR_UNPUBLISH_DESTINATIONS as readonly string[]).includes(destination)
-  ) {
-    throw new ValidationError(`Invalid unpublish destination: ${destination}`, {
-      destination,
-    });
-  }
-  return destination as EditorPublishDestination;
-}
 
 export async function unpublishDocumentAction(
   objectId: string,
@@ -98,8 +69,9 @@ export async function unpublishDocumentAction(
     });
 
     // Narrow the widened `string` destination at runtime BEFORE it reaches the
-    // service's adapter registry (rejects `okf` and any unexpected value).
-    const destination = assertEditorDestination(input.destination);
+    // service's adapter registry (rejects `okf` and any unexpected value) via
+    // the shared editor-destination guard in `lib/content/validators.ts`.
+    const destination = assertEditorDestination(input.destination, "unpublish");
 
     const result = await publishService.unpublish(
       requester,

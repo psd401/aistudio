@@ -106,11 +106,15 @@ jest.mock("@/lib/document-processing", () => ({
 // the hoisted import of retrieval-service can run these factories before the
 // `let`s' declaration lines without a TDZ error.
 let loadedObject: unknown = null;
+// Per-id map for multi-object tests; when null, every id resolves `loadedObject`.
+let loadedObjectsById: Record<string, unknown> | null = null;
 let currentVersion: unknown = { id: "ver-1", versionNumber: 3 };
 let s3Text = "the full markdown body of the doc";
 jest.mock("@/lib/content/content-service", () => ({
   contentService: {
-    loadByIdOrSlug: jest.fn(async () => loadedObject),
+    loadByIdOrSlug: jest.fn(async (id: string) =>
+      loadedObjectsById ? (loadedObjectsById[id] ?? null) : loadedObject
+    ),
   },
 }));
 jest.mock("@/lib/content/version-service", () => ({
@@ -149,6 +153,7 @@ import {
   repositoryItemChunks,
 } from "@/lib/db/schema";
 import { s3Store } from "@/lib/content/storage/s3-store";
+import { visibilityService } from "@/lib/content/visibility-service";
 import type { Requester } from "@/lib/content/types";
 
 // The mocked s3Store.getText, retrieved from the mocked module so §16.3 tests
@@ -202,6 +207,7 @@ beforeEach(() => {
   loadAssistantScopeResult = [];
   vectorSearchResult = [oneHit];
   loadedObject = groupStaffDoc;
+  loadedObjectsById = null;
   currentVersion = { id: "ver-1", versionNumber: 3 };
   s3Text = "the full markdown body of the doc";
   txResults = [];
@@ -251,6 +257,45 @@ describe("§16.2 permission-aware search — the safety boundary", () => {
     vectorSearchResult = [];
     const hits = await retrievalService.search(staffUser, "playbook");
     expect(hits).toEqual([]);
+  });
+
+  it("concurrent canView filtering keeps the ORIGINAL hit order and never checks status-excluded hits", async () => {
+    // Three hits → three distinct objects, in vector-search (similarity) order.
+    // obj-2 is a DRAFT: the cheap status pre-filter excludes it BEFORE the
+    // (now-parallelized) canView batch, so it must never cost a canView call.
+    vectorSearchResult = [
+      { ...oneHit, itemId: 100, chunkId: 5, similarity: 0.95 },
+      { ...oneHit, itemId: 101, chunkId: 6, similarity: 0.93 },
+      { ...oneHit, itemId: 102, chunkId: 7, similarity: 0.91 },
+    ];
+    resolveLinksResult = [
+      { objectId: "obj-1", repositoryItemId: 100 },
+      { objectId: "obj-2", repositoryItemId: 101 },
+      { objectId: "obj-3", repositoryItemId: 102 },
+    ];
+    loadedObjectsById = {
+      "obj-1": { ...groupStaffDoc, id: "obj-1", slug: "doc-1" },
+      "obj-2": { ...groupStaffDoc, id: "obj-2", slug: "doc-2", status: "draft" },
+      "obj-3": { ...groupStaffDoc, id: "obj-3", slug: "doc-3" },
+    };
+
+    const canViewSpy = jest.spyOn(visibilityService, "canView");
+    try {
+      const hits = await retrievalService.search(staffUser, "playbook");
+
+      // Same predicates as the sequential loop: published + in scope + canView.
+      // Order is the ORIGINAL vector-search order (obj-1 before obj-3 by
+      // similarity), never Promise completion order.
+      expect(hits.map((h) => h.objectId)).toEqual(["obj-1", "obj-3"]);
+      expect(hits.map((h) => h.chunkId)).toEqual([5, 7]);
+      expect(hits.map((h) => h.similarity)).toEqual([0.95, 0.91]);
+
+      // The draft hit was dropped by the cheap pre-filter — no canView DB call.
+      const checkedIds = canViewSpy.mock.calls.map(([, obj]) => obj.id);
+      expect(checkedIds).toEqual(["obj-1", "obj-3"]);
+    } finally {
+      canViewSpy.mockRestore();
+    }
   });
 });
 
