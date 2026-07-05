@@ -26,6 +26,12 @@ const PUBLIC_PATHS = [
   // first visit, since consent happens outside the PSD web session).
   "/api/agent", // Agent-to-Next.js endpoints use Bearer shared-secret auth
   "/agent-connect", // Consent page and OAuth callback — signed JWT in URL
+  // Atrium public reader (#1057): /p/[slug] is the anonymous public_web reader
+  // route (spec §20). It is world-readable by design — the page itself gates
+  // strictly on visibility_level='public' + a live public_web publication and
+  // consults no session — so it must NOT be redirected to sign-in. A non-public
+  // or unpublished slug 404s (existence-masking), never redirects.
+  "/p",
 ];
 
 // Atrium artifact sandbox (#1052): the app embeds an <iframe> pointing at a

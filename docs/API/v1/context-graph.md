@@ -1037,10 +1037,11 @@ is not live at the destination returns `unpublished: false` rather than erroring
 `{destination}` is one of `intranet`, `public_web`, `schoology`, `google`. Requires
 `content:publish_internal`.
 
-**Public-publish gate (§26.4):** taking `public_web` offline requires the same
+**Public-publish gate (§26.4):** taking any public-facing destination
+(`public_web`, `schoology`, `google`) offline requires the same
 `content:publish_public` authority needed to publish it — `content:publish_internal`
-alone can publish/unpublish `intranet`/`schoology`/`google` but not tear down a live
-public destination.
+alone can publish/unpublish `intranet` (the only internal-audience destination) but
+cannot publish to, or tear down a live, public-facing destination.
 
 **Response `200`**
 
