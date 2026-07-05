@@ -153,3 +153,38 @@ test("handles '' escaped quotes inside string literals without breaking scan pos
   );
   expect(found).toEqual(['CAST(score AS NUMERIC)']);
 });
+
+test('handles backslash-escaped quotes inside string literals without breaking scan position', () => {
+  const found = findUnqualifiedNumericCasts(
+    "SELECT CAST(score AS NUMERIC), 'it\\'s CAST(x AS NUMERIC) here' AS label FROM t"
+  );
+  expect(found).toEqual(['CAST(score AS NUMERIC)']);
+});
+
+test('ignores unqualified casts inside single-line comments', () => {
+  const found = findUnqualifiedNumericCasts(
+    'SELECT id FROM t -- CAST(score AS NUMERIC)\nSELECT score::numeric FROM t'
+  );
+  expect(found).toEqual(['::numeric']);
+});
+
+test('ignores unqualified casts inside multi-line comments', () => {
+  const found = findUnqualifiedNumericCasts(
+    'SELECT id FROM t /* CAST(score AS NUMERIC) */'
+  );
+  expect(found).toEqual([]);
+});
+
+test('flags a bare TRY_CAST(...AS NUMERIC) with no precision', () => {
+  const found = findUnqualifiedNumericCasts(
+    'SELECT TRY_CAST(score AS NUMERIC) FROM iready_scores'
+  );
+  expect(found).toEqual(['TRY_CAST(score AS NUMERIC)']);
+});
+
+test('does not flag TRY_CAST(...AS NUMERIC(10,2)) with explicit precision', () => {
+  const found = findUnqualifiedNumericCasts(
+    'SELECT TRY_CAST(score AS NUMERIC(10,2)) FROM iready_scores'
+  );
+  expect(found).toEqual([]);
+});

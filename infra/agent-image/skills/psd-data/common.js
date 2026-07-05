@@ -68,36 +68,74 @@ function emit(obj) {
 // query results/CSV exports) — the external Lambda's own source couldn't be
 // inspected during triage, so this check guards against the suspected
 // trigger, it does not confirm the server's actual behavior.
-const CAST_OPEN_RE = /\bCAST\s*\(/gi;
+const CAST_OPEN_RE = /\b(?:TRY_)?CAST\s*\(/gi;
 const UNQUALIFIED_CAST_TAIL_RE = /\bAS\s+(NUMERIC|DECIMAL)\s*$/i;
 const UNQUALIFIED_SHORTHAND_RE = /::\s*(NUMERIC|DECIMAL)\b(?!\s*\()/gi;
 
-// Blank out single-quoted string literal contents (preserving length/offsets
-// so match indices still line up with the original string) so neither regex
-// above fires on SQL text that merely *mentions* a cast inside a literal,
-// e.g. `WHERE note LIKE '%CAST(x AS NUMERIC)%'`. Handles '' as an escaped
-// quote; does not handle dollar-quoted strings (rare in this context).
+// Blank out single-quoted string literal contents and SQL comments
+// (preserving length/offsets so match indices still line up with the
+// original string) so neither regex above fires on SQL text that merely
+// *mentions* a cast inside a literal or a comment, e.g.
+// `WHERE note LIKE '%CAST(x AS NUMERIC)%'` or `-- CAST(x AS NUMERIC)`.
+// Handles '' and backslash as escaped quotes inside strings; does not
+// handle dollar-quoted strings (rare in this context).
 function blankStringLiterals(sql) {
   let out = '';
-  let inString = false;
-  for (let i = 0; i < sql.length; i++) {
+  let i = 0;
+  while (i < sql.length) {
     const ch = sql[i];
-    if (inString) {
-      if (ch === "'" && sql[i + 1] === "'") {
-        out += '  ';
-        i++;
-      } else if (ch === "'") {
-        inString = false;
+    const next = sql[i + 1];
+
+    if (ch === '-' && next === '-') {
+      out += '  ';
+      i += 2;
+      while (i < sql.length && sql[i] !== '\n') {
         out += ' ';
-      } else {
-        out += ch === '\n' ? '\n' : ' ';
+        i++;
       }
-    } else if (ch === "'") {
-      inString = true;
-      out += ' ';
-    } else {
-      out += ch;
+      continue;
     }
+
+    if (ch === '/' && next === '*') {
+      out += '  ';
+      i += 2;
+      while (i < sql.length) {
+        if (sql[i] === '*' && sql[i + 1] === '/') {
+          out += '  ';
+          i += 2;
+          break;
+        }
+        out += sql[i] === '\n' ? '\n' : ' ';
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      out += ' ';
+      i++;
+      while (i < sql.length) {
+        const curr = sql[i];
+        if (curr === '\\') {
+          out += '  ';
+          i += 2;
+        } else if (curr === "'" && sql[i + 1] === "'") {
+          out += '  ';
+          i += 2;
+        } else if (curr === "'") {
+          out += ' ';
+          i++;
+          break;
+        } else {
+          out += curr === '\n' ? '\n' : ' ';
+          i++;
+        }
+      }
+      continue;
+    }
+
+    out += ch;
+    i++;
   }
   return out;
 }
@@ -119,10 +157,11 @@ function findMatchingClose(sql, openIndex) {
 
 /**
  * Scan a SQL string for NUMERIC/DECIMAL casts with no explicit precision.
- * Only flags actual `CAST(...)` calls and `::TYPE` shorthand — not bare
- * `... AS numeric`/`... AS decimal` column aliases (which share the same
- * `AS <TYPE>)` text but aren't a cast at all) — and ignores anything inside
- * a string literal. Returns the matched fragments (empty if none).
+ * Only flags actual `CAST(...)`/`TRY_CAST(...)` calls and `::TYPE` shorthand
+ * — not bare `... AS numeric`/`... AS decimal` column aliases (which share
+ * the same `AS <TYPE>)` text but aren't a cast at all) — and ignores
+ * anything inside a string literal or a SQL comment. Returns the matched
+ * fragments (empty if none).
  */
 function findUnqualifiedNumericCasts(sql) {
   if (typeof sql !== 'string') return [];
