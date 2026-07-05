@@ -10,6 +10,7 @@ import dataclasses
 import json
 import logging
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -110,10 +111,12 @@ class OpenClawAdapter(HarnessAdapter):
     """
 
     DEFAULT_CONFIG_PATH = "/home/node/.openclaw/openclaw.json"
-    # Fixed gateway token passed via --token CLI flag. OpenClaw overwrites the
-    # config file on startup (generating a new random token), so reading from
-    # the config is unreliable. The --token CLI flag overrides the config value.
-    GATEWAY_TOKEN = "psd-agent-internal-gateway-token"
+    # Gateway auth token is generated per container at startup (see __init__),
+    # never hardcoded. It is passed to the gateway via the --token CLI flag and
+    # reused by this adapter's connect envelope, so launcher and client always
+    # agree within the process. OpenClaw overwrites the config file's token on
+    # startup and --token overrides that config value, so the on-disk config
+    # token is never the operative secret.
     # client.id MUST be "openclaw-tui" — verified by reading OpenClaw source:
     # - "cli" passes auth but scopes are cleared (not an operator UI client)
     # - "openclaw-control-ui" triggers browser origin check (rejects non-browser)
@@ -131,6 +134,12 @@ class OpenClawAdapter(HarnessAdapter):
         self._gateway_port: int = 3100
         self._process: Optional[subprocess.Popen] = None
         self._ready: bool = False
+        # Per-container random gateway token (REV-INFRA-005). Generated once at
+        # startup so it is never committed to source and never readable by the
+        # sandboxed `node` agent from a static file. Passed to `openclaw gateway
+        # --token` (launcher) and reused in the connect envelope (client), so the
+        # two always agree within this process.
+        self._gateway_token: str = secrets.token_urlsafe(32)
 
     def configure(self, config: dict) -> None:
         """Configure the OpenClaw adapter. Idempotent — safe to call multiple times."""
@@ -147,7 +156,7 @@ class OpenClawAdapter(HarnessAdapter):
                     [
                         "openclaw", "gateway",
                         "--port", str(self._gateway_port),
-                        "--token", self.GATEWAY_TOKEN,
+                        "--token", self._gateway_token,
                     ],
                     stdout=sys.stdout,
                     stderr=sys.stderr,
@@ -241,7 +250,7 @@ class OpenClawAdapter(HarnessAdapter):
                 model=observed_model,
             )
 
-        gateway_token = self.GATEWAY_TOKEN
+        gateway_token = self._gateway_token
         ws_url = f"ws://127.0.0.1:{self._gateway_port}"
         response_text = ""
 

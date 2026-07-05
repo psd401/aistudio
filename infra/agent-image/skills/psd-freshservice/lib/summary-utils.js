@@ -47,10 +47,17 @@ async function fetchAgentMap(apiKey, agentIds) {
     throw new Error('fetchAgentMap: agentIds must be an array or null/undefined');
   }
 
-  if (agentIds && agentIds.length > 0) {
+  // An explicit array — even an empty one — means "fetch only these". An empty
+  // list is a no-op that returns an empty map, NOT a request to page the entire
+  // roster (REV-COR-332): responderIds is [] on any period with zero closed
+  // tickets (weekends/holidays), and paging 50 sequential /agents calls to build
+  // a map the caller never indexes just burns the tenant's rate budget. Full
+  // pagination is reserved for the agentIds-omitted (null/undefined) case below.
+  if (Array.isArray(agentIds)) {
     // Fetch only the agents we need. Batched in groups of 10 to avoid
     // saturating Freshservice's rate limits when a workspace has 50+
-    // unique responders in a single summary period.
+    // unique responders in a single summary period. An empty uniqueIds list
+    // simply skips the loop and returns the empty map.
     const BATCH_SIZE = 10;
     const INTER_BATCH_DELAY_MS = 50;
     const uniqueIds = [...new Set(agentIds)];

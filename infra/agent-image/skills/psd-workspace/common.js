@@ -206,6 +206,21 @@ function splitCommand(cmd) {
 }
 
 /**
+ * Return the value of the `--json` argument from an argv token array — i.e. the
+ * exact string gws receives (quotes already stripped by splitCommand). Returns
+ * null if there is no `--json` flag with a following value. Security-sensitive
+ * consumers (the Phase 1 gate exception) MUST read the payload from here rather
+ * than re-scanning the raw command string, so what is inspected is identical to
+ * what executes.
+ */
+function extractJsonArg(tokens) {
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (tokens[i] === '--json') return tokens[i + 1];
+  }
+  return null;
+}
+
+/**
  * Exec gws with GOOGLE_WORKSPACE_CLI_TOKEN set. Streams stdout; returns exit
  * code. gws ignores GOOGLE_ACCESS_TOKEN — must be GOOGLE_WORKSPACE_CLI_TOKEN
  * per the gws README "Pre-obtained Access Token" section.
@@ -293,6 +308,34 @@ const PHASE1_FORBIDDEN = [
     reason: 'modifying Drive sharing permissions (Phase 1: no permission changes)' },
 ];
 
+// gws gmail "helper" verbs that put a message on the wire. The `+`-prefixed
+// forms are unambiguous (they never appear as a search-query value), so they
+// are blocked wherever they appear in the argv. The bare forms (`gmail send`)
+// are only blocked in the verb slot immediately after `gmail`, so a legitimate
+// `--query 'reply'` search is not falsely refused. (REV-COR-350)
+const GMAIL_PLUS_SEND_HELPERS = new Set(['+send', '+reply', '+reply-all', '+forward']);
+const GMAIL_BARE_SEND_HELPERS = new Set(['send', 'reply', 'reply-all', 'forward']);
+const GMAIL_SEND_HELPER_REASON =
+  'sending/replying/forwarding mail via a gmail helper (Phase 1: drafts only)';
+
+/**
+ * Detect the gmail send/reply/forward helper forms from argv tokens. These
+ * escape the start-anchored PHASE1_FORBIDDEN patterns when the command is
+ * prefixed with the `gws` program token or a flag before the verb
+ * (`gws gmail +send`, `gmail --to x +send`). Returns a reason string to refuse,
+ * or null. Requires a `gmail` token to be present so unrelated commands are
+ * unaffected.
+ */
+function detectGmailSendHelper(tokens) {
+  const lower = tokens.map((t) => t.toLowerCase());
+  const gmailIdx = lower.indexOf('gmail');
+  if (gmailIdx === -1) return null;
+  if (lower.some((t) => GMAIL_PLUS_SEND_HELPERS.has(t))) return GMAIL_SEND_HELPER_REASON;
+  const verb = lower[gmailIdx + 1];
+  if (verb && GMAIL_BARE_SEND_HELPERS.has(verb)) return GMAIL_SEND_HELPER_REASON;
+  return null;
+}
+
 /**
  * Narrow exception to the `drive.permissions.create` block: the agent is
  * permitted to share files it owns (scope === 'agent_account') back to the
@@ -314,45 +357,27 @@ const PHASE1_FORBIDDEN = [
  * Returns true if the share request is the narrow caller-only handoff;
  * false otherwise. False means fall through to the existing block.
  */
-function isShareToCallerHandoff(commandString, context) {
+function isShareToCallerHandoff(tokens, context) {
   if (!context || context.scope !== 'agent_account' || !context.ownerEmail) {
     return false;
   }
-  // Must be the create variant — update/delete remain blocked.
-  if (!/\bdrive[\s.]+permissions[\s.]+create\b/i.test(commandString)) {
+  // Must be the create variant — update/delete remain blocked. Match against
+  // the executed tokenization (REV-COR-346), not the raw string.
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const createRe = /\bdrive[\s.]+permissions[\s.]+create\b/i;
+  if (!createRe.test(spaceJoined) && !createRe.test(dotJoined)) {
     return false;
   }
 
-  // Extract the --json payload without mutating it. We reuse the same brace-
-  // balanced parser idea as mutateJsonField but read-only.
-  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
-  if (jsonFlagIdx === -1) return false;
-  let i = jsonFlagIdx + '--json'.length;
-  while (i < commandString.length && /\s/.test(commandString[i])) i++;
-  if (commandString[i] === "'" || commandString[i] === '"') i++;
-  const jsonStart = i;
-  if (commandString[jsonStart] !== '{') return false;
-  let depth = 0;
-  let inString = false;
-  let stringChar = '';
-  let escape = false;
-  let jsonEnd = -1;
-  for (let j = jsonStart; j < commandString.length; j++) {
-    const ch = commandString[j];
-    if (escape) { escape = false; continue; }
-    if (ch === '\\') { escape = true; continue; }
-    if (inString) {
-      if (ch === stringChar) inString = false;
-      continue;
-    }
-    if (ch === '"' || ch === "'") { inString = true; stringChar = ch; continue; }
-    if (ch === '{') depth++;
-    else if (ch === '}') { depth--; if (depth === 0) { jsonEnd = j; break; } }
-  }
-  if (jsonEnd === -1) return false;
+  // Read the --json payload from the argv token that actually executes, so the
+  // exception cannot be granted on a benign-looking payload that differs from
+  // what gws receives (REV-COR-346).
+  const jsonStr = extractJsonArg(tokens);
+  if (!jsonStr) return false;
   let payload;
   try {
-    payload = JSON.parse(commandString.slice(jsonStart, jsonEnd + 1));
+    payload = JSON.parse(jsonStr);
   } catch {
     return false;
   }
@@ -392,18 +417,37 @@ function enforcePhase1Gates(commandString, context) {
   if (!commandString || typeof commandString !== 'string') {
     return { allowed: true };
   }
+  // SECURITY (REV-COR-346): match against the SAME tokenization that executes.
+  // execGws runs splitCommand(commandString), which strips quotes. Matching the
+  // raw string let an attacker insert a quote into a forbidden verb
+  // (`messages 'send'`) so the regex missed it while splitCommand reassembled
+  // the exact blocked argv. We tokenize first and test the space- and
+  // dot-joined argv, so the gate sees precisely what gws will receive.
+  const tokens = splitCommand(commandString);
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const hits = (pattern) => pattern.test(spaceJoined) || pattern.test(dotJoined);
+
   for (const { pattern, reason } of PHASE1_FORBIDDEN) {
-    if (pattern.test(commandString)) {
+    if (hits(pattern)) {
       // Narrow exception: agent shares its own file with the caller, read-only.
       if (
-        /\bdrive[\s.]+permissions[\s.]+create\b/i.test(commandString) &&
-        isShareToCallerHandoff(commandString, context)
+        hits(/\bdrive[\s.]+permissions[\s.]+create\b/i) &&
+        isShareToCallerHandoff(tokens, context)
       ) {
         return { allowed: true };
       }
       return { allowed: false, reason };
     }
   }
+
+  // Helper-form send/reply/forward (REV-COR-350) — `gws gmail +send`,
+  // `gmail --to x +send` escape the start-anchored patterns above.
+  const helperReason = detectGmailSendHelper(tokens);
+  if (helperReason) {
+    return { allowed: false, reason: helperReason };
+  }
+
   return { allowed: true };
 }
 

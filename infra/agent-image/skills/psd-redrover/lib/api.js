@@ -288,7 +288,13 @@ function parseDate(dateArg) {
     };
   }
 
-  const d = new Date(dateArg);
+  // Force local-midnight parsing. `new Date('2026-01-15')` parses a date-only
+  // ISO string as UTC midnight, which in the container's America/Los_Angeles TZ
+  // (UTC-7/8) reads back as the *previous* calendar day through formatDate's
+  // local getters — a silent off-by-one on both the query window and the label.
+  // Appending T00:00:00 parses as local midnight, preserving the requested day
+  // (mirrors the psd-freshservice fix). See REV-COR-331.
+  const d = new Date(`${dateArg}T00:00:00`);
   if (isNaN(d.getTime())) {
     fail(`Could not parse date: ${dateArg}`, 'bad_args');
   }
