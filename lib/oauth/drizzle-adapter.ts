@@ -21,6 +21,7 @@ import {
   oauthRefreshTokens,
 } from "@/lib/db/schema"
 import { createLogger } from "@/lib/logger"
+import { systemUserIdOrNull } from "@/lib/content/helpers"
 import { createHash } from "node:crypto"
 
 // ============================================
@@ -308,12 +309,34 @@ class DrizzleAdapter implements Adapter {
     payload: AdapterPayload,
     expiresAt?: Date
   ): Promise<void> {
+    // Client-credentials tokens (Atrium Phase 5) have no end-user `accountId`;
+    // the row's user_id is NOT NULL, so fall back to the configured Atrium system
+    // user (the owner of autonomous-agent content). Without it configured, a
+    // client-credentials token cannot be persisted — surface that as a clear
+    // error rather than a NaN insert.
+    const accountUserId = Number.parseInt(payload.accountId as string, 10)
+    let userId = accountUserId
+    if (Number.isNaN(userId)) {
+      // Validate via the shared `systemUserIdOrNull()` (requires
+      // Number.isInteger(id) && id > 0) rather than a bare `!Number.isNaN(parseInt)`
+      // — the latter accepts `-1`, `1.5` (parseInt truncates → 1), and trailing
+      // garbage ("3abc"), any of which would insert a bogus owner id. A null here
+      // is an operator misconfiguration (missing/invalid env var), not bad client
+      // input, so surface it as a clear error.
+      const sysId = systemUserIdOrNull()
+      if (sysId == null) {
+        throw new Error(
+          "Cannot persist a user-less access token (client_credentials) without a valid ATRIUM_SYSTEM_USER_ID (positive integer)"
+        )
+      }
+      userId = sysId
+    }
     await executeQuery(
       (db) =>
         db.insert(oauthAccessTokens).values({
           jti: id,
           clientId: payload.clientId as string,
-          userId: Number.parseInt(payload.accountId as string, 10),
+          userId,
           scopes: (payload.scope as string)?.split(" ") ?? [],
           expiresAt: expiresAt ?? new Date(Date.now() + 900_000),
         }),

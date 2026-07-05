@@ -98,8 +98,15 @@ RUN set -eux; \
     uv --version
 
 # Google Workspace CLI (#912) — Rust single binary invoked by the psd-workspace
-# skill. ARM64 matches AgentCore runtime. The skill passes OAuth access tokens
-# via the GOOGLE_ACCESS_TOKEN env var.
+# skill. ARM64 matches AgentCore runtime. run.js/common.js authenticate each
+# call by exporting the per-user OAuth access token as GOOGLE_WORKSPACE_CLI_TOKEN
+# (gws ignores GOOGLE_ACCESS_TOKEN — see common.js execGws).
+#
+# The real binary is installed as /usr/local/bin/gws.real and a refuse-by-default
+# wrapper is installed as /usr/local/bin/gws. Every `gws` from the agent's exec
+# tool resolves the wrapper first; run.js reaches gws.real directly. See
+# bin/gws-wrapper.sh for rationale (incident: 2026-07-01 — bare `gws chat spaces
+# list` → 401 → wrong "no credentials" answer + Phase 1 gate-bypass surface).
 #
 # Pinned version + SHA256 come from the official release's .sha256 sidecar.
 # When bumping, run:
@@ -107,14 +114,21 @@ RUN set -eux; \
 # and paste the hex digest into GWS_SHA256 below.
 ARG GWS_VERSION=0.22.5
 ARG GWS_SHA256=94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0
+# COPY --chmod so the wrapper mode lands in one layer (layer count is
+# load-bearing for AgentCore's Firecracker snapshotter — see gh install below).
+COPY --chmod=755 bin/gws-wrapper.sh /usr/local/bin/gws
+# Install the real gws binary as /usr/local/bin/gws.real. The final
+# `gws --version` verifies the wrapper delegates introspection to it.
 RUN set -eux; \
     curl -fsSL -o /tmp/gws.tar.gz \
       "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz"; \
     echo "${GWS_SHA256}  /tmp/gws.tar.gz" | sha256sum -c -; \
-    tar -xzf /tmp/gws.tar.gz -C /usr/local/bin --strip-components=0 ./gws; \
+    tar -xzf /tmp/gws.tar.gz -C /tmp --strip-components=0 ./gws; \
+    mv /tmp/gws /usr/local/bin/gws.real; \
     rm /tmp/gws.tar.gz; \
-    chmod +x /usr/local/bin/gws; \
-    gws --version
+    chmod +x /usr/local/bin/gws.real; \
+    /usr/local/bin/gws.real --version; \
+    /usr/local/bin/gws --version
 
 # GitHub CLI (#965 follow-on) — single Go binary so the agent can read PRs,
 # issues, and run gh-api calls without us shipping a custom skill. ARM64
@@ -191,6 +205,36 @@ RUN mkdir -p /home/node/.openclaw/memory
 #   translation layer entirely. Result: we own no per-model format adapter
 #   code; any Bedrock model works by changing the `id` below.
 #
+#   agents.defaults.memorySearch — embedding provider for semantic search over
+#   the agent's local ~/.openclaw/memory/ files. OpenClaw's default provider is
+#   "openai", but this container provisions NO OpenAI key (it reaches models
+#   only through Bedrock Mantle), so memory indexing fails at runtime with
+#   `No API key found for provider "openai"`. We pin provider=bedrock +
+#   model=amazon.titan-embed-text-v2:0 (the documented Bedrock embedding
+#   default) so indexing works out-of-the-box. `provider: bedrock` is OpenClaw's
+#   NATIVE Bedrock provider — distinct from the amazon-bedrock-mantle localhost
+#   proxy used for chat — so it calls bedrock-runtime.<region>.amazonaws.com
+#   directly via the AWS SDK (no baseUrl/region key in the config). Two runtime
+#   dependencies follow from that, both already satisfied by the stack:
+#     • Region: the AWS SDK needs AWS_REGION, which AgentCore does NOT inject
+#       into the microVM (see agentcore_wrapper.py / workspace_sync.py, which
+#       hardcode a `|| us-east-1` fallback for exactly this reason). OpenClaw's
+#       vendored binary has no such fallback, so AWS_REGION/AWS_DEFAULT_REGION
+#       are set explicitly on the AgentCore Runtime (runtimeEnvVars in
+#       agent-platform-stack.ts) so this call can resolve an endpoint.
+#     • Auth: hydrate_bedrock_api_key() exports AWS_BEARER_TOKEN_BEDROCK
+#       process-wide (agentcore_wrapper.py). OpenClaw's memory_search relies on
+#       that hydrated Bedrock token (per the authoritative memory_search
+#       rationale comment at agent-platform-stack.ts:502-510), so this call is
+#       authorized by the shared BedrockApiUser's `bedrock:CallWithBearerToken`
+#       grant (`BedrockEmbeddingsViaBearerToken`), NOT the execution role. If a
+#       SigV4 path is used instead, the `InvokeModel` on foundation-model/*
+#       grants (BedrockApiUser `InvokeBedrockModels` and the execution role
+#       `BedrockModelInvocation`) cover the titan model. Either path is already
+#       granted. (Exact auth-selection internals are OpenClaw's; not asserted
+#       here beyond the token dependency the existing grant already documents.)
+#   No IAM change and no new Docker layer — the COPY below already ships it.
+#
 #   plugins.entries.active-memory — blocking memory sub-agent that runs before
 #   every main reply, shares the inherited session model, and its failure
 #   cascades to the main reply as `surface_error`. Config rationale:
@@ -207,6 +251,19 @@ RUN mkdir -p /home/node/.openclaw/memory
 #   config.model — requires adding a second model to bedrock-proxy. Until
 #   then the sub-agent adds ~5-10s to every turn's wall-clock latency.
 COPY openclaw.json /home/node/.openclaw/openclaw.json
+# Build-time config sanity check (post-2026-07-02 config-risk hardening): surface
+# any openclaw.json schema/key errors at BUILD time instead of at runtime (a
+# rejected config would stop the gateway from starting = an outage). Non-fatal
+# for now — until we confirm `config validate` needs no live runtime env, we
+# only echo a marker on nonzero so a false-positive can't block the build. Read
+# the `[config-validate]` lines in the build log; harden to fatal once trusted.
+RUN HOME=/home/node openclaw config validate >/tmp/config-validate.log 2>&1; \
+    STATUS=$?; \
+    sed 's/^/[config-validate] /' /tmp/config-validate.log; \
+    rm -f /tmp/config-validate.log; \
+    if [ "$STATUS" -ne 0 ]; then \
+      echo "[config-validate] NONZERO EXIT — inspect openclaw.json before deploying"; \
+    fi
 # OpenClaw auto-injects SOUL.md as the system prompt every turn.
 # NOTE: Do NOT put HTML comments or TODO notes in this file — they are
 # visible to the LLM. Keep roadmap notes here in the Dockerfile instead.
@@ -252,13 +309,20 @@ COPY MEMORY.md /home/node/.openclaw/MEMORY.md
 # Loaded via openclaw.json skills.load.extraDirs. Install dependencies at
 # build time so the agent container starts fast.
 COPY skills /opt/psd-skills
-RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund
+# Skill dependencies. Consolidated into a SINGLE RUN (was 7 separate RUNs) to
+# stay well under AgentCore's Firecracker overlay-mount layer ceiling — the base
+# image sits at the edge (53 layers) and a 54th layer fails to mount with
+# "Failed to mount overlay: No such file or directory" (agent outage 2026-07-02,
+# caused by adding the gws-wrapper COPY at 53). Absolute `cd` paths so the chain
+# is independent of prior CWD. Keep new skills in this RUN, not new RUNs.
+RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-html-artifact && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund
 # chat-card has zero npm deps. chat-chart's npm install is paired with the
 # matplotlib install above — both stay disabled until we figure out the
 # AgentCore overlay-mount failure. With both off the image boots cleanly

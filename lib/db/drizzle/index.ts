@@ -504,6 +504,7 @@ export {
   type RepositoryWithAccess,
   // Repository query operations
   getRepositoryById,
+  isSystemManagedRepository,
   getRepositoriesByOwnerId,
   getPublicRepositories,
   getAllRepositoriesWithOwner,

@@ -12,6 +12,7 @@
 'use strict';
 
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
 
 const {
   SecretsManagerClient,
@@ -230,7 +231,14 @@ function execGws(commandString, accessToken) {
   if (tokens.length === 0) {
     fail('--command is empty');
   }
-  const result = spawnSync('gws', tokens, {
+  // Call the real binary directly. In the agent container the model-facing
+  // `gws` on PATH is a refuse-by-default wrapper (bin/gws-wrapper.sh) that
+  // blocks direct data access; run.js is the only sanctioned caller, so it
+  // must reach the unwrapped binary at /usr/local/bin/gws.real. Local/dev
+  // images that ship no wrapper fall back to `gws` on PATH.
+  const REAL_GWS = '/usr/local/bin/gws.real';
+  const bin = fs.existsSync(REAL_GWS) ? REAL_GWS : 'gws';
+  const result = spawnSync(bin, tokens, {
     env: { ...process.env, GOOGLE_WORKSPACE_CLI_TOKEN: accessToken },
     stdio: ['ignore', 'inherit', 'inherit'],
   });

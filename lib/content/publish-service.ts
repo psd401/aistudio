@@ -18,10 +18,12 @@
  *     external side effect (drizzle-client anti-pattern: external IO inside a tx).
  *
  * The adapter (`./publish-adapters`) abstracts *where a published version becomes
- * live*. Phase 1 wires only the reader-backed `intranet` adapter (a no-op); the
- * other destinations throw until their phase lands.
+ * live*. As of Phase 7 (#1057) two reader-backed adapters are live — `intranet`
+ * (`/c/[slug]`) and `public_web` (`/p/[slug]`) — and `schoology` / `google` are
+ * governed connector stubs that throw until wired. Every non-intranet destination
+ * is public-facing (`isPublicDestination`) and sits behind the §26.4 gate.
  *
- * See docs/features/atrium-design-spec.md §15 (publishing).
+ * See docs/features/atrium-design-spec.md §15 (publishing) / §26.4 (public gate).
  */
 
 import { and, eq } from "drizzle-orm";
@@ -32,11 +34,27 @@ import {
 } from "@/lib/db/drizzle-client";
 import { contentObjects, contentPublications } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
-import { assertCanEdit, authorUserIdOf } from "./helpers";
+import {
+  actorKindOf,
+  assertCanEdit,
+  authorUserIdOf,
+  canPublishPublic,
+  raisePublishApprovalRequired,
+} from "./helpers";
 import { visibilityService } from "./visibility-service";
-import { NotFoundError, ValidationError, ForbiddenError } from "./errors";
-import type { PublishAdapter, PublishDestination } from "./publish-adapters/types";
+import { retrievalService } from "./retrieval-service";
+import { contentEvents } from "./events";
+import { NotFoundError, ValidationError, ApprovalRequiredError } from "./errors";
+import {
+  isPublicDestination,
+  type PublishAdapter,
+  type PublishDestination,
+} from "./publish-adapters/types";
 import { intranetAdapter } from "./publish-adapters/intranet";
+import { publicWebAdapter } from "./publish-adapters/public-web";
+import { schoologyAdapter } from "./publish-adapters/schoology";
+import { googleAdapter } from "./publish-adapters/google";
+import { okfAdapter } from "./publish-adapters/okf";
 import type {
   Requester,
   VisibilityGrant,
@@ -58,26 +76,24 @@ export interface PublishInput {
 }
 
 /**
- * The destination adapter registry. Phase 1 wires only the reader-backed
- * `intranet` adapter; the remaining destinations throw until their phase lands,
- * so a stray `public_web`/`schoology`/`google` publish fails loudly rather than
- * silently writing a publication row with no live side effect.
+ * The destination adapter registry (Phase 7, #1057). Two live, reader-backed
+ * destinations — `intranet` (`/c/[slug]`) and `public_web` (`/p/[slug]`) — plus
+ * the `schoology` / `google` connector STUBS (`implemented: false`), which are
+ * explicit v1 non-goals beyond a governed path (§2). A stub's adapter throws
+ * BEFORE the publish transaction (see the `implemented === false` guard below),
+ * so a not-yet-wired connector fails loudly rather than committing a publication
+ * row with no live side effect. All three non-intranet destinations are
+ * public-facing (`isPublicDestination`) and sit behind the §26.4 gate.
  */
-const notImplemented = (destination: PublishDestination): PublishAdapter => ({
-  destination,
-  async publish(): Promise<{ externalRef: string | null }> {
-    throw new ValidationError(
-      `Publishing to '${destination}' is not implemented in Phase 1`,
-      { destination }
-    );
-  },
-});
-
 const adapters: Record<PublishDestination, PublishAdapter> = {
   intranet: intranetAdapter,
-  public_web: notImplemented("public_web"),
-  schoology: notImplemented("schoology"),
-  google: notImplemented("google"),
+  public_web: publicWebAdapter,
+  schoology: schoologyAdapter,
+  google: googleAdapter,
+  // `okf` serializes a single object to a portable OKF concept bundle (Phase 8,
+  // #1103, §36.2). Registered so the destination is pipeline-complete; the primary
+  // collection-grained surface is `okfExportService` (export_okf).
+  okf: okfAdapter,
 };
 
 /** A loaded object's fields the publish path needs. */
@@ -113,6 +129,153 @@ async function loadPublishable(
   return rows[0] ?? null;
 }
 
+/**
+ * Post-commit publish side effects, both best-effort: a successful publish has
+ * already committed, so neither a retrieval-index failure nor an event-bus
+ * hiccup may roll it back. Extracted from `publish` so the method stays within
+ * the length budget; the sequencing is unchanged — the retrieval index (§16.1)
+ * is awaited so indexing happens inline on the publish path (its failure is
+ * caught + logged, NOT an invariant — a later re-publish/re-index retries it),
+ * then the `content.published` event (§27: connector pushes, notifications) is
+ * emitted fire-and-forget (`void`), since `emit` swallows its own errors and
+ * awaiting would only hold the response open for an SNS round-trip.
+ */
+async function runPublishSideEffects(args: {
+  req: Requester;
+  objectId: string;
+  slug: string;
+  publishedVersionId: string;
+  destination: PublishDestination;
+  log: ReturnType<typeof createLogger>;
+}): Promise<void> {
+  const { req, objectId, slug, publishedVersionId, destination, log } = args;
+  try {
+    await retrievalService.indexObject(objectId);
+  } catch (indexError) {
+    log.warn("Failed to index published content for retrieval", {
+      objectId,
+      error:
+        indexError instanceof Error ? indexError.message : String(indexError),
+    });
+  }
+
+  void contentEvents.emit("content.published", {
+    objectId,
+    slug,
+    versionId: publishedVersionId,
+    destination,
+    actorKind: actorKindOf(req),
+    agentLabel: req.kind === "user" ? null : req.agentLabel,
+  });
+}
+
+/**
+ * Post-commit destination side effect + external-ref recording (Phase 7, #1057).
+ * Extracted from `publish` so the method stays within the max-lines budget; the
+ * sequencing is unchanged.
+ *
+ * The publication row was already committed as `status: "live"`. This runs the
+ * destination adapter AFTER the transaction (external IO inside a tx is a
+ * drizzle-client anti-pattern) with two guarantees:
+ *  1. Compensation: if the adapter throws — a real external adapter (Schoology/
+ *     Google) failing to notify the destination, OR the `intranet` adapter's
+ *     post-commit nav-item write (`ensureNavItem`) failing — flip the row to
+ *     `failed` so a retry re-runs the adapter, and re-throw so the caller sees the
+ *     failure. `public_web` DOES run here, but only computes a URL string (no
+ *     I/O), so it never throws and thus never reaches this compensation branch;
+ *     the Schoology/Google stubs throw BEFORE the tx and so never reach
+ *     `runPublishAdapter` at all.
+ *  2. External-ref recording: persist the adapter's returned `external_ref` (the
+ *     `public_web` reader URL, a future connector resource id, …) so the row
+ *     records WHERE the version went live. Skipped when the adapter has no
+ *     external system (intranet returns null). Best-effort: the content is
+ *     already live, so a failure to record the descriptive ref is logged, not
+ *     thrown (it never un-publishes live content); republish overwrites it via
+ *     this same UPDATE, so a stale ref cannot linger.
+ */
+async function runPublishAdapter(args: {
+  adapter: PublishAdapter;
+  objectId: string;
+  slug: string;
+  versionId: string;
+  title: string;
+  collectionId: string | null;
+  publicationId: string;
+  destination: PublishDestination;
+  log: ReturnType<typeof createLogger>;
+}): Promise<void> {
+  const {
+    adapter,
+    objectId,
+    slug,
+    versionId,
+    title,
+    collectionId,
+    publicationId,
+    destination,
+    log,
+  } = args;
+
+  let externalRef: string | null = null;
+  try {
+    const adapterResult = await adapter.publish({
+      objectId,
+      slug,
+      versionId,
+      title,
+      collectionId,
+    });
+    externalRef = adapterResult.externalRef;
+  } catch (adapterError) {
+    log.error("Publish adapter failed; marking publication failed", {
+      objectId,
+      destination,
+      publicationId,
+      error:
+        adapterError instanceof Error ? adapterError.message : String(adapterError),
+    });
+    await executeQuery(
+      (db) =>
+        db
+          .update(contentPublications)
+          .set({ status: "failed", updatedAt: new Date() })
+          .where(eq(contentPublications.id, publicationId)),
+      "publish.markFailed"
+    ).catch((markError) =>
+      // Best-effort compensation: if even the status flip fails, surface the
+      // ORIGINAL adapter error (more actionable) but log the marking failure.
+      log.error("Failed to mark publication failed after adapter error", {
+        publicationId,
+        error: markError instanceof Error ? markError.message : String(markError),
+      })
+    );
+    throw adapterError;
+  }
+
+  if (externalRef !== null) {
+    await executeQuery(
+      (db) =>
+        db
+          .update(contentPublications)
+          .set({ externalRef, updatedAt: new Date() })
+          .where(eq(contentPublications.id, publicationId)),
+      "publish.persistExternalRef"
+    ).catch((refError) =>
+      log.warn("Failed to persist publication external_ref", {
+        publicationId,
+        destination,
+        error: refError instanceof Error ? refError.message : String(refError),
+      })
+    );
+  }
+}
+
+// §26.4 — this publish path's two gate sites (the pre-tx public-destination branch
+// and the in-tx visibility-widen branch, below) both raise via the shared
+// `raisePublishApprovalRequired` (in `./helpers`, also used by
+// `visibilityService.setLevel`) so the message + emitted event shape stay
+// identical across every §26.4 gate site.
+
 export const publishService = {
   /**
    * Publish (or republish) an object's working head to a destination. Idempotent
@@ -122,7 +285,14 @@ export const publishService = {
   async publish(
     req: Requester,
     objectId: string,
-    input: PublishInput
+    input: PublishInput,
+    /**
+     * Surface-resolved authorization context. `hasPublishPublicCapability` lets
+     * the in-app server-action surface pass a non-admin human's
+     * `content.publish_public` capability into the §26.4 gate; API/MCP surfaces
+     * omit it (agents are scope-gated, admins pass via `req.isAdmin`).
+     */
+    opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<{ publicationId: string; publishedVersionId: string }> {
     const log = createLogger({ action: "publish.publish" });
 
@@ -148,13 +318,28 @@ export const publishService = {
     }
     assertCanEdit(req, obj.ownerUserId);
 
-    // Public web publishing (and the approval/capability gate it requires per
-    // §26.4) lands in a later phase. The Phase 1 reference path only needs
-    // `intranet`, so reject `public_web` explicitly rather than half-wiring it.
-    if (input.destination === "public_web") {
-      throw new ForbiddenError(
-        "Publishing to the public web is not available yet",
-        { destination: input.destination }
+    // Whether this caller holds the §26.4 public-publish authority (pure, no IO).
+    const mayPublishPublic = canPublishPublic(
+      req,
+      opts.hasPublishPublicCapability ?? false
+    );
+
+    // §26.4 gate — PART 1 (destination), evaluated pre-transaction because it does
+    // NOT depend on the object's current visibility (a public-facing destination —
+    // public_web/schoology/google, `isPublicDestination` — is ALWAYS a public
+    // exposure) and so is race-free here. It runs BEFORE the adapter-not-implemented
+    // check below so an unauthorized caller (including every autonomous agent) gets
+    // the approval signal, not a "not yet available" error. PART 2 — widening
+    // visibility to `public` — DOES depend on the current level, so it is evaluated
+    // inside the transaction against the FOR-UPDATE-locked row (see below), closing
+    // the TOCTOU hole where a concurrent narrow (public → internal) between a
+    // pre-read and the locked write would skip the gate on a real widen-back.
+    if (isPublicDestination(input.destination) && !mayPublishPublic) {
+      raisePublishApprovalRequired(
+        req,
+        "Publishing to a public destination requires approval",
+        { objectId, slug: obj.slug, destination: input.destination },
+        { destination: input.destination, objectId }
       );
     }
 
@@ -171,6 +356,23 @@ export const publishService = {
 
     const adapter = adapters[input.destination];
 
+    // A destination whose adapter is not yet implemented (public_web/schoology/
+    // google — later phases) must fail BEFORE the transaction. Otherwise the
+    // status/visibility widening below commits, then the post-commit adapter call
+    // throws, and the object is left flagged `public` (canView treats
+    // visibilityLevel === "public" as world-readable regardless of publication
+    // status) with no live publication — a "failed" publish that silently exposed
+    // the content. Blocking here writes nothing. This runs AFTER the §26.4 gate so
+    // an unauthorized caller still gets the approval signal, not this error. (When
+    // a real external adapter lands, its runtime failures will instead need
+    // compensating revert of the committed status/visibility.)
+    if (adapter.implemented === false) {
+      throw new ValidationError(
+        `Publishing to '${input.destination}' is not yet available`,
+        { destination: input.destination }
+      );
+    }
+
     const publicationId = await executeTransaction(
       async (tx: DbTransaction) => {
         // Lock the content row FOR UPDATE at the start of the transaction so two
@@ -182,13 +384,36 @@ export const publishService = {
         // `loadPublishable` above, but re-select inside the tx (a concurrent delete
         // could have removed it between the load and this lock); a missing row 404s.
         const locked = await tx
-          .select({ id: contentObjects.id })
+          .select({
+            id: contentObjects.id,
+            visibilityLevel: contentObjects.visibilityLevel,
+          })
           .from(contentObjects)
           .where(eq(contentObjects.id, objectId))
           .for("update")
           .limit(1);
         if (!locked[0]) {
           throw new NotFoundError("Content not found", { objectId });
+        }
+
+        // §26.4 gate — PART 2 (visibility widen), evaluated HERE against the locked
+        // row's CURRENT visibility so it is race-free: a widen to `public` is gated
+        // iff the locked row is not ALREADY public. A concurrent narrow can no
+        // longer slip between the check and the widen (both hold this lock), so an
+        // unauthorized caller can never widen-back-to-public un-approved. A no-op
+        // re-save of already-public content is not a new exposure and passes.
+        // Throwing here rolls the transaction back, so nothing is widened/published.
+        if (
+          input.visibility?.level === "public" &&
+          locked[0].visibilityLevel !== "public" &&
+          !mayPublishPublic
+        ) {
+          raisePublishApprovalRequired(
+            req,
+            "Publishing to a public destination requires approval",
+            { objectId, slug: obj.slug, destination: input.destination },
+            { destination: input.destination, objectId }
+          );
         }
 
         // Optionally widen visibility in the same tx so the status change and
@@ -246,54 +471,38 @@ export const publishService = {
       "publish.publish"
     );
 
-    // Destination side effect runs AFTER the transaction commits (never inside
-    // it): external IO in a transaction is a drizzle-client anti-pattern. The
-    // intranet adapter is a no-op; `external_ref` stays whatever the row holds.
-    //
-    // The publication row was committed as `status: "live"` above. If the adapter
-    // throws (a real non-no-op adapter — Schoology/Google — failing to notify the
-    // destination), the row would otherwise be a dangling "live" record for a
-    // version that never went live downstream. Compensate: flip the row to
-    // `failed` so a retry re-runs the adapter, and re-throw so the caller sees the
-    // failure. The intranet adapter cannot reach this path (it never throws).
-    try {
-      await adapter.publish({
-        objectId,
-        slug: obj.slug,
-        versionId: publishedVersionId,
-        title: obj.title,
-        collectionId: obj.collectionId,
-      });
-    } catch (adapterError) {
-      log.error("Publish adapter failed; marking publication failed", {
-        objectId,
-        destination: input.destination,
-        publicationId,
-        error: adapterError instanceof Error ? adapterError.message : String(adapterError),
-      });
-      await executeQuery(
-        (db) =>
-          db
-            .update(contentPublications)
-            .set({ status: "failed", updatedAt: new Date() })
-            .where(eq(contentPublications.id, publicationId)),
-        "publish.markFailed"
-      ).catch((markError) =>
-        // Best-effort compensation: if even the status flip fails, surface the
-        // ORIGINAL adapter error (more actionable) but log the marking failure.
-        log.error("Failed to mark publication failed after adapter error", {
-          publicationId,
-          error: markError instanceof Error ? markError.message : String(markError),
-        })
-      );
-      throw adapterError;
-    }
+    // Post-commit: run the destination adapter (external IO outside the tx) with
+    // compensation, then record its external_ref. Extracted so `publish` stays
+    // within the max-lines budget.
+    await runPublishAdapter({
+      adapter,
+      objectId,
+      slug: obj.slug,
+      versionId: publishedVersionId,
+      title: obj.title,
+      collectionId: obj.collectionId,
+      publicationId,
+      destination: input.destination,
+      log,
+    });
 
     log.info("Published content", {
       objectId,
       destination: input.destination,
       publishedVersionId,
     });
+
+    // After-commit side effects (retrieval index §16.1 + `content.published`
+    // event §27), both best-effort so neither can roll back the committed publish.
+    await runPublishSideEffects({
+      req,
+      objectId,
+      slug: obj.slug,
+      publishedVersionId,
+      destination: input.destination,
+      log,
+    });
+
     return { publicationId, publishedVersionId };
   },
 
@@ -313,7 +522,8 @@ export const publishService = {
   async unpublish(
     req: Requester,
     objectId: string,
-    destination: PublishDestination
+    destination: PublishDestination,
+    opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<{ unpublished: boolean }> {
     const log = createLogger({ action: "publish.unpublish" });
 
@@ -331,6 +541,21 @@ export const publishService = {
       throw new NotFoundError("Content not found", { objectId });
     }
     assertCanEdit(req, obj.ownerUserId);
+
+    // §26.4 — taking a public-facing destination (public_web/schoology/google)
+    // offline requires the same authority as putting it up in the first place.
+    // Without this, `content:publish_internal` alone could tear down already-live
+    // public content it could never have published, which is backwards from a
+    // review-safety standpoint.
+    if (
+      isPublicDestination(destination) &&
+      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
+    ) {
+      throw new ApprovalRequiredError(
+        "Unpublishing from a public destination requires approval",
+        { destination, objectId }
+      );
+    }
 
     const adapter = adapters[destination];
 
@@ -371,13 +596,31 @@ export const publishService = {
           .set({ status: "unpublished", updatedAt: new Date() })
           .where(eq(contentPublications.id, pub[0].id));
 
-        // Revert the object to draft so it no longer reads as published. Visibility
-        // is intentionally NOT narrowed here — unpublishing removes the live
-        // surface, not the grant set; a later republish reuses the same visibility.
-        await tx
-          .update(contentObjects)
-          .set({ status: "draft", updatedAt: new Date() })
-          .where(eq(contentObjects.id, objectId));
+        // Revert the object to draft ONLY when no OTHER destination is still live.
+        // With `public_web` now a live adapter (Phase 7, #1057), an object can be
+        // live on several destinations at once (e.g. `intranet` + `public_web`);
+        // unpublishing one destination must NOT mark the object a draft while
+        // another reader route still serves it. The row just flipped to
+        // `unpublished` above is excluded by the `status = 'live'` filter.
+        // Visibility is intentionally NOT narrowed here — unpublishing removes the
+        // live surface, not the grant set; a later republish reuses the same
+        // visibility.
+        const stillLive = await tx
+          .select({ id: contentPublications.id })
+          .from(contentPublications)
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.status, "live")
+            )
+          )
+          .limit(1);
+        if (!stillLive[0]) {
+          await tx
+            .update(contentObjects)
+            .set({ status: "draft", updatedAt: new Date() })
+            .where(eq(contentObjects.id, objectId));
+        }
 
         return pub[0].externalRef;
       },
@@ -410,6 +653,18 @@ export const publishService = {
     }
 
     log.info("Unpublished content", { objectId, destination });
+
+    // Emit after the commit + adapter teardown, only when a live publication was
+    // actually removed (the `unpublished: false` no-op path returned above).
+    // Fire-and-forget (`void`, not `await`): best-effort, never blocks the response.
+    void contentEvents.emit("content.unpublished", {
+      objectId,
+      slug: obj.slug,
+      destination,
+      actorKind: actorKindOf(req),
+      agentLabel: req.kind === "user" ? null : req.agentLabel,
+    });
+
     return { unpublished: true };
   },
 

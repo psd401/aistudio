@@ -1105,6 +1105,9 @@ async function invokeAgentCore(
   response: string;
   inputTokens: number;
   outputTokens: number;
+  /** Bedrock prompt-caching token split (issue #1089). 0 on non-caching models. */
+  cacheReadInputTokens: number;
+  cacheWriteInputTokens: number;
   model: string | null;
   /** Wall-clock ms reported by the harness from chat.send to final. */
   latencyMs: number;
@@ -1121,6 +1124,20 @@ async function invokeAgentCore(
     started_at: string;
     finished_at: string;
   }>;
+  /**
+   * True when this turn is an error/degraded return rather than a real answer
+   * (harness-reported via metadata.failed, or a router-side invocation error).
+   * The caller flags these instead of logging a clean "Message processed".
+   */
+  failed?: boolean;
+  /** Short class for the failure (e.g. OpenClawChatError, AgentCoreHttpError). */
+  errorClass?: string;
+  /**
+   * Which layer detected the failure. 'harness' failures are already recorded
+   * in agent_failures by the container, so the router only logs them; 'router'
+   * failures are recorded by the caller (nothing else saw them).
+   */
+  errorSource?: 'harness' | 'router';
 }> {
   // Resolve the AgentCore Runtime ID — check env var, then module-level cache,
   // then SSM. Cached at module scope with TTL to avoid redundant SSM API calls
@@ -1157,10 +1174,15 @@ async function invokeAgentCore(
         'Your agent is not yet deployed. An administrator needs to push the agent image and deploy the AgentCore Runtime.',
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
       model: null,
       latencyMs: 0,
       messages: [],
       toolCalls: [],
+      failed: true,
+      errorClass: 'AgentNotDeployed',
+      errorSource: 'router',
     };
   }
 
@@ -1237,10 +1259,15 @@ async function invokeAgentCore(
           response: "I'm temporarily busy. Please try again in a moment.",
           inputTokens: 0,
           outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheWriteInputTokens: 0,
           model: null,
           latencyMs: 0,
           messages: [],
           toolCalls: [],
+          failed: true,
+          errorClass: `AgentCoreThrottled_${response.status}`,
+          errorSource: 'router',
         };
       }
 
@@ -1248,10 +1275,15 @@ async function invokeAgentCore(
         response: 'I encountered an error processing your message. Please try again.',
         inputTokens: 0,
         outputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheWriteInputTokens: 0,
         model: null,
         latencyMs: 0,
         messages: [],
         toolCalls: [],
+        failed: true,
+        errorClass: `AgentCoreHttpError_${response.status}`,
+        errorSource: 'router',
       };
     }
 
@@ -1309,10 +1341,27 @@ async function invokeAgentCore(
       response: result,
       inputTokens: (metadata.input_tokens as number) || 0,
       outputTokens: (metadata.output_tokens as number) || 0,
-      model: (metadata.model as string) || 'kimi-k2.5',
+      // Bedrock prompt-caching split (issue #1089); the wrapper sends 0 on
+      // GLM-5 and on any turn with no cache activity.
+      cacheReadInputTokens: (metadata.cache_read_input_tokens as number) || 0,
+      cacheWriteInputTokens: (metadata.cache_write_input_tokens as number) || 0,
+      // The wrapper (issue #1083) now always sends the real model id
+      // ("zai.glm-5") on success and null on error paths. The stale
+      // 'kimi-k2.5' fallback was dead code — the wrapper used to send the
+      // literal "default", which is truthy, so this branch never fired and
+      // every row was mislabeled. Fall back to 'unknown' only if the metadata
+      // is somehow missing the field.
+      model: (metadata.model as string) || 'unknown',
       latencyMs: (metadata.latency_ms as number) || 0,
       messages,
       toolCalls,
+      // Harness-reported error turn (e.g. OpenClaw session-init conflict). The
+      // container already wrote the agent_failures row; the caller only logs
+      // this so it isn't recorded as a clean success.
+      failed: metadata.failed === true,
+      errorClass:
+        typeof metadata.error_class === 'string' ? metadata.error_class : undefined,
+      errorSource: metadata.failed === true ? 'harness' : undefined,
     };
   } catch (error) {
     log.error('AgentCore invocation error', {
@@ -1323,10 +1372,16 @@ async function invokeAgentCore(
         "I'm temporarily unable to help. Please try again shortly.",
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
       model: null,
       latencyMs: 0,
       messages: [],
       toolCalls: [],
+      failed: true,
+      errorClass:
+        error instanceof Error ? error.name || 'AgentCoreInvocationError' : 'AgentCoreInvocationError',
+      errorSource: 'router',
     };
   }
 }
@@ -1453,6 +1508,9 @@ async function logTelemetry(
     model: string | null;
     inputTokens: number;
     outputTokens: number;
+    /** Bedrock prompt-caching split (issue #1089). Default 0 for callers that don't set it. */
+    cacheReadInputTokens?: number;
+    cacheWriteInputTokens?: number;
     latencyMs: number;
     guardrailBlocked: boolean;
     spaceName: string;
@@ -1485,10 +1543,19 @@ async function logTelemetry(
 
   try {
     const sql = await getDbClient();
-    const totalTokens = params.inputTokens + params.outputTokens;
     const invokedBy = params.invokedBy ?? null;
     const agentOwnerId = params.agentOwnerId ?? null;
     const topic = params.topic ?? null;
+    // Bedrock prompt-caching split (issue #1089). Optional on the params, so
+    // default to 0 — GLM-5 rows and older callers record no cache activity.
+    const cacheReadTokens = params.cacheReadInputTokens ?? 0;
+    const cacheWriteTokens = params.cacheWriteInputTokens ?? 0;
+    // Session total is true VOLUME processed, so it must include the cached
+    // prefix (#1089/#1092): input_tokens is now the DE-CACHED billable input,
+    // so add cache read/write back or agent_sessions.total_tokens under-reports
+    // on cache-hit turns. cache tokens are 0 on GLM-5 / non-caching turns.
+    const totalTokens =
+      params.inputTokens + params.outputTokens + cacheReadTokens + cacheWriteTokens;
 
     // Insert agent_messages first to get the id, then fan out to the
     // deep-telemetry tables. The session upsert is independent and can
@@ -1496,9 +1563,11 @@ async function logTelemetry(
     const [messageRow] = await Promise.all([
       sql<{ id: number }[]>`INSERT INTO agent_messages
           (user_id, session_id, model, input_tokens, output_tokens,
+           cache_read_input_tokens, cache_write_input_tokens,
            latency_ms, guardrail_blocked, space_name, invoked_by, agent_owner_id, topic, created_at)
           VALUES (${params.userId}, ${params.sessionId}, ${params.model},
                   ${params.inputTokens}, ${params.outputTokens},
+                  ${cacheReadTokens}, ${cacheWriteTokens},
                   ${params.latencyMs}, ${params.guardrailBlocked},
                   ${params.spaceName}, ${invokedBy}, ${agentOwnerId}, ${topic}, NOW())
           RETURNING id`,
@@ -1646,6 +1715,53 @@ async function recordFailure(
       originalSeverity: params.severity,
     });
   }
+}
+
+/**
+ * Observe a failed agent turn without changing the user-facing behavior (the
+ * error text is still delivered to Chat by the caller). Fixes the gap where a
+ * 0-token error turn — e.g. an OpenClaw session-init conflict — was logged as a
+ * clean "Message processed" success and left no alertable signal.
+ *
+ * Harness-origin failures (errorSource === 'harness') are already persisted in
+ * agent_failures by the container, so we only log them here to avoid a
+ * double-counted row. Router-origin failures (invocation errors) are persisted
+ * here since nothing else recorded them. Returns whether the turn was failed so
+ * the caller can suppress its success log.
+ */
+async function flagFailedTurn(
+  agentResult: {
+    failed?: boolean;
+    errorClass?: string;
+    errorSource?: 'harness' | 'router';
+    response: string;
+    model: string | null;
+  },
+  ctx: { userId: string; sessionId: string; latencyMs: number },
+  log: ReturnType<typeof createLogger>,
+): Promise<boolean> {
+  if (!agentResult.failed) return false;
+  log.warn('Agent returned an error turn', {
+    errorClass: agentResult.errorClass ?? 'unknown',
+    errorSource: agentResult.errorSource ?? 'unknown',
+    latencyMs: ctx.latencyMs,
+  });
+  if (agentResult.errorSource === 'router') {
+    await recordFailure(
+      {
+        source: 'router',
+        severity: 'error',
+        userId: ctx.userId,
+        sessionId: ctx.sessionId,
+        model: agentResult.model,
+        errorClass: agentResult.errorClass ?? 'AgentCoreError',
+        errorMessage: agentResult.response,
+        context: { phase: 'agentcore_invoke' },
+      },
+      log,
+    );
+  }
+  return true;
 }
 
 function classifyError(err: unknown): { errorClass: string; message: string; stack: string | null } {
@@ -2418,8 +2534,12 @@ async function processRecord(
         }
       ).finally(() => releaseSessionLock(crossSessionId, crossLockToken, log));
 
-      // Token alerting
-      const totalTokens = agentResult.inputTokens + agentResult.outputTokens;
+      // Token alerting — total VOLUME processed incl. the cached prefix
+      // (#1089/#1092): a large cached-context turn is still a heavy turn worth
+      // flagging, and input_tokens is de-cached, so add cache read/write back.
+      const totalTokens =
+        agentResult.inputTokens + agentResult.outputTokens +
+        agentResult.cacheReadInputTokens + agentResult.cacheWriteInputTokens;
       if (totalTokens > TOKEN_LIMIT) {
         log.warn('Token usage exceeds alerting threshold (cross-user)', {
           invoker: senderEmail,
@@ -2481,6 +2601,8 @@ async function processRecord(
           model: agentResult.model,
           inputTokens: agentResult.inputTokens,
           outputTokens: agentResult.outputTokens,
+          cacheReadInputTokens: agentResult.cacheReadInputTokens,
+          cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
           latencyMs,
           guardrailBlocked: false, // Always false here — blocked messages return early above
           spaceName,
@@ -2493,13 +2615,20 @@ async function processRecord(
         log
       );
 
-      log.info('Cross-user invocation processed', {
-        invoker: senderEmail,
-        agentOwner: targetUser.email,
-        model: agentResult.model,
-        source: crossUserInvocation.source,
-        latencyMs,
-      });
+      const crossTurnFailed = await flagFailedTurn(
+        agentResult,
+        { userId: senderEmail, sessionId: crossSessionId, latencyMs },
+        log,
+      );
+      if (!crossTurnFailed) {
+        log.info('Cross-user invocation processed', {
+          invoker: senderEmail,
+          agentOwner: targetUser.email,
+          model: agentResult.model,
+          source: crossUserInvocation.source,
+          latencyMs,
+        });
+      }
       return;
     }
   }
@@ -2549,7 +2678,12 @@ async function processRecord(
   // The response is still delivered — this is for monitoring/alerting.
   // Hard enforcement requires pre-invocation token estimation via session
   // tracking in DynamoDB, which is planned for Phase 2.
-  const totalTokens = agentResult.inputTokens + agentResult.outputTokens;
+  // Total VOLUME processed incl. the cached prefix (#1089/#1092): input_tokens
+  // is de-cached billable input, so add cache read/write back for an accurate
+  // heavy-turn signal.
+  const totalTokens =
+    agentResult.inputTokens + agentResult.outputTokens +
+    agentResult.cacheReadInputTokens + agentResult.cacheWriteInputTokens;
   if (totalTokens > TOKEN_LIMIT) {
     log.warn('Token usage exceeds alerting threshold', {
       inputTokens: agentResult.inputTokens,
@@ -2598,6 +2732,8 @@ async function processRecord(
       model: agentResult.model,
       inputTokens: agentResult.inputTokens,
       outputTokens: agentResult.outputTokens,
+      cacheReadInputTokens: agentResult.cacheReadInputTokens,
+      cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
       latencyMs,
       // Preserve the guardrail signal for telemetry — the message was not
       // blocked, but we record whether it would have been under the old
@@ -2611,11 +2747,18 @@ async function processRecord(
     log
   );
 
-  log.info('Message processed', {
-    sender: senderName,
-    model: agentResult.model,
-    latencyMs,
-    inputTokens: agentResult.inputTokens,
-    outputTokens: agentResult.outputTokens,
-  });
+  const turnFailed = await flagFailedTurn(
+    agentResult,
+    { userId: senderEmail, sessionId, latencyMs },
+    log,
+  );
+  if (!turnFailed) {
+    log.info('Message processed', {
+      sender: senderName,
+      model: agentResult.model,
+      latencyMs,
+      inputTokens: agentResult.inputTokens,
+      outputTokens: agentResult.outputTokens,
+    });
+  }
 }

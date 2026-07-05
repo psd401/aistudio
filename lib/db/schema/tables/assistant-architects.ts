@@ -27,6 +27,25 @@ import { users } from "./users";
  */
 export type AssistantArchitectMode = "prompt_chain" | "agentic";
 
+/**
+ * Atrium Phase 6 (Issue #1056) retrieval scope: narrows
+ * `retrievalService.search` candidates for this assistant before
+ * `visibilityService.canView` is enforced per requester (spec §16.4). `null`/
+ * unset = unscoped (any published content the requester can view).
+ */
+export interface AssistantRetrievalScope {
+  collectionId?: string | null;
+  tags?: string[];
+  /**
+   * Caps how BROADLY EXPOSED a candidate may be, ranked private < group <
+   * internal < public. A cap of `internal` admits private/group/internal but
+   * excludes `public` (the most broadly exposed tier) — i.e. it is an upper
+   * bound on exposure, not a floor on restriction. `canView` still enforces
+   * per-requester access on top of this narrowing.
+   */
+  maxVisibilityLevel?: "private" | "group" | "internal" | "public";
+}
+
 export const assistantArchitects = pgTable("assistant_architects", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
@@ -71,4 +90,7 @@ export const assistantArchitects = pgTable("assistant_architects", {
    * no platform-imposed default (Issue #926).
    */
   agentMaxRequestsPerHour: integer("agent_max_requests_per_hour"),
+
+  // ── Retrieval scoping (Atrium Phase 6, Issue #1056) ────────────────────────
+  retrievalScope: jsonb("retrieval_scope").$type<AssistantRetrievalScope>(),
 });

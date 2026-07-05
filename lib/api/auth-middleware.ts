@@ -35,6 +35,13 @@ export interface ApiAuthContext {
   scopes: string[];
   apiKeyId?: number;
   oauthClientId?: string;
+  /**
+   * The human a delegated agent acts for (Atrium §26.1). Set only when an OIDC
+   * token carries a `delegated_for` claim (RFC 8693-style actor delegation): the
+   * agent's `client_id` identifies the agent, `delegated_for` the human whose
+   * grants it inherits. Absent for ordinary user / autonomous tokens.
+   */
+  delegatedForUserId?: number;
 }
 
 export interface ApiErrorResponse {
@@ -158,6 +165,7 @@ export async function authenticateRequest(
         authType: "jwt",
         scopes: jwtResult.scopes,
         oauthClientId: jwtResult.clientId,
+        delegatedForUserId: jwtResult.delegatedForUserId,
       };
     } catch (error) {
       timer({ status: "error" });
@@ -342,7 +350,15 @@ interface JwtAuthResult {
   userId: number;
   cognitoSub: string;
   scopes: string[];
-  clientId: string;
+  /**
+   * The OIDC `client_id`/`azp`, or `undefined` when the token carries neither.
+   * NOT a sentinel string — `requesterFromApiAuth` does a truthy check on
+   * `oauthClientId`, so a literal `"unknown"` would be treated as a real client
+   * id and route the caller down the agent-resolution branch.
+   */
+  clientId?: string;
+  /** The human a delegated agent acts for, from a `delegated_for` claim. */
+  delegatedForUserId?: number;
 }
 
 /**
@@ -378,6 +394,18 @@ async function verifyJwtToken(
     const scopeStr = (payload.scope as string) ?? "";
     const scopes = scopeStr ? scopeStr.split(" ") : [];
 
+    // Atrium delegated-agent marker (§26.1). A `delegated_for` claim (numeric
+    // user id, or RFC 8693 `act.sub`) names the human the agent acts for; the
+    // content surface uses it to build an `agent-delegated` requester that
+    // inherits exactly that human's grants. Ignore non-numeric / absent values.
+    const delegatedForRaw =
+      (payload.delegated_for as string | number | undefined) ??
+      ((payload.act as { sub?: string } | undefined)?.sub);
+    const delegatedForUserId =
+      delegatedForRaw != null && Number.isInteger(Number(delegatedForRaw))
+        ? Number(delegatedForRaw)
+        : undefined;
+
     return {
       userId,
       cognitoSub,
@@ -387,8 +415,10 @@ async function verifyJwtToken(
         if (!cid) {
           log.warn("JWT missing client_id and azp claims")
         }
-        return cid ?? "unknown"
+        // undefined (not a sentinel) when absent — see JwtAuthResult.clientId.
+        return cid || undefined
       })(),
+      delegatedForUserId,
     };
   } catch (error) {
     log.warn("JWT verification error", {

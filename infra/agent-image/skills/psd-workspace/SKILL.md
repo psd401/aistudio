@@ -1,7 +1,7 @@
 ---
 name: psd-workspace
 summary: Google Workspace operations (Gmail, Calendar, Drive, Docs, Meet, Chat) via the user's dedicated agent account.
-description: Wraps the `gws` CLI. Fetches a refresh token from AWS Secrets Manager, exchanges it for an access token, and executes `gws` subcommands against Google APIs as the agent's own Workspace identity (e.g. `agnt_hagelk@psd401.net`). If the agent has no token yet — or the token is stale — the skill mints a one-time consent URL and returns a structured error. Your job in that case is to paste the `consent_url` verbatim into your Chat reply and ask the user to click it.
+description: Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Meet, Chat) as the user's agent account. Use for reading or writing email, calendar events, files, or any Workspace data.
 allowed-tools: Bash(node:*)
 ---
 

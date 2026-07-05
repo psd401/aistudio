@@ -42,6 +42,508 @@ def j(msg: str, **kw) -> str:
 
 
 UPSTREAM = "https://bedrock-mantle.us-east-1.api.aws"
+
+# ---------------------------------------------------------------------------
+# Cumulative token-usage accounting (issue #1083)
+#
+# The admin Agents dashboard needs real token counts + the real model id per
+# agent turn. OpenClaw does not surface usage on its WebSocket event stream
+# reliably, but Mantle's OpenAI-compatible responses DO carry a `usage` object
+# — streaming responses emit it in a final chunk when the request asks for
+# `stream_options.include_usage=true`, and non-streaming responses always
+# include it. This proxy already parses every upstream response, so it is the
+# clean capture point.
+#
+# We keep MODULE-LEVEL CUMULATIVE counters (never reset) plus the last model
+# id. agentcore_wrapper.py reads `/usage` once before adapter.process() and
+# once after, then takes the delta — that correctly sums a single turn's usage
+# across the many sub-calls a tool loop makes. This works because the proxy is
+# per-container = per-microVM = per-session and turns are serial, so no
+# concurrent turn can interleave its usage into another turn's delta window.
+#
+# Only the FINAL adopted upstream response (post-retry, post-rescue) is counted,
+# so a retried/degenerate first attempt does not double-count.
+# ---------------------------------------------------------------------------
+_usage_lock = asyncio.Lock()
+_cumulative_input_tokens = 0
+_cumulative_output_tokens = 0
+# Bedrock prompt-caching token split (issue #1089). Cumulative like the
+# input/output counters; agentcore_wrapper.py reads the before/after delta so a
+# single turn's cache activity is summed across the tool-loop sub-calls.
+_cumulative_cache_read_tokens = 0
+_cumulative_cache_write_tokens = 0
+_last_model: Optional[str] = None
+_usage_events = 0  # count of upstream responses that carried a usage object
+
+
+def _extract_usage(
+    parsed: dict,
+) -> tuple[Optional[int], Optional[int], int, int]:
+    """Pull (billable_input, completion, cache_read, cache_write) from a `usage`
+    object. Returns (None, None, 0, 0) when no usage is present.
+
+    Accepts both the OpenAI field names (prompt_tokens/completion_tokens +
+    prompt_tokens_details.cached_tokens) and the Anthropic-via-Mantle spelling
+    (input_tokens/output_tokens + cache_read_input_tokens/
+    cache_creation_input_tokens).
+
+    IMPORTANT — de-caching (issue #1089): the two usage shapes count input
+    tokens DIFFERENTLY, so cache subtraction must be shape-aware:
+
+      * OpenAI shape (`prompt_tokens`): the TOTAL prompt, which INCLUDES the
+        cached reads/writes. Recording that total as billable input AND pricing
+        cache_read/cache_write separately would double-count, so we de-cache:
+        `billable_input = prompt_tokens - cache_read - cache_write`.
+      * Anthropic shape (`input_tokens`): ALREADY the de-cached, full-rate input
+        — `cache_read_input_tokens` and `cache_creation_input_tokens` are
+        counted SEPARATELY, not inside `input_tokens`. Subtracting again would
+        undercount and clamp to 0 on cache-hit turns (chatgpt-codex #1092
+        review), so we use `input_tokens` verbatim.
+
+    With no caching (GLM-5) cache_read/write are 0 and both branches reduce to
+    the old behaviour.
+    """
+    if not isinstance(parsed, dict):
+        return None, None, 0, 0
+    usage = parsed.get("usage")
+    if not isinstance(usage, dict):
+        return None, None, 0, 0
+
+    # Track WHICH field the input count came from — only the OpenAI total gets
+    # de-cached below (the Anthropic field is already billable).
+    prompt_tokens = usage.get("prompt_tokens")
+    input_tokens = usage.get("input_tokens")
+
+    ct = usage.get("completion_tokens")
+    if not isinstance(ct, int):
+        ct = usage.get("output_tokens")
+
+    # Cache reads: Anthropic-native field, else the OpenAI cached_tokens subset.
+    cache_read = usage.get("cache_read_input_tokens")
+    if not isinstance(cache_read, int):
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            cache_read = details.get("cached_tokens")
+    cache_read = cache_read if isinstance(cache_read, int) and cache_read > 0 else 0
+
+    # Cache writes: Anthropic spells it cache_creation_input_tokens.
+    cache_write = usage.get("cache_creation_input_tokens")
+    if not isinstance(cache_write, int):
+        cache_write = usage.get("cache_write_input_tokens")
+    cache_write = cache_write if isinstance(cache_write, int) and cache_write > 0 else 0
+
+    if isinstance(prompt_tokens, int):
+        # OpenAI total includes cache read/write — de-cache to billable input.
+        billable_input = max(0, prompt_tokens - cache_read - cache_write)
+    elif isinstance(input_tokens, int):
+        # Anthropic input_tokens is already the de-cached billable input.
+        billable_input = input_tokens
+    else:
+        billable_input = None
+
+    return (billable_input,
+            ct if isinstance(ct, int) else None,
+            cache_read,
+            cache_write)
+
+
+def inject_include_usage(payload: dict) -> bool:
+    """When a request is streaming, ensure `stream_options.include_usage` is
+    true so Mantle emits a final usage chunk. Mutates `payload` in place.
+    Returns True if a change was made (caller must reserialize the body).
+
+    Non-streaming requests are untouched — their responses always carry usage.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if not payload.get("stream"):
+        return False
+    opts = payload.get("stream_options")
+    if not isinstance(opts, dict):
+        opts = {}
+        payload["stream_options"] = opts
+    if opts.get("include_usage") is True:
+        return False
+    opts["include_usage"] = True
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Claude Sonnet 5 request-shaping + Bedrock prompt caching (issue #1089)
+#
+# When the harness model is switched from GLM-5 to Claude Sonnet 5 the proxy
+# becomes the request-shaping layer, because OpenClaw's OpenAI-completions path
+# cannot express Anthropic-Messages concepts and Bedrock rejects some params
+# that GLM-5 tolerated:
+#
+#   * Sonnet 5 400s on non-default temperature/top_p/top_k -> strip them.
+#   * On Bedrock, a forced tool_choice ({type:tool|any}) REQUIRES thinking
+#     disabled; OpenClaw's loop forces tool_choice, so set thinking:disabled.
+#   * Bedrock has no automatic prompt caching -> inject explicit cache_control
+#     breakpoints at the stable prefix boundary so the ~32k fixed prefix is
+#     re-read at ~0.1x instead of re-charged at full input price every turn.
+#
+# All of this is GATED on the model being an Anthropic/Claude model, so a
+# rollback to GLM-5 (revert openclaw.json, keep this image) leaves GLM-5
+# requests byte-for-byte unchanged.
+# ---------------------------------------------------------------------------
+
+# 1-hour TTL: agent turns are often minutes apart, so a 5-minute cache would
+# expire between turns and re-pay the write every turn. 1h (2x write, break-even
+# at >=3 reads) keeps the stable prefix warm across the gaps.
+CACHE_TTL = "1h"
+
+# Sampling params Sonnet 5 rejects with a 400 when set to a non-default value.
+_SONNET_STRIP_KEYS = ("temperature", "top_p", "top_k")
+
+
+def _is_anthropic_model(model: Optional[str]) -> bool:
+    """True for Claude/Anthropic model ids (e.g. anthropic.claude-sonnet-5,
+    us.anthropic.claude-sonnet-5). The Sonnet request-shaping below only applies
+    to these, so GLM-5 (zai.glm-5) traffic is never touched."""
+    if not isinstance(model, str):
+        return False
+    m = model.lower()
+    return "claude" in m or "anthropic" in m or "sonnet" in m
+
+
+def shape_request_for_sonnet(payload: dict) -> list:
+    """Strip params Sonnet 5 rejects and force thinking disabled. Mutates
+    `payload` in place. Returns a list of change tags for logging (empty = no
+    change). No-op for non-Anthropic models."""
+    if not isinstance(payload, dict):
+        return []
+    if not _is_anthropic_model(payload.get("model")):
+        return []
+    changes: list = []
+    for key in _SONNET_STRIP_KEYS:
+        if key in payload:
+            del payload[key]
+            changes.append(f"strip:{key}")
+    # OpenClaw's OpenAI path may carry reasoning_effort; with thinking disabled
+    # it is redundant and can conflict with the explicit thinking field, so drop
+    # it and set thinking:disabled (required alongside forced tool_choice on
+    # Bedrock).
+    if "reasoning_effort" in payload:
+        del payload["reasoning_effort"]
+        changes.append("strip:reasoning_effort")
+    if payload.get("thinking") != {"type": "disabled"}:
+        payload["thinking"] = {"type": "disabled"}
+        changes.append("thinking:disabled")
+    return changes
+
+
+def _add_cache_control(msg: dict, ttl: str) -> bool:
+    """Attach a cache_control breakpoint to an OpenAI-format message by moving
+    its content into the content-parts form (the shape the Anthropic
+    OpenAI-compat layer reads cache_control from). Returns True if a breakpoint
+    was placed. Deterministic -> does not itself invalidate the cache."""
+    if not isinstance(msg, dict):
+        return False
+    breakpoint_obj = {"type": "ephemeral", "ttl": ttl}
+    content = msg.get("content")
+    if isinstance(content, str):
+        if not content.strip():
+            return False
+        msg["content"] = [
+            {"type": "text", "text": content, "cache_control": breakpoint_obj}
+        ]
+        return True
+    if isinstance(content, list) and content:
+        # Attach to the last block that can carry cache_control.
+        for block in reversed(content):
+            if isinstance(block, dict):
+                block["cache_control"] = breakpoint_obj
+                return True
+    return False
+
+
+def inject_cache_breakpoints(payload: dict) -> int:
+    """Inject up to two cache_control breakpoints so the byte-stable prefix is
+    cached across turns (issue #1089). No-op for non-Anthropic models. Mutates
+    `payload` in place; returns the number of breakpoints placed.
+
+    Placement (render order is tools -> system -> messages):
+      1. End of the LEADING system block (messages[0..k] where role==system).
+         The compat layer maps the system message onto Anthropic `system`, so a
+         breakpoint there caches tools + the full ~32k system prefix. We anchor
+         on the *leading* system block, not the last system message, so the
+         retry-reminder system messages this proxy appends at the tail (see
+         build_retry_body) never shift the breakpoint and bust the cache.
+      2. End of the LAST message overall — reuses the whole conversation prefix
+         on multi-turn follow-ups.
+    Volatile per-turn content (the user's new question, any per-request caller
+    line) lives in the trailing user turn, i.e. AFTER breakpoint 1 — so the
+    cached prefix stays byte-stable turn to turn.
+    """
+    if not isinstance(payload, dict):
+        return 0
+    if not _is_anthropic_model(payload.get("model")):
+        return 0
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return 0
+
+    placed = 0
+    # 1. Last message of the contiguous leading system block.
+    last_leading_system_idx = -1
+    for idx, msg in enumerate(messages):
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            last_leading_system_idx = idx
+        else:
+            break
+    if last_leading_system_idx >= 0:
+        if _add_cache_control(messages[last_leading_system_idx], CACHE_TTL):
+            placed += 1
+
+    # 2. Last message overall (skip if it is the same leading-system message).
+    last_idx = len(messages) - 1
+    if last_idx != last_leading_system_idx:
+        if _add_cache_control(messages[last_idx], CACHE_TTL):
+            placed += 1
+
+    return placed
+
+
+# ---------------------------------------------------------------------------
+# Anthropic Messages path (issue #1089 — CORRECTED handoff)
+#
+# Bedrock Mantle does NOT serve Claude on the OpenAI-completions endpoint
+# (`/v1/chat/completions` returns 400 "does not support the '/v1/chat/completions'
+# API"). Claude is served on the Anthropic Messages endpoint
+# `https://bedrock-mantle.<region>.api.aws/anthropic/v1/messages`. OpenClaw is
+# therefore configured with `api: "anthropic-messages"` (openclaw.json), so it
+# sends NATIVE Anthropic Messages requests here. This proxy branch:
+#   * injects `cache_control` in the ANTHROPIC shape (top-level `system` +
+#     last message content block) — verified to cache on this endpoint
+#     (cache_creation on turn 1 → cache_read on turn 2), and
+#   * parses the Anthropic SSE stream (message_start / content_block_delta /
+#     message_delta) for usage.
+# The OpenAI-only request-shaping (thinking:disabled, stream_options,
+# OpenAI-format cache injection) is NOT applied here — it would 400 a native
+# Anthropic request.
+# ---------------------------------------------------------------------------
+
+
+def _is_anthropic_messages_path(path: str) -> bool:
+    """True when the forwarded path targets Mantle's Anthropic Messages API
+    (e.g. `anthropic/v1/messages`). OpenClaw's `anthropic-messages` provider
+    hits `<baseUrl>/v1/messages`, and our baseUrl ends in `/anthropic`, so the
+    proxy path is `anthropic/v1/messages`."""
+    if not isinstance(path, str):
+        return False
+    p = path.lstrip("/")
+    return p.startswith("anthropic/") or p.endswith("/v1/messages") or p == "v1/messages"
+
+
+def _cache_ctrl() -> dict:
+    return {"type": "ephemeral", "ttl": CACHE_TTL}
+
+
+def _normalize_cache_ttl(payload: dict, ttl: str) -> int:
+    """Rewrite the `ttl` of EVERY existing `cache_control` block in an Anthropic
+    request (tools -> system -> messages order) to `ttl`. Returns the count of
+    cache_control blocks found. Mutates in place.
+
+    WHY (issue #1089, 2nd validation miss): OpenClaw's `anthropic-messages`
+    provider ALREADY injects its own `cache_control` blocks — with a 5-minute
+    TTL. Anthropic REJECTS a request where a 1h block comes after a 5m block
+    ("a ttl='1h' cache_control block must not come after a ttl='5m'..."). So we
+    do NOT add our own blocks on top of OpenClaw's; we upgrade OpenClaw's blocks
+    in place to our 1h TTL. Uniform TTL => no ordering conflict, and we still get
+    the long cache window #1089 wants.
+    """
+    count = 0
+
+    def bump(blocks) -> None:
+        nonlocal count
+        if not isinstance(blocks, list):
+            return
+        for b in blocks:
+            if isinstance(b, dict) and isinstance(b.get("cache_control"), dict):
+                b["cache_control"]["ttl"] = ttl
+                count += 1
+
+    # tools: each tool def may carry a cache_control.
+    for t in payload.get("tools") or []:
+        if isinstance(t, dict) and isinstance(t.get("cache_control"), dict):
+            t["cache_control"]["ttl"] = ttl
+            count += 1
+    # system: list-of-blocks form.
+    bump(payload.get("system"))
+    # messages: each message's content-block array.
+    for m in payload.get("messages") or []:
+        if isinstance(m, dict):
+            bump(m.get("content"))
+    return count
+
+
+def inject_anthropic_cache_breakpoints(payload: dict) -> int:
+    """Ensure the byte-stable prefix of a native Anthropic Messages request is
+    cached at our 1h TTL (issue #1089). Mutates `payload` in place; returns the
+    number of cache_control breakpoints in effect.
+
+    Two cases:
+      * OpenClaw already placed cache_control blocks (it does, at 5m) -> we only
+        NORMALIZE their TTL to 1h (see _normalize_cache_ttl). We must NOT add our
+        own blocks on top, or Anthropic 400s on the mixed-TTL ordering rule.
+      * OpenClaw placed none -> we add our own on the last `system` block (the
+        big fixed prefix) and the last message content block.
+    """
+    if not isinstance(payload, dict):
+        return 0
+
+    # Prefer normalizing OpenClaw's own breakpoints to 1h.
+    existing = _normalize_cache_ttl(payload, CACHE_TTL)
+    if existing:
+        return existing
+
+    # Fallback: OpenClaw placed no cache_control -> add our own.
+    placed = 0
+    system = payload.get("system")
+    if isinstance(system, str) and system.strip():
+        payload["system"] = [
+            {"type": "text", "text": system, "cache_control": _cache_ctrl()}
+        ]
+        placed += 1
+    elif isinstance(system, list) and system:
+        for block in reversed(system):
+            if isinstance(block, dict):
+                block["cache_control"] = _cache_ctrl()
+                placed += 1
+                break
+
+    messages = payload.get("messages")
+    if isinstance(messages, list) and messages:
+        last = messages[-1]
+        if isinstance(last, dict):
+            content = last.get("content")
+            if isinstance(content, str) and content.strip():
+                last["content"] = [
+                    {"type": "text", "text": content, "cache_control": _cache_ctrl()}
+                ]
+                placed += 1
+            elif isinstance(content, list) and content:
+                for block in reversed(content):
+                    if isinstance(block, dict) and block.get("type") in (
+                        "text", "tool_result", "tool_use", "image", "document"
+                    ):
+                        block["cache_control"] = _cache_ctrl()
+                        placed += 1
+                        break
+
+    return placed
+
+
+def _parse_anthropic_stream(joined: str):
+    """Parse an Anthropic Messages SSE stream. Returns
+    (content, stop_reason, usage_in, usage_out, cache_read, cache_write, model).
+
+    Event shapes (verified against Mantle):
+      message_start  -> {"message":{"model","usage":{input_tokens,
+                          cache_creation_input_tokens, cache_read_input_tokens}}}
+      content_block_delta -> {"delta":{"type":"text_delta","text":"..."}}
+      message_delta  -> {"usage":{output_tokens, ...}, "delta":{"stop_reason"}}
+    Usage is merged across message_start (input + cache) and message_delta
+    (output, and a repeat of input/cache on Mantle) taking the latest non-None.
+    """
+    content = ""
+    stop_reason = None
+    usage_in = usage_out = None
+    cache_read = cache_write = 0
+    model = None
+    for line in joined.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            d = json.loads(payload)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        t = d.get("type")
+        if t == "message_start":
+            msg = d.get("message") or {}
+            if isinstance(msg, dict):
+                if isinstance(msg.get("model"), str):
+                    model = msg["model"]
+                ui, uo, cr, cw = _extract_usage(msg)
+                if ui is not None:
+                    usage_in = ui
+                if uo is not None:
+                    usage_out = uo
+                if cr:
+                    cache_read = cr
+                if cw:
+                    cache_write = cw
+        elif t == "content_block_delta":
+            delta = d.get("delta") or {}
+            if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                content += delta.get("text", "") or ""
+        elif t == "message_delta":
+            ui, uo, cr, cw = _extract_usage(d)
+            if ui is not None:
+                usage_in = ui
+            if uo is not None:
+                usage_out = uo
+            if cr:
+                cache_read = cr
+            if cw:
+                cache_write = cw
+            dd = d.get("delta") or {}
+            if isinstance(dd, dict) and dd.get("stop_reason"):
+                stop_reason = dd["stop_reason"]
+    return content, stop_reason, usage_in, usage_out, cache_read, cache_write, model
+
+
+def _parse_anthropic_response(joined: str):
+    """Parse an Anthropic Messages response (streaming SSE or non-streaming
+    JSON). Same 7-tuple as _parse_anthropic_stream."""
+    if "data:" in joined:
+        return _parse_anthropic_stream(joined)
+    try:
+        d = json.loads(joined)
+    except Exception:
+        return "", None, None, None, 0, 0, None
+    if not isinstance(d, dict):
+        return "", None, None, None, 0, 0, None
+    content = ""
+    for block in d.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            content += block.get("text", "") or ""
+    ui, uo, cr, cw = _extract_usage(d)
+    model = d.get("model") if isinstance(d.get("model"), str) else None
+    return content, d.get("stop_reason"), ui, uo, cr, cw, model
+
+
+def detect_trailing_prefill(payload: dict) -> bool:
+    """Sonnet 5 400s on a last-assistant-turn prefill. OpenClaw's tool loop
+    should never send one (the last turn is user/tool), but detect it so a
+    surprise surfaces in CloudWatch rather than as an opaque 400. Non-
+    destructive: we log, we do not mutate (dropping the message could corrupt
+    the turn)."""
+    if not isinstance(payload, dict):
+        return False
+    if not _is_anthropic_model(payload.get("model")):
+        return False
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return False
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "assistant":
+        return False
+    content = last.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return len(content) > 0
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Tool-call-id repair for Kimi K2.5 on Bedrock Mantle
 #
@@ -124,19 +626,40 @@ _REDACTED_ROLES = {"tool", "system"}
 
 
 def _redact_messages_for_log(parsed):
-    """Return a shallow-redacted copy of a parsed chat body safe(r) for logging:
-    the `content` of tool/system messages is replaced with a length placeholder.
-    Used only when LOG_BODIES is explicitly enabled."""
+    """Return a shallow-redacted copy of a parsed chat body safe(r) for logging.
+    Covers both message shapes this proxy sees: OpenAI-style role="tool"/"system"
+    messages (whole `content` replaced with a length placeholder) and Anthropic
+    Messages API `tool_result` content blocks embedded in a user/assistant
+    message's `content` list (only that block's payload is redacted — sibling
+    `tool_use`/`text` blocks stay visible for debugging). Used only when
+    LOG_BODIES is explicitly enabled."""
     if not isinstance(parsed, dict) or not isinstance(parsed.get("messages"), list):
         return None
     redacted = dict(parsed)
     out_msgs = []
     for m in parsed["messages"]:
-        if isinstance(m, dict) and m.get("role") in _REDACTED_ROLES:
-            content = m.get("content")
+        if not isinstance(m, dict):
+            out_msgs.append(m)
+            continue
+        content = m.get("content")
+        if m.get("role") in _REDACTED_ROLES:
             clen = len(content) if isinstance(content, str) else None
             rm = dict(m)
             rm["content"] = f"<redacted {m.get('role')} content, len={clen}>"
+            out_msgs.append(rm)
+        elif isinstance(content, list):
+            rm = dict(m)
+            new_blocks = []
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    nb = dict(b)
+                    payload = nb.get("content")
+                    n = len(json.dumps(payload, ensure_ascii=False)) if payload is not None else 0
+                    nb["content"] = f"[tool_result content redacted — {n} chars]"
+                    new_blocks.append(nb)
+                else:
+                    new_blocks.append(b)
+            rm["content"] = new_blocks
             out_msgs.append(rm)
         else:
             out_msgs.append(m)
@@ -173,15 +696,18 @@ def _log_request_body(req_id, req_body, parsed):
             log.warning(j("req_body_truncated", req_id=req_id,
                           total_len=total_len, logged=MAX_REQ_LOG))
 
-    # Emit each message individually for role/content/tool_call shape. The raw
-    # content of tool/system messages is redacted.
+    # Emit each message individually for role/content/tool_call shape. `raw`
+    # comes from the redacted messages (see _redact_messages_for_log above) so
+    # neither whole tool/system content nor embedded tool_result blocks reach
+    # this log line; content_type/content_len are computed from the original
+    # message since shape/length metadata is not sensitive.
     if isinstance(parsed, dict) and isinstance(parsed.get("messages"), list):
+        log_msgs = (redacted or {}).get("messages") if isinstance(redacted, dict) else None
+        if not isinstance(log_msgs, list) or len(log_msgs) != len(parsed["messages"]):
+            log_msgs = parsed["messages"]
         for idx, msg in enumerate(parsed["messages"]):
             role = msg.get("role")
-            if role in _REDACTED_ROLES:
-                raw = f"<redacted {role} content>"
-            else:
-                raw = json.dumps(msg, ensure_ascii=False)[:8000]
+            raw = json.dumps(log_msgs[idx], ensure_ascii=False)[:8000]
             log.info(j("req_message", req_id=req_id, idx=idx, role=role,
                        has_tool_calls=bool(msg.get("tool_calls")),
                        content_type=("string" if isinstance(msg.get("content"), str)
@@ -322,6 +848,26 @@ async def handle_health(_request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
+async def handle_usage(_request: web.Request) -> web.Response:
+    """Return the cumulative token usage + last model id observed across all
+    Mantle calls this container has proxied (issue #1083).
+
+    agentcore_wrapper.py reads this once before adapter.process() and once
+    after, then takes the delta to get a single turn's usage. Counters are
+    monotonic and never reset; the delta is what matters, not the absolute.
+    """
+    async with _usage_lock:
+        payload = {
+            "input_tokens": _cumulative_input_tokens,
+            "output_tokens": _cumulative_output_tokens,
+            "cache_read_input_tokens": _cumulative_cache_read_tokens,
+            "cache_write_input_tokens": _cumulative_cache_write_tokens,
+            "model": _last_model,
+            "usage_events": _usage_events,
+        }
+    return web.json_response(payload)
+
+
 async def handle_proxy(request: web.Request) -> web.StreamResponse:
     path = request.match_info.get("path", "")
     url = f"{UPSTREAM}/{path}"
@@ -338,14 +884,42 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     except Exception:
         parsed = None
 
-    # REPAIR STEP: fix stripped tool_call_ids before anything else touches
-    # the body. Reserialize only if we actually rewrote fields — keeps the
-    # wire payload byte-identical when no repair is needed.
-    if isinstance(parsed, dict) and parsed.get("messages"):
-        rewrites = repair_tool_call_ids(parsed)
-        if rewrites:
-            req_body = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
-            log.info(j("tool_call_id_repair", req_id=req_id, rewrites=rewrites))
+    # REQUEST-REWRITE STEP: two INDEPENDENT concerns, each with its own guard,
+    # before anything else touches the body. Reserialize only if we actually
+    # mutated the payload — keeps the wire body byte-identical otherwise.
+    #   (a) tool_call_id repair — needs a messages array to walk.
+    #   (b) include_usage injection — only needs `stream:true`; it must NOT be
+    #       gated on `messages` (a future change to the repair guard would
+    #       otherwise silently disable usage tracking). Decoupled per review.
+    # The Anthropic Messages path (Claude Sonnet 5, issue #1089) needs
+    # DIFFERENT handling than the OpenAI-completions path: OpenClaw sends a
+    # native Anthropic request, so we inject cache_control in the Anthropic
+    # shape and apply NONE of the OpenAI-only shaping (thinking:disabled,
+    # stream_options, OpenAI-format cache injection) which would 400 it.
+    is_anthropic = _is_anthropic_messages_path(path)
+    if isinstance(parsed, dict):
+        if is_anthropic:
+            cache_breakpoints = inject_anthropic_cache_breakpoints(parsed)
+            if cache_breakpoints:
+                req_body = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
+                log.info(j("request_rewritten_anthropic", req_id=req_id,
+                           cache_breakpoints=cache_breakpoints))
+        else:
+            rewrites = repair_tool_call_ids(parsed) if parsed.get("messages") else 0
+            usage_injected = inject_include_usage(parsed)
+            # Legacy OpenAI-completions request-shaping (GLM-5/Kimi). No-op for
+            # non-Anthropic models; Anthropic traffic never reaches this branch.
+            sonnet_changes = shape_request_for_sonnet(parsed)
+            cache_breakpoints = inject_cache_breakpoints(parsed)
+            if detect_trailing_prefill(parsed):
+                log.warning(j("sonnet_trailing_prefill_detected", req_id=req_id,
+                              note="last message is an assistant prefill"))
+            if rewrites or usage_injected or sonnet_changes or cache_breakpoints:
+                req_body = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
+                log.info(j("request_rewritten", req_id=req_id, rewrites=rewrites,
+                           include_usage_injected=usage_injected,
+                           sonnet_changes=sonnet_changes,
+                           cache_breakpoints=cache_breakpoints))
 
     if parsed and isinstance(parsed, dict):
         summary = {
@@ -414,9 +988,14 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         chunks) so we can inspect the response and decide whether to retry
         before committing it to the client.
 
-        Returns (status, headers_dict, chunks_list, content_text, finish_reason).
-        `content_text` is the reassembled assistant delta text (from SSE `data:`
-        events when streaming), used to detect empty/degenerate outputs.
+        Returns (status, headers_dict, chunks_list, content_text, finish_reason,
+        usage_in, usage_out, cache_read, cache_write, model). `content_text` is
+        the reassembled assistant delta text (from SSE `data:` events when
+        streaming), used to detect empty/degenerate outputs. `usage_in` is the
+        de-cached billable input; `cache_read`/`cache_write` are the Bedrock
+        prompt-caching token split (issue #1089). All usage numbers are pulled
+        from the response (None/0 when absent) and fed to the cumulative
+        `/usage` counters by the caller.
         """
         body_to_send = body_override if body_override is not None else req_body
         async with ClientSession(timeout=timeout) as session:
@@ -437,8 +1016,17 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 # Reassemble SSE content for streaming responses.
                 content = ""
                 finish = None
+                usage_in: Optional[int] = None
+                usage_out: Optional[int] = None
+                cache_read = 0
+                cache_write = 0
+                resp_model: Optional[str] = None
                 joined = b"".join(chunks).decode(errors="replace")
-                if "data:" in joined:
+                if is_anthropic:
+                    # Native Anthropic Messages response (streaming or JSON).
+                    (content, finish, usage_in, usage_out,
+                     cache_read, cache_write, resp_model) = _parse_anthropic_response(joined)
+                elif "data:" in joined:
                     for line in joined.splitlines():
                         line = line.strip()
                         if not line.startswith("data: "):
@@ -450,6 +1038,24 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                             d = json.loads(payload)
                         except Exception:
                             continue
+                        if isinstance(d, dict):
+                            # Usage + model can ride on ANY chunk — the final
+                            # usage chunk (stream_options.include_usage) carries
+                            # `usage` with an empty `choices: []`, while `model`
+                            # appears on every chunk. Capture both before the
+                            # empty-choices skip below.
+                            ui, uo, cr, cw = _extract_usage(d)
+                            if ui is not None:
+                                usage_in = ui
+                            if uo is not None:
+                                usage_out = uo
+                            if cr:
+                                cache_read = cr
+                            if cw:
+                                cache_write = cw
+                            m = d.get("model")
+                            if isinstance(m, str) and m:
+                                resp_model = m
                         # A present-but-empty `choices: []` (the usage chunk
                         # emitted for stream_options.include_usage, which OpenClaw
                         # 2026.6.11 now requests) makes `.get("choices", [{}])`
@@ -474,11 +1080,16 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         # present-but-empty list must not be indexed (the prior
                         # `[{}]` default silently dropped content here under the
                         # except: pass).
-                        choices = d.get("choices") or []
-                        if choices:
-                            msg = choices[0].get("message", {})
-                            content = msg.get("content") or ""
-                            finish = choices[0].get("finish_reason")
+                        if isinstance(d, dict):
+                            usage_in, usage_out, cache_read, cache_write = _extract_usage(d)
+                            m = d.get("model")
+                            if isinstance(m, str) and m:
+                                resp_model = m
+                            choices = d.get("choices") or []
+                            if choices:
+                                msg = choices[0].get("message", {})
+                                content = msg.get("content") or ""
+                                finish = choices[0].get("finish_reason")
                     except Exception:
                         pass
                 log.info(j(
@@ -489,9 +1100,15 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                     total_bytes=total,
                     content_len=len(content),
                     finish=finish,
+                    usage_in=usage_in,
+                    usage_out=usage_out,
+                    cache_read=cache_read,
+                    cache_write=cache_write,
+                    resp_model=resp_model,
                     elapsed_ms=int((time.time() - t0) * 1000),
                 ))
-                return status, up_headers, chunks, content, finish
+                return (status, up_headers, chunks, content, finish,
+                        usage_in, usage_out, cache_read, cache_write, resp_model)
 
     def is_retryable_failure(status: int, content: str, finish: Optional[str]) -> Optional[str]:
         """Classify the upstream response. Return a reason-string if the
@@ -575,8 +1192,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
     try:
         # First attempt.
-        status, headers, chunks, content, finish = await fetch_upstream("first")
-        reason = is_retryable_failure(status, content, finish)
+        (status, headers, chunks, content, finish,
+         usage_in, usage_out, cache_read, cache_write, resp_model) = await fetch_upstream("first")
+        # The native Anthropic path (Sonnet 5) does not use the OpenAI-shaped
+        # empty-relay/degeneracy retry+rescue — that was a GLM-5/Kimi workaround
+        # and its detectors assume the OpenAI response shape. We forward the
+        # response through and only account usage.
+        reason = None if is_anthropic else is_retryable_failure(status, content, finish)
         retry_attempts = 0
         # Up to 2 retries (3 total upstream calls). Stop as soon as one
         # succeeds. The retry body carries the empty-relay reminder only
@@ -597,16 +1219,37 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                           attempt=retry_attempts,
                           first_content_len=len(content), first_finish=finish,
                           inject_reminder=bool(retry_body)))
-            status_r, headers_r, chunks_r, content_r, finish_r = await fetch_upstream(
+            (status_r, headers_r, chunks_r, content_r, finish_r,
+             usage_in_r, usage_out_r, cache_read_r, cache_write_r,
+             resp_model_r) = await fetch_upstream(
                 f"retry{retry_attempts}", body_override=retry_body
             )
             reason_r = is_retryable_failure(status_r, content_r, finish_r)
-            # Always adopt the latest attempt's response — if it succeeds we
-            # use it directly; if it fails we still prefer it as the most
+            # Always adopt the latest attempt's response body — if it succeeds
+            # we use it directly; if it fails we still prefer it as the most
             # recent attempt before any rescue synthesis.
             status, headers, chunks, content, finish = (
                 status_r, headers_r, chunks_r, content_r, finish_r
             )
+            # Usage carry-forward: adopt the retry's usage ONLY when it actually
+            # reported usage — a retry whose response was differently-shaped (no
+            # `usage` object) must NOT discard the real, already-generated token
+            # count from the prior attempt (that would undercount cost). We take
+            # the latest NON-None value per field so the final billed usage is
+            # the freshest real number, not a null overwrite (review round 2).
+            if usage_in_r is not None:
+                usage_in = usage_in_r
+            if usage_out_r is not None:
+                usage_out = usage_out_r
+            # Cache tokens ride the same carry-forward rule: adopt the retry's
+            # split ONLY when the retry actually carried a usage object, so a
+            # usage-less retry response doesn't zero out the real cache numbers
+            # from the prior attempt.
+            if usage_in_r is not None or usage_out_r is not None:
+                cache_read = cache_read_r
+                cache_write = cache_write_r
+            if resp_model_r:
+                resp_model = resp_model_r
             if reason_r is None:
                 log.info(j("retry_succeeded", req_id=req_id,
                            attempt=retry_attempts,
@@ -650,6 +1293,29 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                           synth_text_len=len(rescue_text),
                           retries_attempted=retry_attempts))
 
+        # Account the FINAL adopted response's usage into the cumulative
+        # counters so agentcore_wrapper's before/after `/usage` delta captures
+        # this turn's tokens. Rescue synthesis replaces the chunks but keeps the
+        # usage from the last real upstream attempt (usage_in/out unchanged),
+        # which is the right number to bill for the turn.
+        if usage_in is not None or usage_out is not None or resp_model:
+            global _cumulative_input_tokens, _cumulative_output_tokens
+            global _cumulative_cache_read_tokens, _cumulative_cache_write_tokens
+            global _last_model, _usage_events
+            async with _usage_lock:
+                if isinstance(usage_in, int):
+                    _cumulative_input_tokens += usage_in
+                if isinstance(usage_out, int):
+                    _cumulative_output_tokens += usage_out
+                if isinstance(cache_read, int):
+                    _cumulative_cache_read_tokens += cache_read
+                if isinstance(cache_write, int):
+                    _cumulative_cache_write_tokens += cache_write
+                if resp_model:
+                    _last_model = resp_model
+                if usage_in is not None or usage_out is not None:
+                    _usage_events += 1
+
         # Forward the (possibly retried) response to the client.
         resp = web.StreamResponse(status=status, headers=headers)
         await resp.prepare(request)
@@ -686,6 +1352,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 def main() -> None:
     app = web.Application(client_max_size=50 * 1024 * 1024)
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/usage", handle_usage)
     app.router.add_route("*", "/{path:.*}", handle_proxy)
     log.info(j("starting", host="127.0.0.1", port=18791, upstream=UPSTREAM))
     web.run_app(app, host="127.0.0.1", port=18791, access_log=None,

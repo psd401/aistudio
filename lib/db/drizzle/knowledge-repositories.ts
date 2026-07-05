@@ -35,7 +35,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc, or, inArray, isNotNull, type SQL } from "drizzle-orm";
+import { eq, and, desc, or, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
@@ -57,6 +57,17 @@ import { createLogger, sanitizeForLogging } from "@/lib/logger";
 // ============================================
 // Constants
 // ============================================
+
+/**
+ * SQL predicate that EXCLUDES system-managed repositories (e.g. the Atrium
+ * retrieval index, Issue #1056) from a query. System-managed repositories hold
+ * content governed by a finer-grained permission model (`visibilityService.canView`)
+ * than repository-level access, so they must never be returned by the generic
+ * repository access-check queries — otherwise `repository-tools` /
+ * `retrieveKnowledgeForPrompt` could search the shared index and bypass
+ * `canView`. `IS DISTINCT FROM` handles a NULL `metadata` correctly.
+ */
+const EXCLUDE_SYSTEM_MANAGED: SQL = sql`(${knowledgeRepositories.metadata} ->> 'systemManaged') IS DISTINCT FROM 'true'`;
 
 /**
  * Maximum number of chunks that can be inserted in a single batch operation
@@ -150,6 +161,24 @@ export interface RepositoryWithAccess {
 // ============================================
 // Knowledge Repository Query Operations
 // ============================================
+
+/**
+ * Whether a repository is system-managed (e.g. the Atrium retrieval index,
+ * Issue #1056). System-managed repositories hold content governed by a
+ * FINER-GRAINED permission model than repository-level access — every Atrium
+ * hit is filtered by `visibilityService.canView` (spec §16.2). They must NOT be
+ * reachable through the generic repository read/search actions, which enforce
+ * only repository-level access (or, for `searchRepository`, none), or a caller
+ * could bypass `canView` by searching the shared `repository_items` index
+ * directly. Atrium's own `retrievalService.search` queries the index by id and
+ * re-checks `canView`, so it is unaffected by this guard.
+ */
+export function isSystemManagedRepository(
+  repo: Pick<SelectKnowledgeRepository, "metadata"> | null | undefined
+): boolean {
+  const metadata = repo?.metadata as Record<string, unknown> | null | undefined;
+  return metadata?.systemManaged === true;
+}
 
 /**
  * Get a repository by ID
@@ -307,18 +336,22 @@ export async function getUserAccessibleRepositories(
         )
         .leftJoin(userRoles, eq(userRoles.roleId, repositoryAccess.roleId))
         .where(
-          or(
-            // Public repositories
-            eq(knowledgeRepositories.isPublic, true),
-            // User owns the repository
-            eq(knowledgeRepositories.ownerId, userId),
-            // Direct user access (must check not null from LEFT JOIN)
-            and(
-              isNotNull(repositoryAccess.userId),
-              eq(repositoryAccess.userId, userId)
-            ),
-            // Role-based access (must check not null from LEFT JOIN)
-            and(isNotNull(userRoles.userId), eq(userRoles.userId, userId))
+          and(
+            // Never surface system-managed repos (Atrium index) here (#1056).
+            EXCLUDE_SYSTEM_MANAGED,
+            or(
+              // Public repositories
+              eq(knowledgeRepositories.isPublic, true),
+              // User owns the repository
+              eq(knowledgeRepositories.ownerId, userId),
+              // Direct user access (must check not null from LEFT JOIN)
+              and(
+                isNotNull(repositoryAccess.userId),
+                eq(repositoryAccess.userId, userId)
+              ),
+              // Role-based access (must check not null from LEFT JOIN)
+              and(isNotNull(userRoles.userId), eq(userRoles.userId, userId))
+            )
           )
         )
         .orderBy(knowledgeRepositories.name),
@@ -366,6 +399,8 @@ export async function getAccessibleRepositoryIds(
         .where(
           and(
             inArray(knowledgeRepositories.id, repositoryIds),
+            // Never grant access to system-managed repos (Atrium index) (#1056).
+            EXCLUDE_SYSTEM_MANAGED,
             or(
               // Public repositories
               eq(knowledgeRepositories.isPublic, true),
@@ -447,6 +482,9 @@ export async function getAccessibleRepositoriesByCognitoSub(
         .where(
           and(
             inArray(knowledgeRepositories.id, repositoryIds),
+            // Never grant access to system-managed repos (Atrium index) (#1056)
+            // — repository-tools resolves access through this function.
+            EXCLUDE_SYSTEM_MANAGED,
             or(...accessConditions)
           )
         ),

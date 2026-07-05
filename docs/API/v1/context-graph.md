@@ -647,3 +647,587 @@ Returns voice availability with a human-readable reason string. Clients call thi
 
 Bidirectional audio streaming for real-time voice conversations. See [`features/voice-api.md`](../../features/voice-api.md) for the full WebSocket protocol specification including message types, close codes, and connection flow.
 
+---
+
+## Atrium Content API (Issue #1055, Phase 5)
+
+Routes under `/api/v1/content/*` manage Atrium **content objects** (documents and
+artifacts), their **versions**, **visibility**, and **publishing**. They follow the
+same v1 conventions as the graph endpoints and mirror the Atrium MCP tools 1:1 — the
+same service layer backs every surface (server actions, REST, MCP), so there is no
+privileged write path. See [`features/atrium-design-spec.md`](../../features/atrium-design-spec.md) §23.
+
+**Auth:** Bearer only — an `sk-` API key or an OIDC bearer (JWT). There is **no**
+session-cookie path for these endpoints. Every response carries `X-Request-Id` and
+(for API-key callers) the `X-RateLimit-*` headers. The success envelope is
+`{ "data": ..., "meta": { "requestId": ... } }`; errors are
+`{ "error": { "code", "message", "details"? }, "requestId" }`.
+
+**Scopes:**
+
+| Scope | Grants |
+|-------|--------|
+| `content:read` | List content, get an object, list versions |
+| `content:create` | Create content objects (and their initial version) |
+| `content:update` | Update metadata, create versions, set visibility |
+| `content:publish_internal` | Publish to / unpublish from a destination |
+| `content:publish_public` | Publish to a public-facing destination without approval |
+
+Staff API keys may hold up to `content:publish_internal`; `content:publish_public`
+is administrator-held. A caller without it that requests a `public`-facing outcome is
+not rejected — it returns `202` with `data.status = "approval_required"` and enters
+the review queue (the §26.4 gate). This applies everywhere a request could reach
+`visibilityLevel: "public"` or take a `public_web` publication offline, not just the
+publish endpoint: `POST /content` (create at `visibility.level: "public"`),
+`PATCH /content/{id}/visibility` (widen to `public`), `POST /content/{id}/publish`
+(publish to `public_web`), and `DELETE /content/{id}/publish/{destination}`
+(unpublish from `public_web` — taking public content down needs the same authority
+as putting it up).
+
+**Content error codes** (in addition to the shared `INVALID_TOKEN`,
+`INSUFFICIENT_SCOPE`, `RATE_LIMIT_EXCEEDED`, and `INTERNAL_ERROR`):
+
+| HTTP | Code | Description |
+|------|------|-------------|
+| 400 | `VALIDATION_ERROR` | Invalid query params or request body. `details` carries Zod issues. |
+| 400 | `INVALID_JSON` | Request body is not valid JSON. |
+| 400 | `CONTENT_VALIDATION` | Service-level input failure (e.g. unknown collection slug, missing body). |
+| 403 | `CONTENT_FORBIDDEN` | The caller may not edit / act on this object. |
+| 404 | `CONTENT_NOT_FOUND` | The object does not exist — or is not visible to the caller (reads are 404-masked). |
+| 409 | `CONTENT_CONFLICT` | Slug collision or version-number race. |
+
+> The public-publish gate surfaces as a `202` **success** whose body is
+> `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
+> `approval_required` is a `data.status` value, not an `error.code`.
+
+---
+
+### Content objects
+
+#### `GET /api/v1/content`
+
+List content objects the caller may view (permission-filtered server-side). Requires `content:read`.
+
+**Query parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `kind` | `document` \| `artifact` | Filter by content kind |
+| `collection` | string (slug or UUID) | Scope to one collection |
+| `tag` | string | Filter by a single tag (exact match) |
+| `status` | `draft` \| `published` \| `archived` | Filter by lifecycle status |
+
+**Example request:**
+
+```bash
+curl -H "Authorization: Bearer sk-your-key" \
+  "https://your-domain/api/v1/content?kind=document&status=published&tag=policy"
+```
+
+**Response `200`** — `meta.count` is the number of items returned.
+
+```json
+{
+  "data": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "kind": "document",
+      "title": "AI Acceptable Use Policy",
+      "slug": "ai-acceptable-use-policy",
+      "ownerUserId": 1,
+      "createdByActor": "human",
+      "createdByAgentId": null,
+      "collectionId": "c0ffee00-0000-4000-8000-000000000001",
+      "visibilityLevel": "internal",
+      "currentVersionId": "11111111-2222-4333-8444-555555555555",
+      "sourceRef": null,
+      "tags": ["policy"],
+      "status": "published",
+      "indexedAt": "2026-06-30T12:00:00.000Z",
+      "createdAt": "2026-06-29T09:00:00.000Z",
+      "updatedAt": "2026-06-30T12:00:00.000Z"
+    }
+  ],
+  "meta": { "requestId": "req_abc123", "count": 1 }
+}
+```
+
+---
+
+#### `POST /api/v1/content`
+
+Create a document or artifact. **Does not publish.** When `body` is supplied, an
+initial version (v1) is snapshotted. Requires `content:create`.
+
+**Request body:**
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `kind` | `document` \| `artifact` | yes | — |
+| `title` | string | yes | 1-500 chars |
+| `collectionId` | string | no | Collection slug or UUID; resolved server-side |
+| `body` | string | no | markdown (document) or code (artifact). Omit to create no v1 |
+| `bodyFormat` | `markdown` \| `html` \| `jsx` | no | — |
+| `visibility` | object | no | `{ level, grants? }` (see Visibility below). Defaults to the collection default, else `private` |
+| `tags` | string[] | no | — |
+
+**Example request:**
+
+```bash
+curl -X POST -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kind": "document",
+    "title": "AI Acceptable Use Policy",
+    "collectionId": "governance",
+    "body": "# Acceptable Use\n\nDraft policy...",
+    "bodyFormat": "markdown",
+    "visibility": { "level": "group", "grants": [{ "kind": "role", "value": "staff" }] },
+    "tags": ["policy"]
+  }' \
+  "https://your-domain/api/v1/content"
+```
+
+**Response `201`** — the created object joined with its current `version` and the
+internal reader `url` (`/c/{slug}`).
+
+```json
+{
+  "data": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "kind": "document",
+    "title": "AI Acceptable Use Policy",
+    "slug": "ai-acceptable-use-policy",
+    "ownerUserId": 1,
+    "createdByActor": "human",
+    "collectionId": "c0ffee00-0000-4000-8000-000000000001",
+    "visibilityLevel": "group",
+    "currentVersionId": "11111111-2222-4333-8444-555555555555",
+    "tags": ["policy"],
+    "status": "draft",
+    "version": {
+      "id": "11111111-2222-4333-8444-555555555555",
+      "objectId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "versionNumber": 1,
+      "authorActor": "human",
+      "bodyFormat": "markdown",
+      "summary": null,
+      "createdAt": "2026-06-30T12:00:00.000Z"
+    },
+    "url": "/c/ai-acceptable-use-policy"
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `400`** — Validation error, or `CONTENT_VALIDATION` (e.g. unknown collection slug).
+**Response `403`** — API key lacks `content:create`.
+**Response `409`** — `CONTENT_CONFLICT` (slug collision).
+**Response `202`** — approval required: `visibility.level: "public"` was requested (explicitly,
+or inherited from a collection whose default is `public`) without `content:publish_public`.
+Nothing is created; body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
+
+---
+
+#### `GET /api/v1/content/{id}`
+
+Get a single object joined with its current version and reader `url`. View
+permission is enforced server-side; objects the caller may not view return `404`
+(not `403`). Requires `content:read`.
+
+**Response `200`** — same shape as the create response (object + `version` + `url`).
+**Response `404`** — `CONTENT_NOT_FOUND` (missing or not visible).
+
+---
+
+#### `PATCH /api/v1/content/{id}`
+
+Update object **metadata only** — body changes go through the versions endpoint.
+Requires `content:update`.
+
+**Request body** (all optional):
+
+| Field | Type | Constraints |
+|-------|------|-------------|
+| `title` | string | 1-500 chars |
+| `tags` | string[] \| null | Replaces all tags; `null` clears them |
+| `collectionId` | string \| null | Collection slug or UUID; `null` clears the collection |
+| `status` | `draft` \| `published` \| `archived` | — |
+
+**Example request:**
+
+```bash
+curl -X PATCH -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "published", "tags": ["policy", "governance"] }' \
+  "https://your-domain/api/v1/content/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+```
+
+**Response `200`** — returns the updated object metadata (no `version`/`url`).
+**Response `404`** — `CONTENT_NOT_FOUND`.
+
+---
+
+### Versions
+
+#### `GET /api/v1/content/{id}/versions`
+
+List the object's versions, newest first. View permission is enforced (404-masked)
+before the list is exposed. Requires `content:read`.
+
+**Response `200`**
+
+```json
+{
+  "data": [
+    {
+      "id": "22222222-3333-4444-8555-666666666666",
+      "objectId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "versionNumber": 2,
+      "authorActor": "agent",
+      "authorUserId": null,
+      "authorAgentId": "policy-bot",
+      "bodyFormat": "markdown",
+      "bodyLocation": "atrium/objects/a1b2.../v2.md",
+      "bodyInline": null,
+      "summary": "Tightened the data-retention section",
+      "createdAt": "2026-06-30T13:00:00.000Z"
+    }
+  ],
+  "meta": { "requestId": "req_abc123", "count": 1 }
+}
+```
+
+---
+
+#### `POST /api/v1/content/{id}/versions`
+
+Snapshot a new version from `body` and make it the current version. Requires `content:update`.
+
+**Request body:**
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `body` | string | yes | min 1 char |
+| `bodyFormat` | `markdown` \| `html` \| `jsx` | no | — |
+| `summary` | string | no | max 2000 chars — change note |
+
+**Example request:**
+
+```bash
+curl -X POST -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{ "body": "# Acceptable Use (rev 2)...", "summary": "Tightened data retention" }' \
+  "https://your-domain/api/v1/content/a1b2c3d4-e5f6-7890-abcd-ef1234567890/versions"
+```
+
+**Response `201`** — the object joined with its new current `version` (no `url`).
+**Response `404`** — `CONTENT_NOT_FOUND`.
+**Response `409`** — `CONTENT_CONFLICT` (version-number race).
+
+---
+
+### Visibility
+
+#### `PATCH /api/v1/content/{id}/visibility`
+
+Set the visibility `level` and (for `group`) the widening `grants`. The route loads
+the object (enforcing view permission, 404-masked) and gates edit before mutating.
+Requires `content:update`.
+
+**Request body** (the Visibility object):
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `level` | `private` \| `group` \| `internal` \| `public` | yes | — |
+| `grants` | `{ kind, value }[]` | no | Only meaningful when `level` is `group` |
+
+`grants[].kind` is one of `role`, `building`, `department`, `grade`, `user`; `value` is the matching identifier.
+
+**Example request:**
+
+```bash
+curl -X PATCH -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{ "level": "group", "grants": [{ "kind": "building", "value": "HS" }] }' \
+  "https://your-domain/api/v1/content/a1b2c3d4-e5f6-7890-abcd-ef1234567890/visibility"
+```
+
+**Response `200`**
+
+```json
+{
+  "data": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "visibility": { "visibilityLevel": "group" }
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `403`** — `CONTENT_FORBIDDEN` (caller may not edit this object).
+**Response `404`** — `CONTENT_NOT_FOUND`.
+**Response `202`** — approval required: `level: "public"` was requested without
+`content:publish_public` — the same §26.4 gate `POST /content/{id}/publish` enforces,
+so a `content:update`-only caller cannot reach "public" through this endpoint either.
+Body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
+
+---
+
+### Publishing
+
+#### `POST /api/v1/content/{id}/publish`
+
+Publish the object's current version to a destination. Requires `content:publish_internal`.
+
+**Request body:**
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `destination` | `intranet` \| `public_web` \| `schoology` \| `google` \| `okf` | yes | `okf` serializes the single object to a portable OKF concept bundle in S3 (internal-publish authority) |
+| `visibility` | object | no | Optional visibility to apply alongside the publish |
+
+**Public-publish gate (§26.4):** if `destination`/`visibility` is public-facing and
+the caller lacks `content:publish_public`, the request is **not** published — it
+returns `202` with `data.status = "approval_required"` and enters the review queue.
+
+**Example request:**
+
+```bash
+curl -X POST -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{ "destination": "intranet" }' \
+  "https://your-domain/api/v1/content/a1b2c3d4-e5f6-7890-abcd-ef1234567890/publish"
+```
+
+**Response `200`** (published)
+
+```json
+{
+  "data": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "destination": "intranet",
+    "publishedVersionId": "11111111-2222-4333-8444-555555555555"
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `202`** (approval required — public publish without `content:publish_public`)
+
+```json
+{
+  "data": {
+    "status": "approval_required",
+    "message": "Public publishing requires approval; your request has been queued for review."
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `403`** — API key lacks `content:publish_internal`, or `CONTENT_FORBIDDEN`.
+**Response `404`** — `CONTENT_NOT_FOUND`.
+
+---
+
+#### `DELETE /api/v1/content/{id}/publish/{destination}`
+
+Unpublish the object from a destination. **Idempotent:** unpublishing an object that
+is not live at the destination returns `unpublished: false` rather than erroring.
+`{destination}` is one of `intranet`, `public_web`, `schoology`, `google`, `okf`. Requires
+`content:publish_internal`.
+
+**Public-publish gate (§26.4):** taking any public-facing destination
+(`public_web`, `schoology`, `google`) offline requires the same
+`content:publish_public` authority needed to publish it — `content:publish_internal`
+alone can publish/unpublish `intranet` (the only internal-audience destination) but
+cannot publish to, or tear down a live, public-facing destination.
+
+**Response `200`**
+
+```json
+{
+  "data": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "destination": "intranet",
+    "unpublished": true
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `400`** — Invalid or missing destination.
+**Response `404`** — `CONTENT_NOT_FOUND`.
+**Response `202`** — approval required: unpublishing `public_web` was requested without
+`content:publish_public`. Body is
+`{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
+
+---
+
+### OKF interoperability (Phase 8, §36)
+
+[Open Knowledge Format (OKF v0.1)](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)
+is a portable, vendor-neutral serialization for agent context: a directory of
+markdown files with YAML frontmatter (one *concept* per file), plus two reserved
+filenames — `index.md` (navigation) and `log.md` (change history). Atrium exposes
+**export** (a collection → an OKF bundle) and **import** (a bundle → content) at
+REST + MCP parity. A bundle is transported as a JSON manifest of files
+(`{ files: [{ path, content }] }`), returned inline and persisted to S3.
+
+**Frontmatter mapping (§36.1):** `type` ← `content_objects.kind` (required),
+`title` ← title, `description` ← head-version summary, `resource` ← a prior
+publication URL, `tags` ← tags, `timestamp` ← `updated_at`; the body is the head
+version (documents inline, artifacts in a fenced code block).
+
+#### `POST /api/v1/content/export/okf`
+
+Export a collection subtree as an OKF bundle. Requires `content:read`.
+
+**Request body:**
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `collectionId` | string | yes | Root collection slug or id |
+| `audience` | `internal` \| `public` | no | Default `internal` |
+
+**Permission-at-export (the security-critical surface, §36.2):** every object is
+filtered by the caller's view permission — a student-identity bundle excludes
+staff-only concepts. **Public bundles:** `audience: "public"` restricts the bundle
+to `visibility_level = 'public'` objects and requires `content:publish_public`;
+without it (including for EVERY autonomous agent) the request returns `202` with
+`data.status = "approval_required"` and enters the review queue.
+
+**Example request:**
+
+```bash
+curl -X POST -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{ "collectionId": "mathematics", "audience": "internal" }' \
+  "https://your-domain/api/v1/content/export/okf"
+```
+
+**Response `200`** (the bundle)
+
+```json
+{
+  "data": {
+    "okfVersion": "0.1",
+    "generator": "psd-aistudio-atrium/okf-exporter@0.1",
+    "rootCollectionId": "c1111111-2222-4333-8444-555555555555",
+    "audience": "internal",
+    "objectCount": 2,
+    "collectionCount": 1,
+    "files": [
+      { "path": "index.md", "content": "---\ntype: \"index\"\ntitle: \"Mathematics\"\n---\n..." },
+      { "path": "fractions.md", "content": "---\ntype: \"document\"\ntitle: \"Fractions\"\n---\n..." },
+      { "path": "log.md", "content": "# Change history — Fractions\n..." }
+    ],
+    "location": "https://s3.../atrium/okf/.../exp.json?X-Amz-..."
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `202`** (approval required — public bundle without `content:publish_public`)
+Body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
+**Response `403`** — API key lacks `content:read`. **Response `400`** — `CONTENT_VALIDATION` (unresolvable `collectionId`). **Response `404`** — `CONTENT_NOT_FOUND` (a root collection the caller cannot enter is masked as not-found).
+
+---
+
+#### `POST /api/v1/content/import/okf`
+
+Import an OKF bundle into content. Requires `content:create`.
+
+**Request body:**
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `files` | array of `{ path, content }` | yes | ≥ 1 file |
+| `targetCollectionId` | string | no | Import the bundle root INTO this collection; a fresh root is created when omitted |
+
+**Provenance (§36.3):** imported objects are **agent-authored**
+(`actor_kind = 'agent'`, attributed to the seeded `atrium-importer` identity) and
+created **private + draft** — never fabricated human authorship, never pre-widened.
+The triggering caller is recorded in the audit trail.
+
+**Retry semantics (not transactional):** import is additive and not wrapped in a
+single transaction (`contentService.create` does its own tx + post-commit S3 IO
+per object). A run that fails partway leaves the already-created private/draft
+content in place, and a retry re-imports the whole bundle as **new** objects (no
+path/`sourceRef` dedup; slugs auto-suffix). For idempotency, import into a fresh
+`targetCollectionId` and, on failure, delete that partial collection before retrying.
+
+**Response `201`**
+
+```json
+{
+  "data": {
+    "rootCollectionId": "d1111111-2222-4333-8444-555555555555",
+    "collectionsCreated": 1,
+    "objectCount": 2,
+    "objects": [
+      { "id": "...", "slug": "fractions", "title": "Fractions", "collectionId": "d1111111-..." }
+    ]
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `400`** — `CONTENT_VALIDATION` (empty bundle / no concept files).
+**Response `403`** — API key lacks `content:create`, or the `atrium-content` capability (session).
+
+---
+
+## Atrium Content Data Model Reference
+
+### ContentObject
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | Object primary key |
+| `kind` | `document` \| `artifact` | Content kind |
+| `title` | string | Display title |
+| `slug` | string | URL slug (reader path is `/c/{slug}`) |
+| `ownerUserId` | integer | Owning user |
+| `createdByActor` | `human` \| `agent` | Who created it |
+| `createdByAgentId` | string \| null | Agent identifier when created by an agent |
+| `collectionId` | UUID \| null | Owning collection |
+| `visibilityLevel` | `private` \| `group` \| `internal` \| `public` | Effective visibility level |
+| `currentVersionId` | UUID \| null | Current version pointer |
+| `sourceRef` | object \| null | Provenance reference when imported |
+| `tags` | string[] | Free-form tags |
+| `status` | `draft` \| `published` \| `archived` | Lifecycle status |
+| `indexedAt` | ISO 8601 \| null | Last search-index time |
+| `createdAt` | ISO 8601 \| null | Creation timestamp |
+| `updatedAt` | ISO 8601 \| null | Last update timestamp |
+
+Create / get responses additionally include a `version` object (the current
+`ContentVersion`, or `null`) and a `url` (the internal reader deep link).
+
+### ContentVersion
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | Version primary key |
+| `objectId` | UUID | Parent object |
+| `versionNumber` | integer | Monotonic version number |
+| `authorActor` | `human` \| `agent` | Who authored the version |
+| `authorUserId` | integer \| null | Authoring user |
+| `authorAgentId` | string \| null | Authoring agent identifier |
+| `bodyFormat` | `markdown` \| `html` \| `jsx` | Body format |
+| `bodyLocation` | string | Storage pointer (e.g. S3 key) for the body |
+| `bodyInline` | string \| null | Raw inline body for small artifacts — **untrusted** code; only render in a code editor or the cross-origin sandboxed iframe |
+| `renderLocation` | string \| null | Rendered-output pointer |
+| `proofDocRef` | string \| null | Proof / provenance document reference |
+| `summary` | string \| null | Change summary |
+| `createdAt` | ISO 8601 \| null | Creation timestamp |
+
+### Visibility
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `level` | `private` \| `group` \| `internal` \| `public` | Base visibility |
+| `grants` | `{ kind, value }[]` | Group widening; only meaningful when `level` is `group` |
+| `grants[].kind` | `role` \| `building` \| `department` \| `grade` \| `user` | Dimension to widen along |
+| `grants[].value` | string | Matching identifier for that dimension |
+

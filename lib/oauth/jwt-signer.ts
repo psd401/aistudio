@@ -15,6 +15,15 @@ export interface JwtSigner {
   signJwt(payload: Record<string, unknown>): Promise<string>
   getPublicKeyJwk(): Promise<JwksKey>
   getKid(): string
+  /**
+   * The PRIVATE signing JWK for node-oidc-provider to sign JWT access/id tokens
+   * with, or `null` when the key is non-exportable (KMS). The public counterpart
+   * is served via `getPublicKeyJwk`, so the API middleware verifies tokens
+   * against the same key. In production with KMS this returns null; an
+   * exportable OIDC signing key must be supplied separately (see
+   * oidc-provider-config.ts and the Phase 5 verification runbook).
+   */
+  getSigningJwk(): Promise<Record<string, unknown> | null>
 }
 
 // ============================================
@@ -46,7 +55,12 @@ class LocalJwtSigner implements JwtSigner {
   private async _generateKeyPair(): Promise<void> {
     const { generateKeyPair, exportJWK } = await import("jose")
 
-    const { privateKey, publicKey } = await generateKeyPair("RS256")
+    // `extractable: true` so the private key can be exported as a JWK for
+    // node-oidc-provider to sign JWT access tokens (Atrium Phase 5,
+    // `getSigningJwk`). Dev-only key; production uses KMS / an injected key.
+    const { privateKey, publicKey } = await generateKeyPair("RS256", {
+      extractable: true,
+    })
     this.privateKey = privateKey
 
     const jwk = await exportJWK(publicKey)
@@ -78,6 +92,14 @@ class LocalJwtSigner implements JwtSigner {
     return this.publicKeyJwk!
   }
 
+  async getSigningJwk(): Promise<Record<string, unknown> | null> {
+    await this.init()
+    const { exportJWK } = await import("jose")
+    const jwk = await exportJWK(this.privateKey as CryptoKey)
+    // Include the metadata oidc-provider needs to select + advertise the key.
+    return { ...jwk, use: "sig", alg: "RS256", kid: this.kid }
+  }
+
   getKid(): string {
     return this.kid
   }
@@ -101,6 +123,22 @@ export async function getJwtSigner(): Promise<JwtSigner> {
     const kid = process.env.KMS_SIGNING_KEY_KID ?? `kms-${Date.now()}`
     signerInstance = new KmsJwtService(kmsArn, kid)
   } else {
+    // HARD-FAIL in production rather than silently using LocalJwtSigner. The local
+    // signer generates an `extractable: true` in-memory RSA key PER PROCESS: on
+    // Fargate (esp. Spot) container recycles it rotates, invalidating every issued
+    // token, AND it violates the "private key never leaves KMS" invariant since it
+    // exports the private JWK. If KMS_SIGNING_KEY_ARN is missing in prod (dropped
+    // env var, bad Secrets Manager wiring, a new env stood up before its KMS key),
+    // that must fail loudly at init, not fall back. Mirrors the OIDC_COOKIE_SECRET
+    // prod guard in oidc-provider-config.ts. (NODE_ENV=production is set by the ECS
+    // task definition, so this reliably fires in the deployed environment.)
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "KMS_SIGNING_KEY_ARN must be set in production — refusing to fall back to " +
+          "the local (extractable, per-process, non-durable) JWT signer. Wire an " +
+          "OIDC signing KMS key (or an injected signer) before serving tokens."
+      )
+    }
     log.info("Using local RSA JWT signer (dev mode)")
     signerInstance = new LocalJwtSigner()
   }

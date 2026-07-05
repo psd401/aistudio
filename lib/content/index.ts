@@ -16,9 +16,44 @@ export type { CollectionTreeNode } from "./collection-service";
 export { navItemService } from "./nav-item-service";
 export type { NavObject } from "./nav-item-service";
 export { publishService } from "./publish-service";
+export { retrievalService } from "./retrieval-service";
+export type { RetrievalScope, RetrievalHit } from "./retrieval-service";
+export { okfExportService } from "./okf/export";
+export type { OkfExportInput, OkfExportResult } from "./okf/export";
+export { okfImportService } from "./okf/import";
+export type {
+  OkfImportInput,
+  OkfImportResult,
+  OkfImportedObject,
+} from "./okf/import";
+export type {
+  OkfBundle,
+  OkfFile,
+  OkfFrontmatter,
+  OkfConcept,
+  OkfAudience,
+} from "./okf/profile";
+export { OKF_VERSION, OKF_GENERATOR } from "./okf/profile";
 export { s3Store } from "./storage/s3-store";
 export { renderMarkdownToHtml } from "./render/markdown-render";
 export { sanitizeHtml } from "./render/html-sanitize";
+
+export { contentEvents } from "./events";
+export type { ContentEventType, ContentEventPayload } from "./events";
+export { recordContentAudit } from "./audit";
+export type {
+  ContentAuditAction,
+  ContentAuditSurface,
+  ContentAuditOutcome,
+  ContentAuditEntry,
+} from "./audit";
+
+export {
+  requesterFromApiAuth,
+  buildDelegatedRequester,
+  buildAutonomousRequesterForIdentity,
+} from "./requester-from-auth";
+export type { RequesterAuthInput } from "./requester-from-auth";
 
 export {
   ContentError,
@@ -35,6 +70,7 @@ export {
   assertCanEdit,
   canEdit,
   canPublishPublic,
+  hasPublishPublicScope,
   principalOf,
   slugifyTitle,
 } from "./helpers";

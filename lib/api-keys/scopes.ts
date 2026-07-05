@@ -64,6 +64,13 @@ export const ROLE_SCOPES: Record<string, ApiScope[]> = {
     "mcp:search_decisions",
     "mcp:list_assistants",
     "mcp:get_decision_graph",
+    // Atrium content (Phase 5, Issue #1055). Staff may mint API keys that
+    // author and publish content INTERNALLY — "agents do what people can".
+    // `content:publish_public` is human-/admin-held and deliberately withheld.
+    "content:read",
+    "content:create",
+    "content:update",
+    "content:publish_internal",
   ],
   administrator: ALL_SCOPES,
 };

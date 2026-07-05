@@ -2,19 +2,19 @@
   "models": {
     "providers": {
       "amazon-bedrock-mantle": {
-        "baseUrl": "http://127.0.0.1:18791/v1",
-        "api": "openai-completions",
+        "baseUrl": "http://127.0.0.1:18791/anthropic",
+        "api": "anthropic-messages",
         "auth": "api-key",
         "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
         "models": [
           {
-            "id": "zai.glm-5",
-            "name": "GLM-5 (via Bedrock Mantle)",
+            "id": "anthropic.claude-sonnet-5",
+            "name": "Claude Sonnet 5 (via Bedrock Mantle)",
             "reasoning": false,
             "input": ["text"],
-            "contextWindow": 203000,
+            "contextWindow": 1000000,
             "maxTokens": 32768,
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+            "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 6 }
           }
         ]
       }
@@ -23,16 +23,21 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "amazon-bedrock-mantle/zai.glm-5"
+        "primary": "amazon-bedrock-mantle/anthropic.claude-sonnet-5"
       },
       "workspace": "/home/node/.openclaw",
+      "contextTokens": 100000,
       "heartbeat": {
         "every": "0m"
+      },
+      "memorySearch": {
+        "provider": "bedrock",
+        "model": "amazon.titan-embed-text-v2:0"
       }
     }
   },
   "tools": {
-    "profile": "full",
+    "toolSearch": true,
     "deny": ["cron", "nodes", "gateway"]
   },
   "skills": {

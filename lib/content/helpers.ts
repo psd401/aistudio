@@ -8,7 +8,9 @@
  */
 
 import { ErrorFactories } from "@/lib/error-utils";
-import { ForbiddenError } from "./errors";
+import { ApprovalRequiredError, ForbiddenError } from "./errors";
+import { contentEvents } from "./events";
+import type { PublishDestination } from "./publish-adapters/types";
 import type { Principal, Requester } from "./types";
 
 /**
@@ -198,6 +200,19 @@ export function assertCanEdit(req: Requester, ownerUserId: number): void {
  * may publish publicly. Autonomous agents never hold it. Phase 0 exposes this
  * predicate for the contract; the publish service that uses it lands in Phase 5/7.
  */
+/**
+ * The §26.4 authority check: may this requester publish/expose content publicly?
+ *
+ * NOTE `hasPublishPublicCapability` is consulted ONLY for `user`-kind requesters
+ * (a human whose capability the surface resolved from their role). The other kinds
+ * derive their own authority and IGNORE the parameter:
+ *  - `agent-delegated` re-reads `content:publish_public` from its OWN token scopes
+ *    (so a delegated agent can never exceed what its token was granted, regardless
+ *    of what a surface computed), and
+ *  - `agent-autonomous` can NEVER publish public (returns false unconditionally).
+ * Call sites compute the boolean uniformly for all kinds for simplicity; it is
+ * authoritative only for the `user` branch. Do NOT assume it gates the others.
+ */
 export function canPublishPublic(
   req: Requester,
   hasPublishPublicCapability: boolean
@@ -206,4 +221,65 @@ export function canPublishPublic(
   if (req.kind === "agent-delegated")
     return req.scopes.includes("content:publish_public");
   return false;
+}
+
+/**
+ * Whether an authenticated API/MCP caller's token scopes include the EXPLICIT
+ * `content:publish_public` scope — the value the REST/MCP surfaces pass to the
+ * service's §26.4 gate as `hasPublishPublicCapability`.
+ *
+ * Every content REST route and MCP handler that resolves this authority computes
+ * the same `scopes.includes("content:publish_public")`; this is the single point
+ * of truth so the scope string is not hand-typed at ~7 call sites. A typo at a
+ * call site would fail CLOSED (the scope would never be recognized, so an
+ * authorized caller is wrongly gated), which is safe but a silent, hard-to-spot
+ * bug — centralizing the literal removes that whole class of drift. A `.includes`
+ * over the exact string, so a session wildcard `["*"]` deliberately does NOT
+ * match: only an explicitly-granted `content:publish_public` scope passes (admins
+ * still pass via `req.isAdmin` inside the service).
+ */
+export function hasPublishPublicScope(
+  scopes: string[] | null | undefined
+): boolean {
+  // Null-safe: every call site passes a real `string[]` (auth/MCP `scopes`), but
+  // accepting null/undefined defensively means a malformed auth context can never
+  // turn this authority check into a runtime crash — it simply denies.
+  return scopes?.includes("content:publish_public") ?? false;
+}
+
+/**
+ * §26.4 — emit the approval-queue signal and throw `ApprovalRequiredError` for an
+ * unauthorized public exposure. Shared by every §26.4 gate site (`publishService`'s
+ * pre-tx destination check + in-tx visibility-widen check, and
+ * `visibilityService.setLevel`'s in-tx widen check) so the emitted event shape and
+ * fail-closed behavior stay identical everywhere this security boundary is
+ * enforced — a future gate site cannot drift by hand-rolling its own emit-then-throw.
+ *
+ * `eventPayload`/`errorContext` are passed through as-is (rather than derived from
+ * a single shape) because callers intentionally differ: `publishService` includes
+ * `slug`/`destination` in the emitted event (readable in the approval-queue UI)
+ * but only `destination`/`objectId` in the thrown error's `details`, while
+ * `visibilityService.setLevel` has no destination concept and passes `objectId`
+ * alone to both.
+ *
+ * `void` emit is fire-and-forget (best-effort; `emit` swallows its own errors and
+ * never rejects), safe even right before a throw — including inside a
+ * transaction, where the throw rolls the tx back.
+ */
+export function raisePublishApprovalRequired(
+  req: Requester,
+  message: string,
+  eventPayload: {
+    objectId: string;
+    slug?: string;
+    destination?: PublishDestination;
+  },
+  errorContext: Record<string, unknown>
+): never {
+  void contentEvents.emit("content.public_publish_requested", {
+    ...eventPayload,
+    actorKind: actorKindOf(req),
+    agentLabel: req.kind === "user" ? null : req.agentLabel,
+  });
+  throw new ApprovalRequiredError(message, errorContext);
 }

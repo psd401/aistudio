@@ -6,6 +6,7 @@
 
 import type { McpToolDefinition } from "./types"
 import type { ApiScope } from "@/lib/api-keys/scopes"
+import { CONTENT_MCP_TOOLS, CONTENT_TOOL_SCOPE_MAP } from "./content-tools"
 
 // ============================================
 // Tool-to-Scope Mapping
@@ -17,6 +18,8 @@ export const TOOL_SCOPE_MAP: Record<string, ApiScope> = {
   execute_assistant: "mcp:execute_assistant",
   list_assistants: "mcp:list_assistants",
   get_decision_graph: "mcp:get_decision_graph",
+  // Atrium content tools (Phase 5, Issue #1055).
+  ...CONTENT_TOOL_SCOPE_MAP,
 }
 
 // ============================================
@@ -186,6 +189,9 @@ Example:
       required: ["nodeId"],
     },
   },
+  // Atrium content tools (Phase 5, Issue #1055) — listed so scoped callers
+  // discover them via tools/list.
+  ...CONTENT_MCP_TOOLS,
 ]
 
 // ============================================
