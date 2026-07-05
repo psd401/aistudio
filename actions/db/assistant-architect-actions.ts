@@ -40,7 +40,6 @@ import {
   getPendingAssistantArchitects as drizzleGetPendingAssistantArchitects,
   getToolInputFields,
   getChainPrompts,
-  getUserById,
   createToolInputField,
   deleteToolInputField,
   updateToolInputField,
@@ -50,9 +49,7 @@ import {
   getAIModels,
   getAIModelById,
   getAssistantArchitectsByStatus,
-  getRoleByName,
-  assignCapabilityToRole,
-  createNavigationItem
+  getRoleByName
 } from "@/lib/db/drizzle";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
@@ -425,8 +422,7 @@ export async function getAssistantArchitectsAction(): Promise<
   ActionState<(SelectAssistantArchitect & {
     inputFields: SelectToolInputField[];
     prompts: SelectChainPrompt[];
-    creator: { firstName: string; lastName: string; email: string } | null;
-    cognito_sub: string;
+    creator: { firstName: string; lastName: string } | null;
   })[]>
 > {
   const requestId = generateRequestId()
@@ -436,16 +432,28 @@ export async function getAssistantArchitectsAction(): Promise<
   try {
     log.info("Action started: Getting assistant architects via Drizzle")
 
+    // Auth (REV-COR-034): this action is in the client manifest, so it is
+    // directly invocable regardless of the /api wrapper's gate. Require a session
+    // and the assistant-architect capability (or admin) before querying, matching
+    // app/api/assistant-architects/route.ts. Previously this returned every
+    // user's drafts, prompt contents, creator emails, and cognito_subs to anyone.
+    const session = await getServerSession();
+    if (!session?.sub) {
+      return { isSuccess: false, message: "Unauthorized" };
+    }
+    if (!(await hasRole("administrator")) && !(await hasCapabilityAccess("assistant-architect"))) {
+      return { isSuccess: false, message: "Access denied" };
+    }
+
     // Get all architects with creator info via Drizzle
     const architects = await drizzleGetAssistantArchitects();
 
-    // For each architect, get input fields, prompts, and cognito_sub in parallel
+    // For each architect, get input fields and prompts in parallel
     const architectsWithRelations = await Promise.all(
       architects.map(async (architect) => {
-        const [inputFields, prompts, user] = await Promise.all([
+        const [inputFields, prompts] = await Promise.all([
           getToolInputFields(architect.id),
-          getChainPrompts(architect.id),
-          architect.userId ? getUserById(architect.userId) : Promise.resolve(null)
+          getChainPrompts(architect.id)
         ]);
 
         // Transform prompts to handle repositoryIds and enabledTools
@@ -476,12 +484,13 @@ export async function getAssistantArchitectsAction(): Promise<
           agentMaxRequestsPerHour: architect.agentMaxRequestsPerHour,
           inputFields,
           prompts: transformedPrompts,
+          // creator.email and cognito_sub removed (REV-COR-034): the list page
+          // renders names only, and cognito_sub is a stable identity key that
+          // must not leak (see REV-COR-035 for how a leaked sub is abused).
           creator: architect.creator ? {
             firstName: architect.creator.firstName || '',
-            lastName: architect.creator.lastName || '',
-            email: architect.creator.email
-          } : null,
-          cognito_sub: user?.cognitoSub || ''
+            lastName: architect.creator.lastName || ''
+          } : null
         };
       })
     );
@@ -533,6 +542,25 @@ export async function getAssistantArchitectByIdAction(
         level: ErrorLevel.WARN,
         details: { id }
       });
+    }
+
+    // Visibility (REV-COR-034): a non-approved architect and its prompt contents
+    // (author IP / internal instructions) are readable only by the creator or an
+    // admin. Approved tools stay readable by any route-authenticated caller
+    // (browser session OR API key at the route layer) so execution and the v1 API
+    // are unaffected — this gates draft/pending enumeration without a hard session
+    // requirement that would break API-key callers.
+    if (architect.status !== "approved") {
+      const isAdmin = await hasRole("administrator");
+      const currentUser = await getCurrentUserAction();
+      const callerId = currentUser.isSuccess ? currentUser.data?.user?.id : undefined;
+      if (!isAdmin && architect.userId !== callerId) {
+        throw createError("Assistant architect not found", {
+          code: "NOT_FOUND",
+          level: ErrorLevel.WARN,
+          details: { id }
+        });
+      }
     }
 
     // Get input fields and prompts in parallel via Drizzle
@@ -1206,6 +1234,18 @@ export async function reorderInputFieldsAction(
       return { isSuccess: false, message: "Forbidden" }
     }
 
+    // Scope caller-supplied field IDs to THIS tool (REV-COR-033) — same
+    // confused-deputy fix as setPromptPositionsAction. updateToolInputField
+    // filters by id alone, so without this a caller could reposition input
+    // fields belonging to another user's tool by supplying their IDs.
+    const toolFields = await getToolInputFields(toolIdInt);
+    const allowedFieldIds = new Set(toolFields.map(f => f.id));
+    const suppliedFieldIds = fieldOrders.map(({ id }) => Number.parseInt(id, 10));
+    if (suppliedFieldIds.some(id => Number.isNaN(id) || !allowedFieldIds.has(id))) {
+      log.warn("Rejected input field reorder with out-of-tool IDs", { toolId });
+      return { isSuccess: false, message: "One or more fields do not belong to this tool" }
+    }
+
     // Update each field's position
     const updatedFields = await Promise.all(
       fieldOrders.map(async ({ id, position }) => {
@@ -1251,6 +1291,24 @@ export async function addChainPromptAction(
   try {
     log.info("Action started: Adding chain prompt", { architectId, promptName: data.name })
 
+    // Auth: require a session and admin-or-creator ownership of the target
+    // architect BEFORE any write, on ALL input shapes. Previously the only check
+    // was conditional — inside the repositoryIds branch — leaving the common path
+    // fully unauthenticated (REV-COR-031 / REV-SEC-041). Chain prompts are the
+    // executable instructions of an assistant, so an unauthorized insert is stored
+    // prompt injection into a possibly-approved, shared tool that others execute.
+    const session = await getServerSession();
+    if (!session?.sub) {
+      log.warn("Unauthorized addChainPrompt attempt");
+      return { isSuccess: false, message: "Unauthorized" };
+    }
+    const architectIdInt = safeParseInt(architectId, 'architectId');
+    const architect = await drizzleGetAssistantArchitectById(architectIdInt);
+    if (!architect) {
+      return { isSuccess: false, message: "Tool not found" };
+    }
+    await authorizePromptMutation(architect.userId, log);
+
     // Validate enabled tools if provided
     if (data.enabledTools && data.enabledTools.length > 0) {
       const toolValidation = await validateEnabledTools(data.enabledTools, data.modelId);
@@ -1263,13 +1321,9 @@ export async function addChainPromptAction(
       }
     }
 
-    // If repository IDs are provided, validate user has access
+    // If repository IDs are provided, validate the caller has repository access
+    // (the auth gate above already established the session + ownership).
     if (data.repositoryIds && data.repositoryIds.length > 0) {
-      const session = await getServerSession();
-      if (!session || !session.sub) {
-        return { isSuccess: false, message: "Unauthorized" };
-      }
-
       const hasAccess = await hasCapabilityAccess("knowledge-repositories");
       if (!hasAccess) {
         return { isSuccess: false, message: "Access denied. You need knowledge repository access." };
@@ -1277,7 +1331,7 @@ export async function addChainPromptAction(
     }
 
     await createChainPrompt({
-      assistantArchitectId: safeParseInt(architectId, 'architectId'),
+      assistantArchitectId: architectIdInt,
       name: data.name,
       content: data.content,
       modelId: data.modelId,
@@ -1298,8 +1352,11 @@ export async function addChainPromptAction(
     }
   } catch (error) {
     timer({ status: "error" })
-    log.error("Error adding chain prompt:", error)
-    return { isSuccess: false, message: "Failed to add chain prompt" }
+    return handleError(error, "Failed to add chain prompt", {
+      context: "addChainPrompt",
+      requestId,
+      operation: "addChainPrompt"
+    })
   }
 }
 
@@ -1786,6 +1843,26 @@ export async function updatePromptResultAction(
       return { isSuccess: false, message: "Invalid execution ID" }
     }
 
+    // Ownership: the execution must belong to the caller (REV-COR-036). The
+    // resolved user was previously dropped, so any authenticated user could
+    // overwrite another user's execution output/status by iterating the integer
+    // executionId — stored-content injection across users. Mirror the ownership
+    // scoping in getExecutionResultsAction.
+    const currentUserId = currentUserResult.data.user.id
+    const execRows = await executeQuery(
+      (db) =>
+        db
+          .select({ userId: toolExecutions.userId })
+          .from(toolExecutions)
+          .where(eq(toolExecutions.id, executionIdInt))
+          .limit(1),
+      "getExecutionOwnerForResultUpdate"
+    )
+    if (!execRows[0] || execRows[0].userId !== currentUserId) {
+      log.warn("Prompt result update denied (not execution owner)", { executionId: executionIdInt })
+      return { isSuccess: false, message: "Execution not found" }
+    }
+
     // Build update object conditionally (matching promptResults schema)
     const updates: Partial<{
       outputData: string;
@@ -1803,6 +1880,11 @@ export async function updatePromptResultAction(
     }
     if (result.executionTime !== undefined && typeof result.executionTime === 'number') {
       updates.executionTimeMs = result.executionTime
+    }
+    // A successful output write should mark the row completed (REV-COR-036);
+    // previously only the error branch set a status, leaving successes stale.
+    if (updates.outputData !== undefined && updates.errorMessage === undefined) {
+      updates.status = "completed"
     }
     // Note: tokensUsed is not in the schema, so we ignore it
 
@@ -1888,42 +1970,46 @@ export async function approveAssistantArchitectAction(
 
     const finalCapabilityId = capability.id
 
-    // Create navigation item if it doesn't exist
     const navLink = `/tools/assistant-architect/${id}`
-    const existingNav = await executeQuery(
-      (db) =>
-        db
-          .select({ id: navigationItems.id })
-          .from(navigationItems)
-          .where(eq(navigationItems.link, navLink))
-          .limit(1),
-      "checkNavigationItemExists"
-    )
 
-    if (existingNav.length === 0) {
-      // Let the database auto-generate the navigation item id; gate the item on
-      // the architect's capability (navigation_items.capability_id, #928).
-      await createNavigationItem({
-        label: updatedTool.name,
-        icon: "IconWand",
-        link: navLink,
-        type: "link",
-        capabilityId: finalCapabilityId,
-        isActive: true
-      })
-    }
-
-    // Grant the capability to the staff and administrator roles.
+    // Resolve the target roles before the transaction (these are reads).
     const staffRole = await getRoleByName("staff")
     const adminRole = await getRoleByName("administrator")
+    const roleIdsToGrant = [staffRole, adminRole]
+      .filter((r): r is NonNullable<typeof r> => r !== null)
+      .map(r => r.id)
 
-    const rolesToAssign = [staffRole, adminRole].filter(r => r !== null)
-
-    for (const role of rolesToAssign) {
-      if (role) {
-        await assignCapabilityToRole(role.id, finalCapabilityId)
+    // Wire the approved tool's access ATOMICALLY (REV-COR-037): the nav item and
+    // BOTH role grants either all commit or all roll back, so a failure part-way
+    // never leaves the tool approved-with-capability but half-wired (a nav item
+    // no role can reach, or only one role granted). Idempotent — re-running after
+    // a partial failure converges: the nav item is guarded by an existence check
+    // and the grants use onConflictDoNothing on the unique (role_id, capability_id)
+    // constraint. Replaces the previous non-transactional await-in-loop.
+    await executeTransaction(async (tx) => {
+      const existingNavTx = await tx
+        .select({ id: navigationItems.id })
+        .from(navigationItems)
+        .where(eq(navigationItems.link, navLink))
+        .limit(1)
+      if (existingNavTx.length === 0) {
+        // Gate the item on the architect's capability (navigation_items.capability_id, #928).
+        await tx.insert(navigationItems).values({
+          label: updatedTool.name,
+          icon: "IconWand",
+          link: navLink,
+          type: "link",
+          capabilityId: finalCapabilityId,
+          isActive: true
+        })
       }
-    }
+      if (roleIdsToGrant.length > 0) {
+        await tx
+          .insert(roleCapabilities)
+          .values(roleIdsToGrant.map(roleId => ({ roleId, capabilityId: finalCapabilityId })))
+          .onConflictDoNothing()
+      }
+    }, "wireApprovedArchitectAccess")
 
     log.info("Assistant architect approved successfully", { id })
     timer({ status: "success", id })
@@ -2388,6 +2474,19 @@ export async function setPromptPositionsAction(
     const isAdmin = await hasRole("administrator");
     if (!isAdmin && architect.userId !== userId) {
       return { isSuccess: false, message: "Forbidden" }
+    }
+
+    // Scope the caller-supplied prompt IDs to THIS tool (REV-COR-033). The
+    // ownership check above only authorizes `toolId`; updateChainPrompt filters
+    // by id alone, so without this a caller who owns tool A could rewrite the
+    // position/parallelGroup of prompts belonging to another user's (approved)
+    // assistant B by supplying B's prompt IDs. Reject any id not in this tool.
+    const toolPrompts = await getChainPrompts(toolIdInt);
+    const allowedPromptIds = new Set(toolPrompts.map(p => p.id));
+    const suppliedPromptIds = positions.map(({ id }) => Number.parseInt(id, 10));
+    if (suppliedPromptIds.some(id => Number.isNaN(id) || !allowedPromptIds.has(id))) {
+      log.warn("Rejected prompt position update with out-of-tool IDs", { toolId });
+      return { isSuccess: false, message: "One or more prompts do not belong to this tool" }
     }
 
     // Update positions and parallel_group for each prompt

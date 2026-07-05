@@ -12,6 +12,8 @@ import {
   deleteGenericJob,
 } from "@/lib/db/drizzle"
 import { getServerSession } from "@/lib/auth/server-session"
+import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
+import { hasRole } from "@/utils/roles"
 import {
   handleError,
   ErrorFactories,
@@ -23,6 +25,21 @@ import {
   startTimer,
   sanitizeForLogging
 } from "@/lib/logger"
+
+/**
+ * Resolve the caller's numeric user id + admin flag for ownership checks
+ * (REV-COR-038). Every job action authorizes against the OWNING user, not just
+ * session presence, so a logged-in user cannot read/tamper/delete other users'
+ * jobs by iterating the integer id, nor attribute a created job to someone else.
+ */
+async function resolveJobCaller(): Promise<{ userId: number; isAdmin: boolean }> {
+  const currentUser = await getCurrentUserAction()
+  if (!currentUser.isSuccess || !currentUser.data) {
+    throw ErrorFactories.authNoSession()
+  }
+  const isAdmin = await hasRole("administrator")
+  return { userId: currentUser.data.user.id, isAdmin }
+}
 
 export async function createJobAction(
   job: Omit<CreateGenericJobData, "userId"> & { userId?: number | string }
@@ -44,17 +61,23 @@ export async function createJobAction(
     }
     
     log.debug("User authenticated", { userId: session.sub })
-    
-    if (!job.userId) {
-      log.warn("Missing userId for job creation")
-      return { isSuccess: false, message: "A userId must be provided to create a job." };
-    }
 
-    // Convert userId to number if it's a string
-    const userIdNum = typeof job.userId === 'string' ? Number.parseInt(job.userId, 10) : job.userId;
-    if (Number.isNaN(userIdNum)) {
-      log.warn("Invalid userId provided", { userId: job.userId })
-      return { isSuccess: false, message: "Invalid userId provided." };
+    // Attribute the job to the caller. A caller-supplied userId is honored only
+    // for administrators (create-on-behalf-of); everyone else is pinned to their
+    // own id, so a job can never be framed as another user (REV-COR-038).
+    const { userId: callerId, isAdmin } = await resolveJobCaller()
+    let userIdNum = callerId
+    if (job.userId !== undefined && job.userId !== null && job.userId !== '') {
+      const requested = typeof job.userId === 'string' ? Number.parseInt(job.userId, 10) : job.userId
+      if (Number.isNaN(requested)) {
+        log.warn("Invalid userId provided", { userId: job.userId })
+        return { isSuccess: false, message: "Invalid userId provided." };
+      }
+      if (requested !== callerId && !isAdmin) {
+        log.warn("Non-admin attempted to attribute a job to another user", { requested })
+        throw ErrorFactories.authzInsufficientPermissions("create jobs for other users")
+      }
+      userIdNum = requested
     }
 
     log.info("Creating job in database", {
@@ -123,6 +146,14 @@ export async function getJobAction(id: string): Promise<ActionState<GenericJob>>
       throw ErrorFactories.dbRecordNotFound("jobs", idNum)
     }
 
+    // Ownership check: a non-owner (non-admin) gets not-found, not the job
+    // (REV-COR-038 — prevents IDOR read + existence disclosure).
+    const { userId: callerId, isAdmin } = await resolveJobCaller()
+    if (job.userId !== callerId && !isAdmin) {
+      log.warn("Job access denied (not owner)", { jobId: idNum })
+      throw ErrorFactories.dbRecordNotFound("jobs", idNum)
+    }
+
     log.info("Job retrieved successfully", {
       jobId: job.id,
       jobType: job.type,
@@ -164,6 +195,14 @@ export async function getUserJobsAction(userId: string): Promise<ActionState<Gen
     if (Number.isNaN(userIdNum)) {
       log.warn("Invalid user ID provided", { userId })
       return { isSuccess: false, message: "Invalid user ID" };
+    }
+
+    // A caller may only list their own jobs unless they are an administrator
+    // (REV-COR-038).
+    const { userId: callerId, isAdmin } = await resolveJobCaller()
+    if (userIdNum !== callerId && !isAdmin) {
+      log.warn("User jobs access denied (not self)", { requested: userIdNum })
+      throw ErrorFactories.authzInsufficientPermissions("view other users' jobs")
     }
 
     log.debug("Fetching user jobs from database", { userId: userIdNum })
@@ -223,6 +262,17 @@ export async function updateJobAction(
       return { isSuccess: false, message: "No valid fields to update" };
     }
 
+    // Ownership check before mutating (REV-COR-038): non-owner → not-found.
+    const existingForUpdate = await getGenericJobById(idNum)
+    if (!existingForUpdate) {
+      throw ErrorFactories.dbRecordNotFound("jobs", idNum)
+    }
+    const updateCaller = await resolveJobCaller()
+    if (existingForUpdate.userId !== updateCaller.userId && !updateCaller.isAdmin) {
+      log.warn("Job update denied (not owner)", { jobId: idNum })
+      throw ErrorFactories.dbRecordNotFound("jobs", idNum)
+    }
+
     log.info("Updating job in database", {
       jobId: idNum,
       fieldsUpdated: fieldsCount
@@ -275,6 +325,17 @@ export async function deleteJobAction(id: string): Promise<ActionState<void>> {
     if (Number.isNaN(idNum)) {
       log.warn("Invalid job ID provided", { jobId: id })
       return { isSuccess: false, message: "Invalid job ID" };
+    }
+
+    // Ownership check before deleting (REV-COR-038): non-owner → not-found.
+    const existingForDelete = await getGenericJobById(idNum)
+    if (!existingForDelete) {
+      throw ErrorFactories.dbRecordNotFound("jobs", idNum)
+    }
+    const deleteCaller = await resolveJobCaller()
+    if (existingForDelete.userId !== deleteCaller.userId && !deleteCaller.isAdmin) {
+      log.warn("Job deletion denied (not owner)", { jobId: idNum })
+      throw ErrorFactories.dbRecordNotFound("jobs", idNum)
     }
 
     log.info("Deleting job from database", { jobId: idNum })

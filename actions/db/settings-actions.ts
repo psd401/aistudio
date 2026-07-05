@@ -1,7 +1,7 @@
 "use server"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { getSettings, getSettingValue as getSettingValueDrizzle, upsertSetting, deleteSetting as deleteSettingDrizzle, getSettingActualValue as getSettingActualValueDrizzle } from "@/lib/db/drizzle"
+import { getSettings, upsertSetting, deleteSetting as deleteSettingDrizzle, getSettingActualValue as getSettingActualValueDrizzle } from "@/lib/db/drizzle"
 import { hasRole } from "@/lib/auth/role-helpers"
 import { ActionState } from "@/types/actions-types"
 import {
@@ -15,7 +15,7 @@ import {
   startTimer,
   sanitizeForLogging
 } from "@/lib/logger"
-import { revalidateSettingsCache, getSetting, maskKey } from "@/lib/settings-manager"
+import { revalidateSettingsCache, getSetting } from "@/lib/settings-manager"
 
 export interface Setting {
   id: number
@@ -88,28 +88,13 @@ export async function getSettingsAction(): Promise<ActionState<Setting[]>> {
   }
 }
 
-// Get a single setting value (for internal use)
-export async function getSettingValueAction(key: string): Promise<string | null> {
-  const requestId = generateRequestId()
-  const timer = startTimer("getSettingValue")
-  const log = createLogger({ requestId, action: "getSettingValue" })
-  
-  const safeKey = maskKey(key)
-
-  try {
-    log.debug("Getting setting value", { key: safeKey })
-
-    const value = await getSettingValueDrizzle(key)
-
-    log.debug("Setting value retrieved", { key: safeKey, hasValue: !!value })
-    timer({ status: value ? "success" : "not_found" })
-    return value
-  } catch (error) {
-    log.error("Error getting setting value", { key: safeKey, error })
-    timer({ status: "error" })
-    return null
-  }
-}
+// NOTE: getSettingValueAction was removed (REV-COR-048). It was an unused
+// `"use server"` export that returned raw, unmasked setting values (including
+// `isSecret` provider keys) with no session/role check — a public endpoint
+// leaking secrets. Server-side callers must use `getSetting` from
+// `@/lib/settings-manager` or `getSettingValue` from `@/lib/db/drizzle` (neither
+// is a server action). An action-level need must add getServerSession() +
+// hasRole("administrator") and return ActionState (see getSettingActualValueAction).
 
 // Create or update a setting (admin only)
 export async function upsertSettingAction(input: CreateSettingInput): Promise<ActionState<Setting>> {
