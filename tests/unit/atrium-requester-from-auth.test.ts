@@ -65,6 +65,7 @@ import {
   requesterFromApiAuth,
   buildDelegatedRequester,
   buildAutonomousRequesterForIdentity,
+  requesterForUserId,
 } from "@/lib/content/requester-from-auth";
 import { principalOf } from "@/lib/content/helpers";
 
@@ -273,5 +274,31 @@ describe("buildDelegatedRequester grant-inheritance invariant", () => {
     // principalOf forces isAdmin:false for delegated — the agent CANNOT exceed
     // the human's grants by inheriting admin power.
     expect(principalOf(req).isAdmin).toBe(false);
+  });
+});
+
+describe("requesterForUserId (API-key execution path, #1059 completion)", () => {
+  it("builds a plain user requester with admin derived from roles", async () => {
+    roleRows = [{ name: "administrator" }];
+    const req = await requesterForUserId(42);
+    expect(req).not.toBeNull();
+    if (!req || req.kind !== "user") throw new Error("wrong kind");
+    expect(req.userId).toBe(42);
+    expect(req.roles).toEqual(["administrator"]);
+    expect(req.building).toBe("High School");
+    expect(req.isAdmin).toBe(true);
+  });
+
+  it("returns null (never throws) when the user row is missing", async () => {
+    userRows = [];
+    await expect(requesterForUserId(999)).resolves.toBeNull();
+  });
+
+  it("returns null (never throws) when the lookup itself fails", async () => {
+    const { executeQuery } = jest.requireMock("@/lib/db/drizzle-client") as {
+      executeQuery: jest.Mock;
+    };
+    executeQuery.mockRejectedValueOnce(new Error("db down"));
+    await expect(requesterForUserId(42)).resolves.toBeNull();
   });
 });

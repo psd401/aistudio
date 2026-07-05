@@ -217,6 +217,11 @@ export async function addDocumentItem(
     log.debug("Getting user ID from session")
     const userId = await getUserIdFromSession(session.sub)
 
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API — a foreign item would pollute the retrieval
+    // index. Runs BEFORE the ownership check (404-mask precedes 403).
+    await assertNotSystemManagedRepository(input.repository_id)
+
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
     const canModify = await canModifyRepository(input.repository_id, userId)
@@ -359,6 +364,10 @@ export async function addDocumentWithPresignedUrl(
     // Get the user ID from the cognito_sub
     const userId = await getUserIdFromSession(session.sub)
 
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
+
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
     const canModify = await canModifyRepository(input.repository_id, userId)
@@ -500,6 +509,10 @@ export async function addUrlItem(
     // Get the user ID from the cognito_sub
     const userId = await getUserIdFromSession(session.sub)
 
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
+
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
     const canModify = await canModifyRepository(input.repository_id, userId)
@@ -617,6 +630,10 @@ export async function addTextItem(
     // Get the user ID from the cognito_sub
     log.debug("Getting user ID from session")
     const userId = await getUserIdFromSession(session.sub)
+
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
 
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
@@ -1130,6 +1147,31 @@ export async function updateItemProcessingStatus(
         itemId
       })
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
+    }
+
+    // A status write keyed by itemId is a cross-repo write path: without a
+    // per-item guard any capability holder could flip processing status on an
+    // arbitrary item (IDOR), including rows of the system-managed Atrium index
+    // (#1056). Mirror removeRepositoryItem: resolve the item (404 on miss),
+    // reject system-managed repos (404-mask), then require ownership (403).
+    log.debug("Fetching item for status update", { itemId })
+    const itemRaw = await getRepositoryItemById(itemId)
+    if (!itemRaw) {
+      log.warn("Item not found for status update", { itemId })
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+    }
+    await assertNotSystemManagedRepository(itemRaw.repositoryId)
+
+    const userId = await getUserIdFromSession(session.sub)
+    log.debug("Checking repository ownership", { repositoryId: itemRaw.repositoryId, userId })
+    const canModify = await canModifyRepository(itemRaw.repositoryId, userId)
+    if (!canModify) {
+      log.warn("Status update denied - not owner", {
+        userId,
+        repositoryId: itemRaw.repositoryId,
+        itemId
+      })
+      throw ErrorFactories.authzOwnerRequired("update items in repository")
     }
 
     // Update processing status via Drizzle

@@ -518,6 +518,11 @@ export const publishService = {
    * no-op-safe call when there is no live publication (returns `unpublished:
    * false`) rather than throwing — unpublishing an already-unpublished object is
    * idempotent from the caller's view.
+   *
+   * Once NO destination remains live, the retrieval index entry is pruned
+   * post-commit (best-effort) so unpublished content stops surfacing as
+   * assistant context (§16); while any other destination is still live the
+   * index is kept.
    */
   async unpublish(
     req: Requester,
@@ -561,7 +566,10 @@ export const publishService = {
 
     // Mark the publication unpublished and revert the object to draft atomically.
     // Lock the row FOR UPDATE so a concurrent publish/unpublish serializes here.
-    const externalRef = await executeTransaction(
+    // Resolves to undefined when nothing was live (idempotent no-op), else the
+    // removed publication's externalRef plus whether ANY other destination is
+    // still live (drives the retrieval-index pruning below).
+    const outcome = await executeTransaction(
       async (tx: DbTransaction) => {
         const locked = await tx
           .select({ id: contentObjects.id })
@@ -622,15 +630,19 @@ export const publishService = {
             .where(eq(contentObjects.id, objectId));
         }
 
-        return pub[0].externalRef;
+        return {
+          externalRef: pub[0].externalRef,
+          anyLiveRemaining: Boolean(stillLive[0]),
+        };
       },
       "publish.unpublish"
     );
 
-    if (externalRef === undefined) {
+    if (outcome === undefined) {
       // No live publication existed — idempotent no-op.
       return { unpublished: false };
     }
+    const { externalRef, anyLiveRemaining } = outcome;
 
     // Destination teardown AFTER the transaction commits (external/secondary IO
     // outside the tx). For the intranet adapter this hides the nav item; a
@@ -649,6 +661,27 @@ export const publishService = {
               : String(adapterError),
         });
         throw adapterError;
+      }
+    }
+
+    // Retrieval-index pruning (§16): once NO destination is live anywhere, the
+    // object must stop surfacing as assistant context — remove its backing
+    // repository_item/chunks/link and clear indexed_at. While ANY destination
+    // remains live the index stays (the content is still published somewhere).
+    // Best-effort like the publish-side indexing: the unpublish has already
+    // committed, so a prune failure is logged, never thrown — a later
+    // unpublish/archive (removeFromIndex is idempotent) or re-publish
+    // re-converges the index.
+    if (!anyLiveRemaining) {
+      try {
+        await retrievalService.removeFromIndex(objectId);
+      } catch (pruneError) {
+        log.warn("Failed to prune retrieval index after unpublish", {
+          objectId,
+          destination,
+          error:
+            pruneError instanceof Error ? pruneError.message : String(pruneError),
+        });
       }
     }
 

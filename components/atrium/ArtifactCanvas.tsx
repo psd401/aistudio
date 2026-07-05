@@ -12,7 +12,10 @@
  * Data flow:
  * - On mount / object change, fetch the version list (`listVersionsAction`) and
  *   load the head version's code (`getArtifactCodeAction`).
- * - Selecting a version in the dropdown loads that version's code.
+ * - Selecting a version in the dropdown loads that version's code (preview-only;
+ *   the working head is unchanged). "Restore this version" (editors, non-current
+ *   selection) additionally repoints the working head at the previewed version
+ *   via `rollbackVersionAction` (Epic #1059 completion).
  * - Preview renders the loaded code in `<ArtifactSandbox>` (cross-origin, §28.1).
  * - Saving in the Code tab calls `createVersionAction` (human-authored); we then
  *   refresh the version list and select the new head.
@@ -26,6 +29,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getArtifactCodeAction } from "@/actions/db/atrium/get-artifact-code";
 import { listVersionsAction, type VersionSummary } from "@/actions/db/atrium/list-versions";
 import { createVersionAction } from "@/actions/db/atrium/create-version";
+import { rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
 import type { BodyFormat } from "@/lib/content";
 import { ArtifactSandbox } from "./ArtifactSandbox";
 import { CodeEditor } from "./CodeEditor";
@@ -75,24 +79,85 @@ function withOptimisticHead(prev: VersionSummary[], head: NewHead): VersionSumma
   ];
 }
 
-/** The canvas header: Preview|Code toggle, version dropdown, status text. */
+/**
+ * Restore the SELECTED (non-current) version as the working head (Epic #1059
+ * completion). The selected version's code is already loaded in the canvas
+ * (the preview-version behavior is unchanged); rollback only repoints the head,
+ * so afterwards we refresh the version list for the moved `(current)` marker.
+ * Module-level (setters threaded in) to keep the component body under the
+ * max-lines-per-function lint, mirroring VisibilityChip's performVisibilitySave.
+ */
+async function performRestore(args: {
+  target: string;
+  version: VersionSummary;
+  refreshVersions: () => Promise<VersionSummary[] | null>;
+  setRestoring: (v: boolean) => void;
+  setRestoreNotice: (v: string | null) => void;
+}): Promise<void> {
+  const { target, version, refreshVersions, setRestoring, setRestoreNotice } = args;
+  if (
+    typeof window !== "undefined" &&
+    !window.confirm(
+      `Restore v${version.versionNumber} as the current version? Publishing will then make v${version.versionNumber} live.`
+    )
+  ) {
+    return;
+  }
+  setRestoring(true);
+  setRestoreNotice(null);
+  try {
+    const result = await rollbackVersionAction(target, version.id);
+    if (!result.isSuccess) {
+      setRestoreNotice(result.message ?? "Could not restore this version");
+      return;
+    }
+    // Refresh so `isCurrent` moves to the restored version. On a transient
+    // refresh failure the prior list is preserved (refreshVersions contract);
+    // the restore itself already committed.
+    await refreshVersions();
+    setRestoreNotice(`Restored v${version.versionNumber} as current`);
+  } catch (err) {
+    setRestoreNotice(
+      err instanceof Error ? err.message : "Could not restore this version"
+    );
+  } finally {
+    setRestoring(false);
+  }
+}
+
+/** The canvas header: Preview|Code toggle, version dropdown, restore, status. */
 function CanvasToolbar({
   tab,
   onTab,
   versions,
   selectedVersionId,
   onSelectVersion,
+  onRestore,
+  canEdit,
+  restoring,
   state,
   message,
+  notice,
 }: {
   tab: Tab;
   onTab: (t: Tab) => void;
   versions: VersionSummary[];
   selectedVersionId: string | null;
   onSelectVersion: (id: string) => void;
+  /** Restore the selected version as the working head. */
+  onRestore: () => void;
+  /** Whether the viewer may edit (the restore action re-checks server-side). */
+  canEdit: boolean;
+  restoring: boolean;
   state: LoadState;
   message: string | null;
+  /** Restore success/failure feedback (shown only when the canvas is ready). */
+  notice: string | null;
 }) {
+  // Restorable when the viewer may edit and the previewed version is NOT
+  // already the working head (derived here so the parent stays lean).
+  const selected = versions.find((v) => v.id === selectedVersionId) ?? null;
+  const canRestore = canEdit && selected !== null && !selected.isCurrent;
   return (
     <div className="flex items-center gap-3 text-xs text-gray-500">
       <div className="inline-flex overflow-hidden rounded border" role="tablist">
@@ -134,9 +199,22 @@ function CanvasToolbar({
         </label>
       )}
 
+      {canRestore && (
+        <button
+          type="button"
+          onClick={onRestore}
+          disabled={restoring || state === "loading"}
+          className="rounded border px-2 py-1 hover:bg-gray-50 disabled:opacity-50"
+          data-testid="artifact-restore-version"
+        >
+          {restoring ? "Restoring…" : "Restore this version"}
+        </button>
+      )}
+
       <span aria-live="polite" className="ml-auto">
         {state === "loading" && "Loading…"}
         {state === "error" && (message ?? "Error")}
+        {state === "ready" && notice}
       </span>
     </div>
   );
@@ -164,6 +242,11 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [code, setCode] = useState<string>("");
   const [bodyFormat, setBodyFormat] = useState<BodyFormat>("html");
+  // Restore-selected-version state (Epic #1059 completion): `restoring` blocks
+  // double-fire; `restoreNotice` is the success/failure caption (kept separate
+  // from `message`, which belongs to the load-error state machine).
+  const [restoring, setRestoring] = useState(false);
+  const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
   // The resolved stable object UUID (idOrSlug may be a slug); save targets this.
   const objectIdRef = useRef<string | null>(null);
 
@@ -242,6 +325,7 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
     void (async () => {
       setState("loading");
       setMessage(null);
+      setRestoreNotice(null);
       try {
         // loadCode sets selectedVersionId internally on success; we don't need
         // its return value here. Both run concurrently; if either rejects the
@@ -264,6 +348,9 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
   const handleSelectVersion = useCallback(
     async (versionId: string) => {
       setState("loading");
+      // A stale restore caption for a previously-selected version would mislead
+      // once a different version is being previewed.
+      setRestoreNotice(null);
       try {
         // loadCode's own seq token makes the latest selection win.
         await loadCode(versionId);
@@ -323,6 +410,20 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
     [idOrSlug, bodyFormat, refreshVersions, loadCode]
   );
 
+  const handleRestore = useCallback(() => {
+    const version = versions.find((v) => v.id === selectedVersionId);
+    if (!version || version.isCurrent) return;
+    void performRestore({
+      // Target the resolved UUID (idOrSlug may be a slug); loadCode has always
+      // populated objectIdRef by the time a version is selectable.
+      target: objectIdRef.current ?? idOrSlug,
+      version,
+      refreshVersions,
+      setRestoring,
+      setRestoreNotice,
+    });
+  }, [versions, selectedVersionId, idOrSlug, refreshVersions]);
+
   return (
     <div className="atrium-artifact-canvas flex flex-col gap-2">
       <CanvasToolbar
@@ -331,8 +432,12 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
         versions={versions}
         selectedVersionId={selectedVersionId}
         onSelectVersion={handleSelectVersion}
+        onRestore={handleRestore}
+        canEdit={canEdit}
+        restoring={restoring}
         state={state}
         message={message}
+        notice={restoreNotice}
       />
 
       {/* Canvas body */}

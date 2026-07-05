@@ -1,8 +1,11 @@
 import { vectorSearch, hybridSearch } from "@/lib/repositories/search-service"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { sql } from "drizzle-orm"
+import { assistantArchitects } from "@/lib/db/schema"
+import { eq, sql } from "drizzle-orm"
 import { createLogger, generateRequestId } from "@/lib/logger"
 import { encodingForModel } from "js-tiktoken"
+import type { Requester } from "@/lib/content/types"
+import type { RetrievalHit } from "@/lib/content/retrieval-service"
 
 interface KnowledgeChunk {
   chunkId: number
@@ -218,6 +221,133 @@ export async function retrieveKnowledgeForPrompt(
     log.error('Error retrieving knowledge for prompt', { error })
     return []
   }
+}
+
+/** Options for Atrium content retrieval (same caps as the repository path). */
+interface AtriumKnowledgeOptions {
+  maxChunks?: number
+  maxTokens?: number
+  similarityThreshold?: number
+}
+
+/**
+ * Retrieve permission-aware Atrium content context for an assistant prompt
+ * (Atrium Phase 6, Issue #1056 — "content as context", Epic #1059).
+ *
+ * OFF BY DEFAULT: only assistants whose `assistant_architects.retrieval_scope`
+ * is set (migration 094) retrieve Atrium content. A null/unset scope skips the
+ * search entirely — `retrievalService.searchForAssistant` is never called — so
+ * assistants that predate Phase 6 behave exactly as before.
+ *
+ * FAIL CLOSED: a missing requester (e.g. a scheduled run that resolved no
+ * service identity) skips retrieval. Atrium hits are always bounded by the
+ * ACTUAL caller's `canView` (enforced per hit inside `searchForAssistant`) —
+ * never a borrowed or implicit authority.
+ *
+ * Mirrors `retrieveKnowledgeForPrompt`'s failure posture: any error logs and
+ * returns [] so retrieval can never fail an execution. The token budget is the
+ * same algorithm the repository path applies (whole chunks until the cap, one
+ * truncated tail chunk when ≥100 tokens remain).
+ *
+ * `retrievalService` is imported lazily so this module (loaded by every
+ * assistant execution path) does not statically pull the content/embedding
+ * stack when Atrium retrieval never runs.
+ */
+export async function retrieveAtriumKnowledgeForPrompt(
+  requester: Requester | null | undefined,
+  assistantId: number,
+  promptContent: string,
+  options: AtriumKnowledgeOptions = {},
+  requestId?: string
+): Promise<RetrievalHit[]> {
+  const log = createLogger({
+    requestId: requestId || generateRequestId(),
+    module: 'knowledge-retrieval'
+  })
+
+  // No derivable caller identity -> no Atrium context (fail closed to nothing).
+  if (!requester) return []
+
+  try {
+    // Gate on the stored scope BEFORE searching: null/unset = retrieval off.
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select({ retrievalScope: assistantArchitects.retrievalScope })
+          .from(assistantArchitects)
+          .where(eq(assistantArchitects.id, assistantId))
+          .limit(1),
+      "atrium.assistantRetrievalScopeGate"
+    )
+    if (!rows[0] || rows[0].retrievalScope == null) return []
+
+    const { retrievalService } = await import("@/lib/content/retrieval-service")
+    const hits = await retrievalService.searchForAssistant(
+      requester,
+      assistantId,
+      promptContent,
+      {
+        limit: options.maxChunks ?? DEFAULT_OPTIONS.maxChunks,
+        threshold: options.similarityThreshold
+      }
+    )
+    if (hits.length === 0) return []
+
+    // Apply the same token budget the repository path enforces.
+    const maxTokens = options.maxTokens ?? DEFAULT_OPTIONS.maxTokens ?? 4000
+    const limited: RetrievalHit[] = []
+    let totalTokens = 0
+    for (const hit of hits) {
+      const hitTokens = countTokens(hit.content, requestId)
+      if (totalTokens + hitTokens <= maxTokens) {
+        limited.push(hit)
+        totalTokens += hitTokens
+      } else {
+        const remainingTokens = maxTokens - totalTokens
+        if (remainingTokens > 100) {
+          limited.push({
+            ...hit,
+            content:
+              truncateToTokenLimit(hit.content, remainingTokens) +
+              "\n[... truncated for token limit]"
+          })
+        }
+        break
+      }
+    }
+    return limited
+  } catch (error) {
+    log.error('Error retrieving Atrium knowledge for prompt', { assistantId, error })
+    return []
+  }
+}
+
+/**
+ * Format Atrium retrieval hits into a clearly-labelled context block. Mirrors
+ * `formatKnowledgeContext`'s structure but with distinct `atrium:<slug>` source
+ * labels so the model (and anyone auditing a transcript) can tell Atrium
+ * content apart from repository knowledge.
+ */
+export function formatAtriumKnowledgeContext(hits: RetrievalHit[]): string {
+  if (hits.length === 0) {
+    return ""
+  }
+
+  const sections = hits.map((hit, index) => {
+    return `## Atrium Source ${index + 1}: ${hit.title} (atrium:${hit.slug})
+Relevance Score: ${(hit.similarity * 100).toFixed(1)}%
+
+${hit.content}`
+  })
+
+  return `# Atrium Content Context
+
+The following published content was retrieved from the Atrium content workspace based on relevance to the prompt:
+
+${sections.join('\n\n---\n\n')}
+
+---
+End of Atrium content context.`
 }
 
 /**

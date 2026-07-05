@@ -296,6 +296,9 @@ const listContentSchema = z.object({
   collection: z.string().min(1).optional(),
   tag: z.string().optional(),
   status: z.enum(["draft", "published", "archived"]).optional(),
+  // Case-insensitive title search; the 200-char bound mirrors the REST
+  // listQuerySchema so both surfaces reject oversized input at the boundary.
+  query: z.string().min(1).max(200).optional(),
 });
 
 async function handleListContent(
@@ -314,6 +317,7 @@ async function handleListContent(
       collectionId,
       tag: parsed.data.tag,
       status: parsed.data.status,
+      query: parsed.data.query,
     });
     return ok({
       items: items.map((o) => ({
@@ -537,6 +541,62 @@ async function handlePublishContent(
   }
 }
 
+const unpublishContentSchema = z.object({
+  id: z.string().min(1),
+  // Mirrors the REST DELETE route's DESTINATIONS: no `okf` — an okf publication
+  // is a serialized S3 bundle with no live surface to take down.
+  destination: z.enum(["intranet", "public_web", "schoology", "google"]),
+});
+
+async function handleUnpublishContent(
+  args: Record<string, unknown>,
+  context: McpToolContext
+): Promise<McpToolResult> {
+  const parsed = unpublishContentSchema.safeParse(args);
+  if (!parsed.success) return zodFail(parsed.error);
+  const resolved = await resolveReq(context);
+  if ("result" in resolved) return resolved.result;
+  const { req } = resolved;
+  const destination = parsed.data.destination;
+  try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(context);
+    // §26.4 — taking a public-facing destination offline needs the same EXPLICIT
+    // content:publish_public authority as publishing it (enforced inside
+    // publishService.unpublish; a session wildcard does NOT satisfy it). Without
+    // it, `fail` below maps the ApprovalRequiredError to a structured
+    // approval_required result — never a silent failure.
+    const hasPublishPublicCapability = hasPublishPublicScope(context.scopes);
+    const result = await publishService.unpublish(req, parsed.data.id, destination, {
+      hasPublishPublicCapability,
+    });
+    void recordContentAudit({
+      req,
+      action: "unpublish",
+      surface: "mcp",
+      objectId: parsed.data.id,
+      destination,
+      outcome: "ok",
+      requestId: context.requestId,
+    });
+    // `unpublished: false` = idempotent no-op (nothing was live there) — mirrors
+    // the REST DELETE response shape.
+    return ok({
+      id: parsed.data.id,
+      destination,
+      unpublished: result.unpublished,
+    });
+  } catch (err) {
+    return fail(err, {
+      req,
+      action: "unpublish",
+      objectId: parsed.data.id,
+      destination,
+      requestId: context.requestId,
+    });
+  }
+}
+
 const exportOkfSchema = z.object({
   collectionId: z.string().min(1).max(200),
   audience: z.enum(["internal", "public"]).optional(),
@@ -653,6 +713,7 @@ export const CONTENT_TOOL_HANDLERS: Record<string, McpToolHandler> = {
   create_version: handleCreateVersion,
   set_visibility: handleSetVisibility,
   publish_content: handlePublishContent,
+  unpublish_content: handleUnpublishContent,
   export_okf: handleExportOkf,
   import_okf: handleImportOkf,
 };

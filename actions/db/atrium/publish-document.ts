@@ -3,12 +3,15 @@
 /**
  * Atrium publish-document server action
  *
- * Issue #1051 (Epic #1059, Atrium Phase 1). Thin wrapper over
- * `publishService.publish` — publishes a document's working head to the intranet
- * reader (`/c/[slug]`) for the logged-in human surface. View + edit permission is
- * enforced in the service; the surface adds the feature-capability gate.
+ * Issue #1051 (Epic #1059, Atrium Phase 1; destinations widened for Epic #1059
+ * completion). Thin wrapper over `publishService.publish` — publishes an
+ * object's working head to a destination for the logged-in human surface:
+ * `intranet` (`/c/[slug]`), `public_web` (`/p/[slug]`, §26.4-gated), or the
+ * `schoology`/`google` connector stubs (their adapters throw
+ * `implemented:false` until wired). View + edit permission is enforced in the
+ * service; the surface adds the feature-capability gate.
  *
- * See docs/features/atrium-design-spec.md §15 (publishing).
+ * See docs/features/atrium-design-spec.md §15 (publishing) / §26.4.
  */
 
 import {
@@ -19,17 +22,61 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { publishService } from "@/lib/content/publish-service";
-import { ApprovalRequiredError } from "@/lib/content/errors";
+import { ApprovalRequiredError, ValidationError } from "@/lib/content/errors";
 import { assertGrantKind, assertLevel } from "@/lib/content/validators";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
 
+/**
+ * The destinations the in-app editor surface may publish to / unpublish from.
+ * Deliberately EXCLUDES `okf` (the Phase 8 portable-bundle export is an API/MCP
+ * surface by design, not an editor button) — so this is a runtime-validated
+ * subset of the service's `PublishDestination`, mirrored in
+ * `unpublish-document.ts` and the `EditorToolbar` picker.
+ */
+const EDITOR_PUBLISH_DESTINATIONS = [
+  "intranet",
+  "public_web",
+  "schoology",
+  "google",
+] as const;
+
+export type EditorPublishDestination =
+  (typeof EDITOR_PUBLISH_DESTINATIONS)[number];
+
+/**
+ * Narrow a widened `string` destination (the action input contract) to an
+ * editor-publishable destination, throwing a ValidationError (400) on anything
+ * else — including `okf`, which is a valid SERVICE destination but not an
+ * editor one. Mirrors `assertLevel`/`assertGrantKind`: a bare `as` cast would
+ * let an unexpected value through to the adapter registry.
+ */
+function assertEditorDestination(
+  destination: string
+): EditorPublishDestination {
+  if (
+    !(EDITOR_PUBLISH_DESTINATIONS as readonly string[]).includes(destination)
+  ) {
+    throw new ValidationError(`Invalid publish destination: ${destination}`, {
+      destination,
+    });
+  }
+  return destination as EditorPublishDestination;
+}
+
 export async function publishDocumentAction(
   objectId: string,
   input: {
-    destination: "intranet";
+    /**
+     * Widened to `string` (the action/REST-style input contract) and narrowed at
+     * runtime via `assertEditorDestination`. `intranet` publishes to the internal
+     * reader; `public_web`/`schoology`/`google` are §26.4 public destinations —
+     * a caller without public-publish authority gets the pending-approval
+     * outcome, not a failure (see the ApprovalRequiredError branch below).
+     */
+    destination: string;
     /**
      * Optional visibility-widening applied in the publish transaction. `level`
      * arrives as a plain `string` (the action/REST/MCP input contract) and is
@@ -76,12 +123,16 @@ export async function publishDocumentAction(
       }),
     });
 
+    // Narrow the widened `string` destination at runtime BEFORE it reaches the
+    // service's adapter registry (rejects `okf` and any unexpected value).
+    const destination = assertEditorDestination(input.destination);
+
     // `input.visibility` carries a widened `level` and `grant.kind` (plain
     // `string`). `assertLevel` / `assertGrantKind` narrow each via a RUNTIME
     // check (throwing ValidationError on an unexpected value) before they reach
     // the service — the DB enum is the last line of defense, not the first.
     const result = await publishService.publish(requester, objectId, {
-      destination: input.destination,
+      destination,
       visibility: input.visibility
         ? {
             level: assertLevel(input.visibility.level),
@@ -108,8 +159,8 @@ export async function publishDocumentAction(
     timer({ status: "error" });
     // §26.4 gate: a public-destination publish without approval is a
     // pending-approval outcome (approval-queue event emitted), not a failure.
-    // Surface it distinctly (defensive — the shipped editor only publishes to
-    // intranet today, but the action accepts public destinations).
+    // Surface it distinctly — the editor's destination picker exposes
+    // `public_web`, so a non-admin caller routinely lands here.
     if (error instanceof ApprovalRequiredError) {
       log.info("Publish requires approval", { requestId });
       return {

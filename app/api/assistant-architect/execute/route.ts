@@ -9,7 +9,14 @@ import { getAIModelById } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { sql } from 'drizzle-orm';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
-import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
+import {
+  retrieveKnowledgeForPrompt,
+  formatKnowledgeContext,
+  retrieveAtriumKnowledgeForPrompt,
+  formatAtriumKnowledgeContext,
+} from '@/lib/assistant-architect/knowledge-retrieval';
+import { getUserRequester } from '@/actions/db/atrium/requester';
+import type { Requester } from '@/lib/content/types';
 import { hasCapabilityAccess, hasRole } from '@/utils/roles';
 import { ErrorFactories } from '@/lib/error-utils';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
@@ -101,6 +108,15 @@ interface PromptExecutionContext {
   assistantOwnerSub?: string;
   userId: number;
   executionStartTime: number;
+  /** The executing assistant's id, for the Atrium retrieval-scope gate (§16.4). */
+  assistantId: number;
+  /**
+   * The Atrium content Requester the execution retrieves as (Phase 6, Issue
+   * #1056): the session user, so every Atrium hit is bounded by THEIR
+   * `canView`. Null when no requester was derivable — Atrium retrieval then
+   * skips entirely (fail closed to nothing); repository retrieval is unaffected.
+   */
+  atriumRequester: Requester | null;
   conversation?: {
     conversationId: string;
     assistantId: number;
@@ -728,6 +744,19 @@ export async function POST(req: Request) {
       architect, toolId, userId, inputs, executionId, log
     });
 
+    // 7.6. Resolve the Atrium content Requester for permission-aware retrieval
+    // (Phase 6, Issue #1056). Resolution failure (e.g. no matching user row)
+    // must never fail the execution: Atrium retrieval simply skips (fail closed
+    // to nothing) while repository retrieval proceeds unchanged.
+    let atriumRequester: Requester | null = null;
+    try {
+      atriumRequester = await getUserRequester(requestId, session);
+    } catch (requesterError) {
+      log.warn('Could not resolve Atrium requester; skipping Atrium retrieval', {
+        error: requesterError instanceof Error ? requesterError.message : String(requesterError)
+      });
+    }
+
     // 8. Execute with streaming. Caller scopes (role-derived) are needed for
     // agentic tool resolution; harmless to compute for prompt-chain mode too.
     const callerRoleNames = currentUserData.roles.map(r => r.name);
@@ -739,6 +768,8 @@ export async function POST(req: Request) {
       assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
       userId,
       executionStartTime: Date.now(),
+      assistantId: toolId,
+      atriumRequester,
       conversation: nexusConversationId ? {
         conversationId: nexusConversationId,
         assistantId: toolId,
@@ -1584,6 +1615,12 @@ async function resolvePromptModelAndTools(
  * Emits the knowledge-retrieval-start / knowledge-retrieved events and returns
  * the formatted context string ('' when no repositories or no chunks). Logic and
  * event ordering are identical to the original inline block.
+ *
+ * Also appends Atrium content context (Phase 6, Issue #1056): permission-aware
+ * retrieval over published Atrium content, gated by the assistant's stored
+ * `retrieval_scope` (null scope = off, so default behavior is unchanged) and
+ * bounded by the session user's `canView` via `context.atriumRequester` (null
+ * requester = skip, fail closed).
  */
 async function injectRepositoryKnowledge(
   prompt: ChainPrompt,
@@ -1643,6 +1680,25 @@ async function injectRepositoryKnowledge(
       });
     }
   }
+
+  // Atrium content-as-context (Phase 6, Issue #1056). Off unless the assistant
+  // has a retrieval_scope; skipped when no requester was derivable. Same caps
+  // as the repository block; distinct `atrium:<slug>` source labels.
+  const atriumHits = await retrieveAtriumKnowledgeForPrompt(
+    context.atriumRequester,
+    context.assistantId,
+    prompt.content,
+    { maxChunks: 10, maxTokens: 4000 },
+    requestId
+  );
+  if (atriumHits.length > 0) {
+    repositoryContext += '\n\n' + formatAtriumKnowledgeContext(atriumHits);
+    log.debug('Atrium content context retrieved', {
+      promptId: prompt.id,
+      hitCount: atriumHits.length
+    });
+  }
+
   return repositoryContext;
 }
 

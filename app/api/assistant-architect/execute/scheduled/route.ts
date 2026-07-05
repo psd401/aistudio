@@ -7,7 +7,12 @@ import { executeQuery } from '@/lib/db/drizzle-client';
 import { eq, desc, sql } from 'drizzle-orm';
 import { promptResults, scheduledExecutions } from '@/lib/db/schema';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
-import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
+import {
+  retrieveKnowledgeForPrompt,
+  formatKnowledgeContext,
+  retrieveAtriumKnowledgeForPrompt,
+  formatAtriumKnowledgeContext,
+} from '@/lib/assistant-architect/knowledge-retrieval';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import { buildAutonomousRequesterForIdentity } from '@/lib/content';
 import type { Requester } from '@/lib/content/types';
@@ -71,6 +76,8 @@ interface PromptExecutionContext {
   userCognitoSub: string;
   assistantOwnerSub?: string;
   userId: number;
+  /** The executing assistant's id, for the Atrium retrieval-scope gate (§16.4). */
+  assistantId: number;
   /**
    * The autonomous agent Requester the run executes as (§25 service identity),
    * when the schedule specified an `agent_identity_id`. Null = the run authors any
@@ -418,6 +425,7 @@ export async function POST(req: NextRequest) {
       userCognitoSub,
       assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
       userId,
+      assistantId: toolId,
       // The resolved service-identity Requester (null when the schedule runs as the
       // owning user). Threaded so the content-authoring tool wiring reads its write
       // authority from the identity's scopes.
@@ -624,6 +632,74 @@ function describeWriteIdentity(context: PromptExecutionContext): string {
 }
 
 /**
+ * Step 1: inject repository knowledge + Atrium content context for one prompt.
+ * Mirrors the interactive route's `injectRepositoryKnowledge`. Returns the
+ * combined context string ('' when nothing was retrieved). Extracted from
+ * `executePromptChainServerSide` (complexity budget); logic unchanged.
+ *
+ * Atrium (Phase 6, Issue #1056): off unless the assistant has a
+ * `retrieval_scope`. A scheduled run retrieves ONLY as its resolved service
+ * identity (§25): a null `agentRequester` skips Atrium retrieval entirely
+ * (fail closed) rather than borrowing the owning user's authority.
+ */
+async function injectKnowledgeContext(
+  prompt: ChainPrompt,
+  context: PromptExecutionContext,
+  requestId: string,
+  log: ReturnType<typeof createLogger>
+): Promise<string> {
+  let repositoryContext = '';
+  if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+    log.debug('Retrieving repository knowledge', {
+      promptId: prompt.id,
+      repositoryIds: prompt.repositoryIds
+    });
+
+    const knowledgeChunks = await retrieveKnowledgeForPrompt(
+      prompt.content,
+      prompt.repositoryIds,
+      context.userCognitoSub,
+      context.assistantOwnerSub,
+      {
+        maxChunks: 10,
+        maxTokens: 4000,
+        similarityThreshold: 0.7,
+        searchType: 'hybrid',
+        vectorWeight: 0.8
+      },
+      requestId
+    );
+
+    if (knowledgeChunks.length > 0) {
+      repositoryContext = '\n\n' + formatKnowledgeContext(knowledgeChunks);
+      log.debug('Repository context retrieved', {
+        promptId: prompt.id,
+        chunkCount: knowledgeChunks.length
+      });
+    }
+  }
+
+  // Atrium content-as-context (Phase 6): same caps as the repository block,
+  // distinct `atrium:<slug>` source labels (see the function JSDoc for gating).
+  const atriumHits = await retrieveAtriumKnowledgeForPrompt(
+    context.agentRequester,
+    context.assistantId,
+    prompt.content,
+    { maxChunks: 10, maxTokens: 4000 },
+    requestId
+  );
+  if (atriumHits.length > 0) {
+    repositoryContext += '\n\n' + formatAtriumKnowledgeContext(atriumHits);
+    log.debug('Atrium content context retrieved', {
+      promptId: prompt.id,
+      hitCount: atriumHits.length
+    });
+  }
+
+  return repositoryContext;
+}
+
+/**
  * Execute prompt chain server-side without SSE
  * Collects complete response in memory
  */
@@ -664,37 +740,13 @@ async function executePromptChainServerSide(
         });
       }
 
-      // 1. Inject repository context if configured
-      let repositoryContext = '';
-      if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
-        log.debug('Retrieving repository knowledge', {
-          promptId: prompt.id,
-          repositoryIds: prompt.repositoryIds
-        });
-
-        const knowledgeChunks = await retrieveKnowledgeForPrompt(
-          prompt.content,
-          prompt.repositoryIds,
-          context.userCognitoSub,
-          context.assistantOwnerSub,
-          {
-            maxChunks: 10,
-            maxTokens: 4000,
-            similarityThreshold: 0.7,
-            searchType: 'hybrid',
-            vectorWeight: 0.8
-          },
-          requestId
-        );
-
-        if (knowledgeChunks.length > 0) {
-          repositoryContext = '\n\n' + formatKnowledgeContext(knowledgeChunks);
-          log.debug('Repository context retrieved', {
-            promptId: prompt.id,
-            chunkCount: knowledgeChunks.length
-          });
-        }
-      }
+      // 1. Inject repository + Atrium knowledge context if configured
+      const repositoryContext = await injectKnowledgeContext(
+        prompt,
+        context,
+        requestId,
+        log
+      );
 
       // 2. Apply variable substitution with prompt execution order validation
       const inputMapping = (prompt.inputMapping || {}) as Record<string, string>;

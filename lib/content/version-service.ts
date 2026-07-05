@@ -34,6 +34,7 @@ import { contentObjects, contentVersions } from "@/lib/db/schema";
 import { pgTimestampAsText } from "@/lib/db/drizzle-helpers";
 import { createLogger } from "@/lib/logger";
 import { actorKindOf, agentIdOf, assertCanEdit, authorUserIdOf } from "./helpers";
+import { screenAgentBodyForWrite } from "./agent-screening";
 import { rowToVersionDTO, type VersionRowAsText } from "./mappers";
 import { renderMarkdownToHtml } from "./render/markdown-render";
 import { s3Store } from "./storage/s3-store";
@@ -332,6 +333,13 @@ export const versionService = {
     obj: { id: string; kind: "document" | "artifact" },
     input: SnapshotInput
   ): Promise<ContentVersionDTO> {
+    // §28.3 — agent-authored bodies (document markdown AND artifact code) are
+    // guardrails/PII-screened BEFORE the write, mirroring the agent bridge.
+    // No-op for human/delegated authors. Runs pre-transaction: screening is
+    // external IO (Bedrock) that must never hold a pooled connection.
+    // Fail-closed: blocked or unscreenable content throws ValidationError.
+    await screenAgentBodyForWrite(req, input.body, obj.id);
+
     const { version, s3Writes } = await executeTransaction(
       (tx) => snapshotInTx(tx, req, obj, input),
       "content.snapshot"

@@ -213,6 +213,9 @@ K-12 content filtering with Amazon Bedrock Guardrails.
 #### [features/voice-api.md](./features/voice-api.md)
 Real-time voice conversations via WebSocket with Gemini Live API, transcript persistence, permissions, and content safety guardrails.
 
+#### [features/atrium-design-spec.md](./features/atrium-design-spec.md)
+**Atrium content workspace** (Epic #1059) — agent-native documents and sandboxed interactive artifacts: collaborative editing, visibility model and permission-aware retrieval, publishing connectors with the §26.4 public-publish approval gate, the anonymous `/p/[slug]` public reader, OKF export/import, and the MCP/REST content tool surfaces.
+
 ## 🚀 Quick Start
 
 ### For New Developers

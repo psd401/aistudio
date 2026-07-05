@@ -716,12 +716,13 @@ List content objects the caller may view (permission-filtered server-side). Requ
 | `collection` | string (slug or UUID) | Scope to one collection |
 | `tag` | string | Filter by a single tag (exact match) |
 | `status` | `draft` \| `published` \| `archived` | Filter by lifecycle status |
+| `query` | string (1–200 chars) | Case-insensitive title substring search |
 
 **Example request:**
 
 ```bash
 curl -H "Authorization: Bearer sk-your-key" \
-  "https://your-domain/api/v1/content?kind=document&status=published&tag=policy"
+  "https://your-domain/api/v1/content?kind=document&status=published&tag=policy&query=acceptable%20use"
 ```
 
 **Response `200`** — `meta.count` is the number of items returned.
@@ -1034,8 +1035,9 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 Unpublish the object from a destination. **Idempotent:** unpublishing an object that
 is not live at the destination returns `unpublished: false` rather than erroring.
-`{destination}` is one of `intranet`, `public_web`, `schoology`, `google`, `okf`. Requires
-`content:publish_internal`.
+`{destination}` is one of `intranet`, `public_web`, `schoology`, `google` (no `okf`:
+an okf publication is a serialized S3 bundle with no live surface to take down).
+Mirrors the MCP `unpublish_content` tool. Requires `content:publish_internal`.
 
 **Public-publish gate (§26.4):** taking any public-facing destination
 (`public_web`, `schoology`, `google`) offline requires the same

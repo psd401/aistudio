@@ -32,6 +32,12 @@ const PUBLIC_PATHS = [
   // consults no session — so it must NOT be redirected to sign-in. A non-public
   // or unpublished slug 404s (existence-masking), never redirects.
   "/p",
+  // SEO endpoints (#1059): sitemap enumerates ONLY objects passing the exact
+  // /p/[slug] public gate (app/sitemap.ts); robots.txt points crawlers at it.
+  // Both must be crawler-reachable without a session or the /p/ content is
+  // undiscoverable.
+  "/sitemap.xml",
+  "/robots.txt",
 ];
 
 // Atrium artifact sandbox (#1052): the app embeds an <iframe> pointing at a

@@ -201,3 +201,57 @@ describe("Atrium public reader page — metadata does not leak non-public titles
     expect(executeQueryMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Atrium public reader page — SEO metadata enrichment (Epic #1059)", () => {
+  it("enriches a gate-passing object with description, OpenGraph, and explicit index/follow robots", async () => {
+    executeQueryMock.mockResolvedValueOnce([PUBLIC_OBJ]);
+    executeQueryMock.mockResolvedValueOnce([PUBLICATION_ROW]);
+    // Description comes from the PUBLISHED version's summary — the version the
+    // publication points at, never a newer draft.
+    getByIdMock.mockResolvedValue({ summary: "A public guideline summary." });
+
+    const meta = await generateMetadata({
+      params: Promise.resolve({ slug: "some-slug" }),
+    });
+
+    expect(getByIdMock).toHaveBeenCalledWith("obj-1", "ver-1");
+    expect(meta.title).toBe("Public Doc");
+    expect(meta.description).toBe("A public guideline summary.");
+    expect(meta.openGraph).toEqual({
+      title: "Public Doc",
+      description: "A public guideline summary.",
+      type: "article",
+    });
+    // This route is intentionally public (spec §20) — robots must be explicit.
+    expect(meta.robots).toEqual({ index: true, follow: true });
+  });
+
+  it("omits the description (but keeps OG + robots) when the version has no summary", async () => {
+    executeQueryMock.mockResolvedValueOnce([PUBLIC_OBJ]);
+    executeQueryMock.mockResolvedValueOnce([PUBLICATION_ROW]);
+    getByIdMock.mockResolvedValue({ summary: null });
+
+    const meta = await generateMetadata({
+      params: Promise.resolve({ slug: "some-slug" }),
+    });
+
+    expect(meta.description).toBeUndefined();
+    expect(meta.openGraph).toEqual({
+      title: "Public Doc",
+      description: undefined,
+      type: "article",
+    });
+    expect(meta.robots).toEqual({ index: true, follow: true });
+  });
+
+  it("masked (non-public) objects get NO description/OG/robots — nothing to distinguish from absent", async () => {
+    executeQueryMock.mockResolvedValueOnce([INTERNAL_OBJ]);
+
+    const meta = await generateMetadata({
+      params: Promise.resolve({ slug: "some-slug" }),
+    });
+
+    expect(meta).toEqual({ title: "Atrium" });
+    expect(getByIdMock).not.toHaveBeenCalled();
+  });
+});

@@ -1,0 +1,192 @@
+/**
+ * Unit tests for the §28.3 agent content screening core (Epic #1059 completion,
+ * `lib/content/agent-screening.ts`) — the module extracted from the agent-bridge
+ * route so every agent write path screens through one implementation.
+ *
+ * Covers:
+ *  - `screenAgentContent`: blocked → blocked verdict (guardrails message
+ *    surfaced), degraded → FAIL-CLOSED degraded verdict, allowed → PII detected
+ *    + logged (telemetry only, non-fatal on detector failure).
+ *  - `screenAgentBodyForWrite` (the content-service write gate): screens ONLY
+ *    autonomous-agent requesters with a non-empty body; human and delegated
+ *    requesters never touch the safety stack (zero behavior change); blocked /
+ *    degraded content throws a fail-closed `ValidationError` with the bridge's
+ *    user-facing semantics.
+ *
+ * Only the lazily-imported `@/lib/safety` boundary is mocked; the REAL
+ * `actorKindOf` helper runs so the actor-kind gate is exercised, not stubbed.
+ */
+
+interface FakeSafetyResult {
+  allowed: boolean;
+  degraded?: boolean;
+  blockedReason?: string;
+  blockedMessage?: string;
+  blockedCategories?: string[];
+}
+
+let checkResult: FakeSafetyResult = { allowed: true };
+let piiEntities: unknown[] = [];
+let piiThrows = false;
+
+const checkInputSafetyMock = jest.fn(async (..._args: unknown[]) => checkResult);
+const detectPIIMock = jest.fn(async (..._args: unknown[]) => {
+  if (piiThrows) throw new Error("comprehend unavailable");
+  return piiEntities;
+});
+
+// The module imports @/lib/safety LAZILY (await import inside the function);
+// jest's module registry intercepts dynamic imports the same as static ones.
+jest.mock("@/lib/safety", () => ({
+  getContentSafetyService: () => ({
+    checkInputSafety: (...args: unknown[]) => checkInputSafetyMock(...args),
+  }),
+  getPIITokenizationService: () => ({
+    detectPII: (...args: unknown[]) => detectPIIMock(...args),
+  }),
+}));
+
+import {
+  screenAgentContent,
+  screenAgentBodyForWrite,
+  AGENT_SCREEN_BLOCKED_MESSAGE,
+  AGENT_SCREEN_DEGRADED_MESSAGE,
+} from "@/lib/content/agent-screening";
+import { ValidationError } from "@/lib/content/errors";
+import type { Requester } from "@/lib/content/types";
+
+const humanUser: Requester = {
+  kind: "user",
+  userId: 7,
+  roles: ["staff"],
+  isAdmin: false,
+};
+// Delegated agents record as 'human' (actorKindOf) — they act AS their human.
+const delegatedAgent: Requester = {
+  kind: "agent-delegated",
+  actingForUserId: 7,
+  roles: ["staff"],
+  scopes: ["content:create", "content:update"],
+  agentLabel: "helper-bot",
+};
+const autonomousAgent: Requester = {
+  kind: "agent-autonomous",
+  agentId: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+  roleId: null,
+  roles: ["staff"],
+  scopes: ["content:create", "content:update"],
+  agentLabel: "ship-reporter",
+};
+
+beforeEach(() => {
+  checkResult = { allowed: true };
+  piiEntities = [];
+  piiThrows = false;
+  checkInputSafetyMock.mockClear();
+  detectPIIMock.mockClear();
+});
+
+describe("screenAgentContent", () => {
+  it("returns a blocked verdict with the guardrails message when content is blocked", async () => {
+    checkResult = {
+      allowed: false,
+      blockedReason: "HATE",
+      blockedMessage: "This violates policy X.",
+      blockedCategories: ["HATE"],
+    };
+    const verdict = await screenAgentContent("bad text", "obj-1");
+    expect(verdict).toEqual({
+      allowed: false,
+      reason: "blocked",
+      message: "This violates policy X.",
+    });
+    // Blocked content never reaches the PII detector.
+    expect(detectPIIMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the generic blocked message when guardrails supply none", async () => {
+    checkResult = { allowed: false };
+    const verdict = await screenAgentContent("bad text", null);
+    expect(verdict).toEqual({
+      allowed: false,
+      reason: "blocked",
+      message: AGENT_SCREEN_BLOCKED_MESSAGE,
+    });
+  });
+
+  it("FAILS CLOSED on a degraded evaluation (guardrails unavailable)", async () => {
+    // The shared guardrails service fails OPEN (allowed:true, degraded:true) on
+    // an AWS error — unacceptable for persisted agent content, so the screening
+    // core must convert it into a rejection.
+    checkResult = { allowed: true, degraded: true };
+    const verdict = await screenAgentContent("any text", "obj-1");
+    expect(verdict).toEqual({
+      allowed: false,
+      reason: "degraded",
+      message: AGENT_SCREEN_DEGRADED_MESSAGE,
+    });
+    expect(detectPIIMock).not.toHaveBeenCalled();
+  });
+
+  it("allows clean content and runs PII detection as telemetry", async () => {
+    piiEntities = [{ Type: "NAME" }];
+    const verdict = await screenAgentContent("clean text", "obj-1");
+    expect(verdict).toEqual({ allowed: true });
+    expect(checkInputSafetyMock).toHaveBeenCalledWith("clean text", "obj-1");
+    expect(detectPIIMock).toHaveBeenCalledWith("clean text");
+  });
+
+  it("treats a PII detector failure as non-fatal (content still allowed)", async () => {
+    piiThrows = true;
+    const verdict = await screenAgentContent("clean text", null);
+    expect(verdict).toEqual({ allowed: true });
+  });
+});
+
+describe("screenAgentBodyForWrite (the content-service write gate)", () => {
+  it("never screens a human author (zero behavior change)", async () => {
+    checkResult = { allowed: false }; // would block IF screened
+    await expect(
+      screenAgentBodyForWrite(humanUser, "# anything", null)
+    ).resolves.toBeUndefined();
+    expect(checkInputSafetyMock).not.toHaveBeenCalled();
+  });
+
+  it("never screens a delegated agent (records as 'human' per actorKindOf)", async () => {
+    checkResult = { allowed: false };
+    await expect(
+      screenAgentBodyForWrite(delegatedAgent, "# anything", "obj-1")
+    ).resolves.toBeUndefined();
+    expect(checkInputSafetyMock).not.toHaveBeenCalled();
+  });
+
+  it("skips screening for a missing or whitespace-only body", async () => {
+    await screenAgentBodyForWrite(autonomousAgent, undefined, null);
+    await screenAgentBodyForWrite(autonomousAgent, "   \n\t ", null);
+    expect(checkInputSafetyMock).not.toHaveBeenCalled();
+  });
+
+  it("allows a clean autonomous-agent body", async () => {
+    await expect(
+      screenAgentBodyForWrite(autonomousAgent, "# clean", "obj-1")
+    ).resolves.toBeUndefined();
+    expect(checkInputSafetyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws ValidationError with the bridge's blocked semantics on blocked content", async () => {
+    checkResult = { allowed: false, blockedMessage: "Nope." };
+    await expect(
+      screenAgentBodyForWrite(autonomousAgent, "# bad", "obj-1")
+    ).rejects.toThrow(/Content blocked by safety policy/);
+    await expect(
+      screenAgentBodyForWrite(autonomousAgent, "# bad", "obj-1")
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("throws ValidationError (fail closed) when screening is degraded/unavailable", async () => {
+    checkResult = { allowed: true, degraded: true };
+    await expect(
+      screenAgentBodyForWrite(autonomousAgent, "# any", "obj-1")
+    ).rejects.toThrow(/Safety screening unavailable/);
+  });
+});
