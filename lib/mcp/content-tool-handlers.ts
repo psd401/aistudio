@@ -18,6 +18,8 @@ import {
   contentService,
   hasPublishPublicScope,
   isContentError,
+  okfExportService,
+  okfImportService,
   publishService,
   recordContentAudit,
   requesterFromApiAuth,
@@ -33,6 +35,7 @@ import {
 // Reuse the REST-side schemas verbatim so MCP and REST validate the same grant /
 // visibility contract from ONE definition (they were byte-identical copies).
 import {
+  okfImportFilesSchema,
   restGrantSchema as grantZ,
   restVisibilitySchema as visibilityZ,
 } from "@/lib/content/rest";
@@ -482,7 +485,7 @@ async function handleSetVisibility(
 
 const publishContentSchema = z.object({
   id: z.string().min(1),
-  destination: z.enum(["intranet", "public_web", "schoology", "google"]),
+  destination: z.enum(["intranet", "public_web", "schoology", "google", "okf"]),
 });
 
 async function handlePublishContent(
@@ -534,6 +537,113 @@ async function handlePublishContent(
   }
 }
 
+const exportOkfSchema = z.object({
+  collectionId: z.string().min(1).max(200),
+  audience: z.enum(["internal", "public"]).optional(),
+});
+
+async function handleExportOkf(
+  args: Record<string, unknown>,
+  context: McpToolContext
+): Promise<McpToolResult> {
+  const parsed = exportOkfSchema.safeParse(args);
+  if (!parsed.success) return zodFail(parsed.error);
+  const resolved = await resolveReq(context);
+  if ("result" in resolved) return resolved.result;
+  const { req } = resolved;
+  try {
+    // Export is a read/serialization — NOT capability-gated (reads never are; the
+    // canView filter is in the service). A `public` audience is gated by §26.4
+    // inside okfExportService via this authority flag (an EXPLICIT
+    // content:publish_public scope; a session wildcard does NOT satisfy it).
+    //
+    // `resolveCollectionId` THROWS for an unresolvable id (caught by `fail` below →
+    // structured error); its required overload guarantees a defined id for the
+    // zod-validated `.min(1)` input, so no `undefined` narrowing is needed.
+    const collectionId = await resolveCollectionId(parsed.data.collectionId);
+    const hasPublishPublicCapability = hasPublishPublicScope(context.scopes);
+    const result = await okfExportService.exportCollection(req, collectionId, {
+      audience: parsed.data.audience,
+      hasPublishPublicCapability,
+    });
+    void recordContentAudit({
+      req,
+      action: "export_okf",
+      surface: "mcp",
+      objectId: null,
+      destination: "okf",
+      outcome: "ok",
+      requestId: context.requestId,
+    });
+    return ok({
+      okfVersion: result.bundle.okfVersion,
+      rootCollectionId: result.bundle.rootCollectionId,
+      audience: result.bundle.audience,
+      objectCount: result.bundle.objectCount,
+      collectionCount: result.bundle.collectionCount,
+      files: result.bundle.files,
+      location: result.url,
+    });
+  } catch (err) {
+    return fail(err, {
+      req,
+      action: "export_okf",
+      destination: "okf",
+      requestId: context.requestId,
+    });
+  }
+}
+
+const importOkfSchema = z.object({
+  files: okfImportFilesSchema,
+  targetCollectionId: z.string().min(1).max(200).optional(),
+});
+
+async function handleImportOkf(
+  args: Record<string, unknown>,
+  context: McpToolContext
+): Promise<McpToolResult> {
+  const parsed = importOkfSchema.safeParse(args);
+  if (!parsed.success) return zodFail(parsed.error);
+  const resolved = await resolveReq(context);
+  if ("result" in resolved) return resolved.result;
+  const { req } = resolved;
+  try {
+    // Import CREATES content, so gate session humans on the atrium-content
+    // capability (like create); sk-/agent callers are scope-gated at dispatch.
+    await assertContentAuthoringCapability(context);
+    const targetCollectionId = parsed.data.targetCollectionId
+      ? await resolveCollectionId(parsed.data.targetCollectionId)
+      : undefined;
+    const result = await okfImportService.importBundle(req, {
+      files: parsed.data.files,
+      targetCollectionId,
+    });
+    void recordContentAudit({
+      req,
+      action: "import_okf",
+      surface: "mcp",
+      objectId: null,
+      destination: "okf",
+      outcome: "ok",
+      requestId: context.requestId,
+    });
+    return ok({
+      rootCollectionId: result.rootCollectionId,
+      collectionsCreated: result.collectionsCreated,
+      objectCount: result.objectCount,
+      objects: result.objects,
+    });
+  } catch (err) {
+    return fail(err, {
+      req,
+      action: "import_okf",
+      destination: "okf",
+      requestId: context.requestId,
+    });
+  }
+}
+
 export const CONTENT_TOOL_HANDLERS: Record<string, McpToolHandler> = {
   create_document: handleCreateDocument,
   create_artifact: handleCreateArtifact,
@@ -543,4 +653,6 @@ export const CONTENT_TOOL_HANDLERS: Record<string, McpToolHandler> = {
   create_version: handleCreateVersion,
   set_visibility: handleSetVisibility,
   publish_content: handlePublishContent,
+  export_okf: handleExportOkf,
+  import_okf: handleImportOkf,
 };

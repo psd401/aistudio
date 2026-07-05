@@ -109,3 +109,29 @@ export const restVisibilitySchema = z.object({
   level: z.enum(["private", "group", "internal", "public"]),
   grants: z.array(restGrantSchema).optional(),
 });
+
+/**
+ * Request-size SAFETY bounds on an OKF import bundle (Phase 8, #1103) — NOT a
+ * product quota, but a DoS backstop: `okfImportService.importBundle` creates one
+ * collection/object per file with a sequential DB write each, and `content:create`
+ * is grantable to non-admin API/agent callers. Mirrors the repo's existing
+ * request-input bounds (`assistant-execution-service.ts` MAX_INPUT_FIELDS etc.).
+ * Generous so a legitimate large-curriculum bundle is never constrained.
+ */
+export const OKF_IMPORT_MAX_FILES = 1000;
+export const OKF_IMPORT_MAX_FILE_CONTENT_CHARS = 5_000_000;
+export const OKF_IMPORT_MAX_PATH_CHARS = 1024;
+
+/**
+ * The shared `files` schema both the REST endpoint and the MCP tool validate
+ * against, so REST + MCP inherit identical bounds from one definition.
+ */
+export const okfImportFilesSchema = z
+  .array(
+    z.object({
+      path: z.string().min(1).max(OKF_IMPORT_MAX_PATH_CHARS),
+      content: z.string().max(OKF_IMPORT_MAX_FILE_CONTENT_CHARS),
+    })
+  )
+  .min(1)
+  .max(OKF_IMPORT_MAX_FILES);

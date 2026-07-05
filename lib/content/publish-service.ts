@@ -54,6 +54,7 @@ import { intranetAdapter } from "./publish-adapters/intranet";
 import { publicWebAdapter } from "./publish-adapters/public-web";
 import { schoologyAdapter } from "./publish-adapters/schoology";
 import { googleAdapter } from "./publish-adapters/google";
+import { okfAdapter } from "./publish-adapters/okf";
 import type {
   Requester,
   VisibilityGrant,
@@ -89,6 +90,10 @@ const adapters: Record<PublishDestination, PublishAdapter> = {
   public_web: publicWebAdapter,
   schoology: schoologyAdapter,
   google: googleAdapter,
+  // `okf` serializes a single object to a portable OKF concept bundle (Phase 8,
+  // #1103, §36.2). Registered so the destination is pipeline-complete; the primary
+  // collection-grained surface is `okfExportService` (export_okf).
+  okf: okfAdapter,
 };
 
 /** A loaded object's fields the publish path needs. */

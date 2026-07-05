@@ -984,7 +984,7 @@ Publish the object's current version to a destination. Requires `content:publish
 
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
-| `destination` | `intranet` \| `public_web` \| `schoology` \| `google` | yes | — |
+| `destination` | `intranet` \| `public_web` \| `schoology` \| `google` \| `okf` | yes | `okf` serializes the single object to a portable OKF concept bundle in S3 (internal-publish authority) |
 | `visibility` | object | no | Optional visibility to apply alongside the publish |
 
 **Public-publish gate (§26.4):** if `destination`/`visibility` is public-facing and
@@ -1034,7 +1034,7 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 Unpublish the object from a destination. **Idempotent:** unpublishing an object that
 is not live at the destination returns `unpublished: false` rather than erroring.
-`{destination}` is one of `intranet`, `public_web`, `schoology`, `google`. Requires
+`{destination}` is one of `intranet`, `public_web`, `schoology`, `google`, `okf`. Requires
 `content:publish_internal`.
 
 **Public-publish gate (§26.4):** taking any public-facing destination
@@ -1061,6 +1061,120 @@ cannot publish to, or tear down a live, public-facing destination.
 **Response `202`** — approval required: unpublishing `public_web` was requested without
 `content:publish_public`. Body is
 `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
+
+---
+
+### OKF interoperability (Phase 8, §36)
+
+[Open Knowledge Format (OKF v0.1)](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)
+is a portable, vendor-neutral serialization for agent context: a directory of
+markdown files with YAML frontmatter (one *concept* per file), plus two reserved
+filenames — `index.md` (navigation) and `log.md` (change history). Atrium exposes
+**export** (a collection → an OKF bundle) and **import** (a bundle → content) at
+REST + MCP parity. A bundle is transported as a JSON manifest of files
+(`{ files: [{ path, content }] }`), returned inline and persisted to S3.
+
+**Frontmatter mapping (§36.1):** `type` ← `content_objects.kind` (required),
+`title` ← title, `description` ← head-version summary, `resource` ← a prior
+publication URL, `tags` ← tags, `timestamp` ← `updated_at`; the body is the head
+version (documents inline, artifacts in a fenced code block).
+
+#### `POST /api/v1/content/export/okf`
+
+Export a collection subtree as an OKF bundle. Requires `content:read`.
+
+**Request body:**
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `collectionId` | string | yes | Root collection slug or id |
+| `audience` | `internal` \| `public` | no | Default `internal` |
+
+**Permission-at-export (the security-critical surface, §36.2):** every object is
+filtered by the caller's view permission — a student-identity bundle excludes
+staff-only concepts. **Public bundles:** `audience: "public"` restricts the bundle
+to `visibility_level = 'public'` objects and requires `content:publish_public`;
+without it (including for EVERY autonomous agent) the request returns `202` with
+`data.status = "approval_required"` and enters the review queue.
+
+**Example request:**
+
+```bash
+curl -X POST -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{ "collectionId": "mathematics", "audience": "internal" }' \
+  "https://your-domain/api/v1/content/export/okf"
+```
+
+**Response `200`** (the bundle)
+
+```json
+{
+  "data": {
+    "okfVersion": "0.1",
+    "generator": "psd-aistudio-atrium/okf-exporter@0.1",
+    "rootCollectionId": "c1111111-2222-4333-8444-555555555555",
+    "audience": "internal",
+    "objectCount": 2,
+    "collectionCount": 1,
+    "files": [
+      { "path": "index.md", "content": "---\ntype: \"index\"\ntitle: \"Mathematics\"\n---\n..." },
+      { "path": "fractions.md", "content": "---\ntype: \"document\"\ntitle: \"Fractions\"\n---\n..." },
+      { "path": "log.md", "content": "# Change history — Fractions\n..." }
+    ],
+    "location": "https://s3.../atrium/okf/.../exp.json?X-Amz-..."
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `202`** (approval required — public bundle without `content:publish_public`)
+Body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
+**Response `403`** — API key lacks `content:read`. **Response `400`** — `CONTENT_VALIDATION` (unresolvable `collectionId`). **Response `404`** — `CONTENT_NOT_FOUND` (a root collection the caller cannot enter is masked as not-found).
+
+---
+
+#### `POST /api/v1/content/import/okf`
+
+Import an OKF bundle into content. Requires `content:create`.
+
+**Request body:**
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `files` | array of `{ path, content }` | yes | ≥ 1 file |
+| `targetCollectionId` | string | no | Import the bundle root INTO this collection; a fresh root is created when omitted |
+
+**Provenance (§36.3):** imported objects are **agent-authored**
+(`actor_kind = 'agent'`, attributed to the seeded `atrium-importer` identity) and
+created **private + draft** — never fabricated human authorship, never pre-widened.
+The triggering caller is recorded in the audit trail.
+
+**Retry semantics (not transactional):** import is additive and not wrapped in a
+single transaction (`contentService.create` does its own tx + post-commit S3 IO
+per object). A run that fails partway leaves the already-created private/draft
+content in place, and a retry re-imports the whole bundle as **new** objects (no
+path/`sourceRef` dedup; slugs auto-suffix). For idempotency, import into a fresh
+`targetCollectionId` and, on failure, delete that partial collection before retrying.
+
+**Response `201`**
+
+```json
+{
+  "data": {
+    "rootCollectionId": "d1111111-2222-4333-8444-555555555555",
+    "collectionsCreated": 1,
+    "objectCount": 2,
+    "objects": [
+      { "id": "...", "slug": "fractions", "title": "Fractions", "collectionId": "d1111111-..." }
+    ]
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `400`** — `CONTENT_VALIDATION` (empty bundle / no concept files).
+**Response `403`** — API key lacks `content:create`, or the `atrium-content` capability (session).
 
 ---
 

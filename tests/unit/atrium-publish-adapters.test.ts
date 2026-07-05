@@ -41,25 +41,30 @@ const PUBLISH_INPUT = {
 };
 
 describe("isPublicDestination / PUBLIC_DESTINATIONS", () => {
-  it("classifies intranet as internal and public_web/schoology/google as public", () => {
+  it("classifies intranet/okf as internal and public_web/schoology/google as public", () => {
     expect(isPublicDestination("intranet")).toBe(false);
     expect(isPublicDestination("public_web")).toBe(true);
     expect(isPublicDestination("schoology")).toBe(true);
     expect(isPublicDestination("google")).toBe(true);
+    // OKF export (Phase 8, #1103) is NOT public: a single-object bundle carries the
+    // internal-publish authority; the §26.4 public gate applies to the COLLECTION
+    // exporter's `public` audience, not the destination.
+    expect(isPublicDestination("okf")).toBe(false);
   });
 
   it("PUBLIC_DESTINATIONS is exactly the three family-facing destinations", () => {
     expect([...PUBLIC_DESTINATIONS].sort()).toEqual(
       ["google", "public_web", "schoology"].sort()
     );
-    // intranet is the only destination that is NOT public.
+    // intranet and okf are the non-public destinations.
     const all: PublishDestination[] = [
       "intranet",
       "public_web",
       "schoology",
       "google",
+      "okf",
     ];
-    expect(all.filter((d) => !isPublicDestination(d))).toEqual(["intranet"]);
+    expect(all.filter((d) => !isPublicDestination(d))).toEqual(["intranet", "okf"]);
   });
 });
 

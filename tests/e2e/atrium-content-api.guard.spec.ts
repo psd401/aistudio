@@ -70,4 +70,20 @@ test.describe("Atrium content v1 endpoints — unauthenticated 401 (always-run)"
       (await request.delete(`/api/v1/content/${SOME_ID}/publish/intranet`)).status()
     ).toBe(401);
   });
+
+  // OKF interoperability (Phase 8, #1103) — export/import are auth-gated before any
+  // handler logic (withApiAuth), so unauthenticated requests get 401 without a token.
+  test("POST /api/v1/content/export/okf -> 401", async ({ request }) => {
+    const res = await request.post("/api/v1/content/export/okf", {
+      data: { collectionId: SOME_ID },
+    });
+    expect(res.status()).toBe(401);
+  });
+
+  test("POST /api/v1/content/import/okf -> 401", async ({ request }) => {
+    const res = await request.post("/api/v1/content/import/okf", {
+      data: { files: [{ path: "a.md", content: "probe" }] },
+    });
+    expect(res.status()).toBe(401);
+  });
 });

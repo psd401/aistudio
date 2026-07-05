@@ -172,6 +172,17 @@ jest.mock("@/lib/content/publish-adapters/google", () => ({
   },
 }));
 
+// The okf adapter (Phase 8, #1103) serializes a single object to a portable OKF
+// bundle. The REAL module imports content-service (→ mappers → drizzle-helpers,
+// which needs `sql`, not in this suite's minimal drizzle-orm mock), so mock it to
+// a light stub — this suite never publishes to okf.
+jest.mock("@/lib/content/publish-adapters/okf", () => ({
+  okfAdapter: {
+    destination: "okf",
+    publish: jest.fn(async () => ({ externalRef: null })),
+  },
+}));
+
 // A chainable tx stub. The TERMINAL builder methods `.limit()` and `.returning()`
 // each shift the next queued result off `txResults` (in call order): a `.limit()`
 // terminates a SELECT (the FOR UPDATE lock, the live-publication lookup), and a
