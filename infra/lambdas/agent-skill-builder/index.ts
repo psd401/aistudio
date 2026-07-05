@@ -17,7 +17,7 @@
 
 import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
-import { execSync } from 'child_process';
+import { execSync, type ExecSyncOptionsWithStringEncoding } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Handler } from 'aws-lambda';
@@ -128,15 +128,17 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
 
   try {
     // 1. Download skill files from S3
-    await downloadSkillFromS3(event.s3Key, workDir);
+    await downloadSkillFromS3(event.s3Key, workDir, log);
 
     // 2. Run automated scan
     const findings = await scanSkill(workDir);
 
-    // 3. Check if scan is clean
+    // 3. Check if scan is clean. Dependency-vulnerability auditing does NOT run
+    // here — `npm audit` needs a resolved lockfile/node_modules, which don't
+    // exist pre-install, so it runs post-install below (REV-INFRA-062). This
+    // gate covers the pre-install secret/PII checks only.
     const isFlagged = findings.secrets.length > 0 ||
-      findings.pii.length > 0 ||
-      findings.npmAudit.some(a => a.severity === 'critical' || a.severity === 'high');
+      findings.pii.length > 0;
 
     if (isFlagged) {
       // Update DB: mark as flagged with findings
@@ -156,16 +158,7 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
     const packageJsonPath = path.join(workDir, 'package.json');
     if (fs.existsSync(packageJsonPath)) {
       try {
-        execSync('npm install --production --no-audit --no-fund', {
-          cwd: workDir,
-          timeout: 120_000, // 2 min max for npm install
-          stdio: 'pipe',
-          env: {
-            ...process.env,
-            HOME: '/tmp',
-            npm_config_cache: '/tmp/.npm',
-          },
-        });
+        installSkillDependencies(workDir);
       } catch (npmErr: unknown) {
         const message = npmErr instanceof Error ? npmErr.message : String(npmErr);
         await updateSkillStatus(event.skillId, 'flagged', {
@@ -183,6 +176,32 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
           status: 'build_failed',
           skillId: event.skillId,
           error: message.substring(0, 500),
+        };
+      }
+
+      // 4b. Audit the *resolved* dependency tree now that `npm install` has
+      // produced a package-lock.json + node_modules. npm audit is a no-op
+      // (ENOLOCK) before install, which is why the pre-install scan could never
+      // catch dependency CVEs (REV-INFRA-062). A high/critical advisory flags
+      // the skill and skips promotion — nothing has been uploaded yet.
+      const npmAudit = auditInstalledDeps(workDir, log);
+      if (npmAudit.some(a => a.severity === 'critical' || a.severity === 'high')) {
+        const auditFindings: ScanFindings = {
+          secrets: [],
+          pii: [],
+          npmAudit,
+          skillMdLint: [],
+          summary: `${npmAudit.length} high/critical npm vulnerability(ies)`,
+        };
+        await updateSkillStatus(event.skillId, 'flagged', auditFindings);
+        await writeAuditLog(event.skillId, 'scan_flagged', event.actorUserId, {
+          findings: auditFindings.summary,
+        });
+
+        return {
+          status: 'flagged',
+          skillId: event.skillId,
+          findings: auditFindings,
         };
       }
     }
@@ -231,15 +250,22 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
   }
 };
 
-async function downloadSkillFromS3(prefix: string, destDir: string): Promise<void> {
+export async function downloadSkillFromS3(
+  prefix: string,
+  destDir: string,
+  log: LambdaLogger,
+  s3Client: S3Client = s3,
+): Promise<void> {
   fs.mkdirSync(destDir, { recursive: true });
 
   // H5 fix: Paginate ListObjectsV2 to handle skills with >1000 files
   const normalizedPrefix = prefix.endsWith('/') ? prefix : `${prefix}/`;
   let continuationToken: string | undefined;
+  // Resolve the work-dir root once for the traversal containment check below.
+  const destRoot = path.resolve(destDir) + path.sep;
 
   do {
-    const listResp = await s3.send(new ListObjectsV2Command({
+    const listResp = await s3Client.send(new ListObjectsV2Command({
       Bucket: BUCKET,
       Prefix: normalizedPrefix,
       ContinuationToken: continuationToken,
@@ -248,11 +274,21 @@ async function downloadSkillFromS3(prefix: string, destDir: string): Promise<voi
     for (const obj of listResp.Contents || []) {
       if (!obj.Key || obj.Key.endsWith('/')) continue;
 
-      const relativePath = obj.Key.slice(prefix.length).replace(/^\//, '');
-      const destPath = path.join(destDir, relativePath);
+      const relativePath = obj.Key.slice(prefix.length).replace(/^\/+/, '');
+      // Path-traversal guard (REV-INFRA-063): S3 keys are user-influenced —
+      // draft filenames become key suffixes — and may contain `..` segments.
+      // path.join/resolve would normalize `../../x` to a path OUTSIDE destDir,
+      // a zip-slip write into /tmp (npm cache, another concurrent build's work
+      // dir) that undermines the scan. Reject any key whose resolved
+      // destination escapes the per-build work dir.
+      const destPath = path.resolve(destDir, relativePath);
+      if (!destPath.startsWith(destRoot)) {
+        log.warn('Skipping S3 object with path-traversing key', { key: obj.Key });
+        continue;
+      }
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
 
-      const getResp = await s3.send(new GetObjectCommand({
+      const getResp = await s3Client.send(new GetObjectCommand({
         Bucket: BUCKET,
         Key: obj.Key,
       }));
@@ -406,39 +442,12 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
     }
   }
 
-  // npm audit (best-effort, skip if package.json missing)
-  const pkgPath = path.join(skillDir, 'package.json');
-  if (fs.existsSync(pkgPath)) {
-    try {
-      const auditOutput = execSync('npm audit --json --production 2>/dev/null || true', {
-        cwd: skillDir,
-        timeout: 30_000,
-        encoding: 'utf-8',
-        env: {
-          ...process.env,
-          HOME: '/tmp',
-          npm_config_cache: '/tmp/.npm',
-        },
-      });
-
-      try {
-        const audit = JSON.parse(auditOutput);
-        const vulns = audit.vulnerabilities || {};
-        for (const [, info] of Object.entries(vulns) as [string, { severity: string; name: string }][]) {
-          if (info.severity === 'high' || info.severity === 'critical') {
-            findings.npmAudit.push({
-              severity: info.severity,
-              title: info.name || 'unknown',
-            });
-          }
-        }
-      } catch {
-        // audit JSON parse failure — not a blocker
-      }
-    } catch {
-      // npm audit failed — not a blocker
-    }
-  }
+  // NOTE: dependency-vulnerability auditing (npm audit) intentionally does NOT
+  // run here. Before `npm install` there is no package-lock.json / node_modules,
+  // so `npm audit` is a no-op (ENOLOCK) and never sees a single advisory — which
+  // made this gate a no-op (REV-INFRA-062). The audit now runs post-install via
+  // auditInstalledDeps() in the handler, against the resolved dependency tree.
+  // findings.npmAudit is populated there, not here.
 
   // Build summary
   const parts: string[] = [];
@@ -449,6 +458,90 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
   findings.summary = parts.length > 0 ? parts.join(', ') : 'clean';
 
   return findings;
+}
+
+/**
+ * Install a skill's production dependencies with npm lifecycle scripts DISABLED.
+ *
+ * `--ignore-scripts` (belt-and-suspenders: also `npm_config_ignore_scripts`) is
+ * load-bearing SECURITY, not an optimization: this installs a user-submitted,
+ * unvetted skill's dependencies, and npm runs preinstall/install/postinstall
+ * lifecycle scripts by default — arbitrary code execution under the Lambda's
+ * execution role. The pre-install scan never inspects lifecycle scripts, so a
+ * `postinstall` in the skill's own package.json (or any dependency) would
+ * otherwise run unchecked. See REV-INFRA-061.
+ */
+export function installSkillDependencies(workDir: string): void {
+  execSync('npm install --production --ignore-scripts --no-audit --no-fund', {
+    cwd: workDir,
+    timeout: 120_000, // 2 min max for npm install
+    stdio: 'pipe',
+    env: {
+      ...process.env,
+      HOME: '/tmp',
+      npm_config_cache: '/tmp/.npm',
+      npm_config_ignore_scripts: 'true',
+    },
+  });
+}
+
+/**
+ * Audit the *resolved* dependency tree for known high/critical advisories.
+ *
+ * Runs AFTER `installSkillDependencies`, when a package-lock.json + node_modules
+ * exist — `npm audit` is a no-op (ENOLOCK) without them, which is why the
+ * pre-install scan could never see dependency vulns (REV-INFRA-062).
+ *
+ * Graceful degradation (documented behavior): if the audit tooling itself
+ * cannot produce parseable JSON (npm/network error), we log a WARNING and
+ * return []. A tooling error is therefore VISIBLE in logs, never a silent
+ * "clean" — but it does not hard-block promotion, matching the best-effort
+ * intent of the other scan steps. `exec` is injectable for testing.
+ */
+export function auditInstalledDeps(
+  dir: string,
+  log: LambdaLogger,
+  exec: (command: string, options: ExecSyncOptionsWithStringEncoding) => string = execSync,
+): { severity: string; title: string }[] {
+  const results: { severity: string; title: string }[] = [];
+
+  let auditOutput: string;
+  try {
+    // `|| true` so a non-zero exit (npm audit returns 1 when vulns exist) still
+    // yields the JSON on stdout instead of throwing before we can parse it.
+    auditOutput = exec('npm audit --json --production 2>/dev/null || true', {
+      cwd: dir,
+      timeout: 30_000,
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        HOME: '/tmp',
+        npm_config_cache: '/tmp/.npm',
+      },
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn('npm audit could not run; dependency vulnerabilities were NOT evaluated', {
+      error: message.substring(0, 300),
+    });
+    return results;
+  }
+
+  let audit: { vulnerabilities?: Record<string, { severity?: string; name?: string }> };
+  try {
+    audit = JSON.parse(auditOutput);
+  } catch {
+    log.warn('npm audit produced no parseable JSON; dependency vulnerabilities were NOT evaluated');
+    return results;
+  }
+
+  const vulns = audit.vulnerabilities || {};
+  for (const [, info] of Object.entries(vulns)) {
+    if (info.severity === 'high' || info.severity === 'critical') {
+      results.push({ severity: info.severity, title: info.name || 'unknown' });
+    }
+  }
+  return results;
 }
 
 async function updateSkillStatus(
