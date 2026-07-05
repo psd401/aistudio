@@ -63,27 +63,91 @@ function emit(obj) {
 }
 
 // psd-data-mcp rejects NUMERIC/DECIMAL casts that don't specify precision
-// (see SKILL.md's "Hard rules"). Matching on the `AS <TYPE>)` / `::<TYPE>`
-// boundary — rather than trying to parse the whole CAST(...) expression —
-// keeps this robust against nested parens in the casted expression itself
-// (e.g. `CAST(ROUND(x, 2) AS NUMERIC)`).
-const UNQUALIFIED_CAST_RE = /\bAS\s+(NUMERIC|DECIMAL)\s*\)/gi;
+// (see SKILL.md's "Hard rules"). This is the leading, medium-confidence
+// hypothesis for FS#162394 / issue #1106 (numeric columns disappearing from
+// query results/CSV exports) — the external Lambda's own source couldn't be
+// inspected during triage, so this check guards against the suspected
+// trigger, it does not confirm the server's actual behavior.
+const CAST_OPEN_RE = /\bCAST\s*\(/gi;
+const UNQUALIFIED_CAST_TAIL_RE = /\bAS\s+(NUMERIC|DECIMAL)\s*$/i;
 const UNQUALIFIED_SHORTHAND_RE = /::\s*(NUMERIC|DECIMAL)\b(?!\s*\()/gi;
 
+// Blank out single-quoted string literal contents (preserving length/offsets
+// so match indices still line up with the original string) so neither regex
+// above fires on SQL text that merely *mentions* a cast inside a literal,
+// e.g. `WHERE note LIKE '%CAST(x AS NUMERIC)%'`. Handles '' as an escaped
+// quote; does not handle dollar-quoted strings (rare in this context).
+function blankStringLiterals(sql) {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (inString) {
+      if (ch === "'" && sql[i + 1] === "'") {
+        out += '  ';
+        i++;
+      } else if (ch === "'") {
+        inString = false;
+        out += ' ';
+      } else {
+        out += ch === '\n' ? '\n' : ' ';
+      }
+    } else if (ch === "'") {
+      inString = true;
+      out += ' ';
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+// Find the index of the ')' that closes the '(' at openIndex, accounting for
+// nested parens (e.g. `CAST(ROUND(x, 2) AS NUMERIC)`). Returns -1 if
+// unmatched (malformed SQL — the MCP server will reject it on its own).
+function findMatchingClose(sql, openIndex) {
+  let depth = 1;
+  for (let i = openIndex + 1; i < sql.length; i++) {
+    if (sql[i] === '(') depth++;
+    else if (sql[i] === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
 /**
- * Scan a SQL string for NUMERIC/DECIMAL casts with no explicit precision —
- * the pattern the MCP server silently rejects, which is the confirmed
- * trigger for numeric columns disappearing from query results/CSV exports
- * (FS#162394 / issue #1106). Returns the matched fragments (empty if none).
+ * Scan a SQL string for NUMERIC/DECIMAL casts with no explicit precision.
+ * Only flags actual `CAST(...)` calls and `::TYPE` shorthand — not bare
+ * `... AS numeric`/`... AS decimal` column aliases (which share the same
+ * `AS <TYPE>)` text but aren't a cast at all) — and ignores anything inside
+ * a string literal. Returns the matched fragments (empty if none).
  */
 function findUnqualifiedNumericCasts(sql) {
   if (typeof sql !== 'string') return [];
+  const scan = blankStringLiterals(sql);
   const matches = [];
-  UNQUALIFIED_CAST_RE.lastIndex = 0;
+
+  CAST_OPEN_RE.lastIndex = 0;
   let m;
-  while ((m = UNQUALIFIED_CAST_RE.exec(sql))) matches.push(m[0].trim());
+  while ((m = CAST_OPEN_RE.exec(scan))) {
+    const openParenIndex = m.index + m[0].length - 1;
+    const closeParenIndex = findMatchingClose(scan, openParenIndex);
+    if (closeParenIndex === -1) continue;
+    const inner = scan.slice(openParenIndex + 1, closeParenIndex);
+    if (UNQUALIFIED_CAST_TAIL_RE.test(inner)) {
+      matches.push(
+        sql.slice(m.index, closeParenIndex + 1).replace(/\s+/g, ' ').trim()
+      );
+    }
+  }
+
   UNQUALIFIED_SHORTHAND_RE.lastIndex = 0;
-  while ((m = UNQUALIFIED_SHORTHAND_RE.exec(sql))) matches.push(m[0].trim());
+  while ((m = UNQUALIFIED_SHORTHAND_RE.exec(scan))) {
+    matches.push(sql.slice(m.index, m.index + m[0].length).trim());
+  }
+
   return matches;
 }
 

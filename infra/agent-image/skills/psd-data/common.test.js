@@ -4,6 +4,13 @@
  * agent's generated SQL casts to NUMERIC/DECIMAL without precision, which
  * psd-data-mcp rejects server-side. This client-side check catches the
  * pattern before the request ever leaves the skill.
+ *
+ * The scanner only flags actual `CAST(...)` calls and `::TYPE` shorthand —
+ * not bare `... AS numeric`/`... AS decimal` column aliases that share the
+ * same trailing text but aren't a cast, and not text inside string literals
+ * — both confirmed false-positive gaps found in self-review before this
+ * landed (see the `blankStringLiterals`/paren-depth-matching approach in
+ * common.js instead of the earlier boundary-only regex).
  */
 
 'use strict';
@@ -18,14 +25,14 @@ test('flags a bare CAST(...AS NUMERIC) with no precision', () => {
   const found = findUnqualifiedNumericCasts(
     'SELECT CAST(score AS NUMERIC) FROM iready_scores'
   );
-  expect(found).toEqual(['AS NUMERIC)']);
+  expect(found).toEqual(['CAST(score AS NUMERIC)']);
 });
 
 test('flags a bare CAST(...AS DECIMAL) with no precision', () => {
   const found = findUnqualifiedNumericCasts(
     'SELECT CAST(score AS DECIMAL) FROM iready_scores'
   );
-  expect(found).toEqual(['AS DECIMAL)']);
+  expect(found).toEqual(['CAST(score AS DECIMAL)']);
 });
 
 test('flags bare shorthand ::numeric with no precision', () => {
@@ -67,7 +74,16 @@ test('handles nested parens inside the casted expression', () => {
   const found = findUnqualifiedNumericCasts(
     'SELECT CAST(ROUND(score, 2) AS NUMERIC) FROM iready_scores'
   );
-  expect(found).toEqual(['AS NUMERIC)']);
+  expect(found).toEqual(['CAST(ROUND(score, 2) AS NUMERIC)']);
+});
+
+test('handles a nested CAST inside the casted expression independently', () => {
+  const found = findUnqualifiedNumericCasts(
+    'SELECT CAST(CAST(score AS INTEGER) AS NUMERIC) FROM iready_scores'
+  );
+  // Only the outer cast is unqualified; the inner CAST(...AS INTEGER) isn't
+  // NUMERIC/DECIMAL at all and must not be reported.
+  expect(found).toEqual(['CAST(CAST(score AS INTEGER) AS NUMERIC)']);
 });
 
 test('returns no matches for SQL with no numeric casts at all', () => {
@@ -81,17 +97,59 @@ test('finds every unqualified cast when several are present', () => {
   const found = findUnqualifiedNumericCasts(
     'SELECT CAST(math_score AS NUMERIC), reading_score::decimal FROM iready_scores'
   );
-  expect(found).toEqual(['AS NUMERIC)', '::decimal']);
+  expect(found).toEqual(['CAST(math_score AS NUMERIC)', '::decimal']);
 });
 
 test('is case-insensitive on the type keyword', () => {
   const found = findUnqualifiedNumericCasts(
     'SELECT CAST(score as Numeric) FROM iready_scores'
   );
-  expect(found).toEqual(['as Numeric)']);
+  expect(found).toEqual(['CAST(score as Numeric)']);
 });
 
 test('returns an empty array for non-string input', () => {
   expect(findUnqualifiedNumericCasts(undefined)).toEqual([]);
   expect(findUnqualifiedNumericCasts(null)).toEqual([]);
+});
+
+test('does not flag a bare column alias literally named "numeric" with no CAST at all', () => {
+  const found = findUnqualifiedNumericCasts(
+    'SELECT id, score AS numeric FROM (SELECT id, score) sub'
+  );
+  expect(found).toEqual([]);
+});
+
+test('does not flag a bare column alias literally named "decimal" as the last item in a subquery', () => {
+  const found = findUnqualifiedNumericCasts(
+    'SELECT * FROM (SELECT id, score AS decimal) sub'
+  );
+  expect(found).toEqual([]);
+});
+
+test('does not flag cast-like text inside a string literal', () => {
+  const found = findUnqualifiedNumericCasts(
+    "SELECT * FROM notes WHERE note_text LIKE '%CAST(x AS NUMERIC)%'"
+  );
+  expect(found).toEqual([]);
+});
+
+test('does not flag shorthand-like text inside a string literal', () => {
+  const found = findUnqualifiedNumericCasts(
+    "SELECT * FROM notes WHERE note_text LIKE '%score::decimal%'"
+  );
+  expect(found).toEqual([]);
+});
+
+test('still flags a real unqualified cast alongside an unrelated string literal', () => {
+  const found = findUnqualifiedNumericCasts(
+    "SELECT CAST(score AS NUMERIC), 'CAST(x AS NUMERIC) in a note' AS label FROM t"
+  );
+  expect(found).toEqual(['CAST(score AS NUMERIC)']);
+});
+
+test("handles '' escaped quotes inside string literals without breaking scan position", () => {
+  const found = findUnqualifiedNumericCasts(
+    "SELECT CAST(score AS NUMERIC), 'it''s CAST(x AS NUMERIC) here' AS label FROM t"
+  );
+  expect(found).toEqual(['CAST(score AS NUMERIC)']);
 });

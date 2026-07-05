@@ -3,7 +3,11 @@
  * (FS#162394 / issue #1106): a bare NUMERIC/DECIMAL cast must be rejected
  * client-side, before the request ever reaches the MCP server, since the
  * server-side rejection silently drops the column from CSV exports instead
- * of surfacing a clear error.
+ * of surfacing a clear error. Also covers the `call --tool query_data`
+ * passthrough route — a gap found in self-review, since SKILL.md explicitly
+ * documents "call" as always available even for tools with a typed
+ * subcommand ("a convenience, not a fence"), so the check must apply there
+ * too, not just in the typed `query` case.
  *
  * common.js's callMcp is overridden on the shared module.exports object
  * BEFORE run.js is required, so run.js's top-level
@@ -110,4 +114,49 @@ test('query with no numeric casts reaches the MCP server unaffected', async () =
   ]);
   expect(mcpCalls).toHaveLength(1);
   expect(mcpCalls[0].params.name).toBe('query_data');
+});
+
+test('call --tool query_data with a bare cast is rejected before hitting the MCP server (passthrough bypass gap)', async () => {
+  let thrown;
+  try {
+    await runCli([
+      'call',
+      '--user', EMAIL,
+      '--tool', 'query_data',
+      '--args', JSON.stringify({
+        reason: 'iReady score export via passthrough',
+        sql_query: 'SELECT CAST(score AS NUMERIC) FROM iready_scores',
+      }),
+    ]);
+  } catch (err) {
+    thrown = err;
+  }
+  expect(thrown).toBeDefined();
+  expect(thrown.exitCode).toBe(1);
+  expect(mcpCalls).toHaveLength(0);
+});
+
+test('call --tool query_data with an explicit-precision cast reaches the MCP server', async () => {
+  await runCli([
+    'call',
+    '--user', EMAIL,
+    '--tool', 'query_data',
+    '--args', JSON.stringify({
+      reason: 'iReady score export via passthrough',
+      sql_query: 'SELECT CAST(score AS NUMERIC(10,2)) FROM iready_scores',
+    }),
+  ]);
+  expect(mcpCalls).toHaveLength(1);
+  expect(mcpCalls[0].params.name).toBe('query_data');
+});
+
+test('call --tool <other-tool> is never checked, even with cast-like text in its args', async () => {
+  await runCli([
+    'call',
+    '--user', EMAIL,
+    '--tool', 'list_available_tables',
+    '--args', JSON.stringify({ sql_query: 'SELECT CAST(score AS NUMERIC) FROM t' }),
+  ]);
+  expect(mcpCalls).toHaveLength(1);
+  expect(mcpCalls[0].params.name).toBe('list_available_tables');
 });
