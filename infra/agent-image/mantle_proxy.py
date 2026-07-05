@@ -706,6 +706,15 @@ def _log_request_body(req_id, req_body, parsed):
         if not isinstance(log_msgs, list) or len(log_msgs) != len(parsed["messages"]):
             log_msgs = parsed["messages"]
         for idx, msg in enumerate(parsed["messages"]):
+            # A malformed/untrusted body can put a non-dict entry in `messages`;
+            # this is a debugging aid, not request validation, so log what we
+            # can rather than raising AttributeError out of a logging helper
+            # (copilot-pull-request-reviewer review).
+            if not isinstance(msg, dict):
+                log.info(j("req_message", req_id=req_id, idx=idx, role=None,
+                           has_tool_calls=False, content_type=type(msg).__name__,
+                           content_len=None, raw=json.dumps(msg, ensure_ascii=False)[:8000]))
+                continue
             role = msg.get("role")
             raw = json.dumps(log_msgs[idx], ensure_ascii=False)[:8000]
             log.info(j("req_message", req_id=req_id, idx=idx, role=role,
