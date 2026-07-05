@@ -186,6 +186,16 @@ test('ignores unqualified casts inside multi-line comments', () => {
   expect(found).toEqual([]);
 });
 
+test('ignores unqualified casts inside nested multi-line comments', () => {
+  // Postgres block comments nest, so the whole span up to the *last* `*/`
+  // is one comment — a scanner that stops at the first `*/` would wrongly
+  // treat 'still-outer-comment CAST(x AS NUMERIC)' as live SQL.
+  const found = findUnqualifiedNumericCasts(
+    'SELECT id FROM t /* outer /* inner */ still-outer-comment CAST(score AS NUMERIC) */'
+  );
+  expect(found).toEqual([]);
+});
+
 test('flags a bare TRY_CAST(...AS NUMERIC) with no precision', () => {
   const found = findUnqualifiedNumericCasts(
     'SELECT TRY_CAST(score AS NUMERIC) FROM iready_scores'

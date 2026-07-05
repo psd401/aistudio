@@ -99,16 +99,26 @@ function blankStringLiterals(sql) {
     }
 
     if (ch === '/' && next === '*') {
+      // Postgres block comments nest, so track depth rather than stopping
+      // at the first `*/` — otherwise a nested `/* ... */` would end the
+      // blanked region early and expose the remaining "still-outer-comment"
+      // text as live SQL to scan.
+      let depth = 1;
       out += '  ';
       i += 2;
-      while (i < sql.length) {
-        if (sql[i] === '*' && sql[i + 1] === '/') {
+      while (i < sql.length && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') {
+          depth++;
           out += '  ';
           i += 2;
-          break;
+        } else if (sql[i] === '*' && sql[i + 1] === '/') {
+          depth--;
+          out += '  ';
+          i += 2;
+        } else {
+          out += sql[i] === '\n' ? '\n' : ' ';
+          i++;
         }
-        out += sql[i] === '\n' ? '\n' : ' ';
-        i++;
       }
       continue;
     }
