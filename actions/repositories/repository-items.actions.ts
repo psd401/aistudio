@@ -26,7 +26,16 @@ import {
 import { revalidatePath } from "next/cache"
 import { uploadDocument, deleteDocument } from "@/lib/aws/s3-client"
 import { queueFileForProcessing, processUrl } from "@/lib/services/file-processing-service"
-import { canModifyRepository, getUserIdFromSession } from "./repository-permissions"
+import { canModifyRepository, canReadRepository, getUserIdFromSession } from "./repository-permissions"
+import { toContentDispositionValue } from "@/lib/repositories/content-disposition"
+
+// Runtime-validated processing-status union (REV-COR-068): actions are network
+// endpoints, so the TS parameter type is not enforced on the wire.
+const VALID_PROCESSING_STATUSES = ["pending", "processing", "completed", "failed"] as const
+type ProcessingStatus = (typeof VALID_PROCESSING_STATUSES)[number]
+function isProcessingStatus(s: string): s is ProcessingStatus {
+  return (VALID_PROCESSING_STATUSES as readonly string[]).includes(s)
+}
 
 export interface RepositoryItem {
   id: number
@@ -363,6 +372,19 @@ export async function addDocumentWithPresignedUrl(
         repositoryId: input.repository_id
       })
       throw ErrorFactories.authzOwnerRequired("add items to repository")
+    }
+
+    // S3-key namespace check (REV-SEC-062): the client echoes back a key, but the
+    // legitimate upload flow (generateUploadUrl) only ever mints keys under
+    // repositories/${repositoryId}/. Reject any other key so a user cannot register
+    // an arbitrary documents-bucket object onto their repo and presign-download it.
+    const expectedKeyPrefix = `repositories/${input.repository_id}/`
+    if (!input.s3Key.startsWith(expectedKeyPrefix)) {
+      log.warn("Presigned upload denied - s3Key outside repository namespace", {
+        userId,
+        repositoryId: input.repository_id
+      })
+      return { isSuccess: false, message: "Invalid S3 key for this repository" }
     }
 
     // Create repository item with S3 key reference via Drizzle
@@ -847,6 +869,13 @@ export async function listRepositoryItems(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // Per-repository access check (REV-COR-061): the capability is not per-repo.
+    const userId = await getUserIdFromSession(session.sub)
+    if (!(await canReadRepository(repositoryId, userId))) {
+      log.warn("List items denied - no read access", { userId: session.sub, repositoryId })
+      throw ErrorFactories.authzResourceNotFound("knowledge_repository", String(repositoryId))
+    }
+
     // Fetch repository items via Drizzle
     log.debug("Fetching repository items from database", { repositoryId })
     const itemsRaw = await getRepositoryItems(repositoryId)
@@ -916,6 +945,13 @@ export async function searchRepositoryItems(
         repositoryId
       })
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
+    }
+
+    // Per-repository access check (REV-COR-061) — this returns chunk CONTENT.
+    const userId = await getUserIdFromSession(session.sub)
+    if (!(await canReadRepository(repositoryId, userId))) {
+      log.warn("Search items denied - no read access", { userId: session.sub, repositoryId })
+      throw ErrorFactories.authzResourceNotFound("knowledge_repository", String(repositoryId))
     }
 
     // Search in item names via Drizzle
@@ -1038,6 +1074,18 @@ export async function getItemChunks(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // Resolve the item's repository and require read access (REV-COR-061) — this
+    // returns full chunk text.
+    const itemRaw = await getRepositoryItemById(itemId)
+    if (!itemRaw) {
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+    }
+    const userId = await getUserIdFromSession(session.sub)
+    if (!(await canReadRepository(itemRaw.repositoryId, userId))) {
+      log.warn("Get chunks denied - no read access", { userId: session.sub, itemId })
+      throw ErrorFactories.authzResourceNotFound("repository_item", String(itemId))
+    }
+
     // Fetch chunks via Drizzle
     log.debug("Fetching chunks from database", { itemId })
     const chunksRaw = await getRepositoryItemChunks(itemId)
@@ -1106,6 +1154,25 @@ export async function updateItemProcessingStatus(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // Validate the status string (REV-COR-068): actions are network endpoints, so
+    // the TS union is not enforced at runtime — reject anything outside the four
+    // states before any write instead of casting an arbitrary string in.
+    if (!isProcessingStatus(status)) {
+      log.warn("Invalid processing status", { itemId, status })
+      return { isSuccess: false, message: "Invalid processing status" }
+    }
+
+    // This is a WRITE — require modify access on the item's repository (REV-COR-061).
+    const itemRaw = await getRepositoryItemById(itemId)
+    if (!itemRaw) {
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+    }
+    const userId = await getUserIdFromSession(session.sub)
+    if (!(await canModifyRepository(itemRaw.repositoryId, userId))) {
+      log.warn("Status update denied - not owner/admin", { userId: session.sub, itemId })
+      throw ErrorFactories.authzOwnerRequired("update item processing status")
+    }
+
     // Update processing status via Drizzle
     log.info("Updating processing status in database", {
       itemId,
@@ -1113,7 +1180,7 @@ export async function updateItemProcessingStatus(
       hasError: !!error
     })
 
-    await updateRepositoryItemStatus(itemId, status as "pending" | "processing" | "completed" | "failed", error ?? null)
+    await updateRepositoryItemStatus(itemId, status, error ?? null)
 
     log.info("Processing status updated successfully", { itemId, status })
 
@@ -1178,30 +1245,50 @@ export async function getDocumentDownloadUrl(
       return { isSuccess: false, message: "Item is not a document" }
     }
 
+    // Per-repository access check (REV-COR-061) — this presigns a private document.
+    const userId = await getUserIdFromSession(session.sub)
+    if (!(await canReadRepository(item.repositoryId, userId))) {
+      log.warn("Download URL denied - no read access", { userId: session.sub, itemId })
+      throw ErrorFactories.authzResourceNotFound("repository_item", String(itemId))
+    }
+
+    // Defense in depth (REV-SEC-062): never presign a stored source outside this
+    // item's own repository namespace — blocks a client-planted key (via
+    // addDocumentWithPresignedUrl) from being signed against the shared bucket.
+    const expectedPrefix = `repositories/${item.repositoryId}/`
+    if (!item.source.startsWith(expectedPrefix)) {
+      log.warn("Download URL denied - source outside repository namespace", {
+        itemId,
+        repositoryId: item.repositoryId
+      })
+      return { isSuccess: false, message: "Item is not available for download" }
+    }
+
     // Generate a presigned URL for download
     const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner')
     const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3')
-    
+
     const s3Client = new S3Client({})
     const bucketName = process.env.DOCUMENTS_BUCKET_NAME
-    
+
     if (!bucketName) {
       return { isSuccess: false, message: "Storage not configured" }
     }
 
-    // Extract file extension from the original S3 key or metadata
-    const filename = resolveDownloadFilename(item)
+    // Sanitize/encode the display filename before it lands in the reflected
+    // Content-Disposition header (REV-COR-071).
+    const contentDisposition = toContentDispositionValue(resolveDownloadFilename(item))
 
     const command = new GetObjectCommand({
       Bucket: bucketName,
       Key: item.source,
-      ResponseContentDisposition: `attachment; filename="${filename}"`
+      ResponseContentDisposition: contentDisposition
     })
 
     log.info("Generating presigned download URL", {
       itemId,
       s3Key: item.source,
-      fileName: filename
+      contentDisposition
     })
     
     const downloadUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 }) // 1 hour
