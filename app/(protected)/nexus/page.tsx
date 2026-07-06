@@ -10,6 +10,7 @@ import { useEffect, useMemo, useCallback, useState, useRef, Suspense } from 'rea
 import { NexusShell } from './_components/layout/nexus-shell'
 import { NexusLayout } from './_components/layout/nexus-layout'
 import { ErrorBoundary } from './_components/error-boundary'
+import dynamic from 'next/dynamic'
 import { PromptAutoLoader } from './_components/prompt-auto-loader'
 import { ConversationInitializer } from './_components/conversation-initializer'
 import { z } from 'zod'
@@ -499,6 +500,15 @@ function NexusRuntimeWrapper({
 }
 
 // Component that uses useSearchParams - must be wrapped in Suspense
+// Atrium workspace panel (Epic #1059, spec §17). Client-only lazy chunk: the
+// collaborative editor / sandbox stack (TipTap+Yjs, CodeMirror) must not weigh
+// down the Nexus bundle when no workspace is open.
+const WorkspacePanel = dynamic(
+  () =>
+    import('@/components/atrium/WorkspacePanel').then((m) => m.WorkspacePanel),
+  { ssr: false }
+)
+
 function NexusPageContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -543,6 +553,22 @@ function NexusPageContent() {
     const raw = searchParams.get('skillId')
     return raw && uuidSchema.safeParse(raw).success ? raw : undefined
   }, [searchParams])
+
+  // Atrium workspace panel (Epic #1059, spec §17): `?workspace=<id|slug>` opens
+  // the content editor BESIDE the chat as a pure layout sibling — the conversation
+  // tree (initializer/runtime/thread) never sees it. Loose validation only (the
+  // action canView-gates + 404-masks server-side); cap length like other params.
+  const urlWorkspaceId = useMemo(() => {
+    const raw = searchParams.get('workspace')
+    return raw && raw.length > 0 && raw.length <= 200 ? raw : null
+  }, [searchParams])
+  const closeWorkspace = useCallback(() => {
+    // Preserve every OTHER param (id/model/tool/...) — only `workspace` clears.
+    const params = new URLSearchParams(window.location.search)
+    params.delete('workspace')
+    const qs = params.toString()
+    router.replace(qs ? `/nexus?${qs}` : '/nexus', { scroll: false })
+  }, [router])
 
   // Load models and manage model selection
   const [preferredModelId, setPreferredModelId] = useState<string | null>(urlModelId)
@@ -711,9 +737,18 @@ function NexusPageContent() {
     // Clear fallback state — it's only relevant to the previously loaded conversation
     setConversationModelId(null)
 
-    // Update URL to reflect the current conversation
-    const newUrl = `/nexus?id=${newConversationId}`
-    router.push(newUrl, { scroll: false })
+    // Update URL to reflect the current conversation. PRESERVE an open Atrium
+    // workspace panel (`?workspace=`, Epic #1059 §17): without this, the ID
+    // assignment on a NEW conversation's first message would rewrite the URL to
+    // `/nexus?id=...` and slam the panel shut mid-stream. Read at call time from
+    // the live URL (not a hook value) so this callback keeps its exact deps —
+    // per docs/features/nexus-conversation-architecture.md, destabilizing these
+    // memoized callbacks risks runtime remounts.
+    const keep = new URLSearchParams()
+    keep.set('id', newConversationId)
+    const workspace = new URLSearchParams(window.location.search).get('workspace')
+    if (workspace) keep.set('workspace', workspace)
+    router.push(`/nexus?${keep.toString()}`, { scroll: false })
 
     log.debug('Conversation ID updated', { newId: newConversationId })
   }, [router])
@@ -775,50 +810,58 @@ function NexusPageContent() {
       <ConnectorToolProvider>
         <NexusLayout conversationId={conversationId}>
           <NexusShell>
-            <div className="relative h-full">
-              {selectedModel ? (
-                <>
-                  {modelFallbackInfo && (
-                    <div className="px-4 pt-2">
-                      <ModelFallbackBanner
-                        originalModel={modelFallbackInfo.originalModel}
-                        fallbackModel={modelFallbackInfo.fallbackModel}
-                        onDismiss={() => setConversationModelId(null)}
-                      />
-                    </div>
-                  )}
-                  <ConversationInitializer
-                    conversationId={stableConversationId}
-                    onModelUsed={handleModelUsed}
-                  >
-                    {(initialMessages) => (
-                      <NexusRuntimeWrapper
-                        conversationId={conversationId}
-                        selectedModel={selectedModel}
-                        enabledTools={enabledTools}
-                        enabledConnectors={enabledConnectors}
-                        skillId={urlSkillId}
-                        attachmentAdapter={attachmentAdapter}
-                        voiceAvailable={voiceAvailability.available}
-                        voiceUnavailableReason={!voiceAvailability.available && !voiceAvailability.loading ? voiceAvailability.reason : undefined}
-                        initialMessages={initialMessages}
-                        onConversationIdChange={handleConversationIdChange}
-                        processingAttachments={processingAttachments}
-                        models={models}
-                        onModelChange={setSelectedModel}
-                        isLoadingModels={isLoadingModels}
-                        onToolsChange={onToolsChange}
-                        onConnectorsChange={onConnectorsChange}
-                      />
+            {/* Workspace split (Epic #1059 §17): the chat column is the EXACT
+                pre-existing tree (initializer/runtime untouched); the Atrium
+                panel is a pure layout sibling keyed on ?workspace=. */}
+            <div className="flex h-full min-h-0">
+              <div className="relative h-full min-w-0 flex-1">
+                {selectedModel ? (
+                  <>
+                    {modelFallbackInfo && (
+                      <div className="px-4 pt-2">
+                        <ModelFallbackBanner
+                          originalModel={modelFallbackInfo.originalModel}
+                          fallbackModel={modelFallbackInfo.fallbackModel}
+                          onDismiss={() => setConversationModelId(null)}
+                        />
+                      </div>
                     )}
-                  </ConversationInitializer>
-                </>
-              ) : (
-                <div className="flex h-full items-center justify-center">
-                  <div className="text-center">
-                    <div className="text-lg text-muted-foreground">Please select a model to start chatting</div>
+                    <ConversationInitializer
+                      conversationId={stableConversationId}
+                      onModelUsed={handleModelUsed}
+                    >
+                      {(initialMessages) => (
+                        <NexusRuntimeWrapper
+                          conversationId={conversationId}
+                          selectedModel={selectedModel}
+                          enabledTools={enabledTools}
+                          enabledConnectors={enabledConnectors}
+                          skillId={urlSkillId}
+                          attachmentAdapter={attachmentAdapter}
+                          voiceAvailable={voiceAvailability.available}
+                          voiceUnavailableReason={!voiceAvailability.available && !voiceAvailability.loading ? voiceAvailability.reason : undefined}
+                          initialMessages={initialMessages}
+                          onConversationIdChange={handleConversationIdChange}
+                          processingAttachments={processingAttachments}
+                          models={models}
+                          onModelChange={setSelectedModel}
+                          isLoadingModels={isLoadingModels}
+                          onToolsChange={onToolsChange}
+                          onConnectorsChange={onConnectorsChange}
+                        />
+                      )}
+                    </ConversationInitializer>
+                  </>
+                ) : (
+                  <div className="flex h-full items-center justify-center">
+                    <div className="text-center">
+                      <div className="text-lg text-muted-foreground">Please select a model to start chatting</div>
+                    </div>
                   </div>
-                </div>
+                )}
+              </div>
+              {urlWorkspaceId && (
+                <WorkspacePanel idOrSlug={urlWorkspaceId} onClose={closeWorkspace} />
               )}
             </div>
           </NexusShell>
