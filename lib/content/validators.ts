@@ -12,6 +12,10 @@
  * (`assertValidGrant`) as the last line before the DB — see visibility-service.ts.
  */
 import { ValidationError } from "@/lib/content/errors";
+import {
+  PUBLISH_DESTINATIONS,
+  type PublishDestination,
+} from "@/lib/content/publish-adapters/types";
 import type { GrantKind, VisibilityLevel } from "@/lib/content/types";
 
 const VALID_GRANT_KINDS: readonly GrantKind[] = [
@@ -82,4 +86,75 @@ export function assertLevel(level: string): VisibilityLevel {
     throw new ValidationError(`Invalid visibility level: ${level}`, { level });
   }
   return level as VisibilityLevel;
+}
+
+/**
+ * The FULL set of destinations `publishService.publish` accepts, DERIVED from
+ * the canonical `PUBLISH_DESTINATIONS` list in `publish-adapters/types.ts` (the
+ * array `PublishDestination` itself is derived from) — so a newly added
+ * destination is a member here in the same edit, never a silent gap. Exported
+ * (like `GRANT_KIND_SET`) so the §26.4 approval-replay path re-validates the
+ * destination it reads back out of the stored jsonb context while keeping its
+ * own error shape (`ErrorFactories.invalidInput`).
+ */
+export const PUBLISH_DESTINATION_SET: ReadonlySet<string> = new Set<string>(
+  PUBLISH_DESTINATIONS
+);
+
+/**
+ * Type-guard form of `PUBLISH_DESTINATION_SET` for callers that keep their own
+ * error type/shape (the approvals replay throws `ErrorFactories.invalidInput`,
+ * not `ValidationError`) — the membership test still comes from ONE place.
+ */
+export function isPublishDestination(
+  value: string
+): value is PublishDestination {
+  return PUBLISH_DESTINATION_SET.has(value);
+}
+
+/**
+ * The destinations the in-app editor surface may publish to / unpublish from.
+ * Deliberately EXCLUDES `okf` (the Phase 8 portable-bundle export is an API/MCP
+ * surface by design, not an editor button) — a runtime-validated subset of the
+ * service's `PublishDestination`.
+ */
+export type EditorPublishDestination = Exclude<PublishDestination, "okf">;
+
+/**
+ * DERIVED from the canonical list (full set minus the explicit `okf` exclusion)
+ * rather than hand-listed, so the editor surface and the service can never
+ * drift: a destination added to `PUBLISH_DESTINATIONS` flows here automatically,
+ * and excluding it from the editor is a deliberate edit to the filter AND the
+ * `EditorPublishDestination` type together (the type predicate keeps the two in
+ * lockstep — a filter that excluded a non-`okf` value would no longer typecheck
+ * as covering `Exclude<PublishDestination, "okf">`).
+ */
+const EDITOR_PUBLISH_DESTINATIONS: readonly EditorPublishDestination[] =
+  PUBLISH_DESTINATIONS.filter(
+    (d): d is EditorPublishDestination => d !== "okf"
+  );
+
+/** Membership set for `assertEditorDestination`; exported for the editor UI. */
+export const EDITOR_PUBLISH_DESTINATION_SET: ReadonlySet<string> =
+  new Set<string>(EDITOR_PUBLISH_DESTINATIONS);
+
+/**
+ * Narrow a widened `string` destination (the action input contract) to an
+ * editor-publishable destination, throwing a ValidationError (400) on anything
+ * else — including `okf`, which is a valid SERVICE destination but not an
+ * editor one. Mirrors `assertLevel`/`assertGrantKind`: a bare `as` cast would
+ * let an unexpected value through to the adapter registry. `action` selects the
+ * surface's message ("publish" vs "unpublish"), preserving each server action's
+ * original error text.
+ */
+export function assertEditorDestination(
+  destination: string,
+  action: "publish" | "unpublish"
+): EditorPublishDestination {
+  if (!EDITOR_PUBLISH_DESTINATION_SET.has(destination)) {
+    throw new ValidationError(`Invalid ${action} destination: ${destination}`, {
+      destination,
+    });
+  }
+  return destination as EditorPublishDestination;
 }

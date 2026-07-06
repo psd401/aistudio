@@ -11,7 +11,7 @@
  * visibility widening (`setLevel`) lands with the publish service in Phase 5/7.
  */
 
-import { and, desc, eq, ne, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, ilike, ne, sql, type SQL } from "drizzle-orm";
 import {
   executeQuery,
   executeTransaction,
@@ -42,6 +42,20 @@ import type {
 
 /** Upper bound on a `listVisible` tag filter, mirroring the tags column width. */
 const MAX_TAG_LENGTH = 100;
+
+/** Upper bound on a `listVisible` free-text `query` filter (title search). */
+const MAX_QUERY_LENGTH = 200;
+
+/**
+ * Escape LIKE/ILIKE metacharacters (`\`, `%`, `_`) in user-supplied search text
+ * so a query like "50%_off" matches literally instead of acting as a wildcard
+ * pattern. Postgres's default LIKE escape character is backslash, so escaping
+ * with `\` needs no explicit ESCAPE clause. The pattern itself is still a bound
+ * parameter — this is pattern-semantics hygiene, not injection protection.
+ */
+function escapeLikePattern(text: string): string {
+  return text.replace(/[\\%_]/g, (m) => `\\${m}`);
+}
 
 /** Upper bound on a grant value, mirroring the `grant_value varchar(255)` column. */
 const MAX_GRANT_VALUE_LENGTH = 255;
@@ -657,9 +671,20 @@ export const visibilityService = {
     if (filter.kind) filters.push(eq(o.kind, filter.kind));
     if (filter.tag) {
       // Bound parameter (injection-safe); cap length so an oversized tag string
-      // cannot be pushed to the driver on every list call.
+      // cannot be pushed to the driver on every list call. Array-overlap (`&&`
+      // against a one-element text[]) rather than `= ANY(tags)`: only the
+      // overlap operator can use the `idx_content_tags` GIN index (migration
+      // 085) — `<tag> = ANY(column)` forces a sequential scan.
       const tag = filter.tag.slice(0, MAX_TAG_LENGTH);
-      filters.push(sql`${tag} = ANY(${o.tags})`);
+      filters.push(sql`${o.tags} && ARRAY[${tag}]::text[]`);
+    }
+    if (filter.query) {
+      // Case-insensitive title substring search. Bounded + LIKE-escaped so an
+      // oversized or wildcard-bearing query can neither bloat the bound
+      // parameter nor act as a pattern; the pattern is a bound parameter
+      // (injection-safe).
+      const q = escapeLikePattern(filter.query.slice(0, MAX_QUERY_LENGTH));
+      filters.push(ilike(o.title, `%${q}%`));
     }
 
     const rows = await executeQuery(

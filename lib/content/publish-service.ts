@@ -518,6 +518,11 @@ export const publishService = {
    * no-op-safe call when there is no live publication (returns `unpublished:
    * false`) rather than throwing — unpublishing an already-unpublished object is
    * idempotent from the caller's view.
+   *
+   * Once NO destination remains live, the retrieval index entry is pruned
+   * post-commit (best-effort) so unpublished content stops surfacing as
+   * assistant context (§16); while any other destination is still live the
+   * index is kept.
    */
   async unpublish(
     req: Requester,
@@ -561,7 +566,10 @@ export const publishService = {
 
     // Mark the publication unpublished and revert the object to draft atomically.
     // Lock the row FOR UPDATE so a concurrent publish/unpublish serializes here.
-    const externalRef = await executeTransaction(
+    // Resolves to undefined when nothing was live (idempotent no-op), else the
+    // removed publication's externalRef plus whether ANY other destination is
+    // still live (drives the retrieval-index pruning below).
+    const outcome = await executeTransaction(
       async (tx: DbTransaction) => {
         const locked = await tx
           .select({ id: contentObjects.id })
@@ -622,20 +630,46 @@ export const publishService = {
             .where(eq(contentObjects.id, objectId));
         }
 
-        return pub[0].externalRef;
+        return {
+          externalRef: pub[0].externalRef,
+          anyLiveRemaining: Boolean(stillLive[0]),
+        };
       },
       "publish.unpublish"
     );
 
-    if (externalRef === undefined) {
+    if (outcome === undefined) {
       // No live publication existed — idempotent no-op.
       return { unpublished: false };
+    }
+    const { externalRef, anyLiveRemaining } = outcome;
+
+    // Retrieval-index pruning (§16) FIRST — before the adapter teardown. Once NO
+    // destination is live anywhere, the object must stop surfacing as assistant
+    // context: remove its backing repository_item/chunks/link and clear
+    // indexed_at. This runs BEFORE the teardown deliberately: the teardown can
+    // throw (and re-throws below), and a retry would idempotently no-op at the
+    // `status = 'live'` filter and never reach a prune placed after it — leaving
+    // the index un-pruned indefinitely. Best-effort itself: the unpublish tx has
+    // already committed, so a prune failure is logged, never thrown.
+    if (!anyLiveRemaining) {
+      try {
+        await retrievalService.removeFromIndex(objectId);
+      } catch (pruneError) {
+        log.warn("Failed to prune retrieval index after unpublish", {
+          objectId,
+          destination,
+          error:
+            pruneError instanceof Error ? pruneError.message : String(pruneError),
+        });
+      }
     }
 
     // Destination teardown AFTER the transaction commits (external/secondary IO
     // outside the tx). For the intranet adapter this hides the nav item; a
     // failure is logged and surfaced (the publication is already marked
-    // unpublished, so the live surface is gone regardless).
+    // unpublished + the index already pruned, so the live surface is gone
+    // regardless).
     if (adapter.unpublish) {
       try {
         await adapter.unpublish({ objectId, externalRef });
@@ -666,6 +700,93 @@ export const publishService = {
     });
 
     return { unpublished: true };
+  },
+
+  /**
+   * Take an object OFFLINE at every destination — the takedown cascade for a
+   * status transition OUT of `published` (`draft` or `archived`) via
+   * `contentService.update` (#1059).
+   *
+   * This is a removal, so unlike `unpublish` it is NOT §26.4-gated: pulling public
+   * content DOWN is always the safe direction, and the caller has already run
+   * `assertCanEdit`. It flips every live `content_publications` row for the object
+   * to `unpublished` in one FOR-UPDATE-locked transaction, then runs each
+   * destination adapter's teardown (e.g. the intranet nav-item hide) post-commit.
+   *
+   * Without this, setting a published object to `draft` or `archived` left it
+   * reachable at its permanent public/intranet reader URL — both readers gate ONLY
+   * on a live publication, never on `content_objects.status` — a content-exposure
+   * footgun that contradicts what "draft"/"archived" imply. The caller writes the
+   * new status; this method never touches status. Idempotent: no live publication
+   * (already unpublished, or never published) → no-op.
+   */
+  async retractAllPublications(objectId: string): Promise<void> {
+    const log = createLogger({ action: "publish.retractAllPublications" });
+
+    const torn = await executeTransaction(
+      async (tx: DbTransaction) => {
+        const locked = await tx
+          .select({ id: contentObjects.id })
+          .from(contentObjects)
+          .where(eq(contentObjects.id, objectId))
+          .for("update")
+          .limit(1);
+        if (!locked[0]) {
+          throw new NotFoundError("Content not found", { objectId });
+        }
+        const live = await tx
+          .select({
+            destination: contentPublications.destination,
+            externalRef: contentPublications.externalRef,
+          })
+          .from(contentPublications)
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.status, "live")
+            )
+          );
+        if (live.length === 0) return [];
+        await tx
+          .update(contentPublications)
+          .set({ status: "unpublished", updatedAt: new Date() })
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.status, "live")
+            )
+          );
+        return live;
+      },
+      "publish.retractAllPublications"
+    );
+
+    // Adapter teardown AFTER the commit (secondary IO). Best-effort PER
+    // destination: the publication is already flipped `unpublished`, so the live
+    // reader surface is gone regardless of a nav-hide failure — log and continue
+    // so one failing destination cannot leave the others' teardown unrun.
+    for (const pub of torn) {
+      const adapter = adapters[pub.destination as PublishDestination];
+      if (!adapter?.unpublish) continue;
+      try {
+        await adapter.unpublish({ objectId, externalRef: pub.externalRef });
+      } catch (adapterError) {
+        log.warn("Archive teardown failed for a destination", {
+          objectId,
+          destination: pub.destination,
+          error:
+            adapterError instanceof Error
+              ? adapterError.message
+              : String(adapterError),
+        });
+      }
+    }
+    if (torn.length > 0) {
+      log.info("Retracted all live publications for archive", {
+        objectId,
+        destinations: torn.map((p) => p.destination),
+      });
+    }
   },
 
   /**

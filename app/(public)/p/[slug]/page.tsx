@@ -136,18 +136,56 @@ const loadPublicObject = cache(async (
 });
 
 /**
- * Page metadata. The title is resolved ONLY for an object that passes the public
- * gate (public visibility + a live public_web publication) — its title is
- * world-readable by definition, so exposing it in the tab/link preview leaks
- * nothing. Anything that fails the gate gets a generic title, so a probe cannot
- * distinguish a private slug from an absent one via metadata either.
+ * Load the published version for a gate-passing object. Wrapped in React `cache`
+ * so `generateMetadata` (which reads the version summary for the description) and
+ * the page body (which reads the version for rendering) share ONE DB read per
+ * request instead of two.
+ */
+const loadPublishedVersion = cache(
+  async (objectId: string, versionId: string) =>
+    versionService.getById(objectId, versionId)
+);
+
+/**
+ * Page metadata. Title/description/OG tags are resolved ONLY for an object that
+ * passes the public gate (public visibility + a live public_web publication) —
+ * its title and published-version summary are world-readable by definition, so
+ * exposing them in the tab/link preview leaks nothing. Anything that fails the
+ * gate gets a generic title and NO other metadata, so a probe cannot distinguish
+ * a private slug from an absent one via metadata either.
+ *
+ * This route is intentionally public (spec §20), so robots are explicitly
+ * index/follow — the SEO surface for public_web publications (with /sitemap.xml
+ * enumerating the same gate-passing set).
  */
 export async function generateMetadata({
   params,
 }: PublicReaderPageProps): Promise<Metadata> {
   const { slug } = await params;
   const published = await loadPublicObject(slug);
-  return { title: published ? published.title : "Atrium" };
+  if (!published) {
+    // Masked: generic title only — no description, no OG, no robots directive
+    // that could differentiate "exists but non-public" from "absent".
+    return { title: "Atrium" };
+  }
+  // Description comes from the PUBLISHED version's change summary (the only
+  // world-readable per-version text) — never a draft/head version, which may be
+  // newer than what the public page renders.
+  const version = await loadPublishedVersion(
+    published.id,
+    published.publishedVersionId
+  );
+  const description = version?.summary?.trim() || undefined;
+  return {
+    title: published.title,
+    description,
+    openGraph: {
+      title: published.title,
+      description,
+      type: "article",
+    },
+    robots: { index: true, follow: true },
+  };
 }
 
 /**
@@ -166,8 +204,9 @@ export default async function PublicReaderPage({
     notFound();
   }
 
-  // Load the published version (object-scoped) for its body.
-  const version = await versionService.getById(
+  // Load the published version (object-scoped) for its body. Shared (React
+  // `cache`) with generateMetadata, which reads the same version's summary.
+  const version = await loadPublishedVersion(
     published.id,
     published.publishedVersionId
   );

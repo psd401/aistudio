@@ -1142,6 +1142,13 @@ paths:
           schema:
             type: string
             enum: [draft, published, archived]
+        - name: query
+          in: query
+          description: Case-insensitive title substring search
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
       responses:
         "200":
           description: List of visible content objects
@@ -1574,7 +1581,8 @@ paths:
       description: |
         Removes the object's live publication at a destination. Idempotent:
         unpublishing an object that is not live there returns `unpublished: false`
-        rather than erroring. Requires `content:publish_internal`.
+        rather than erroring. Mirrors the MCP `unpublish_content` tool. Requires
+        `content:publish_internal`.
 
         **Public-publish gate (§26.4):** taking down any public-facing
         destination (`public_web`, `schoology`, `google`) requires the same
@@ -1844,10 +1852,13 @@ components:
       name: destination
       in: path
       required: true
-      description: Publish destination
+      description: |
+        Destination to unpublish from. No `okf`: an okf publication is a
+        serialized S3 bundle with no live surface to take down (the route
+        rejects it with 400).
       schema:
         type: string
-        enum: [intranet, public_web, schoology, google, okf]
+        enum: [intranet, public_web, schoology, google]
 
   # ---- Headers ----
   headers:

@@ -85,11 +85,19 @@ jest.mock("drizzle-orm", () => ({
 }));
 
 // publish-service now calls retrievalService.indexObject after a successful
-// publish (Phase 6, §16.1). Stub it so this suite doesn't drag in the embedding
-// / vector-search stack (ai-helpers → provider-factory → settings-manager);
-// the index wiring itself is covered by atrium-retrieval-permission-aware.test.ts.
+// publish (Phase 6, §16.1) and retrievalService.removeFromIndex after an
+// unpublish that leaves NO destination live (index pruning). Stub both so this
+// suite doesn't drag in the embedding / vector-search stack (ai-helpers →
+// provider-factory → settings-manager); the index/prune internals are covered by
+// atrium-retrieval-permission-aware.test.ts / atrium-retrieval-index-pruning.test.ts.
+const removeFromIndexMock = jest.fn(async (_objectId: string) => undefined);
 jest.mock("@/lib/content/retrieval-service", () => ({
-  retrievalService: { indexObject: jest.fn(async () => undefined) },
+  retrievalService: {
+    indexObject: jest.fn(async () => undefined),
+    // Deref the outer mock lazily (jest.mock factories are hoisted above the
+    // const declaration — a direct reference is a TDZ error).
+    removeFromIndex: (objectId: string) => removeFromIndexMock(objectId),
+  },
 }));
 
 jest.mock("@/lib/content/visibility-service", () => ({
@@ -118,6 +126,10 @@ jest.mock("@/lib/content/visibility-service", () => ({
 // ran AFTER the transaction.
 let adapterPublishCalls = 0;
 let adapterUnpublishCalls = 0;
+// When true, the intranet adapter teardown throws — used to prove the retrieval
+// index is pruned BEFORE the teardown (#4), so a teardown failure can't strand
+// the index un-pruned.
+let adapterUnpublishThrows = false;
 jest.mock("@/lib/content/publish-adapters/intranet", () => ({
   intranetAdapter: {
     destination: "intranet",
@@ -127,6 +139,7 @@ jest.mock("@/lib/content/publish-adapters/intranet", () => ({
     }),
     unpublish: jest.fn(async () => {
       adapterUnpublishCalls += 1;
+      if (adapterUnpublishThrows) throw new Error("nav hide boom");
     }),
   },
 }));
@@ -276,6 +289,7 @@ beforeEach(() => {
   lastSetLevelExtraSet = null;
   adapterPublishCalls = 0;
   adapterUnpublishCalls = 0;
+  adapterUnpublishThrows = false;
   publicWebPublishCalls = 0;
   lastPublicWebSlug = null;
   lastSetPayload = null;
@@ -538,6 +552,20 @@ describe("publishService.unpublish", () => {
     expect(adapterUnpublishCalls).toBe(1);
   });
 
+  it("prunes the retrieval index BEFORE the adapter teardown (#4 — teardown failure can't strand the index)", async () => {
+    // No other destination live → the object goes fully offline, so the index
+    // must be pruned. The teardown then throws; the prune must already have run
+    // (a retry would idempotently no-op at the `status='live'` filter and never
+    // reach a prune placed after the teardown).
+    adapterUnpublishThrows = true;
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    await expect(
+      publishService.unpublish(owner, "o1", "intranet")
+    ).rejects.toThrow(/nav hide boom/);
+    expect(removeFromIndexMock).toHaveBeenCalledWith("o1");
+    expect(adapterUnpublishCalls).toBe(1);
+  });
+
   // §26.4 — taking a public destination offline requires the same authority as
   // putting it up: content:publish_internal alone must not be enough to tear
   // down already-live public_web content.
@@ -591,6 +619,34 @@ describe("publishService.unpublish", () => {
     // downgraded to draft (intranet remains live).
     expect(statuses).toContain("unpublished");
     expect(statuses).not.toContain("draft");
+    // The retrieval index is KEPT while any destination is still live — the
+    // content is still published somewhere and must remain retrievable.
+    expect(removeFromIndexMock).not.toHaveBeenCalled();
+  });
+
+  it("prunes the retrieval index only when the last live destination is removed", async () => {
+    // tx queue: FOR UPDATE lock, the live row being torn down, then the
+    // "any other destination still live?" check returns [] (none remain).
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
+    const result = await publishService.unpublish(admin, "o1", "public_web");
+    expect(result).toEqual({ unpublished: true });
+    expect(removeFromIndexMock).toHaveBeenCalledTimes(1);
+    expect(removeFromIndexMock).toHaveBeenCalledWith("o1");
+  });
+
+  it("does NOT prune the index on the idempotent no-op path (nothing was live)", async () => {
+    txResults = [[{ id: "o1" }], []];
+    const result = await publishService.unpublish(owner, "o1", "intranet");
+    expect(result).toEqual({ unpublished: false });
+    expect(removeFromIndexMock).not.toHaveBeenCalled();
+  });
+
+  it("a prune failure is best-effort: the unpublish still succeeds", async () => {
+    removeFromIndexMock.mockRejectedValueOnce(new Error("index prune boom"));
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
+    const result = await publishService.unpublish(admin, "o1", "public_web");
+    // The unpublish already committed; a failed index prune is logged, not thrown.
+    expect(result).toEqual({ unpublished: true });
   });
 
   it("reverts the object to draft when the unpublished destination was the last live one", async () => {

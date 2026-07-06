@@ -19,18 +19,27 @@
  * See docs/features/atrium-design-spec.md §15 (publishing).
  */
 
-/** A destination a published version can be made live at. */
-export type PublishDestination =
-  | "intranet"
-  | "public_web"
-  | "schoology"
-  | "google"
+/**
+ * Every destination a published version can be made live at — the canonical
+ * list. `PublishDestination` is DERIVED from this array, so the type cannot gain
+ * a member without this list (and every validator set built from it in
+ * `lib/content/validators.ts`) picking it up in the same edit.
+ */
+export const PUBLISH_DESTINATIONS = [
+  "intranet",
+  "public_web",
+  "schoology",
+  "google",
   // Open Knowledge Format export (Phase 8, #1103, §36) — a portable bundle, not a
   // live reader/connector. NOT in `PUBLIC_DESTINATIONS`: a single-object bundle
   // carries the internal-publish authority (the object's owner already views/edits
   // it); the §26.4 public gate applies to the COLLECTION exporter's `public`
   // audience (`lib/content/okf/export.ts`), not the destination.
-  | "okf";
+  "okf",
+] as const;
+
+/** A destination a published version can be made live at. */
+export type PublishDestination = (typeof PUBLISH_DESTINATIONS)[number];
 
 /**
  * The destinations that expose content to a PUBLIC / family-facing audience and

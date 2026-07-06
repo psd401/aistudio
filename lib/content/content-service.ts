@@ -12,6 +12,7 @@
  */
 
 import { eq, like, sql } from "drizzle-orm";
+import { createLogger } from "@/lib/logger";
 import {
   executeQuery,
   executeTransaction,
@@ -30,6 +31,7 @@ import {
   systemUserId,
 } from "./helpers";
 import { contentEvents } from "./events";
+import { screenAgentBodyForWrite } from "./agent-screening";
 import {
   objectSelectFields,
   rowToObjectDTO,
@@ -52,6 +54,7 @@ import type {
   Requester,
   SnapshotInput,
   UpdatePatch,
+  VisibilityGrant,
   VisibilityLevel,
 } from "./types";
 
@@ -192,6 +195,121 @@ async function loadByIdOrSlug(
   return bySlug[0] ? rowToObjectDTO(bySlug[0] as ObjectRowAsText) : null;
 }
 
+/**
+ * Validate `create`'s title/kind input, throwing typed 400s. Enforces the
+ * varchar(500) column limit as a `ValidationError` rather than a raw Postgres
+ * 22001 ("value too long") error. Extracted from `create` (complexity budget).
+ */
+function assertValidCreateInput(input: CreateObjectInput): void {
+  if (!input.title?.trim()) {
+    throw new ValidationError("Title is required");
+  }
+  if (input.title.trim().length > TITLE_MAX_LENGTH) {
+    throw new ValidationError(
+      `Title must be ${TITLE_MAX_LENGTH} characters or fewer`
+    );
+  }
+  if (input.kind !== "document" && input.kind !== "artifact") {
+    throw new ValidationError("kind must be 'document' or 'artifact'", {
+      kind: input.kind,
+    });
+  }
+}
+
+/**
+ * §26.4 — emit the approval-queue signal and throw for an unauthorized public
+ * CREATE. Shared by both of `create`'s gate sites (the explicit-`public` input
+ * gate and the resolved-level gate) so the emitted event shape and fail-closed
+ * behavior stay identical. Fire-and-forget emit (`void`, not `await`): `emit`
+ * swallows its own errors, so awaiting only adds an SNS round-trip. No object
+ * exists yet to carry an id/slug on the event (unlike `publish`/`setLevel`,
+ * which gate an already-persisted object) — the surface layer's audit write
+ * still records the attempted (denied) create.
+ */
+function raiseCreateApprovalRequired(
+  req: Requester,
+  details: Record<string, unknown>
+): never {
+  void contentEvents.emit("content.public_publish_requested", {
+    objectId: "",
+    destination: "create",
+    actorKind: actorKindOf(req),
+    agentLabel: req.kind === "user" ? null : req.agentLabel,
+  });
+  throw new ApprovalRequiredError(
+    "Creating public content requires approval",
+    details
+  );
+}
+
+/**
+ * Resolve the visibility level + grants a create persists, enforcing the
+ * grant/level invariants and the §26.4 resolved-level gate. Extracted from
+ * `create` (complexity budget); the ordering vs. `ownerFor` is unchanged.
+ */
+async function resolveCreateVisibility(
+  req: Requester,
+  input: CreateObjectInput,
+  mayPublishPublic: boolean
+): Promise<{ visibilityLevel: VisibilityLevel; grants: VisibilityGrant[] }> {
+  const explicitLevel = input.visibility?.level;
+  const grants = input.visibility?.grants ?? [];
+
+  // A group object with no grants is invisible to everyone but the owner/admin
+  // (equivalent to private without the semantics) — almost always a mistake.
+  // The authoritative enforcement is `applyGrantsForLevel` in the create
+  // transaction (against the RESOLVED level, so a collection-defaulted `group`
+  // is covered too); this is a cheap pre-transaction fast-fail for the common
+  // explicit-group case.
+  if (explicitLevel === "group" && grants.length === 0) {
+    throw new ValidationError(
+      "group visibility requires at least one grant"
+    );
+  }
+
+  let visibilityLevel: VisibilityLevel =
+    explicitLevel ??
+    (await collectionDefaultOutsideTx(input.collectionId)) ??
+    "private";
+
+  // A collection whose default is `group` can't be satisfied at create time:
+  // the create surface (library "New doc/artifact", the dialog takes only a
+  // title) authors no grants, and a grantless `group` is invisible to all but
+  // owner/admin. Rather than BLOCK creation from a group-default section
+  // (every seeded group collection would 400), fall back to `private`
+  // (owner-only) when the level was INHERITED from the collection default and
+  // no grants were supplied; the author then sets group visibility + grants
+  // via the Phase 3 visibility editor. An EXPLICIT grantless group still
+  // fails (the pre-transaction guard above + the assert below) — only the
+  // silent collection-default inheritance is softened here.
+  if (explicitLevel == null && visibilityLevel === "group" && grants.length === 0) {
+    visibilityLevel = "private";
+  }
+
+  // Validate the RESOLVED level + grants BEFORE the transaction so an invalid
+  // combination (e.g. an explicit `group` with no grants) fails without
+  // writing — and rolling back — an object row. The pre-transaction guard
+  // above only catches the explicit-`group` case.
+  visibilityService.assertWritableLevel(visibilityLevel, grants);
+
+  // §26.4 — creating directly at `public` (explicitly, or via a collection
+  // whose admin-set default is `public`) is the same privilege boundary as
+  // widening to public through `publish`/`set_visibility`; gate it the same
+  // way rather than letting a `content:create`-only caller reach "public"
+  // by skipping straight to creation. Parity with Gate 1 (explicit
+  // `input.visibility.level === "public"`): a collection whose admin-set
+  // default is `public` (e.g. the seeded `public-site` collection,
+  // default_visibility_level = 'public') resolves to "public" HERE without an
+  // explicit visibility, so emit the same approval-queue signal before failing
+  // closed — otherwise SNS consumers miss this denied-public-create case that
+  // Gate 1 covers.
+  if (visibilityLevel === "public" && !mayPublishPublic) {
+    raiseCreateApprovalRequired(req, { title: input.title });
+  }
+
+  return { visibilityLevel, grants };
+}
+
 export const contentService = {
   loadByIdOrSlug,
 
@@ -213,41 +331,18 @@ export const contentService = {
     opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<ContentObjectWithVersion> {
     assertCanCreate(req);
+    assertValidCreateInput(input);
 
-    if (!input.title?.trim()) {
-      throw new ValidationError("Title is required");
-    }
-    // Enforce the varchar(500) column limit as a typed 400 rather than a raw
-    // Postgres 22001 ("value too long") error.
-    if (input.title.trim().length > TITLE_MAX_LENGTH) {
-      throw new ValidationError(
-        `Title must be ${TITLE_MAX_LENGTH} characters or fewer`
-      );
-    }
-    if (input.kind !== "document" && input.kind !== "artifact") {
-      throw new ValidationError("kind must be 'document' or 'artifact'", {
-        kind: input.kind,
-      });
-    }
+    // Whether this caller holds the §26.4 public-publish authority (pure, no IO).
+    const mayPublishPublic = canPublishPublic(
+      req,
+      opts.hasPublishPublicCapability ?? false
+    );
 
-    // The §26.4 public-visibility gate, BEFORE any write. Emit the approval-queue
-    // signal (parity with publish/set_visibility) then throw — nothing is created.
-    // Fire-and-forget (`void`, not `await`): `emit` swallows its own errors, so
-    // awaiting only adds an SNS round-trip to the response path.
-    if (
-      input.visibility?.level === "public" &&
-      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
-    ) {
-      void contentEvents.emit("content.public_publish_requested", {
-        objectId: "",
-        destination: "create",
-        actorKind: actorKindOf(req),
-        agentLabel: req.kind === "user" ? null : req.agentLabel,
-      });
-      throw new ApprovalRequiredError(
-        "Creating public content requires approval",
-        { level: input.visibility.level }
-      );
+    // The §26.4 public-visibility gate (Gate 1, explicit `public` input),
+    // BEFORE any write — nothing is created.
+    if (input.visibility?.level === "public" && !mayPublishPublic) {
+      raiseCreateApprovalRequired(req, { level: input.visibility.level });
     }
 
     const ownerUserId = ownerFor(req);
@@ -257,80 +352,21 @@ export const contentService = {
     const createdByActor = actorKindOf(req);
     const createdByAgentId = agentIdOf(req);
 
-    // A group object with no grants is invisible to everyone but the owner/admin
-    // (equivalent to private without the semantics) — almost always a mistake.
-    // The authoritative enforcement is `applyGrantsForLevel` below (against the
-    // RESOLVED level, so a collection-defaulted `group` is covered too); this is a
-    // cheap pre-transaction fast-fail for the common explicit-group case.
-    if (
-      input.visibility?.level === "group" &&
-      (input.visibility.grants?.length ?? 0) === 0
-    ) {
-      throw new ValidationError(
-        "group visibility requires at least one grant"
-      );
-    }
+    // Resolve level + grants, enforcing the grant/level invariants and the
+    // §26.4 resolved-level gate (Gate 2 — e.g. a public collection default).
+    const { visibilityLevel, grants } = await resolveCreateVisibility(
+      req,
+      input,
+      mayPublishPublic
+    );
 
-    const grants = input.visibility?.grants ?? [];
-    let visibilityLevel: VisibilityLevel =
-      input.visibility?.level ??
-      (await collectionDefaultOutsideTx(input.collectionId)) ??
-      "private";
-
-    // A collection whose default is `group` can't be satisfied at create time:
-    // the create surface (library "New doc/artifact", the dialog takes only a
-    // title) authors no grants, and a grantless `group` is invisible to all but
-    // owner/admin. Rather than BLOCK creation from a group-default section
-    // (every seeded group collection would 400), fall back to `private`
-    // (owner-only) when the level was INHERITED from the collection default and
-    // no grants were supplied; the author then sets group visibility + grants
-    // via the Phase 3 visibility editor. An EXPLICIT grantless group still
-    // fails (the pre-transaction guard above + the assert below) — only the
-    // silent collection-default inheritance is softened here.
-    if (
-      input.visibility?.level == null &&
-      visibilityLevel === "group" &&
-      grants.length === 0
-    ) {
-      visibilityLevel = "private";
-    }
-
-    // Validate the RESOLVED level + grants BEFORE the transaction so an invalid
-    // combination (e.g. an explicit `group` with no grants) fails without
-    // writing — and rolling back — an object row. The pre-transaction guard
-    // above only catches the explicit-`group` case.
-    visibilityService.assertWritableLevel(visibilityLevel, grants);
-
-    // §26.4 — creating directly at `public` (explicitly, or via a collection
-    // whose admin-set default is `public`) is the same privilege boundary as
-    // widening to public through `publish`/`set_visibility`; gate it the same
-    // way rather than letting a `content:create`-only caller reach "public"
-    // by skipping straight to creation.
-    if (
-      visibilityLevel === "public" &&
-      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
-    ) {
-      // Parity with Gate 1 (explicit `input.visibility.level === "public"`): a
-      // collection whose admin-set default is `public` (e.g. the seeded
-      // `public-site` collection, default_visibility_level = 'public') resolves
-      // to "public" HERE without an explicit visibility, so emit the same
-      // approval-queue signal before failing closed — otherwise SNS consumers
-      // miss this denied-public-create case that Gate 1 covers.
-      void contentEvents.emit("content.public_publish_requested", {
-        objectId: "",
-        destination: "create",
-        actorKind: actorKindOf(req),
-        agentLabel: req.kind === "user" ? null : req.agentLabel,
-      });
-      // No object exists yet to carry an id/slug on the approval-queue event
-      // (unlike `publish`/`setLevel`, which gate an already-persisted object) —
-      // surface the same structured error; the surface layer's audit write
-      // still records the attempted (denied) create.
-      throw new ApprovalRequiredError(
-        "Creating public content requires approval",
-        { title: input.title }
-      );
-    }
+    // §28.3 — agent-authored bodies (a document's markdown AND an artifact's
+    // code) are guardrails/PII-screened BEFORE any write, mirroring the agent
+    // bridge. No-op for human/delegated authors and bodyless creates. Runs
+    // pre-transaction: screening is external IO (Bedrock) that must never hold
+    // a pooled connection. Fail-closed: blocked or unscreenable content throws
+    // ValidationError and nothing is created.
+    await screenAgentBodyForWrite(req, input.body, null);
 
     const { object, version, s3Writes } = await executeTransaction(
       async (tx) => {
@@ -580,9 +616,48 @@ export const contentService = {
     // Guard against a concurrent delete between load and update (TOCTOU): the
     // RETURNING yields no row, so surface a clean NotFoundError, not a TypeError.
     if (!rows[0]) throw new NotFoundError("Content not found", { id });
+
+    // A transition OUT of `published` (to `draft` or `archived`) must take the
+    // object offline everywhere and stop it surfacing as assistant context. Both
+    // readers gate ONLY on a live `content_publications` row (never on `status`),
+    // so without the takedown a "drafted" or "archived" object stays fully live at
+    // its permanent reader URL — a content-exposure footgun. The takedown is a
+    // removal (no §26.4 gate; assertCanEdit already ran), AWAITED, and its failure
+    // surfaces: silently leaving public content live is the exact exposure these
+    // status changes are expected to prevent.
+    if (patch.status === "draft" || patch.status === "archived") {
+      const { publishService } = await import("./publish-service");
+      await publishService.retractAllPublications(existing.id);
+      // Retrieval-index prune (§16): best-effort + idempotent (a re-save retries a
+      // previously failed prune); runs on every draft/archived write, not just the
+      // first transition.
+      await pruneRetrievalIndexBestEffort(existing.id);
+    }
     return rowToObjectDTO(rows[0] as ObjectRowAsText);
   },
 };
+
+/**
+ * Best-effort retrieval-index prune for the archive path. The metadata update
+ * has already committed, so a prune failure is logged, never thrown. Lazy
+ * import: retrieval-service statically imports THIS module, so a static import
+ * back would create a cycle.
+ */
+async function pruneRetrievalIndexBestEffort(objectId: string): Promise<void> {
+  try {
+    const { retrievalService } = await import("./retrieval-service");
+    await retrievalService.removeFromIndex(objectId);
+  } catch (pruneError) {
+    createLogger({ action: "content.update" }).warn(
+      "Failed to prune retrieval index after archive",
+      {
+        objectId,
+        error:
+          pruneError instanceof Error ? pruneError.message : String(pruneError),
+      }
+    );
+  }
+}
 
 /** Throw NotFoundError (not Forbidden) when the requester cannot view the object. */
 async function assertViewable(

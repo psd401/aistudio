@@ -10,7 +10,9 @@
  * Safety (spec §28.3): the agent's markdown is screened by Bedrock Guardrails
  * (blocked content is rejected, never persisted) and scanned for PII (logged as
  * telemetry — document content is NOT tokenized, since a published document must
- * keep its real text) BEFORE it touches the document.
+ * keep its real text) BEFORE it touches the document. The screening core lives
+ * in `lib/content/agent-screening.ts` (shared with `contentService.create` /
+ * `versionService.snapshot`); this route only maps its verdict to HTTP.
  *
  * Auth (Phase 1): a logged-in human with edit rights on the object operates the
  * agent; the session is the authorization conduit and the X-Agent-Id is the
@@ -25,7 +27,7 @@ import { getUserRequester } from "@/actions/db/atrium/requester";
 import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { canEdit } from "@/lib/content/helpers";
-import { getContentSafetyService, getPIITokenizationService } from "@/lib/safety";
+import { screenAgentContent } from "@/lib/content/agent-screening";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { agentIdentities } from "@/lib/db/schema";
 import { applyAgentEdit, type AgentEditMode } from "@/lib/content/collab/apply-agent-edit";
@@ -128,8 +130,6 @@ interface BridgeBody {
   mode?: unknown;
 }
 
-type Logger = ReturnType<typeof createLogger>;
-
 function parseMode(mode: unknown): AgentEditMode {
   return mode === "append" ? "append" : "replace";
 }
@@ -154,55 +154,28 @@ async function loadEditableObject(
   return { obj: { id: obj.id, ownerUserId: obj.ownerUserId } };
 }
 
-/** Screen agent markdown: block on guardrails, log PII (telemetry only). Returns
- * a NextResponse if the content is blocked, else null (proceed). */
+/** Screen agent markdown via the shared §28.3 core (`lib/content/agent-screening`
+ * — guardrails fail-closed + PII telemetry, logging included). `requestId` threads
+ * this request's correlation onto the core's blocked/degraded log lines. This
+ * wrapper only maps the verdict to HTTP: 422 for blocked content, 503 for a
+ * degraded (unavailable) screening evaluation. Returns null to proceed. */
 async function screenAgentMarkdown(
   markdown: string,
   objectId: string,
-  log: Logger
+  requestId: string
 ): Promise<NextResponse | null> {
-  const safety = await getContentSafetyService().checkInputSafety(markdown, objectId);
-  if (!safety.allowed) {
-    log.warn("Agent write blocked by guardrails", {
-      objectId,
-      reason: safety.blockedReason,
-      categories: safety.blockedCategories,
-    });
+  const verdict = await screenAgentContent(markdown, objectId, requestId);
+  if (verdict.allowed) return null;
+  if (verdict.reason === "blocked") {
     return NextResponse.json(
-      {
-        error: "Content blocked by safety policy",
-        message: safety.blockedMessage ?? "The proposed content was blocked.",
-      },
+      { error: "Content blocked by safety policy", message: verdict.message },
       { status: 422 }
     );
   }
-  // FAIL CLOSED on degraded guardrails. The shared guardrails service fails OPEN
-  // (returns allowed:true) when an AWS error/timeout/throttle prevents evaluation
-  // — acceptable for latency-sensitive chat, but NOT for unscreened agent content
-  // writing directly into a live K-12 document. A transient Bedrock failure must
-  // never let hate speech / CSAM / etc. through here; reject and let the agent retry.
-  if (safety.degraded) {
-    log.error("Agent write rejected: guardrails unavailable (failing closed)", { objectId });
-    return NextResponse.json(
-      {
-        error: "Safety screening unavailable",
-        message: "Content could not be safety-screened right now. Please retry shortly.",
-      },
-      { status: 503 }
-    );
-  }
-  // PII: detect + log only. A document keeps its real text; never tokenize-replace.
-  try {
-    const entities = await getPIITokenizationService().detectPII(markdown);
-    if (entities.length > 0) {
-      log.warn("PII detected in agent document write", { objectId, piiCount: entities.length });
-    }
-  } catch (piiError) {
-    log.warn("PII detection failed (non-fatal)", {
-      error: piiError instanceof Error ? piiError.message : String(piiError),
-    });
-  }
-  return null;
+  return NextResponse.json(
+    { error: "Safety screening unavailable", message: verdict.message },
+    { status: 503 }
+  );
 }
 
 async function postHandler(
@@ -267,7 +240,7 @@ async function postHandler(
     // withDocumentLock ensures only one screen→apply sequence runs per objectId at
     // a time within this ECS task. See the _docLocks comment for cross-task scope.
     const lockResult = await withDocumentLock(loaded.obj.id, async () => {
-      const blocked = await screenAgentMarkdown(markdown, loaded.obj.id, log);
+      const blocked = await screenAgentMarkdown(markdown, loaded.obj.id, requestId);
       if (blocked) return blocked;
       await applyAgentEdit({ objectId: loaded.obj.id, markdown, agentId, mode });
       return null;

@@ -187,6 +187,14 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     internalScopes: ["content:publish_internal"],
     destructive: true,
   },
+  // Unpublish shares publish's authority model (the §26.4 public-takedown gate
+  // lives in publishService.unpublish, not in a scope here).
+  unpublish_content: {
+    identifier: "content.unpublish",
+    requiredScope: "content:publish_internal",
+    internalScopes: ["content:publish_internal"],
+    destructive: true,
+  },
   // OKF interoperability (Phase 8, #1103, §36.4). Export is a read/serialization
   // (content:read; the §26.4 public gate is enforced in okfExportService, not by a
   // scope here). Import CREATES content, so it is destructive + content:create.

@@ -113,6 +113,11 @@ export interface ListFilter {
   collectionId?: string;
   kind?: ContentKind;
   tag?: string;
+  /**
+   * Case-insensitive title substring search. The service clamps it to 200
+   * chars and LIKE-escapes `\`/`%`/`_`, so callers pass raw user text.
+   */
+  query?: string;
   status?: "draft" | "published" | "archived";
   limit?: number;
   offset?: number;

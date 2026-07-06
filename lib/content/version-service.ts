@@ -34,6 +34,7 @@ import { contentObjects, contentVersions } from "@/lib/db/schema";
 import { pgTimestampAsText } from "@/lib/db/drizzle-helpers";
 import { createLogger } from "@/lib/logger";
 import { actorKindOf, agentIdOf, assertCanEdit, authorUserIdOf } from "./helpers";
+import { screenAgentBodyForWrite } from "./agent-screening";
 import { rowToVersionDTO, type VersionRowAsText } from "./mappers";
 import { renderMarkdownToHtml } from "./render/markdown-render";
 import { s3Store } from "./storage/s3-store";
@@ -332,6 +333,13 @@ export const versionService = {
     obj: { id: string; kind: "document" | "artifact" },
     input: SnapshotInput
   ): Promise<ContentVersionDTO> {
+    // §28.3 — agent-authored bodies (document markdown AND artifact code) are
+    // guardrails/PII-screened BEFORE the write, mirroring the agent bridge.
+    // No-op for human/delegated authors. Runs pre-transaction: screening is
+    // external IO (Bedrock) that must never hold a pooled connection.
+    // Fail-closed: blocked or unscreenable content throws ValidationError.
+    await screenAgentBodyForWrite(req, input.body, obj.id);
+
     const { version, s3Writes } = await executeTransaction(
       (tx) => snapshotInTx(tx, req, obj, input),
       "content.snapshot"
@@ -526,5 +534,40 @@ export const versionService = {
       }
     }, "content.rollback");
     log.info("Rolled back content head", { objectId, toVersionId });
+
+    // Refresh the retrieval index (§16). The index stores a PERSISTED snapshot of
+    // the head version's chunked text, so repointing the working head above changes
+    // what "current" means without touching that snapshot — a published,
+    // retrieval-scoped object would keep surfacing the STALE pre-rollback text to
+    // assistants until some unrelated republish re-indexed it. Best-effort: the
+    // rollback has already committed, so a re-index failure is logged, never thrown.
+    await reindexAfterRollbackBestEffort(objectId);
   },
 };
+
+/**
+ * Best-effort retrieval-index refresh after a rollback repoints the working head.
+ * `retrievalService.indexObject` self-guards on `status === "published"` (and on a
+ * missing object / current version), so this is a safe no-op for a draft/archived
+ * or unindexed object — it never wrongly ADDS an unpublished object to the index —
+ * while a published object is re-indexed to reflect the rolled-back head. Mirrors
+ * the publish path's inline `indexObject` and content-service's
+ * `pruneRetrievalIndexBestEffort`: the head change has already committed, so a
+ * re-index failure is logged, never thrown. Lazy import: retrieval-service
+ * statically imports THIS module, so a static import back would create a cycle.
+ */
+async function reindexAfterRollbackBestEffort(objectId: string): Promise<void> {
+  try {
+    const { retrievalService } = await import("./retrieval-service");
+    await retrievalService.indexObject(objectId);
+  } catch (indexError) {
+    createLogger({ action: "content.rollback" }).warn(
+      "Failed to re-index retrieval snapshot after rollback",
+      {
+        objectId,
+        error:
+          indexError instanceof Error ? indexError.message : String(indexError),
+      }
+    );
+  }
+}

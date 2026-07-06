@@ -272,6 +272,50 @@ async function indexObject(objectId: string): Promise<void> {
   }, "retrieval.indexObject");
 }
 
+/**
+ * Remove one object from the retrieval index — the inverse of `indexObject`.
+ * Deletes the backing `repository_item` + its chunks + the `content_index_links`
+ * row and clears `content_objects.indexed_at`, all in one transaction.
+ *
+ * Idempotent: an unindexed object (no link row) is a silent no-op. Callers are
+ * the de-exposure paths — `publishService.unpublish` once NO destination remains
+ * live, and `contentService.update` on an archive transition — so content that
+ * is no longer published anywhere stops surfacing as assistant context. A later
+ * re-publish re-indexes cleanly: `indexObject` sees no link and creates a fresh
+ * item/link pair.
+ */
+async function removeFromIndex(objectId: string): Promise<void> {
+  await executeTransaction(async (tx: DbTransaction) => {
+    const link = await tx
+      .select({
+        id: contentIndexLinks.id,
+        repositoryItemId: contentIndexLinks.repositoryItemId,
+      })
+      .from(contentIndexLinks)
+      .where(eq(contentIndexLinks.objectId, objectId))
+      .limit(1);
+    if (!link[0]) return; // never indexed / already pruned — idempotent no-op
+
+    // Chunks first, then the link (it references the item), then the item.
+    // The FK cascades would cover chunks/link on item delete, but explicit
+    // ordering keeps the transaction deterministic and self-documenting.
+    await tx
+      .delete(repositoryItemChunks)
+      .where(eq(repositoryItemChunks.itemId, link[0].repositoryItemId));
+    await tx
+      .delete(contentIndexLinks)
+      .where(eq(contentIndexLinks.id, link[0].id));
+    await tx
+      .delete(repositoryItems)
+      .where(eq(repositoryItems.id, link[0].repositoryItemId));
+    await tx
+      .update(contentObjects)
+      .set({ indexedAt: null })
+      .where(eq(contentObjects.id, objectId));
+  }, "retrieval.removeFromIndex");
+  log.info("Removed content from retrieval index", { objectId });
+}
+
 /** Does `obj` satisfy the (optional) collection/tags/max-visibility scope? */
 function withinScope(obj: ContentObjectDTO, scope?: RetrievalScope): boolean {
   if (!scope) return true;
@@ -327,8 +371,11 @@ async function search(
   );
   const itemToObjectId = new Map(links.map((l) => [l.repositoryItemId, l.objectId]));
 
+  // Resolve + cheap-filter first (status/scope are in-memory checks against the
+  // already-loaded object), so hits excluded here never cost a `canView` DB call.
   const objCache = new Map<string, ContentObjectDTO | null>();
-  const results: RetrievalHit[] = [];
+  const candidates: Array<{ hit: (typeof hits)[number]; obj: ContentObjectDTO }> =
+    [];
   for (const hit of hits) {
     const objectId = itemToObjectId.get(hit.itemId);
     if (!objectId) continue;
@@ -340,16 +387,26 @@ async function search(
     }
     if (!obj || obj.status !== "published") continue;
     if (!withinScope(obj, scope)) continue;
+    candidates.push({ hit, obj });
+  }
 
-    // The safety boundary: never return what the requester can't see.
-    const visible = await visibilityService.canView(req, {
-      id: obj.id,
-      ownerUserId: obj.ownerUserId,
-      visibilityLevel: obj.visibilityLevel,
-    });
-    if (!visible) continue;
-
-    results.push({
+  // The safety boundary: never return what the requester can't see. The per-hit
+  // checks are independent DB round trips (up to `limit` of them on the hot
+  // assistant-retrieval path), so run them CONCURRENTLY — `Promise.all` preserves
+  // input order, and the index-aligned filter below keeps the returned hits in
+  // the original vector-search (similarity) order, never completion order.
+  const visibility = await Promise.all(
+    candidates.map(({ obj }) =>
+      visibilityService.canView(req, {
+        id: obj.id,
+        ownerUserId: obj.ownerUserId,
+        visibilityLevel: obj.visibilityLevel,
+      })
+    )
+  );
+  return candidates
+    .filter((_, i) => visibility[i])
+    .map(({ hit, obj }) => ({
       objectId: obj.id,
       title: obj.title,
       slug: obj.slug,
@@ -357,9 +414,7 @@ async function search(
       content: hit.content,
       similarity: hit.similarity,
       chunkIndex: hit.chunkIndex,
-    });
-  }
-  return results;
+    }));
 }
 
 /**
@@ -419,6 +474,7 @@ async function searchForAssistant(
 
 export const retrievalService = {
   indexObject,
+  removeFromIndex,
   search,
   getContextDocument,
   searchForAssistant,
