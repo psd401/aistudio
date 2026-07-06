@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { uploadId, jobId } = ConfirmUploadSchema.parse(body);
     
-    log.info('Confirming upload', { uploadId, jobId, userId: session.userId });
+    log.info('Confirming upload', { uploadId, jobId, userId: session.sub });
     
     // Get job details to verify ownership and get processing info
     const job = await getJobStatus(jobId, session.sub);

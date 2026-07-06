@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from '@/lib/auth/server-session';
-import { completeMultipartUpload } from '@/lib/aws/document-upload';
+import { completeMultipartUpload, sanitizeFileName } from '@/lib/aws/document-upload';
 import { confirmDocumentUpload, getJobStatus } from '@/lib/services/document-job-service';
 import { sendToProcessingQueue } from '@/lib/aws/lambda-trigger';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
@@ -31,10 +31,10 @@ export async function POST(req: NextRequest) {
     const { uploadId, jobId, parts } = CompleteMultipartSchema.parse(body);
     
     log.info('Completing multipart upload', { 
-      uploadId, 
-      jobId, 
+      uploadId,
+      jobId,
       partCount: parts.length,
-      userId: session.userId 
+      userId: session.sub
     });
     
     // Get job details to verify ownership
@@ -44,17 +44,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Job not found' }, { status: 404 });
     }
     
-    // Sanitize filename for S3 key
-    const sanitizedFileName = job.fileName.replace(/[^\d.A-Za-z-]/g, '_');
-    
+    // Sanitize filename for S3 key (REV-COR-212). Use the shared sanitizeFileName
+    // (single sanitization) so the completed object key matches the key the
+    // multipart upload was created under by generateMultipartUrls — the old inline
+    // regex could diverge and cause NoSuchUpload on completion.
+    const sanitizedFileName = sanitizeFileName(job.fileName);
+
     // Complete multipart upload in S3
     await completeMultipartUpload(jobId, sanitizedFileName, uploadId, parts);
-    
+
     // Confirm upload in job tracking
     await confirmDocumentUpload(jobId, uploadId);
-    
-    // Generate S3 key
-    const s3Key = `uploads/${jobId}/${sanitizedFileName}`;
+
+    // Generate S3 key (REV-COR-212). Must include the "v2/" prefix that
+    // document-upload.ts stores objects under; the processor received a bogus
+    // "uploads/…" key before this fix and every multipart document failed to process.
+    const s3Key = `v2/uploads/${jobId}/${sanitizedFileName}`;
     
     // Environment validation (skip in test environment)
     if (process.env.NODE_ENV !== 'test' && !process.env.DOCUMENTS_BUCKET_NAME) {
