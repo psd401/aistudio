@@ -106,7 +106,11 @@ export function EditorToolbar({
         </span>
       )}
       {canEdit && (
-        <span className="ml-auto flex items-center gap-2">
+        // flex-wrap here too (PR #1131 review): the action group's min-content
+        // width (~500px across six controls) exceeds the workspace panel's
+        // 380px minimum, so without wrapping INSIDE the group the outer wrap
+        // still clips Publish/Unpublish off the panel edge.
+        <span className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
           {/* Track-changes toggle: while ON, edits become proposed suggestions. */}
           <Button
             type="button"

@@ -53,12 +53,16 @@ test.describe("Nexus workspace panel (authenticated)", () => {
       //     Also: opening the panel must never cause horizontal page overflow.
       const dims = await page.evaluate(() => {
         const p = document.querySelector('[data-testid="workspace-panel"]') as HTMLElement | null;
-        const ed = document.querySelector(".atrium-editor") as HTMLElement | null;
+        // Scope the editor lookup to the PANEL so a second editor elsewhere on
+        // the page can never satisfy (or fail) this guard (PR #1131 review).
+        const ed = p?.querySelector(".atrium-editor") as HTMLElement | null;
         const doc = document.documentElement;
         return {
           panelW: p ? p.getBoundingClientRect().width : 0,
           editorW: ed ? ed.getBoundingClientRect().width : 0,
-          horizOverflow: doc.scrollWidth > doc.clientWidth,
+          // 1px tolerance: subpixel layout can round scrollWidth a hair past
+          // clientWidth without any real overflow (PR #1131 review).
+          horizOverflow: doc.scrollWidth > doc.clientWidth + 1,
         };
       });
       expect(dims.horizOverflow).toBe(false);
