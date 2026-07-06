@@ -131,6 +131,12 @@ export interface EcsServiceConstructProps {
    */
   collabJwtSecretArn: string;
   /**
+   * Guardrail violation-log hash secret ARN from Secrets Manager (#727).
+   * HMAC key for pseudonymizing session/user ids in guardrail-violation logs;
+   * without it the app logs a fixed 'redacted' placeholder (uncorrelatable).
+   */
+  guardrailHashSecretArn: string;
+  /**
    * K-12 Content Safety: Bedrock Guardrail ARN (from GuardrailsStack)
    * If provided, enables precise IAM scoping instead of wildcard
    */
@@ -289,6 +295,7 @@ export class EcsServiceConstruct extends Construct {
         props.authSecretArn,
         props.internalApiSecretArn,
         props.collabJwtSecretArn,
+        props.guardrailHashSecretArn,
       ],
     }));
 
@@ -325,6 +332,7 @@ export class EcsServiceConstruct extends Construct {
                 props.authSecretArn, // Include auth secret
                 props.internalApiSecretArn, // Include internal API secret
                 props.collabJwtSecretArn, // Include Atrium collab token signing secret (#1051)
+                props.guardrailHashSecretArn, // Include guardrail hash secret (#727)
               ],
             }),
             // Agent Workspace OAuth secrets — read+update for refresh tokens (#912).
@@ -764,6 +772,14 @@ export class EcsServiceConstruct extends Construct {
         COLLAB_JWT_SECRET: ecs.Secret.fromSecretsManager(
           secretsmanager.Secret.fromSecretCompleteArn(this, 'CollabJwtSecret', props.collabJwtSecretArn),
           'COLLAB_JWT_SECRET'
+        ),
+        // Guardrail violation-log hash secret (#727 / 2026-07-06 chat outage):
+        // enables real per-session HMAC pseudonymization in violation logs.
+        // The app degrades to a 'redacted' placeholder if this is ever missing —
+        // it must never take chat down again.
+        GUARDRAIL_HASH_SECRET: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretCompleteArn(this, 'GuardrailHashSecret', props.guardrailHashSecretArn),
+          'GUARDRAIL_HASH_SECRET'
         ),
         // Issue #603: Database credentials for postgres.js driver
         // The RDS secret contains a JSON object with: username, password, host, port, dbname
