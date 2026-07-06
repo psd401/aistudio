@@ -48,8 +48,17 @@ export class LambdaLogger {
     }
 
     if (typeof data === 'string') {
-      // Remove potentially sensitive information
-      return data.replace(/password|secret|key|token|auth/gi, '[REDACTED]');
+      // Redact secret VALUES, not the keyword names (REV-INFRA-095). The old regex
+      // replaced the literal words password/secret/key/token/auth wherever they
+      // appeared, so `Authorization: Bearer abc123` became `[REDACTED]orization:
+      // Bearer abc123` — masking a harmless word while leaking the token in full.
+      // This redacts the value after a sensitive key (`key=VALUE`, `key: VALUE`,
+      // `Authorization: Bearer VALUE`). Free-form message strings are otherwise NOT
+      // deep-scrubbed — callers must avoid interpolating secrets into messages.
+      return data.replace(
+        /\b(password|passwd|secret|token|api[_-]?key|access[_-]?key|authorization|auth[_-]?token)\b(\s*[:=]\s*)(?:bearer\s+)?[^\s"',;})&]+/gi,
+        '$1$2[REDACTED]'
+      );
     }
 
     if (Array.isArray(data)) {
@@ -57,12 +66,17 @@ export class LambdaLogger {
     }
 
     if (typeof data === 'object') {
-      const sanitized: any = {};
+      // Object.create(null) so a document-controlled `__proto__`/`constructor` key
+      // cannot pollute Object.prototype via `sanitized[key] = ...` (REV-INFRA-095).
+      const sanitized: Record<string, unknown> = Object.create(null);
       for (const [key, value] of Object.entries(data)) {
-        if (key.toLowerCase().includes('password') || 
-            key.toLowerCase().includes('secret') || 
-            key.toLowerCase().includes('key') ||
-            key.toLowerCase().includes('token')) {
+        const lower = key.toLowerCase();
+        // Redact when the KEY names a secret. Word-ish matches (not a bare `key`
+        // substring) so benign keys like s3Key / chunkKey / publicKey are not
+        // over-redacted, while `auth` is included for parity with the string branch.
+        const isSensitive =
+          LambdaLogger.SENSITIVE_KEY_RE.test(lower) || lower === 'key' || lower === 'auth';
+        if (isSensitive) {
           sanitized[key] = '[REDACTED]';
         } else {
           sanitized[key] = this.sanitizeData(value);
@@ -73,6 +87,9 @@ export class LambdaLogger {
 
     return data;
   }
+
+  private static readonly SENSITIVE_KEY_RE =
+    /password|passwd|secret|token|credential|api[_-]?key|access[_-]?key|authorization|auth[_-]?token/i;
 
   info(message: string, data?: any): void {
     // In Lambda, console.log goes to CloudWatch automatically

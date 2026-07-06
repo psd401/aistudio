@@ -9,34 +9,7 @@ import * as XLSX from '@e965/xlsx';
 import JSZip from 'jszip';
 import { parseString } from 'xml2js';
 import { createLambdaLogger } from '../utils/lambda-logger';
-
-/**
- * Securely removes HTML tags to prevent injection attacks.
- *
- * Order matters: decode entities FIRST so that double-encoded sequences
- * (e.g. &amp;lt;script&amp;gt;) are resolved before tag stripping, preventing
- * double-decode bypass attacks (CLAUDE.md: use single-pass entity decode).
- */
-function sanitizeHTML(html: string): string {
-  // Step 1: Decode entities in a single pass with a lookup table to prevent
-  // the double-decode bypass that chained .replace() calls allow.
-  const entityMap: Record<string, string> = {
-    '&lt;': '<',
-    '&gt;': '>',
-    '&quot;': '"',
-    '&#x27;': "'",
-    '&#39;': "'",
-    '&amp;': '&',
-  };
-  let sanitized = html.replace(/&(?:lt|gt|quot|#x27|#39|amp);/g, (m) => entityMap[m] ?? m);
-
-  // Step 2: Strip all HTML tags in a single pass (no loop needed — global replace
-  // removes all non-overlapping tag matches in one sweep, avoiding O(n²) behaviour).
-  sanitized = sanitized.replace(/<[^>]*>/g, ' ');
-
-  // Step 3: Clean up whitespace
-  return sanitized.replace(/\s+/g, ' ').trim();
-}
+import { sanitizeHtml } from '../utils/html-sanitizer';
 
 interface XlsxSheetData {
   name: unknown;
@@ -137,16 +110,30 @@ export class OfficeProcessor implements DocumentProcessor {
   private async processDocx(buffer: Buffer): Promise<any> {
     const logger = createLambdaLogger({ operation: 'OfficeProcessor.processDocx' });
     logger.info('Processing DOCX document');
-    
-    // Extract raw text
+
+    // mammoth.convertToHtml re-unzips and fully re-parses the DOCX; its output is only
+    // consumed by convertDocxToMarkdown. Skip it entirely on the common text-only path,
+    // and when markdown IS requested run both parses concurrently (REV-PERF-032).
+    if (this.config.convertToMarkdown) {
+      const [textResult, htmlResult] = await Promise.all([
+        mammoth.extractRawText({ buffer }),
+        mammoth.convertToHtml({ buffer }),
+      ]);
+      return {
+        text: textResult.value,
+        html: htmlResult.value,
+        metadata: {
+          messages: textResult.messages,
+          wordCount: textResult.value.split(/\s+/).length,
+          characterCount: textResult.value.length,
+        }
+      };
+    }
+
     const textResult = await mammoth.extractRawText({ buffer });
-    
-    // Also extract with HTML for better structure understanding
-    const htmlResult = await mammoth.convertToHtml({ buffer });
-    
     return {
       text: textResult.value,
-      html: htmlResult.value,
+      html: undefined,
       metadata: {
         messages: textResult.messages,
         wordCount: textResult.value.split(/\s+/).length,
@@ -221,26 +208,34 @@ export class OfficeProcessor implements DocumentProcessor {
       
       // Extract text from all slides
       const slides: any[] = [];
-      let slideIndex = 1;
       let combinedText = '';
-      
-      // Process slides sequentially
-      while (true) {
-        const slideFile = zipData.file(`ppt/slides/slide${slideIndex}.xml`);
-        if (!slideFile) break;
-        
+
+      // Enumerate the slide entries actually present in the archive, sorted by their
+      // numeric index (REV-COR-413). PPTX does not guarantee contiguous slide file
+      // numbering — deleting a slide can leave a gap (slide1, slide2, slide4) — so
+      // the old `while(true)` that broke at the first missing index silently dropped
+      // every slide after a gap.
+      const slideNames = Object.keys(zipData.files)
+        .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+        .sort((a, b) =>
+          Number(a.match(/slide(\d+)\.xml$/)![1]) - Number(b.match(/slide(\d+)\.xml$/)![1])
+        );
+
+      for (const name of slideNames) {
+        const slideFile = zipData.file(name);
+        if (!slideFile) continue;
+
+        const slideNumber = Number(name.match(/slide(\d+)\.xml$/)![1]);
         const slideXml = await slideFile.async('text');
-        const slideText = await this.extractTextFromSlideXml(slideXml, slideIndex);
-        
+        const slideText = await this.extractTextFromSlideXml(slideXml, slideNumber);
+
         if (slideText && slideText.length > 0) {
           slides.push({
-            id: slideIndex,
+            id: slideNumber,
             text: slideText
           });
-          combinedText += `\n\n## Slide ${slideIndex}\n\n${slideText.join('\n')}`;
+          combinedText += `\n\n## Slide ${slideNumber}\n\n${slideText.join('\n')}`;
         }
-        
-        slideIndex++;
       }
       
       if (slides.length === 0) {
@@ -367,9 +362,12 @@ export class OfficeProcessor implements DocumentProcessor {
           .replace(/<\/em>/g, '*')
           .replace(/<br[^>]*>/g, '\n')
           .replace(/\n{3,}/g, '\n\n'); // Clean up excessive newlines
-        
-        // Apply secure HTML sanitization to prevent injection attacks
-        const sanitizedMarkdown = sanitizeHTML(markdown);
+
+        // Apply secure HTML sanitization to prevent injection attacks. Preserve
+        // newlines (REV-COR-408) so the paragraph/heading structure just built above
+        // survives — the default sanitizer collapses every \n into a space, which
+        // flattened DOCX markdown to a single line.
+        const sanitizedMarkdown = sanitizeHtml(markdown, { preserveNewlines: true });
         return sanitizedMarkdown.trim();
       } catch (error) {
         const logger = createLambdaLogger({ operation: 'OfficeProcessor.convertDocxToMarkdown' });
@@ -520,16 +518,18 @@ export class OfficeProcessor implements DocumentProcessor {
     while (startIndex < text.length) {
       let endIndex = Math.min(startIndex + chunkSize, text.length);
       
-      // Try to break at sentence boundary
+      // Try to break at a sentence boundary — but only when the break still leaves
+      // a chunk larger than the overlap. Otherwise `endIndex - overlap` would move
+      // the next window BACKWARD and the loop would never terminate (REV-COR-406).
       if (endIndex < text.length) {
         const lastSentenceEnd = text.lastIndexOf('.', endIndex);
-        if (lastSentenceEnd > startIndex) {
+        if (lastSentenceEnd > startIndex && (lastSentenceEnd + 1 - startIndex) > overlap) {
           endIndex = lastSentenceEnd + 1;
         }
       }
-      
+
       const chunkContent = text.substring(startIndex, endIndex).trim();
-      
+
       if (chunkContent.length > 0) {
         chunks.push({
           chunkIndex,
@@ -543,9 +543,17 @@ export class OfficeProcessor implements DocumentProcessor {
         });
         chunkIndex++;
       }
-      
-      startIndex = endIndex - overlap;
-      if (startIndex >= endIndex) break;
+
+      // Once a chunk reaches the end of the text, everything is covered — stop
+      // (REV-COR-406). Without this the loop would keep emitting tiny overlapping
+      // tail windows because `endIndex - overlap` sits behind `startIndex` near the end.
+      if (endIndex >= text.length) break;
+
+      // Advance with guaranteed forward progress (REV-COR-406): never regress and
+      // always move at least one character past the previous start.
+      const nextStart = Math.max(startIndex + 1, endIndex - overlap);
+      if (nextStart <= startIndex) break; // defensive; should be unreachable
+      startIndex = nextStart;
     }
     
     const logger = createLambdaLogger({ operation: 'OfficeProcessor.chunkText' });

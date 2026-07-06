@@ -1,4 +1,4 @@
-import { SQSEvent, Context } from 'aws-lambda';
+import { SQSEvent, Context, SQSBatchResponse, SQSBatchItemFailure } from 'aws-lambda';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { DynamoDBClient, PutItemCommand, QueryCommand } from '@aws-sdk/client-dynamodb';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
@@ -15,7 +15,6 @@ const sqsClient = new SQSClient({});
 const DOCUMENTS_BUCKET = process.env.DOCUMENTS_BUCKET_NAME!;
 const DOCUMENT_JOBS_TABLE = process.env.DOCUMENT_JOBS_TABLE!;
 const HIGH_MEMORY_QUEUE_URL = process.env.HIGH_MEMORY_QUEUE_URL;
-const DLQ_URL = process.env.DLQ_URL;
 const PROCESSOR_TYPE = process.env.PROCESSOR_TYPE || 'STANDARD'; // STANDARD or HIGH_MEMORY
 
 interface ProcessingContext {
@@ -140,34 +139,10 @@ async function sendToHighMemoryQueue(context: ProcessingContext): Promise<void> 
   logger.info('Job sent to high-memory queue', { jobId: context.jobId, queueUrl: HIGH_MEMORY_QUEUE_URL });
 }
 
-// Send to DLQ for manual review
-async function sendToDLQ(jobId: string, error: Error | any, context: ProcessingContext): Promise<void> {
-  const logger = createLambdaLogger({ operation: 'sendToDLQ', jobId });
-  if (!DLQ_URL) {
-    logger.error('DLQ_URL not configured');
-    return;
-  }
-  
-  try {
-    await sqsClient.send(new SendMessageCommand({
-      QueueUrl: DLQ_URL,
-      MessageBody: JSON.stringify({
-        jobId,
-        error: {
-          message: error.message,
-          stack: error.stack,
-        },
-        context,
-        timestamp: new Date().toISOString(),
-        processorType: PROCESSOR_TYPE,
-      }),
-    }));
-    
-    logger.info('Failed job sent to DLQ', { jobId, processorType: PROCESSOR_TYPE });
-  } catch (dlqError) {
-    logger.error('Failed to send to DLQ', dlqError);
-  }
-}
+// Failed documents are re-thrown from processDocument and reported by the handler via
+// batchItemFailures (REV-INFRA-091); SQS then retries and redrives them to the
+// configured DLQ (processingQueue.deadLetterQueue, maxReceiveCount) automatically, so
+// the previous eager manual DLQ send is no longer needed.
 
 // Stream to buffer converter
 async function streamToBuffer(stream: Readable): Promise<Buffer> {
@@ -296,94 +271,104 @@ async function processDocument(context: ProcessingContext): Promise<void> {
       failedAt: new Date().toISOString(),
       processingStage: 'failed',
     }, logger);
-    
-    // Send to DLQ for manual review
-    await sendToDLQ(jobId, error, context);
-    
-    throw error; // Re-throw to let Lambda handle retry logic
+
+    // Re-throw so the handler reports this record in batchItemFailures. SQS then
+    // retries it (maxReceiveCount) and redrives it to the DLQ on exhaustion
+    // (REV-INFRA-091). The previous eager sendToDLQ here fired on the FIRST failure,
+    // DLQ-ing transient failures before SQS's retry budget was used.
+    throw error;
   }
 }
 
+// A processing context paired with the SQS messageId it came from, so the handler
+// can report per-record success/failure via the reportBatchItemFailures contract.
+interface ProcessingItem {
+  context: ProcessingContext;
+  messageId: string;
+}
+
 // Extract processing contexts from SQS events
-function extractProcessingContexts(event: SQSEvent): ProcessingContext[] {
-  const contexts: ProcessingContext[] = [];
-  
+function extractProcessingContexts(event: SQSEvent): ProcessingItem[] {
+  const items: ProcessingItem[] = [];
+
   for (const record of event.Records) {
     try {
       const message = JSON.parse(record.body);
-      
+
       // Handle both direct processing messages and S3 event notifications
       if (message.jobId) {
-        // Direct processing message
-        contexts.push(message as ProcessingContext);
+        // Direct processing message — keep its messageId for batchItemFailures.
+        items.push({ context: message as ProcessingContext, messageId: record.messageId });
       } else if (message.Records && message.Records[0]?.s3) {
         // S3 event notification - skip since we use direct job processing
         const logger = createLambdaLogger({ operation: 'extractProcessingContexts' });
-        logger.info('Received S3 event but skipping in favor of direct job processing', { 
-          eventType: 'S3', 
-          objectKey: message.Records[0].s3.object.key 
+        logger.info('Received S3 event but skipping in favor of direct job processing', {
+          eventType: 'S3',
+          objectKey: message.Records[0].s3.object.key
         });
       }
     } catch (parseError) {
+      // An unparseable record is a poison message that retrying cannot fix; log and
+      // skip it (SQS deletes it) rather than retrying forever.
       const logger = createLambdaLogger({ operation: 'extractProcessingContexts' });
       logger.error('Failed to parse SQS record', parseError);
     }
   }
-  
-  return contexts;
+
+  return items;
 }
 
 // Lambda handler
-export async function handler(event: SQSEvent, context: Context): Promise<void> {
-  const logger = createLambdaLogger({ 
+export async function handler(event: SQSEvent, context: Context): Promise<SQSBatchResponse> {
+  const logger = createLambdaLogger({
     operation: 'lambda-handler',
     requestId: context.awsRequestId,
     processorType: PROCESSOR_TYPE
   });
-  
+
   logger.info('Lambda handler invoked', {
     recordCount: event.Records.length,
     processorType: PROCESSOR_TYPE,
     memoryLimit: context.memoryLimitInMB,
     remainingTime: context.getRemainingTimeInMillis()
   });
-  
-  const processingContexts = extractProcessingContexts(event);
-  
-  if (processingContexts.length === 0) {
+
+  const items = extractProcessingContexts(event);
+
+  if (items.length === 0) {
     logger.warn('No valid processing contexts found in event');
-    return;
+    return { batchItemFailures: [] };
   }
-  
+
   // Process documents concurrently (but limited by Lambda concurrency settings)
   const results = await Promise.allSettled(
-    processingContexts.map(ctx => processDocument(ctx))
+    items.map(item => processDocument(item.context))
   );
-  
-  // Check for failures
-  const failures = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
-  
-  if (failures.length > 0) {
-    logger.error('Some documents failed to process', {
-      failureCount: failures.length,
-      totalCount: results.length,
-      failures: failures.map((failure, index) => ({
-        documentIndex: index,
-        reason: failure.reason
-      }))
-    });
-    
-    // If all documents failed, throw to trigger Lambda retry
-    if (failures.length === results.length) {
-      const error = new Error(`All ${failures.length} documents failed to process`);
-      logger.error('All documents failed - triggering Lambda retry', error);
-      throw error;
+
+  // Report per-record failures via the reportBatchItemFailures contract (REV-INFRA-091).
+  // Both SQS event sources set reportBatchItemFailures: true, so returning the failed
+  // records' itemIdentifiers keeps ONLY those messages on the queue for SQS retry and
+  // DLQ redrive (maxReceiveCount reached) — the previous void return made Lambda treat
+  // a partial-batch failure as a full success and silently delete the failed messages.
+  const batchItemFailures: SQSBatchItemFailure[] = [];
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      batchItemFailures.push({ itemIdentifier: items[index].messageId });
+      logger.error('Document processing failed — record left on queue for retry', {
+        jobId: items[index].context.jobId,
+        messageId: items[index].messageId,
+        reason: result.reason instanceof Error ? result.reason.message : String(result.reason)
+      });
     }
-  }
-  
+  });
+
   logger.info('Lambda execution completed', {
-    successCount: results.length - failures.length,
-    failureCount: failures.length,
+    successCount: results.length - batchItemFailures.length,
+    failureCount: batchItemFailures.length,
     totalCount: results.length
   });
+
+  // An all-failed batch is naturally a subset of this: every itemIdentifier is
+  // returned, so SQS retries the whole batch.
+  return { batchItemFailures };
 }
