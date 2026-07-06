@@ -23,9 +23,14 @@ test('--sensitive data is refused, not routed to quickchart', () => {
 test('no quickchart.io URL is produced for --sensitive input', () => {
   // engine==='refuse' means main() calls fail() before renderQuickChart(), so
   // no quickchart.io URL is ever constructed. Assert the load-bearing decision.
+  // (Checked via a bare URL-scheme match, not a domain substring — CodeQL
+  // flags `.includes('https://<domain>')` as an incomplete URL sanitization
+  // pattern since substring checks against a specific host are bypassable;
+  // this assertion isn't a trust decision, it's just confirming the reason
+  // text never embeds any URL at all.)
   const r = chooseEngine({ '--sensitive': true }, 'anything');
   assert.strictEqual(r.engine, 'refuse');
-  assert.ok(!String(r.reason).includes('https://quickchart.io'));
+  assert.doesNotMatch(String(r.reason), /https?:\/\//);
 });
 
 test('PII-matching data is refused in auto mode', () => {
