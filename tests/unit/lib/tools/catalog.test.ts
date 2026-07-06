@@ -46,6 +46,12 @@ jest.mock("@/lib/mcp/tool-handlers", () => ({
   },
 }))
 
+// dispatch() lazily imports the skill executor for `skill:{id}` handlerRefs
+// (#925). Mock it so skill dispatch resolves without the S3/DB graph.
+jest.mock("@/lib/skills/skill-tool-executor", () => ({
+  executeSkillTool: jest.fn(),
+}))
+
 import { ToolCatalog } from "@/lib/tools/catalog/catalog"
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest"
 
@@ -689,6 +695,189 @@ describe("ToolCatalog", () => {
       const search = all.find((e) => e.identifier === "decisions.search")
       expect(capture?.destructive).toBe(true)
       expect(search?.destructive).toBe(false)
+    })
+  })
+
+  // Issue #925 (epic #922 completion audit): skill-derived catalog rows carry
+  // `handlerRef: skill:{id}` and dispatch through the lazily-imported skill
+  // executor, never through TOOL_HANDLERS.
+  describe("skill handlerRef dispatch (#925)", () => {
+    const SKILL_ID = "11111111-1111-1111-1111-111111111111"
+
+    function skillDbRow(over: Record<string, unknown> = {}) {
+      return {
+        identifier: "skill.weather-helper",
+        version: "v1",
+        name: "weather-helper",
+        description: "Looks up the weather",
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: null,
+        surfaces: ["mcp", "internal"],
+        requiredScopes: [],
+        agentCallable: true,
+        source: "skill",
+        isActive: true,
+        handlerRef: `skill:${SKILL_ID}`,
+        ...over,
+      }
+    }
+
+    function skillExecutorMock() {
+      const { executeSkillTool } = jest.requireMock(
+        "@/lib/skills/skill-tool-executor"
+      ) as { executeSkillTool: jest.Mock }
+      executeSkillTool.mockReset()
+      return executeSkillTool
+    }
+
+    it("dispatches a skill tool via executeSkillTool and returns its result", async () => {
+      dbRows = [skillDbRow()]
+      const executeSkillTool = skillExecutorMock()
+      const skillResult = {
+        content: [{ type: "text", text: "SKILL.md contents" }],
+      }
+      executeSkillTool.mockResolvedValue(skillResult)
+
+      const catalog = new ToolCatalog()
+      const result = await catalog.dispatch(
+        "weather-helper",
+        {},
+        { userId: 1, cognitoSub: "s", scopes: ["*"], requestId: "r" }
+      )
+
+      // ok:true itself proves the skill path was taken: "weather-helper" has no
+      // TOOL_HANDLERS entry, so the code-handler path would have returned
+      // {ok:false, reason:"no_handler"}.
+      expect(result.ok).toBe(true)
+      expect(result.ok && result.result).toBe(skillResult)
+      expect(executeSkillTool).toHaveBeenCalledWith(SKILL_ID)
+    })
+
+    it("dispatches a skill tool on the internal surface too", async () => {
+      dbRows = [skillDbRow()]
+      const executeSkillTool = skillExecutorMock()
+      executeSkillTool.mockResolvedValue({ content: [] })
+
+      const catalog = new ToolCatalog()
+      const result = await catalog.dispatch(
+        "weather-helper",
+        {},
+        { userId: 1, cognitoSub: "s", scopes: ["*"], requestId: "r" },
+        "internal"
+      )
+      expect(result.ok).toBe(true)
+      expect(executeSkillTool).toHaveBeenCalledWith(SKILL_ID)
+    })
+  })
+
+  // Issue #927 (epic #922 completion audit): dispatch supports `name@vN`
+  // version-pinned addressing; a removed or malformed pin fails clearly as
+  // unknown, never silently falling back to latest.
+  describe("version-pinned dispatch addressing (#927)", () => {
+    function pinnedSkillRow(version: string, skillId: string) {
+      return {
+        identifier: "skill.multi-skill",
+        version,
+        name: "multi-skill",
+        description: "x",
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: null,
+        surfaces: ["mcp"],
+        requiredScopes: [],
+        agentCallable: true,
+        source: "skill",
+        isActive: true,
+        handlerRef: `skill:${skillId}`,
+      }
+    }
+
+    function skillExecutorMock() {
+      const { executeSkillTool } = jest.requireMock(
+        "@/lib/skills/skill-tool-executor"
+      ) as { executeSkillTool: jest.Mock }
+      executeSkillTool.mockReset()
+      return executeSkillTool
+    }
+
+    beforeEach(() => {
+      // Two versions sharing one wire name; the handlerRef identifies which
+      // version actually dispatched.
+      dbRows = [pinnedSkillRow("v1", "id-v1"), pinnedSkillRow("v2", "id-v2")]
+    })
+
+    it("dispatch('name@v1') targets exactly v1 even when v2 exists", async () => {
+      const executeSkillTool = skillExecutorMock()
+      executeSkillTool.mockResolvedValue({ content: [] })
+
+      const catalog = new ToolCatalog()
+      const result = await catalog.dispatch(
+        "multi-skill@v1",
+        {},
+        { userId: 1, cognitoSub: "s", scopes: ["*"], requestId: "r" }
+      )
+      expect(result.ok).toBe(true)
+      expect(executeSkillTool).toHaveBeenCalledTimes(1)
+      expect(executeSkillTool).toHaveBeenCalledWith("id-v1")
+    })
+
+    it("dispatch('name@v3') for a nonexistent version reports unknown", async () => {
+      const executeSkillTool = skillExecutorMock()
+      const catalog = new ToolCatalog()
+      const result = await catalog.dispatch(
+        "multi-skill@v3",
+        {},
+        { userId: 1, cognitoSub: "s", scopes: ["*"], requestId: "r" }
+      )
+      expect(result.ok).toBe(false)
+      expect(result.ok === false && result.reason).toBe("unknown")
+      expect(executeSkillTool).not.toHaveBeenCalled()
+    })
+
+    it("dispatch('name@banana') with a malformed pin reports unknown", async () => {
+      const executeSkillTool = skillExecutorMock()
+      const catalog = new ToolCatalog()
+      const result = await catalog.dispatch(
+        "multi-skill@banana",
+        {},
+        { userId: 1, cognitoSub: "s", scopes: ["*"], requestId: "r" }
+      )
+      expect(result.ok).toBe(false)
+      expect(result.ok === false && result.reason).toBe("unknown")
+      expect(executeSkillTool).not.toHaveBeenCalled()
+    })
+  })
+
+  // Issue #926 defense-in-depth: the internal agent surface must never dispatch
+  // a human-only (agentCallable=false) tool, even with valid scopes.
+  describe("internal-surface agentCallable dispatch guard (#926)", () => {
+    it("rejects an agentCallable=false tool on the internal surface as unknown", async () => {
+      dbRows = [
+        {
+          identifier: "assistants.humanonly",
+          version: "v1",
+          name: "human_only",
+          description: "x",
+          inputSchema: { type: "object", properties: {} },
+          outputSchema: null,
+          surfaces: ["internal"],
+          requiredScopes: [],
+          agentCallable: false,
+          source: "assistant",
+          isActive: true,
+          handlerRef: "assistant:9",
+        },
+      ]
+      const catalog = new ToolCatalog()
+      const result = await catalog.dispatch(
+        "human_only",
+        {},
+        { userId: 1, cognitoSub: "s", scopes: ["*"], requestId: "r" },
+        "internal"
+      )
+      expect(result.ok).toBe(false)
+      // Reported as unknown (not scope_denied) so the tool's existence does not
+      // leak to the agent loop.
+      expect(result.ok === false && result.reason).toBe("unknown")
     })
   })
 })

@@ -8,8 +8,9 @@
  * `content:publish_public` surfaces a structured `approval_required` signal the
  * agent can relay — never a silent failure (§26.4).
  *
- * Scopes are enforced in the JSON-RPC dispatcher (`TOOL_SCOPE_MAP`) BEFORE these
- * run; the requester established here governs ownership/visibility/the gate.
+ * Scopes are enforced by the unified tool catalog's `dispatch()` (each catalog
+ * entry's `requiredScopes`, #924) BEFORE these run; the requester established
+ * here governs ownership/visibility/the gate.
  */
 
 import { z } from "zod";

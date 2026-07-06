@@ -12,6 +12,7 @@ import { psdAgentSkillAudit } from "@/lib/db/schema/tables/agent-skill-audit"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import {
   serializeAssistantToSkill,
+  findInvalidAllowedToolEntries,
   type SerializerPrompt,
 } from "@/lib/skills/skill-serializer"
 import {
@@ -23,6 +24,32 @@ export interface PublishSkillResult {
   skillId: string
   slug: string
   scanQueued: boolean
+}
+
+/**
+ * Lint the derived `allowed-tools` BEFORE serializing (epic #922 audit):
+ * entries outside the strict identifier charset (or with a malformed `@version`
+ * pin) would be silently dropped by the serializer's defense-in-depth filter —
+ * surface them to the author instead, since a dropped pin silently
+ * widens/narrows the published skill's tool access.
+ */
+function assertPublishableToolEntries(
+  serializerPrompts: SerializerPrompt[],
+  assistantId: string,
+  log: ReturnType<typeof createLogger>
+): void {
+  const invalidToolEntries = findInvalidAllowedToolEntries(serializerPrompts)
+  if (invalidToolEntries.length === 0) return
+  log.warn("Publish rejected: invalid allowed-tools entries", {
+    assistantId,
+    invalidToolEntries,
+  })
+  throw ErrorFactories.invalidInput(
+    "enabledTools",
+    invalidToolEntries.join(", "),
+    `These tool references cannot be published in a skill's allowed-tools list: ${invalidToolEntries.join(", ")}. ` +
+      "Tool references must be plain identifiers (letters, digits, dots, dashes, colons) with an optional @vN version pin."
+  )
 }
 
 /**
@@ -91,6 +118,16 @@ export async function publishAssistantArchitectAsSkillAction(
     }
 
     // 2. Serialize to SKILL.md.
+    const serializerPrompts = (architect.prompts ?? []).map<SerializerPrompt>((p) => ({
+      name: p.name,
+      content: p.content,
+      systemContext: p.systemContext ?? null,
+      position: p.position ?? null,
+      enabledTools: Array.isArray(p.enabledTools) ? p.enabledTools : [],
+    }))
+
+    assertPublishableToolEntries(serializerPrompts, assistantId, log)
+
     const serialized = serializeAssistantToSkill({
       name: architect.name,
       description: architect.description ?? null,
@@ -100,13 +137,7 @@ export async function publishAssistantArchitectAsSkillAction(
         fieldType: f.fieldType,
         options: f.options,
       })),
-      prompts: (architect.prompts ?? []).map<SerializerPrompt>((p) => ({
-        name: p.name,
-        content: p.content,
-        systemContext: p.systemContext ?? null,
-        position: p.position ?? null,
-        enabledTools: Array.isArray(p.enabledTools) ? p.enabledTools : [],
-      })),
+      prompts: serializerPrompts,
     })
 
     // 3. Upload the SKILL.md folder to S3 (draft prefix).

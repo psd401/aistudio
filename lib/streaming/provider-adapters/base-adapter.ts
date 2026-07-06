@@ -61,6 +61,94 @@ export type AccumulatedToolCall = {
 };
 
 /**
+ * Usage shape reported by streamText's onFinish. AI SDK v6 reports
+ * `inputTokens`/`outputTokens` (LanguageModelUsage); the legacy
+ * `promptTokens`/`completionTokens` names are kept as fallbacks for provider
+ * adapters that still emit them. Reading only the legacy names silently zeroed
+ * the persisted prompt/completion split (epic #922 completion audit) — the
+ * cost-cap predicate already reads the v6 names.
+ */
+interface StreamFinishUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  reasoningTokens?: number;
+}
+
+/** Normalize onFinish usage to the internal prompt/completion shape. */
+export function transformFinishUsage(
+  rawUsage: unknown
+): { promptTokens: number; completionTokens: number; totalTokens: number } | undefined {
+  if (!rawUsage) return undefined;
+  const usage = rawUsage as StreamFinishUsage;
+  return {
+    promptTokens: usage.inputTokens ?? usage.promptTokens ?? 0,
+    completionTokens: usage.outputTokens ?? usage.completionTokens ?? 0,
+    totalTokens: usage.totalTokens || 0,
+  };
+}
+
+/** One normalized step of a multi-step tool-use run (Issue #977). */
+type TransformedStep = {
+  text: string;
+  toolCalls: AccumulatedToolCall[];
+  finishReason: string;
+};
+
+/** Validate + normalize a step's raw toolCalls array (drops malformed items). */
+function extractStepToolCalls(rawCalls: unknown): AccumulatedToolCall[] {
+  const stepToolCalls: AccumulatedToolCall[] = [];
+  if (!Array.isArray(rawCalls)) return stepToolCalls;
+  for (const tc of rawCalls) {
+    if (typeof tc !== 'object' || tc === null) continue;
+    const tcTyped = tc as { toolCallId?: string; toolName?: string; args?: unknown; input?: unknown };
+    if (typeof tcTyped.toolCallId !== 'string' || typeof tcTyped.toolName !== 'string') continue;
+    stepToolCalls.push({
+      toolCallId: tcTyped.toolCallId,
+      toolName: tcTyped.toolName,
+      args: ((tcTyped.input ?? tcTyped.args) as Record<string, unknown>) || {},
+    });
+  }
+  return stepToolCalls;
+}
+
+/** Match a step's raw toolResults back onto its (already extracted) toolCalls. */
+function attachStepToolResults(
+  stepToolCalls: AccumulatedToolCall[],
+  rawResults: unknown
+): void {
+  if (!Array.isArray(rawResults)) return;
+  for (const tr of rawResults) {
+    if (typeof tr !== 'object' || tr === null) continue;
+    const trTyped = tr as { toolCallId?: string; output?: unknown };
+    if (typeof trTyped.toolCallId !== 'string') continue;
+    const match = stepToolCalls.find(tc => tc.toolCallId === trTyped.toolCallId);
+    if (match) match.result = trTyped.output;
+  }
+}
+
+/**
+ * Normalize one raw onFinish step: validate its toolCalls, then match each
+ * step-local toolResult back to its call so callers can persist steps as
+ * separate messages and preserve multi-turn structure on replay (Issue #977).
+ */
+function transformFinishStep(rawStep: unknown): TransformedStep {
+  if (typeof rawStep !== 'object' || rawStep === null) {
+    return { text: '', toolCalls: [], finishReason: 'stop' };
+  }
+  const s = rawStep as Record<string, unknown>;
+  const stepToolCalls = extractStepToolCalls(s.toolCalls);
+  attachStepToolResults(stepToolCalls, s.toolResults);
+  return {
+    text: typeof s.text === 'string' ? s.text : '',
+    toolCalls: stepToolCalls,
+    finishReason: typeof s.finishReason === 'string' ? s.finishReason : 'stop',
+  };
+}
+
+/**
  * Base class for all provider adapters
  * Provides common functionality and interface implementation
  */
@@ -247,76 +335,22 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             toolNames: accumulatedToolCalls.map(tc => tc.toolName)
           });
 
-          // Define proper type for usage
-          interface StreamUsage {
-            promptTokens?: number;
-            completionTokens?: number;
-            totalTokens?: number;
-            reasoningTokens?: number;
-          }
-
           // Extract tool results from event.steps (shared method handles runtime validation)
           this.extractToolResultsFromSteps(event, accumulatedToolCalls, logger);
 
-          // Transform to our expected format
-          const usage = event.usage as StreamUsage;
-
-          // Build per-step breakdown for multi-step tool-use persistence.
-          // Each step's toolResults are matched to its toolCalls so the caller
-          // can persist them as separate messages and preserve the correct
-          // multi-turn structure on conversation replay. (Issue #977)
-          // AI SDK v6 TypeScript types don't declare `steps` on the onFinish event
-          // object, but the runtime value includes it for multi-step tool-use flows.
-          // Cast to access the field until the SDK's types are updated.
+          // Build per-step breakdown for multi-step tool-use persistence
+          // (transformFinishStep, Issue #977). AI SDK v6 TypeScript types don't
+          // declare `steps` on the onFinish event object, but the runtime value
+          // includes it for multi-step tool-use flows. Cast to access the field
+          // until the SDK's types are updated.
           const rawSteps = (event as Record<string, unknown>).steps;
           const steps = Array.isArray(rawSteps)
-            ? rawSteps.map((rawStep: unknown) => {
-                if (typeof rawStep !== 'object' || rawStep === null) {
-                  return { text: '', toolCalls: [], finishReason: 'stop' };
-                }
-                const s = rawStep as Record<string, unknown>;
-
-                const stepToolCalls: AccumulatedToolCall[] = [];
-                const rawCalls = s.toolCalls;
-                if (Array.isArray(rawCalls)) {
-                  for (const tc of rawCalls) {
-                    if (typeof tc !== 'object' || tc === null) continue;
-                    const tcTyped = tc as { toolCallId?: string; toolName?: string; args?: unknown; input?: unknown };
-                    if (typeof tcTyped.toolCallId !== 'string' || typeof tcTyped.toolName !== 'string') continue;
-                    stepToolCalls.push({
-                      toolCallId: tcTyped.toolCallId,
-                      toolName: tcTyped.toolName,
-                      args: ((tcTyped.input ?? tcTyped.args) as Record<string, unknown>) || {},
-                    });
-                  }
-                }
-
-                const rawResults = s.toolResults;
-                if (Array.isArray(rawResults)) {
-                  for (const tr of rawResults) {
-                    if (typeof tr !== 'object' || tr === null) continue;
-                    const trTyped = tr as { toolCallId?: string; output?: unknown };
-                    if (typeof trTyped.toolCallId !== 'string') continue;
-                    const match = stepToolCalls.find(tc => tc.toolCallId === trTyped.toolCallId);
-                    if (match) match.result = trTyped.output;
-                  }
-                }
-
-                return {
-                  text: typeof s.text === 'string' ? s.text : '',
-                  toolCalls: stepToolCalls,
-                  finishReason: typeof s.finishReason === 'string' ? s.finishReason : 'stop',
-                };
-              })
+            ? rawSteps.map(transformFinishStep)
             : undefined;
 
           const transformedData = {
             text: event.text || '',
-            usage: usage ? {
-              promptTokens: usage.promptTokens || 0,
-              completionTokens: usage.completionTokens || 0,
-              totalTokens: usage.totalTokens || 0
-            } : undefined,
+            usage: transformFinishUsage(event.usage),
             finishReason: event.finishReason || 'stop',
             toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
             // Pass steps whenever any exist (not only > 1): a single-step agentic

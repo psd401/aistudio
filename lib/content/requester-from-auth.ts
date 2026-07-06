@@ -14,8 +14,9 @@
  *     (role-driven visibility, scopes from the token, owns via the system user).
  *   - otherwise (sk- key / session / human OIDC token) -> `user`.
  *
- * Scope enforcement happens at the surface (`requireScope` / MCP `TOOL_SCOPE_MAP`)
- * BEFORE the service is called; this resolver only establishes WHO is calling.
+ * Scope enforcement happens at the surface (`requireScope` / the unified tool
+ * catalog's per-entry `requiredScopes` on MCP dispatch, #924) BEFORE the service
+ * is called; this resolver only establishes WHO is calling.
  */
 
 import { and, eq } from "drizzle-orm";

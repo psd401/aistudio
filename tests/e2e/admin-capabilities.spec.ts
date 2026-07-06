@@ -127,7 +127,7 @@ test.describe('Admin Capability Management', () => {
     await expect(manifestRow.getByText(/^code$/i)).toBeVisible({ timeout: 10000 })
   })
 
-  test('role assignment dialog opens for a capability', async ({ page }) => {
+  test('role assignment toggle persists across dialog reopen', async ({ page }) => {
     await page.getByRole('tab', { name: /Capabilities/i }).click()
 
     const firstRow = page.getByRole('row').nth(1) // header is row 0
@@ -136,12 +136,59 @@ test.describe('Admin Capability Management', () => {
       return
     }
 
-    // The second action button is the role-assignment trigger.
-    const buttons = firstRow.getByRole('button')
-    await buttons.nth(1).click()
+    const openDialog = async () => {
+      // The second action button is the role-assignment trigger.
+      await firstRow.getByRole('button').nth(1).click()
+      await expect(
+        page.getByText(/Role assignments/i)
+      ).toBeVisible({ timeout: 10000 })
+      // Wait for the role list to load (the dialog fetches assignments on open).
+      await expect(
+        page.getByRole('dialog').getByText('Loading roles...')
+      ).toBeHidden({ timeout: 10000 })
+    }
+    const closeDialog = async () => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByRole('dialog')).toBeHidden({ timeout: 10000 })
+    }
 
-    await expect(
-      page.getByText(/Role assignments/i)
-    ).toBeVisible({ timeout: 10000 })
+    await openDialog()
+
+    const checkbox = page.getByRole('dialog').getByRole('checkbox').first()
+    if ((await page.getByRole('dialog').getByRole('checkbox').count()) === 0) {
+      test.skip(true, 'No roles available to assign')
+      return
+    }
+    await expect(checkbox).toBeEnabled()
+    const initiallyChecked = await checkbox.isChecked()
+
+    // Toggle the first role. The checkbox disables while the server action is
+    // in flight, then reflects the new assignment.
+    await checkbox.click()
+    await expect(checkbox).toBeChecked({
+      checked: !initiallyChecked,
+      timeout: 10000,
+    })
+    await expect(checkbox).toBeEnabled()
+
+    // Re-open: the dialog reloads assignments from the server, so the toggled
+    // state persisting here proves the assignment was saved, not just local UI.
+    await closeDialog()
+    await openDialog()
+    const reopened = page.getByRole('dialog').getByRole('checkbox').first()
+    await expect(reopened).toBeChecked({
+      checked: !initiallyChecked,
+      timeout: 10000,
+    })
+
+    // Toggle back so the test leaves role assignments unchanged.
+    await expect(reopened).toBeEnabled()
+    await reopened.click()
+    await expect(reopened).toBeChecked({
+      checked: initiallyChecked,
+      timeout: 10000,
+    })
+    await expect(reopened).toBeEnabled()
+    await closeDialog()
   })
 })

@@ -109,10 +109,39 @@ export function intersectSkillAllowedTools(
 export async function getApprovedSkillAllowedTools(
   skillId: string
 ): Promise<string[] | null> {
+  const session = await getApprovedSkillSession(skillId);
+  return session ? session.allowedTools : null;
+}
+
+/** What a skill-bound chat session needs from an approved skill. */
+export interface ApprovedSkillSession {
+  /** Skill display/slug name (for the injected prompt header + logging). */
+  name: string;
+  /** The skill's `allowed-tools` pin (possibly empty = no pin). */
+  allowedTools: string[];
+  /** S3 prefix of the promoted skill folder (SKILL.md lives under it). */
+  s3Key: string;
+}
+
+/**
+ * Fetch everything a skill-bound session needs from an APPROVED skill
+ * (scope=shared, scanStatus=clean) in one lookup: the `allowed-tools` pin plus
+ * the S3 key for loading the SKILL.md instructions. Returns `null` for an
+ * unknown/unapproved id — callers MUST treat that as "do not loosen, do not
+ * inject" (epic #922 completion audit: the chat route now also injects the
+ * skill's instructions, so the approval gate covers both).
+ */
+export async function getApprovedSkillSession(
+  skillId: string
+): Promise<ApprovedSkillSession | null> {
   const rows = await executeQuery(
     (db) =>
       db
-        .select({ allowedTools: psdAgentSkills.allowedTools })
+        .select({
+          name: psdAgentSkills.name,
+          allowedTools: psdAgentSkills.allowedTools,
+          s3Key: psdAgentSkills.s3Key,
+        })
         .from(psdAgentSkills)
         .where(
           and(
@@ -126,5 +155,37 @@ export async function getApprovedSkillAllowedTools(
   );
   const row = rows[0];
   if (!row) return null;
-  return Array.isArray(row.allowedTools) ? row.allowedTools : [];
+  return {
+    name: row.name,
+    allowedTools: Array.isArray(row.allowedTools) ? row.allowedTools : [],
+    s3Key: row.s3Key,
+  };
+}
+
+/**
+ * Apply a skill's `allowed-tools` pin to MCP connector tool sets (#925 AC#6 —
+ * epic #922 completion audit). The built-in tool intersection alone left a hole:
+ * connector tools were merged into the model's tool set unconditionally, so a
+ * skill-bound session with connectors enabled could still call any external
+ * tool. Same semantics as {@link intersectSkillAllowedTools}: an EMPTY pin
+ * restricts nothing; a non-empty pin keeps only connector tools whose wire name
+ * matches a pinned base name (in practice this drops external tools, since pins
+ * are catalog identifiers).
+ *
+ * Returns new result objects with filtered `tools`; the originals (and their
+ * `close` handles) are not mutated, so connection cleanup is unaffected.
+ *
+ * Pure — no I/O.
+ */
+export function filterConnectorToolsByPin<
+  T extends { tools: Record<string, unknown> },
+>(results: T[], allowedTools: string[]): T[] {
+  if (allowedTools.length === 0) return results;
+  const pinned = new Set(parseSkillAllowedTools(allowedTools).map((p) => p.name));
+  return results.map((result) => ({
+    ...result,
+    tools: Object.fromEntries(
+      Object.entries(result.tools).filter(([name]) => pinned.has(name))
+    ),
+  }));
 }

@@ -17,7 +17,7 @@
  * catalog is consulted on every chat message and MCP request. Code-manifest
  * entries need no DB round-trip.
  *
- * Scope filtering generalizes the MCP `getToolsForScopes()` pattern to all
+ * Scope filtering generalizes the retired MCP per-tool scope-map pattern to all
  * surfaces: a caller sees a tool only if it holds every `requiredScope` (or the
  * `*` wildcard). `agentOnly` additionally drops `agentCallable = false` tools so
  * internal agent loops cannot invoke human-only / destructive tools.
@@ -87,6 +87,18 @@ interface DbCache {
 /** The `identifier@version` key used to dedupe and look up entries. */
 function entryKey(identifier: string, version: string): string {
   return `${identifier}@${version}`;
+}
+
+/**
+ * Parse a `skill:{id}` handlerRef into the skill id, or null when the ref is
+ * not a skill ref. Duplicated (trivially) from `skill-tool-executor.ts` so this
+ * module does not import it eagerly — the executor's S3/DB graph must stay out
+ * of non-Node bundles (same reason `loadHandlers` is lazy).
+ */
+function parseSkillRef(handlerRef: string | null | undefined): string | null {
+  if (!handlerRef || !handlerRef.startsWith("skill:")) return null;
+  const id = handlerRef.slice("skill:".length).trim();
+  return id.length > 0 ? id : null;
 }
 
 /**
@@ -654,16 +666,40 @@ export class ToolCatalog {
     surface: ToolSurface = "mcp",
     callerType?: CatalogCallerType
   ): Promise<ToolDispatchResult> {
-    // `get()` returns inactive entries too, so re-check `isActive` here: a
-    // found-but-disabled tool must report as unknown (not leak its existence).
-    const entry = await this.get(toolName);
+    // Version-pinned addressing (#927): a caller may address a specific version
+    // as `name@vN` (tools/list `include: "all"` returns multiple versions that
+    // share a wire name, so the suffix is the only way to reach a non-latest
+    // version). A pinned ref resolves to that exact version; a malformed or
+    // removed pin reports as unknown (clear failure for the pinned consumer
+    // rather than silently falling back to latest).
+    const entry = await this.getForDispatch(toolName);
     // Restrict to tools exposed on the requested surface so cross-surface leakage
-    // is impossible: a tool not on `surface` reports as unknown.
+    // is impossible: a tool not on `surface` reports as unknown. `getForDispatch`
+    // returns inactive entries too, so re-check `isActive` here: a
+    // found-but-disabled tool must report as unknown (not leak its existence).
     if (!entry || !entry.isActive || !entry.surfaces.includes(surface)) {
+      return { ok: false, reason: "unknown" };
+    }
+    // Defense-in-depth (#926): the internal agent surface must never invoke a
+    // human-only tool, even if a future caller skips the resolver's `agentOnly`
+    // list-time filter and dispatches directly.
+    if (surface === "internal" && !entry.agentCallable) {
       return { ok: false, reason: "unknown" };
     }
     if (!hasRequiredScopes(context.scopes, requiredScopesForSurface(entry, surface))) {
       return { ok: false, reason: "scope_denied" };
+    }
+    // Skill-derived tools (#925): `handlerRef: skill:{id}` loads the approved
+    // skill's SKILL.md as the tool result (progressive disclosure — a skill is an
+    // instruction folder, not a function). Resolved lazily so the S3/DB graph
+    // stays out of non-Node bundles, mirroring `loadHandlers`.
+    const skillId = parseSkillRef(entry.handlerRef);
+    if (skillId) {
+      this.maybeEmitDeprecation(entry, surface, callerType, context);
+      const { executeSkillTool } = await import(
+        "@/lib/skills/skill-tool-executor"
+      );
+      return { ok: true, result: await executeSkillTool(skillId) };
     }
     // Code MCP tools are keyed in TOOL_HANDLERS by their wire `name` (what the
     // manifest sets and what clients send), resolved lazily to keep the handler
@@ -673,19 +709,59 @@ export class ToolCatalog {
     if (!handler) {
       return { ok: false, reason: "no_handler" };
     }
-    // Emit the deprecation telemetry event AFTER confirming a handler exists —
-    // only tools that will actually be invoked should count as deprecated usage.
-    // Fire-and-forget; does not gate or delay dispatch. (#927.)
-    if (entry.deprecatedAt) {
-      this.emitDeprecationWarning(entry, {
-        // Default to the surface-implied caller type when not explicitly passed:
-        // mcp -> mcp_client, internal -> internal, else fall back to the surface.
-        callerType:
-          callerType ?? (surface === "mcp" ? "mcp_client" : "internal"),
-        callerId: String(context.userId),
-      });
-    }
+    this.maybeEmitDeprecation(entry, surface, callerType, context);
     return { ok: true, result: await handler(args, context) };
+  }
+
+  /**
+   * Resolve the catalog entry a dispatch targets. Plain `name` resolves via
+   * {@link get} (highest version). `name@vN` resolves to that exact version of
+   * the tool whose wire name or identifier matches — or undefined when the pin
+   * is malformed or that version does not exist (removed pins must fail clearly,
+   * never fall back to latest). (#927.)
+   */
+  private async getForDispatch(
+    toolName: string
+  ): Promise<ToolCatalogEntry | undefined> {
+    if (!toolName.includes("@")) {
+      return this.get(toolName);
+    }
+    const parsed = parseToolRef(toolName);
+    if (!parsed || !parsed.version) return undefined;
+    const all = await this.list({ includeInactive: true });
+    const matches = all.filter(
+      (e) =>
+        (e.identifier === parsed.identifier || e.name === parsed.identifier) &&
+        e.version === parsed.version
+    );
+    if (matches.length === 0) return undefined;
+    // Prefer identifier matches over wire-name matches (same tiebreak as get()).
+    matches.sort((a, b) => {
+      const aId = a.identifier === parsed.identifier ? 0 : 1;
+      const bId = b.identifier === parsed.identifier ? 0 : 1;
+      return aId - bId;
+    });
+    return matches[0];
+  }
+
+  /**
+   * Emit the deprecation telemetry event AFTER the dispatch target is confirmed
+   * invocable — only tools that will actually run should count as deprecated
+   * usage. Fire-and-forget; does not gate or delay dispatch. (#927.)
+   */
+  private maybeEmitDeprecation(
+    entry: ToolCatalogEntry,
+    surface: ToolSurface,
+    callerType: CatalogCallerType | undefined,
+    context: McpToolContext
+  ): void {
+    if (!entry.deprecatedAt) return;
+    this.emitDeprecationWarning(entry, {
+      // Default to the surface-implied caller type when not explicitly passed:
+      // mcp -> mcp_client, internal -> internal, else fall back to the surface.
+      callerType: callerType ?? (surface === "mcp" ? "mcp_client" : "internal"),
+      callerId: String(context.userId),
+    });
   }
 }
 
