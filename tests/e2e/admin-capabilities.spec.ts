@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures'
+import { authenticateContext } from './helpers/session-auth'
 
 /**
  * E2E tests for admin capability management (Issue #923).
@@ -44,7 +45,17 @@ test.describe('Admin Roles & Capabilities — Public Access', () => {
 })
 
 test.describe('Admin Capability Management', () => {
+  // Mint the seeded-admin session like the other functional specs — without
+  // this the beforeEach always landed unauthenticated and every test in this
+  // describe silently skipped, even under PLAYWRIGHT_AUTH_ENABLED (epic #922
+  // completion audit).
+  test.skip(
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
+    'Requires an authenticated admin session — set PLAYWRIGHT_AUTH_ENABLED=true and seed users'
+  )
+
   test.beforeEach(async ({ page }) => {
+    await authenticateContext(page.context())
     await page.goto('/admin/roles')
 
     const url = page.url()
