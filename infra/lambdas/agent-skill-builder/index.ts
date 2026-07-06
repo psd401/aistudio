@@ -460,8 +460,12 @@ async function updateSkillStatus(
     resourceArn: DATABASE_RESOURCE_ARN,
     secretArn: DATABASE_SECRET_ARN,
     database: DATABASE_NAME,
+    // scan_status is VARCHAR + CHECK (migration 070 — deliberately NOT an enum).
+    // Casting to agent_skill_scan_status fails outright on any database that
+    // never had the pre-070 partial state (the orphan enum types only exist
+    // where that leftover was cleaned up in place), so bind plain text.
     sql: `UPDATE psd_agent_skills
-          SET scan_status = CAST(:status AS agent_skill_scan_status),
+          SET scan_status = :status,
               scan_findings = CAST(:findings AS JSONB),
               updated_at = NOW()
           WHERE id = CAST(:id AS UUID)`,
@@ -482,9 +486,10 @@ async function updateSkillAfterPromotion(
     resourceArn: DATABASE_RESOURCE_ARN,
     secretArn: DATABASE_SECRET_ARN,
     database: DATABASE_NAME,
+    // scope/scan_status are VARCHAR + CHECK, not enums — see updateSkillStatus.
     sql: `UPDATE psd_agent_skills
-          SET scope = CAST(:scope AS agent_skill_scope),
-              scan_status = 'clean'::agent_skill_scan_status,
+          SET scope = :scope,
+              scan_status = 'clean',
               s3_key = :s3key,
               updated_at = NOW()
           WHERE id = CAST(:id AS UUID)`,

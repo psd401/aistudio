@@ -23,6 +23,7 @@ jest.mock("@/lib/content/render/html-sanitize", () => ({
 
 import { CONTENT_MCP_TOOLS, CONTENT_TOOL_SCOPE_MAP } from "@/lib/mcp/content-tools";
 import { CONTENT_TOOL_HANDLERS } from "@/lib/mcp/content-tool-handlers";
+import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest";
 
 const EXPECTED = [
   "create_document",
@@ -49,6 +50,14 @@ describe("Atrium MCP content tools registry", () => {
     for (const name of EXPECTED) {
       expect(CONTENT_TOOL_SCOPE_MAP[name]).toBeDefined();
       expect(typeof CONTENT_TOOL_HANDLERS[name]).toBe("function");
+    }
+  });
+
+  it("keeps the unified catalog's requiredScopes in sync with CONTENT_TOOL_SCOPE_MAP (drift guard — the catalog is the live enforcement point, epic #922 audit)", () => {
+    for (const name of EXPECTED) {
+      const entry = TOOL_MANIFEST.find((t) => t.name === name);
+      expect(entry).toBeDefined();
+      expect(entry!.requiredScopes).toEqual([CONTENT_TOOL_SCOPE_MAP[name]]);
     }
   });
 

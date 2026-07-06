@@ -2,7 +2,9 @@
  * Atrium content MCP tool definitions (Issue #1055, Phase 5 §24)
  *
  * The atomic content primitives exposed to MCP clients, registered into
- * `MCP_TOOLS` / `TOOL_SCOPE_MAP` alongside the existing first-party tools. They
+ * `MCP_TOOLS` alongside the existing first-party tools (scope enforcement lives
+ * in the unified tool catalog — `lib/tools/catalog/manifest.ts` — which a unit
+ * test keeps in sync with `CONTENT_TOOL_SCOPE_MAP` below). They
  * are deliberately atomic — there is NO `generate_and_publish`; an agent calls
  * `create_*` then `publish_content` as separate, individually-scoped steps.
  *

@@ -113,16 +113,63 @@ function toYamlScalar(value: string): string {
  * tools (e.g. `nexus.chat`) are passed through unchanged — the export
  * documentation notes which references are platform-specific.
  */
+/** Base charset of an `allowed-tools` entry (identifier / wire / connector name). */
+const ALLOWED_TOOL_BASE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
+/** Version-pin token: `v1`, `v2`, ... — no `v0`, no leading zeros. */
+const ALLOWED_TOOL_VERSION_RE = /^v[1-9]\d*$/
+
+/**
+ * Strict validation for an `allowed-tools` entry: a catalog identifier or wire
+ * name (`documents.create`, `search_decisions`, `connector:canva:design`)
+ * with an optional `@vN` pin. Anything outside this set — whitespace, newlines,
+ * `:` followed by space, YAML meta characters, malformed pins — is REJECTED,
+ * because the frontmatter line is emitted unquoted (comma-separated inline
+ * list, the format the infra scanner expects) and a hostile entry could
+ * otherwise inject frontmatter keys (epic #922 completion audit). Split into
+ * two anchored regexes (base + pin) rather than one nested-optional pattern so
+ * the linter's ReDoS analysis stays trivially satisfiable.
+ */
+export function isValidAllowedToolEntry(entry: string): boolean {
+  const at = entry.indexOf("@")
+  if (at === -1) return ALLOWED_TOOL_BASE_RE.test(entry)
+  return (
+    ALLOWED_TOOL_BASE_RE.test(entry.slice(0, at)) &&
+    ALLOWED_TOOL_VERSION_RE.test(entry.slice(at + 1))
+  )
+}
+
 export function deriveAllowedTools(prompts: SerializerPrompt[] = []): string[] {
   const set = new Set<string>()
   for (const prompt of prompts) {
     const tools = Array.isArray(prompt.enabledTools) ? prompt.enabledTools : []
     for (const tool of tools) {
       const trimmed = typeof tool === "string" ? tool.trim() : ""
-      if (trimmed) set.add(trimmed)
+      // Entries failing the strict charset are dropped here as defense-in-depth;
+      // the publish action additionally rejects the publish with a user-facing
+      // error listing them (so a drop is never silent in the real flow).
+      if (trimmed && isValidAllowedToolEntry(trimmed)) set.add(trimmed)
     }
   }
   return Array.from(set).sort((a, b) => a.localeCompare(b))
+}
+
+/**
+ * Return the raw `enabledTools` entries that would NOT survive
+ * {@link deriveAllowedTools}'s strict charset — the publish action surfaces
+ * these to the author instead of silently dropping them. Pure — no I/O.
+ */
+export function findInvalidAllowedToolEntries(
+  prompts: SerializerPrompt[] = []
+): string[] {
+  const invalid = new Set<string>()
+  for (const prompt of prompts) {
+    const tools = Array.isArray(prompt.enabledTools) ? prompt.enabledTools : []
+    for (const tool of tools) {
+      const trimmed = typeof tool === "string" ? tool.trim() : ""
+      if (trimmed && !isValidAllowedToolEntry(trimmed)) invalid.add(trimmed)
+    }
+  }
+  return Array.from(invalid)
 }
 
 /**

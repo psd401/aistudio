@@ -332,4 +332,46 @@ describe("syncToolCatalogManifest", () => {
     expect(result.deactivated).toEqual([])
     expect(fakeTools[0].isActive).toBe(true)
   })
+
+  // Issue #927 (epic #922 completion audit): a published version's schema is
+  // FROZEN. A manifest edit changing it is refused wholesale — the row is left
+  // untouched and the key is reported in schemaViolations.
+  describe("version schema immutability (#927)", () => {
+    it("refuses an inputSchema change to a published version and reports it", async () => {
+      await runSync([entry()])
+
+      const changed = entry({
+        inputSchema: {
+          type: "object",
+          properties: { q: { type: "string", description: "query" } },
+        },
+        // A simultaneous description edit must ALSO be refused: the violation
+        // freezes the whole row, not just the schema columns.
+        description: "Sneaky new description",
+      })
+      const freshTool = entry({
+        identifier: "decisions.capture",
+        name: "capture_decision",
+      })
+      const result = await runSync([changed, freshTool])
+
+      expect(result.schemaViolations).toEqual(["decisions.search@v1"])
+      expect(result.updated).toEqual([])
+      // Other manifest entries still process despite the violation.
+      expect(result.inserted).toEqual(["decisions.capture@v1"])
+
+      const frozen = fakeTools.find((t) => t.identifier === "decisions.search")!
+      expect(frozen.inputSchema).toEqual({ type: "object", properties: {} })
+      expect(frozen.description).toBe("Search decisions")
+    })
+
+    it("a name/description-only change (schemas identical) still updates with no violations", async () => {
+      await runSync([entry()])
+      const result = await runSync([entry({ description: "New description" })])
+
+      expect(result.schemaViolations).toEqual([])
+      expect(result.updated).toEqual(["decisions.search@v1"])
+      expect(fakeTools[0].description).toBe("New description")
+    })
+  })
 })

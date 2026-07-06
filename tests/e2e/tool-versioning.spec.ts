@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures'
+import { authenticateContext } from './helpers/session-auth'
 
 /**
  * E2E tests for tool & skill versioning (Issue #927, Epic #922 ws#5).
@@ -159,6 +160,13 @@ test.describe('admin-tool-version-history-display', () => {
   })
 
   test('admin sees the tool version history page', async ({ page }) => {
+    // Mint the seeded-admin session — without it this test always landed
+    // unauthenticated and silently skipped (epic #922 completion audit).
+    test.skip(
+      process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
+      'Requires an authenticated admin session — set PLAYWRIGHT_AUTH_ENABLED=true and seed users'
+    )
+    await authenticateContext(page.context())
     await page.goto('/admin/tools')
     const url = page.url()
     if (isUnauthenticated(url) || !url.includes('/admin/tools')) {

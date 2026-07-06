@@ -47,8 +47,11 @@ import { getScopesForRoles } from '@/lib/api-keys/scopes';
 import { toolCatalogInstance } from '@/lib/tools/catalog/catalog';
 import {
   intersectSkillAllowedTools,
-  getApprovedSkillAllowedTools,
+  getApprovedSkillSession,
+  filterConnectorToolsByPin,
+  type ApprovedSkillSession,
 } from '@/lib/skills/skill-tool-enforcement';
+import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -146,6 +149,10 @@ async function executeStreaming(params: {
   enabledConnectors: string[];
   connectorToolResults: McpConnectorToolsResult[];
   failedConnectorIds: string[];
+  /** Bound skill's SKILL.md content, injected into the system prompt (#925). */
+  skillInstructions?: string;
+  /** Bound skill's name (labels the injected instruction block). */
+  skillName?: string;
   reasoningEffort: 'minimal' | 'low' | 'medium' | 'high';
   responseMode: 'standard' | 'flex' | 'priority';
   requestId: string;
@@ -157,15 +164,12 @@ async function executeStreaming(params: {
   const {
     messages, modelConfig, userId, sessionId, conversationId,
     conversationIdValue, conversationTitle, enabledTools, enabledConnectors,
-    connectorToolResults, failedConnectorIds, reasoningEffort, responseMode,
+    connectorToolResults, failedConnectorIds, skillInstructions, skillName,
+    reasoningEffort, responseMode,
     requestId, dbModelId, log, timer, precomputedInputTokenMappings
   } = params;
 
-  const systemPrompt = `You are a helpful AI assistant in the Nexus interface.
-
-When discussing hardware, networking equipment, or technical specifications, treat model numbers, part numbers, and product identifiers as publicly available product information. Do not suggest that such identifiers have been redacted or withheld.
-
-IMPORTANT: If text contains privacy tokens like [PII:xxxx-xxxx-xxxx-xxxx], preserve them exactly as written. Do not modify, expand, or interpret these tokens.`;
+  const systemPrompt = buildNexusSystemPrompt(skillInstructions, skillName);
 
   // When MCP connectors are enabled, pre-merge adapter tools + connector tools
   // and pass as request.tools so the streaming service uses them directly
@@ -1015,32 +1019,107 @@ async function scopeFilterEnabledTools(
   return scoped;
 }
 
+const NEXUS_BASE_SYSTEM_PROMPT = `You are a helpful AI assistant in the Nexus interface.
+
+When discussing hardware, networking equipment, or technical specifications, treat model numbers, part numbers, and product identifiers as publicly available product information. Do not suggest that such identifiers have been redacted or withheld.
+
+IMPORTANT: If text contains privacy tokens like [PII:xxxx-xxxx-xxxx-xxxx], preserve them exactly as written. Do not modify, expand, or interpret these tokens.`;
+
 /**
- * Enforce a bound skill's `allowed-tools` pin over the (already scope-filtered)
- * tool list (#925 AC#6). The client tool list is untrusted, so the pin is
- * re-applied here whenever the session is bound to a skill. A skill with no pin
- * (empty allowed-tools) or an unknown/unapproved id leaves the list unchanged.
+ * Build the session system prompt. Skill session binding (#925): the bound
+ * skill's SKILL.md is appended so the session follows the skill's instructions
+ * (the tool pin alone restricted tools without changing behavior — epic #922
+ * completion audit). The content is the scanned, admin-approved artifact loaded
+ * server-side; it is never taken from the client.
  */
-async function enforceSkillAllowedTools(
-  scopedEnabledTools: string[],
+function buildNexusSystemPrompt(
+  skillInstructions: string | undefined,
+  skillName: string | undefined
+): string {
+  if (!skillInstructions) return NEXUS_BASE_SYSTEM_PROMPT;
+  return `${NEXUS_BASE_SYSTEM_PROMPT}\n\n---\n\nThe user has loaded the skill "${skillName ?? 'skill'}" into this session. Follow its instructions below for this conversation.\n\n${skillInstructions}`;
+}
+
+/**
+ * Load the session's bound skill (#925 AC#4/#6 — epic #922 completion audit).
+ * Returns the approved skill's session data (allowed-tools pin + name + s3Key)
+ * plus its SKILL.md instructions, or null when no skill is bound or the id is
+ * unknown/unapproved (callers must then neither loosen tools nor inject
+ * instructions). The SKILL.md read is best-effort: a missing artifact still
+ * enforces the pin, it just injects nothing.
+ */
+async function loadBoundSkill(
   skillId: string | undefined,
   log: ReturnType<typeof createLogger>
-): Promise<string[]> {
-  if (!skillId) return scopedEnabledTools;
-  const allowed = await getApprovedSkillAllowedTools(skillId);
-  if (allowed === null) {
+): Promise<(ApprovedSkillSession & { instructions: string | null }) | null> {
+  if (!skillId) return null;
+  const session = await getApprovedSkillSession(skillId);
+  if (!session) {
     log.warn('Session bound to unknown/unapproved skill; not enforcing tool pin', { skillId });
-    return scopedEnabledTools;
+    return null;
   }
-  const enforced = intersectSkillAllowedTools(scopedEnabledTools, allowed);
-  if (enforced.length !== scopedEnabledTools.length) {
-    log.info('Skill allowed-tools pin applied', {
+  const instructions = await readSkillMarkdown(session.s3Key);
+  if (instructions === null) {
+    log.warn('Bound skill has no readable SKILL.md; enforcing pin without instructions', {
       skillId,
-      before: scopedEnabledTools.length,
-      after: enforced.length,
     });
   }
-  return enforced;
+  return { ...session, instructions };
+}
+
+/**
+ * Apply a bound skill's session binding over the already-scope-filtered tool
+ * list (#925 — epic #922 completion audit): intersect the built-in tools with
+ * the skill's `allowed-tools`, filter the MCP connector tool sets by the same
+ * pin (leaving connectors unpinned let a skill-bound session call any external
+ * tool), and surface the skill's SKILL.md for system-prompt injection. With no
+ * skillId (or an unknown/unapproved one) everything passes through unchanged.
+ */
+async function applySkillSessionBinding(args: {
+  scopedEnabledTools: string[];
+  connectorToolResults: McpConnectorToolsResult[];
+  skillId: string | undefined;
+  log: ReturnType<typeof createLogger>;
+}): Promise<{
+  scopedEnabledTools: string[];
+  effectiveConnectorToolResults: McpConnectorToolsResult[];
+  skillInstructions: string | undefined;
+  skillName: string | undefined;
+}> {
+  const { connectorToolResults, skillId, log } = args;
+  const boundSkill = await loadBoundSkill(skillId, log);
+  if (!boundSkill) {
+    return {
+      scopedEnabledTools: args.scopedEnabledTools,
+      effectiveConnectorToolResults: connectorToolResults,
+      skillInstructions: undefined,
+      skillName: undefined,
+    };
+  }
+  const scopedEnabledTools = intersectSkillAllowedTools(
+    args.scopedEnabledTools,
+    boundSkill.allowedTools
+  );
+  const effectiveConnectorToolResults = filterConnectorToolsByPin(
+    connectorToolResults,
+    boundSkill.allowedTools
+  );
+  log.info('Skill session binding applied', {
+    skillId,
+    toolsBefore: args.scopedEnabledTools.length,
+    toolsAfter: scopedEnabledTools.length,
+    connectorToolsAfter: effectiveConnectorToolResults.reduce(
+      (n, r) => n + Object.keys(r.tools).length,
+      0
+    ),
+    hasInstructions: boundSkill.instructions !== null,
+  });
+  return {
+    scopedEnabledTools,
+    effectiveConnectorToolResults,
+    skillInstructions: boundSkill.instructions ?? undefined,
+    skillName: boundSkill.name,
+  };
 }
 
 /**
@@ -1130,12 +1209,15 @@ export async function POST(req: Request) {
     connectorToolResults.push(...resolvedConnectorTools);
 
     // 8b. Scope-gate built-in (AI SDK) tools via the unified tool catalog (#924),
-    // then enforce the bound skill's allowed-tools pin if the session loaded one (#925).
-    const scopedEnabledTools = await enforceSkillAllowedTools(
-      await scopeFilterEnabledTools(enabledTools, userRoleNames, log),
+    // then apply the bound skill's session binding (#925): allowed-tools pin over
+    // built-in AND connector tools, plus SKILL.md instruction injection.
+    const skillBinding = await applySkillSessionBinding({
+      scopedEnabledTools: await scopeFilterEnabledTools(enabledTools, userRoleNames, log),
+      connectorToolResults,
       skillId,
-      log
-    );
+      log,
+    });
+    const { scopedEnabledTools, effectiveConnectorToolResults, skillInstructions, skillName } = skillBinding;
 
     // 9. Execute streaming and return response
     // Once executeStreaming returns successfully, the streaming Response is in flight.
@@ -1151,8 +1233,12 @@ export async function POST(req: Request) {
       conversationTitle,
       enabledTools: scopedEnabledTools,
       enabledConnectors,
-      connectorToolResults,
+      // Pin-filtered copies; they share `close` handles with the hoisted
+      // originals, so pre-stream catch cleanup is unaffected.
+      connectorToolResults: effectiveConnectorToolResults,
       failedConnectorIds,
+      skillInstructions,
+      skillName,
       reasoningEffort: validation.data.reasoningEffort || 'medium',
       responseMode: validation.data.responseMode || 'standard',
       requestId,

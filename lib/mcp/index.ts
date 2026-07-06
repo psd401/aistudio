@@ -4,7 +4,7 @@
  */
 
 export { parseJsonRpcRequest, handleJsonRpcRequest } from "./jsonrpc-handler"
-export { getToolsForScopes, hasToolScope, TOOL_SCOPE_MAP, MCP_TOOLS } from "./tool-registry"
+export { MCP_TOOLS } from "./tool-registry"
 export { TOOL_HANDLERS } from "./tool-handlers"
 export { createSession, getSession, removeSession, getSessionCount } from "./session-manager"
 export type {

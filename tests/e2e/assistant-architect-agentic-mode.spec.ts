@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures'
+import { authenticateContext } from './helpers/session-auth'
 
 /**
  * E2E coverage for the agentic Assistant Architect mode (Issue #926).
@@ -17,6 +18,18 @@ import { test, expect } from './fixtures'
  */
 
 test.describe('Assistant Architect — agentic mode', () => {
+  // Mint the seeded-admin session — without it every test here landed on the
+  // sign-in redirect and silently skipped, even under PLAYWRIGHT_AUTH_ENABLED
+  // (epic #922 completion audit).
+  test.skip(
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
+    'Requires an authenticated session — set PLAYWRIGHT_AUTH_ENABLED=true and seed users'
+  )
+
+  test.beforeEach(async ({ page }) => {
+    await authenticateContext(page.context())
+  })
+
   // ── assistant-architect-agentic-mode-creation ──────────────────────────────
   test('author can select agentic mode and pick tools in the editor', async ({ page }) => {
     // Open the create flow (mode selector lives in the shared create/edit form).

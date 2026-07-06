@@ -2337,6 +2337,55 @@ export async function getAvailableAgentToolsAction(): Promise<ActionState<Availa
   }
 }
 
+/** One MCP connector the author may enable for an agentic assistant. */
+export interface AvailableAgentConnector {
+  id: string;
+  name: string;
+}
+
+/**
+ * List the MCP connectors the CURRENT user may enable for an agentic assistant
+ * (Issue #926 — epic #922 completion audit: the backend accepted
+ * `agentEnabledConnectors` but the editor had no way to populate it). Same
+ * access source as the Nexus chat connector list (`getAvailableConnectors`);
+ * `validateAgentConnectors` re-checks on save and the executor re-resolves per
+ * caller at run time.
+ */
+export async function getAvailableAgentConnectorsAction(): Promise<ActionState<AvailableAgentConnector[]>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getAvailableAgentConnectors")
+  const log = createLogger({ requestId, action: "getAvailableAgentConnectors" })
+
+  try {
+    const session = await getServerSession();
+    if (!session || !session.sub) {
+      return { isSuccess: false, message: "Unauthorized" }
+    }
+    const currentUser = await getCurrentUserAction();
+    if (!currentUser.isSuccess || !currentUser.data) {
+      return { isSuccess: false, message: "User not found" }
+    }
+    const roleNames = currentUser.data.roles.map(r => r.name);
+
+    const { getAvailableConnectors } = await import("@/lib/mcp/connector-service");
+    const connectors = await getAvailableConnectors(currentUser.data.user.id, roleNames);
+    const available: AvailableAgentConnector[] = connectors.map(c => ({
+      id: c.id,
+      name: c.name,
+    }));
+
+    log.info("Available agent connectors retrieved", { count: available.length })
+    timer({ status: "success", count: available.length })
+    return createSuccess(available, "Available agent connectors retrieved")
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to get available agent connectors", {
+      context: "getAvailableAgentConnectors",
+      requestId,
+    })
+  }
+}
+
 export async function getAiModelsAction(): Promise<ActionState<SelectAiModel[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getAiModels")

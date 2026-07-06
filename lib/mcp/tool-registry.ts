@@ -1,26 +1,19 @@
 /**
  * MCP Tool Registry
- * Defines available MCP tools with schemas and required scopes.
+ * Defines available MCP tools (name / description / inputSchema).
  * Part of Issue #686 - MCP Server + OAuth2/OIDC Provider (Phase 3)
+ *
+ * NOTE (epic #922 audit): the legacy `TOOL_SCOPE_MAP` and the
+ * `getToolsForScopes()` / `hasToolScope()` helpers were REMOVED. They had no
+ * live callers and silently drifted from the real enforcement point: scope
+ * checks live exclusively in the unified tool catalog (`lib/tools/catalog/`),
+ * whose entries carry `requiredScopes` consumed by both `tools/list` and
+ * `tools/call` (#924). This module now only declares the MCP tool definitions
+ * the catalog manifest projects.
  */
 
 import type { McpToolDefinition } from "./types"
-import type { ApiScope } from "@/lib/api-keys/scopes"
-import { CONTENT_MCP_TOOLS, CONTENT_TOOL_SCOPE_MAP } from "./content-tools"
-
-// ============================================
-// Tool-to-Scope Mapping
-// ============================================
-
-export const TOOL_SCOPE_MAP: Record<string, ApiScope> = {
-  search_decisions: "mcp:search_decisions",
-  capture_decision: "mcp:capture_decision",
-  execute_assistant: "mcp:execute_assistant",
-  list_assistants: "mcp:list_assistants",
-  get_decision_graph: "mcp:get_decision_graph",
-  // Atrium content tools (Phase 5, Issue #1055).
-  ...CONTENT_TOOL_SCOPE_MAP,
-}
+import { CONTENT_MCP_TOOLS } from "./content-tools"
 
 // ============================================
 // Tool Definitions
@@ -193,29 +186,3 @@ Example:
   // discover them via tools/list.
   ...CONTENT_MCP_TOOLS,
 ]
-
-// ============================================
-// Registry Helpers
-// ============================================
-
-/**
- * Get tool definitions filtered by the caller's scopes.
- */
-export function getToolsForScopes(scopes: string[]): McpToolDefinition[] {
-  const isWildcard = scopes.includes("*")
-
-  return MCP_TOOLS.filter((tool) => {
-    if (isWildcard) return true
-    const requiredScope = TOOL_SCOPE_MAP[tool.name]
-    return requiredScope && scopes.includes(requiredScope)
-  })
-}
-
-/**
- * Check if a scope list grants access to a specific tool.
- */
-export function hasToolScope(scopes: string[], toolName: string): boolean {
-  if (scopes.includes("*")) return true
-  const requiredScope = TOOL_SCOPE_MAP[toolName]
-  return !!requiredScope && scopes.includes(requiredScope)
-}

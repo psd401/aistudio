@@ -1179,13 +1179,27 @@ async function persistAgenticResult(args: {
   usage?: AgenticFinishUsage;
   finishReason: string;
   steps: Array<{ toolCalls?: unknown[] }>;
+  /** Per-token USD rates used by the in-loop cost cap; null = model unpriced. */
+  costRates: { inputPerToken: number; outputPerToken: number } | null;
   log: ReturnType<typeof createLogger>;
 }): Promise<void> {
-  const { context, drivingPromptId, agentStartTime, text, usage, finishReason, steps, log } = args;
+  const { context, drivingPromptId, agentStartTime, text, usage, finishReason, steps, costRates, log } = args;
   const executionTimeMs = Date.now() - agentStartTime;
   const toolCallCount = steps.reduce((n, s) => n + (s.toolCalls?.length || 0), 0);
+  // Persist the run's estimated spend (#926 — epic #922 completion audit): the
+  // cap was enforced in-loop but the actual cost was never recorded for audit /
+  // reconciliation. Same rates and formula as the adapter's cost predicate.
+  // Null when the model is unpriced or usage was not reported.
+  const estimatedCostCents =
+    costRates && usage
+      ? Math.round(
+          (usage.promptTokens * costRates.inputPerToken +
+            usage.completionTokens * costRates.outputPerToken) * 100
+        )
+      : null;
   log.info('Agentic execution finished', {
     executionId: context.executionId,
+    estimatedCostCents,
     finishReason,
     steps: steps.length,
     toolCalls: toolCallCount,
@@ -1194,7 +1208,14 @@ async function persistAgenticResult(args: {
 
   // Persist the final output as a single prompt_result attributed to the driving
   // prompt. Per-tool detail lives in the events table (the audit sink).
-  const promptInputData = { mode: 'agentic', toolCalls: toolCallCount, steps: steps.length };
+  const promptInputData = {
+    mode: 'agentic',
+    toolCalls: toolCallCount,
+    steps: steps.length,
+    // Estimated run cost in cents (null when unpriceable) — queryable per-run
+    // spend for audit/reconciliation (#926).
+    estimatedCostCents,
+  };
   // Bind every value as a parameter (never sql.raw + manual escaping, which is
   // fragile and bypasses Drizzle's parameterization). The jsonb and enum casts
   // are applied to bound placeholders so untrusted-shaped data can't break out.
@@ -1249,6 +1270,7 @@ async function persistAgenticResult(args: {
   await storeExecutionEvent(context.executionId, 'execution-complete', {
     executionId: context.executionId,
     totalTokens: usage?.totalTokens || 0,
+    estimatedCostCents,
     duration: Date.now() - context.executionStartTime,
     success: true,
   }).catch(err => log.error('Failed to store agentic execution-complete event', { error: err }));
@@ -1459,6 +1481,19 @@ async function executeAgenticAssistant(args: {
   };
 
   const agentStartTime = Date.now();
+  // Hoisted so onFinish can persist the run's estimated cost with the SAME rates
+  // the in-loop cap used. When the author configured a cap but the model has no
+  // complete pricing, the cap is unenforceable — say so loudly (structured warn →
+  // CloudWatch) instead of silently skipping it (epic #922 completion audit).
+  const costRates = buildCostRates(modelData);
+  if (typeof config.costCapCents === 'number' && config.costCapCents > 0 && costRates === null) {
+    log.warn('Agentic cost cap configured but NOT enforceable: model has no complete pricing', {
+      executionId: context.executionId,
+      assistantName: architect.name,
+      modelId: String(modelData.modelId),
+      costCapCents: config.costCapCents,
+    });
+  }
   const connectorResults: McpConnectorToolsResult[] = resolved.connectorResults;
   let cleanedUp = false;
   const cleanupConnectors = async () => {
@@ -1483,7 +1518,7 @@ async function executeAgenticAssistant(args: {
       // estimated cost reaches the cap. Rates come from the model row (per-1k →
       // per-token). Skipped when the model has no cost data or no cap is set.
       costCapCents: config.costCapCents,
-      costRates: buildCostRates(modelData),
+      costRates,
       timeout: config.timeoutSeconds * 1000,
       callbacks: {
         // onFinish/onError run asynchronously AFTER the HTTP response has already
@@ -1495,7 +1530,7 @@ async function executeAgenticAssistant(args: {
           try {
             await persistAgenticResult({
               context, drivingPromptId: drivingPrompt.id, agentStartTime,
-              text: text || '', usage, finishReason, steps: steps || [], log,
+              text: text || '', usage, finishReason, steps: steps || [], costRates, log,
             });
           } catch (saveError) {
             log.error('Failed to finalize agentic execution', { error: saveError, executionId: context.executionId });
