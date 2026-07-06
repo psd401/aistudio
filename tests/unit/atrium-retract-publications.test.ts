@@ -1,5 +1,5 @@
 /**
- * Unit tests for `publishService.retractAllForArchive` (Epic #1059 completion).
+ * Unit tests for `publishService.retractAllPublications` (Epic #1059 completion).
  *
  * The archive cascade: archiving must take an object OFFLINE at EVERY destination
  * (both readers gate on a live `content_publications` row, never on `status`), so
@@ -91,13 +91,13 @@ beforeEach(() => {
   publicWebUnpublish.mockClear().mockResolvedValue(undefined);
 });
 
-describe("publishService.retractAllForArchive", () => {
+describe("publishService.retractAllPublications", () => {
   it("flips every live publication to unpublished and tears down each destination", async () => {
     liveRows = [
       { destination: "intranet", externalRef: null },
       { destination: "public_web", externalRef: "https://p/x" },
     ];
-    await publishService.retractAllForArchive("obj-1");
+    await publishService.retractAllPublications("obj-1");
     // The bulk flip ran with status: 'unpublished'.
     expect(setPayloads).toEqual([
       expect.objectContaining({ status: "unpublished" }),
@@ -112,7 +112,7 @@ describe("publishService.retractAllForArchive", () => {
 
   it("is an idempotent no-op when nothing is live", async () => {
     liveRows = [];
-    await publishService.retractAllForArchive("obj-1");
+    await publishService.retractAllPublications("obj-1");
     expect(setPayloads).toHaveLength(0);
     expect(intranetUnpublish).not.toHaveBeenCalled();
   });
@@ -126,7 +126,7 @@ describe("publishService.retractAllForArchive", () => {
     // Best-effort: the publication is already flipped, so a teardown failure is
     // logged, never thrown — and must not skip the other destination.
     await expect(
-      publishService.retractAllForArchive("obj-1")
+      publishService.retractAllPublications("obj-1")
     ).resolves.toBeUndefined();
     expect(publicWebUnpublish).toHaveBeenCalledTimes(1);
   });
@@ -134,7 +134,7 @@ describe("publishService.retractAllForArchive", () => {
   it("throws NotFoundError when the object row is gone", async () => {
     lockRow = [];
     await expect(
-      publishService.retractAllForArchive("obj-1")
+      publishService.retractAllPublications("obj-1")
     ).rejects.toBeInstanceOf(NotFoundError);
   });
 });

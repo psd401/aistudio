@@ -64,14 +64,15 @@ jest.mock("@/lib/content/retrieval-service", () => ({
   },
 }));
 
-// Archive also cascades a takedown of every live publication (the archive
-// affordance promises the content is hidden — both readers gate on a live
-// publication, so archiving MUST retract them). Lazy-imported like retrieval.
-const retractAllForArchiveMock = jest.fn(async (_objectId: string) => undefined);
+// A transition out of `published` (draft OR archived) cascades a takedown of
+// every live publication — both readers gate on a live publication, so leaving
+// one live would keep "drafted"/"archived" content publicly servable. Lazy-
+// imported like retrieval.
+const retractAllPublicationsMock = jest.fn(async (_objectId: string) => undefined);
 jest.mock("@/lib/content/publish-service", () => ({
   publishService: {
-    retractAllForArchive: (objectId: string) =>
-      retractAllForArchiveMock(objectId),
+    retractAllPublications: (objectId: string) =>
+      retractAllPublicationsMock(objectId),
   },
 }));
 
@@ -98,31 +99,32 @@ beforeEach(() => {
   updateRows.length = 0;
   removeFromIndexMock.mockClear();
   removeFromIndexMock.mockResolvedValue(undefined);
-  retractAllForArchiveMock.mockClear();
-  retractAllForArchiveMock.mockResolvedValue(undefined);
+  retractAllPublicationsMock.mockClear();
+  retractAllPublicationsMock.mockResolvedValue(undefined);
 });
 
-describe("contentService.update archive → retract publications + prune index", () => {
-  it("retracts every live publication AND prunes the index when archiving", async () => {
-    updateRows.push(
-      [{ ...baseObj }], // loadByIdOrSlug
-      [{ ...baseObj, status: "archived" }] // UPDATE ... RETURNING
-    );
-    const result = await contentService.update(owner, baseObj.id, {
-      status: "archived",
-    });
-    expect(result.status).toBe("archived");
-    // The takedown runs so archived content is not left live at its reader URL.
-    expect(retractAllForArchiveMock).toHaveBeenCalledTimes(1);
-    expect(retractAllForArchiveMock).toHaveBeenCalledWith(baseObj.id);
-    expect(removeFromIndexMock).toHaveBeenCalledTimes(1);
-    expect(removeFromIndexMock).toHaveBeenCalledWith(baseObj.id);
-  });
+describe("contentService.update: draft/archived → retract publications + prune index", () => {
+  it.each(["archived", "draft"] as const)(
+    "retracts every live publication AND prunes the index when status → %s",
+    async (status) => {
+      updateRows.push(
+        [{ ...baseObj }], // loadByIdOrSlug
+        [{ ...baseObj, status }] // UPDATE ... RETURNING
+      );
+      const result = await contentService.update(owner, baseObj.id, { status });
+      expect(result.status).toBe(status);
+      // The takedown runs so the object is not left live at its reader URL.
+      expect(retractAllPublicationsMock).toHaveBeenCalledTimes(1);
+      expect(retractAllPublicationsMock).toHaveBeenCalledWith(baseObj.id);
+      expect(removeFromIndexMock).toHaveBeenCalledTimes(1);
+      expect(removeFromIndexMock).toHaveBeenCalledWith(baseObj.id);
+    }
+  );
 
-  it("SURFACES a retract failure (never silently leaves archived content live)", async () => {
+  it("SURFACES a retract failure (never silently leaves published content live)", async () => {
     // Unlike the best-effort index prune, a failed takedown must throw: leaving a
-    // publicly-live-but-archived object is the exact exposure this cascade closes.
-    retractAllForArchiveMock.mockRejectedValueOnce(new Error("retract boom"));
+    // publicly-live-but-drafted/archived object is the exact exposure this closes.
+    retractAllPublicationsMock.mockRejectedValueOnce(new Error("retract boom"));
     updateRows.push([{ ...baseObj }], [{ ...baseObj, status: "archived" }]);
     await expect(
       contentService.update(owner, baseObj.id, { status: "archived" })
@@ -138,17 +140,10 @@ describe("contentService.update archive → retract publications + prune index",
     expect(result.status).toBe("archived");
   });
 
-  it("does NOT retract or prune on a non-archive status update", async () => {
-    updateRows.push([{ ...baseObj }], [{ ...baseObj, status: "draft" }]);
-    await contentService.update(owner, baseObj.id, { status: "draft" });
-    expect(removeFromIndexMock).not.toHaveBeenCalled();
-    expect(retractAllForArchiveMock).not.toHaveBeenCalled();
-  });
-
-  it("does NOT retract or prune on a metadata-only update", async () => {
+  it("does NOT retract or prune on a metadata-only update (no status change)", async () => {
     updateRows.push([{ ...baseObj }], [{ ...baseObj, title: "New" }]);
     await contentService.update(owner, baseObj.id, { title: "New" });
     expect(removeFromIndexMock).not.toHaveBeenCalled();
-    expect(retractAllForArchiveMock).not.toHaveBeenCalled();
+    expect(retractAllPublicationsMock).not.toHaveBeenCalled();
   });
 });

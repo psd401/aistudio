@@ -644,10 +644,32 @@ export const publishService = {
     }
     const { externalRef, anyLiveRemaining } = outcome;
 
+    // Retrieval-index pruning (§16) FIRST — before the adapter teardown. Once NO
+    // destination is live anywhere, the object must stop surfacing as assistant
+    // context: remove its backing repository_item/chunks/link and clear
+    // indexed_at. This runs BEFORE the teardown deliberately: the teardown can
+    // throw (and re-throws below), and a retry would idempotently no-op at the
+    // `status = 'live'` filter and never reach a prune placed after it — leaving
+    // the index un-pruned indefinitely. Best-effort itself: the unpublish tx has
+    // already committed, so a prune failure is logged, never thrown.
+    if (!anyLiveRemaining) {
+      try {
+        await retrievalService.removeFromIndex(objectId);
+      } catch (pruneError) {
+        log.warn("Failed to prune retrieval index after unpublish", {
+          objectId,
+          destination,
+          error:
+            pruneError instanceof Error ? pruneError.message : String(pruneError),
+        });
+      }
+    }
+
     // Destination teardown AFTER the transaction commits (external/secondary IO
     // outside the tx). For the intranet adapter this hides the nav item; a
     // failure is logged and surfaced (the publication is already marked
-    // unpublished, so the live surface is gone regardless).
+    // unpublished + the index already pruned, so the live surface is gone
+    // regardless).
     if (adapter.unpublish) {
       try {
         await adapter.unpublish({ objectId, externalRef });
@@ -661,27 +683,6 @@ export const publishService = {
               : String(adapterError),
         });
         throw adapterError;
-      }
-    }
-
-    // Retrieval-index pruning (§16): once NO destination is live anywhere, the
-    // object must stop surfacing as assistant context — remove its backing
-    // repository_item/chunks/link and clear indexed_at. While ANY destination
-    // remains live the index stays (the content is still published somewhere).
-    // Best-effort like the publish-side indexing: the unpublish has already
-    // committed, so a prune failure is logged, never thrown — a later
-    // unpublish/archive (removeFromIndex is idempotent) or re-publish
-    // re-converges the index.
-    if (!anyLiveRemaining) {
-      try {
-        await retrievalService.removeFromIndex(objectId);
-      } catch (pruneError) {
-        log.warn("Failed to prune retrieval index after unpublish", {
-          objectId,
-          destination,
-          error:
-            pruneError instanceof Error ? pruneError.message : String(pruneError),
-        });
       }
     }
 
@@ -702,23 +703,25 @@ export const publishService = {
   },
 
   /**
-   * Take an object OFFLINE at every destination — the archive cascade (#1059).
+   * Take an object OFFLINE at every destination — the takedown cascade for a
+   * status transition OUT of `published` (`draft` or `archived`) via
+   * `contentService.update` (#1059).
    *
-   * Archiving is a removal, so unlike `unpublish` this is NOT §26.4-gated: pulling
-   * public content DOWN is always the safe direction, and the caller
-   * (`contentService.update` on the archived transition) has already run
+   * This is a removal, so unlike `unpublish` it is NOT §26.4-gated: pulling public
+   * content DOWN is always the safe direction, and the caller has already run
    * `assertCanEdit`. It flips every live `content_publications` row for the object
    * to `unpublished` in one FOR-UPDATE-locked transaction, then runs each
    * destination adapter's teardown (e.g. the intranet nav-item hide) post-commit.
    *
-   * Without this, an archived object stayed reachable at its permanent public /
-   * intranet reader URL (both readers gate only on a live publication, never on
-   * `status`), directly contradicting the "hidden" archive affordance. The object's
-   * status is set to `archived` by the caller; this method never touches status.
-   * Idempotent: no live publication → no-op.
+   * Without this, setting a published object to `draft` or `archived` left it
+   * reachable at its permanent public/intranet reader URL — both readers gate ONLY
+   * on a live publication, never on `content_objects.status` — a content-exposure
+   * footgun that contradicts what "draft"/"archived" imply. The caller writes the
+   * new status; this method never touches status. Idempotent: no live publication
+   * (already unpublished, or never published) → no-op.
    */
-  async retractAllForArchive(objectId: string): Promise<void> {
-    const log = createLogger({ action: "publish.retractAllForArchive" });
+  async retractAllPublications(objectId: string): Promise<void> {
+    const log = createLogger({ action: "publish.retractAllPublications" });
 
     const torn = await executeTransaction(
       async (tx: DbTransaction) => {
@@ -755,7 +758,7 @@ export const publishService = {
           );
         return live;
       },
-      "publish.retractAllForArchive"
+      "publish.retractAllPublications"
     );
 
     // Adapter teardown AFTER the commit (secondary IO). Best-effort PER

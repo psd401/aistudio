@@ -534,5 +534,40 @@ export const versionService = {
       }
     }, "content.rollback");
     log.info("Rolled back content head", { objectId, toVersionId });
+
+    // Refresh the retrieval index (§16). The index stores a PERSISTED snapshot of
+    // the head version's chunked text, so repointing the working head above changes
+    // what "current" means without touching that snapshot — a published,
+    // retrieval-scoped object would keep surfacing the STALE pre-rollback text to
+    // assistants until some unrelated republish re-indexed it. Best-effort: the
+    // rollback has already committed, so a re-index failure is logged, never thrown.
+    await reindexAfterRollbackBestEffort(objectId);
   },
 };
+
+/**
+ * Best-effort retrieval-index refresh after a rollback repoints the working head.
+ * `retrievalService.indexObject` self-guards on `status === "published"` (and on a
+ * missing object / current version), so this is a safe no-op for a draft/archived
+ * or unindexed object — it never wrongly ADDS an unpublished object to the index —
+ * while a published object is re-indexed to reflect the rolled-back head. Mirrors
+ * the publish path's inline `indexObject` and content-service's
+ * `pruneRetrievalIndexBestEffort`: the head change has already committed, so a
+ * re-index failure is logged, never thrown. Lazy import: retrieval-service
+ * statically imports THIS module, so a static import back would create a cycle.
+ */
+async function reindexAfterRollbackBestEffort(objectId: string): Promise<void> {
+  try {
+    const { retrievalService } = await import("./retrieval-service");
+    await retrievalService.indexObject(objectId);
+  } catch (indexError) {
+    createLogger({ action: "content.rollback" }).warn(
+      "Failed to re-index retrieval snapshot after rollback",
+      {
+        objectId,
+        error:
+          indexError instanceof Error ? indexError.message : String(indexError),
+      }
+    );
+  }
+}

@@ -12,6 +12,7 @@ import {
   formatKnowledgeContext,
   retrieveAtriumKnowledgeForPrompt,
   formatAtriumKnowledgeContext,
+  resolveScheduledAtriumRetrievalRequester,
 } from '@/lib/assistant-architect/knowledge-retrieval';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import { buildAutonomousRequesterForIdentity } from '@/lib/content';
@@ -86,6 +87,15 @@ interface PromptExecutionContext {
    * the user's full human authority.
    */
   agentRequester: Requester | null;
+  /**
+   * The requester used ONLY for Atrium content RETRIEVAL (§16): the agent service
+   * identity when set, otherwise the schedule OWNER's own `user` requester. Distinct
+   * from `agentRequester` (the write/execution identity, left untouched): retrieval
+   * is read-only and bounded per-hit by `canView`, so reading as the owner exposes
+   * only content they may already see — this is NOT borrowing the owner's write
+   * authority. Null (both unresolved) skips retrieval (fail closed).
+   */
+  atriumRetrievalRequester: Requester | null;
 }
 
 /**
@@ -296,6 +306,19 @@ export async function POST(req: NextRequest) {
     if ('errorResponse' in agentResolution) return agentResolution.errorResponse;
     const agentRequester = agentResolution.requester;
 
+    // Atrium retrieval requester (Phase 6, §16): retrieval is READ-ONLY and bounded
+    // per-hit by `canView`, so when a schedule specifies no agent identity we fall
+    // back to the schedule OWNER's own `user` requester FOR RETRIEVAL ONLY — it can
+    // surface only content the owner may already see. This is NOT borrowing the
+    // owner's authority for a WRITE (which the design forbids); the write/execution
+    // identity stays exactly `agentRequester`. Without this fallback scheduled Atrium
+    // retrieval was dead code: nothing populates `scheduled_executions.agent_identity_id`,
+    // so `agentRequester` is always null and retrieval never fired. Both null -> skip.
+    const atriumRetrievalRequester = await resolveScheduledAtriumRetrievalRequester(
+      agentRequester,
+      userId
+    );
+
     log.info('Scheduled execution request parsed', sanitizeForLogging({
       scheduleId,
       toolId,
@@ -429,7 +452,10 @@ export async function POST(req: NextRequest) {
       // The resolved service-identity Requester (null when the schedule runs as the
       // owning user). Threaded so the content-authoring tool wiring reads its write
       // authority from the identity's scopes.
-      agentRequester
+      agentRequester,
+      // Read-only Atrium retrieval identity: the service identity when set, else the
+      // owning user (canView-bounded). Distinct from the write identity above.
+      atriumRetrievalRequester
     };
 
     try {
@@ -638,9 +664,11 @@ function describeWriteIdentity(context: PromptExecutionContext): string {
  * `executePromptChainServerSide` (complexity budget); logic unchanged.
  *
  * Atrium (Phase 6, Issue #1056): off unless the assistant has a
- * `retrieval_scope`. A scheduled run retrieves ONLY as its resolved service
- * identity (§25): a null `agentRequester` skips Atrium retrieval entirely
- * (fail closed) rather than borrowing the owning user's authority.
+ * `retrieval_scope`. A scheduled run retrieves as `atriumRetrievalRequester` —
+ * the resolved service identity (§25) when set, otherwise the schedule OWNER's
+ * own `user` requester (read-only + `canView`-bounded, so it exposes only content
+ * the owner may already see; NOT the owner's write authority). A null requester
+ * (neither resolvable) skips Atrium retrieval entirely (fail closed).
  */
 async function injectKnowledgeContext(
   prompt: ChainPrompt,
@@ -682,7 +710,7 @@ async function injectKnowledgeContext(
   // Atrium content-as-context (Phase 6): same caps as the repository block,
   // distinct `atrium:<slug>` source labels (see the function JSDoc for gating).
   const atriumHits = await retrieveAtriumKnowledgeForPrompt(
-    context.agentRequester,
+    context.atriumRetrievalRequester,
     context.assistantId,
     prompt.content,
     { maxChunks: 10, maxTokens: 4000 },

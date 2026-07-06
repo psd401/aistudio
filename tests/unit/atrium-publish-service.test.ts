@@ -126,6 +126,10 @@ jest.mock("@/lib/content/visibility-service", () => ({
 // ran AFTER the transaction.
 let adapterPublishCalls = 0;
 let adapterUnpublishCalls = 0;
+// When true, the intranet adapter teardown throws — used to prove the retrieval
+// index is pruned BEFORE the teardown (#4), so a teardown failure can't strand
+// the index un-pruned.
+let adapterUnpublishThrows = false;
 jest.mock("@/lib/content/publish-adapters/intranet", () => ({
   intranetAdapter: {
     destination: "intranet",
@@ -135,6 +139,7 @@ jest.mock("@/lib/content/publish-adapters/intranet", () => ({
     }),
     unpublish: jest.fn(async () => {
       adapterUnpublishCalls += 1;
+      if (adapterUnpublishThrows) throw new Error("nav hide boom");
     }),
   },
 }));
@@ -284,6 +289,7 @@ beforeEach(() => {
   lastSetLevelExtraSet = null;
   adapterPublishCalls = 0;
   adapterUnpublishCalls = 0;
+  adapterUnpublishThrows = false;
   publicWebPublishCalls = 0;
   lastPublicWebSlug = null;
   lastSetPayload = null;
@@ -543,6 +549,20 @@ describe("publishService.unpublish", () => {
     txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
     const result = await publishService.unpublish(owner, "o1", "intranet");
     expect(result).toEqual({ unpublished: true });
+    expect(adapterUnpublishCalls).toBe(1);
+  });
+
+  it("prunes the retrieval index BEFORE the adapter teardown (#4 — teardown failure can't strand the index)", async () => {
+    // No other destination live → the object goes fully offline, so the index
+    // must be pruned. The teardown then throws; the prune must already have run
+    // (a retry would idempotently no-op at the `status='live'` filter and never
+    // reach a prune placed after the teardown).
+    adapterUnpublishThrows = true;
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    await expect(
+      publishService.unpublish(owner, "o1", "intranet")
+    ).rejects.toThrow(/nav hide boom/);
+    expect(removeFromIndexMock).toHaveBeenCalledWith("o1");
     expect(adapterUnpublishCalls).toBe(1);
   });
 
