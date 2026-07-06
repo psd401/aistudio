@@ -36,6 +36,28 @@ describe('sanitizeHtml — decode-first bypass (REV-COR-409 / REV-INFRA-094)', (
   it('passes plain text through unchanged', () => {
     expect(sanitizeHtml('just some words')).toBe('just some words');
   });
+
+  it('does not re-introduce <script> from decimal-entity-encoded input (REV-INFRA-096)', () => {
+    // &#60; = '<', &#62; = '>' — a numeric-entity bypass of the old named-only decoder.
+    const out = sanitizeHtml('&#60;script&#62;alert(1)&#60;/script&#62;');
+    expect(out).not.toContain('<script>');
+    expect(out).not.toContain('<');
+    expect(out).not.toContain('>');
+    expect(out).toContain('alert(1)');
+  });
+
+  it('does not re-introduce <script> from hex-entity-encoded input (REV-INFRA-096)', () => {
+    // &#x3c; = '<', &#x3e; = '>'
+    const out = sanitizeHtml('&#x3c;script&#x3e;alert(1)&#x3c;/script&#x3e;');
+    expect(out).not.toContain('<script>');
+    expect(out).not.toContain('<');
+    expect(out).not.toContain('>');
+    expect(out).toContain('alert(1)');
+  });
+
+  it('leaves an unrecognized or malformed entity untouched', () => {
+    expect(sanitizeHtml('AT&T; &nosuchentity; &#zzz;')).toBe('AT&T; &nosuchentity; &#zzz;');
+  });
 });
 
 describe('sanitizeHtml — preserveNewlines (REV-COR-408)', () => {
