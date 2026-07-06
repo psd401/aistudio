@@ -35,6 +35,12 @@ describe('LambdaLogger.sanitizeData (REV-INFRA-095)', () => {
     expect(sanitize('processing document report.pdf')).toBe('processing document report.pdf');
   });
 
+  it('redacts quoted keys/values in serialized JSON-like strings (REV-INFRA-096)', () => {
+    expect(sanitize('"token": "supersecret"')).toBe('"token": "[REDACTED]"');
+    expect(sanitize("token='supersecret'")).toBe("token='[REDACTED]'");
+    expect(sanitize('{"apiKey":"sk-abc123"}')).toBe('{"apiKey":"[REDACTED]"}');
+  });
+
   it('does not pollute Object.prototype from a __proto__ key', () => {
     const payload = JSON.parse('{"__proto__": {"polluted": true}, "safe": 1}');
     const out = sanitize(payload);

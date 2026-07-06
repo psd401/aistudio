@@ -53,11 +53,14 @@ export class LambdaLogger {
       // appeared, so `Authorization: Bearer abc123` became `[REDACTED]orization:
       // Bearer abc123` — masking a harmless word while leaking the token in full.
       // This redacts the value after a sensitive key (`key=VALUE`, `key: VALUE`,
-      // `Authorization: Bearer VALUE`). Free-form message strings are otherwise NOT
-      // deep-scrubbed — callers must avoid interpolating secrets into messages.
+      // `Authorization: Bearer VALUE`), including quoted forms common in serialized
+      // JSON/XML (`"token": "supersecret"`, `token="supersecret"`) (REV-INFRA-096) —
+      // the unquoted-only version missed these entirely. Free-form message strings
+      // are otherwise NOT deep-scrubbed — callers must avoid interpolating secrets
+      // into messages.
       return data.replace(
-        /\b(password|passwd|secret|token|api[_-]?key|access[_-]?key|authorization|auth[_-]?token)\b(\s*[:=]\s*)(?:bearer\s+)?[^\s"',;})&]+/gi,
-        '$1$2[REDACTED]'
+        /(["']?)\b(password|passwd|secret|token|api[_-]?key|access[_-]?key|authorization|auth[_-]?token)\b\1(\s*[:=]\s*)(["']?)((?:bearer\s+)?)([^\s"',;})&]+)\4/gi,
+        '$1$2$1$3$4$5[REDACTED]$4'
       );
     }
 
