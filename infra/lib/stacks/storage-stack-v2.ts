@@ -21,6 +21,10 @@ export interface StorageStackV2Props extends BaseStackProps {
 export class StorageStackV2 extends BaseStack {
   private _documentsBucketName: string = ""
 
+  // Superseded/deleted object versions are purged after this window. Deliberately a
+  // dedicated constant, NOT database.backupRetention (a DB backup window) — REV-COR-486.
+  private static readonly NONCURRENT_VERSION_RETENTION = cdk.Duration.days(30)
+
   public get documentsBucketName(): string {
     return this._documentsBucketName
   }
@@ -41,10 +45,14 @@ export class StorageStackV2 extends BaseStack {
       autoDeleteObjects: this.deploymentEnvironment !== "prod",
       lifecycleRules: [
         {
-          id: "ExpireDeletedObjects",
+          // Reap ONLY noncurrent (superseded/deleted) versions. Do NOT set `expiration`
+          // on this versioned bucket — it adds a delete marker to every live object,
+          // silently 404-ing current data once it ages out (REV-COR-486). Retention is
+          // an explicit, purpose-named value, not the DB backup window.
+          id: "ExpireNoncurrentVersions",
           enabled: true,
-          expiration: this.config.database.backupRetention, // Use config for consistency
-          noncurrentVersionExpiration: this.config.database.backupRetention,
+          noncurrentVersionExpiration: StorageStackV2.NONCURRENT_VERSION_RETENTION,
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(7),
         },
       ],
       cors: [
