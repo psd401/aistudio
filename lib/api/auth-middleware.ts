@@ -362,6 +362,26 @@ interface JwtAuthResult {
 }
 
 /**
+ * Extract the Atrium delegated-agent marker (§26.1) from a verified token payload.
+ *
+ * The delegation trigger is EXCLUSIVELY a numeric `delegated_for` claim — the one
+ * the delegated minter (`POST /api/v1/agents/delegated-token`) always stamps
+ * directly. We deliberately do NOT fall back to the RFC-8693 `act.sub` actor claim:
+ * a broad `act.sub` fallback would silently promote ANY future token carrying a
+ * numeric `act.sub` (an audit actor, another subsystem's use of `act`) into Atrium
+ * delegation — with no `content:delegate` authorization anywhere on that path. The
+ * minted token keeps `act.sub` for audit only (a non-numeric agent client id).
+ *
+ * Returns the numeric user id, or `undefined` for an absent / non-integer value.
+ */
+export function parseDelegatedForClaim(
+  payload: Record<string, unknown>
+): number | undefined {
+  const raw = payload.delegated_for as string | number | undefined;
+  return raw != null && Number.isInteger(Number(raw)) ? Number(raw) : undefined;
+}
+
+/**
  * Verify a JWT Bearer token issued by the OIDC provider.
  * Uses jose library for JWKS-based verification.
  */
@@ -394,17 +414,8 @@ async function verifyJwtToken(
     const scopeStr = (payload.scope as string) ?? "";
     const scopes = scopeStr ? scopeStr.split(" ") : [];
 
-    // Atrium delegated-agent marker (§26.1). A `delegated_for` claim (numeric
-    // user id, or RFC 8693 `act.sub`) names the human the agent acts for; the
-    // content surface uses it to build an `agent-delegated` requester that
-    // inherits exactly that human's grants. Ignore non-numeric / absent values.
-    const delegatedForRaw =
-      (payload.delegated_for as string | number | undefined) ??
-      ((payload.act as { sub?: string } | undefined)?.sub);
-    const delegatedForUserId =
-      delegatedForRaw != null && Number.isInteger(Number(delegatedForRaw))
-        ? Number(delegatedForRaw)
-        : undefined;
+    // Atrium delegated-agent marker (§26.1) — see `parseDelegatedForClaim`.
+    const delegatedForUserId = parseDelegatedForClaim(payload);
 
     return {
       userId,

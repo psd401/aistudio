@@ -97,11 +97,11 @@ export interface DelegatedTokenClaimsInput {
  * system account rather than the full human — blast-radius containment. Only the
  * content resolver reads `delegated_for` (first) to grant delegated authority.
  *
- * `delegated_for` is emitted NUMERIC. `act.sub` carries the agent's (non-numeric)
- * client id for RFC-8693-style audit richness — and MUST stay non-numeric: the
- * consumer treats a numeric `act.sub` as a `delegated_for` fallback
- * (`auth-middleware.ts`), so a numeric value here would be mis-read as the acting-for
- * user. A client id (uuid/string) yields `Number(act.sub) === NaN`, correctly ignored.
+ * `delegated_for` is emitted NUMERIC — it is the SOLE delegation trigger the
+ * consumer honors (`parseDelegatedForClaim` in `auth-middleware.ts`). `act.sub`
+ * carries the agent's client id for RFC-8693-style AUDIT richness only; the consumer
+ * no longer falls back to it, so it is informational. It is kept non-numeric (a
+ * client id) as defensive hygiene regardless.
  */
 export function buildDelegatedTokenClaims(
   input: DelegatedTokenClaimsInput
