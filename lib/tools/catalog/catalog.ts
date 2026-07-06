@@ -77,6 +77,18 @@ interface DbState {
    * Only deprecated rows are tracked; absence means not deprecated.
    */
   deprecatedCodeKeys: Map<string, CodeDeprecationState>;
+  /**
+   * PUBLISHED input/output schemas of code-managed rows, keyed by
+   * `identifier@version` (Issue #927 immutability — PR #1129 review). The sync
+   * refuses schema edits to a published version, but code entries are projected
+   * from the in-memory manifest — without this override a schema edit that the
+   * sync froze in the DB would still be SERVED by tools/list, REST metadata,
+   * and model tool schemas. The DB row is the published contract, so it wins.
+   */
+  codeSchemas: Map<
+    string,
+    { inputSchema: unknown; outputSchema: Record<string, unknown> | null }
+  >;
 }
 
 interface DbCache {
@@ -109,20 +121,36 @@ function parseSkillRef(handlerRef: string | null | undefined): string | null {
 function manifestToEntry(
   entry: ToolManifestEntry,
   inactiveCodeKeys: Set<string>,
-  deprecatedCodeKeys: Map<string, CodeDeprecationState>
+  deprecatedCodeKeys: Map<string, CodeDeprecationState>,
+  codeSchemas: Map<
+    string,
+    { inputSchema: unknown; outputSchema: Record<string, unknown> | null }
+  >
 ): ToolCatalogEntry {
   const version = entry.version ?? "v1";
   const key = entryKey(entry.identifier, version);
   // A code tool version is never deprecated by the manifest itself; deprecation
   // is a runtime admin (DB) action recorded in deprecatedCodeKeys (#927).
   const deprecation = deprecatedCodeKeys.get(key);
+  // Serve the PUBLISHED (DB) schema, not the manifest's: normally identical
+  // (the sync reconciles them), but after a refused immutability violation the
+  // DB keeps the published contract and this override keeps the runtime serving
+  // it (#927 — PR #1129 review). Falls back to the manifest before first sync
+  // or on cold-start DB failure (documented degradation).
+  const published = codeSchemas.get(key);
   return {
     identifier: entry.identifier,
     version,
     name: entry.name,
     description: entry.description,
-    inputSchema: entry.inputSchema,
-    outputSchema: entry.outputSchema,
+    // DB jsonb columns type as unknown; the row was written FROM this same
+    // shape by the sync, so the cast mirrors dbRowToEntry's.
+    inputSchema: published
+      ? (published.inputSchema as ToolCatalogEntry["inputSchema"])
+      : entry.inputSchema,
+    outputSchema: published
+      ? (published.outputSchema ?? undefined)
+      : entry.outputSchema,
     surfaces: entry.surfaces,
     requiredScopes: entry.requiredScopes,
     surfaceScopes: entry.surfaceScopes,
@@ -206,7 +234,11 @@ function dbRowToEntry(r: ToolCatalogDbRow): ToolCatalogEntry {
 function recordCodeRowState(
   r: ToolCatalogDbRow,
   inactiveCodeKeys: Set<string>,
-  deprecatedCodeKeys: Map<string, CodeDeprecationState>
+  deprecatedCodeKeys: Map<string, CodeDeprecationState>,
+  codeSchemas: Map<
+    string,
+    { inputSchema: unknown; outputSchema: Record<string, unknown> | null }
+  >
 ): void {
   const key = entryKey(r.identifier, r.version);
   if (!r.isActive) {
@@ -221,6 +253,13 @@ function recordCodeRowState(
       removalDate: r.removalDate ?? null,
     });
   }
+  // The DB row's schema is the PUBLISHED contract for this version; the
+  // manifest projection serves it so a frozen (refused) manifest schema edit is
+  // never exposed to callers (#927 immutability — PR #1129 review).
+  codeSchemas.set(key, {
+    inputSchema: r.inputSchema,
+    outputSchema: r.outputSchema,
+  });
 }
 
 /** True when `scopes` grant access to a tool requiring `requiredScopes`. */
@@ -285,10 +324,11 @@ export class ToolCatalog {
   /** Manifest-derived runtime entries (no DB round-trip). */
   private manifestEntries(
     inactiveCodeKeys: Set<string>,
-    deprecatedCodeKeys: Map<string, CodeDeprecationState>
+    deprecatedCodeKeys: Map<string, CodeDeprecationState>,
+    codeSchemas: DbState["codeSchemas"]
   ): ToolCatalogEntry[] {
     return TOOL_MANIFEST.map((e) =>
-      manifestToEntry(e, inactiveCodeKeys, deprecatedCodeKeys)
+      manifestToEntry(e, inactiveCodeKeys, deprecatedCodeKeys, codeSchemas)
     );
   }
 
@@ -320,6 +360,7 @@ export class ToolCatalog {
         const entries: ToolCatalogEntry[] = [];
         const inactiveCodeKeys = new Set<string>();
         const deprecatedCodeKeys = new Map<string, CodeDeprecationState>();
+        const codeSchemas: DbState["codeSchemas"] = new Map();
         for (const r of rows as ToolCatalogDbRow[]) {
           // Treat both 'code' and 'retired' rows as code-managed: track their
           // is_active + deprecation state for the manifest projection rather than
@@ -327,7 +368,7 @@ export class ToolCatalog {
           // is a code tool removed from the manifest; its admin-disabled state
           // must survive a later re-add (PR #1032 review finding #1).
           if (r.source === "code" || r.source === "retired") {
-            recordCodeRowState(r, inactiveCodeKeys, deprecatedCodeKeys);
+            recordCodeRowState(r, inactiveCodeKeys, deprecatedCodeKeys, codeSchemas);
             continue;
           }
           entries.push(dbRowToEntry(r));
@@ -337,6 +378,7 @@ export class ToolCatalog {
           entries,
           inactiveCodeKeys,
           deprecatedCodeKeys,
+          codeSchemas,
         };
         this.dbCache = { state, expiresAt: Date.now() + DB_CACHE_TTL_MS };
         return state;
@@ -365,6 +407,7 @@ export class ToolCatalog {
           entries: [],
           inactiveCodeKeys: new Set(),
           deprecatedCodeKeys: new Map(),
+          codeSchemas: new Map(),
         };
       } finally {
         this.dbPromise = null;
@@ -396,16 +439,17 @@ export class ToolCatalog {
    * identifier@version collision with a DB row.
    */
   async list(filter: ToolCatalogFilter = {}): Promise<ToolCatalogEntry[]> {
-    const { entries: dbEntries, inactiveCodeKeys, deprecatedCodeKeys } =
+    const { entries: dbEntries, inactiveCodeKeys, deprecatedCodeKeys, codeSchemas } =
       await this.dbState();
     const merged = new Map<string, ToolCatalogEntry>();
     for (const e of dbEntries) {
       merged.set(entryKey(e.identifier, e.version), e);
     }
     // Manifest entries override DB rows for the same key (code is authoritative),
-    // but honor an admin's DB is_active=false via inactiveCodeKeys and DB-level
-    // deprecation via deprecatedCodeKeys (#927).
-    for (const e of this.manifestEntries(inactiveCodeKeys, deprecatedCodeKeys)) {
+    // but honor an admin's DB is_active=false via inactiveCodeKeys, DB-level
+    // deprecation via deprecatedCodeKeys, and the PUBLISHED schema via
+    // codeSchemas (#927).
+    for (const e of this.manifestEntries(inactiveCodeKeys, deprecatedCodeKeys, codeSchemas)) {
       merged.set(entryKey(e.identifier, e.version), e);
     }
 

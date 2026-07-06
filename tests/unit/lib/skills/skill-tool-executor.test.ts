@@ -80,7 +80,7 @@ describe("executeSkillTool", () => {
     // scope=shared + scan_status=clean (fail closed, same message either way).
     executeQueryMock.mockResolvedValue([])
 
-    const result = await executeSkillTool("bogus-id")
+    const result = await executeSkillTool("99999999-8888-4777-8666-555555555555")
 
     expect(result.isError).toBe(true)
     expect(result.content).toHaveLength(1)
@@ -90,13 +90,23 @@ describe("executeSkillTool", () => {
     expect(readSkillMarkdownMock).not.toHaveBeenCalled()
   })
 
+  it("short-circuits a malformed (non-UUID) skill id before touching the DB (PR #1129 review)", async () => {
+    const result = await executeSkillTool("bogus-id")
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("not available")
+    // A malformed id must never reach PostgreSQL (uuid syntax error).
+    expect(executeQueryMock).not.toHaveBeenCalled()
+    expect(readSkillMarkdownMock).not.toHaveBeenCalled()
+  })
+
   it("returns an isError 'could not be loaded' result when SKILL.md is unreadable", async () => {
     executeQueryMock.mockResolvedValue([
       { name: "weather-helper", s3Key: "skills/shared/weather-helper/" },
     ])
     readSkillMarkdownMock.mockResolvedValue(null)
 
-    const result = await executeSkillTool("skill-id")
+    const result = await executeSkillTool("11111111-2222-4333-8444-555555555555")
 
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain("could not be loaded")
@@ -115,7 +125,7 @@ describe("executeSkillTool", () => {
     ])
     readSkillMarkdownMock.mockResolvedValue(skillMd)
 
-    const result = await executeSkillTool("skill-id")
+    const result = await executeSkillTool("11111111-2222-4333-8444-555555555555")
 
     expect(result.isError).toBeUndefined()
     expect(result.content).toHaveLength(1)

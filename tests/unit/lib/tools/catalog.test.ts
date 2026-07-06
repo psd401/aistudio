@@ -85,6 +85,41 @@ describe("ToolCatalog", () => {
     expect(tools.every((t) => t.surfaces.includes("mcp"))).toBe(true)
   })
 
+  it("serves the PUBLISHED (DB) schema for a code tool, not the manifest's (#927 immutability — PR #1129 review)", async () => {
+    // Simulate a frozen immutability violation: the DB row (published contract)
+    // holds a different input schema than the in-memory manifest. The runtime
+    // must serve the DB schema — otherwise a refused manifest edit would still
+    // be exposed via tools/list, REST metadata, and model tool schemas.
+    const publishedSchema = {
+      type: "object",
+      properties: { frozen: { type: "string", description: "published" } },
+    }
+    dbRows = [
+      {
+        identifier: "decisions.search",
+        version: "v1",
+        name: "search_decisions",
+        description: "published description",
+        inputSchema: publishedSchema,
+        outputSchema: null,
+        surfaces: ["mcp", "internal"],
+        requiredScopes: ["mcp:search_decisions"],
+        agentCallable: true,
+        source: "code",
+        isActive: true,
+        deprecatedAt: null,
+        replacedBy: null,
+        removalDate: null,
+        handlerRef: "decisions.search",
+      },
+    ]
+    const catalog = new ToolCatalog()
+    const tools = await catalog.list({ surface: "mcp", scopes: ["*"] })
+    const search = tools.find((t) => t.identifier === "decisions.search")
+    expect(search).toBeDefined()
+    expect(search!.inputSchema).toEqual(publishedSchema)
+  })
+
   it("filters AI SDK tools by surface", async () => {
     const catalog = new ToolCatalog()
     const tools = await catalog.list({ surface: "ai_sdk", scopes: ["*"] })

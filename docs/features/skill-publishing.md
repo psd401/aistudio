@@ -64,7 +64,7 @@ The body documents the assistant: `# name`, `## Inputs` (field table),
 
 | Surface | Mechanism |
 |---------|-----------|
-| **Nexus chat** | Session binding, not a callable tool: `/skills/{id}` → "Use in chat" passes `skillId`; the chat route re-validates approval server-side, intersects the session's tools (built-in **and** MCP connector tools) with `allowed-tools`, and injects the SKILL.md instructions into the system prompt. An unknown/unapproved id neither loosens tools nor injects anything. |
+| **Nexus chat** | Session binding, not a callable tool: `/skills/{id}` → "Use in chat" passes `skillId`; the chat route re-validates approval server-side, intersects the session's built-in tools with `allowed-tools`, drops MCP connector tools unless a pin explicitly namespaces them (`connector:{name}` or `connector:{serverId}:{name}` — a bare pin never admits an external tool, which could otherwise shadow the pinned built-in), and injects the SKILL.md instructions into the system prompt. An unknown/unapproved id neither loosens tools nor injects anything. |
 | **Agentic assistants / MCP** | The `skill.{slug}` catalog tool is invocable; dispatch resolves `handlerRef: skill:{id}` via `lib/skills/skill-tool-executor.ts`, which re-checks approval (uncached) and returns the SKILL.md document as the tool result (progressive disclosure — a skill is an instruction folder, not a function). |
 
 ## Export for Claude Code / Claude Desktop

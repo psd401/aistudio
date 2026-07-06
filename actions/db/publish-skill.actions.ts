@@ -48,7 +48,7 @@ function assertPublishableToolEntries(
     "enabledTools",
     invalidToolEntries.join(", "),
     `These tool references cannot be published in a skill's allowed-tools list: ${invalidToolEntries.join(", ")}. ` +
-      "Tool references must be plain identifiers (letters, digits, dots, dashes, colons) with an optional @vN version pin."
+      "Tool references must be plain identifiers (letters, digits, dots, dashes, underscores, colons) with an optional @vN version pin."
   )
 }
 

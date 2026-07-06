@@ -146,7 +146,7 @@ describe("getApprovedSkillAllowedTools (DB path)", () => {
         s3Key: "skills/shared/weather-helper/",
       },
     ])
-    await expect(getApprovedSkillAllowedTools("skill-id")).resolves.toEqual([
+    await expect(getApprovedSkillAllowedTools("11111111-2222-4333-8444-555555555555")).resolves.toEqual([
       "webSearch",
       "imageGen",
     ])
@@ -158,7 +158,7 @@ describe("getApprovedSkillAllowedTools (DB path)", () => {
     executeQueryMock.mockResolvedValue([
       { name: "no-pin", allowedTools: null, s3Key: "skills/shared/no-pin/" },
     ])
-    await expect(getApprovedSkillAllowedTools("skill-id")).resolves.toEqual([])
+    await expect(getApprovedSkillAllowedTools("11111111-2222-4333-8444-555555555555")).resolves.toEqual([])
   })
 })
 
@@ -175,7 +175,7 @@ describe("getApprovedSkillSession (epic #922 completion audit)", () => {
         s3Key: "skills/shared/weather-helper/",
       },
     ])
-    await expect(getApprovedSkillSession("skill-id")).resolves.toEqual({
+    await expect(getApprovedSkillSession("11111111-2222-4333-8444-555555555555")).resolves.toEqual({
       name: "weather-helper",
       allowedTools: ["documents.create@v1"],
       s3Key: "skills/shared/weather-helper/",
@@ -193,11 +193,19 @@ describe("getApprovedSkillSession (epic #922 completion audit)", () => {
     executeQueryMock.mockResolvedValue([
       { name: "no-pin", allowedTools: null, s3Key: "skills/shared/no-pin/" },
     ])
-    await expect(getApprovedSkillSession("skill-id")).resolves.toEqual({
+    await expect(getApprovedSkillSession("11111111-2222-4333-8444-555555555555")).resolves.toEqual({
       name: "no-pin",
       allowedTools: [],
       s3Key: "skills/shared/no-pin/",
     })
+  })
+})
+
+describe("isSkillIdShaped / malformed-id guard (PR #1129 review)", () => {
+  it("returns null for a malformed (non-UUID) skill id without querying the DB", async () => {
+    const before = executeQueryMock.mock.calls.length
+    await expect(getApprovedSkillSession("not-a-uuid")).resolves.toBeNull()
+    expect(executeQueryMock.mock.calls.length).toBe(before)
   })
 })
 
@@ -226,10 +234,33 @@ describe("filterConnectorToolsByPin (#925 AC#6 — epic #922 completion audit)",
     ])
   })
 
-  it("keeps only connector tools whose name matches a version-stripped pin", () => {
+  it("drops connector tools matching a BARE pin name (shadowing guard — PR #1129 review)", () => {
+    // A bare pin is a catalog identifier; a connector tool sharing that wire
+    // name is a DIFFERENT (external) tool and, with connector merge precedence,
+    // would otherwise shadow the pinned built-in.
     const results = makeResults()
     const out = filterConnectorToolsByPin(results, ["documents.create@v1"])
+    expect(Object.keys(out[0].tools)).toEqual([])
+  })
+
+  it("keeps a connector tool only via an explicit connector: pin", () => {
+    const results = makeResults()
+    const out = filterConnectorToolsByPin(results, ["connector:external.rocket"])
+    expect(Object.keys(out[0].tools)).toEqual(["external.rocket"])
+  })
+
+  it("keeps a connector tool via a server-scoped connector:{serverId}:{name} pin", () => {
+    const results = makeResults()
+    const out = filterConnectorToolsByPin(results, [
+      "connector:srv-1:documents.create",
+    ])
     expect(Object.keys(out[0].tools)).toEqual(["documents.create"])
+    // The same pin does not admit the tool on a DIFFERENT server.
+    const other = filterConnectorToolsByPin(
+      [{ ...makeResults()[0], serverId: "srv-2" }],
+      ["connector:srv-1:documents.create"]
+    )
+    expect(Object.keys(other[0].tools)).toEqual([])
   })
 
   it("drops every connector tool when no pin matches", () => {
@@ -240,7 +271,7 @@ describe("filterConnectorToolsByPin (#925 AC#6 — epic #922 completion audit)",
 
   it("returns NEW objects and never mutates the originals' tools", () => {
     const results = makeResults()
-    const out = filterConnectorToolsByPin(results, ["documents.create"])
+    const out = filterConnectorToolsByPin(results, ["connector:documents.create"])
     expect(out[0]).not.toBe(results[0])
     expect(out[0].tools).not.toBe(results[0].tools)
     // Original tool set untouched (its close handle must still clean up both).
@@ -252,7 +283,7 @@ describe("filterConnectorToolsByPin (#925 AC#6 — epic #922 completion audit)",
 
   it("preserves non-tools properties (serverId, close) via spread", () => {
     const results = makeResults()
-    const out = filterConnectorToolsByPin(results, ["documents.create"])
+    const out = filterConnectorToolsByPin(results, ["connector:documents.create"])
     expect(out[0].serverId).toBe("srv-1")
     expect(out[0].close).toBe(results[0].close)
   })

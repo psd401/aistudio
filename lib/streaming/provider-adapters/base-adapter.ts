@@ -83,10 +83,15 @@ export function transformFinishUsage(
 ): { promptTokens: number; completionTokens: number; totalTokens: number } | undefined {
   if (!rawUsage) return undefined;
   const usage = rawUsage as StreamFinishUsage;
+  const promptTokens = usage.inputTokens ?? usage.promptTokens ?? 0;
+  const completionTokens = usage.outputTokens ?? usage.completionTokens ?? 0;
   return {
-    promptTokens: usage.inputTokens ?? usage.promptTokens ?? 0,
-    completionTokens: usage.outputTokens ?? usage.completionTokens ?? 0,
-    totalTokens: usage.totalTokens || 0,
+    promptTokens,
+    completionTokens,
+    // Derive the total when the provider omits it (or reports a bogus 0 while
+    // the components are non-zero) so downstream token accounting never sees a
+    // zero total for a real completion. (PR #1129 review.)
+    totalTokens: usage.totalTokens || promptTokens + completionTokens,
   };
 }
 

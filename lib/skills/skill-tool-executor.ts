@@ -21,6 +21,7 @@ import { and, eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { psdAgentSkills } from "@/lib/db/schema/tables/agent-skills";
 import { readSkillMarkdown } from "@/lib/skills/skill-publish-pipeline";
+import { isSkillIdShaped } from "@/lib/skills/skill-tool-enforcement";
 import { createLogger } from "@/lib/logger";
 import type { McpToolResult } from "@/lib/mcp/types";
 
@@ -38,6 +39,16 @@ function errorResult(text: string): McpToolResult {
  * receives the complete, scanned artifact — nothing is re-synthesized here.
  */
 export async function executeSkillTool(skillId: string): Promise<McpToolResult> {
+  // A malformed id would raise a PostgreSQL uuid syntax error instead of
+  // resolving to "unknown skill" — guard before querying. handlerRefs are
+  // written by us at registration, so this only trips on a corrupted ref.
+  // (PR #1129 review.)
+  if (!isSkillIdShaped(skillId)) {
+    log.warn("Skill tool invoked with malformed skill id", { skillId });
+    return errorResult(
+      "This skill is not available. It may have been unpublished or is awaiting review."
+    );
+  }
   const rows = await executeQuery(
     (db) =>
       db
