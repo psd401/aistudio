@@ -12,6 +12,7 @@ import json
 import logging
 import boto3
 import os
+import re
 from typing import Dict, Any
 
 logger = logging.getLogger()
@@ -24,6 +25,41 @@ secretsmanager = boto3.client(
 )
 
 
+def sanitize_for_logging(text: str) -> str:
+    """Redact ARNs / IPs / emails from log messages (REV-INFRA-115)."""
+    if not text:
+        return text
+    text = re.sub(r'arn:aws:[^:]+:[^:]+:\d+:[^\s]+', '[ARN_REDACTED]', text)
+    text = re.sub(r'\d+\.\d+\.\d+\.\d+', '[IP_REDACTED]', text)
+    text = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[EMAIL_REDACTED]', text)
+    return text
+
+
+def sanitize_error(error: Exception) -> str:
+    """Sanitize an exception message for logging (REV-INFRA-115)."""
+    return sanitize_for_logging(str(error))
+
+
+def validate_rotation_request(arn: str, token: str) -> bool:
+    """
+    AWS-standard rotation preamble guard (REV-INFRA-109). Verifies rotation is
+    enabled, the token is staged for this secret, and it is AWSPENDING (not already
+    AWSCURRENT). Returns True if the caller should short-circuit (already current).
+    """
+    metadata = secretsmanager.describe_secret(SecretId=arn)
+    if not metadata.get('RotationEnabled', False):
+        raise ValueError("Secret is not enabled for rotation")
+    versions = metadata['VersionIdsToStages']
+    if token not in versions:
+        raise ValueError("Rotation token has no stage for this secret")
+    if "AWSCURRENT" in versions[token]:
+        logger.info("Rotation token is already AWSCURRENT; nothing to do")
+        return True
+    if "AWSPENDING" not in versions[token]:
+        raise ValueError("Rotation token is not staged as AWSPENDING")
+    return False
+
+
 def handler(event: Dict[str, Any], context: Any) -> None:
     """
     Main rotation handler for OAuth secrets
@@ -32,76 +68,54 @@ def handler(event: Dict[str, Any], context: Any) -> None:
         event: Event data from Secrets Manager
         context: Lambda context object
     """
-    logger.info(f"OAuth rotation event: {json.dumps(event)}")
+    # Log only the step, never the full event/ARN/ClientRequestToken (REV-INFRA-115).
+    logger.info(f"Rotation event received for step: {event.get('Step')}")
 
     arn = event['SecretId']
     token = event['ClientRequestToken']
     step = event['Step']
 
-    if step == "createSecret":
-        create_secret(arn, token)
-    elif step == "setSecret":
-        set_secret(arn, token)
-    elif step == "testSecret":
-        test_secret(arn, token)
-    elif step == "finishSecret":
-        finish_secret(arn, token)
-    else:
-        raise ValueError(f"Invalid step: {step}")
+    try:
+        # AWS-standard preamble guard before acting on the step (REV-INFRA-109).
+        if validate_rotation_request(arn, token):
+            return
+
+        if step == "createSecret":
+            create_secret(arn, token)
+        elif step == "setSecret":
+            set_secret(arn, token)
+        elif step == "testSecret":
+            test_secret(arn, token)
+        elif step == "finishSecret":
+            finish_secret(arn, token)
+        else:
+            raise ValueError(f"Invalid step: {step}")
+    except Exception as e:
+        logger.error(f"Rotation failed: {sanitize_error(e)}")
+        raise
 
 
 def create_secret(arn: str, token: str) -> None:
     """
-    Step 1: Create new OAuth credentials
+    Step 1: Create new OAuth credentials.
 
-    For OAuth tokens, this typically involves using a refresh token
-    to obtain new access tokens from the OAuth provider.
+    A real implementation must use the stored refresh_token to obtain a NEW
+    access_token from the OAuth provider. There is NO safe placeholder for OAuth:
+    the previous behaviour copied the current secret verbatim into AWSPENDING, so
+    Secrets Manager reported a successful rotation while the token never changed —
+    resetting the rotation clock and suppressing the rotation-failure alarm
+    (REV-INFRA-106 / REV-COR-435-OVF2).
+
+    Until provider-specific refresh is implemented, fail loudly so the rotation
+    surfaces as an error instead of silently promoting an AWSPENDING version whose
+    material is identical to AWSCURRENT.
     """
-    logger.info(f"Creating new OAuth token for {arn}")
-
-    # Check if AWSPENDING version already exists
-    try:
-        secretsmanager.get_secret_value(
-            SecretId=arn,
-            VersionId=token,
-            VersionStage="AWSPENDING"
-        )
-        logger.info("OAuth token version already exists, skipping creation")
-        return
-    except secretsmanager.exceptions.ResourceNotFoundException:
-        pass
-
-    # Get current secret
-    current_secret = secretsmanager.get_secret_value(
-        SecretId=arn,
-        VersionStage="AWSCURRENT"
+    logger.error("OAuth rotation is not implemented; refusing to promote an unchanged token")
+    raise NotImplementedError(
+        "OAuth secret rotation is not implemented. A provider-specific refresh-token "
+        "exchange that mints a new access_token is required before this secret can be "
+        "rotated. Implement the provider integration or disable rotation for this secret."
     )
-
-    secret_dict = json.loads(current_secret['SecretString'])
-
-    # TODO: Implement OAuth token refresh logic here
-    # This should use the refresh_token to get new access_token
-    # Example structure:
-    # {
-    #   "access_token": "new_access_token",
-    #   "refresh_token": "refresh_token",
-    #   "expires_in": 3600,
-    #   "token_type": "Bearer"
-    # }
-
-    # For now, we'll just copy the current secret as a placeholder
-    # In production, replace this with actual OAuth refresh logic
-    logger.warning("Using placeholder rotation - implement OAuth provider-specific logic")
-
-    # Put new secret version
-    secretsmanager.put_secret_value(
-        SecretId=arn,
-        ClientRequestToken=token,
-        SecretString=json.dumps(secret_dict),
-        VersionStages=['AWSPENDING']
-    )
-
-    logger.info("Successfully created new OAuth token version (placeholder)")
 
 
 def set_secret(arn: str, token: str) -> None:
@@ -169,12 +183,21 @@ def finish_secret(arn: str, token: str) -> None:
             current_version = version
             break
 
-    # Move AWSCURRENT stage to new version
-    secretsmanager.update_secret_version_stage(
-        SecretId=arn,
-        VersionStage="AWSCURRENT",
-        MoveToVersionId=token,
-        RemoveFromVersionId=current_version
-    )
+    # Move AWSCURRENT stage to new version. Never pass RemoveFromVersionId=None
+    # (REV-INFRA-109).
+    if current_version is not None:
+        secretsmanager.update_secret_version_stage(
+            SecretId=arn,
+            VersionStage="AWSCURRENT",
+            MoveToVersionId=token,
+            RemoveFromVersionId=current_version
+        )
+    else:
+        logger.warning("No AWSCURRENT version found to remove; setting AWSCURRENT without removal")
+        secretsmanager.update_secret_version_stage(
+            SecretId=arn,
+            VersionStage="AWSCURRENT",
+            MoveToVersionId=token
+        )
 
     logger.info("Successfully completed OAuth token rotation")
