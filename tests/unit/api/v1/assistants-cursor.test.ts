@@ -5,7 +5,7 @@
  * shape must be validated at the route so a malformed value (?cursor=abc) is a 400
  * before the DB, not a NaN comparison that surfaces as a 500 (REV-SEC-168).
  */
-import { listQuerySchema } from "@/app/api/v1/assistants/route"
+import { listQuerySchema } from "@/app/api/v1/assistants/query-schema"
 
 describe("assistants list cursor validation (REV-SEC-168)", () => {
   it("rejects a non-numeric cursor", () => {

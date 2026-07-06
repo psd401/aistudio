@@ -4,28 +4,11 @@
  * Part of Issue #685 - Assistant Execution API (Phase 2)
  */
 
-import { z } from "zod"
 import { withApiAuth, requireScope, createApiResponse, createErrorResponse, isAdminByUserId } from "@/lib/api"
 import { listAccessibleAssistants } from "@/lib/api/assistant-service"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { createLogger } from "@/lib/logger"
-
-// ============================================
-// Validation Schemas
-// ============================================
-
-// Exported for unit testing (REV-SEC-168).
-export const listQuerySchema = z.object({
-  status: z.enum(["draft", "pending_approval", "approved", "rejected", "disabled"]).optional(),
-  search: z.string().min(1).max(100).optional(),
-  limit: z.coerce.number().int().min(1).max(100).optional(),
-  // Opaque assistant-id cursor: validate its numeric shape here so a malformed
-  // value (e.g. ?cursor=abc) is a 400 before the DB, not a 500 (REV-SEC-168).
-  cursor: z
-    .string()
-    .regex(/^[1-9]\d*$/, "cursor must be a positive integer")
-    .optional(),
-})
+import { listQuerySchema } from "./query-schema"
 
 const LIST_TOOL_IDENTIFIER = "assistants.list"
 
