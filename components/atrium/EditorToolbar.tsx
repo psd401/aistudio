@@ -43,18 +43,30 @@ interface EditorToolbarProps {
   canEdit: boolean;
   /** An edit action is in flight — disables the buttons to block double-fire. */
   busy: boolean;
+  /** Whether "suggesting mode" (track changes) is currently ON. */
+  suggesting: boolean;
+  /** Distinct pending-suggestion groups in the doc (drives the hint + Accept all). */
+  suggestionCount: number;
   onSnapshot: () => void;
   onPublish: (destination: EditorPublishDestination) => void;
   onUnpublish: (destination: EditorPublishDestination) => void;
+  /** Flip suggesting mode. */
+  onToggleSuggesting: () => void;
+  /** Resolve every pending suggestion to the accepted baseline. */
+  onAcceptAll: () => void;
 }
 
 export function EditorToolbar({
   status,
   canEdit,
   busy,
+  suggesting,
+  suggestionCount,
   onSnapshot,
   onPublish,
   onUnpublish,
+  onToggleSuggesting,
+  onAcceptAll,
 }: EditorToolbarProps): React.JSX.Element {
   // The picked destination drives BOTH Publish and Unpublish, so the "which
   // destination?" choice is one control (kept simple — spec asked for a select).
@@ -84,8 +96,36 @@ export function EditorToolbar({
         />
         Agent
       </span>
+      {suggestionCount > 0 && (
+        // Non-blocking hint — surfaced to everyone; only editors get Accept all.
+        <span data-testid="suggestion-count" className="text-amber-600">
+          {suggestionCount} unresolved suggestion{suggestionCount === 1 ? "" : "s"}
+        </span>
+      )}
       {canEdit && (
         <span className="ml-auto flex items-center gap-2">
+          {/* Track-changes toggle: while ON, edits become proposed suggestions. */}
+          <Button
+            type="button"
+            size="sm"
+            variant={suggesting ? "default" : "outline"}
+            aria-pressed={suggesting}
+            disabled={busy}
+            onClick={onToggleSuggesting}
+            data-testid="suggesting-toggle"
+          >
+            Suggesting{suggesting ? " on" : ""}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy || suggestionCount === 0}
+            onClick={onAcceptAll}
+            data-testid="accept-all"
+          >
+            Accept all
+          </Button>
           <Button
             type="button"
             size="sm"

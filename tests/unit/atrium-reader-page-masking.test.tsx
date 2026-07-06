@@ -83,6 +83,16 @@ jest.mock("@/actions/db/atrium/requester", () => ({
   getOptionalRequester: (...a: unknown[]) => getOptionalRequesterMock(...a),
 }));
 
+// The reader now reads an editors-only unresolved-comment count via this action;
+// the real module drags the whole content/DB stack (drizzle sql helpers) into the
+// unit test, so mock it to an empty thread list (count 0 → no chip).
+const listCommentThreadsMock = jest.fn((..._a: unknown[]) =>
+  Promise.resolve({ isSuccess: true, message: "", data: [] })
+);
+jest.mock("@/actions/db/atrium/comments", () => ({
+  listCommentThreadsAction: (...a: unknown[]) => listCommentThreadsMock(...a),
+}));
+
 jest.mock("@/lib/content/artifact-sandbox-config", () => ({
   getArtifactSandboxRenderUrl: () => "https://sandbox.example.test/render",
 }));

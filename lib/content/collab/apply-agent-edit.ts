@@ -18,11 +18,13 @@
  * Guardrails + PII screening happen in the route BEFORE this is called.
  */
 
+import { randomUUID } from "node:crypto";
 import * as Y from "yjs";
 import * as syncProtocol from "y-protocols/sync";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { updateYFragment } from "y-prosemirror";
+import type { JSONContent } from "@tiptap/core";
 import { getCollabSchema } from "./editor-extensions";
 import {
   markdownToProseMirrorJSON,
@@ -30,7 +32,14 @@ import {
   yDocToProseMirrorJSON,
 } from "./markdown-bridge";
 import { COLLAB_FIELD, makeAuthorTag } from "./provenance";
+import { ATRIUM_COMMENT_MARK } from "./comment-mark";
+import {
+  ATRIUM_SUGGESTION_DELETE_MARK,
+  ATRIUM_SUGGESTION_INSERT_MARK,
+} from "./suggestion-marks";
 import { signAgentCollabToken } from "./collab-token";
+import { executeQuery } from "@/lib/db/drizzle-client";
+import { atriumDocComments } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
 
 const log = createLogger({ context: "agent-bridge-client" });
@@ -112,10 +121,41 @@ const AGENT_SETTLE_MS = ((): number => {
   return Number.isFinite(n) && n >= 0 ? n : 500;
 })();
 
-/** Apply the agent's markdown to the live document via a short-lived y-sync client. */
-export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
-  const { objectId, markdown, agentId, mode = "replace" } = input;
-  const by = makeAuthorTag("agent", agentId);
+/**
+ * Thrown when a `comment` / `suggest:delete` op names a `quote` that cannot be
+ * located as a contiguous span in the live document. Preserved as a typed error
+ * through the loopback reject path so the bridge route can map it to a 422
+ * (client sent a stale/unmatched anchor) rather than a generic 500.
+ */
+export class QuoteNotLocatedError extends Error {
+  constructor(quote: string) {
+    super(`quote not located in document: ${JSON.stringify(quote.slice(0, 80))}`);
+    this.name = "QuoteNotLocatedError";
+  }
+}
+
+/** Given the hydrated document's ProseMirror JSON, produce the next JSON to diff
+ * into the Y.Doc. May throw (e.g. QuoteNotLocatedError) to abort the apply. */
+type NextDocBuilder = (currentJson: JSONContent) => JSONContent;
+
+/**
+ * Open a short-lived y-sync client to the collab server, hydrate this object's
+ * live Y.Doc, then diff `buildNextJson(currentDocJson)` into it via
+ * `updateYFragment` — the SAME loopback path the original `replace`/`append`
+ * write used. EVERY agent op (edit, comment, suggest) funnels through here so
+ * they share one CRDT-safe apply and one attribution/lock contract; only the
+ * builder differs. All marks are built through the single `getCollabSchema()`
+ * (never a second schema), so agent-side marks map identically to the editor's.
+ *
+ * `buildNextJson` runs AFTER SyncStep2 (the doc is hydrated) and may THROW —
+ * a QuoteNotLocatedError from an unmatched anchor rejects the returned promise
+ * with the ORIGINAL typed error (not the wrapped generic), so callers can map it.
+ */
+async function runLoopbackEdit(
+  objectId: string,
+  agentId: string,
+  buildNextJson: NextDocBuilder
+): Promise<void> {
   // Short-TTL token: this loopback bridge completes in ≤SYNC_TIMEOUT_MS (10s),
   // so a 30s grant is ample and shrinks the ALB-access-log replay window vs. the
   // 5-minute browser token (the token rides in the `?token=` URL — see collab-token.ts).
@@ -140,17 +180,7 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
 
   const applyEdit = (): void => {
     const schema = getCollabSchema();
-    const agentJson = stampAuthor(markdownToProseMirrorJSON(markdown), by);
-    const nextJson =
-      mode === "append"
-        ? (() => {
-            const current = yDocToProseMirrorJSON(ydoc);
-            return {
-              ...current,
-              content: [...(current.content ?? []), ...(agentJson.content ?? [])],
-            };
-          })()
-        : agentJson;
+    const nextJson = buildNextJson(yDocToProseMirrorJSON(ydoc));
     const node = schema.nodeFromJSON(nextJson);
 
     // Send the resulting Yjs update to the server, which applies + broadcasts it.
@@ -234,7 +264,9 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
           const msg = e instanceof Error ? e.message : String(e);
           log.error("Agent bridge sync/apply failed", { msg });
           clearTimeout(timer);
-          reject(new Error(`collab sync apply failed: ${msg}`));
+          // Preserve a QuoteNotLocatedError's type so the route maps it to 422;
+          // wrap anything else as a generic apply failure (500).
+          reject(e instanceof QuoteNotLocatedError ? e : new Error(`collab sync apply failed: ${msg}`));
         }
       });
 
@@ -261,4 +293,278 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
     if (registeredOnUpdate) ydoc.off("update", registeredOnUpdate);
     try { ws.close(); } catch { /* already closed */ }
   }
+}
+
+/** Apply the agent's markdown to the live document via a short-lived y-sync client.
+ *  `replace` rewrites the whole doc; `append` adds the agent's blocks at the end. */
+export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
+  const { objectId, markdown, agentId, mode = "replace" } = input;
+  const by = makeAuthorTag("agent", agentId);
+  await runLoopbackEdit(objectId, agentId, (current) => {
+    const agentJson = stampAuthor(markdownToProseMirrorJSON(markdown), by);
+    if (mode !== "append") return agentJson;
+    return {
+      ...current,
+      content: [...(current.content ?? []), ...(agentJson.content ?? [])],
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// §18.1 comment + suggestion (track-changes) mark transforms
+//
+// These are pure ProseMirror-JSON rewrites (no Y.Doc / socket) so they are unit-
+// testable and reused by the comment/suggest ops below. Every mark they add is a
+// plain `{ type, attrs }` built for the ONE shared `getCollabSchema()`; the schema
+// conversion (`nodeFromJSON`) happens in `runLoopbackEdit`, never against a second
+// schema.
+// ---------------------------------------------------------------------------
+
+/** UUID v4-ish shape — the form `agent_identities.id` takes (defaultRandom()). */
+const AGENT_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A single ProseMirror-JSON mark (the element type of a text node's `marks`). */
+type JSONMark = NonNullable<JSONContent["marks"]>[number];
+
+/** Deep-copy `node`, appending `mark` to every text node. Used to stamp a whole
+ *  proposed-insertion subtree as a pending suggestion. */
+export function addMarkToAllTextNodes(node: JSONContent, mark: JSONMark): JSONContent {
+  const walk = (n: JSONContent): JSONContent => {
+    const next: JSONContent = { ...n };
+    if (n.type === "text") {
+      next.marks = [...(n.marks ?? []), mark];
+    }
+    if (Array.isArray(n.content)) {
+      next.content = n.content.map(walk);
+    }
+    return next;
+  };
+  return walk(node);
+}
+
+/**
+ * Anchor `mark` to the FIRST occurrence of `quote` in the document.
+ *
+ * The quote is located as a substring of a SINGLE text node — the common case for
+ * a contiguous phrase an agent quotes. The matching text node is split into up to
+ * three parts (before / matched / after); `mark` is added to the matched part only,
+ * so the anchor rides that exact span through subsequent CRDT edits (a mark, not a
+ * byte offset — the reason comment-mark.ts and the suggestion marks are marks). The
+ * split parts keep the original node's existing marks (authorship, etc.).
+ *
+ * Returns the rewritten doc, or null when the quote is absent OR spans multiple
+ * text nodes (e.g. crosses a bold boundary); the caller maps null to "not located".
+ */
+export function addMarkToQuoteSpan(
+  doc: JSONContent,
+  quote: string,
+  mark: JSONMark
+): JSONContent | null {
+  if (!quote) return null;
+  const state = { found: false };
+  const splitFor = (textNode: JSONContent): JSONContent[] => {
+    const text = textNode.text ?? "";
+    const idx = text.indexOf(quote);
+    const marks = textNode.marks ?? [];
+    const before = text.slice(0, idx);
+    const middle = text.slice(idx, idx + quote.length);
+    const after = text.slice(idx + quote.length);
+    const parts: JSONContent[] = [];
+    if (before) parts.push({ ...textNode, text: before });
+    parts.push({ ...textNode, text: middle, marks: [...marks, mark] });
+    if (after) parts.push({ ...textNode, text: after });
+    return parts;
+  };
+  const walk = (n: JSONContent): JSONContent => {
+    if (state.found || !Array.isArray(n.content)) return n;
+    const nextContent: JSONContent[] = [];
+    for (const child of n.content) {
+      if (
+        !state.found &&
+        child.type === "text" &&
+        typeof child.text === "string" &&
+        child.text.includes(quote)
+      ) {
+        state.found = true;
+        nextContent.push(...splitFor(child));
+      } else {
+        nextContent.push(walk(child));
+      }
+    }
+    return { ...n, content: nextContent };
+  };
+  const result = walk(doc);
+  return state.found ? result : null;
+}
+
+// ---------------------------------------------------------------------------
+// comment op
+// ---------------------------------------------------------------------------
+
+/**
+ * The comment-thread ROOT row persisted to `atrium_doc_comments` when an agent
+ * applies a `comment` op. Only the anchor (the threadId mark) lives in the Y.Doc;
+ * thread bodies live in Postgres (see comment-mark.ts / atrium-doc-comments.ts).
+ * A root is the row with `parent_id` NULL (the writer sets that); replies hang
+ * under it and are not written here.
+ *
+ * - `authorAgentId` — a registered `agent_identities.id`, or null. It is set ONLY
+ *   when X-Agent-Id is a UUID (a free-form label has no identity row).
+ * - `authorLabel`   — the raw X-Agent-Id, always retained for attribution.
+ */
+export interface AgentCommentThreadRoot {
+  threadId: string;
+  objectId: string;
+  authorAgentId: string | null;
+  authorLabel: string;
+  body: string;
+}
+
+/** Persists the comment-thread root row. Injectable so the smoke can stub the DB. */
+export type CommentThreadRootWriter = (row: AgentCommentThreadRoot) => Promise<void>;
+
+/**
+ * Build the comment-thread root row from the op inputs. Extracted so the row
+ * shape (esp. the author_agent_id-vs-label binding) is unit-testable without a DB.
+ */
+export function buildCommentThreadRoot(params: {
+  threadId: string;
+  objectId: string;
+  agentId: string;
+  body: string;
+}): AgentCommentThreadRoot {
+  return {
+    threadId: params.threadId,
+    objectId: params.objectId,
+    authorAgentId: AGENT_UUID_RE.test(params.agentId) ? params.agentId : null,
+    authorLabel: params.agentId,
+    body: params.body,
+  };
+}
+
+/**
+ * Default writer for the comment-thread root row (#1059 §18.1). Inserts a ROOT row
+ * (`parentId: null`) into the shared `atrium_doc_comments` model. `authorUserId` is
+ * left null: the row attributes the comment to the AGENT (author_agent_id when the
+ * identity is a registered UUID, author_label always) — the human operator is the
+ * session, not the comment author.
+ */
+async function defaultWriteCommentThreadRoot(row: AgentCommentThreadRoot): Promise<void> {
+  await executeQuery(
+    (db) =>
+      db.insert(atriumDocComments).values({
+        threadId: row.threadId,
+        objectId: row.objectId,
+        parentId: null,
+        body: row.body,
+        authorAgentId: row.authorAgentId,
+        authorLabel: row.authorLabel,
+      }),
+    "atrium.agentBridge.insertCommentRoot"
+  );
+}
+
+export interface AgentCommentInput {
+  objectId: string;
+  /** agent_identities.id (or label) — the attribution stamped on the thread. */
+  agentId: string;
+  /** Text span to anchor the thread to (located in the live doc). */
+  quote: string;
+  /** The agent's comment text (screened by the route before this is called). */
+  body: string;
+  /** Reuse an existing thread id, else one is generated server-side. */
+  threadId?: string;
+  /** DI seam (tests / reconciliation). Defaults to the raw-insert writer. */
+  writeThreadRoot?: CommentThreadRootWriter;
+}
+
+/**
+ * Anchor an AtriumComment mark over the quoted span in the live document AND write
+ * the thread root row to Postgres. The agent PROPOSES a comment on a human's text;
+ * it does not rewrite content. Throws QuoteNotLocatedError if the quote is absent.
+ */
+export async function applyAgentComment(
+  input: AgentCommentInput
+): Promise<{ threadId: string }> {
+  const { objectId, agentId, quote, body } = input;
+  const threadId = input.threadId ?? randomUUID();
+  const writeThreadRoot = input.writeThreadRoot ?? defaultWriteCommentThreadRoot;
+  const mark: JSONMark = {
+    type: ATRIUM_COMMENT_MARK,
+    attrs: { threadId, resolved: false },
+  };
+
+  // 1. Anchor the mark in the Y.Doc (throws QuoteNotLocatedError if unmatched).
+  await runLoopbackEdit(objectId, agentId, (current) => {
+    const next = addMarkToQuoteSpan(current, quote, mark);
+    if (!next) throw new QuoteNotLocatedError(quote);
+    return next;
+  });
+
+  // 2. Persist the thread root (only after the anchor landed).
+  await writeThreadRoot(buildCommentThreadRoot({ threadId, objectId, agentId, body }));
+
+  return { threadId };
+}
+
+// ---------------------------------------------------------------------------
+// suggest op (track changes)
+// ---------------------------------------------------------------------------
+
+export type SuggestionKind = "insert" | "delete";
+
+export interface AgentSuggestionInput {
+  objectId: string;
+  agentId: string;
+  kind: SuggestionKind;
+  /** insert: proposed markdown to add (wrapped in the insert mark, not applied). */
+  markdown?: string;
+  /** delete: existing span to propose removing (wrapped in the delete mark; text kept). */
+  quote?: string;
+  /** Reuse an existing suggestion id, else one is generated server-side. */
+  suggestionId?: string;
+}
+
+/**
+ * Apply a PROPOSED change (track-changes), not a direct edit:
+ *  - insert: append the agent's text wrapped in `atriumSuggestionInsert` so a human
+ *    accepts (keep) or rejects (drop) it. The text is also authored (`ai:<agentId>`).
+ *  - delete: wrap the quoted existing span in `atriumSuggestionDelete` (text is NOT
+ *    removed — accepting removes it, rejecting keeps it).
+ *
+ * Every suggestion mark carries `by=ai:<agentId>` + `suggestionId` + `at`. Throws
+ * QuoteNotLocatedError for a delete whose quote is absent.
+ */
+export async function applyAgentSuggestion(
+  input: AgentSuggestionInput
+): Promise<{ suggestionId: string }> {
+  const { objectId, agentId, kind } = input;
+  const suggestionId = input.suggestionId ?? randomUUID();
+  const by = makeAuthorTag("agent", agentId);
+  const at = new Date().toISOString();
+  const attrs = { suggestionId, by, at };
+
+  if (kind === "insert") {
+    const markdown = input.markdown ?? "";
+    const insertMark: JSONMark = { type: ATRIUM_SUGGESTION_INSERT_MARK, attrs };
+    await runLoopbackEdit(objectId, agentId, (current) => {
+      const authored = stampAuthor(markdownToProseMirrorJSON(markdown), by);
+      const proposed = addMarkToAllTextNodes(authored, insertMark);
+      return {
+        ...current,
+        content: [...(current.content ?? []), ...(proposed.content ?? [])],
+      };
+    });
+  } else {
+    const quote = input.quote ?? "";
+    const deleteMark: JSONMark = { type: ATRIUM_SUGGESTION_DELETE_MARK, attrs };
+    await runLoopbackEdit(objectId, agentId, (current) => {
+      const next = addMarkToQuoteSpan(current, quote, deleteMark);
+      if (!next) throw new QuoteNotLocatedError(quote);
+      return next;
+    });
+  }
+
+  return { suggestionId };
 }

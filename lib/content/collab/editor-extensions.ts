@@ -20,6 +20,11 @@ import StarterKit from "@tiptap/starter-kit";
 import { getSchema, type Extensions } from "@tiptap/core";
 import type { Schema } from "@tiptap/pm/model";
 import { AtriumAuthored } from "./authored-mark";
+import { AtriumComment } from "./comment-mark";
+import {
+  AtriumSuggestionInsert,
+  AtriumSuggestionDelete,
+} from "./suggestion-marks";
 
 /**
  * The schema-defining extensions shared by client editor and server transformer.
@@ -34,6 +39,14 @@ export function getSchemaExtensions(): Extensions {
       undoRedo: false,
     }),
     AtriumAuthored,
+    // §18.1 comments + track-changes marks. These MUST live here (the ONE shared
+    // schema) so the client editor, server transformer, agent bridge, and seeding
+    // all build the identical schema — a mark added anywhere else corrupts the Yjs
+    // document. They add marks only (no nodes), so the client/server schema parity
+    // the module header guarantees still holds (asserted in atrium-collab-schema smoke).
+    AtriumComment,
+    AtriumSuggestionInsert,
+    AtriumSuggestionDelete,
   ];
 }
 
