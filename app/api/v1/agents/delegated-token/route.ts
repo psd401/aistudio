@@ -30,7 +30,7 @@ import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 import { withApiAuth, requireScope, createErrorResponse, createApiResponse } from "@/lib/api";
 import { executeQuery } from "@/lib/db/drizzle-client";
-import { agentIdentities, users } from "@/lib/db/schema";
+import { agentIdentities } from "@/lib/db/schema";
 import { getUserRoles } from "@/lib/db/user-roles";
 import { getScopesForRoles } from "@/lib/api-keys/scopes";
 import { systemUserIdOrNull } from "@/lib/content/helpers";
@@ -74,15 +74,6 @@ async function activeAgentByClientId(
     "atrium.delegatedToken.findAgent"
   );
   return rows[0] ?? null;
-}
-
-/** Whether the acting-for user row exists (an id for a deleted user must not mint). */
-async function userExists(userId: number): Promise<boolean> {
-  const rows = await executeQuery(
-    (db) => db.select({ id: users.id }).from(users).where(eq(users.id, userId)).limit(1),
-    "atrium.delegatedToken.userExists"
-  );
-  return rows.length > 0;
 }
 
 export const POST = withApiAuth(async (request: NextRequest, auth, requestId) => {
@@ -148,19 +139,15 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     );
   }
 
-  // 6. The acting-for user must exist; load their role-derived content scopes.
-  if (!(await userExists(body.delegated_for))) {
-    return createErrorResponse(
-      requestId,
-      404,
-      "USER_NOT_FOUND",
-      "The delegated_for user does not exist"
-    );
-  }
+  // 6. Load the acting-for user's role-derived content scopes. A NON-EXISTENT user
+  //    has no roles, so `getUserRoles` returns [] → no grantable scopes → the same
+  //    403 as a role-less user below. Collapsing "unknown user" and "no grantable
+  //    scope" into one response deliberately avoids a user-id ENUMERATION side
+  //    channel (a distinct 404 would let a delegation-capable agent probe which
+  //    user ids exist).
   const userRoleScopes = getScopesForRoles(await getUserRoles(body.delegated_for));
 
-  // 7. Intersect: requested ∩ agent content scopes ∩ user content scopes. A user who
-  //    holds no content authority (e.g. a de-roled account) yields an empty set.
+  // 7. Intersect: requested ∩ agent content scopes ∩ user content scopes.
   const requested = body.scope ? body.scope.split(" ").filter(Boolean) : null;
   const scopes = intersectDelegatedScopes(requested, agent.scopes, userRoleScopes);
   if (scopes.length === 0) {

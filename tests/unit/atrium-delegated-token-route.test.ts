@@ -21,19 +21,16 @@ jest.mock("@/lib/api", () => ({
   createApiResponse: (...a: unknown[]) => createApiResponseMock(a[0]),
 }));
 
-// executeQuery dispatches by label: the agent lookup and the user-existence check.
+// executeQuery dispatches by label: only the agent-identity lookup remains.
 let agentRows: Array<{ scopes: string[]; name: string }> = [];
-let userRows: Array<{ id: number }> = [];
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: jest.fn(async (_cb: unknown, label: string) => {
     if (label === "atrium.delegatedToken.findAgent") return agentRows;
-    if (label === "atrium.delegatedToken.userExists") return userRows;
     return [];
   }),
 }));
 jest.mock("@/lib/db/schema", () => ({
   agentIdentities: { scopes: "scopes", name: "name", oauthClientId: "oauthClientId", isActive: "isActive" },
-  users: { id: "id" },
 }));
 jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
@@ -97,7 +94,6 @@ const call = (auth: Auth, body: unknown) => rawPost(req(body), auth, "rid-1");
 
 beforeEach(() => {
   agentRows = [{ scopes: AGENT_AUTH.scopes, name: "ship-reporter" }];
-  userRows = [{ id: 42 }];
   roleNames = ["staff"];
   signedClaims = null;
   createErrorResponseMock.mockClear();
@@ -133,10 +129,14 @@ describe("POST /api/v1/agents/delegated-token — guards", () => {
     expect(createErrorResponseMock).toHaveBeenCalledWith("rid-1", 400, "VALIDATION_ERROR", expect.any(String), expect.anything());
   });
 
-  it("404s an unknown delegated_for user", async () => {
-    userRows = [];
-    await call(AGENT_AUTH, { delegated_for: 42 });
-    expect(createErrorResponseMock).toHaveBeenCalledWith("rid-1", 404, "USER_NOT_FOUND", expect.any(String));
+  it("403 INSUFFICIENT_SCOPE (NOT a distinct 404) for an unknown user — no id enumeration", async () => {
+    // An unknown user has no roles → getUserRoles [] → empty intersection. The
+    // response is identical to a role-less user's, so a delegation-capable agent
+    // cannot probe which user ids exist.
+    roleNames = []; // getUserRoles returns [] for a nonexistent user
+    await call(AGENT_AUTH, { delegated_for: 999999 });
+    expect(createErrorResponseMock).toHaveBeenCalledWith("rid-1", 403, "INSUFFICIENT_SCOPE", expect.any(String));
+    expect(signedClaims).toBeNull();
   });
 
   it("403 INSUFFICIENT_SCOPE when the user holds no content authority (de-roled)", async () => {

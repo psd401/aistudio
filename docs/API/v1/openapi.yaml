@@ -1853,7 +1853,11 @@ paths:
             (`INSUFFICIENT_SCOPE`), is not an OIDC token backed by an active
             agent identity or is itself a delegated token (`FORBIDDEN`), or
             the requested ∩ agent ∩ user scope intersection is empty
-            (`INSUFFICIENT_SCOPE`).
+            (`INSUFFICIENT_SCOPE`). An UNKNOWN `delegated_for` user also
+            returns `INSUFFICIENT_SCOPE` (an unknown user has no grantable
+            scopes) rather than a distinct 404 — the two are deliberately
+            indistinguishable so a delegation-capable agent cannot enumerate
+            which user ids exist.
           content:
             application/json:
               schema:
@@ -1880,20 +1884,6 @@ paths:
                       code: INSUFFICIENT_SCOPE
                       message: No content scopes are grantable for this agent + user combination
                     requestId: req_abc123
-          headers:
-            X-Request-Id:
-              $ref: "#/components/headers/X-Request-Id"
-        "404":
-          description: The `delegated_for` user does not exist
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error:
-                  code: USER_NOT_FOUND
-                  message: The delegated_for user does not exist
-                requestId: req_abc123
           headers:
             X-Request-Id:
               $ref: "#/components/headers/X-Request-Id"

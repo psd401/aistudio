@@ -1241,8 +1241,7 @@ curl -X POST -H "Authorization: Bearer <agent-oidc-jwt>" \
 ```
 
 **Response `400`** — `VALIDATION_ERROR` (missing/non-positive `delegated_for`, `scope` over 500 chars).
-**Response `403`** — `INSUFFICIENT_SCOPE` (caller lacks `content:delegate`, or the scope intersection is empty) or `FORBIDDEN` (session/`sk-` caller, no active agent identity, or a delegated token attempting to re-mint).
-**Response `404`** — `USER_NOT_FOUND` (the `delegated_for` user does not exist).
+**Response `403`** — `INSUFFICIENT_SCOPE` (caller lacks `content:delegate`, or the scope intersection is empty — including for an **unknown** `delegated_for` user, which has no grantable scopes) or `FORBIDDEN` (session/`sk-` caller, no active agent identity, or a delegated token attempting to re-mint). An unknown user is deliberately indistinguishable from a role-less one (same `INSUFFICIENT_SCOPE`) so a delegation-capable agent cannot enumerate valid user ids.
 **Response `500`** — `CONFIGURATION_ERROR` (`ATRIUM_SYSTEM_USER_ID` not configured).
 
 ---
