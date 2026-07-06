@@ -18,6 +18,13 @@ info:
     Each key has scoped permissions (`graph:read`, `graph:write`).
     Session-authenticated users receive full access for their role.
 
+    Atrium content endpoints (`/api/v1/content/*`, `/api/v1/agents/delegated-token`)
+    are **Bearer-only** (no session cookie) and gated by the content scopes:
+    `content:read`, `content:create`, `content:update`, `content:publish_internal`,
+    `content:publish_public`, and the agent-held minting authority
+    `content:delegate` (required by `POST /api/v1/agents/delegated-token`; never
+    present in a minted delegated token).
+
     ## Rate Limiting
 
     API key requests are rate-limited using a sliding window counter.
@@ -79,6 +86,8 @@ tags:
     description: Tool catalog inspection — versions, deprecation state, and metadata
   - name: Content
     description: Atrium content objects — versions, visibility, and publishing (Issue #1055)
+  - name: Agents
+    description: Agent identity operations — delegated content token minting (Atrium §26.1, Epic #1059)
 
 # ============================================
 # Paths
@@ -1770,6 +1779,144 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /agents/delegated-token:
+    post:
+      operationId: mintDelegatedToken
+      tags: [Agents]
+      summary: Mint a short-lived delegated content token
+      description: |
+        Exchanges an autonomous agent's OAuth client-credentials JWT for a
+        **short-lived (300 s) delegated token** acting on behalf of a named
+        human user (Atrium §26.1, Epic #1059). Requires the agent-held
+        `content:delegate` scope, AND the caller must be an **OIDC agent
+        bearer** (a client-credentials JWT whose client id maps to an ACTIVE
+        agent identity). A session or `sk-` API key cannot mint even if it
+        holds the scope, and a delegated token cannot re-mint (both `403
+        FORBIDDEN`).
+
+        **Scope bounding:** minted scope = requested ∩ the agent's content
+        scopes ∩ the acting-for user's role-derived content scopes. The result
+        never includes `content:delegate`, and includes
+        `content:publish_public` only when the user is an administrator AND
+        the agent holds it. An empty intersection is `403 INSUFFICIENT_SCOPE`
+        — no token is minted.
+
+        **Claims:** the token's `sub` is the low-privilege SYSTEM user
+        (§26.5), not the human; the human is named by the numeric
+        `delegated_for` claim, which only the content surface consumes. Use
+        the returned `access_token` as the Bearer token on
+        `/api/v1/content/*`.
+
+        **Stateless:** the token is signed by the platform OIDC signer and is
+        NOT persisted — it cannot be revoked before expiry; the 300-second TTL
+        is the mitigation.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegatedTokenRequest"
+      responses:
+        "200":
+          description: The delegated token (never persisted; expires in 300 s)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DelegatedTokenResponse"
+              example:
+                data:
+                  access_token: "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  token_type: Bearer
+                  expires_in: 300
+                  scope: "content:create content:read"
+                  delegated_for: 42
+                meta:
+                  requestId: req_abc123
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            Not mintable — the caller lacks `content:delegate`
+            (`INSUFFICIENT_SCOPE`), is not an OIDC token backed by an active
+            agent identity or is itself a delegated token (`FORBIDDEN`), or
+            the requested ∩ agent ∩ user scope intersection is empty
+            (`INSUFFICIENT_SCOPE`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                notAnAgent:
+                  summary: Session or sk- API key caller (not an OIDC agent identity)
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: Delegated tokens can only be minted by an OIDC agent identity
+                    requestId: req_abc123
+                alreadyDelegated:
+                  summary: A delegated token cannot re-mint
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: A delegated token cannot mint further delegated tokens
+                    requestId: req_abc123
+                emptyIntersection:
+                  summary: No grantable scopes for this agent + user combination
+                  value:
+                    error:
+                      code: INSUFFICIENT_SCOPE
+                      message: No content scopes are grantable for this agent + user combination
+                    requestId: req_abc123
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+        "404":
+          description: The `delegated_for` user does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: USER_NOT_FOUND
+                  message: The delegated_for user does not exist
+                requestId: req_abc123
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          description: |
+            `CONFIGURATION_ERROR` when `ATRIUM_SYSTEM_USER_ID` is not
+            configured (delegated minting is disabled); otherwise an
+            unexpected server error (`INTERNAL_ERROR`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: CONFIGURATION_ERROR
+                  message: Delegated token minting is not configured
+                requestId: req_abc123
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+
 # ============================================
 # Components
 # ============================================
@@ -1779,7 +1926,7 @@ components:
     BearerAuth:
       type: http
       scheme: bearer
-      description: "API key token (prefix: `sk-`)"
+      description: "API key token (prefix: `sk-`) or OIDC bearer JWT (agent client-credentials / delegated)"
     SessionAuth:
       type: apiKey
       in: cookie
@@ -2924,6 +3071,64 @@ components:
                     type: string
                     format: uuid
                     nullable: true
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    # -- Delegated agent tokens (§26.1, Epic #1059) --
+    DelegatedTokenRequest:
+      type: object
+      required: [delegated_for]
+      properties:
+        delegated_for:
+          type: integer
+          minimum: 1
+          description: The human user id the agent will act on behalf of.
+          example: 42
+        scope:
+          type: string
+          maxLength: 500
+          description: |
+            Optional space-delimited scope narrowing. Omitted → the full
+            grantable intersection (agent ∩ user content scopes). Never widens
+            beyond that; unknown or non-content scopes simply drop out.
+          example: "content:read content:create"
+
+    DelegatedTokenResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [access_token, token_type, expires_in, scope, delegated_for]
+          properties:
+            access_token:
+              type: string
+              description: |
+                The signed delegated JWT. `sub` is the system user; the human
+                is named by the numeric `delegated_for` claim; `act.sub`
+                carries the agent's (non-numeric) client id for audit.
+            token_type:
+              type: string
+              enum: [Bearer]
+            expires_in:
+              type: integer
+              description: Token lifetime in seconds (300).
+              example: 300
+            scope:
+              type: string
+              description: |
+                The minted scopes, space-delimited and sorted — requested ∩
+                agent content scopes ∩ user role-derived content scopes; never
+                includes `content:delegate`.
+              example: "content:create content:read"
+            delegated_for:
+              type: integer
+              description: The acting-for human user id (echoed from the request).
+              example: 42
         meta:
           type: object
           required: [requestId]

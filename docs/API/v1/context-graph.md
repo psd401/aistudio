@@ -672,6 +672,7 @@ session-cookie path for these endpoints. Every response carries `X-Request-Id` a
 | `content:update` | Update metadata, create versions, set visibility |
 | `content:publish_internal` | Publish to / unpublish from a destination |
 | `content:publish_public` | Publish to a public-facing destination without approval |
+| `content:delegate` | Mint short-lived delegated tokens (`POST /api/v1/agents/delegated-token`) — agent-held authority, never present in a minted token |
 
 Staff API keys may hold up to `content:publish_internal`; `content:publish_public`
 is administrator-held. A caller without it that requests a `public`-facing outcome is
@@ -1177,6 +1178,72 @@ path/`sourceRef` dedup; slugs auto-suffix). For idempotency, import into a fresh
 
 **Response `400`** — `CONTENT_VALIDATION` (empty bundle / no concept files).
 **Response `403`** — API key lacks `content:create`, or the `atrium-content` capability (session).
+
+---
+
+### Delegated agent tokens (§26.1, Epic #1059)
+
+#### `POST /api/v1/agents/delegated-token`
+
+Exchange an autonomous agent's OAuth client-credentials JWT for a **short-lived
+(300 s) delegated token** that acts on behalf of a named human user. Requires the
+agent-held `content:delegate` scope, and the caller must be an **OIDC agent
+bearer** (a JWT whose client id maps to an active `agent_identities` row) — a
+session or `sk-` API key cannot mint even if it holds the scope, and a delegated
+token cannot re-mint. The returned `access_token` is used as the Bearer token on
+`/api/v1/content/*`, where it resolves to an `agent-delegated` requester bound to
+the named user (`isAdmin` forced false).
+
+**Request body:**
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `delegated_for` | integer | yes | Positive user id of the human to act for |
+| `scope` | string | no | Space-delimited narrowing (≤ 500 chars). Omit for the full grantable intersection |
+
+**Scope bounding:** minted scope = requested ∩ the agent's content scopes ∩ the
+user's role-derived content scopes. It never includes `content:delegate`, and
+includes `content:publish_public` only when the user is an administrator AND the
+agent holds it. An empty intersection returns `403 INSUFFICIENT_SCOPE` — no token.
+
+**Token claims:** `sub` is the low-privilege **system user** (§26.5), not the
+human — a surface that does not honor `delegated_for` resolves the token to the
+system account, not the full human. The human is named by the **numeric**
+`delegated_for` claim; `act.sub` carries the agent's (non-numeric) client id for
+audit.
+
+**Stateless / non-revocable:** the token is signed by the platform OIDC signer
+and is not persisted — it cannot be revoked before expiry. The 300-second TTL is
+the mitigation; treat the minted token as single-task-scoped.
+
+**Example request:**
+
+```bash
+curl -X POST -H "Authorization: Bearer <agent-oidc-jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{ "delegated_for": 42, "scope": "content:read content:create" }' \
+  "https://your-domain/api/v1/agents/delegated-token"
+```
+
+**Response `200`**
+
+```json
+{
+  "data": {
+    "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "token_type": "Bearer",
+    "expires_in": 300,
+    "scope": "content:create content:read",
+    "delegated_for": 42
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `400`** — `VALIDATION_ERROR` (missing/non-positive `delegated_for`, `scope` over 500 chars).
+**Response `403`** — `INSUFFICIENT_SCOPE` (caller lacks `content:delegate`, or the scope intersection is empty) or `FORBIDDEN` (session/`sk-` caller, no active agent identity, or a delegated token attempting to re-mint).
+**Response `404`** — `USER_NOT_FOUND` (the `delegated_for` user does not exist).
+**Response `500`** — `CONFIGURATION_ERROR` (`ATRIUM_SYSTEM_USER_ID` not configured).
 
 ---
 
