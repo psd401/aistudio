@@ -49,6 +49,24 @@ describe('processPptx slide enumeration (REV-COR-413)', () => {
   });
 });
 
+describe('convertPptxToMarkdown slide heading numbering (REV-INFRA-098)', () => {
+  const proc = new OfficeProcessor('pptx', config);
+  const convertMarkdown = (content: unknown): Promise<string> =>
+    (proc as unknown as { convertToMarkdown: (c: unknown, t: string) => Promise<string> })
+      .convertToMarkdown(content, 'pptx');
+
+  it('labels headings with the real slide id, not its array position, when numbering has a gap', async () => {
+    const buf = await pptxBuffer([1, 2, 4]); // slide3 deleted → gap
+    const extracted = await processPptx(proc, buf);
+    const markdown = await convertMarkdown(extracted);
+
+    expect(markdown).toContain('## Slide 1');
+    expect(markdown).toContain('## Slide 2');
+    expect(markdown).toContain('## Slide 4'); // would have been "## Slide 3" with index + 1
+    expect(markdown).not.toContain('## Slide 3');
+  });
+});
+
 describe('convertDocxToMarkdown newline preservation (REV-COR-408)', () => {
   const proc = new OfficeProcessor('docx', config);
   const convert = (content: unknown): string =>

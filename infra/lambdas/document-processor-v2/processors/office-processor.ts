@@ -16,6 +16,7 @@ interface XlsxSheetData {
   json: unknown[][];
   rowCount: number;
   columnCount: number;
+  truncated: boolean;
 }
 
 interface XlsxContent {
@@ -171,7 +172,15 @@ export class OfficeProcessor implements DocumentProcessor {
       const json = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
 
       const safeSheetName = OfficeProcessor.sanitizeSheetName(sheetName);
+      // A row count that hits the parse-time cap doesn't mean the sheet HAS exactly
+      // that many rows — it means parsing stopped there, so the true count is unknown
+      // (REV-INFRA-099). Surface that rather than silently reporting a row/text subset
+      // as if it were the complete sheet.
+      const truncated = json.length >= OfficeProcessor.MAX_XLSX_ROWS_PARSE;
       combinedText += `\n\n## Sheet: ${safeSheetName}\n${csv}`;
+      if (truncated) {
+        combinedText += `\n\n> ⚠️ This sheet has ${OfficeProcessor.MAX_XLSX_ROWS_PARSE}+ rows; parsing stopped at the ${OfficeProcessor.MAX_XLSX_ROWS_PARSE}-row cap. The content and row count above are incomplete.`;
+      }
 
       sheetData.push({
         name: sheetName,
@@ -179,13 +188,14 @@ export class OfficeProcessor implements DocumentProcessor {
         csv,
         json,
         rowCount: json.length,
+        truncated,
         // Cap spread to avoid stack overflow on sheets with thousands of columns
         columnCount: json.length > 0
           ? Math.min(10000, Math.max(0, ...json.map((row) => Array.isArray(row) ? row.length : 0)))
           : 0,
       });
     });
-    
+
     return {
       text: combinedText.trim(),
       sheets: sheetData,
@@ -193,6 +203,8 @@ export class OfficeProcessor implements DocumentProcessor {
         sheetCount: workbook.SheetNames.length,
         sheetNames: workbook.SheetNames,
         totalRows: sheetData.reduce((sum, sheet) => sum + sheet.rowCount, 0),
+        // True total may be higher than totalRows above — see per-sheet `truncated`.
+        anySheetTruncated: sheetData.some((sheet) => sheet.truncated),
       }
     };
   }
@@ -427,7 +439,10 @@ export class OfficeProcessor implements DocumentProcessor {
           }
         }
 
-        markdown += `\n**Sheet Stats:** ${sheet.rowCount} rows, ${sheet.columnCount} columns\n\n`;
+        const rowStats = sheet.truncated
+          ? `${sheet.rowCount}+ rows (parsing capped here — true count unknown)`
+          : `${sheet.rowCount} rows`;
+        markdown += `\n**Sheet Stats:** ${rowStats}, ${sheet.columnCount} columns\n\n`;
       });
     }
 
@@ -439,9 +454,13 @@ export class OfficeProcessor implements DocumentProcessor {
     
     // Use structured slide data from node-pptx-parser if available
     if (content.slides && Array.isArray(content.slides)) {
-      content.slides.forEach((slide: any, index: number) => {
+      content.slides.forEach((slide: any) => {
         if (slide.text && slide.text.length > 0) {
-          markdown += `## Slide ${index + 1}\n\n`;
+          // Use the slide's actual archive-derived id (REV-COR-413), not its position in
+          // the array — when slide numbering has a gap (slide1, slide2, slide4), `index`
+          // would mislabel slide 4 as "Slide 3" here even though `combinedText` and
+          // `slides[].id` both correctly show 4.
+          markdown += `## Slide ${slide.id}\n\n`;
           
           // Join slide text with proper formatting
           const slideContent = slide.text.join('\n').trim();
