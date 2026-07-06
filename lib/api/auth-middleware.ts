@@ -22,6 +22,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { validateApiKey, hasScope, updateKeyLastUsed } from "@/lib/api-keys/key-service";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle/utils";
+import { getUserRolesByCognitoSub } from "@/lib/db/drizzle/users";
+import { getScopesForRoles } from "@/lib/api-keys/scopes";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 
 // ============================================
@@ -199,11 +201,16 @@ export async function authenticateRequest(
       authType: "session",
     });
 
+    // Derive session scopes from the caller's roles (single source of truth:
+    // ROLE_SCOPES), mirroring API-key and nexus/chat auth. Previously every session
+    // received ["*"], letting any logged-in user satisfy admin-only scope-gated
+    // routes (e.g. graph:write) with just their browser cookie (REV-SEC-161).
+    const roleNames = await getUserRolesByCognitoSub(session.sub);
     return {
       userId,
       cognitoSub: session.sub,
       authType: "session",
-      scopes: ["*"], // Session users get full access (role-based checks still apply)
+      scopes: getScopesForRoles(roleNames),
     };
   } catch (error) {
     timer({ status: "error" });
@@ -392,9 +399,18 @@ async function verifyJwtToken(
   try {
     const { jwtVerify } = await import("jose");
     const { getJwksKeySet } = await import("@/lib/oauth/jwks-cache");
+    const { getIssuerUrl } = await import("@/lib/oauth/issuer-config");
 
     const jwks = await getJwksKeySet();
-    const { payload } = await jwtVerify(token, jwks);
+    const issuer = getIssuerUrl();
+    // Constrain to API access tokens minted by our provider for this API audience.
+    // The provider stamps aud=issuer on JWT access tokens (getResourceServerInfo)
+    // and iss=issuer; ID tokens carry aud=client_id, so requiring audience=issuer
+    // rejects token-confusion replays. exp/nbf remain enforced by jose (REV-SEC-164).
+    const { payload } = await jwtVerify(token, jwks, {
+      issuer,
+      audience: issuer,
+    });
 
     // Extract user ID from sub claim
     const userId = Number.parseInt(payload.sub ?? "", 10);

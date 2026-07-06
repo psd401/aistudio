@@ -5,7 +5,7 @@ import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getAssistantArchitectByIdAction } from '@/actions/db/assistant-architect-actions';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
-import { getAIModelById } from '@/lib/db/drizzle';
+import { getAIModelById, getUserById } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { sql } from 'drizzle-orm';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
@@ -760,12 +760,17 @@ export async function POST(req: Request) {
     // 8. Execute with streaming. Caller scopes (role-derived) are needed for
     // agentic tool resolution; harmless to compute for prompt-chain mode too.
     const callerRoleNames = currentUserData.roles.map(r => r.name);
+    // Owner's cognito_sub (not the numeric users.id) so owner-based repository
+    // access resolves for non-owner runs (REV-COR-511).
+    const assistantOwnerSub = architect.userId
+      ? ((await getUserById(architect.userId))?.cognitoSub ?? undefined)
+      : undefined;
     const context: PromptExecutionContext = {
       previousOutputs: new Map(),
       accumulatedMessages: [],
       executionId,
       userCognitoSub: session.sub,
-      assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
+      assistantOwnerSub,
       userId,
       executionStartTime: Date.now(),
       assistantId: toolId,
