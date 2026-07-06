@@ -148,6 +148,29 @@ export class FrontendStackEcs extends cdk.Stack {
     });
 
     // ============================================================================
+    // Guardrail Violation-Log Hash Secret (Issue #727 / chat outage 2026-07-06)
+    // ============================================================================
+    // HMAC key for pseudonymizing session/user ids in guardrail-violation logs
+    // (lib/safety/bedrock-guardrails-service.ts hashValue). Without a configured
+    // secret the app REFUSES to hash and logs a fixed 'redacted' placeholder —
+    // private but uncorrelatable, so per-student violation triage needs this set.
+    // A missing secret briefly took down every Nexus chat request when the app
+    // treated it as a production startup error; the secret is now provisioned
+    // here so real per-session hashing works, and the app degrades gracefully if
+    // it ever goes missing again. Injected as GUARDRAIL_HASH_SECRET below.
+    const guardrailHashSecret = new secretsmanager.Secret(this, 'GuardrailHashSecret', {
+      secretName: `aistudio-${environment}-guardrail-hash-secret`,
+      description: 'HMAC key for pseudonymizing ids in guardrail violation logs',
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({}),
+        generateStringKey: 'GUARDRAIL_HASH_SECRET',
+        excludePunctuation: true,
+        passwordLength: 32,
+      },
+      removalPolicy: environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ============================================================================
     // MCP Token Encryption Key (AES-256-GCM DEK)
     // ============================================================================
     // Random 64-character alphanumeric password used as HKDF input key material.
@@ -202,6 +225,8 @@ export class FrontendStackEcs extends cdk.Stack {
       internalApiSecretArn: internalApiSecret.secretArn,
       // Atrium collab token signing secret (#1051, created above)
       collabJwtSecretArn: collabJwtSecret.secretArn,
+      // Guardrail violation-log hash secret (#727, created above)
+      guardrailHashSecretArn: guardrailHashSecret.secretArn,
       // K-12 Content Safety: Guardrails resources from GuardrailsStack
       // These enable precise IAM scoping and DynamoDB access for PII tokenization
       guardrailArn: cdk.Fn.importValue(`${environment}-GuardrailArn`),
