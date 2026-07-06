@@ -1402,6 +1402,19 @@ Because `ship-reporter` lacks `content:publish_public`, the update reaches all s
 - **Delegated (on behalf of a person):** the agent authenticates through the existing `agent-connect` / `consent-token` flow and receives a `Requester` of kind `agent-delegated` bound to user *U*. It **inherits exactly U's permissions**; created content is owned by U and shareable only as far as U can share. (My-agent-drafts-my-brief.)
 - **Autonomous (service identity):** a row in `agent_identities` with its own `role_id` and `scopes`, authenticated via **OAuth client-credentials** on the existing OIDC provider (`oauthClientId`). Produces a `Requester` of kind `agent-autonomous`.
 
+#### Delegated token exchange (`POST /api/v1/agents/delegated-token`, #1059)
+
+REST-side entry into the delegated mode is a **two-step token exchange**:
+
+1. The agent obtains its own client-credentials JWT from the OIDC provider (the autonomous identity above), then calls `POST /api/v1/agents/delegated-token` with `{ delegated_for: <user id>, scope?: "..." }`. Minting requires the agent-held `content:delegate` authority scope, an ACTIVE `agent_identities` row behind the caller's client id, and a token that is not itself delegated (no re-delegation).
+2. The returned `access_token` (a 300 s JWT signed by the same OIDC signer, verifiable through the existing JWKS) is used as the Bearer token on `/api/v1/content/*`, where it resolves to an `agent-delegated` requester bound to the named user (`isAdmin` forced false).
+
+**Claim design:** the token's `sub` is the §26.5 **system user**, not the human — a surface that ignores `delegated_for` (e.g. `/api/v1/chat`) resolves the token to the low-privilege system account (blast-radius containment). The human is named by a **numeric** `delegated_for` claim, which only the content resolver consumes; `act.sub` carries the agent's client id (RFC-8693-style audit) and must stay **non-numeric**, because the consumer treats a numeric `act.sub` as a `delegated_for` fallback.
+
+**Scope bounding:** minted scope = requested ∩ the agent's content scopes ∩ the user's role-derived content scopes — never `content:delegate` itself (a delegated credential can never re-mint), and `content:publish_public` only when the user is an administrator AND the agent holds it. An empty intersection is a 403; no token is minted.
+
+**Tradeoff (stateless, non-revocable):** the token is not persisted, so there is no revocation list — the short TTL (`DELEGATED_TOKEN_TTL_SECONDS` = 300) is the mitigation. Minting is audited via structured logs (agent, client id, user, scopes — never the token itself).
+
 ### 26.2 Scopes
 ```
 content:create            create objects + versions

@@ -39,6 +39,16 @@ export const API_SCOPES = {
   "content:update": "Update Atrium content object metadata and create new versions",
   "content:publish_internal": "Publish Atrium content to internal destinations",
   "content:publish_public": "Publish Atrium content publicly",
+  // Agent-held AUTHORITY scope (Atrium §26.1, #1059): permits an autonomous agent
+  // to mint a short-lived delegated token acting on behalf of a user
+  // (`POST /api/v1/agents/delegated-token`). It is NOT a content DATA operation and
+  // is deliberately excluded from every minted delegated token (see
+  // `lib/oauth/delegated-token.ts`), so a delegated credential can never re-mint.
+  // Granted to agent identities via their `agent_identities.scopes`; a human who
+  // inherits it (administrator gets ALL_SCOPES) still cannot mint — the route also
+  // requires a registered agent identity — and it can never appear in a delegated
+  // token, so it cannot leak onto the content surface.
+  "content:delegate": "Mint delegated Atrium content tokens on behalf of a user",
 } as const;
 
 export type ApiScope = keyof typeof API_SCOPES;
