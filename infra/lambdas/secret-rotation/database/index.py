@@ -54,7 +54,7 @@ def sanitize_for_logging(text: str) -> str:
         return text
 
     # Remove ARNs
-    text = re.sub(r'arn:aws:[^:]+:[^:]+:\d+:[^\s]+', '[ARN_REDACTED]', text)
+    text = re.sub(r'arn:aws(?:-[a-z]+)*:[^:]*:[^:]*:\d*:[^\s]+', '[ARN_REDACTED]', text)
     # Remove IP addresses
     text = re.sub(r'\d+\.\d+\.\d+\.\d+', '[IP_REDACTED]', text)
     # Remove email addresses
@@ -149,7 +149,7 @@ def create_secret(arn: str, token: str) -> None:
 
     Generates a new random password and stores it as AWSPENDING.
     """
-    logger.info(f"Creating new secret version for {arn}")
+    logger.info(f"Creating new secret version for {sanitize_for_logging(arn)}")
 
     # Check if AWSPENDING version already exists
     try:
@@ -199,7 +199,7 @@ def set_secret(arn: str, token: str) -> None:
 
     Updates the database user's password to match the AWSPENDING secret.
     """
-    logger.info(f"Setting secret in database for {arn}")
+    logger.info(f"Setting secret in database for {sanitize_for_logging(arn)}")
 
     # Get pending secret
     pending_secret = secretsmanager.get_secret_value(
@@ -251,7 +251,7 @@ def test_secret(arn: str, token: str) -> None:
 
     Attempts to connect to the database using the AWSPENDING credentials.
     """
-    logger.info(f"Testing secret for {arn}")
+    logger.info(f"Testing secret for {sanitize_for_logging(arn)}")
 
     # Get pending secret
     pending_secret = secretsmanager.get_secret_value(
@@ -286,7 +286,7 @@ def finish_secret(arn: str, token: str) -> None:
 
     Moves the AWSCURRENT label to the AWSPENDING version.
     """
-    logger.info(f"Finishing rotation for {arn}")
+    logger.info(f"Finishing rotation for {sanitize_for_logging(arn)}")
 
     # Get metadata about the secret
     metadata = secretsmanager.describe_secret(SecretId=arn)

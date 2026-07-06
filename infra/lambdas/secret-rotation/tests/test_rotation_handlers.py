@@ -248,7 +248,7 @@ def test_sanitize_for_logging_redacts_arn(mod):
     assert "[ARN_REDACTED]" in out
 
 
-@pytest.mark.parametrize("mod", [OAUTH, CUSTOM, APIKEY])
+@pytest.mark.parametrize("mod", ALL)
 def test_handler_logs_step_not_full_arn(mod, caplog):
     sm = make_sm()
     # short-circuit via the guard (token already AWSCURRENT) to avoid the full flow

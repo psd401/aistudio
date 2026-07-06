@@ -35,7 +35,7 @@ def sanitize_for_logging(text: str) -> str:
     """Redact ARNs / IPs / emails from log messages (REV-INFRA-115)."""
     if not text:
         return text
-    text = re.sub(r'arn:aws:[^:]+:[^:]+:\d+:[^\s]+', '[ARN_REDACTED]', text)
+    text = re.sub(r'arn:aws(?:-[a-z]+)*:[^:]*:[^:]*:\d*:[^\s]+', '[ARN_REDACTED]', text)
     text = re.sub(r'\d+\.\d+\.\d+\.\d+', '[IP_REDACTED]', text)
     text = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[EMAIL_REDACTED]', text)
     return text
@@ -107,7 +107,7 @@ def create_secret(arn: str, token: str) -> None:
 
     Creates a cryptographically secure random API key.
     """
-    logger.info(f"Creating new API key for {arn}")
+    logger.info(f"Creating new API key for {sanitize_for_logging(arn)}")
 
     # Check if AWSPENDING version already exists
     try:
@@ -163,7 +163,7 @@ def set_secret(arn: str, token: str) -> None:
     service to update. Override this function if you need to update
     an external service.
     """
-    logger.info(f"Set secret for {arn} - no-op for simple API keys")
+    logger.info(f"Set secret for {sanitize_for_logging(arn)} - no-op for simple API keys")
     # No action needed for simple API keys
     pass
 
@@ -174,7 +174,7 @@ def test_secret(arn: str, token: str) -> None:
 
     Validates that the new API key meets format requirements.
     """
-    logger.info(f"Testing API key for {arn}")
+    logger.info(f"Testing API key for {sanitize_for_logging(arn)}")
 
     # Get pending secret
     pending_secret = secretsmanager.get_secret_value(
@@ -201,7 +201,7 @@ def finish_secret(arn: str, token: str) -> None:
     """
     Finish the rotation by moving AWSCURRENT label
     """
-    logger.info(f"Finishing rotation for {arn}")
+    logger.info(f"Finishing rotation for {sanitize_for_logging(arn)}")
 
     # Get metadata about the secret
     metadata = secretsmanager.describe_secret(SecretId=arn)

@@ -29,7 +29,7 @@ def sanitize_for_logging(text: str) -> str:
     """Redact ARNs / IPs / emails from log messages (REV-INFRA-115)."""
     if not text:
         return text
-    text = re.sub(r'arn:aws:[^:]+:[^:]+:\d+:[^\s]+', '[ARN_REDACTED]', text)
+    text = re.sub(r'arn:aws(?:-[a-z]+)*:[^:]*:[^:]*:\d*:[^\s]+', '[ARN_REDACTED]', text)
     text = re.sub(r'\d+\.\d+\.\d+\.\d+', '[IP_REDACTED]', text)
     text = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[EMAIL_REDACTED]', text)
     return text
@@ -126,7 +126,7 @@ def set_secret(arn: str, token: str) -> None:
     is obtained from the provider and doesn't need to be "set"
     anywhere else.
     """
-    logger.info(f"Set secret for {arn} - no-op for OAuth tokens")
+    logger.info(f"Set secret for {sanitize_for_logging(arn)} - no-op for OAuth tokens")
     # OAuth tokens don't typically need to be set anywhere
     # They're retrieved from the provider and stored in Secrets Manager
     pass
@@ -139,7 +139,7 @@ def test_secret(arn: str, token: str) -> None:
     Validates that the new token works by making a test API call
     to the OAuth provider.
     """
-    logger.info(f"Testing OAuth token for {arn}")
+    logger.info(f"Testing OAuth token for {sanitize_for_logging(arn)}")
 
     # Get pending secret
     pending_secret = secretsmanager.get_secret_value(
@@ -168,7 +168,7 @@ def finish_secret(arn: str, token: str) -> None:
     """
     Step 4: Finish the rotation by moving AWSCURRENT label
     """
-    logger.info(f"Finishing rotation for {arn}")
+    logger.info(f"Finishing rotation for {sanitize_for_logging(arn)}")
 
     # Get metadata about the secret
     metadata = secretsmanager.describe_secret(SecretId=arn)

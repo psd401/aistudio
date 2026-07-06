@@ -28,6 +28,14 @@ logger.setLevel(logging.INFO)
 # Explicit opt-in for self-contained secrets (no external consumer to update). When
 # unset, the placeholder set_secret fails loudly so a real secret is not marked
 # rotated without its new value being propagated/validated (REV-INFRA-107 / OVF2).
+#
+# Scope caveat: this is a Lambda-level flag, not a per-secret one. If this handler
+# is ever reused as the rotation Lambda for two different CUSTOM/CERTIFICATE
+# secrets — one genuinely self-contained and one with an external consumer — both
+# get the same set_secret behavior. Today `ManagedSecret.createRotationLambda`
+# (infra/lib/constructs/security/managed-secret.ts) only wires SECRETS_MANAGER_ENDPOINT
+# and provisions one Lambda per secret, so this is safe; a future consumer sharing
+# this Lambda across secrets would need a per-secret mechanism instead.
 ALLOW_PLACEHOLDER_ROTATION = os.environ.get('ALLOW_PLACEHOLDER_ROTATION', '').lower() in ('1', 'true', 'yes')
 
 # Initialize AWS clients
@@ -41,7 +49,7 @@ def sanitize_for_logging(text: str) -> str:
     """Redact ARNs / IPs / emails from log messages (REV-INFRA-115)."""
     if not text:
         return text
-    text = re.sub(r'arn:aws:[^:]+:[^:]+:\d+:[^\s]+', '[ARN_REDACTED]', text)
+    text = re.sub(r'arn:aws(?:-[a-z]+)*:[^:]*:[^:]*:\d*:[^\s]+', '[ARN_REDACTED]', text)
     text = re.sub(r'\d+\.\d+\.\d+\.\d+', '[IP_REDACTED]', text)
     text = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[EMAIL_REDACTED]', text)
     return text
@@ -117,7 +125,7 @@ def create_secret(arn: str, token: str) -> None:
     - A new password or token
     - Custom application-specific credentials
     """
-    logger.info(f"Creating new custom secret for {arn}")
+    logger.info(f"Creating new custom secret for {sanitize_for_logging(arn)}")
 
     # Check if AWSPENDING version already exists
     try:
@@ -143,7 +151,7 @@ def create_secret(arn: str, token: str) -> None:
             VersionStage="AWSCURRENT"
         )
         try:
-            parsed = json.loads(current_secret['SecretString'])
+            parsed = json.loads(current_secret.get('SecretString', ''))
             if isinstance(parsed, dict):
                 secret_dict = parsed
             else:
@@ -224,7 +232,7 @@ def test_secret(arn: str, token: str) -> None:
     # string meeting the generator's length invariant, for either the plain-string
     # or JSON {"value": ...} shape. (For a secret with an external consumer, extend
     # this with an authenticated round-trip before promotion.)
-    raw = pending_secret['SecretString']
+    raw = pending_secret.get('SecretString', '')
     try:
         parsed = json.loads(raw)
         value = parsed.get('value') if isinstance(parsed, dict) else parsed
@@ -241,7 +249,7 @@ def finish_secret(arn: str, token: str) -> None:
     """
     Step 4: Finish the rotation by moving AWSCURRENT label
     """
-    logger.info(f"Finishing rotation for {arn}")
+    logger.info(f"Finishing rotation for {sanitize_for_logging(arn)}")
 
     # Get metadata about the secret
     metadata = secretsmanager.describe_secret(SecretId=arn)
