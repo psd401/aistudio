@@ -519,8 +519,16 @@ export class EcsServiceConstruct extends Construct {
                 'arn:aws:bedrock:*:*:provisioned-model/*',
               ],
             }),
-            // K-12 Content Safety: Bedrock Guardrails API access
-            // Uses specific ARN from GuardrailsStack when provided, falls back to wildcard
+            // K-12 Content Safety: Bedrock Guardrails API access.
+            // CROSS-REGION-INFERENCE GOTCHA (2026-07-06 prod outage): ApplyGuardrail
+            // on a guardrail that uses a cross-region inference PROFILE authorizes
+            // against BOTH the guardrail ARN AND the guardrail-PROFILE ARN
+            // (e.g. .../guardrail-profile/us.guardrail.v1:0). Granting only the
+            // guardrail ARN yields 100% AccessDenied on the profile — which made
+            // ContentSafetyService fail and, worse, made Atrium §28.3 agent-write
+            // screening fail CLOSED (every workspace/agent content edit rejected).
+            // Grant the profile ARNs alongside the guardrail. (See PR #1093 for the
+            // agent-router equivalent.)
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [
@@ -528,8 +536,18 @@ export class EcsServiceConstruct extends Construct {
                 'bedrock:GetGuardrail',
               ],
               resources: props.guardrailArn
-                ? [props.guardrailArn]
-                : [`arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`],
+                ? [
+                    props.guardrailArn,
+                    // The system-defined cross-region inference profile the
+                    // guardrail resolves to at apply time. Scoped to the exact
+                    // profile id (NOT a wildcard) to match the proven grants in
+                    // guardrails-stack.ts and agent-platform-stack.ts (PR #1093).
+                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail-profile/us.guardrail.v1:0`,
+                  ]
+                : [
+                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`,
+                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail-profile/us.guardrail.v1:0`,
+                  ],
             }),
             // K-12 Content Safety: Amazon Comprehend for PII detection
             new iam.PolicyStatement({
