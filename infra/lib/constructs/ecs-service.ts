@@ -538,13 +538,15 @@ export class EcsServiceConstruct extends Construct {
               resources: props.guardrailArn
                 ? [
                     props.guardrailArn,
-                    // Cross-region inference profile ARNs (region-qualified, e.g.
-                    // us.guardrail.*) the guardrail resolves to at apply time.
-                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail-profile/*`,
+                    // The system-defined cross-region inference profile the
+                    // guardrail resolves to at apply time. Scoped to the exact
+                    // profile id (NOT a wildcard) to match the proven grants in
+                    // guardrails-stack.ts and agent-platform-stack.ts (PR #1093).
+                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail-profile/us.guardrail.v1:0`,
                   ]
                 : [
                     `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`,
-                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail-profile/*`,
+                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail-profile/us.guardrail.v1:0`,
                   ],
             }),
             // K-12 Content Safety: Amazon Comprehend for PII detection
