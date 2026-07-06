@@ -75,6 +75,14 @@ export default async function AtriumEditPage({
   // the settings dialog is simply not rendered for read-only viewers.
   const headerControls = (
     <div className="flex shrink-0 items-center gap-2">
+      {/* Nexus workspace (spec §17): open this object BESIDE the chat so the
+          adjacent conversation becomes the re-prompt/tweak path. */}
+      <a
+        href={`/nexus?workspace=${obj.id}`}
+        className="rounded border px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
+      >
+        Open beside chat
+      </a>
       {obj.kind === "document" && (
         <VersionMenu key={`versions-${obj.id}`} idOrSlug={obj.id} canEdit={userCanEdit} />
       )}
