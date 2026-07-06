@@ -4,12 +4,24 @@
  */
 import { UIMessage, createUIMessageStream, createUIMessageStreamResponse } from 'ai';
 import { sql, and, desc, eq } from 'drizzle-orm';
-import { executeQuery } from '@/lib/db/drizzle-client';
+import { executeQuery, executeTransaction } from '@/lib/db/drizzle-client';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
 import { getAttachmentFromS3 } from '@/lib/services/attachment-storage-service';
 import { sanitizeTextForDatabase } from '@/lib/utils/text-sanitizer';
 import { safeJsonbStringify } from '@/lib/db/json-utils';
+import { assertSafeFetchUrl } from '@/lib/agents/agent-tools/web-fetch';
 import { createLogger } from '@/lib/logger';
+
+/**
+ * A client-supplied reference `s3Key` (or `s3://` URL) must live under the
+ * ownership-verified conversation's own attachment prefix (REV-SEC-144). Attachment
+ * keys are written as `conversations/${conversationId}/attachments/...`, so any key
+ * outside that prefix points at another conversation/user's object and must be
+ * rejected before any S3 read.
+ */
+function isKeyInConversationPrefix(s3Key: string, conversationId: string): boolean {
+  return s3Key.startsWith(`conversations/${conversationId}/attachments/`);
+}
 
 const log = createLogger({ route: 'api.nexus.chat.image' });
 
@@ -187,36 +199,102 @@ export async function getOrCreateImageConversation(params: {
 }
 
 /**
- * Save user message for image generation
+ * Persist an image-generation exchange atomically (REV-DB-047 / REV-COR-220).
+ *
+ * The user-prompt row, the assistant image row, and the conversation-stats
+ * increment previously ran as three independent queries with a hardcoded
+ * `message_count + 2`, so a failure between them left the counter out of sync with
+ * the actual rows. Wrapping all three in one executeTransaction makes the `+2`
+ * guaranteed correct (both rows are inserted in the same unit). Image generation
+ * and S3 access are side effects and stay OUTSIDE this transaction — only the DB
+ * writes are inside.
  */
-export async function saveImageUserMessage(params: {
+export async function persistImageExchange(params: {
   conversationId: string;
   imagePrompt: string;
+  imageResult: {
+    imageUrl: string;
+    s3Key?: string;
+    model?: string;
+    provider?: string;
+    altText?: string;
+    dimensions?: { width: number; height: number };
+    estimatedCost?: number;
+  };
   dbModelId: number;
 }): Promise<void> {
-  const { conversationId, imagePrompt, dbModelId } = params;
+  const { conversationId, imagePrompt, imageResult, dbModelId } = params;
 
-  await executeQuery(
-    (db) => db.insert(nexusMessages)
-      .values({
-        id: crypto.randomUUID(),
-        conversationId,
-        role: 'user',
-        content: imagePrompt,
-        parts: sql`${safeJsonbStringify([{ type: 'text', text: imagePrompt }])}::jsonb`,
-        modelId: dbModelId,
-        metadata: sql`${safeJsonbStringify({})}::jsonb`,
-        createdAt: new Date()
-      }),
-    'saveImageUserMessage'
-  );
+  // Build assistant parts/content outside the transaction (pure computation).
+  const messageParts: Array<{
+    type: string;
+    text?: string;
+    imageUrl?: string;
+    s3Key?: string;
+    altText?: string;
+  }> = [];
+
+  if (imageResult.altText && imageResult.altText.trim()) {
+    messageParts.push({ type: 'text', text: imageResult.altText.trim() });
+  }
+
+  messageParts.push({
+    type: 'image',
+    imageUrl: imageResult.imageUrl,
+    s3Key: imageResult.s3Key,
+    altText: 'Generated image'
+  });
+
+  const assistantMessageContent = JSON.stringify({
+    type: 'image',
+    imageUrl: imageResult.imageUrl,
+    s3Key: imageResult.s3Key,
+    model: imageResult.model,
+    provider: imageResult.provider,
+    altText: imageResult.altText,
+    dimensions: imageResult.dimensions
+  });
+
+  await executeTransaction(async (tx) => {
+    await tx.insert(nexusMessages).values({
+      id: crypto.randomUUID(),
+      conversationId,
+      role: 'user',
+      content: imagePrompt,
+      parts: sql`${safeJsonbStringify([{ type: 'text', text: imagePrompt }])}::jsonb`,
+      modelId: dbModelId,
+      metadata: sql`${safeJsonbStringify({})}::jsonb`,
+      createdAt: new Date()
+    });
+
+    await tx.insert(nexusMessages).values({
+      conversationId,
+      role: 'assistant',
+      content: assistantMessageContent,
+      parts: sql`${safeJsonbStringify(messageParts)}::jsonb`,
+      modelId: dbModelId,
+      metadata: sql`${safeJsonbStringify({
+        generationType: 'image',
+        estimatedCost: imageResult.estimatedCost
+      })}::jsonb`,
+      createdAt: new Date()
+    });
+
+    // Both rows are inserted in this same transaction, so `+ 2` cannot desync.
+    await tx.update(nexusConversations).set({
+      messageCount: sql`${nexusConversations.messageCount} + 2`,
+      lastMessageAt: new Date(),
+      updatedAt: new Date()
+    }).where(eq(nexusConversations.id, conversationId));
+  }, 'persistImageExchange');
 }
 
 /**
  * Extract reference images from message parts
  */
 export async function extractReferenceImages(
-  lastMessage: ImageGenerationParams['messages'][0] | undefined
+  lastMessage: ImageGenerationParams['messages'][0] | undefined,
+  conversationId: string
 ): Promise<ReferenceImage[]> {
   const referenceImages: ReferenceImage[] = [];
 
@@ -242,9 +320,9 @@ export async function extractReferenceImages(
 
   for (const part of partsArray) {
     if (part.type === 'image') {
-      await handleImagePart(part, referenceImages);
+      await handleImagePart(part, referenceImages, conversationId);
     } else if (part.type === 'file') {
-      await handleFilePart(part, referenceImages);
+      await handleFilePart(part, referenceImages, conversationId);
     }
   }
 
@@ -253,9 +331,16 @@ export async function extractReferenceImages(
 
 async function handleImagePart(
   part: { s3Key?: string; image?: string; imageUrl?: string },
-  referenceImages: ReferenceImage[]
+  referenceImages: ReferenceImage[],
+  conversationId: string
 ): Promise<void> {
   if (part.s3Key) {
+    // REV-SEC-144: only read an s3Key that lives under this conversation's own
+    // attachment prefix — a client can otherwise reference another tenant's key.
+    if (!isKeyInConversationPrefix(part.s3Key, conversationId)) {
+      log.warn('Rejected reference image s3Key outside conversation prefix', { conversationId });
+      return;
+    }
     try {
       const attachmentData = await getAttachmentFromS3(part.s3Key);
       if (attachmentData.image) {
@@ -279,12 +364,31 @@ async function handleImagePart(
     // Logging explicitly is safer than a silent fallback to an unusable URL.
     log.warn('Image part has s3:// URL but no s3Key — cannot retrieve');
   } else if (part.imageUrl) {
-    // s3Key is intentionally omitted — it is provably undefined here because
-    // the first branch (if part.s3Key) already handles parts that carry an s3Key.
+    // REV-SEC-142: a client-supplied reference URL is fetched server-side
+    // downstream; reject private/loopback/link-local/metadata targets (SSRF)
+    // before it can become a reference image. https-only in production.
+    if (!isSafeReferenceUrl(part.imageUrl)) {
+      log.warn('Rejected unsafe reference image URL (SSRF guard)');
+      return;
+    }
     referenceImages.push({
       url: part.imageUrl,
       role: 'reference'
     });
+  }
+}
+
+/**
+ * SSRF guard for a client-supplied reference-image URL (REV-SEC-142). Wraps the
+ * shared assertSafeFetchUrl (blocks private/loopback/link-local/metadata hosts;
+ * https-only in production) and returns a boolean so callers can skip+log.
+ */
+function isSafeReferenceUrl(url: string): boolean {
+  try {
+    assertSafeFetchUrl(url);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -330,7 +434,8 @@ const ALLOWED_IMAGE_MIMES = new Set([
 
 async function handleFilePart(
   part: { mediaType?: string; mimeType?: string; s3Key?: string; url?: string; data?: string },
-  referenceImages: ReferenceImage[]
+  referenceImages: ReferenceImage[],
+  conversationId: string
 ): Promise<void> {
   const mimeType = part.mediaType || part.mimeType || '';
   if (!ALLOWED_IMAGE_MIMES.has(mimeType)) {
@@ -339,6 +444,12 @@ async function handleFilePart(
 
   const s3Key = getS3KeyFromPart(part);
   if (s3Key) {
+    // REV-SEC-144: reject a client-supplied key (incl. s3:// URLs) that is not
+    // under this conversation's own attachment prefix before any S3 read.
+    if (!isKeyInConversationPrefix(s3Key, conversationId)) {
+      log.warn('Rejected reference file s3Key outside conversation prefix', { conversationId });
+      return;
+    }
     await handleS3FileImage(s3Key, mimeType, referenceImages);
     return;
   }
@@ -352,6 +463,12 @@ async function handleFilePart(
   }
 
   if (part.url) {
+    // REV-SEC-142: part.url here is a non-s3:// URL (getS3KeyFromPart already
+    // handled s3://). Reject SSRF targets before it becomes a fetched reference.
+    if (!isSafeReferenceUrl(part.url)) {
+      log.warn('Rejected unsafe reference file URL (SSRF guard)');
+      return;
+    }
     referenceImages.push({ url: part.url, mimeType, role: 'reference' });
   }
 }
@@ -400,87 +517,6 @@ export async function getPreviousGeneratedImages(
   }
 
   return referenceImages;
-}
-
-/**
- * Save assistant message with generated image
- */
-export async function saveImageAssistantMessage(params: {
-  conversationId: string;
-  imageResult: {
-    imageUrl: string;
-    s3Key?: string;
-    model?: string;
-    provider?: string;
-    altText?: string;
-    dimensions?: { width: number; height: number };
-    estimatedCost?: number;
-  };
-  dbModelId: number;
-}): Promise<void> {
-  const { conversationId, imageResult, dbModelId } = params;
-
-  const messageParts: Array<{
-    type: string;
-    text?: string;
-    imageUrl?: string;
-    s3Key?: string;
-    altText?: string;
-  }> = [];
-
-  if (imageResult.altText && imageResult.altText.trim()) {
-    messageParts.push({ type: 'text', text: imageResult.altText.trim() });
-  }
-
-  messageParts.push({
-    type: 'image',
-    imageUrl: imageResult.imageUrl,
-    s3Key: imageResult.s3Key,
-    altText: 'Generated image'
-  });
-
-  const assistantMessageContent = JSON.stringify({
-    type: 'image',
-    imageUrl: imageResult.imageUrl,
-    s3Key: imageResult.s3Key,
-    model: imageResult.model,
-    provider: imageResult.provider,
-    altText: imageResult.altText,
-    dimensions: imageResult.dimensions
-  });
-
-  await executeQuery(
-    (db) => db.insert(nexusMessages)
-      .values({
-        conversationId,
-        role: 'assistant',
-        content: assistantMessageContent,
-        parts: sql`${safeJsonbStringify(messageParts)}::jsonb`,
-        modelId: dbModelId,
-        metadata: sql`${safeJsonbStringify({
-          generationType: 'image',
-          estimatedCost: imageResult.estimatedCost
-        })}::jsonb`,
-        createdAt: new Date()
-      }),
-    'saveImageAssistantMessage'
-  );
-}
-
-/**
- * Update conversation stats after image generation
- */
-export async function updateImageConversationStats(conversationId: string): Promise<void> {
-  await executeQuery(
-    (db) => db.update(nexusConversations)
-      .set({
-        messageCount: sql`${nexusConversations.messageCount} + 2`,
-        lastMessageAt: new Date(),
-        updatedAt: new Date()
-      })
-      .where(eq(nexusConversations.id, conversationId)),
-    'updateImageConversationStats'
-  );
 }
 
 /**
