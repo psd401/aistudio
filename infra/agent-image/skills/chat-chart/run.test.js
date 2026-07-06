@@ -59,3 +59,19 @@ test('explicit --engine quickchart for public data is unchanged', () => {
   assert.strictEqual(r.engine, 'quickchart');
   assert.strictEqual(r.reason, 'explicit');
 });
+
+test('explicit --engine quickchart cannot bypass --sensitive refusal (REV-INFRA-002 gap)', () => {
+  const r = chooseEngine({ '--engine': 'quickchart', '--sensitive': true }, 'apples 5');
+  assert.strictEqual(r.engine, 'refuse');
+});
+
+test('explicit --engine quickchart cannot bypass PII refusal (REV-INFRA-002 gap)', () => {
+  const r = chooseEngine({ '--engine': 'quickchart' }, 'contact a@b.com for details');
+  assert.strictEqual(r.engine, 'refuse');
+});
+
+test('explicit --engine local is unaffected by the sensitivity gate', () => {
+  const r = chooseEngine({ '--engine': 'local', '--sensitive': true }, 'anything');
+  assert.strictEqual(r.engine, 'local');
+  assert.strictEqual(r.reason, 'explicit');
+});

@@ -101,7 +101,7 @@ if [ -f "$GH_CFG" ] && grep -q '^aliases:' "$GH_CFG"; then
       skip==1 && (/^[[:space:]]/ || /^$/ || /^#/) { next }
       skip==1 { skip=0 }
       { print }
-    ' "$GH_CFG" > "$_gh_tmp" && cat "$_gh_tmp" > "$GH_CFG"
+    ' "$GH_CFG" > "$_gh_tmp" && mv "$_gh_tmp" "$GH_CFG"
     rm -f "$_gh_tmp"
   fi
 fi

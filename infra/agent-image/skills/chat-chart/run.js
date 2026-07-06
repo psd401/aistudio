@@ -125,17 +125,24 @@ function chooseEngine(args, dataText) {
   if (!ALLOWED_ENGINES.has(requested)) {
     fail(`--engine must be one of ${[...ALLOWED_ENGINES].join(', ')}`);
   }
-  if (requested !== 'auto') return { engine: requested, reason: 'explicit' };
+  // `local` never leaves the district, so an explicit request bypasses the
+  // sensitivity gate below outright — it's also currently unreachable since
+  // the local engine is disabled in this build (see comment below).
+  if (requested === 'local') return { engine: 'local', reason: 'explicit' };
   // Local (on-host, matplotlib) engine is currently disabled in this build
   // (matplotlib + the chat-chart npm install were removed because they tripped
-  // AgentCore's overlay snapshotter — see 2026-05-18 incident). The only
-  // remaining engine is QuickChart, which transmits the chart data (including
-  // the user's values) to the third-party quickchart.io. So in auto mode we
-  // FAIL CLOSED: refuse to render anything flagged --sensitive or matching a
-  // PII pattern rather than silently leaking it off-district (REV-INFRA-002).
-  // Genuinely public data still renders via QuickChart. When the local engine
-  // is reinstated, restore the prior routing: route to `local` if --sensitive
-  // set OR if data trips detectPII(), else QuickChart.
+  // AgentCore's overlay snapshotter — see 2026-05-18 incident). QuickChart is
+  // therefore the only reachable engine, and it transmits the chart data
+  // (including the user's values) to the third-party quickchart.io. So both
+  // `auto` and explicit `--engine quickchart` FAIL CLOSED here: refuse to
+  // render anything flagged --sensitive or matching a PII pattern rather than
+  // silently leaking it off-district (REV-INFRA-002). An explicit
+  // `--engine quickchart` must not be usable to route around this check —
+  // `local` isn't reachable anyway, so there's no legitimate reason to prefer
+  // quickchart over auto for sensitive data. Genuinely public data still
+  // renders via QuickChart either way. When the local engine is reinstated,
+  // restore the prior routing: route to `local` if --sensitive set OR if data
+  // trips detectPII(), else QuickChart.
   if (args['--sensitive']) {
     return {
       engine: 'refuse',
@@ -157,7 +164,7 @@ function chooseEngine(args, dataText) {
               'local engine.',
     };
   }
-  return { engine: 'quickchart', reason: 'auto: data looks public' };
+  return { engine: 'quickchart', reason: requested === 'quickchart' ? 'explicit' : 'auto: data looks public' };
 }
 
 /**
