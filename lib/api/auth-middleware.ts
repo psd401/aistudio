@@ -196,17 +196,20 @@ export async function authenticateRequest(
       return createErrorResponse(requestId, 401, "UNAUTHORIZED", "Authentication required");
     }
 
+    // Derive session scopes from the caller's roles (single source of truth:
+    // ROLE_SCOPES), mirroring API-key and nexus/chat auth. Previously every session
+    // received ["*"], letting any logged-in user satisfy admin-only scope-gated
+    // routes (e.g. graph:write) with just their browser cookie (REV-SEC-161).
+    // Resolved before the success timer/log so a thrown lookup is recorded as
+    // the error it is, not double-counted as a success followed by an error.
+    const roleNames = await getUserRolesByCognitoSub(session.sub);
+
     timer({ status: "success" });
     log.info("Authenticated via session", {
       userId,
       authType: "session",
     });
 
-    // Derive session scopes from the caller's roles (single source of truth:
-    // ROLE_SCOPES), mirroring API-key and nexus/chat auth. Previously every session
-    // received ["*"], letting any logged-in user satisfy admin-only scope-gated
-    // routes (e.g. graph:write) with just their browser cookie (REV-SEC-161).
-    const roleNames = await getUserRolesByCognitoSub(session.sub);
     return {
       userId,
       cognitoSub: session.sub,
