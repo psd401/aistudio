@@ -286,7 +286,12 @@ function buildSuggestAction(data: BridgeBody): ActionResult {
   };
 }
 
-/** Legacy path (op absent / "replace" / "append") — keeps the exact prior responses. */
+/**
+ * Legacy path (op absent / "replace" / "append") — preserves the prior edit
+ * SEMANTICS (the `mode`/`markdown` behavior is unchanged for back-compat). The
+ * success envelope additionally echoes `op` now, so it is a superset of the prior
+ * `{ applied, mode }` shape, not byte-identical.
+ */
 function buildEditAction(op: BridgeBody["op"], data: BridgeBody): ActionResult {
   const markdown = data.markdown ?? "";
   if (!markdown.trim()) return missing("markdown");

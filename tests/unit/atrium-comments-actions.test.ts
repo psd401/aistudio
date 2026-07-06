@@ -106,6 +106,7 @@ beforeEach(() => {
       threadId: THREAD_ID,
       parentId: null,
       body: "root body",
+      authorUserId: 42,
       authorAgentId: null,
       authorLabel: null,
       resolved: false,
@@ -181,6 +182,7 @@ describe("listCommentThreadsAction", () => {
         threadId: "TA",
         parentId: null,
         body: "root A",
+        authorUserId: 42,
         authorAgentId: null,
         authorLabel: null,
         resolved: false,
@@ -194,6 +196,7 @@ describe("listCommentThreadsAction", () => {
         threadId: "TA",
         parentId: "c1",
         body: "reply A",
+        authorUserId: 43,
         authorAgentId: null,
         authorLabel: null,
         resolved: false,
@@ -208,6 +211,7 @@ describe("listCommentThreadsAction", () => {
         threadId: "TB",
         parentId: null,
         body: "root B",
+        authorUserId: null,
         authorAgentId: "ag-1",
         authorLabel: "ship-bot",
         resolved: true,
@@ -240,6 +244,35 @@ describe("listCommentThreadsAction", () => {
     expect(b.comments[0]).toMatchObject({
       authorKind: "agent",
       authorLabel: "ship-bot",
+    });
+  });
+
+  it("classifies an agent comment with a NON-UUID label (no authorAgentId) as agent", async () => {
+    // The agent bridge may use a documented non-UUID X-Agent-Id (e.g. "bot-1"),
+    // recorded as authorLabel with authorAgentId null. authorKind keys off the
+    // absence of a human author (authorUserId), so these are still "agent".
+    queryResults.set("atrium.comments.listThreads", [
+      {
+        id: "c9",
+        threadId: "TC",
+        parentId: null,
+        body: "agent note",
+        authorUserId: null,
+        authorAgentId: null,
+        authorLabel: "bot-1",
+        resolved: false,
+        createdAt: new Date("2026-07-01T13:00:00Z"),
+        userFirstName: null,
+        userLastName: null,
+        userEmail: null,
+      },
+    ]);
+    const result = await listCommentThreadsAction("obj-1");
+    expect(result.isSuccess).toBe(true);
+    if (!result.isSuccess) return;
+    expect(result.data[0].comments[0]).toMatchObject({
+      authorKind: "agent",
+      authorLabel: "bot-1",
     });
   });
 

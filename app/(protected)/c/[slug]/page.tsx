@@ -65,7 +65,7 @@ import { visibilityService } from "@/lib/content/visibility-service";
 import { versionService } from "@/lib/content/version-service";
 import { canEdit } from "@/lib/content/helpers";
 import { getOptionalRequester } from "@/actions/db/atrium/requester";
-import { listCommentThreadsAction } from "@/actions/db/atrium/comments";
+import { countUnresolvedCommentThreadsAction } from "@/actions/db/atrium/comments";
 import { createLogger } from "@/lib/logger";
 import { ProvenanceFooter } from "@/components/atrium/ProvenanceFooter";
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
@@ -218,16 +218,16 @@ function ReaderShell({
 }
 
 /**
- * Unresolved root-comment count for the editors-only reader chip. Reads through
- * the same `listCommentThreadsAction` the editor uses (each thread is one root
- * comment; count the unresolved ones), and degrades to 0 on any failure so a
- * comments outage never breaks the reader.
+ * Unresolved root-comment count for the editors-only reader chip. Uses the cheap
+ * COUNT action (backed by idx_adc_object_resolved) — NOT listCommentThreadsAction,
+ * which would load + serialize every comment body just to size a number on the hot
+ * reader render. Degrades to 0 on any failure so a comments outage never breaks the
+ * reader.
  */
 async function unresolvedCommentCount(idOrSlug: string): Promise<number> {
   try {
-    const result = await listCommentThreadsAction(idOrSlug);
-    if (!result.isSuccess) return 0;
-    return result.data.filter((thread) => !thread.resolved).length;
+    const result = await countUnresolvedCommentThreadsAction(idOrSlug);
+    return result.isSuccess ? result.data : 0;
   } catch {
     return 0;
   }

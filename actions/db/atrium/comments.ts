@@ -79,6 +79,7 @@ const commentSelect = {
   threadId: atriumDocComments.threadId,
   parentId: atriumDocComments.parentId,
   body: atriumDocComments.body,
+  authorUserId: atriumDocComments.authorUserId,
   authorAgentId: atriumDocComments.authorAgentId,
   authorLabel: atriumDocComments.authorLabel,
   resolved: atriumDocComments.resolved,
@@ -94,6 +95,7 @@ interface CommentRow {
   threadId: string;
   parentId: string | null;
   body: string;
+  authorUserId: number | null;
   authorAgentId: string | null;
   authorLabel: string | null;
   resolved: boolean;
@@ -104,13 +106,16 @@ interface CommentRow {
 }
 
 /**
- * Map one comment row to a DTO. `authorKind` is `agent` iff an agent identity is
- * recorded (mirrors the version/audit invariant). `authorLabel` prefers the stored
- * label, falling back to the joined human name/email (or a generic label) so the
- * reader never renders an empty author.
+ * Map one comment row to a DTO. `authorKind` keys off the absence of a HUMAN author
+ * (`authorUserId == null`), NOT on `authorAgentId`: the agent bridge may use a
+ * documented non-UUID `X-Agent-Id` (e.g. "bot-1"), which is recorded as an
+ * `authorLabel` with a null `authorAgentId` — classifying on `authorAgentId` alone
+ * would mislabel those agent comments as human. UI comments always carry an
+ * `authorUserId`; bridge comments never do. `authorLabel` falls back to the joined
+ * human name/email so the reader never renders an empty author.
  */
 function toCommentDTO(row: CommentRow): CommentDTO {
-  const isAgent = row.authorAgentId != null;
+  const isAgent = row.authorUserId == null;
   const humanName = [row.userFirstName, row.userLastName]
     .filter((part) => Boolean(part && part.trim()))
     .join(" ")
@@ -308,6 +313,51 @@ export async function listCommentThreadsAction(
 }
 
 /**
+ * Count OPEN (unresolved) comment threads on a document — the reader's editors-only
+ * comment chip. A cheap `COUNT` over the root rows (backed by `idx_adc_object_resolved`),
+ * NOT `listCommentThreadsAction`, which would load + serialize every comment BODY just
+ * to compute a number on the hot RSC reader render path. canView-gated (same as list).
+ */
+export async function countUnresolvedCommentThreadsAction(
+  idOrSlug: string
+): Promise<ActionState<number>> {
+  const requestId = generateRequestId();
+  const timer = startTimer("countUnresolvedCommentThreadsAction");
+
+  try {
+    const { obj } = await resolveGatedObject(requestId, idOrSlug, {
+      requireCapability: false,
+      requireEdit: false,
+    });
+
+    const rows = (await executeQuery(
+      (db) =>
+        db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(atriumDocComments)
+          .where(
+            and(
+              eq(atriumDocComments.objectId, obj.id),
+              isNull(atriumDocComments.parentId),
+              eq(atriumDocComments.resolved, false)
+            )
+          ),
+      "atrium.comments.countUnresolved"
+    )) as Array<{ n: number }>;
+
+    timer({ status: "success" });
+    return createSuccess(rows[0]?.n ?? 0, "Counted");
+  } catch (error) {
+    timer({ status: "error" });
+    return handleError(error, "Failed to count comments", {
+      context: "countUnresolvedCommentThreadsAction",
+      requestId,
+      operation: "countUnresolvedCommentThreadsAction",
+    });
+  }
+}
+
+/**
  * Open a new comment thread on a document (edit-gated). Inserts the thread root
  * (`parent_id` NULL) with the client-minted `threadId` that also marks the anchor
  * span in the editor. Returns the new thread DTO.
@@ -332,15 +382,24 @@ export async function createCommentThreadAction(
     const threadId = normalizeThreadId(input?.threadId);
     const body = normalizeBody(input?.body);
 
+    // Idempotent on the caller-supplied threadId: the uq_adc_thread_root partial
+    // unique index guarantees one root per (object, thread), so a retried create
+    // (same threadId) is a no-op that returns the existing thread rather than a 500.
     await executeQuery(
       (db) =>
-        db.insert(atriumDocComments).values({
-          objectId: obj.id,
-          threadId,
-          parentId: null,
-          body,
-          authorUserId: authorUserIdOf(requester),
-        }),
+        db
+          .insert(atriumDocComments)
+          .values({
+            objectId: obj.id,
+            threadId,
+            parentId: null,
+            body,
+            authorUserId: authorUserIdOf(requester),
+          })
+          .onConflictDoNothing({
+            target: [atriumDocComments.objectId, atriumDocComments.threadId],
+            where: isNull(atriumDocComments.parentId),
+          }),
       "atrium.comments.insertRoot"
     );
 

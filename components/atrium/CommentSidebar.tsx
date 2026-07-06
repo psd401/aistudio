@@ -64,6 +64,60 @@ function focusThreadAnchor(editor: Editor | null, threadId: string): void {
   }
 }
 
+/**
+ * Mirror a thread's resolve/reopen into its EDITOR anchor mark so the inline
+ * highlight reflects state without a reload. Rewrites every `atriumComment` mark
+ * carrying `threadId` with the new `resolved` attr (keeping the anchor so a reopen
+ * restores the highlight). Runs on the LOCAL doc; the CRDT propagates it to peers.
+ */
+function setCommentResolvedInEditor(
+  editor: Editor | null,
+  threadId: string,
+  resolved: boolean
+): void {
+  if (!editor) return;
+  const markType = editor.schema.marks[ATRIUM_COMMENT_MARK];
+  if (!markType) return;
+  const ranges: Array<{ from: number; to: number }> = [];
+  editor.state.doc.descendants((node, pos) => {
+    if (!node.isText) return true;
+    const hit = node.marks.find(
+      (m) => m.type === markType && m.attrs.threadId === threadId
+    );
+    if (hit) ranges.push({ from: pos, to: pos + node.nodeSize });
+    return true;
+  });
+  if (ranges.length === 0) return;
+  const tr = editor.state.tr;
+  for (const { from, to } of ranges) {
+    tr.addMark(from, to, markType.create({ threadId, resolved }));
+  }
+  editor.view.dispatch(tr);
+}
+
+/**
+ * Remove every `atriumComment` anchor for `threadId` — used to clean up an orphan
+ * anchor when the backing thread failed to persist. Keyed by threadId (not static
+ * positions) because the async persist may have let the doc shift underneath.
+ */
+function removeCommentMarkByThread(editor: Editor | null, threadId: string): void {
+  if (!editor) return;
+  const markType = editor.schema.marks[ATRIUM_COMMENT_MARK];
+  if (!markType) return;
+  const ranges: Array<{ from: number; to: number }> = [];
+  editor.state.doc.descendants((node, pos) => {
+    if (!node.isText) return true;
+    if (node.marks.some((m) => m.type === markType && m.attrs.threadId === threadId)) {
+      ranges.push({ from: pos, to: pos + node.nodeSize });
+    }
+    return true;
+  });
+  if (ranges.length === 0) return;
+  const tr = editor.state.tr;
+  for (const { from, to } of ranges) tr.removeMark(from, to, markType);
+  editor.view.dispatch(tr);
+}
+
 /** One comment (body + author + time). */
 function CommentRow({ comment }: { comment: CommentDTO }): React.JSX.Element {
   return (
@@ -73,7 +127,9 @@ function CommentRow({ comment }: { comment: CommentDTO }): React.JSX.Element {
           {comment.authorLabel}
           {comment.authorKind === "agent" ? " (agent)" : ""}
         </span>
-        <span>{formatTime(comment.createdAt)}</span>
+        {/* toLocaleString differs by server/client locale+tz → suppress the
+            SSR/hydration diff on this non-semantic timestamp. */}
+        <span suppressHydrationWarning>{formatTime(comment.createdAt)}</span>
       </div>
       <p className="whitespace-pre-wrap text-sm">{comment.body}</p>
     </li>
@@ -202,7 +258,10 @@ export function CommentSidebar({
     if (created) {
       setDraft("");
     } else {
-      editor.chain().setTextSelection({ from, to }).unsetMark(ATRIUM_COMMENT_MARK).run();
+      // Remove the orphan anchor by its THREAD ID, not the original {from,to}:
+      // the persist is async, so the user may have edited/reselected meanwhile,
+      // which would make static positions stale (and clear the wrong span).
+      removeCommentMarkByThread(editor, threadId);
     }
   }, [editor, draft, createThread]);
 
@@ -265,7 +324,13 @@ export function CommentSidebar({
               onFocus={() => focusThreadAnchor(editor, thread.threadId)}
               onReply={(body) => reply(thread.threadId, body)}
               onResolve={(resolved) => {
-                void resolve(thread.threadId, resolved);
+                // Reflect the decision inline immediately, then persist. On a
+                // persist failure `resolve` reverts the sidebar state; re-mirror
+                // so the editor mark doesn't drift from the (reverted) truth.
+                setCommentResolvedInEditor(editor, thread.threadId, resolved);
+                void resolve(thread.threadId, resolved).then((ok) => {
+                  if (!ok) setCommentResolvedInEditor(editor, thread.threadId, !resolved);
+                });
               }}
             />
           ))}

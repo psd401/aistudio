@@ -60,6 +60,15 @@ CREATE INDEX IF NOT EXISTS idx_adc_object_thread
 CREATE INDEX IF NOT EXISTS idx_adc_object_resolved
   ON atrium_doc_comments (object_id, resolved);
 
+-- Exactly ONE root row per (object, thread). The surfaces accept a caller-supplied
+-- threadId (the comment mark's id), so a retried create must not fabricate a second
+-- root — that would make reply/resolve pick an arbitrary root. A partial UNIQUE index
+-- on the roots enforces one-root-per-thread at the DB; the create action treats a
+-- conflict as an idempotent no-op (returns the existing thread).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_adc_thread_root
+  ON atrium_doc_comments (object_id, thread_id)
+  WHERE parent_id IS NULL;
+
 -- updated_at trigger (CLAUDE.md: tables with updated_at MUST have the trigger).
 DROP TRIGGER IF EXISTS update_atrium_doc_comments_updated_at ON atrium_doc_comments;
 CREATE TRIGGER update_atrium_doc_comments_updated_at
