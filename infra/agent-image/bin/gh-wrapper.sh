@@ -206,6 +206,20 @@ if [ "${tokens[0]:-}" = "api" ]; then
     esac
   done
 
+  # Strip a query string and any trailing slash(es) so a caller can't dodge
+  # the path-based guards below by appending `/` or `?x=y` — bash `case`
+  # glob matching lets `*` match zero-length strings, so `/repos/o/r/`
+  # would otherwise match the "deeper sub-resource" pattern instead of the
+  # repo-root pattern, and `.../pulls/1/merge/` would no longer end in the
+  # literal `merge` the raw-PR-merge guard matches on.
+  path="${path%%\?*}"
+  while true; do
+    case "$path" in
+      ?*/) path="${path%/}" ;;
+      *) break ;;
+    esac
+  done
+
   # DELETE via raw api covers repo delete, branch delete, release
   # delete, pr close (also rejected above by name), etc.
   if [ "$method" = "DELETE" ]; then

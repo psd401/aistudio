@@ -90,6 +90,17 @@ refuse_case "api graphql --input file"               api graphql --input payload
 refuse_case "api graphql --input stdin"              api graphql --input -
 refuse_case "api graphql --input= attached form"     api graphql --input=payload.json
 
+# --- claude[bot] review: trailing slash / query string on the path lets
+# bash `case` glob matching treat a zero-length final segment as a "deeper
+# sub-resource", or makes the path no longer end in the literal suffix the
+# merge/protection guards match on ---
+refuse_case "api PATCH repo edit with trailing slash"     api -X PATCH /repos/o/r/ -f archived=true
+refuse_case "api PUT repo edit with trailing slash"       api -X PUT /repos/o/r/ -f visibility=public
+refuse_case "api raw PR merge with trailing slash"        api repos/o/r/pulls/1/merge/ -X POST
+refuse_case "api raw PR merge with query string"          api repos/o/r/pulls/1/merge?foo=bar -X POST
+refuse_case "api branch protection with trailing slash"   api -X PUT /repos/o/r/branches/main/protection/
+allow_case "api PATCH deeper sub-resource with trailing slash" api -X PATCH /repos/o/r/pulls/1/ -f title=x
+
 # --- allowed: reads + reversible + deeper sub-resources ---
 allow_case "api GET repos"                       api GET /repos/o/r
 allow_case "api list pulls"                       api /repos/o/r/pulls
