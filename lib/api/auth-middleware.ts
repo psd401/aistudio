@@ -8,13 +8,14 @@
  *     Yes → SHA-256 prefix lookup → Argon2id verify → AuthContext { authType: "api_key" }
  *     No  → Has "Authorization: Bearer <jwt>" (not sk- prefix)?
  *       Yes → Verify JWT via JWKS → AuthContext { authType: "jwt" }
- *       No  → getServerSession() → AuthContext { authType: "session", scopes: ["*"] }
+ *       No  → getServerSession() → AuthContext { authType: "session", scopes: <role-derived> }
  *     Neither → 401
  *
  * Security:
  * - Raw API keys are NEVER logged
  * - Consistent error messages prevent key existence leakage
- * - Session users get wildcard scopes (full access for their role)
+ * - Session users get scopes derived from their roles via getScopesForRoles() (REV-SEC-161) —
+ *   not a wildcard; a student session cannot satisfy admin-only scopes
  * - API key auth does NOT bypass role-based access checks
  */
 
@@ -229,7 +230,8 @@ export async function authenticateRequest(
  * Check if the auth context has the required scope.
  * Returns a 403 NextResponse if the scope is missing, or null if allowed.
  *
- * Session users always pass (scopes: ["*"]).
+ * Session users pass only if their role-derived scopes (REV-SEC-161) include
+ * this scope — administrators map to ALL_SCOPES, other roles do not.
  *
  * Usage:
  * ```typescript
