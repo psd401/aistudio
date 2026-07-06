@@ -31,6 +31,7 @@ import { contentService } from "@/lib/content/content-service";
 import { canEdit } from "@/lib/content/helpers";
 import { requesterForUserId } from "@/lib/content/requester-from-auth";
 import { applyAgentEdit } from "@/lib/content/collab/apply-agent-edit";
+import { loadDocState } from "@/lib/content/collab/doc-state-store";
 import { screenAgentContent } from "@/lib/content/agent-screening";
 import { createLogger } from "@/lib/logger";
 
@@ -50,7 +51,50 @@ interface ReadResult {
   title: string;
   kind: "document" | "artifact";
   bodyFormat: string | null;
+  /** Current content, or null when it is unavailable (never conflated with ""). */
   body: string | null;
+  /**
+   * True when the content exists but could not be inlined for reading (a large
+   * artifact whose source lives at `bodyLocation`). The model must then edit
+   * conservatively (append/targeted) rather than assume an empty item.
+   */
+  bodyUnavailable?: boolean;
+}
+
+/**
+ * Resolve the CURRENT body of the open object for reading (PR #1136 review):
+ * - documents keep their live text in the Yjs doc, projected to
+ *   `atrium_doc_state.markdown` — NOT in `version.bodyInline` (null for a live
+ *   collab doc). Read the projection, falling back to the version snapshot.
+ * - artifacts store small source inline (`bodyInline`); a large artifact's source
+ *   lives at `bodyLocation` with `bodyInline` null — report `bodyUnavailable`
+ *   rather than telling the model the item is empty (which would let a rewrite
+ *   clobber it).
+ */
+async function resolveReadBody(
+  obj: Awaited<ReturnType<typeof contentService.get>>
+): Promise<{ body: string | null; bodyUnavailable: boolean }> {
+  if (obj.kind === "document") {
+    // A live collaborative document keeps its text in the Yjs doc, projected to
+    // `atrium_doc_state.markdown`. That projection — not `version.bodyInline`
+    // (null for a live doc) — is the readable source. It may lag the very latest
+    // unsaved edits, but returning it beats claiming the doc is empty. When it is
+    // genuinely unavailable (empty projection, no snapshot), signal
+    // `bodyUnavailable` so the model appends/edits conservatively rather than
+    // rewriting from nothing (PR #1136 review).
+    const state = await loadDocState(obj.id);
+    const md =
+      state?.markdown && state.markdown.trim().length > 0
+        ? state.markdown
+        : obj.version?.bodyInline ?? null;
+    if (md !== null) return { body: md, bodyUnavailable: false };
+    return { body: null, bodyUnavailable: true };
+  }
+  // artifact: small source is inline; a large artifact's source lives at
+  // `bodyLocation` (bodyInline null) — report unavailable, never empty.
+  const inline = obj.version?.bodyInline ?? null;
+  if (inline !== null) return { body: inline, bodyUnavailable: false };
+  return { body: null, bodyUnavailable: obj.version != null };
 }
 
 /** Build the read tool (always available for an editable, viewable object). */
@@ -61,7 +105,7 @@ function buildReadTool(
 ): Tool {
   return tool({
     description:
-      "Read the current content of the document or artifact open in the workspace panel beside this chat. Call this before editing so your changes build on the current content.",
+      "Read the current content of the document or artifact open in the workspace panel beside this chat. Call this before editing so your changes build on the current content. If it returns bodyUnavailable, the item has content that could not be loaded — prefer appending or targeted edits over a full rewrite.",
     inputSchema: jsonSchema<Record<string, never>>({
       type: "object",
       properties: {},
@@ -72,11 +116,13 @@ function buildReadTool(
       if (!req) return { error: "Could not resolve your identity." };
       try {
         const obj = await contentService.get(req, idOrSlug);
+        const { body, bodyUnavailable } = await resolveReadBody(obj);
         return {
           title: obj.title,
           kind: obj.kind as "document" | "artifact",
           bodyFormat: obj.version?.bodyFormat ?? null,
-          body: obj.version?.bodyInline ?? "",
+          body,
+          ...(bodyUnavailable ? { bodyUnavailable: true } : {}),
         };
       } catch (err) {
         log.warn("read_workspace_content failed", {
@@ -160,6 +206,7 @@ function buildArtifactUpdateTool(
   objectId: string,
   bodyFormat: string,
   userId: number,
+  requestId: string,
   log: ReturnType<typeof createLogger>
 ): Tool {
   return tool({
@@ -189,8 +236,25 @@ function buildArtifactUpdateTool(
       }
       const req = await requesterForUserId(userId);
       if (!req) return { error: "Could not resolve your identity." };
+      // §28.3: this tool runs under a `kind: "user"` (human) requester, and
+      // contentService.createVersion only screens AGENT/delegated authors — so
+      // the model-generated code would be persisted UNSCREENED without this
+      // explicit gate (PR #1136 review, gemini/codex P1). Screen the agent-
+      // authored code here, mirroring the document edit path. Fail closed.
+      const verdict = await screenAgentContent(code, objectId, requestId);
+      if (!verdict.allowed) {
+        log.warn("update_workspace_artifact blocked by screening", {
+          objectId,
+          reason: verdict.reason,
+        });
+        return {
+          error:
+            verdict.message ??
+            "That content was blocked by the safety screen and was not saved.",
+        };
+      }
       try {
-        // createVersion enforces canView/canEdit and §28.3-screens the body.
+        // createVersion enforces canView/canEdit (screening already done above).
         const result = await contentService.createVersion(req, objectId, {
           body: code,
           bodyFormat: bodyFormat === "jsx" ? "jsx" : "html",
@@ -252,6 +316,7 @@ export async function buildWorkspaceChatTools(params: {
         obj.id,
         obj.version?.bodyFormat ?? "html",
         userId,
+        requestId,
         log
       );
     }
@@ -263,8 +328,12 @@ export async function buildWorkspaceChatTools(params: {
       : " You can update it with the update_workspace_artifact tool (provide the complete new code)."
     : " It is read-only for this user.";
 
+  // Escape the title via JSON.stringify: a content title is user-controlled and
+  // is interpolated into a SYSTEM instruction block, so a raw title with
+  // newlines/quotes could inject prompt structure (PR #1136 review, Copilot).
+  const safeTitle = JSON.stringify(obj.title);
   const systemPromptFragment =
-    `A ${kind} titled "${obj.title}" is open in the workspace panel beside this chat. ` +
+    `A ${kind} titled ${safeTitle} is open in the workspace panel beside this chat. ` +
     `When the user asks you to change, add to, or fix it, act on THAT ${kind} rather than answering in chat only. ` +
     `Call read_workspace_content first to see its current content.` +
     editHint;

@@ -221,7 +221,12 @@ async function executeStreaming(params: {
     conversationId,
     source: 'nexus',
     systemPrompt,
-    enabledTools: mergedTools ? undefined : enabledTools,
+    // Always pass the scoped enabledTools: when `tools` is also set (connector /
+    // workspace merge), the streaming service now merges the model's
+    // provider-native tools UNDER the pre-merged set so web search / code
+    // interpreter aren't dropped just because a connector or workspace is active
+    // (PR #1136 review). Without `tools`, this is the sole tool source as before.
+    enabledTools,
     enabledConnectors,
     tools: mergedTools,
     // maxSteps enables multi-step tool use (agent loop). Needed when MCP connector
@@ -1127,6 +1132,13 @@ async function applySkillSessionBinding(args: {
   effectiveConnectorToolResults: McpConnectorToolsResult[];
   skillInstructions: string | undefined;
   skillName: string | undefined;
+  /**
+   * The bound skill's `allowed-tools` pin (empty = no pin / no skill). Callers
+   * apply it to ANY additional tool set they add after this binding — e.g. the
+   * workspace content tools (§1087) — so a restrictive skill can't be widened by
+   * opening a workspace (PR #1136 review, codex P2).
+   */
+  skillAllowedTools: string[];
 }> {
   const { connectorToolResults, skillId, log } = args;
   const boundSkill = await loadBoundSkill(skillId, log);
@@ -1136,6 +1148,7 @@ async function applySkillSessionBinding(args: {
       effectiveConnectorToolResults: connectorToolResults,
       skillInstructions: undefined,
       skillName: undefined,
+      skillAllowedTools: [],
     };
   }
   const scopedEnabledTools = intersectSkillAllowedTools(
@@ -1161,7 +1174,27 @@ async function applySkillSessionBinding(args: {
     effectiveConnectorToolResults,
     skillInstructions: boundSkill.instructions ?? undefined,
     skillName: boundSkill.name,
+    skillAllowedTools: boundSkill.allowedTools,
   };
+}
+
+/**
+ * Apply a bound skill's `allowed-tools` pin to the workspace content tools
+ * (§1087 — PR #1136 review): with a non-empty pin, keep only workspace tools the
+ * skill explicitly allows (by tool name); an empty pin (no skill / unpinned)
+ * leaves them untouched. Prevents a restrictive skill from being silently widened
+ * with document/artifact-edit tools just because a workspace is open.
+ */
+function filterWorkspaceToolsBySkillPin(
+  tools: ToolSet | undefined,
+  skillAllowedTools: string[]
+): ToolSet | undefined {
+  if (!tools || skillAllowedTools.length === 0) return tools;
+  const allowedNames = intersectSkillAllowedTools(Object.keys(tools), skillAllowedTools);
+  const allowed = new Set(allowedNames);
+  return Object.fromEntries(
+    Object.entries(tools).filter(([name]) => allowed.has(name))
+  ) as ToolSet;
 }
 
 /**
@@ -1177,6 +1210,27 @@ async function bindWorkspaceTools(
 ): Promise<Awaited<ReturnType<typeof buildWorkspaceChatTools>>> {
   if (!workspaceId) return null;
   return buildWorkspaceChatTools({ workspaceIdOrSlug: workspaceId, userId, requestId });
+}
+
+/**
+ * Bind the §1087 workspace tools AND apply the bound skill's allowed-tools pin to
+ * them, returning the (possibly empty) tool set + the matching prompt fragment.
+ * Extracted so POST stays under the complexity budget (PR #1136 review).
+ */
+async function bindWorkspaceToolsForChat(args: {
+  workspaceId: string | undefined;
+  userId: number;
+  requestId: string;
+  skillAllowedTools: string[];
+}): Promise<{ workspaceTools: ToolSet | undefined; workspacePromptFragment: string | undefined }> {
+  const workspace = await bindWorkspaceTools(args.workspaceId, args.userId, args.requestId);
+  const workspaceTools = filterWorkspaceToolsBySkillPin(workspace?.tools, args.skillAllowedTools);
+  // Drop the prompt fragment when the pin filtered every workspace tool away.
+  const hasTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
+  return {
+    workspaceTools,
+    workspacePromptFragment: hasTools ? workspace?.systemPromptFragment : undefined,
+  };
 }
 
 /**
@@ -1274,14 +1328,16 @@ export async function POST(req: Request) {
       skillId,
       log,
     });
-    const { scopedEnabledTools, effectiveConnectorToolResults, skillInstructions, skillName } = skillBinding;
+    const { scopedEnabledTools, effectiveConnectorToolResults, skillInstructions, skillName, skillAllowedTools } = skillBinding;
 
     // 8c. Bind workspace content tools when a document/artifact is open beside the
     // chat (Atrium §1087). Server-built + canView/canEdit-gated; a bad/unviewable
-    // `?workspace=` yields no tools (never breaks chat).
-    const workspace = await bindWorkspaceTools(workspaceId, userId, requestId);
-    const { tools: workspaceTools, systemPromptFragment: workspacePromptFragment } =
-      workspace ?? {};
+    // `?workspace=` yields no tools (never breaks chat). A bound skill's
+    // allowed-tools pin still applies (a restrictive skill can't be widened by
+    // opening a workspace — PR #1136 review).
+    const { workspaceTools, workspacePromptFragment } = await bindWorkspaceToolsForChat({
+      workspaceId, userId, requestId, skillAllowedTools,
+    });
 
     // 9. Execute streaming and return response
     // Once executeStreaming returns successfully, the streaming Response is in flight.

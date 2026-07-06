@@ -36,6 +36,28 @@ A caller who can view but not edit gets only `read_workspace_content`. An
 unknown/unviewable `?workspace=` yields **no** tools — a bad param never breaks
 chat.
 
+### Safety & correctness invariants (PR #1136 review)
+
+- **Both edit paths are §28.3-screened.** The document path screens the markdown
+  before the bridge write. The artifact path screens the code **explicitly**
+  before `createVersion` — because the tool runs under a `kind:"user"` (human)
+  requester and `createVersion`'s internal screening only covers *agent*
+  requesters, so relying on it would persist model code unscreened.
+- **`read_workspace_content` never claims empty.** Documents read the
+  `atrium_doc_state.markdown` projection (the live text is in Yjs, not
+  `version.bodyInline`); when the current content can't be loaded (empty
+  projection, or a large artifact whose source lives at `bodyLocation`) it
+  returns `bodyUnavailable: true` so the model appends/edits conservatively
+  instead of rewriting from nothing.
+- **A bound skill's `allowed-tools` pin applies to workspace tools too** — a
+  restrictive skill can't be widened just by opening a workspace.
+- **Provider-native tools survive.** When workspace (or connector) tools are
+  merged, the streaming service now merges the model's provider-native tools
+  (web search / code interpreter) *under* them, instead of dropping them.
+- The open object's **title is `JSON.stringify`-escaped** before it enters the
+  system prompt (a title is user-controlled; raw newlines/quotes could inject
+  prompt structure).
+
 ## Reuse (no new content logic)
 
 Every tool calls the SAME §11–§15 services the Atrium editors and the MCP content

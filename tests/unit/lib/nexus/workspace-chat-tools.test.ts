@@ -26,6 +26,7 @@ const canEditMock = jest.fn();
 const requesterMock = jest.fn();
 const applyAgentEditMock = jest.fn();
 const screenMock = jest.fn();
+const loadDocStateMock = jest.fn();
 
 jest.mock("@/lib/content/content-service", () => ({
   contentService: {
@@ -41,6 +42,9 @@ jest.mock("@/lib/content/requester-from-auth", () => ({
 }));
 jest.mock("@/lib/content/collab/apply-agent-edit", () => ({
   applyAgentEdit: (...a: unknown[]) => applyAgentEditMock(...a),
+}));
+jest.mock("@/lib/content/collab/doc-state-store", () => ({
+  loadDocState: (...a: unknown[]) => loadDocStateMock(...a),
 }));
 jest.mock("@/lib/content/agent-screening", () => ({
   screenAgentContent: (...a: unknown[]) => screenMock(...a),
@@ -64,6 +68,7 @@ beforeEach(() => {
   requesterMock.mockResolvedValue(REQ);
   screenMock.mockResolvedValue({ allowed: true });
   applyAgentEditMock.mockResolvedValue(undefined);
+  loadDocStateMock.mockResolvedValue({ markdown: "# Live doc", revision: 5 });
 });
 
 describe("buildWorkspaceChatTools", () => {
@@ -123,12 +128,15 @@ describe("buildWorkspaceChatTools", () => {
     expect(out).toEqual({ error: "nope" });
   });
 
-  it("update_workspace_artifact creates a new version through contentService", async () => {
+  it("update_workspace_artifact SCREENS the code (§28.3) then creates a version", async () => {
     getMock.mockResolvedValue(ART);
     canEditMock.mockReturnValue(true);
     createVersionMock.mockResolvedValue({ version: { versionNumber: 3 } });
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.update_workspace_artifact, { code: "<div>new</div>", summary: "tweak" });
+    // The human requester bypasses createVersion's internal screening, so the
+    // tool MUST screen explicitly before saving (PR #1136 review).
+    expect(screenMock).toHaveBeenCalledWith("<div>new</div>", "art-1", "r");
     expect(createVersionMock).toHaveBeenCalledWith(
       REQ,
       "art-1",
@@ -137,11 +145,47 @@ describe("buildWorkspaceChatTools", () => {
     expect(out).toEqual({ ok: true, versionNumber: 3 });
   });
 
-  it("read_workspace_content returns the current title/kind/body", async () => {
+  it("update_workspace_artifact refuses (and does NOT createVersion) when screening blocks", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    screenMock.mockResolvedValue({ allowed: false, reason: "blocked", message: "nope" });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.update_workspace_artifact, { code: "bad code" });
+    expect(createVersionMock).not.toHaveBeenCalled();
+    expect(out).toEqual({ error: "nope" });
+  });
+
+  it("read_workspace_content reads the doc-state markdown projection for a document (not bodyInline)", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(true);
+    loadDocStateMock.mockResolvedValue({ markdown: "# Live doc", revision: 5 });
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Hi" });
+    expect(loadDocStateMock).toHaveBeenCalledWith("doc-1");
+    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Live doc" });
+  });
+
+  it("read_workspace_content flags bodyUnavailable for a document with an empty projection", async () => {
+    getMock.mockResolvedValue({ ...DOC, version: { bodyFormat: "markdown", bodyInline: null, versionNumber: 3 } });
+    canEditMock.mockReturnValue(true);
+    loadDocStateMock.mockResolvedValue({ markdown: "", revision: 5 });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.read_workspace_content, {});
+    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: null, bodyUnavailable: true });
+  });
+
+  it("read_workspace_content flags bodyUnavailable for a large artifact (bodyInline null)", async () => {
+    getMock.mockResolvedValue({ ...ART, version: { bodyFormat: "jsx", bodyInline: null, versionNumber: 2 } });
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.read_workspace_content, {});
+    // Must NOT report body "" (which would let the model rewrite from nothing).
+    expect(out).toEqual({
+      title: "My Art",
+      kind: "artifact",
+      bodyFormat: "jsx",
+      body: null,
+      bodyUnavailable: true,
+    });
   });
 });
