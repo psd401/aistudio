@@ -1,9 +1,15 @@
-import { APIGatewayProxyEvent } from 'aws-lambda';
+import type { APIGatewayProxyEvent } from 'aws-lambda';
 import { RDSDataClient, ExecuteStatementCommand, BatchExecuteStatementCommand, SqlParameter } from '@aws-sdk/client-rds-data';
 import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
-import fetch from 'node-fetch';
+import { lookup } from 'dns/promises';
+import { isIP } from 'net';
 import * as cheerio from 'cheerio';
 import { marked } from 'marked';
+
+// HTTP is performed with the Node 20 global `fetch` (REV-INFRA-122): the processing
+// layer pinned node-fetch v3, which is ESM-only and threw ERR_REQUIRE_ESM when this
+// CommonJS handler `require`d it — crashing init on every invocation. The global
+// fetch needs no layer dependency.
 
 const rdsClient = new RDSDataClient({});
 const dynamoClient = new DynamoDBClient({});
@@ -107,6 +113,116 @@ async function updateItemStatus(
   );
 }
 
+// --- SSRF protection (REV-COR-434) -------------------------------------------
+// The URL comes straight from the job payload with no upstream guarantee that it
+// is public, so validate the scheme and the *resolved* destination before every
+// fetch, and re-validate on each redirect hop (a public host can 302 to an
+// internal one).
+const MAX_REDIRECTS = 5;
+
+function ipv4IsBlocked(ip: string): boolean {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
+    return true; // malformed → block
+  }
+  const [a, b] = parts;
+  if (a === 0) return true;                           // 0.0.0.0/8 "this network"
+  if (a === 10) return true;                          // 10.0.0.0/8 private
+  if (a === 127) return true;                         // 127.0.0.0/8 loopback
+  if (a === 169 && b === 254) return true;            // 169.254.0.0/16 link-local + cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12 private
+  if (a === 192 && b === 168) return true;            // 192.168.0.0/16 private
+  if (a === 100 && b >= 64 && b <= 127) return true;  // 100.64.0.0/10 CGNAT
+  return false;
+}
+
+function ipv6IsBlocked(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  if (lower === '::1' || lower === '::') return true; // loopback / unspecified
+  const mapped = lower.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (mapped) return ipv4IsBlocked(mapped[1]);        // IPv4-mapped IPv6
+  if (/^fe[89ab]/.test(lower)) return true;           // fe80::/10 link-local
+  if (/^f[cd]/.test(lower)) return true;              // fc00::/7 unique-local
+  return false;
+}
+
+// Exported for unit testing (REV-COR-434 tests).
+export function isBlockedAddress(ip: string): boolean {
+  const kind = isIP(ip);
+  if (kind === 4) return ipv4IsBlocked(ip);
+  if (kind === 6) return ipv6IsBlocked(ip);
+  return true; // not a parseable IP → block
+}
+
+// Reject non-http(s) schemes and any host that resolves to a private/loopback/
+// link-local/metadata address. Throws on any violation. Exported for tests.
+export async function assertUrlAllowed(rawUrl: string): Promise<void> {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`Invalid URL: ${rawUrl}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Blocked URL scheme "${parsed.protocol}" (only http/https allowed)`);
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+  if (
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    hostname.endsWith('.internal') ||
+    hostname.endsWith('.local')
+  ) {
+    throw new Error(`Blocked internal hostname: ${parsed.hostname}`);
+  }
+  // A literal IP host is validated directly; a name is resolved to every A/AAAA.
+  if (isIP(hostname)) {
+    if (isBlockedAddress(hostname)) {
+      throw new Error(`Blocked address ${hostname} (SSRF protection)`);
+    }
+    return;
+  }
+  let records: Array<{ address: string }>;
+  try {
+    records = await lookup(hostname, { all: true });
+  } catch {
+    throw new Error(`DNS resolution failed for ${parsed.hostname}`);
+  }
+  if (records.length === 0) {
+    throw new Error(`No DNS records for ${parsed.hostname}`);
+  }
+  for (const { address } of records) {
+    if (isBlockedAddress(address)) {
+      throw new Error(`Host ${parsed.hostname} resolves to blocked address ${address} (SSRF protection)`);
+    }
+  }
+}
+
+// Fetch that validates the target — and every redirect hop — against the SSRF
+// rules. Redirects are followed manually so each new destination is re-checked.
+// Exported for tests.
+export async function safeFetch(rawUrl: string, signal: AbortSignal): Promise<Response> {
+  let currentUrl = rawUrl;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    await assertUrlAllowed(currentUrl);
+    const response = await fetch(currentUrl, {
+      signal,
+      redirect: 'manual',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; AIStudioBot/1.0; +https://aistudio.psd401.ai)',
+      },
+    });
+    const isRedirect = response.status >= 300 && response.status < 400;
+    const location = response.headers.get('location');
+    if (isRedirect && location) {
+      currentUrl = new URL(location, currentUrl).toString(); // resolve relative Location
+      continue;
+    }
+    return response;
+  }
+  throw new Error(`Too many redirects (> ${MAX_REDIRECTS})`);
+}
+
 // Fetch and extract text content from URL
 async function fetchAndExtractContent(url: string): Promise<string> {
   try {
@@ -115,14 +231,9 @@ async function fetchAndExtractContent(url: string): Promise<string> {
     const timeout = setTimeout(() => controller.abort(), 30000); // 30 seconds
 
     try {
-      // Fetch the URL with a timeout
-      const response = await fetch(url, {
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; AIStudioBot/1.0; +https://aistudio.psd401.ai)',
-        },
-      });
-      
+      // Fetch the URL with a timeout (SSRF-validated on every hop — REV-COR-434)
+      const response = await safeFetch(url, controller.signal);
+
       clearTimeout(timeout);
 
       if (!response.ok) {
@@ -206,49 +317,58 @@ async function fetchAndExtractContent(url: string): Promise<string> {
 }
 
 // Intelligent text chunking (same as file processor)
-function chunkText(text: string, maxChunkSize: number = 2000): ChunkData[] {
+// Exported for unit testing (REV-INFRA-135 lineStart test).
+export function chunkText(text: string, maxChunkSize: number = 2000): ChunkData[] {
   const chunks: ChunkData[] = [];
   const lines = text.split('\n');
   let currentChunk = '';
-  const chunkIndex = 0;
-  
+  let lineStart = 0;            // source line where the current chunk begins
+  let currentChunkLines = 0;    // number of lines accumulated into the current chunk
+
   for (const line of lines) {
     if ((currentChunk + line).length > maxChunkSize && currentChunk.length > 0) {
       chunks.push({
         content: currentChunk.trim(),
-        metadata: { lineStart: chunkIndex },
+        metadata: { lineStart },
         chunkIndex: chunks.length,
         tokens: Math.ceil(currentChunk.length / 4), // Rough token estimate
       });
+      lineStart += currentChunkLines; // next chunk starts after the flushed lines
       currentChunk = line + '\n';
+      currentChunkLines = 1;
     } else {
       currentChunk += line + '\n';
+      currentChunkLines++;
     }
   }
-  
+
   if (currentChunk.trim().length > 0) {
     chunks.push({
       content: currentChunk.trim(),
-      metadata: { lineStart: chunkIndex },
+      metadata: { lineStart },
       chunkIndex: chunks.length,
       tokens: Math.ceil(currentChunk.length / 4),
     });
   }
-  
+
   return chunks;
 }
 
 // Store chunks in database
-async function storeChunks(itemId: number, chunks: ChunkData[]) {
+// Targets repository_item_chunks — the knowledge-repository chunk table that has
+// item_id/tokens columns (matching textract-processor). The legacy table this used
+// to point at had neither column, so every insert failed (REV-INFRA-121).
+// Exported for unit testing.
+export async function storeChunks(itemId: number, chunks: ChunkData[]) {
   if (chunks.length === 0) return;
-  
+
   // First, delete existing chunks for this item
   await rdsClient.send(
     new ExecuteStatementCommand({
       resourceArn: DATABASE_RESOURCE_ARN,
       secretArn: DATABASE_SECRET_ARN,
       database: DATABASE_NAME,
-      sql: 'DELETE FROM document_chunks WHERE item_id = :itemId',
+      sql: 'DELETE FROM repository_item_chunks WHERE item_id = :itemId',
       parameters: [createSqlParameter('itemId', itemId)],
     })
   );
@@ -272,7 +392,7 @@ async function storeChunks(itemId: number, chunks: ChunkData[]) {
         resourceArn: DATABASE_RESOURCE_ARN,
         secretArn: DATABASE_SECRET_ARN,
         database: DATABASE_NAME,
-        sql: `INSERT INTO document_chunks 
+        sql: `INSERT INTO repository_item_chunks
               (item_id, content, metadata, chunk_index, tokens)
               VALUES (:itemId, :content, :metadata::jsonb, :chunkIndex, :tokens)`,
         parameterSets: batch,
@@ -323,43 +443,46 @@ async function processURL(job: URLProcessingJob) {
   }
 }
 
-// Lambda handler - can be invoked directly
+// Lambda handler - can be invoked directly (async/event) or via API Gateway.
 export async function handler(event: APIGatewayProxyEvent | URLProcessingJob) {
   console.log('Received event:', JSON.stringify(event, null, 2));
-  
+
+  // Direct/async invocation (event source, InvocationType=Event, SNS/EventBridge/S3).
+  // Let processURL errors propagate out of the handler so Lambda marks the invocation
+  // failed and applies its retry / on-failure destination / DLQ machinery. Returning a
+  // 500-shaped object here would be recorded by Lambda as a SUCCESS and silently drop
+  // the retry (REV-COR-435). processURL records 'failed' status before it re-throws.
+  if ('jobId' in event && 'itemId' in event && 'url' in event) {
+    await processURL(event as URLProcessingJob);
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ message: 'URL processed successfully' }),
+    };
+  }
+
+  // API Gateway invocation — return HTTP-shaped responses (including 4xx/5xx).
   try {
-    // Check if this is a direct invocation with job data
-    if ('jobId' in event && 'itemId' in event && 'url' in event) {
-      await processURL(event as URLProcessingJob);
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ message: 'URL processed successfully' }),
-      };
-    }
-    
-    // Otherwise, handle as API Gateway event
     const body = JSON.parse((event as APIGatewayProxyEvent).body || '{}');
-    
+
     if (!body.jobId || !body.itemId || !body.url) {
       return {
         statusCode: 400,
         body: JSON.stringify({ error: 'Missing required fields: jobId, itemId, url' }),
       };
     }
-    
+
     await processURL(body as URLProcessingJob);
-    
+
     return {
       statusCode: 200,
       body: JSON.stringify({ message: 'URL processing started' }),
     };
-    
   } catch (error) {
     console.error('Handler error:', error);
     return {
       statusCode: 500,
-      body: JSON.stringify({ 
-        error: error instanceof Error ? error.message : 'Unknown error' 
+      body: JSON.stringify({
+        error: error instanceof Error ? error.message : 'Unknown error',
       }),
     };
   }
