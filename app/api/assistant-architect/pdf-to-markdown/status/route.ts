@@ -52,9 +52,11 @@ export async function GET(req: NextRequest) {
     const job = await getGenericJobByIdForUser(jobIdNum, currentUser.data.user.id);
 
     if (!job) {
-      // To handle potential replication lag, we can check if the job exists at all
+      // Replication-lag fallback: a just-created job may be invisible to a
+      // read-replica. Re-check by id, but STILL enforce ownership — never return
+      // another user's job status (REV-SEC-104).
       const anyJob = await getGenericJobById(jobIdNum);
-      if (anyJob) {
+      if (anyJob && anyJob.userId === currentUser.data.user.id) {
         log.info("Job found with replication lag", { jobId, status: anyJob.status });
         timer({ status: "success", jobStatus: anyJob.status });
         return new NextResponse(JSON.stringify({ jobId: jobIdNum, status: anyJob.status }), { status: 200, headers });
