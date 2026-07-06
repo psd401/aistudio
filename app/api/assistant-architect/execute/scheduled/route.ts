@@ -442,10 +442,20 @@ export async function POST(req: NextRequest) {
 
     // 7. Execute prompt chain server-side (no SSE)
     // Owner's cognito_sub (not the numeric users.id) so owner-based repository
-    // access resolves for non-owner scheduled runs (REV-COR-511).
-    const assistantOwnerSub = architect.userId
-      ? ((await getUserById(architect.userId))?.cognitoSub ?? undefined)
-      : undefined;
+    // access resolves for non-owner scheduled runs (REV-COR-511). getUserById
+    // throws if the owner row is gone — treat that as no owner sub rather than
+    // failing the scheduled run (REV-COR-511 follow-up).
+    let assistantOwnerSub: string | undefined;
+    if (architect.userId) {
+      try {
+        assistantOwnerSub = (await getUserById(architect.userId))?.cognitoSub ?? undefined;
+      } catch (error) {
+        log.warn('Failed to resolve assistant owner sub', {
+          userId: architect.userId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const context: PromptExecutionContext = {
       previousOutputs: new Map(),
       accumulatedMessages: [],

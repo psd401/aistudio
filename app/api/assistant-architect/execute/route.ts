@@ -761,10 +761,20 @@ export async function POST(req: Request) {
     // agentic tool resolution; harmless to compute for prompt-chain mode too.
     const callerRoleNames = currentUserData.roles.map(r => r.name);
     // Owner's cognito_sub (not the numeric users.id) so owner-based repository
-    // access resolves for non-owner runs (REV-COR-511).
-    const assistantOwnerSub = architect.userId
-      ? ((await getUserById(architect.userId))?.cognitoSub ?? undefined)
-      : undefined;
+    // access resolves for non-owner runs (REV-COR-511). getUserById throws if
+    // the owner row is gone (e.g. deleted user) — treat that as no owner sub
+    // rather than failing the whole execution (REV-COR-511 follow-up).
+    let assistantOwnerSub: string | undefined;
+    if (architect.userId) {
+      try {
+        assistantOwnerSub = (await getUserById(architect.userId))?.cognitoSub ?? undefined;
+      } catch (error) {
+        log.warn('Failed to resolve assistant owner sub', {
+          userId: architect.userId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const context: PromptExecutionContext = {
       previousOutputs: new Map(),
       accumulatedMessages: [],

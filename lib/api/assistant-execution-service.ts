@@ -223,9 +223,17 @@ async function prepareAssistantExecution(
   // users.id, which never equals the users.cognito_sub the knowledge/repository
   // access predicates compare against, so owner-shared private repos silently
   // returned zero chunks (REV-COR-511).
-  const assistantOwnerSub = architect.userId
-    ? ((await getUserById(architect.userId))?.cognitoSub ?? undefined)
-    : undefined
+  let assistantOwnerSub: string | undefined
+  if (architect.userId) {
+    try {
+      assistantOwnerSub = (await getUserById(architect.userId))?.cognitoSub ?? undefined
+    } catch (error) {
+      log.warn("Failed to resolve assistant owner sub", {
+        userId: architect.userId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
 
   const context: PromptExecutionContext = {
     previousOutputs: new Map(),
