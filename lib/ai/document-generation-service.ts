@@ -128,11 +128,50 @@ function wrapPdfLines(
   return out;
 }
 
+/**
+ * pdf-lib's StandardFonts (Helvetica) use WinAnsi (CP1252) encoding, so drawText
+ * and width measurement throw on any character outside CP1252 (emoji, CJK, Cyrillic,
+ * Greek, most math/arrow symbols). Replace those code points with "?" so a single
+ * such character no longer fails the entire PDF request (REV-COR-499). ASCII/CP1252
+ * text is returned unchanged via the whole-string fast path.
+ */
+function sanitizeForWinAnsi(
+  text: string,
+  font: { encodeText(t: string): unknown }
+): string {
+  try {
+    font.encodeText(text);
+    return text;
+  } catch {
+    let out = "";
+    let replaced = 0;
+    for (const ch of text) {
+      try {
+        font.encodeText(ch);
+        out += ch;
+      } catch {
+        out += "?";
+        replaced++;
+      }
+    }
+    if (replaced > 0) {
+      log.warn("Replaced non-WinAnsi characters in PDF text", { replaced });
+    }
+    return out;
+  }
+}
+
 async function buildPdf(title: string | undefined, content: string): Promise<Uint8Array> {
   const { PDFDocument, StandardFonts } = await import("pdf-lib");
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+
+  // Standard fonts can only encode WinAnsi (CP1252); sanitize so non-CP1252
+  // characters degrade to "?" instead of throwing (REV-COR-499). `font` and `bold`
+  // share the same WinAnsi encoding, so validating against `font` covers both.
+  const safeTitle = title === undefined ? undefined : sanitizeForWinAnsi(title, font);
+  const safeContent = sanitizeForWinAnsi(content, font);
 
   const pageWidth = 612;
   const pageHeight = 792;
@@ -153,11 +192,11 @@ async function buildPdf(title: string | undefined, content: string): Promise<Uin
     y -= size + 4;
   };
 
-  if (title) {
-    for (const l of wrapPdfLines(title, bold, 18, maxWidth)) drawLine(l, bold, 18);
+  if (safeTitle) {
+    for (const l of wrapPdfLines(safeTitle, bold, 18, maxWidth)) drawLine(l, bold, 18);
     y -= 8;
   }
-  for (const l of wrapPdfLines(content, font, fontSize, maxWidth)) {
+  for (const l of wrapPdfLines(safeContent, font, fontSize, maxWidth)) {
     if (l === "") {
       y -= lineHeight / 2;
       continue;

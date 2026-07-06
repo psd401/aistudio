@@ -106,6 +106,29 @@ describe("generateDocument", () => {
     expect(result.filename.endsWith(".txt")).toBe(true);
   });
 
+  it("renders a PDF with non-WinAnsi characters (emoji/CJK/Cyrillic/Greek) instead of throwing (REV-COR-499)", async () => {
+    const result = await generateDocument({
+      format: "pdf",
+      title: "Unicode 😀 Report 日本語",
+      content: "Hello 😀 world — café 日本語 Привет Ωμέγα ↦ ∑",
+      userId: "42",
+    });
+    expect(result.format).toBe("pdf");
+    expect(result.bytes).toBeGreaterThan(0);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still renders an ASCII/CP1252-only PDF (regression, REV-COR-499)", async () => {
+    const result = await generateDocument({
+      format: "pdf",
+      title: "Plain Report",
+      content: "Hello world.\n\nSecond paragraph — café, résumé, naïve.",
+      userId: "42",
+    });
+    expect(result.format).toBe("pdf");
+    expect(result.bytes).toBeGreaterThan(0);
+  });
+
   describe("isDocumentFormat", () => {
     it("accepts known formats and rejects others", () => {
       expect(isDocumentFormat("pdf")).toBe(true);
