@@ -26,6 +26,7 @@
 #   gh alias set ... / gh alias import ...   (aliases are a blocklist bypass)
 #   gh api -X DELETE ...           (method match is case-insensitive)
 #   gh api graphql ... mutation ... (GraphQL merge/delete bypass)
+#   gh api graphql ... --input ...  (opaque request body; refused outright)
 #   gh api -X PATCH|PUT ... /repos/{owner}/{repo}   (raw-API repo edit)
 #   gh api ... /pulls/*/merge          (raw-API PR merge; any method)
 #   gh api ... /branches/*/protection  (rule bypass; any method)
@@ -73,10 +74,27 @@ refuse() {
 # Collect non-flag positional tokens so we can identify the subcommand
 # chain ("pr merge", "repo delete", ...) regardless of where --json /
 # --jq / -R style flags are interleaved.
+#
+# Flags that consume the *next* argv token as their value must have that
+# value skipped too, not just the flag itself — otherwise a value-taking
+# flag ahead of the subcommand shifts everything after it by one slot and
+# the subcommand chain is misread. E.g. `gh --repo o/r pr merge 1` without
+# this would collect tokens=(o/r pr merge 1), so head="o/r pr merge" never
+# matches the "pr merge "* refuse pattern, and `gh --repo o/r api -X DELETE
+# /repos/o/r` would make tokens[0]="o/r" instead of "api", skipping the
+# entire `gh api` policy block below (review: claude[bot] high-priority).
+_gh_skip_next=0
 tokens=()
 for arg in "$@"; do
+  if [ "$_gh_skip_next" = "1" ]; then
+    _gh_skip_next=0
+    continue
+  fi
   case "$arg" in
-    -*) : ;;     # flag — skip
+    -R|--repo|--jq|--hostname|--input|-X|--method)
+      _gh_skip_next=1
+      ;;
+    -*) : ;;     # flag — skip (covers attached forms like --repo=o/r)
     *)  tokens+=("$arg") ;;
   esac
 done
@@ -157,6 +175,16 @@ if [ "${tokens[0]:-}" = "api" ]; then
           # on-disk template and slip past unnoticed. Refuse rather than let
           # an unscannable body through (review: gemini-code-assist high-priority).
           *=@*) refuse "gh api graphql (field value from file/stdin)" ;;
+          # `--input <file>` / `--input -` replaces the *entire* request body
+          # with file/stdin content — a different mechanism than `-f
+          # field=@file` above, and equally opaque to argv scanning. A mutation
+          # sent this way (e.g. `gh api graphql --input payload.json` where
+          # payload.json contains `{"query":"mutation{...}"}`) has no
+          # "mutation" substring and no `=@` pattern anywhere in argv, so it
+          # would otherwise sail through untouched (review: claude[bot]
+          # high-priority). Refuse outright rather than let an unscannable
+          # body through.
+          --input|--input=*) refuse "gh api graphql (--input; body opaque to scan)" ;;
         esac
       done
       break

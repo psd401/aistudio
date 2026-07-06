@@ -74,6 +74,22 @@ refuse_case "api graphql mutation via stdin field"  api graphql -f 'query=@-'
 refuse_case "api graphql mutation via file field"   api graphql -f 'query=@mutation.graphql'
 refuse_case "api graphql mutation via -F stdin"     api graphql -F 'query=@-'
 
+# --- claude[bot] review: value-taking global flag ahead of the subcommand
+# shifting the token stream and defeating name-based + `gh api` policy ---
+refuse_case "pr merge behind --repo"                 --repo o/r pr merge 1
+refuse_case "repo delete behind -R"                  -R o/r repo delete o/r
+refuse_case "api -X DELETE behind --repo"            --repo o/r api -X DELETE /repos/o/r
+refuse_case "api -X PATCH repo-edit behind -R"        -R o/r api -X PATCH /repos/o/r -f visibility=public
+refuse_case "api graphql mutation behind --repo"      --repo o/r api graphql -f 'query=mutation{mergePullRequest(input:{})}'
+allow_case "pr create behind --repo (still allowed)"  --repo o/r pr create --title x --body y
+allow_case "api PATCH deeper sub-resource behind -R"  -R o/r api -X PATCH /repos/o/r/pulls/1 -f title=x
+
+# --- claude[bot] review: --input replaces the entire graphql body, opaque
+# to both the "mutation" substring scan and the `name=@source` field scan ---
+refuse_case "api graphql --input file"               api graphql --input payload.json
+refuse_case "api graphql --input stdin"              api graphql --input -
+refuse_case "api graphql --input= attached form"     api graphql --input=payload.json
+
 # --- allowed: reads + reversible + deeper sub-resources ---
 allow_case "api GET repos"                       api GET /repos/o/r
 allow_case "api list pulls"                       api /repos/o/r/pulls
