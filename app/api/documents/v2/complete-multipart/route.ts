@@ -50,8 +50,13 @@ export async function POST(req: NextRequest) {
     // regex could diverge and cause NoSuchUpload on completion.
     const sanitizedFileName = sanitizeFileName(job.fileName);
 
-    // Complete multipart upload in S3
-    await completeMultipartUpload(jobId, sanitizedFileName, uploadId, parts);
+    // Complete multipart upload in S3. Pass the raw fileName — completeMultipartUpload
+    // sanitizes internally (matching generateMultipartUrls' own key derivation).
+    // Passing the already-sanitized name here would sanitize it a second time, and
+    // sanitizeFileName is not idempotent (e.g. truncation can leave a trailing
+    // underscore that a second pass strips), which would diverge from the key
+    // generateMultipartUrls created and fail completion with NoSuchUpload.
+    await completeMultipartUpload(jobId, job.fileName, uploadId, parts);
 
     // Confirm upload in job tracking
     await confirmDocumentUpload(jobId, uploadId);

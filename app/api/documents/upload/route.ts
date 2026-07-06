@@ -290,11 +290,13 @@ export async function POST(request: NextRequest) {
     } catch (uploadError) {
       log.error('[Upload API] Step failed: Uploading to S3', uploadError);
       timer({ status: "error", reason: "s3_upload_error" });
+      // REV-COR-208: never echo raw exception detail (S3/SDK internals) to the
+      // client — log it server-side and correlate via X-Request-Id.
       return new NextResponse(
-        JSON.stringify({ 
+        JSON.stringify({
           success: false,
-          error: `Failed to upload file to storage: ${uploadError instanceof Error ? uploadError.message : String(uploadError)}` 
-        }), 
+          error: 'Failed to upload file to storage'
+        }),
         { status: 500, headers }
       );
     }
@@ -319,10 +321,11 @@ export async function POST(request: NextRequest) {
       timer({ status: "error", reason: "text_extraction_error" });
       // REV-COR-214: the S3 object was already uploaded — remove it so it is not orphaned.
       await cleanupOrphanedS3(s3Key);
+      // REV-COR-208: never echo raw exception detail to the client.
       return new NextResponse(
         JSON.stringify({
           success: false,
-          error: `Failed to extract text from document: ${extractError instanceof Error ? extractError.message : String(extractError)}`
+          error: 'Failed to extract text from document'
         }),
         { status: 500, headers }
       );
@@ -364,10 +367,11 @@ export async function POST(request: NextRequest) {
       // REV-COR-214: the documents row failed to persist, so only the S3 object
       // needs removing to avoid an orphan.
       await cleanupOrphanedS3(s3Key);
+      // REV-COR-208: never echo raw exception detail to the client.
       return new NextResponse(
         JSON.stringify({
           success: false,
-          error: `Failed to save document to database: ${saveError instanceof Error ? saveError.message : String(saveError)}`
+          error: 'Failed to save document to database'
         }),
         { status: 500, headers }
       );
@@ -405,10 +409,11 @@ export async function POST(request: NextRequest) {
       // then the S3 object.
       await cleanupOrphanedDocument(document.id);
       await cleanupOrphanedS3(s3Key);
+      // REV-COR-208: never echo raw exception detail to the client.
       return new NextResponse(
         JSON.stringify({
           success: false,
-          error: `Failed to process or save document chunks: ${chunkError instanceof Error ? chunkError.message : String(chunkError)}`
+          error: 'Failed to process or save document chunks'
         }),
         { status: 500, headers }
       );
@@ -442,10 +447,11 @@ export async function POST(request: NextRequest) {
     timer({ status: "error" });
     log.error('[Upload API] General Error in POST handler (Restore Step 1):', error);
     log.error('Detailed Error:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
+    // REV-COR-208: never echo raw exception detail to the client.
     return new NextResponse(
-      JSON.stringify({ 
-        success: false, 
-        error: error instanceof Error ? error.message : 'Failed during restore step 1' 
+      JSON.stringify({
+        success: false,
+        error: 'Failed to upload document'
       }),
       { status: 500, headers }
     );

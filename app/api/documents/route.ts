@@ -228,10 +228,11 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     timer({ status: "error" });
     log.error("Error fetching documents", error);
+    // REV-COR-208: never echo raw exception detail to the client.
     return NextResponse.json(
-      { 
-        success: false, 
-        error: error instanceof Error ? error.message : 'Failed to fetch documents' 
+      {
+        success: false,
+        error: 'Failed to fetch documents'
       },
       { status: 500, headers: { "X-Request-Id": requestId } }
     );
@@ -357,12 +358,13 @@ export async function DELETE(request: NextRequest) {
   } catch (error) {
     timer({ status: "error" });
     log.error("Error deleting document", error);
+    // REV-COR-208: never echo raw exception detail to the client.
     return NextResponse.json(
-      { 
-        success: false, 
-        error: error instanceof Error ? error.message : 'Failed to delete document' 
+      {
+        success: false,
+        error: 'Failed to delete document'
       },
       { status: 500, headers: { "X-Request-Id": requestId } }
     );
   }
-} 
+}

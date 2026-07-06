@@ -111,9 +111,14 @@ describe("POST complete-multipart S3 key (REV-COR-212)", () => {
     expect(mockSendToProcessingQueue.mock.calls[0][0].key).toBe(expectedKey)
     expect(mockSendToProcessingQueue.mock.calls[0][0].key.startsWith("v2/uploads/")).toBe(true)
 
-    // The filename handed to completeMultipartUpload is single-sanitized (matches create).
+    // The raw fileName is handed to completeMultipartUpload, which sanitizes
+    // internally exactly once (matching generateMultipartUrls' own key derivation).
+    // Passing an already-sanitized name here would cause completeMultipartUpload to
+    // sanitize it a second time; sanitizeFileName is not idempotent (e.g. truncation
+    // can leave a trailing underscore that a second pass strips), so double-applying
+    // it can target a different S3 key than the one the upload was created under.
     expect(mockCompleteMultipartUpload).toHaveBeenCalledWith(
-      JOB_ID, sanitizeFileName(fileName), "upload-1", [{ ETag: "etag-1", PartNumber: 1 }]
+      JOB_ID, fileName, "upload-1", [{ ETag: "etag-1", PartNumber: 1 }]
     )
   })
 
