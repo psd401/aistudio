@@ -744,11 +744,9 @@ function NexusPageContent() {
     // the live URL (not a hook value) so this callback keeps its exact deps —
     // per docs/features/nexus-conversation-architecture.md, destabilizing these
     // memoized callbacks risks runtime remounts.
-    const params = new URLSearchParams(window.location.search)
-    params.set('id', newConversationId)
     const keep = new URLSearchParams()
     keep.set('id', newConversationId)
-    const workspace = params.get('workspace')
+    const workspace = new URLSearchParams(window.location.search).get('workspace')
     if (workspace) keep.set('workspace', workspace)
     router.push(`/nexus?${keep.toString()}`, { scroll: false })
 
@@ -816,55 +814,55 @@ function NexusPageContent() {
                 pre-existing tree (initializer/runtime untouched); the Atrium
                 panel is a pure layout sibling keyed on ?workspace=. */}
             <div className="flex h-full min-h-0">
-            <div className="relative h-full min-w-0 flex-1">
-              {selectedModel ? (
-                <>
-                  {modelFallbackInfo && (
-                    <div className="px-4 pt-2">
-                      <ModelFallbackBanner
-                        originalModel={modelFallbackInfo.originalModel}
-                        fallbackModel={modelFallbackInfo.fallbackModel}
-                        onDismiss={() => setConversationModelId(null)}
-                      />
-                    </div>
-                  )}
-                  <ConversationInitializer
-                    conversationId={stableConversationId}
-                    onModelUsed={handleModelUsed}
-                  >
-                    {(initialMessages) => (
-                      <NexusRuntimeWrapper
-                        conversationId={conversationId}
-                        selectedModel={selectedModel}
-                        enabledTools={enabledTools}
-                        enabledConnectors={enabledConnectors}
-                        skillId={urlSkillId}
-                        attachmentAdapter={attachmentAdapter}
-                        voiceAvailable={voiceAvailability.available}
-                        voiceUnavailableReason={!voiceAvailability.available && !voiceAvailability.loading ? voiceAvailability.reason : undefined}
-                        initialMessages={initialMessages}
-                        onConversationIdChange={handleConversationIdChange}
-                        processingAttachments={processingAttachments}
-                        models={models}
-                        onModelChange={setSelectedModel}
-                        isLoadingModels={isLoadingModels}
-                        onToolsChange={onToolsChange}
-                        onConnectorsChange={onConnectorsChange}
-                      />
+              <div className="relative h-full min-w-0 flex-1">
+                {selectedModel ? (
+                  <>
+                    {modelFallbackInfo && (
+                      <div className="px-4 pt-2">
+                        <ModelFallbackBanner
+                          originalModel={modelFallbackInfo.originalModel}
+                          fallbackModel={modelFallbackInfo.fallbackModel}
+                          onDismiss={() => setConversationModelId(null)}
+                        />
+                      </div>
                     )}
-                  </ConversationInitializer>
-                </>
-              ) : (
-                <div className="flex h-full items-center justify-center">
-                  <div className="text-center">
-                    <div className="text-lg text-muted-foreground">Please select a model to start chatting</div>
+                    <ConversationInitializer
+                      conversationId={stableConversationId}
+                      onModelUsed={handleModelUsed}
+                    >
+                      {(initialMessages) => (
+                        <NexusRuntimeWrapper
+                          conversationId={conversationId}
+                          selectedModel={selectedModel}
+                          enabledTools={enabledTools}
+                          enabledConnectors={enabledConnectors}
+                          skillId={urlSkillId}
+                          attachmentAdapter={attachmentAdapter}
+                          voiceAvailable={voiceAvailability.available}
+                          voiceUnavailableReason={!voiceAvailability.available && !voiceAvailability.loading ? voiceAvailability.reason : undefined}
+                          initialMessages={initialMessages}
+                          onConversationIdChange={handleConversationIdChange}
+                          processingAttachments={processingAttachments}
+                          models={models}
+                          onModelChange={setSelectedModel}
+                          isLoadingModels={isLoadingModels}
+                          onToolsChange={onToolsChange}
+                          onConnectorsChange={onConnectorsChange}
+                        />
+                      )}
+                    </ConversationInitializer>
+                  </>
+                ) : (
+                  <div className="flex h-full items-center justify-center">
+                    <div className="text-center">
+                      <div className="text-lg text-muted-foreground">Please select a model to start chatting</div>
+                    </div>
                   </div>
-                </div>
+                )}
+              </div>
+              {urlWorkspaceId && (
+                <WorkspacePanel idOrSlug={urlWorkspaceId} onClose={closeWorkspace} />
               )}
-            </div>
-            {urlWorkspaceId && (
-              <WorkspacePanel idOrSlug={urlWorkspaceId} onClose={closeWorkspace} />
-            )}
             </div>
           </NexusShell>
         </NexusLayout>

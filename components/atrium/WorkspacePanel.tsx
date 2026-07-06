@@ -72,7 +72,10 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
 
   return (
     <aside
-      className="flex h-full w-[44%] min-w-[380px] max-w-[720px] flex-col border-l bg-background"
+      // Desktop-only split: below md the 380px minimum + the chat column would
+      // force horizontal overflow, so the panel hides and the full-page editor
+      // (one click away) is the small-screen path.
+      className="hidden h-full w-[44%] min-w-[380px] max-w-[720px] flex-col border-l bg-background md:flex"
       aria-label="Workspace"
       data-testid="workspace-panel"
     >

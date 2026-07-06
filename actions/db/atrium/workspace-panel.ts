@@ -53,6 +53,13 @@ export async function loadWorkspacePanelAction(
     }
 
     const requester = await getUserRequester(requestId);
+    // Belt-and-suspenders: getUserRequester only ever yields a `user` requester
+    // with a non-null userId (it throws otherwise), so this is unreachable — but
+    // fail closed BEFORE any DB work rather than mint a bogus editor identity.
+    if (requester.kind !== "user" || requester.userId == null) {
+      throw ErrorFactories.authNoSession();
+    }
+
     const obj = await contentService.loadByIdOrSlug(idOrSlug);
     if (!obj) throw new NotFoundError("Content not found", { idOrSlug });
 
@@ -63,12 +70,6 @@ export async function loadWorkspacePanelAction(
     });
     // Existence-mask: a non-viewable object 404s exactly like an absent one.
     if (!viewable) throw new NotFoundError("Content not found", { idOrSlug });
-
-    if (requester.kind !== "user" || requester.userId == null) {
-      // The panel is a browser surface; a non-user requester cannot occur via a
-      // server action, but fail closed rather than mint a bogus editor identity.
-      throw ErrorFactories.authNoSession();
-    }
 
     timer({ status: "success" });
     log.info("Workspace panel loaded", { objectId: obj.id, kind: obj.kind });
