@@ -76,7 +76,10 @@ export function EditorToolbar({
     useState<EditorPublishDestination>("intranet");
 
   return (
-    <div className="flex items-center gap-3 text-xs text-gray-500">
+    // flex-wrap so the status legend + action buttons wrap onto a second line in
+    // the narrow Nexus workspace panel (Epic #1059 §17) instead of clipping off
+    // the right edge. The full-width page has room and never wraps.
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-gray-500">
       <span aria-live="polite">
         {status === "connecting" && "Connecting…"}
         {status === "ready" && (canEdit ? "Connected" : "Read-only")}

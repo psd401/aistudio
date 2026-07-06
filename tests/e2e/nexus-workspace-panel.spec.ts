@@ -45,6 +45,26 @@ test.describe("Nexus workspace panel (authenticated)", () => {
       //    a human edit (the §17 edit-beside-chat loop).
       const pm = panel.locator(".ProseMirror");
       await expect(pm).toHaveAttribute("contenteditable", "true", { timeout: 60000 });
+
+      // 2b. Layout regression guard: the editor must NOT collapse to a sliver
+      //     beside the comment rail (the full-page `w-72 md:block` rail keyed off
+      //     the VIEWPORT would leave ~80px in this ~469px panel). In `layout=
+      //     "panel"` the rail stacks below, so the editor keeps the panel width.
+      //     Also: opening the panel must never cause horizontal page overflow.
+      const dims = await page.evaluate(() => {
+        const p = document.querySelector('[data-testid="workspace-panel"]') as HTMLElement | null;
+        const ed = document.querySelector(".atrium-editor") as HTMLElement | null;
+        const doc = document.documentElement;
+        return {
+          panelW: p ? p.getBoundingClientRect().width : 0,
+          editorW: ed ? ed.getBoundingClientRect().width : 0,
+          horizOverflow: doc.scrollWidth > doc.clientWidth,
+        };
+      });
+      expect(dims.horizOverflow).toBe(false);
+      expect(dims.panelW).toBeGreaterThan(0);
+      // Editor occupies the bulk of the panel (was ~17% when collapsed).
+      expect(dims.editorW).toBeGreaterThan(dims.panelW * 0.7);
       const marker = `WS ${Date.now()}`;
       await pm.click();
       await page.keyboard.press("End");

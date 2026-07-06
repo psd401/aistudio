@@ -35,8 +35,18 @@ jest.mock("next/link", () => ({
 }));
 
 jest.mock("@/components/atrium/DocumentEditor", () => ({
-  DocumentEditor: ({ idOrSlug, userId }: { idOrSlug: string; userId: number }) => (
-    <div data-testid="doc-editor">{`doc:${idOrSlug}:u${userId}`}</div>
+  // Echo the `layout` prop too: the panel MUST pass layout="panel" so the editor
+  // stacks its comment rail instead of collapsing beside it (Epic #1059 §17).
+  DocumentEditor: ({
+    idOrSlug,
+    userId,
+    layout,
+  }: {
+    idOrSlug: string;
+    userId: number;
+    layout?: string;
+  }) => (
+    <div data-testid="doc-editor">{`doc:${idOrSlug}:u${userId}:${layout}`}</div>
   ),
 }));
 jest.mock("@/components/atrium/ArtifactCanvas", () => ({
@@ -73,7 +83,7 @@ describe("WorkspacePanel", () => {
     render(<WorkspacePanel idOrSlug="my-doc" onClose={jest.fn()} />);
     expect(screen.getByText("Loading workspace…")).toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.getByTestId("doc-editor")).toHaveTextContent("doc:obj-1:u7")
+      expect(screen.getByTestId("doc-editor")).toHaveTextContent("doc:obj-1:u7:panel")
     );
     expect(screen.getByRole("heading", { name: "My Doc" })).toBeInTheDocument();
     expect(loadMock).toHaveBeenCalledWith("my-doc");
