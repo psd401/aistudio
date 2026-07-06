@@ -136,6 +136,46 @@
 .atrium-authored[data-author="agent"] { background: var(--atrium-agent-soft); }
 
 /* ----------------------------------------------------------------------------
+ * Comments + track-changes marks (§18.1). These are a SEPARATE visual layer over
+ * the green/purple authorship rail — an inserted suggestion reads as both
+ * human-authored (green rail) and pending (green underline). Amber comment
+ * highlight keeps them distinct from the green/purple provenance palette.
+ * -------------------------------------------------------------------------- */
+:root {
+  --atrium-comment: #d97706;      /* amber — comment anchor */
+  --atrium-comment-soft: rgba(217, 119, 6, 0.16);
+  --atrium-suggest-insert: #16a34a; /* green underline — proposed insertion */
+  --atrium-suggest-delete: #dc2626; /* red strikethrough — proposed deletion */
+}
+
+/* Comment anchor: a subtle amber highlight the reviewer can click/hover. */
+.atrium-comment {
+  background: var(--atrium-comment-soft);
+  border-bottom: 1px dotted var(--atrium-comment);
+  cursor: pointer;
+}
+.atrium-comment[data-resolved="true"] {
+  background: transparent;
+  border-bottom-style: dashed;
+  opacity: 0.7;
+}
+
+/* Proposed insertion: green underline, text kept until accepted. */
+.atrium-suggest-insert {
+  color: var(--atrium-suggest-insert);
+  text-decoration: underline;
+  text-decoration-color: var(--atrium-suggest-insert);
+  text-underline-offset: 2px;
+}
+
+/* Proposed deletion: red strikethrough, text kept until accepted. */
+.atrium-suggest-delete {
+  color: var(--atrium-suggest-delete);
+  text-decoration: line-through;
+  text-decoration-color: var(--atrium-suggest-delete);
+}
+
+/* ----------------------------------------------------------------------------
  * Provenance footer (reader) + badges
  * -------------------------------------------------------------------------- */
 .atrium-provenance-footer {

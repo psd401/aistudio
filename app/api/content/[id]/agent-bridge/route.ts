@@ -1,18 +1,26 @@
 /**
  * Atrium agent bridge endpoint (#1051)
  *
- * POST /api/content/[id]/agent-bridge — lets an agent push markdown into the live
- * collaborative document, attributed to the agent (purple rail). This is the
- * rebuilt equivalent of Proof's bridge: the `X-Agent-Id` header maps to the agent
- * label stamped on the rail, and the edit diffs into the same Y.Doc connected
- * editors hold.
+ * POST /api/content/[id]/agent-bridge — lets an agent act on the live collaborative
+ * document, attributed to the agent (purple rail). This is the rebuilt equivalent
+ * of Proof's bridge: the `X-Agent-Id` header maps to the agent label stamped on the
+ * rail, and the change diffs into the same Y.Doc connected editors hold.
  *
- * Safety (spec §28.3): the agent's markdown is screened by Bedrock Guardrails
- * (blocked content is rejected, never persisted) and scanned for PII (logged as
- * telemetry — document content is NOT tokenized, since a published document must
- * keep its real text) BEFORE it touches the document. The screening core lives
- * in `lib/content/agent-screening.ts` (shared with `contentService.create` /
- * `versionService.snapshot`); this route only maps its verdict to HTTP.
+ * Ops (§18.1) via the optional `op` discriminator — the op is OPTIONAL and, when
+ * absent, the request behaves exactly as before (markdown push):
+ *   - `replace` / `append` (default): rewrite / append markdown, authored by the agent.
+ *   - `comment`: anchor a comment thread (AtriumComment mark) over a quoted span and
+ *     write the thread root to `atrium_doc_comments`.
+ *   - `suggest`: propose an insertion / deletion (track-changes suggestion marks) for
+ *     a human to accept or reject — NOT a direct rewrite.
+ *
+ * Safety (spec §28.3): the agent-authored text of EVERY op (markdown / comment body /
+ * suggestion text) is screened by Bedrock Guardrails (blocked content is rejected,
+ * never persisted) and scanned for PII (logged as telemetry — document content is NOT
+ * tokenized, since a published document must keep its real text) BEFORE it touches the
+ * document. The screening core lives in `lib/content/agent-screening.ts` (shared with
+ * `contentService.create` / `versionService.snapshot`); this route only maps its verdict
+ * to HTTP.
  *
  * Auth (Phase 1): a logged-in human with edit rights on the object operates the
  * agent; the session is the authorization conduit and the X-Agent-Id is the
@@ -21,6 +29,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { and, eq } from "drizzle-orm";
+import { z } from "zod";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "@/actions/db/atrium/requester";
@@ -30,7 +39,13 @@ import { canEdit } from "@/lib/content/helpers";
 import { screenAgentContent } from "@/lib/content/agent-screening";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { agentIdentities } from "@/lib/db/schema";
-import { applyAgentEdit, type AgentEditMode } from "@/lib/content/collab/apply-agent-edit";
+import {
+  applyAgentEdit,
+  applyAgentComment,
+  applyAgentSuggestion,
+  QuoteNotLocatedError,
+  type AgentEditMode,
+} from "@/lib/content/collab/apply-agent-edit";
 
 /** UUID v4-ish shape — the form `agent_identities.id` takes (defaultRandom()). */
 const UUID_RE =
@@ -125,12 +140,40 @@ async function isAttributableAgentId(agentId: string): Promise<boolean> {
   return rows.length > 0 && rows[0] != null;
 }
 
-interface BridgeBody {
-  markdown?: unknown;
-  mode?: unknown;
-}
+/**
+ * Bridge request body (§18.1). `op` discriminates the four agent operations; it is
+ * OPTIONAL and, when absent, the request behaves exactly as before (`markdown` +
+ * optional `mode` → replace/append) for back-compat. The op-specific fields are
+ * validated per branch below (zod checks types/shape; required-field presence and
+ * the shared byte-size / screening guards run in the handler). No max-length caps
+ * are imposed here — the existing 512 KB guard (see handler) bounds screened text.
+ */
+const bridgeBodySchema = z.object({
+  op: z.enum(["replace", "append", "comment", "suggest"]).optional(),
+  markdown: z.string().optional(),
+  mode: z.enum(["replace", "append"]).optional(),
+  // comment op
+  quote: z.string().optional(),
+  body: z.string().optional(),
+  threadId: z.string().uuid().optional(),
+  // suggest op
+  kind: z.enum(["insert", "delete"]).optional(),
+  suggestionId: z.string().uuid().optional(),
+});
 
-function parseMode(mode: unknown): AgentEditMode {
+type BridgeBody = z.infer<typeof bridgeBodySchema>;
+
+/** Max byte size for any agent-authored text that gets screened. Bedrock Guardrails'
+ *  internal limit is ~64 KB; oversized payloads degrade silently to "allowed", so
+ *  cap the input well above legitimate use but below what would broadcast a huge
+ *  Yjs update. Shared by every op (markdown, comment body, suggestion text). */
+const MAX_SCREENED_BYTES = 512 * 1024;
+
+/** Resolve the effective edit mode for the legacy (replace/append) path: an explicit
+ *  `op` wins, else fall back to `mode`, else replace. */
+function resolveEditMode(op: BridgeBody["op"], mode: BridgeBody["mode"]): AgentEditMode {
+  if (op === "append") return "append";
+  if (op === "replace") return "replace";
   return mode === "append" ? "append" : "replace";
 }
 
@@ -178,6 +221,90 @@ async function screenAgentMarkdown(
   );
 }
 
+/**
+ * The concrete operation resolved from the request body, plus `screenText`: the
+ * agent-authored text that must pass `screenAgentContent`. EVERY op contributes
+ * screenText (comment body / suggestion text), so every op flows through the same
+ * guardrails+PII gate — no op can smuggle unscreened agent text into the document.
+ */
+type BridgeAction =
+  | { kind: "edit"; mode: AgentEditMode; markdown: string; screenText: string }
+  | { kind: "comment"; quote: string; body: string; threadId?: string; screenText: string }
+  | {
+      kind: "suggest";
+      suggestKind: "insert" | "delete";
+      markdown?: string;
+      quote?: string;
+      suggestionId?: string;
+      screenText: string;
+    };
+
+type ActionResult = { action: BridgeAction } | { error: NextResponse };
+
+function tooLarge(text: string): boolean {
+  return Buffer.byteLength(text, "utf8") > MAX_SCREENED_BYTES;
+}
+
+function missing(field: string): { error: NextResponse } {
+  return { error: NextResponse.json({ error: `${field} is required` }, { status: 400 }) };
+}
+
+function tooLargeError(message = "content too large (max 512 KB)"): { error: NextResponse } {
+  return { error: NextResponse.json({ error: message }, { status: 413 }) };
+}
+
+/** comment: anchor a thread on a quoted span. Screens the agent's comment body.
+ *  The `quote` is checked non-empty but passed UN-trimmed so the exact-substring
+ *  anchor match is preserved. */
+function buildCommentAction(data: BridgeBody): ActionResult {
+  const quote = data.quote ?? "";
+  const body = data.body ?? "";
+  if (!quote.trim()) return missing("quote");
+  if (!body.trim()) return missing("body");
+  if (tooLarge(body)) return tooLargeError();
+  return { action: { kind: "comment", quote, body, threadId: data.threadId, screenText: body } };
+}
+
+/** suggest: propose an insertion (screen the markdown) or a deletion (screen the
+ *  quote — the only agent-supplied text on a delete). */
+function buildSuggestAction(data: BridgeBody): ActionResult {
+  const kind = data.kind;
+  if (!kind) return missing("kind (insert|delete)");
+  if (kind === "insert") {
+    const markdown = data.markdown ?? "";
+    if (!markdown.trim()) return missing("markdown");
+    if (tooLarge(markdown)) return tooLargeError();
+    return {
+      action: { kind: "suggest", suggestKind: "insert", markdown, suggestionId: data.suggestionId, screenText: markdown },
+    };
+  }
+  const quote = data.quote ?? "";
+  if (!quote.trim()) return missing("quote");
+  if (tooLarge(quote)) return tooLargeError();
+  return {
+    action: { kind: "suggest", suggestKind: "delete", quote, suggestionId: data.suggestionId, screenText: quote },
+  };
+}
+
+/** Legacy path (op absent / "replace" / "append") — keeps the exact prior responses. */
+function buildEditAction(op: BridgeBody["op"], data: BridgeBody): ActionResult {
+  const markdown = data.markdown ?? "";
+  if (!markdown.trim()) return missing("markdown");
+  if (tooLarge(markdown)) return tooLargeError("markdown too large (max 512 KB)");
+  return { action: { kind: "edit", mode: resolveEditMode(op, data.mode), markdown, screenText: markdown } };
+}
+
+/**
+ * Validate op-specific fields and resolve the concrete action + the text to screen.
+ * Returns a NextResponse on any validation failure (400 missing field / 413 too
+ * large). Runs BEFORE auth, mirroring the original markdown-required / too-large guards.
+ */
+function buildBridgeAction(op: BridgeBody["op"], data: BridgeBody): ActionResult {
+  if (op === "comment") return buildCommentAction(data);
+  if (op === "suggest") return buildSuggestAction(data);
+  return buildEditAction(op, data);
+}
+
 async function postHandler(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -195,21 +322,28 @@ async function postHandler(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // `request.json()` can resolve to `null` (valid JSON) — coerce to {} so
-    // the BridgeBody destructure doesn't throw a TypeError on `null.markdown`.
-    const body = ((await request.json().catch(() => ({}))) ?? {}) as BridgeBody;
-    const markdown = typeof body.markdown === "string" ? body.markdown : "";
-    if (!markdown.trim()) {
+    // `request.json()` can resolve to `null` (valid JSON) — coerce to {} so the
+    // schema validates an empty body instead of throwing on `null`.
+    const raw = (await request.json().catch(() => ({}))) ?? {};
+    const parsed = bridgeBodySchema.safeParse(raw);
+    if (!parsed.success) {
       timer({ status: "error" });
-      return NextResponse.json({ error: "markdown is required" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Invalid request body", issues: parsed.error.issues },
+        { status: 400 }
+      );
     }
-    // Guard before Bedrock Guardrails: its internal limit is ~64 KB; oversized
-    // payloads degrade silently to "allowed" and would broadcast a huge Yjs update.
-    if (Buffer.byteLength(markdown, "utf8") > 512 * 1024) {
+    const data = parsed.data;
+
+    // Resolve the op into a concrete action + the agent-authored text to screen.
+    // Op-specific required-field / size validation happens here (before auth).
+    const built = buildBridgeAction(data.op, data);
+    if ("error" in built) {
       timer({ status: "error" });
-      return NextResponse.json({ error: "markdown too large (max 512 KB)" }, { status: 413 });
+      return built.error;
     }
-    const mode = parseMode(body.mode);
+    const action = built.action;
+
     // Validate X-Agent-Id: it's stamped into every CRDT node and JWT sub.
     // An unbounded value would bloat the Y.Doc and could overflow JWT headers.
     const rawAgentId = (request.headers.get("x-agent-id") || "agent").trim();
@@ -223,38 +357,89 @@ async function postHandler(
       timer({ status: "error" });
       return loaded.error;
     }
+    const objectId = loaded.obj.id;
 
     // Validate attribution AFTER the edit-rights gate so a caller without edit
     // rights can't probe which agent_identities ids exist. A UUID-shaped id must
     // map to an active registered identity; spoofing a real bot's uuid is rejected.
     if (!(await isAttributableAgentId(agentId))) {
-      log.warn("Agent write rejected: unknown/inactive agent identity", { objectId: loaded.obj.id });
+      log.warn("Agent write rejected: unknown/inactive agent identity", { objectId });
       timer({ status: "error" });
       return NextResponse.json({ error: "Unknown agent identity" }, { status: 403 });
     }
 
     // Serialize screen→apply for this document to prevent a TOCTOU race:
-    // two concurrent append-mode requests could each pass Bedrock Guardrails
-    // independently and then both apply in overlapping CRDT transactions, letting
-    // their combined content bypass the guardrail that reviewed each in isolation.
-    // withDocumentLock ensures only one screen→apply sequence runs per objectId at
-    // a time within this ECS task. See the _docLocks comment for cross-task scope.
-    const lockResult = await withDocumentLock(loaded.obj.id, async () => {
-      const blocked = await screenAgentMarkdown(markdown, loaded.obj.id, requestId);
-      if (blocked) return blocked;
-      await applyAgentEdit({ objectId: loaded.obj.id, markdown, agentId, mode });
-      return null;
+    // two concurrent requests could each pass Bedrock Guardrails independently and
+    // then both apply in overlapping CRDT transactions, letting their combined
+    // content bypass the guardrail that reviewed each in isolation. withDocumentLock
+    // ensures only one screen→apply sequence runs per objectId at a time within this
+    // ECS task. See the _docLocks comment for cross-task scope. ALL ops (edit,
+    // comment, suggest) run inside it — the comment body / suggestion text is
+    // screened the same way as a replace/append markdown payload.
+    const result = await withDocumentLock(objectId, async (): Promise<{
+      ok: boolean;
+      response: NextResponse;
+    }> => {
+      const blocked = await screenAgentMarkdown(action.screenText, objectId, requestId);
+      if (blocked) return { ok: false, response: blocked };
+
+      switch (action.kind) {
+        case "edit": {
+          await applyAgentEdit({ objectId, markdown: action.markdown, agentId, mode: action.mode });
+          return {
+            ok: true,
+            response: NextResponse.json({ applied: true, op: action.mode, mode: action.mode }),
+          };
+        }
+        case "comment": {
+          const { threadId } = await applyAgentComment({
+            objectId,
+            agentId,
+            quote: action.quote,
+            body: action.body,
+            threadId: action.threadId,
+          });
+          return { ok: true, response: NextResponse.json({ applied: true, op: "comment", threadId }) };
+        }
+        case "suggest": {
+          const { suggestionId } = await applyAgentSuggestion({
+            objectId,
+            agentId,
+            kind: action.suggestKind,
+            markdown: action.markdown,
+            quote: action.quote,
+            suggestionId: action.suggestionId,
+          });
+          return {
+            ok: true,
+            response: NextResponse.json({
+              applied: true,
+              op: "suggest",
+              kind: action.suggestKind,
+              suggestionId,
+            }),
+          };
+        }
+      }
     });
-    if (lockResult !== null) {
-      // screenAgentMarkdown returned a blocked response inside the lock.
+
+    if (!result.ok) {
+      // screenAgentMarkdown returned a blocked/degraded response inside the lock.
       timer({ status: "error" });
-      return lockResult;
+      return result.response;
     }
 
     timer({ status: "success" });
-    log.info("Applied agent edit", { objectId: loaded.obj.id, agentId, mode });
-    return NextResponse.json({ applied: true, mode });
+    log.info("Applied agent op", { objectId, agentId, op: action.kind });
+    return result.response;
   } catch (error) {
+    // A comment / suggest:delete whose quote is absent surfaces as this typed
+    // error — the client sent a stale/unmatched anchor, so map it to 422 (not 500).
+    if (error instanceof QuoteNotLocatedError) {
+      timer({ status: "error" });
+      log.warn("Agent bridge: quoted anchor not found in document");
+      return NextResponse.json({ error: "Quoted text not found in document" }, { status: 422 });
+    }
     timer({ status: "error" });
     log.error("Agent bridge failed", {
       error: error instanceof Error ? error.message : String(error),

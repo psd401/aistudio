@@ -33,6 +33,9 @@ import { EditorToolbar } from "./EditorToolbar";
 import { useEditorActions } from "./use-editor-actions";
 import { AuthoredTracker } from "./authored-tracker";
 import { ProvenanceRail } from "./provenance-rail";
+import { SuggestionMode, useSuggestionState } from "./suggestion-mode";
+import { CommentSidebar } from "./CommentSidebar";
+import { acceptAllSuggestions } from "@/lib/content/collab/suggestions";
 import "@/styles/atrium-content.css";
 
 interface CollabSession {
@@ -80,6 +83,13 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
         Markdown,
         Collaboration.configure({ document: ydoc }),
         AuthoredTracker.configure({ by: makeAuthorTag("human", userId) }),
+        // §18.1 track-changes: a client-only plugin layer (no schema change) that
+        // turns edits into pending suggestions while its toggle is on. Coexists
+        // with AuthoredTracker/ProvenanceRail as a separate visual layer.
+        SuggestionMode.configure({
+          by: makeAuthorTag("human", userId),
+          defaultOn: false,
+        }),
         ProvenanceRail,
       ],
     },
@@ -191,18 +201,34 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
     handleUnpublish,
   } = useEditorActions({ editor, idOrSlug, docNameRef });
 
+  // Live track-changes toggle state + pending-suggestion count for the toolbar.
+  const { suggesting, count: suggestionCount } = useSuggestionState(editor);
+
   return (
     <div className="flex flex-col gap-2">
       <EditorToolbar
         status={status}
         canEdit={canEdit}
         busy={busy}
+        suggesting={suggesting}
+        suggestionCount={suggestionCount}
         onSnapshot={handleSnapshot}
         onPublish={handlePublish}
         onUnpublish={handleUnpublish}
+        onToggleSuggesting={() => editor?.commands.toggleSuggesting()}
+        onAcceptAll={() => {
+          if (editor) acceptAllSuggestions(editor);
+        }}
       />
-      <div className="atrium-editor">
-        <EditorContent editor={editor} className="atrium-content" />
+      <div className="flex gap-4">
+        <div className="atrium-editor min-w-0 flex-1">
+          <EditorContent editor={editor} className="atrium-content" />
+        </div>
+        {/* Right rail: comment threads. Hidden on small screens; the anchors stay
+            in the doc regardless so a narrow viewport never loses comment data. */}
+        <div className="hidden w-72 shrink-0 md:block">
+          <CommentSidebar idOrSlug={idOrSlug} editor={editor} canEdit={canEdit} />
+        </div>
       </div>
       {message && (
         <p

@@ -65,6 +65,7 @@ import { visibilityService } from "@/lib/content/visibility-service";
 import { versionService } from "@/lib/content/version-service";
 import { canEdit } from "@/lib/content/helpers";
 import { getOptionalRequester } from "@/actions/db/atrium/requester";
+import { listCommentThreadsAction } from "@/actions/db/atrium/comments";
 import { createLogger } from "@/lib/logger";
 import { ProvenanceFooter } from "@/components/atrium/ProvenanceFooter";
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
@@ -163,6 +164,7 @@ export async function generateMetadata(_props: ReaderPageProps): Promise<Metadat
 function ReaderShell({
   title,
   editHref,
+  commentCount,
   collectionId,
   mainClassName,
   children,
@@ -170,6 +172,8 @@ function ReaderShell({
   title: string;
   /** The `/atrium/[id]/edit` link, or null when the viewer may not edit. */
   editHref: string | null;
+  /** Unresolved root-comment threads; the editors-only chip is hidden when 0. */
+  commentCount: number;
   collectionId: string | null;
   mainClassName: string;
   children: React.ReactNode;
@@ -185,19 +189,48 @@ function ReaderShell({
         <header className="mb-6 flex items-start justify-between gap-3">
           <h1 className="text-3xl font-semibold">{title}</h1>
           {editHref && (
-            <Link
-              href={editHref}
-              className="shrink-0 rounded-md border px-3 py-1.5 text-sm hover:bg-muted"
-              data-testid="reader-edit-link"
-            >
-              Edit
-            </Link>
+            <div className="flex shrink-0 items-center gap-2">
+              {/* Editors-only comment chip (editHref is null for non-editors, so
+                  this whole block never renders for them) linking to the editor. */}
+              {commentCount > 0 && (
+                <Link
+                  href={editHref}
+                  className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted"
+                  data-testid="reader-comment-chip"
+                >
+                  {commentCount} comment{commentCount === 1 ? "" : "s"}
+                </Link>
+              )}
+              <Link
+                href={editHref}
+                className="rounded-md border px-3 py-1.5 text-sm hover:bg-muted"
+                data-testid="reader-edit-link"
+              >
+                Edit
+              </Link>
+            </div>
           )}
         </header>
         {children}
       </main>
     </div>
   );
+}
+
+/**
+ * Unresolved root-comment count for the editors-only reader chip. Reads through
+ * the same `listCommentThreadsAction` the editor uses (each thread is one root
+ * comment; count the unresolved ones), and degrades to 0 on any failure so a
+ * comments outage never breaks the reader.
+ */
+async function unresolvedCommentCount(idOrSlug: string): Promise<number> {
+  try {
+    const result = await listCommentThreadsAction(idOrSlug);
+    if (!result.isSuccess) return 0;
+    return result.data.filter((thread) => !thread.resolved).length;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -257,6 +290,10 @@ export default async function ReaderPage({
     ? `/atrium/${published.id}/edit`
     : null;
 
+  // Editors-only comment chip count. Only read when the viewer may edit (the chip
+  // is editor-gated) so a non-editor render never issues the comments query.
+  const commentCount = editHref ? await unresolvedCommentCount(published.id) : 0;
+
   // ARTIFACT reader: load the untrusted code server-side and render it ONLY in
   // the cross-origin sandbox. The code is never placed in app-origin HTML.
   if (published.kind === "artifact") {
@@ -276,6 +313,7 @@ export default async function ReaderPage({
       <ReaderShell
         title={published.title}
         editHref={editHref}
+        commentCount={commentCount}
         collectionId={published.collectionId}
         mainClassName="min-w-0 max-w-4xl flex-1"
       >
@@ -313,6 +351,7 @@ export default async function ReaderPage({
     <ReaderShell
       title={published.title}
       editHref={editHref}
+      commentCount={commentCount}
       collectionId={published.collectionId}
       mainClassName="min-w-0 max-w-3xl flex-1"
     >

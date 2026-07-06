@@ -26,6 +26,7 @@ import {
   type EditorPublishDestination,
 } from "@/actions/db/atrium/publish-document";
 import { unpublishDocumentAction } from "@/actions/db/atrium/unpublish-document";
+import { toCleanMarkdown } from "@/lib/content/collab/suggestions";
 import type { ActionState } from "@/types";
 
 /**
@@ -140,7 +141,10 @@ export function useEditorActions({
     // only render once canEdit is true, which is set together with docName, so
     // the ref is populated; idOrSlug is a defensive fallback.
     const target = docNameRef.current ?? idOrSlug;
-    const body = editor.storage.markdown.getMarkdown();
+    // Clean, accepted-baseline markdown (see toCleanMarkdown): pending insertions
+    // removed, deletions applied, comment/suggestion marks stripped — so a snapshot
+    // never captures comment or unaccepted-suggestion residue as the canonical body.
+    const body = toCleanMarkdown(editor);
     void runAction(async () => {
       const result = await snapshotDocumentAction(target, { body });
       return mapActionResult(result, {

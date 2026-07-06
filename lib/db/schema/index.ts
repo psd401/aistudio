@@ -195,6 +195,8 @@ export * from "./tables/content-audit-logs";
 export * from "./tables/content-publish-requests";
 // Phase 1 (#1051): live collaborative document state (Yjs CRDT)
 export * from "./tables/atrium-doc-state";
+// Comments / track-changes thread store (§18.1)
+export * from "./tables/atrium-doc-comments";
 
 // ============================================
 // Relations
