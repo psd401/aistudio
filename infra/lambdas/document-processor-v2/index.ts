@@ -287,9 +287,19 @@ interface ProcessingItem {
   messageId: string;
 }
 
+interface ExtractedRecords {
+  items: ProcessingItem[];
+  // messageIds whose body failed JSON.parse — reported as batchItemFailures too, so
+  // SQS retries/redrives them instead of deleting them as if they were processed
+  // (REV-INFRA-097): a void/skip here previously left them out of batchItemFailures
+  // entirely, and any record NOT in that list is treated by SQS as a success.
+  parseFailureMessageIds: string[];
+}
+
 // Extract processing contexts from SQS events
-function extractProcessingContexts(event: SQSEvent): ProcessingItem[] {
+function extractProcessingContexts(event: SQSEvent): ExtractedRecords {
   const items: ProcessingItem[] = [];
+  const parseFailureMessageIds: string[] = [];
 
   for (const record of event.Records) {
     try {
@@ -308,14 +318,17 @@ function extractProcessingContexts(event: SQSEvent): ProcessingItem[] {
         });
       }
     } catch (parseError) {
-      // An unparseable record is a poison message that retrying cannot fix; log and
-      // skip it (SQS deletes it) rather than retrying forever.
+      // A malformed body cannot be fixed by processing logic, but it CAN be fixed by
+      // a human (bad producer, truncated message, etc.) — report it as a batch item
+      // failure so it stays on the queue for SQS retry / DLQ redrive rather than
+      // being silently deleted as a false success (REV-INFRA-097).
       const logger = createLambdaLogger({ operation: 'extractProcessingContexts' });
-      logger.error('Failed to parse SQS record', parseError);
+      logger.error('Failed to parse SQS record', parseError, { messageId: record.messageId });
+      parseFailureMessageIds.push(record.messageId);
     }
   }
 
-  return items;
+  return { items, parseFailureMessageIds };
 }
 
 // Lambda handler
@@ -333,11 +346,19 @@ export async function handler(event: SQSEvent, context: Context): Promise<SQSBat
     remainingTime: context.getRemainingTimeInMillis()
   });
 
-  const items = extractProcessingContexts(event);
+  const { items, parseFailureMessageIds } = extractProcessingContexts(event);
+
+  // Parse failures are reported regardless of whether any record parsed successfully
+  // (REV-INFRA-097) — they are independent of the items array below.
+  const batchItemFailures: SQSBatchItemFailure[] = parseFailureMessageIds.map(
+    (messageId) => ({ itemIdentifier: messageId })
+  );
 
   if (items.length === 0) {
-    logger.warn('No valid processing contexts found in event');
-    return { batchItemFailures: [] };
+    logger.warn('No valid processing contexts found in event', {
+      parseFailureCount: parseFailureMessageIds.length
+    });
+    return { batchItemFailures };
   }
 
   // Process documents concurrently (but limited by Lambda concurrency settings)
@@ -350,7 +371,6 @@ export async function handler(event: SQSEvent, context: Context): Promise<SQSBat
   // records' itemIdentifiers keeps ONLY those messages on the queue for SQS retry and
   // DLQ redrive (maxReceiveCount reached) — the previous void return made Lambda treat
   // a partial-batch failure as a full success and silently delete the failed messages.
-  const batchItemFailures: SQSBatchItemFailure[] = [];
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
       batchItemFailures.push({ itemIdentifier: items[index].messageId });
@@ -363,9 +383,9 @@ export async function handler(event: SQSEvent, context: Context): Promise<SQSBat
   });
 
   logger.info('Lambda execution completed', {
-    successCount: results.length - batchItemFailures.length,
+    successCount: results.length - (batchItemFailures.length - parseFailureMessageIds.length),
     failureCount: batchItemFailures.length,
-    totalCount: results.length
+    totalCount: results.length + parseFailureMessageIds.length
   });
 
   // An all-failed batch is naturally a subset of this: every itemIdentifier is

@@ -91,3 +91,33 @@ describe('handler reportBatchItemFailures (REV-INFRA-091)', () => {
     expect(result.batchItemFailures.map((f) => f.itemIdentifier).sort()).toEqual(['m1', 'm2']);
   });
 });
+
+describe('handler poison-message reporting (REV-INFRA-097)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('reports a record with an unparseable body as a batch item failure instead of dropping it', async () => {
+    const event = {
+      Records: [
+        record('j1', 'ok1.txt', 'm1'),
+        { messageId: 'poison', body: '{not valid json' },
+      ],
+    } as any;
+
+    const result = await handler(event, ctx);
+
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'poison' }]);
+  });
+
+  it('reports only parse failures when every record is unparseable (no processable items)', async () => {
+    const event = {
+      Records: [
+        { messageId: 'poison1', body: '{not valid json' },
+        { messageId: 'poison2', body: 'also not json' },
+      ],
+    } as any;
+
+    const result = await handler(event, ctx);
+
+    expect(result.batchItemFailures.map((f) => f.itemIdentifier).sort()).toEqual(['poison1', 'poison2']);
+  });
+});
