@@ -125,4 +125,23 @@ describe("CanvaApiClient.request — 429 exhaustion (REV-COR-627)", () => {
     // Retry-After: 2 → 2000ms passed to setTimeout.
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2000)
   })
+
+  it("parses an HTTP-date Retry-After header (RFC 7231) instead of NaN-ing to an immediate retry", async () => {
+    const retryAfterDate = new Date(Date.now() + 3000).toUTCString()
+    fetchMock
+      .mockResolvedValueOnce(resp(429, undefined, retryAfterDate))
+      .mockResolvedValueOnce(resp(200, { ok: true }))
+    const client = new CanvaApiClient("token")
+
+    const result = await client.get<{ ok: boolean }>("/v1/assets/x")
+
+    expect(result).toEqual({ ok: true })
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1)
+    const waitMs = setTimeoutSpy.mock.calls[0][1] as number
+    // Must resolve to a real, positive delay derived from the date — not NaN (which
+    // would collapse to an immediate 0ms retry per the pre-fix bug).
+    expect(Number.isNaN(waitMs)).toBe(false)
+    expect(waitMs).toBeGreaterThan(0)
+    expect(waitMs).toBeLessThanOrEqual(3000)
+  })
 })

@@ -155,10 +155,22 @@ export class CanvaApiClient {
             "RATE_LIMITED"
           )
 
+          // Retry-After is seconds-delta per RFC 7231, but proxies/gateways may send
+          // an HTTP-date instead; parseInt alone yields NaN for a date and collapses
+          // waitMs to 0, causing an immediate retry with no backoff.
           const retryAfter = resp.headers.get("Retry-After")
-          const waitMs = retryAfter
-            ? parseInt(retryAfter, 10) * 1000
-            : INITIAL_BACKOFF_MS * Math.pow(2, attempt)
+          let waitMs = INITIAL_BACKOFF_MS * Math.pow(2, attempt)
+          if (retryAfter) {
+            const seconds = parseInt(retryAfter, 10)
+            if (!Number.isNaN(seconds)) {
+              waitMs = seconds * 1000
+            } else {
+              const dateMs = Date.parse(retryAfter)
+              if (!Number.isNaN(dateMs)) {
+                waitMs = Math.max(0, dateMs - Date.now())
+              }
+            }
+          }
 
           log.warn("Canva API rate limited", {
             url,
