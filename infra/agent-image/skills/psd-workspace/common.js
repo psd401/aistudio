@@ -230,6 +230,10 @@ function splitCommand(cmd) {
 const PAYLOAD_PLACEHOLDERS = {
   '--json-file': { flag: '--json', placeholder: '@@PSD_PAYLOAD_JSON@@', kind: 'json' },
   '--body-file': { flag: '--body', placeholder: '@@PSD_PAYLOAD_BODY@@', kind: 'text' },
+  // chat +send message text. Added after the live 2026-07-07 run: the agent
+  // GUESSED `--text-file` while fumbling +send syntax against the clock —
+  // it's the natural generalization of the two flags above, so make it real.
+  '--text-file': { flag: '--text', placeholder: '@@PSD_PAYLOAD_TEXT@@', kind: 'text' },
 };
 
 /**

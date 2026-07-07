@@ -510,6 +510,11 @@ class OpenClawAdapter(HarnessAdapter):
                 # final `event:chat` state=final arrives with an empty message
                 # and is now just a completion signal).
                 agent_assistant_accum: str = ""
+                # True when tool activity arrived after accumulated assistant
+                # text — the next assistant delta starts a NEW narration
+                # segment and gets a blank-line separator (issue #1138 F4;
+                # the run-on "…in Plaud.Good, done…" came from this path).
+                assistant_boundary_pending: bool = False
                 # Allow recv() to sit idle for up to 60s between events
                 # without raising — long tool calls (web_fetch, model
                 # inference on a big prompt) produce gaps with no stream
@@ -606,14 +611,29 @@ class OpenClawAdapter(HarnessAdapter):
                             )
                             cumulative = self._extract_text(data.get("message"))
                             if isinstance(increment, str) and increment:
-                                agent_assistant_accum = (
-                                    increment
-                                    if replace
-                                    else agent_assistant_accum + increment
+                                agent_assistant_accum = self._accumulate_assistant(
+                                    agent_assistant_accum,
+                                    increment,
+                                    replace,
+                                    assistant_boundary_pending,
                                 )
+                                assistant_boundary_pending = False
                             elif isinstance(cumulative, str) and cumulative:
                                 agent_assistant_accum = cumulative
+                                assistant_boundary_pending = False
+                        elif stream in ("item", "command_output"):
+                            # Newer OpenClaw builds report tool activity as
+                            # `item`/`command_output` streams. Tool activity
+                            # after accumulated text means the next assistant
+                            # delta starts a NEW narration segment — mark the
+                            # boundary so segments don't run together
+                            # ("...in Plaud.Good, done..."), issue #1138 F4.
+                            if agent_assistant_accum:
+                                assistant_boundary_pending = True
                         elif stream == "tool_call" and isinstance(data, dict):
+                            # Same boundary rule for protocol-v3 tool events.
+                            if agent_assistant_accum:
+                                assistant_boundary_pending = True
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -626,6 +646,8 @@ class OpenClawAdapter(HarnessAdapter):
                                 "started_at": time.time(),
                             }
                         elif stream == "tool_result" and isinstance(data, dict):
+                            if agent_assistant_accum:
+                                assistant_boundary_pending = True
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -934,6 +956,29 @@ class OpenClawAdapter(HarnessAdapter):
             failed=True,
             error_class="EmptyAgentResponse",
         )
+
+    @staticmethod
+    def _accumulate_assistant(
+        accum: str,
+        increment: str,
+        replace: bool,
+        boundary_pending: bool,
+    ) -> str:
+        """Append a streamed assistant increment to the turn accumulator.
+
+        `replace` resets the buffer (protocol v4 replace-mode delta).
+        `boundary_pending` means tool activity separated this increment from
+        the previously accumulated text — i.e. the model started a NEW
+        narration segment — so join with a blank line instead of butting the
+        segments together (issue #1138 F4: "…in Plaud.Good, done…").
+        Increments within one segment must never get separators; the caller
+        only sets `boundary_pending` on tool events.
+        """
+        if replace:
+            return increment
+        if boundary_pending and accum and increment:
+            return accum + "\n\n" + increment
+        return accum + increment
 
     @staticmethod
     def _extract_text(content) -> str:

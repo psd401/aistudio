@@ -175,6 +175,31 @@ describe('resolvePayloadFiles error paths (fail() exits — run via subprocess)'
   });
 });
 
+describe('--text-file (chat +send message text)', () => {
+  test('resolves like --body-file with its own placeholder', () => {
+    const msg = "Team — two docs from the 7/1 meeting:\n1) Summary\n2) Todos ('74 items')";
+    const p = tmpFile(msg, '.txt');
+    const resolved = resolvePayloadFiles(
+      `chat +send --space spaces/XXXX --text-file ${p}`
+    );
+    expect(resolved.payloads['@@PSD_PAYLOAD_TEXT@@']).toBe(msg);
+    expect(resolved.execCommand).toContain('--text @@PSD_PAYLOAD_TEXT@@');
+    expect(resolved.execCommand).not.toContain('--text-file');
+  });
+
+  test('--text and --text-file together are rejected', () => {
+    const p = tmpFile('hi', '.txt');
+    const r = spawnSync(
+      process.execPath,
+      ['-e', `require('${__dirname}/common.js').resolvePayloadFiles(process.argv[1])`,
+        `chat +send --text 'inline' --text-file ${p}`],
+      { encoding: 'utf8' }
+    );
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('not both');
+  });
+});
+
 describe('quoted file paths (review finding 2)', () => {
   test('a quoted absolute path resolves like an unquoted one', () => {
     const payload = { a: 1 };

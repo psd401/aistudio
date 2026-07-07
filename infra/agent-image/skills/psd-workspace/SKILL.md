@@ -118,9 +118,15 @@ node /opt/psd-skills/psd-workspace/run.js \
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "gmail +draft --to bill@psd401.net --subject 'Follow up' --body-file /tmp/draft-body.txt"
+
+# Chat message text (+send) uses --text-file (replaces --text)
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net --scope agent \
+  --command "chat +send --space spaces/XXXX --text-file /tmp/chatmsg.txt"
 ```
 
-Rules: the path must be absolute; use `--json-file` OR `--json`, never both;
+Rules: the path must be absolute; use the file form OR the inline flag, never
+both (`--json`/`--json-file`, `--body`/`--body-file`, `--text`/`--text-file`);
 one of each flag per command. The file content is handed to gws as exactly one
 argv token — quoting rules never apply to it. Phase 1 gates and marker
 injection still see the real payload (they run against the resolved content),
@@ -129,6 +135,28 @@ refused, and file-based payloads still get audit markers.
 
 Use inline `--json` only for short, quote-free payloads you compose yourself
 (IDs, dates, enum values). Anything containing prose goes through a file.
+
+## Writing Google Docs: NATIVE formatting, never markdown
+
+Google Docs does not render markdown — `# Heading`, `**bold**`, and `- bullet`
+pasted as text show up literally and read as broken. When writing doc content
+via `docs documents batchUpdate`:
+
+- Insert plain text with `insertText` (no markdown syntax in the text).
+- Make headings with `updateParagraphStyle` +
+  `paragraphStyle.namedStyleType: "HEADING_1"` (…`HEADING_6`) over the
+  heading's range.
+- Make bullet/numbered lists with `createParagraphBullets`
+  (`bulletPreset: "BULLET_DISC_CIRCLE_SQUARE"` or
+  `"NUMBERED_DECIMAL_ALPHA_ROMAN"`) over the paragraphs' range.
+- Bold/italic with `updateTextStyle` (`textStyle.bold: true`, `italic`) +
+  `fields`.
+
+Batch ALL requests for a section into ONE `batchUpdate` call (one `--json-file`
+payload with a `requests` array) — one call per doc, not one call per
+formatting operation. Compose the payload in a file and pass it with
+`--json-file` (see above); index math is easiest when you insert text first
+and style ranges immediately after, back-to-front.
 
 ## Phase 1 boundaries (hard gates — refused at the skill layer)
 
