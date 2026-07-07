@@ -50,20 +50,26 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       timer({ status: "error", reason: "forbidden" });
       return new NextResponse("Prompt not found", { status: 404, headers: { "X-Request-Id": requestId } })
     }
-    if (!(await hasCapabilityAccess("assistant-architect"))) {
+    if (!(await hasCapabilityAccess("assistant-architect", session.sub))) {
       log.warn("Prompt access denied - missing capability", { userId: session.sub });
       return notFound()
     }
     const architect = prompt.assistantArchitectId != null
       ? await getAssistantArchitectById(prompt.assistantArchitectId)
       : null
-    const currentUser = await getCurrentUserAction()
-    const callerId = currentUser.isSuccess ? currentUser.data?.user?.id : undefined
-    const isOwner = architect?.userId != null && architect.userId === callerId
-    const isApproved = architect?.status === "approved"
-    if (!architect || (!isOwner && !isApproved && !(await hasRole("administrator")))) {
-      log.warn("Prompt access denied - no access to parent architect", { userId: session.sub, promptId: promptIdInt });
+    if (!architect) {
+      log.warn("Prompt access denied - parent architect not found", { userId: session.sub, promptId: promptIdInt });
       return notFound()
+    }
+    const isApproved = architect.status === "approved"
+    if (!isApproved) {
+      const currentUser = await getCurrentUserAction()
+      const callerId = currentUser.isSuccess ? currentUser.data?.user?.id : undefined
+      const isOwner = architect.userId != null && architect.userId === callerId
+      if (!isOwner && !(await hasRole("administrator"))) {
+        log.warn("Prompt access denied - no access to parent architect", { userId: session.sub, promptId: promptIdInt });
+        return notFound()
+      }
     }
 
     let actualModelId: string | null = null;
