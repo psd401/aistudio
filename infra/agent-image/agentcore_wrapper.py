@@ -381,22 +381,49 @@ def _sanitize_header_field(value, max_len: int) -> str:
     return re.sub(r'["\\\[\]\n\r]', "", value).strip()[:max_len]
 
 
+def _attachment_workspace_paths(attachments) -> list:
+    """Collect valid workspace-relative paths of router-fetched Chat uploads.
+
+    Router-generated (`attachments/<stamp>-<idx>-<name>`), but treated as
+    untrusted since the payload crosses a service boundary: only plain
+    relative paths under attachments/ with a safe character set pass.
+    workspace_sync.pull_files() re-validates against traversal independently.
+    """
+    if not isinstance(attachments, list):
+        return []
+    paths = []
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        path = att.get("workspacePath")
+        if (
+            isinstance(path, str)
+            and path.startswith("attachments/")
+            and ".." not in path
+            and re.fullmatch(r"[A-Za-z0-9._/-]+", path)
+        ):
+            paths.append(path)
+    return paths
+
+
 def _render_attachments_header(attachments) -> str:
     """Render forwarded Chat attachments into a prompt header (issue #1138 F1).
 
-    The router forwards structured metadata only — it does not fetch bytes.
-    This header tells the agent what arrived and how to reach it: Drive
-    files/chips are readable via the psd-workspace skill (sharing/scope
-    permitting); files uploaded directly in Chat are not downloaded for the
-    agent, so it should ask the user to share them via Drive.
-
-    NOTE: if a router-side byte-fetch path is added later (media.download to
-    the agent's S3 workspace), update the closing guidance line so the agent
-    knows Chat uploads are now readable.
+    Tells the agent what arrived and how to reach it:
+      - Chat uploads the router fetched carry `path="…"` — the file already
+        exists in the workspace (pulled per-turn via workspace_sync.pull_files)
+        and the agent reads it directly with its file tools.
+      - Chat uploads WITHOUT a path failed to download — the agent should say
+        so and ask the user to re-attach, never pretend the file is absent.
+      - Drive files/chips are metadata-only by design (the Drive barrier):
+        readable via the psd-workspace skill, subject to sharing with the
+        agent account.
     """
     if not isinstance(attachments, list) or not attachments:
         return ""
     lines = []
+    fetched = 0
+    failed_uploads = 0
     for att in attachments:
         if not isinstance(att, dict):
             continue
@@ -409,20 +436,41 @@ def _render_attachments_header(attachments) -> str:
                 f'- name="{name}" type="{mime}" source="drive-link"{loc}'
             )
         else:
-            lines.append(
-                f'- name="{name}" type="{mime}" source="chat-upload"'
-            )
+            path = _sanitize_header_field(att.get("workspacePath"), 512)
+            if path and path.startswith("attachments/"):
+                fetched += 1
+                lines.append(
+                    f'- name="{name}" type="{mime}" source="chat-upload" '
+                    f'path="/home/node/.openclaw/{path}"'
+                )
+            else:
+                failed_uploads += 1
+                lines.append(
+                    f'- name="{name}" type="{mime}" source="chat-upload" '
+                    f"(download failed — file NOT available)"
+                )
     if not lines:
         return ""
     body = "\n".join(lines)
+    guidance = []
+    if fetched:
+        guidance.append(
+            "Files with a path= are already downloaded into your workspace — "
+            "read them directly with your file tools at that path."
+        )
+    if failed_uploads:
+        guidance.append(
+            "Files marked download failed could not be retrieved — tell the "
+            "user and ask them to re-attach."
+        )
+    guidance.append(
+        "To read a Google Drive file or chip, use the psd-workspace skill "
+        "(the file may need to be shared with your agent account first)."
+    )
     return (
         f"[attachments: the user attached {len(lines)} file(s) to this "
         f"message]\n{body}\n"
-        "[To read a Google Drive file or chip, use the psd-workspace skill "
-        "(the file may need to be shared with your agent account first). "
-        "Files uploaded directly in Chat are NOT downloaded for you — if you "
-        "need their contents, ask the user to share the file via Google "
-        "Drive.]"
+        f"[{' '.join(guidance)}]"
     )
 
 
@@ -540,6 +588,27 @@ def main():
                 workspace_sync.start_periodic_push(workspace_prefix, interval_s=120)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("workspace mount failed: %s", exc)
+
+        # Per-turn attachment delivery (issue #1138 F1): the router uploaded
+        # Chat attachment bytes to S3 AFTER this microVM's one-time workspace
+        # pull, so fetch exactly those keys now — the header below points the
+        # agent at /home/node/.openclaw/<workspacePath> and the file must
+        # exist there before the turn starts. Failures are non-fatal: the
+        # agent still gets the metadata and reports the file as unavailable.
+        attachment_paths = _attachment_workspace_paths(payload.get("attachments"))
+        if attachment_paths and workspace_prefix:
+            try:
+                pulled = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    workspace_sync.pull_files,
+                    workspace_prefix,
+                    attachment_paths,
+                )
+                logger.info(
+                    "attachments pulled: %d/%d", pulled, len(attachment_paths)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("attachment pull failed: %s", exc)
 
         # Inject per-turn context: the caller's identity AND the current
         # Pacific local time. The LLM has no real clock — without this header

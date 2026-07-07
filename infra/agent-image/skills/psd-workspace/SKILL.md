@@ -47,9 +47,11 @@ and I'll read it."*
 Chat message attachments arrive to you as an `[attachments: …]` header at the
 top of the turn. A Drive chip / Drive-file attachment carries a `driveFileId` —
 read it with the steps above. A file **uploaded directly in Chat**
-(`source="chat-upload"`) is **not** downloaded for you; you cannot open its
-bytes. Tell the user to share it via Google Drive instead, and then read it as
-above.
+(`source="chat-upload"`) is downloaded into your workspace for you: the header
+carries `path="/home/node/.openclaw/attachments/…"` — read that file directly
+with your file tools; no Drive access is involved. If the header instead marks
+the upload `download failed`, the fetch didn't work this time — tell the user
+and ask them to re-attach the file (or share it via Drive as a fallback).
 
 ## Invocation
 

@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 
-import { extractAttachments } from './attachments';
+import { buildWorkspacePath, extractAttachments } from './attachments';
 
 describe('extractAttachments', () => {
   test('empty message → no attachments', () => {
@@ -233,5 +233,53 @@ describe('extractAttachments', () => {
     });
     expect(result[0].name).toBe('uploaded file');
     expect(result[0].source).toBe('chat-upload');
+  });
+});
+
+describe('buildWorkspacePath', () => {
+  const now = new Date('2026-07-06T23:51:33.123Z');
+
+  test('safe filename passes through under a stamped attachments/ prefix', () => {
+    expect(buildWorkspacePath('report.pdf', 0, now)).toBe(
+      'attachments/20260706T235133-0-report.pdf'
+    );
+  });
+
+  test('unsafe characters collapse to dashes; spaces and quotes removed', () => {
+    expect(buildWorkspacePath('Q3 Budget (final) "v2".xlsx', 1, now)).toBe(
+      'attachments/20260706T235133-1-Q3-Budget-final-v2-.xlsx'
+    );
+  });
+
+  test('path traversal and hidden-file prefixes are stripped', () => {
+    // `../../etc/passwd` → separators/dots collapse; leading dots removed.
+    const result = buildWorkspacePath('../../etc/passwd', 0, now);
+    expect(result).toBe('attachments/20260706T235133-0-etc-passwd');
+    expect(result).not.toContain('..');
+    expect(buildWorkspacePath('.hidden', 0, now)).toBe(
+      'attachments/20260706T235133-0-hidden'
+    );
+  });
+
+  test('empty or fully-stripped name falls back to "file"', () => {
+    expect(buildWorkspacePath('', 0, now)).toBe(
+      'attachments/20260706T235133-0-file'
+    );
+    expect(buildWorkspacePath('///', 2, now)).toBe(
+      'attachments/20260706T235133-2-file'
+    );
+  });
+
+  test('long names truncate but keep the extension', () => {
+    const result = buildWorkspacePath(`${'a'.repeat(300)}.pdf`, 0, now);
+    expect(result.endsWith('.pdf')).toBe(true);
+    // attachments/ + stamp + index + name stays bounded.
+    expect(result.length).toBeLessThanOrEqual('attachments/20260706T235133-0-'.length + 120);
+  });
+
+  test('index disambiguates same-name uploads in one message', () => {
+    expect(buildWorkspacePath('a.txt', 0, now)).not.toBe(
+      buildWorkspacePath('a.txt', 1, now)
+    );
   });
 });

@@ -2085,6 +2085,10 @@ export class AgentPlatformStack extends cdk.Stack {
         ENVIRONMENT: environment,
         USERS_TABLE: this.usersTable.tableName,
         SIGNALS_TABLE: this.signalsTable.tableName,
+        // Chat-uploaded attachment bytes are delivered to the agent via
+        // s3://<workspace-bucket>/<workspacePrefix>/attachments/ (#1138 F1).
+        // The role already has PutObject via ServiceRoleFactory s3Buckets.
+        WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
         MESSAGE_DEDUP_TABLE: this.messageDedupTable.tableName,
         SESSION_LOCKS_TABLE: this.sessionLocksTable.tableName,
         INTERAGENT_TABLE: interAgentTable.tableName,

@@ -77,8 +77,18 @@ export interface AgentAttachment {
   source: 'chat-upload' | 'drive-link';
   /** Present for Drive files/chips — the file the agent can try to read. */
   driveFileId?: string;
-  /** Present for Chat uploads — the media.download handle (future fetch path). */
+  /** Present for Chat uploads — the media.download handle the router fetches. */
   attachmentResourceName?: string;
+  /**
+   * Present for Chat uploads the router successfully fetched: the
+   * workspace-relative path (e.g. `attachments/20260706T235133-0-report.pdf`).
+   * The same string is the S3 key suffix under the user's workspace prefix
+   * AND the path under /home/node/.openclaw/ in the microVM — the container
+   * pulls exactly this key before the turn, and a cold microVM restores it
+   * via the normal full workspace pull. Absent when the fetch failed (the
+   * rendered header then tells the agent the file could not be downloaded).
+   */
+  workspacePath?: string;
 }
 
 /**
@@ -100,6 +110,34 @@ function sanitizeDriveFileId(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const cleaned = value.slice(0, 256).replace(/[^A-Za-z0-9_-]/g, '');
   return cleaned || undefined;
+}
+
+/**
+ * Build the workspace-relative destination path for a fetched Chat upload.
+ *
+ * The result is used verbatim as an S3 key suffix (`<prefix>/<path>`) and as
+ * a filesystem path under /home/node/.openclaw/ inside the microVM, so it
+ * must be safe for both: the filename is reduced to `[A-Za-z0-9._-]`, leading
+ * dots are stripped (no hidden files, no `..` traversal), and length is
+ * bounded. A UTC timestamp + per-message index prefix keeps repeated uploads
+ * of the same filename from overwriting each other.
+ */
+export function buildWorkspacePath(name: string, index: number, now: Date): string {
+  let safeName = name
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^[.-]+/, '')
+    .replace(/-{2,}/g, '-');
+  if (safeName.length > 120) {
+    // Preserve the extension when truncating so the agent's tooling can
+    // still infer the file type from the name.
+    const dot = safeName.lastIndexOf('.');
+    const ext = dot > 0 ? safeName.slice(dot).slice(0, 16) : '';
+    safeName = safeName.slice(0, 120 - ext.length) + ext;
+  }
+  if (!safeName) safeName = 'file';
+  // 2026-07-06T23:51:33.123Z -> 20260706T235133
+  const stamp = now.toISOString().replace(/[-:]/g, '').slice(0, 15);
+  return `attachments/${stamp}-${index}-${safeName}`;
 }
 
 function deriveDriveName(mimeType: string): string {
