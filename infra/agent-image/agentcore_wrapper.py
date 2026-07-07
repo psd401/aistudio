@@ -367,6 +367,63 @@ signal.signal(signal.SIGTERM, handle_shutdown)
 signal.signal(signal.SIGINT, handle_shutdown)
 
 
+def _sanitize_header_field(value, max_len: int) -> str:
+    """Strip prompt-header delimiters (brackets/newlines) and clamp length.
+
+    Attachment fields originate from user-controlled Chat data; re-sanitize
+    here (the router also cleans them) so a crafted filename can't break out
+    of the structured [attachments: ...] header.
+    """
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[\[\]\n\r]", "", value).strip()[:max_len]
+
+
+def _render_attachments_header(attachments) -> str:
+    """Render forwarded Chat attachments into a prompt header (issue #1138 F1).
+
+    The router forwards structured metadata only — it does not fetch bytes.
+    This header tells the agent what arrived and how to reach it: Drive
+    files/chips are readable via the psd-workspace skill (sharing/scope
+    permitting); files uploaded directly in Chat are not downloaded for the
+    agent, so it should ask the user to share them via Drive.
+
+    NOTE: if a router-side byte-fetch path is added later (media.download to
+    the agent's S3 workspace), update the closing guidance line so the agent
+    knows Chat uploads are now readable.
+    """
+    if not isinstance(attachments, list) or not attachments:
+        return ""
+    lines = []
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        name = _sanitize_header_field(att.get("name"), 256) or "unnamed"
+        mime = _sanitize_header_field(att.get("mimeType"), 100) or "unknown type"
+        if att.get("source") == "drive-link":
+            drive_id = _sanitize_header_field(att.get("driveFileId"), 256)
+            loc = f' driveFileId="{drive_id}"' if drive_id else ""
+            lines.append(
+                f'- name="{name}" type="{mime}" source="drive-link"{loc}'
+            )
+        else:
+            lines.append(
+                f'- name="{name}" type="{mime}" source="chat-upload"'
+            )
+    if not lines:
+        return ""
+    body = "\n".join(lines)
+    return (
+        f"[attachments: the user attached {len(lines)} file(s) to this "
+        f"message]\n{body}\n"
+        "[To read a Google Drive file or chip, use the psd-workspace skill "
+        "(the file may need to be shared with your agent account first). "
+        "Files uploaded directly in Chat are NOT downloaded for you — if you "
+        "need their contents, ask the user to share the file via Google "
+        "Drive.]"
+    )
+
+
 def main():
     """Start the AgentCore wrapper."""
     # Log the build marker FIRST so it appears even if startup fails.
@@ -428,6 +485,9 @@ def main():
             invoked_by_email          — cross-user: email of the person consulting this agent
             invoked_by_display_name   — cross-user: display name of the invoker
             thread_context            — cross-user: ephemeral thread context from the Chat space
+            attachments               — Chat files/Drive chips (issue #1138 F1):
+                                        [{name, mimeType, source, driveFileId?,
+                                          attachmentResourceName?}]
         """
         global _current_workspace_prefix
 
@@ -441,11 +501,15 @@ def main():
         invoked_by_email = payload.get("invoked_by_email", "")
         invoked_by_display_name = payload.get("invoked_by_display_name", "")
         thread_context = payload.get("thread_context", "")
+        # Chat attachments / Drive chips the router forwarded (issue #1138 F1).
+        attachments_header = _render_attachments_header(payload.get("attachments"))
 
         logger.info(
-            "Invocation received: session=%s user=%s prefix=%s msg_length=%d cross_user=%s",
+            "Invocation received: session=%s user=%s prefix=%s msg_length=%d "
+            "cross_user=%s attachments=%d",
             session_id, user_email, workspace_prefix or "-", len(user_message),
             invoked_by_email or "no",
+            len(payload.get("attachments") or []),
         )
 
         if not user_message.strip():
@@ -488,6 +552,11 @@ def main():
             f"Pacific ({pacific_now.strftime('%Y-%m-%dT%H:%M:%S%z')})]"
         )
 
+        # Attachment header goes between the identity/time headers and the
+        # user's message so the agent sees what arrived before reading the
+        # request (issue #1138 F1). Empty when there are no attachments.
+        attach_section = f"\n{attachments_header}" if attachments_header else ""
+
         # Cross-user invocation: when someone other than the agent owner
         # is consulting this agent, inject a [cross-user-invocation] header so
         # the system prompt can adjust behavior (consultation only, no task
@@ -515,17 +584,17 @@ def main():
             framed = (
                 f"[agent-owner: {display_name or user_email} <{user_email}>]\n"
                 f"{now_header}\n"
-                f"{cross_user_header}{thread_section}\n\n"
+                f"{cross_user_header}{thread_section}{attach_section}\n\n"
                 f"{user_message}"
             )
         elif display_name or user_email != "unknown":
             framed = (
                 f"[caller: {display_name or user_email} <{user_email}>]\n"
-                f"{now_header}\n\n"
+                f"{now_header}{attach_section}\n\n"
                 f"{user_message}"
             )
         else:
-            framed = f"{now_header}\n\n{user_message}"
+            framed = f"{now_header}{attach_section}\n\n{user_message}"
 
         # Flush the SSE headers immediately. Without an early yield the SDK
         # waits for the first chunk before sending headers, defeating the

@@ -60,6 +60,12 @@ import * as chatPkg from '@googleapis/chat';
 import { Agent as UndiciAgent, fetch as undiciFetch } from 'undici';
 import { classifyTopic, isPrivateMessage, isoWeek, type Topic } from './topic-classifier';
 import { extractRichEnvelope } from './rich-envelope';
+import {
+  extractAttachments,
+  type AgentAttachment,
+  type ChatAnnotation,
+  type ChatAttachment,
+} from './attachments';
 
 // ---------------------------------------------------------------------------
 // Structured logging (Lambda-compatible, no console.* per CLAUDE.md exception)
@@ -236,6 +242,17 @@ interface GoogleChatEvent {
     slashCommand?: {
       commandId: string;
     };
+    /**
+     * Files the user attached in Chat — uploaded content or a Drive file
+     * added via the "+" menu. Forwarded to the agent so it knows a file
+     * arrived (issue #1138 F1). Rides through normalizeChatEvent unchanged.
+     */
+    attachment?: ChatAttachment[];
+    /**
+     * Inline annotations, including Drive chips / rich links
+     * (`type: 'RICH_LINK'`). Their driveFileId is surfaced to the agent.
+     */
+    annotations?: ChatAnnotation[];
     createTime: string;
   };
   /**
@@ -1100,6 +1117,9 @@ async function invokeAgentCore(
     invokedBy?: { email: string; displayName: string };
     /** Ephemeral thread context for cross-user invocations */
     threadContext?: string;
+    /** Files the user attached in Chat (issue #1138 F1). Rendered into the
+     * prompt header by the container so the agent knows a file arrived. */
+    attachments?: AgentAttachment[];
   }
 ): Promise<{
   response: string;
@@ -1214,6 +1234,12 @@ async function invokeAgentCore(
       ...(userContext?.threadContext && {
         thread_context: userContext.threadContext,
       }),
+      // Structured attachment metadata (issue #1138 F1). The container renders
+      // an [attachments: ...] prompt header from this so the agent sees what
+      // arrived instead of reporting "I don't see any attachment."
+      ...(userContext?.attachments?.length
+        ? { attachments: userContext.attachments }
+        : {}),
     });
 
     const request = new HttpRequest({
@@ -2183,6 +2209,10 @@ async function processRecord(
   // Prefer argumentText; fall back to text when absent (older API versions,
   // edge cases where only one field is populated).
   const rawText = (message?.argumentText ?? message?.text ?? '').trim();
+  // Files the user attached in Chat (uploaded content + Drive chips). A
+  // message may carry ONLY an attachment (no caption), so this also decides
+  // whether an otherwise-empty message is worth processing (issue #1138 F1).
+  const attachments = message ? extractAttachments(message) : [];
   // Slash commands with no arguments (e.g., bare "/ask") have empty argumentText
   // but are still valid — the handler will show usage help. Only bail on truly
   // empty messages when there's no recognized slash command present.
@@ -2196,7 +2226,11 @@ async function processRecord(
     log.warn('Ignoring unrecognized slash command', { commandId: slashCommandId });
     return;
   }
-  if (!message || (!rawText && !hasRecognizedSlashCommand) || !message.sender) {
+  if (
+    !message ||
+    (!rawText && !hasRecognizedSlashCommand && attachments.length === 0) ||
+    !message.sender
+  ) {
     log.warn('Message event missing required fields');
     return;
   }
@@ -2311,7 +2345,14 @@ async function processRecord(
   const senderName = message.sender.name;
   const senderEmail = message.sender.email;
   const senderDisplayName = message.sender.displayName;
-  let messageText = rawText;
+  // Attachment-only messages (a file with no caption) have empty text. Give
+  // the agent a minimal prompt so the container doesn't short-circuit on an
+  // empty message — the [attachments: ...] header still carries the details.
+  let messageText =
+    rawText ||
+    (attachments.length > 0
+      ? '(The user attached a file with no accompanying message.)'
+      : rawText);
   const spaceName = chatEvent.space.name;
   const threadName = message.thread?.name;
 
@@ -2344,6 +2385,8 @@ async function processRecord(
     sender: senderName,
     space: spaceName,
     textLength: messageText.length,
+    attachmentCount: attachments.length,
+    attachmentSources: attachments.map((a) => a.source),
   });
 
   // Guard: reject messages that exceed the configured length limit before
@@ -2531,6 +2574,7 @@ async function processRecord(
             displayName: senderDisplayName,
           },
           threadContext,
+          ...(attachments.length ? { attachments } : {}),
         }
       ).finally(() => releaseSessionLock(crossSessionId, crossLockToken, log));
 
@@ -2671,6 +2715,7 @@ async function processRecord(
     {
       displayName: senderDisplayName,
       workspacePrefix: user.workspacePrefix,
+      ...(attachments.length ? { attachments } : {}),
     }
   ).finally(() => releaseSessionLock(sessionId, lockToken, log));
 
