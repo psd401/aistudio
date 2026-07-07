@@ -245,12 +245,10 @@ export function selectListedTools<T extends VersionedEntry>(
 function sanitizeToolArguments(args: unknown): Record<string, unknown> {
   const safe: Record<string, unknown> = Object.create(null)
   if (args && typeof args === "object" && !Array.isArray(args)) {
-    for (const key of Object.keys(args as Record<string, unknown>)) {
-      if (key === "__proto__" || key === "constructor" || key === "prototype") {
-        continue
-      }
-      safe[key] = (args as Record<string, unknown>)[key]
-    }
+    const entries = Object.entries(args as Record<string, unknown>).filter(
+      ([key]) => key !== "__proto__" && key !== "constructor" && key !== "prototype"
+    )
+    Object.assign(safe, Object.fromEntries(entries))
   }
   return safe
 }
