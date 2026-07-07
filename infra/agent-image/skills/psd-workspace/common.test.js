@@ -166,4 +166,23 @@ describe('resolvePayloadFiles error paths (fail() exits — run via subprocess)'
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('not both');
   });
+
+  test('--body and --body-file together are rejected (review finding 1)', () => {
+    const p = tmpFile('hello', '.txt');
+    const r = runResolve(`gmail +draft --body 'stale text' --body-file ${p}`);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('not both');
+  });
+});
+
+describe('quoted file paths (review finding 2)', () => {
+  test('a quoted absolute path resolves like an unquoted one', () => {
+    const payload = { a: 1 };
+    const p = tmpFile(JSON.stringify(payload));
+    for (const quoted of [`'${p}'`, `"${p}"`]) {
+      const resolved = resolvePayloadFiles(`docs write --json-file ${quoted}`);
+      expect(resolved).not.toBeNull();
+      expect(resolved.payloads['@@PSD_PAYLOAD_JSON@@']).toBe(JSON.stringify(payload));
+    }
+  });
 });

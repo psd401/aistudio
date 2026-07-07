@@ -261,10 +261,27 @@ function resolvePayloadFiles(commandString) {
     if (matches.length > 1) {
       fail(`${fileFlag} may appear at most once per command`);
     }
-    if (fileFlag === '--json-file' && /(^|\s)--json\s/.test(commandString)) {
-      fail('use either --json or --json-file, not both');
+    // Exactly one payload source per flag: reject the file form alongside its
+    // inline counterpart (--json + --json-file, --body + --body-file) —
+    // otherwise gws would receive two occurrences of the same flag and pick
+    // one silently. `--json\s` does not match `--json-file` (hyphen, not
+    // whitespace, follows), so the file flag never trips its own check.
+    const inlineRe = new RegExp(`(^|\\s)${spec.flag}\\s`);
+    if (inlineRe.test(commandString)) {
+      fail(`use either ${spec.flag} or ${fileFlag}, not both`);
     }
-    const filePath = matches[0][2];
+    let filePath = matches[0][2];
+    // Models habitually quote flag values (every SKILL.md example quotes
+    // --params). \S+ captures those quotes, so strip one matching
+    // surrounding pair before validating — otherwise a valid quoted path
+    // fails the absolute-path check with a misleading error.
+    if (
+      filePath.length >= 2 &&
+      ((filePath.startsWith("'") && filePath.endsWith("'")) ||
+        (filePath.startsWith('"') && filePath.endsWith('"')))
+    ) {
+      filePath = filePath.slice(1, -1);
+    }
     if (!filePath.startsWith('/')) {
       fail(`${fileFlag} requires an absolute path (got "${filePath}")`);
     }
