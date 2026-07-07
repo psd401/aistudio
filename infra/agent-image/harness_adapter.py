@@ -74,6 +74,32 @@ def _format_for_chat(text: str) -> str:
         return text
 
 
+def _frame_failed_partial(partial: str) -> str:
+    """Wrap a failed/degraded turn so it is never presented as a clean answer.
+
+    When a turn dies mid-task the model has usually emitted some scratchpad
+    narration ("Now let's read the file...") before it stopped. Posting that
+    verbatim reads to the user as a finished reply, hiding the failure and any
+    side effects that already ran (issue #1138 F4). Prefix an explicit error
+    frame; keep the partial so the user still sees what completed. When there
+    is no partial, return a standalone error.
+
+    `partial` must already be chat-formatted (the frame text is plain).
+    """
+    partial = (partial or "").strip()
+    if partial:
+        return (
+            "⚠️ I couldn't finish that — I hit a problem partway "
+            "through and some steps may have already run. Here's how far I "
+            "got:\n\n" + partial
+        )
+    return (
+        "⚠️ I couldn't complete that — I hit a problem partway "
+        "through. Some steps may have already run, so please check before "
+        "retrying."
+    )
+
+
 class HarnessAdapter(abc.ABC):
     """Abstract base class for agent harness adapters."""
 
@@ -684,10 +710,13 @@ class OpenClawAdapter(HarnessAdapter):
                                     "last_state": last_state,
                                 },
                             )
-                            err_text = (
+                            # Never post the accumulated scratchpad narration
+                            # as if it were the answer — frame it as a failed
+                            # partial (issue #1138 F4).
+                            err_text = _frame_failed_partial(
                                 _format_for_chat(response_text)
                                 if response_text
-                                else "I encountered an error processing your message."
+                                else ""
                             )
                             return TurnResult(
                                 text=err_text,
@@ -838,8 +867,11 @@ class OpenClawAdapter(HarnessAdapter):
                         "first_events": first_event_types,
                     },
                 )
+                # A partial that never reached a final event is still a
+                # failed turn — frame it so it doesn't read as a finished
+                # answer (issue #1138 F4).
                 return _result(
-                    _format_for_chat(response_text.strip()),
+                    _frame_failed_partial(_format_for_chat(response_text.strip())),
                     failed=True,
                     error_class="ChatDeadlineExpiredPartial",
                 )
@@ -919,7 +951,15 @@ class OpenClawAdapter(HarnessAdapter):
                     parts.append(block.get("text", ""))
                 elif isinstance(block, str):
                     parts.append(block)
-            return "".join(parts)
+            # Join DISTINCT text blocks with a blank line. The model emits a
+            # short narration text block before each tool call, so a single
+            # assistant message often carries several text blocks interleaved
+            # with tool_use blocks. Concatenating them with no separator
+            # produced runs like "...in Plaud.Good, done. Let's read the
+            # file.Now getting..." (issue #1138 F4). Blank-line join keeps each
+            # block readable; empties are dropped so we never emit a leading or
+            # trailing separator.
+            return "\n\n".join(p for p in parts if p and p.strip())
         return str(content) if content else ""
 
     def health(self) -> bool:
