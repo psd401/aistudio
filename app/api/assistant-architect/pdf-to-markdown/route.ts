@@ -15,6 +15,10 @@ const PDF_TO_MARKDOWN_MODEL_ID = 20
 // enforced nothing. Size is capped by an early Content-Length check plus the
 // authoritative post-formData file.size check below.
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+// The early Content-Length guard below sees the whole multipart body (boundaries,
+// headers, other fields), not just the file bytes, so it needs slack above the
+// authoritative file.size limit or a file right at the limit gets rejected early.
+const MAX_UPLOAD_CONTENT_LENGTH_BYTES = MAX_UPLOAD_BYTES + 64 * 1024
 
 export const runtime = 'nodejs'
 
@@ -57,8 +61,8 @@ export async function POST(req: NextRequest) {
     // Reject obviously-oversized uploads via Content-Length BEFORE buffering the
     // whole body (REV-COR-201). Content-Length can be spoofed/absent, so the
     // post-formData file.size check below stays the authoritative guard.
-    const contentLength = Number(req.headers.get('content-length') || 0)
-    if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_BYTES) {
+    const contentLength = Number(req.headers.get('content-length') || 0);
+    if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_CONTENT_LENGTH_BYTES) {
       log.warn('Upload rejected by Content-Length', { contentLength });
       timer({ status: "error", reason: "file_too_large" });
       return new NextResponse(
