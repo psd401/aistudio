@@ -1,10 +1,19 @@
 import { headers } from "next/headers";
-import crypto from "node:crypto";
+import { randomUUID } from "node:crypto";
+
+// The inbound x-request-id is attacker-controlled and flows into the logging
+// correlation field, so accept it only when it matches a bounded, safe allowlist
+// (no CRLF, control chars, or oversized values that could forge/spoof log lines);
+// otherwise fall back to a generated UUID (REV-SEC-189).
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
 export async function getRequestId(): Promise<string> {
   const headersList = await headers();
-  const requestId = headersList.get("x-request-id") || crypto.randomUUID();
-  return requestId;
+  const headerValue = headersList.get("x-request-id");
+  if (headerValue && REQUEST_ID_PATTERN.test(headerValue)) {
+    return headerValue;
+  }
+  return randomUUID();
 }
 
 export async function createRequestContext() {
