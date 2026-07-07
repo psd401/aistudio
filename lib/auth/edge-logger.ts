@@ -69,9 +69,14 @@ export function createEdgeLogger(context: LogContext): EdgeLogger {
     const formattedMessage = `[${timestamp}] ${contextString} ${level}: ${message}`
     const metaString = sanitizedMeta ? ` ${JSON.stringify(sanitizedMeta)}` : ''
 
+    // Gate the debug-endpoint forward by the same rule as the console output below
+    // (warn/error always, info/debug dev-only) — otherwise info() calls (which can
+    // carry auth metadata like sub/email) would forward to DEBUG_LOG_ENDPOINT in
+    // production even though only warn/error were intended to leave development.
+    const shouldEmit = level === 'ERROR' || level === 'WARN' || process.env.NODE_ENV === 'development'
+
     try {
-      // Forward to the optional log endpoint in EVERY environment (Edge-compatible).
-      if (process.env.DEBUG_LOG_ENDPOINT) {
+      if (shouldEmit && process.env.DEBUG_LOG_ENDPOINT) {
         fetch(process.env.DEBUG_LOG_ENDPOINT, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
