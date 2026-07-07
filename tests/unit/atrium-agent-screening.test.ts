@@ -5,13 +5,14 @@
  *
  * Covers:
  *  - `screenAgentContent`: blocked → blocked verdict (guardrails message
- *    surfaced), degraded → FAIL-CLOSED degraded verdict, allowed → PII detected
- *    + logged (telemetry only, non-fatal on detector failure).
+ *    surfaced), degraded → FAIL-OPEN (allowed, telemetry logged), allowed → PII
+ *    detected + logged (telemetry only, non-fatal on detector failure).
  *  - `screenAgentBodyForWrite` (the content-service write gate): screens any
  *    AGENT requester — autonomous OR delegated (`isAgentRequester`) — with a
  *    non-empty body; a human author never touches the safety stack (zero
- *    behavior change); blocked / degraded content throws a fail-closed
- *    `ValidationError` with the bridge's user-facing semantics.
+ *    behavior change); a positive guardrails detection throws a `ValidationError`
+ *    with the bridge's user-facing semantics, while a degraded evaluation fails
+ *    OPEN and never throws.
  *
  * Only the lazily-imported `@/lib/safety` boundary is mocked; the REAL
  * `isAgentRequester` helper runs so the machine-authorship gate is exercised.
@@ -55,7 +56,6 @@ import {
   screenAgentContent,
   screenAgentBodyForWrite,
   AGENT_SCREEN_BLOCKED_MESSAGE,
-  AGENT_SCREEN_DEGRADED_MESSAGE,
 } from "@/lib/content/agent-screening";
 import { ValidationError } from "@/lib/content/errors";
 import { createLogger } from "@/lib/logger";
@@ -124,17 +124,14 @@ describe("screenAgentContent", () => {
     });
   });
 
-  it("FAILS CLOSED on a degraded evaluation (guardrails unavailable)", async () => {
-    // The shared guardrails service fails OPEN (allowed:true, degraded:true) on
-    // an AWS error — unacceptable for persisted agent content, so the screening
-    // core must convert it into a rejection.
+  it("FAILS OPEN on a degraded evaluation (guardrails unavailable → allowed)", async () => {
+    // Guardrails are telemetry-only here: a degraded evaluation (AWS error /
+    // ApplyGuardrail AccessDenied / throttle) must NOT block the write. The core
+    // allows the content and logs the skipped evaluation; it does not run PII
+    // detection on the degraded path.
     checkResult = { allowed: true, degraded: true };
     const verdict = await screenAgentContent("any text", "obj-1");
-    expect(verdict).toEqual({
-      allowed: false,
-      reason: "degraded",
-      message: AGENT_SCREEN_DEGRADED_MESSAGE,
-    });
+    expect(verdict).toEqual({ allowed: true });
     expect(detectPIIMock).not.toHaveBeenCalled();
   });
 
@@ -169,13 +166,10 @@ describe("screenAgentContent", () => {
   });
 
   it("omits requestId from the logger context when none is provided (today's behavior)", async () => {
+    // The degraded path still creates the (telemetry) logger; it just allows.
     checkResult = { allowed: true, degraded: true };
     const verdict = await screenAgentContent("any text", "obj-1");
-    expect(verdict).toEqual({
-      allowed: false,
-      reason: "degraded",
-      message: AGENT_SCREEN_DEGRADED_MESSAGE,
-    });
+    expect(verdict).toEqual({ allowed: true });
     // Exact-match: no `requestId` key sneaks in when the caller has none.
     expect(createLoggerMock).toHaveBeenCalledWith({
       module: "atrium-agent-screening",
@@ -234,11 +228,13 @@ describe("screenAgentBodyForWrite (the content-service write gate)", () => {
     ).rejects.toBeInstanceOf(ValidationError);
   });
 
-  it("throws ValidationError (fail closed) when screening is degraded/unavailable", async () => {
+  it("does NOT throw (fails open) when screening is degraded/unavailable", async () => {
     checkResult = { allowed: true, degraded: true };
     await expect(
       screenAgentBodyForWrite(autonomousAgent, "# any", "obj-1")
-    ).rejects.toThrow(/Safety screening unavailable/);
+    ).resolves.toBeUndefined();
+    // Screening was attempted (telemetry) even though it degraded to allow.
+    expect(checkInputSafetyMock).toHaveBeenCalledTimes(1);
   });
 
   it("passes an optional requestId through to the screening logger without changing the verdict", async () => {

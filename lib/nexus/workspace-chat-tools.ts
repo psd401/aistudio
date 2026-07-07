@@ -169,7 +169,8 @@ function buildDocumentEditTool(
         return { error: "That edit is too large to apply in one step." };
       }
       // §28.3: screen the agent-authored markdown BEFORE writing (same gate as the
-      // agent-bridge route). Fail closed — blocked/unscreenable content is refused.
+      // agent-bridge route). Only a positive guardrails detection refuses the
+      // write; a degraded/unavailable evaluation fails OPEN in the core.
       const verdict = await screenAgentContent(markdown, objectId, requestId);
       if (!verdict.allowed) {
         log.warn("edit_workspace_document blocked by screening", {
@@ -240,7 +241,8 @@ function buildArtifactUpdateTool(
       // contentService.createVersion only screens AGENT/delegated authors — so
       // the model-generated code would be persisted UNSCREENED without this
       // explicit gate (PR #1136 review, gemini/codex P1). Screen the agent-
-      // authored code here, mirroring the document edit path. Fail closed.
+      // authored code here, mirroring the document edit path. Only a positive
+      // guardrails detection refuses; a degraded evaluation fails OPEN in the core.
       const verdict = await screenAgentContent(code, objectId, requestId);
       if (!verdict.allowed) {
         log.warn("update_workspace_artifact blocked by screening", {
