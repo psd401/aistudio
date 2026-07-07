@@ -83,6 +83,14 @@ jest.mock("@/lib/logger", () => ({
   sanitizeForLogging: jest.fn((d: unknown) => d),
 }))
 
+// The route's `@/lib/db/schema` import transitively reaches the Atrium
+// markdown-render pipeline, which imports the pure-ESM unified/remark/rehype
+// ecosystem next/jest (SWC) cannot transform (see jest.config.js). Mock it
+// directly, matching the established pattern (e.g. tests/unit/atrium-rollback.test.ts).
+jest.mock("@/lib/content/render/markdown-render", () => ({
+  renderMarkdownToHtml: () => "<p>unused</p>",
+}))
+
 import type { NextRequest } from "next/server"
 import { POST } from "../route"
 
