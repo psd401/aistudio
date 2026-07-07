@@ -26,7 +26,7 @@
         "primary": "amazon-bedrock-mantle/anthropic.claude-sonnet-5"
       },
       "workspace": "/home/node/.openclaw",
-      "contextTokens": 100000,
+      "contextTokens": 200000,
       "heartbeat": {
         "every": "0m"
       },
