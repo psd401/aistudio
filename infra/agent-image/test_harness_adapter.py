@@ -98,3 +98,30 @@ class TestFrameFailedPartial(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAccumulateAssistant(unittest.TestCase):
+    """Boundary-aware accumulation of streamed assistant segments (#1138 F4)."""
+
+    @staticmethod
+    def acc(accum, increment, replace, boundary_pending):
+        return OpenClawAdapter._accumulate_assistant(
+            accum, increment, replace, boundary_pending
+        )
+
+    def test_increments_within_a_segment_join_without_separator(self):
+        a = self.acc("", "Now let's find", False, False)
+        a = self.acc(a, " recordings.", False, False)
+        self.assertEqual(a, "Now let's find recordings.")
+
+    def test_boundary_after_tool_activity_inserts_blank_line(self):
+        a = self.acc("Now let's find recordings from 7/1 in Plaud.", "Good, done.", False, True)
+        self.assertEqual(
+            a, "Now let's find recordings from 7/1 in Plaud.\n\nGood, done."
+        )
+
+    def test_replace_resets_buffer_regardless_of_boundary(self):
+        self.assertEqual(self.acc("old text", "fresh", True, True), "fresh")
+
+    def test_boundary_with_empty_accum_adds_no_leading_separator(self):
+        self.assertEqual(self.acc("", "First words", False, True), "First words")
