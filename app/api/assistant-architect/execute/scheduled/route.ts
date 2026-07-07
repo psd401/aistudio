@@ -906,11 +906,15 @@ async function executePromptChainServerSide(
         }
       };
 
-      // 7. Execute prompt with streaming (server-side collection)
-      const streamResponse = await unifiedStreamingService.stream(streamRequest);
-
-      // Wait for both stream completion AND result storage to prevent race condition
+      // 7. Execute prompt with streaming (server-side collection). The stream call
+      // itself is inside this try so a rejection here (e.g. provider/model error
+      // before any onFinish callback fires) also clears the per-prompt timeout —
+      // otherwise it would fire later and reject an already-settled finishPromise
+      // with no handler attached.
       try {
+        const streamResponse = await unifiedStreamingService.stream(streamRequest);
+
+        // Wait for both stream completion AND result storage to prevent race condition
         await Promise.all([
           streamResponse.result.usage,
           finishPromise

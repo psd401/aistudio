@@ -115,6 +115,7 @@ class TestResponse {
     return JSON.parse(this._body || "null")
   }
 }
+const OriginalResponse = (global as unknown as { Response: unknown }).Response
 ;(global as unknown as { Response: unknown }).Response = TestResponse
 
 const FUTURE_EXP = 9_999_999_999
@@ -141,6 +142,10 @@ const validBody = {
 }
 
 describe("POST execute/scheduled binding & replay (REV-SEC-101 / REV-COR-200)", () => {
+  afterAll(() => {
+    ;(global as unknown as { Response: unknown }).Response = OriginalResponse
+  })
+
   beforeEach(() => {
     jest.clearAllMocks()
     process.env.INTERNAL_API_SECRET = "test-secret"
