@@ -114,11 +114,33 @@ describe('auditInstalledDeps (REV-INFRA-062)', () => {
     expect(warnings.some((w) => /not evaluated/i.test(w.message))).toBe(true);
   });
 
-  test('audit tooling throwing degrades gracefully with a WARNING', () => {
+  test('audit tooling throwing (no stdout) degrades gracefully with a WARNING', () => {
     const warnings: Warn[] = [];
     const fakeExec = () => {
       throw new Error('spawn npm ENOENT');
     };
+    const out = auditInstalledDeps('/work', collectingLogger(warnings), fakeExec);
+    expect(out).toEqual([]);
+    expect(warnings.some((w) => /not evaluated/i.test(w.message))).toBe(true);
+  });
+
+  test('npm audit exiting non-zero for real vulnerabilities still parses stdout from the thrown error', () => {
+    const warnings: Warn[] = [];
+    const fakeExec = () => {
+      const err = new Error('Command failed') as Error & { stdout: string };
+      err.stdout = JSON.stringify({
+        vulnerabilities: { minimist: { severity: 'critical', name: 'minimist' } },
+      });
+      throw err;
+    };
+    const out = auditInstalledDeps('/work', collectingLogger(warnings), fakeExec);
+    expect(out).toEqual([{ severity: 'critical', title: 'minimist' }]);
+    expect(warnings.length).toBe(0);
+  });
+
+  test('a top-level `error` field (registry/auth failure) degrades gracefully with a WARNING, never a silent clean', () => {
+    const warnings: Warn[] = [];
+    const fakeExec = () => JSON.stringify({ error: { code: 'E401', summary: 'unauthorized' } });
     const out = auditInstalledDeps('/work', collectingLogger(warnings), fakeExec);
     expect(out).toEqual([]);
     expect(warnings.some((w) => /not evaluated/i.test(w.message))).toBe(true);

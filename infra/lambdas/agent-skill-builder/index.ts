@@ -274,7 +274,7 @@ export async function downloadSkillFromS3(
     for (const obj of listResp.Contents || []) {
       if (!obj.Key || obj.Key.endsWith('/')) continue;
 
-      const relativePath = obj.Key.slice(prefix.length).replace(/^\/+/, '');
+      const relativePath = obj.Key.slice(normalizedPrefix.length);
       // Path-traversal guard (REV-INFRA-063): S3 keys are user-influenced —
       // draft filenames become key suffixes — and may contain `..` segments.
       // path.join/resolve would normalize `../../x` to a path OUTSIDE destDir,
@@ -475,7 +475,10 @@ export function installSkillDependencies(workDir: string): void {
   execSync('npm install --production --ignore-scripts --no-audit --no-fund', {
     cwd: workDir,
     timeout: 120_000, // 2 min max for npm install
-    stdio: 'pipe',
+    // Only stderr is inspected on failure; piping stdout too risks exceeding
+    // Node's default maxBuffer on a verbose install and throwing a
+    // false-positive error.
+    stdio: ['ignore', 'ignore', 'pipe'],
     env: {
       ...process.env,
       HOME: '/tmp',
@@ -507,9 +510,12 @@ export function auditInstalledDeps(
 
   let auditOutput: string;
   try {
-    // `|| true` so a non-zero exit (npm audit returns 1 when vulns exist) still
-    // yields the JSON on stdout instead of throwing before we can parse it.
-    auditOutput = exec('npm audit --json --production 2>/dev/null || true', {
+    // npm audit exits non-zero when vulnerabilities are found, but still
+    // writes the JSON report to stdout — capture it from the thrown error
+    // below instead of silencing the exit code, so a genuine tooling/network
+    // failure (which also exits non-zero, with no usable stdout) is still
+    // visible instead of masquerading as "no vulnerabilities".
+    auditOutput = exec('npm audit --json --production', {
       cwd: dir,
       timeout: 30_000,
       encoding: 'utf-8',
@@ -520,14 +526,19 @@ export function auditInstalledDeps(
       },
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    log.warn('npm audit could not run; dependency vulnerabilities were NOT evaluated', {
-      error: message.substring(0, 300),
-    });
-    return results;
+    const stdout = (err as { stdout?: string | Buffer } | undefined)?.stdout;
+    if (stdout) {
+      auditOutput = typeof stdout === 'string' ? stdout : stdout.toString('utf-8');
+    } else {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn('npm audit could not run; dependency vulnerabilities were NOT evaluated', {
+        error: message.substring(0, 300),
+      });
+      return results;
+    }
   }
 
-  let audit: { vulnerabilities?: Record<string, { severity?: string; name?: string }> };
+  let audit: { error?: unknown; vulnerabilities?: Record<string, { severity?: string; name?: string }> };
   try {
     audit = JSON.parse(auditOutput);
   } catch {
@@ -535,7 +546,20 @@ export function auditInstalledDeps(
     return results;
   }
 
-  const vulns = audit.vulnerabilities || {};
+  // A registry/auth failure can still exit with valid JSON that carries a
+  // top-level `error` and no `vulnerabilities` key at all (distinct from a
+  // clean tree, which reports `vulnerabilities: {}`). Treat that the same as
+  // a tooling failure — a visible warning, never a silent "clean" — since
+  // the whole point of this gate is that a failed audit must not look like
+  // a passed one.
+  if (audit.error || !audit.vulnerabilities) {
+    log.warn('npm audit did not evaluate dependencies; dependency vulnerabilities were NOT evaluated', {
+      error: audit.error ? JSON.stringify(audit.error).substring(0, 300) : undefined,
+    });
+    return results;
+  }
+
+  const vulns = audit.vulnerabilities;
   for (const [, info] of Object.entries(vulns)) {
     if (info.severity === 'high' || info.severity === 'critical') {
       results.push({ severity: info.severity, title: info.name || 'unknown' });
