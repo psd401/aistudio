@@ -163,20 +163,27 @@ async function getDEK(): Promise<Buffer> {
     return dekCache.key
   }
 
-  // Local dev fallback: derive from env var instead of Secrets Manager.
-  // ENVIRONMENT is set by ECS task definition (always "dev", "staging", or "prod") and is
-  // absent in local dev (Docker Compose / `bun run dev:local`). When ENVIRONMENT is absent,
-  // we're in local dev and MCP_TOKEN_ENCRYPTION_KEY is safe to use. When present, only "dev"
-  // is allowed — all other values (staging, prod) block the env var to force Secrets Manager.
-  // If a future ECS task definition omits ENVIRONMENT, this will fall through to the local
-  // path — ensure ENVIRONMENT is always set in ECS task definitions.
+  // Local dev fallback: derive the DEK from MCP_TOKEN_ENCRYPTION_KEY instead of Secrets
+  // Manager, but ONLY when a POSITIVE local-dev marker is present — fail closed everywhere
+  // else. The previous gate only blocked a truthy, non-"dev" ENVIRONMENT, so an ABSENT
+  // ENVIRONMENT (a deploy typo, or an ECS task def that drops the var) silently fell through
+  // to the env-var key — encrypting stored tokens with a weak, shared, non-rotated local key
+  // (REV-SEC-201). Local dev is now signalled positively: NODE_ENV="development" (which
+  // `next dev`/`bun run dev:local` sets automatically), ENVIRONMENT="dev" (a dev ECS task),
+  // or an explicit IS_LOCAL_DEV="true". Any deployed runtime with ENVIRONMENT unset or set to
+  // a non-dev value (NODE_ENV="production") throws and is forced onto the Secrets Manager path.
   const localKey = process.env.MCP_TOKEN_ENCRYPTION_KEY
   if (localKey) {
-    const environment = process.env.ENVIRONMENT
-    if (environment && environment !== "dev") {
+    const isLocalDev =
+      process.env.ENVIRONMENT === "dev" ||
+      process.env.NODE_ENV === "development" ||
+      process.env.IS_LOCAL_DEV === "true"
+    if (!isLocalDev) {
+      const environment = process.env.ENVIRONMENT
       throw new Error(
-        `MCP_TOKEN_ENCRYPTION_KEY is not allowed in environment '${environment}'. ` +
-          "Use AWS Secrets Manager for token encryption in non-dev environments."
+        "MCP_TOKEN_ENCRYPTION_KEY is only permitted in local dev " +
+          (environment ? `(ENVIRONMENT='${environment}')` : "(ENVIRONMENT is unset)") +
+          ". Use AWS Secrets Manager for token encryption outside local dev."
       )
     }
     log.warn("Using MCP_TOKEN_ENCRYPTION_KEY env var for DEK — local dev only")
