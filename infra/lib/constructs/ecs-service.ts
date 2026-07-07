@@ -13,6 +13,7 @@ import * as cloudwatch_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as autoscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 import { RedisCache } from './cache/redis-cache';
+import { usGuardrailProfileArns } from './security';
 
 export interface EcsServiceConstructProps {
   vpc: ec2.IVpc;
@@ -539,14 +540,16 @@ export class EcsServiceConstruct extends Construct {
                 ? [
                     props.guardrailArn,
                     // The system-defined cross-region inference profile the
-                    // guardrail resolves to at apply time. Scoped to the exact
-                    // profile id (NOT a wildcard) to match the proven grants in
-                    // guardrails-stack.ts and agent-platform-stack.ts (PR #1093).
-                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail-profile/us.guardrail.v1:0`,
+                    // guardrail resolves to at apply time. Pinned to the exact
+                    // profile id (NOT a wildcard) but granted in every region
+                    // the profile fans out to — ApplyGuardrail authorizes
+                    // against the DESTINATION region, so a single-region grant
+                    // fails whenever routing leaves it (issue #1138 F5).
+                    ...usGuardrailProfileArns(cdk.Stack.of(this).account),
                   ]
                 : [
                     `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`,
-                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail-profile/us.guardrail.v1:0`,
+                    ...usGuardrailProfileArns(cdk.Stack.of(this).account),
                   ],
             }),
             // K-12 Content Safety: Amazon Comprehend for PII detection

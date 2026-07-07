@@ -367,6 +367,113 @@ signal.signal(signal.SIGTERM, handle_shutdown)
 signal.signal(signal.SIGINT, handle_shutdown)
 
 
+def _sanitize_header_field(value, max_len: int) -> str:
+    """Strip prompt-header delimiters and clamp length.
+
+    Attachment fields originate from user-controlled Chat data; re-sanitize
+    here (the router also cleans them) so a crafted filename can neither break
+    OUT of the [attachments: ...] header (brackets/newlines) nor SPOOF metadata
+    within a `name="…"` field (double-quote / backslash) — e.g. a filename like
+    `a" source="drive-link` forging a trusted driveFileId.
+    """
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r'["\\\[\]\n\r]', "", value).strip()[:max_len]
+
+
+def _attachment_workspace_paths(attachments) -> list:
+    """Collect valid workspace-relative paths of router-fetched Chat uploads.
+
+    Router-generated (`attachments/<stamp>-<idx>-<name>`), but treated as
+    untrusted since the payload crosses a service boundary: only plain
+    relative paths under attachments/ with a safe character set pass.
+    workspace_sync.pull_files() re-validates against traversal independently.
+    """
+    if not isinstance(attachments, list):
+        return []
+    paths = []
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        path = att.get("workspacePath")
+        if (
+            isinstance(path, str)
+            and path.startswith("attachments/")
+            and ".." not in path
+            and re.fullmatch(r"[A-Za-z0-9._/-]+", path)
+        ):
+            paths.append(path)
+    return paths
+
+
+def _render_attachments_header(attachments) -> str:
+    """Render forwarded Chat attachments into a prompt header (issue #1138 F1).
+
+    Tells the agent what arrived and how to reach it:
+      - Chat uploads the router fetched carry `path="…"` — the file already
+        exists in the workspace (pulled per-turn via workspace_sync.pull_files)
+        and the agent reads it directly with its file tools.
+      - Chat uploads WITHOUT a path failed to download — the agent should say
+        so and ask the user to re-attach, never pretend the file is absent.
+      - Drive files/chips are metadata-only by design (the Drive barrier):
+        readable via the psd-workspace skill, subject to sharing with the
+        agent account.
+    """
+    if not isinstance(attachments, list) or not attachments:
+        return ""
+    lines = []
+    fetched = 0
+    failed_uploads = 0
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        name = _sanitize_header_field(att.get("name"), 256) or "unnamed"
+        mime = _sanitize_header_field(att.get("mimeType"), 100) or "unknown type"
+        if att.get("source") == "drive-link":
+            drive_id = _sanitize_header_field(att.get("driveFileId"), 256)
+            loc = f' driveFileId="{drive_id}"' if drive_id else ""
+            lines.append(
+                f'- name="{name}" type="{mime}" source="drive-link"{loc}'
+            )
+        else:
+            path = _sanitize_header_field(att.get("workspacePath"), 512)
+            if path and path.startswith("attachments/"):
+                fetched += 1
+                lines.append(
+                    f'- name="{name}" type="{mime}" source="chat-upload" '
+                    f'path="/home/node/.openclaw/{path}"'
+                )
+            else:
+                failed_uploads += 1
+                lines.append(
+                    f'- name="{name}" type="{mime}" source="chat-upload" '
+                    f"(download failed — file NOT available)"
+                )
+    if not lines:
+        return ""
+    body = "\n".join(lines)
+    guidance = []
+    if fetched:
+        guidance.append(
+            "Files with a path= are already downloaded into your workspace — "
+            "read them directly with your file tools at that path."
+        )
+    if failed_uploads:
+        guidance.append(
+            "Files marked download failed could not be retrieved — tell the "
+            "user and ask them to re-attach."
+        )
+    guidance.append(
+        "To read a Google Drive file or chip, use the psd-workspace skill "
+        "(the file may need to be shared with your agent account first)."
+    )
+    return (
+        f"[attachments: the user attached {len(lines)} file(s) to this "
+        f"message]\n{body}\n"
+        f"[{' '.join(guidance)}]"
+    )
+
+
 def main():
     """Start the AgentCore wrapper."""
     # Log the build marker FIRST so it appears even if startup fails.
@@ -428,6 +535,9 @@ def main():
             invoked_by_email          — cross-user: email of the person consulting this agent
             invoked_by_display_name   — cross-user: display name of the invoker
             thread_context            — cross-user: ephemeral thread context from the Chat space
+            attachments               — Chat files/Drive chips (issue #1138 F1):
+                                        [{name, mimeType, source, driveFileId?,
+                                          attachmentResourceName?}]
         """
         global _current_workspace_prefix
 
@@ -441,11 +551,15 @@ def main():
         invoked_by_email = payload.get("invoked_by_email", "")
         invoked_by_display_name = payload.get("invoked_by_display_name", "")
         thread_context = payload.get("thread_context", "")
+        # Chat attachments / Drive chips the router forwarded (issue #1138 F1).
+        attachments_header = _render_attachments_header(payload.get("attachments"))
 
         logger.info(
-            "Invocation received: session=%s user=%s prefix=%s msg_length=%d cross_user=%s",
+            "Invocation received: session=%s user=%s prefix=%s msg_length=%d "
+            "cross_user=%s attachments=%d",
             session_id, user_email, workspace_prefix or "-", len(user_message),
             invoked_by_email or "no",
+            len(payload.get("attachments") or []),
         )
 
         if not user_message.strip():
@@ -475,6 +589,27 @@ def main():
             except Exception as exc:  # noqa: BLE001
                 logger.warning("workspace mount failed: %s", exc)
 
+        # Per-turn attachment delivery (issue #1138 F1): the router uploaded
+        # Chat attachment bytes to S3 AFTER this microVM's one-time workspace
+        # pull, so fetch exactly those keys now — the header below points the
+        # agent at /home/node/.openclaw/<workspacePath> and the file must
+        # exist there before the turn starts. Failures are non-fatal: the
+        # agent still gets the metadata and reports the file as unavailable.
+        attachment_paths = _attachment_workspace_paths(payload.get("attachments"))
+        if attachment_paths and workspace_prefix:
+            try:
+                pulled = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    workspace_sync.pull_files,
+                    workspace_prefix,
+                    attachment_paths,
+                )
+                logger.info(
+                    "attachments pulled: %d/%d", pulled, len(attachment_paths)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("attachment pull failed: %s", exc)
+
         # Inject per-turn context: the caller's identity AND the current
         # Pacific local time. The LLM has no real clock — without this header
         # it falls back to whatever timestamps it sees in system metadata
@@ -487,6 +622,11 @@ def main():
             f"[now: {pacific_now.strftime('%A, %B %d, %Y %-I:%M %p')} "
             f"Pacific ({pacific_now.strftime('%Y-%m-%dT%H:%M:%S%z')})]"
         )
+
+        # Attachment header goes between the identity/time headers and the
+        # user's message so the agent sees what arrived before reading the
+        # request (issue #1138 F1). Empty when there are no attachments.
+        attach_section = f"\n{attachments_header}" if attachments_header else ""
 
         # Cross-user invocation: when someone other than the agent owner
         # is consulting this agent, inject a [cross-user-invocation] header so
@@ -515,17 +655,17 @@ def main():
             framed = (
                 f"[agent-owner: {display_name or user_email} <{user_email}>]\n"
                 f"{now_header}\n"
-                f"{cross_user_header}{thread_section}\n\n"
+                f"{cross_user_header}{thread_section}{attach_section}\n\n"
                 f"{user_message}"
             )
         elif display_name or user_email != "unknown":
             framed = (
                 f"[caller: {display_name or user_email} <{user_email}>]\n"
-                f"{now_header}\n\n"
+                f"{now_header}{attach_section}\n\n"
                 f"{user_message}"
             )
         else:
-            framed = f"{now_header}\n\n{user_message}"
+            framed = f"{now_header}{attach_section}\n\n{user_message}"
 
         # Flush the SSE headers immediately. Without an early yield the SDK
         # waits for the first chunk before sending headers, defeating the

@@ -54,12 +54,22 @@ import { SignatureV4 } from '@smithy/signature-v4';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { HttpRequest } from '@smithy/protocol-http';
+import { S3Client } from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
 import { Context as LambdaContext, SQSBatchResponse, SQSEvent, SQSRecord } from 'aws-lambda';
 import * as crypto from 'crypto';
+import type { Readable } from 'stream';
 import * as chatPkg from '@googleapis/chat';
 import { Agent as UndiciAgent, fetch as undiciFetch } from 'undici';
 import { classifyTopic, isPrivateMessage, isoWeek, type Topic } from './topic-classifier';
 import { extractRichEnvelope } from './rich-envelope';
+import {
+  buildWorkspacePath,
+  extractAttachments,
+  type AgentAttachment,
+  type ChatAnnotation,
+  type ChatAttachment,
+} from './attachments';
 
 // ---------------------------------------------------------------------------
 // Structured logging (Lambda-compatible, no console.* per CLAUDE.md exception)
@@ -105,6 +115,7 @@ const bedrockClient = new BedrockRuntimeClient({});
 const dynamoClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const secretsClient = new SecretsManagerClient({});
 const ssmClient = new SSMClient({});
+const s3Client = new S3Client({});
 
 // SigV4 signer — promoted to module scope to avoid re-creating the credential
 // provider chain on every invocation. In a Lambda context credentials are stable
@@ -236,6 +247,17 @@ interface GoogleChatEvent {
     slashCommand?: {
       commandId: string;
     };
+    /**
+     * Files the user attached in Chat — uploaded content or a Drive file
+     * added via the "+" menu. Forwarded to the agent so it knows a file
+     * arrived (issue #1138 F1). Rides through normalizeChatEvent unchanged.
+     */
+    attachment?: ChatAttachment[];
+    /**
+     * Inline annotations, including Drive chips / rich links
+     * (`type: 'RICH_LINK'`). Their driveFileId is surfaced to the agent.
+     */
+    annotations?: ChatAnnotation[];
     createTime: string;
   };
   /**
@@ -1100,6 +1122,9 @@ async function invokeAgentCore(
     invokedBy?: { email: string; displayName: string };
     /** Ephemeral thread context for cross-user invocations */
     threadContext?: string;
+    /** Files the user attached in Chat (issue #1138 F1). Rendered into the
+     * prompt header by the container so the agent knows a file arrived. */
+    attachments?: AgentAttachment[];
   }
 ): Promise<{
   response: string;
@@ -1214,6 +1239,12 @@ async function invokeAgentCore(
       ...(userContext?.threadContext && {
         thread_context: userContext.threadContext,
       }),
+      // Structured attachment metadata (issue #1138 F1). The container renders
+      // an [attachments: ...] prompt header from this so the agent sees what
+      // arrived instead of reporting "I don't see any attachment."
+      ...(userContext?.attachments?.length
+        ? { attachments: userContext.attachments }
+        : {}),
     });
 
     const request = new HttpRequest({
@@ -1390,14 +1421,14 @@ async function invokeAgentCore(
 // Google Chat response
 // ---------------------------------------------------------------------------
 
-async function sendGoogleChatResponse(
-  spaceName: string,
-  threadName: string | undefined,
-  text: string,
-  log: ReturnType<typeof createLogger>
-): Promise<void> {
-  // Throw on failure so SQS marks the message as failed and retries (or DLQs).
-  // Callers must let the error propagate for retry semantics to work.
+/**
+ * Build (or reuse) the authenticated Google Chat API client. The `chat.bot`
+ * scope covers both message sends AND `media.download` of message
+ * attachments, so the same client serves responses and attachment fetches.
+ * Cached across warm invocations to avoid an OAuth token round-trip; the
+ * cache is invalidated when credentials refresh (TTL expiry or parse error).
+ */
+async function getChatClient(): Promise<NonNullable<typeof cachedChatClient>> {
   const credentialsJson = await getGoogleCredentials();
   let credentials: Record<string, unknown>;
   try {
@@ -1411,9 +1442,6 @@ async function sendGoogleChatResponse(
     throw new Error('Google credentials secret contains invalid JSON');
   }
 
-  // Reuse the cached Chat API client across warm invocations to avoid an
-  // OAuth token round-trip on every response. The cache is invalidated when
-  // credentials are refreshed (TTL expiry or JSON parse error above).
   if (!cachedChatClient) {
     const googleAuth = new chatPkg.auth.GoogleAuth({
       credentials,
@@ -1422,7 +1450,102 @@ async function sendGoogleChatResponse(
     cachedChatClient = chatPkg.chat({ version: 'v1', auth: googleAuth });
   }
 
-  const chatClient = cachedChatClient;
+  return cachedChatClient;
+}
+
+/**
+ * Fetch Chat-uploaded attachment bytes into the agent's S3 workspace
+ * (issue #1138 F1 byte-fetch). Drive files are deliberately NOT fetched —
+ * the drive.file scope barrier is a design decision; only content the user
+ * pushed directly into the conversation with the agent is delivered.
+ *
+ * For each `chat-upload` attachment, streams `media.download` (authorized by
+ * the same `chat.bot` app credential used to send responses) into
+ * `s3://$WORKSPACE_BUCKET/<workspacePrefix>/attachments/...` via multipart
+ * upload, so even large uploads never buffer fully in Lambda memory (Chat's
+ * own per-file ceiling is 200 MB). On success the attachment gains a
+ * `workspacePath`; the container pulls exactly that key into the microVM
+ * before the turn. Failures are logged and leave the attachment without a
+ * `workspacePath` — the prompt header then tells the agent the file could
+ * not be downloaded, instead of silently pretending it doesn't exist.
+ *
+ * Mutates the passed attachments in place. Never throws: a fetch failure
+ * must not take down the whole turn — the message text still flows.
+ */
+async function fetchChatUploads(
+  attachments: AgentAttachment[],
+  workspacePrefix: string,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const uploads = attachments.filter(
+    (a) => a.source === 'chat-upload' && a.attachmentResourceName
+  );
+  if (uploads.length === 0 || !workspacePrefix) return;
+
+  const bucket = process.env.WORKSPACE_BUCKET || '';
+  if (!bucket) {
+    log.warn('WORKSPACE_BUCKET not configured — Chat uploads not fetched', {
+      count: uploads.length,
+    });
+    return;
+  }
+
+  let chatClient: Awaited<ReturnType<typeof getChatClient>>;
+  try {
+    chatClient = await getChatClient();
+  } catch (error) {
+    log.error('Chat client unavailable — Chat uploads not fetched', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+
+  for (const [index, att] of uploads.entries()) {
+    const startedAt = Date.now();
+    try {
+      // `alt: 'media'` returns the raw bytes; responseType 'stream' keeps
+      // them as a Readable instead of buffering the whole file.
+      const download = await chatClient.media.download(
+        { resourceName: att.attachmentResourceName as string, alt: 'media' },
+        { responseType: 'stream' }
+      );
+      const workspacePath = buildWorkspacePath(att.name, index, new Date());
+      const upload = new Upload({
+        client: s3Client,
+        params: {
+          Bucket: bucket,
+          Key: `${workspacePrefix}/${workspacePath}`,
+          Body: download.data as unknown as Readable,
+          ...(att.mimeType ? { ContentType: att.mimeType } : {}),
+        },
+      });
+      await upload.done();
+      att.workspacePath = workspacePath;
+      log.info('Chat upload fetched to agent workspace', {
+        name: att.name,
+        mimeType: att.mimeType,
+        workspacePath,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      log.error('Chat upload fetch failed — forwarding metadata only', {
+        name: att.name,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+async function sendGoogleChatResponse(
+  spaceName: string,
+  threadName: string | undefined,
+  text: string,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  // Throw on failure so SQS marks the message as failed and retries (or DLQs).
+  // Callers must let the error propagate for retry semantics to work.
+  const chatClient = await getChatClient();
 
   // Pull a rich-output envelope out of the agent reply, if one is present.
   // The envelope carries cardsV2 / accessoryWidgets the chat-card / chat-chart
@@ -2183,6 +2306,10 @@ async function processRecord(
   // Prefer argumentText; fall back to text when absent (older API versions,
   // edge cases where only one field is populated).
   const rawText = (message?.argumentText ?? message?.text ?? '').trim();
+  // Files the user attached in Chat (uploaded content + Drive chips). A
+  // message may carry ONLY an attachment (no caption), so this also decides
+  // whether an otherwise-empty message is worth processing (issue #1138 F1).
+  const attachments = message ? extractAttachments(message) : [];
   // Slash commands with no arguments (e.g., bare "/ask") have empty argumentText
   // but are still valid — the handler will show usage help. Only bail on truly
   // empty messages when there's no recognized slash command present.
@@ -2196,7 +2323,11 @@ async function processRecord(
     log.warn('Ignoring unrecognized slash command', { commandId: slashCommandId });
     return;
   }
-  if (!message || (!rawText && !hasRecognizedSlashCommand) || !message.sender) {
+  if (
+    !message ||
+    (!rawText && !hasRecognizedSlashCommand && attachments.length === 0) ||
+    !message.sender
+  ) {
     log.warn('Message event missing required fields');
     return;
   }
@@ -2311,7 +2442,14 @@ async function processRecord(
   const senderName = message.sender.name;
   const senderEmail = message.sender.email;
   const senderDisplayName = message.sender.displayName;
-  let messageText = rawText;
+  // Attachment-only messages (a file with no caption) have empty text. Give
+  // the agent a minimal prompt so the container doesn't short-circuit on an
+  // empty message — the [attachments: ...] header still carries the details.
+  let messageText =
+    rawText ||
+    (attachments.length > 0
+      ? '(The user attached a file with no accompanying message.)'
+      : rawText);
   const spaceName = chatEvent.space.name;
   const threadName = message.thread?.name;
 
@@ -2344,6 +2482,8 @@ async function processRecord(
     sender: senderName,
     space: spaceName,
     textLength: messageText.length,
+    attachmentCount: attachments.length,
+    attachmentSources: attachments.map((a) => a.source),
   });
 
   // Guard: reject messages that exceed the configured length limit before
@@ -2506,6 +2646,11 @@ async function processRecord(
       const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
       const crossSessionId = `xuser-${targetUser.workspacePrefix}-${spaceHash}-${invokerHash}-${buildTag}`;
 
+      // Deliver Chat uploads to the TARGET user's workspace — that is where
+      // the consulted agent's turn runs, and the invoker deliberately sent
+      // the file to that agent (issue #1138 F1).
+      await fetchChatUploads(attachments, targetUser.workspacePrefix, log);
+
       // Same per-session serialization as the owner path — cross-user
       // invocations also collide if two queries land back-to-back.
       const crossLockToken = await waitForSessionLock(crossSessionId, log);
@@ -2531,6 +2676,7 @@ async function processRecord(
             displayName: senderDisplayName,
           },
           threadContext,
+          ...(attachments.length ? { attachments } : {}),
         }
       ).finally(() => releaseSessionLock(crossSessionId, crossLockToken, log));
 
@@ -2650,6 +2796,12 @@ async function processRecord(
   const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
   const sessionId = `${user.workspacePrefix}-${spaceHash}-${buildTag}`;
 
+  // Deliver Chat-uploaded files into the agent's S3 workspace so the agent
+  // can actually read them (issue #1138 F1). Runs BEFORE the session lock so
+  // a slow download doesn't extend the lock hold. Mutates `attachments` in
+  // place (adds workspacePath on success); never throws.
+  await fetchChatUploads(attachments, user.workspacePrefix, log);
+
   // Serialize per-session invocations. Two messages back-to-back from the
   // same user/space share this session ID and would otherwise hit the same
   // OpenClaw turn loop concurrently — the second turn comes back empty.
@@ -2671,6 +2823,7 @@ async function processRecord(
     {
       displayName: senderDisplayName,
       workspacePrefix: user.workspacePrefix,
+      ...(attachments.length ? { attachments } : {}),
     }
   ).finally(() => releaseSessionLock(sessionId, lockToken, log));
 

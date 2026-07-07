@@ -35,7 +35,7 @@ import {
   VPCProvider,
   IEnvironmentConfig,
 } from './constructs';
-import { ServiceRoleFactory } from './constructs/security';
+import { ServiceRoleFactory, usGuardrailProfileArns } from './constructs/security';
 
 export interface AgentPlatformStackProps extends cdk.StackProps {
   environment: 'dev' | 'staging' | 'prod';
@@ -858,11 +858,13 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
       // The guardrail uses cross-region inference (guardrails-stack.ts
       // crossRegionConfig), so ApplyGuardrail authorizes against BOTH the
-      // guardrail ARN AND the system-defined guardrail-profile ARN. Granting
-      // only the guardrail ARN yields AccessDenied on every call.
+      // guardrail ARN AND the system-defined guardrail-profile ARN in the
+      // DESTINATION region Bedrock routes to — a FIXED US fan-out set, not
+      // this.region. Granting one region yields AccessDenied whenever routing
+      // leaves it (issue #1138 F5). Profile id stays pinned.
       resources: [
         props.guardrailArn,
-        `arn:aws:bedrock:${this.region}:${this.account}:guardrail-profile/us.guardrail.v1:0`,
+        ...usGuardrailProfileArns(this.account),
       ],
     }));
 
@@ -1072,11 +1074,13 @@ export class AgentPlatformStack extends cdk.Stack {
             actions: ['bedrock:ApplyGuardrail', 'bedrock:GetGuardrail'],
             // Cross-region inference (guardrails-stack.ts crossRegionConfig)
             // makes ApplyGuardrail authorize against BOTH the guardrail ARN
-            // and the system-defined guardrail-profile ARN. Omitting the
-            // profile ARN caused AccessDenied on 100% of router turns.
+            // and the system-defined guardrail-profile ARN in the DESTINATION
+            // region Bedrock routes to. Scoping to this.region caused
+            // AccessDenied on 100% of router turns routed to us-east-2
+            // (issue #1138 F5); grant the whole fixed US fan-out set.
             resources: [
               props.guardrailArn,
-              `arn:aws:bedrock:${this.region}:${this.account}:guardrail-profile/us.guardrail.v1:0`,
+              ...usGuardrailProfileArns(this.account),
             ],
           })],
         }),
@@ -2081,6 +2085,10 @@ export class AgentPlatformStack extends cdk.Stack {
         ENVIRONMENT: environment,
         USERS_TABLE: this.usersTable.tableName,
         SIGNALS_TABLE: this.signalsTable.tableName,
+        // Chat-uploaded attachment bytes are delivered to the agent via
+        // s3://<workspace-bucket>/<workspacePrefix>/attachments/ (#1138 F1).
+        // The role already has PutObject via ServiceRoleFactory s3Buckets.
+        WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
         MESSAGE_DEDUP_TABLE: this.messageDedupTable.tableName,
         SESSION_LOCKS_TABLE: this.sessionLocksTable.tableName,
         INTERAGENT_TABLE: interAgentTable.tableName,

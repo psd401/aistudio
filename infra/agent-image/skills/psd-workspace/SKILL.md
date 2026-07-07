@@ -18,6 +18,41 @@ Phase 1 introduces two parallel OAuth identities per user. The `--scope` flag se
 
 If you omit `--scope`, the skill defaults to `user`. Phase 1 work is overwhelmingly on user data.
 
+## Reading a Drive file the user already has — the `drive.file` 404
+
+The **user** slot's `drive.file` scope only exposes files this OAuth client
+created or that the user explicitly opened through it. So `files.get` (or any
+read) on a **pre-existing** doc the user already owns returns Drive's
+`404 File not found`. **This is a scope limitation, not a sharing problem** —
+the user owns the file, and sharing it with their own account changes nothing.
+
+When you hit a 404 reading a Drive file or a Drive chip on the **user** slot:
+
+1. **Retry with `--scope agent`.** Your agent identity is
+   `agnt_<caller-uniqname>@psd401.net` (for caller `hagelk@psd401.net` that is
+   `agnt_hagelk@psd401.net`). It can read anything shared with it.
+2. **If that still 404s,** the file simply hasn't been shared with your agent
+   account yet. Ask the user to **share it with your agent account** —
+   e.g. `agnt_hagelk@psd401.net` — Reader (view) access is enough.
+
+**Never** tell the user to share the file with their **own** address
+(`hagelk@psd401.net`): they already own it, so that guidance sends them in
+circles. Name the **agent** account (`agnt_…`) every time.
+
+Do **not** describe a 404 as "the file doesn't exist" or "you need to share it
+with yourself." Say instead: *"I can't open that file with the access I have
+yet — share it with my agent account `agnt_<you>@psd401.net` (Reader is fine)
+and I'll read it."*
+
+Chat message attachments arrive to you as an `[attachments: …]` header at the
+top of the turn. A Drive chip / Drive-file attachment carries a `driveFileId` —
+read it with the steps above. A file **uploaded directly in Chat**
+(`source="chat-upload"`) is downloaded into your workspace for you: the header
+carries `path="/home/node/.openclaw/attachments/…"` — read that file directly
+with your file tools; no Drive access is involved. If the header instead marks
+the upload `download failed`, the fetch didn't work this time — tell the user
+and ask them to re-attach the file (or share it via Drive as a fallback).
+
 ## Invocation
 
 ```bash
