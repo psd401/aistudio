@@ -4,7 +4,10 @@ import {
   invalidateDEKCache,
   _resetForTesting,
 } from "@/lib/crypto/token-encryption"
-import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager"
+import {
+  SecretsManagerClient,
+  GetSecretValueCommand,
+} from "@aws-sdk/client-secrets-manager"
 
 // Mock AWS SDK
 jest.mock("@aws-sdk/client-secrets-manager")
@@ -37,8 +40,16 @@ describe("Token Encryption (AES-256-GCM)", () => {
     delete process.env.ENVIRONMENT
     delete process.env.IS_LOCAL_DEV
 
-    mockSend = jest.fn().mockResolvedValue({
-      SecretString: TEST_SECRET,
+    // Verify the command passed to .send() is the expected type — fails loudly if the
+    // implementation changes to call a different Secrets Manager API, instead of
+    // silently returning a plausible-looking response for the wrong request.
+    mockSend = jest.fn().mockImplementation((command) => {
+      if (!(command instanceof GetSecretValueCommand)) {
+        throw new Error("Unexpected command")
+      }
+      return Promise.resolve({
+        SecretString: TEST_SECRET,
+      })
     })
 
     ;(SecretsManagerClient as jest.Mock).mockImplementation(() => ({
@@ -314,6 +325,52 @@ describe("Token Encryption (AES-256-GCM)", () => {
       const encrypted = await encryptToken("local-token")
       expect(await decryptToken(encrypted)).toBe("local-token")
       expect(mockSend).not.toHaveBeenCalled()
+    })
+
+    it("uses the env key when NODE_ENV=development (next dev)", async () => {
+      process.env.MCP_TOKEN_ENCRYPTION_KEY = LOCAL_KEY
+      const originalNodeEnv = process.env.NODE_ENV
+      Object.defineProperty(process.env, "NODE_ENV", {
+        value: "development",
+        configurable: true,
+      })
+      try {
+        const encrypted = await encryptToken("nodeenv-token")
+        expect(await decryptToken(encrypted)).toBe("nodeenv-token")
+        expect(mockSend).not.toHaveBeenCalled()
+      } finally {
+        Object.defineProperty(process.env, "NODE_ENV", {
+          value: originalNodeEnv,
+          configurable: true,
+        })
+      }
+    })
+
+    it("throws when ENVIRONMENT=prod even if IS_LOCAL_DEV=true is also set (explicit non-dev ENVIRONMENT vetoes every other marker)", async () => {
+      process.env.MCP_TOKEN_ENCRYPTION_KEY = LOCAL_KEY
+      process.env.ENVIRONMENT = "prod"
+      process.env.IS_LOCAL_DEV = "true"
+      await expect(encryptToken("t")).rejects.toThrow(/only permitted in local dev.*prod/i)
+      expect(mockSend).not.toHaveBeenCalled()
+    })
+
+    it("throws when ENVIRONMENT=staging even if NODE_ENV=development is also set", async () => {
+      process.env.MCP_TOKEN_ENCRYPTION_KEY = LOCAL_KEY
+      process.env.ENVIRONMENT = "staging"
+      const originalNodeEnv = process.env.NODE_ENV
+      Object.defineProperty(process.env, "NODE_ENV", {
+        value: "development",
+        configurable: true,
+      })
+      try {
+        await expect(encryptToken("t")).rejects.toThrow(/only permitted in local dev.*staging/i)
+        expect(mockSend).not.toHaveBeenCalled()
+      } finally {
+        Object.defineProperty(process.env, "NODE_ENV", {
+          value: originalNodeEnv,
+          configurable: true,
+        })
+      }
     })
 
     it("falls back to Secrets Manager when no env key is set", async () => {

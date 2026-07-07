@@ -168,18 +168,26 @@ async function getDEK(): Promise<Buffer> {
   // else. The previous gate only blocked a truthy, non-"dev" ENVIRONMENT, so an ABSENT
   // ENVIRONMENT (a deploy typo, or an ECS task def that drops the var) silently fell through
   // to the env-var key — encrypting stored tokens with a weak, shared, non-rotated local key
-  // (REV-SEC-201). Local dev is now signalled positively: NODE_ENV="development" (which
-  // `next dev`/`bun run dev:local` sets automatically), ENVIRONMENT="dev" (a dev ECS task),
-  // or an explicit IS_LOCAL_DEV="true". Any deployed runtime with ENVIRONMENT unset or set to
-  // a non-dev value (NODE_ENV="production") throws and is forced onto the Secrets Manager path.
+  // (REV-SEC-201). Local dev is now signalled positively: NODE_ENV="development" (set
+  // automatically by `next dev`), ENVIRONMENT="dev" (a dev ECS task), or an explicit
+  // IS_LOCAL_DEV="true" (set by `bun run dev:local`/`dev:voice`, whose custom server.ts
+  // never sets NODE_ENV itself). Any deployed runtime with ENVIRONMENT unset or set to a
+  // non-dev value throws and is forced onto the Secrets Manager path — and an explicit
+  // non-dev ENVIRONMENT always wins over a stray NODE_ENV/IS_LOCAL_DEV marker.
   const localKey = process.env.MCP_TOKEN_ENCRYPTION_KEY
   if (localKey) {
+    const environment = process.env.ENVIRONMENT
+    // A deployed runtime always sets ENVIRONMENT explicitly (dev/staging/prod). If it is
+    // present and not "dev", that is authoritative and vetoes every other marker — a stray
+    // NODE_ENV=development or IS_LOCAL_DEV=true misconfiguration must not reopen the gate
+    // in a deployed, non-dev environment.
+    const explicitlyNonDev = environment !== undefined && environment !== "dev"
     const isLocalDev =
-      process.env.ENVIRONMENT === "dev" ||
-      process.env.NODE_ENV === "development" ||
-      process.env.IS_LOCAL_DEV === "true"
+      !explicitlyNonDev &&
+      (environment === "dev" ||
+        process.env.NODE_ENV === "development" ||
+        process.env.IS_LOCAL_DEV === "true")
     if (!isLocalDev) {
-      const environment = process.env.ENVIRONMENT
       throw new Error(
         "MCP_TOKEN_ENCRYPTION_KEY is only permitted in local dev " +
           (environment ? `(ENVIRONMENT='${environment}')` : "(ENVIRONMENT is unset)") +
