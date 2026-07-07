@@ -926,7 +926,14 @@ export function rejectUnsafeMcpUrl(rawUrl: string): void {
     throw new Error("MCP server URL must use HTTP or HTTPS")
   }
 
-  const hostname = parsed.hostname.toLowerCase()
+  // WHATWG URL brackets IPv6 hostnames (e.g. "[::1]", "[fe80::1]") per spec — strip
+  // them so the IPv6 private-range patterns below (anchored without brackets) match
+  // real IPv6 literal URLs instead of silently never firing.
+  const rawHostname = parsed.hostname.toLowerCase()
+  const hostname =
+    rawHostname.startsWith("[") && rawHostname.endsWith("]")
+      ? rawHostname.slice(1, -1)
+      : rawHostname
 
   // Defense-in-depth against non-standard IPv4 encodings — decimal (2130706433),
   // hex (0x7f000001), and octal (0177.0.0.1) all denote 127.0.0.1 (REV-COR-623).
@@ -954,6 +961,7 @@ export function rejectUnsafeMcpUrl(rawUrl: string): void {
     /^169\.254\./, // link-local / AWS IMDS
     /^0\.0\.0\.0$/,
     /^localhost$/,
+    /^::$/, // IPv6 unspecified address
     /^::1$/,
     /^fc[\da-f]{2}:/i, // IPv6 unique-local (fc00::/7)
     /^fd[\da-f]{2}:/i,

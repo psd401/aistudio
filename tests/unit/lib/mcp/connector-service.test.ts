@@ -189,6 +189,19 @@ describe("rejectUnsafeMcpUrl — encoded-IP SSRF (REV-COR-623)", () => {
       // 93.184.216.34 (example.com) — canonical, public → not a numeric encoding.
       expect(() => rejectUnsafeMcpUrl("https://93.184.216.34/")).not.toThrow()
     })
+
+    // WHATWG URL brackets IPv6 hostnames (e.g. "[::1]"); the private-range patterns
+    // are anchored without brackets, so the validator must strip them first or these
+    // never match real IPv6 literal URLs.
+    it.each([
+      ["unspecified address ::", "https://[::]/"],
+      ["loopback ::1", "https://[::1]/"],
+      ["link-local fe80::1", "https://[fe80::1]/"],
+      ["unique-local fc00::1", "https://[fc00::1]/"],
+      ["IPv4-mapped ::ffff:127.0.0.1", "https://[::ffff:127.0.0.1]/"],
+    ])("rejects bracketed IPv6 %s", (_label, url) => {
+      expect(() => rejectUnsafeMcpUrl(url)).toThrow(/private\/internal/)
+    })
   })
 
   it("rejects an invalid URL string", () => {
