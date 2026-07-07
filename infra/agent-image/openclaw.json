@@ -38,6 +38,9 @@
   },
   "tools": {
     "toolSearch": true,
+    "codeMode": {
+      "timeoutMs": 60000
+    },
     "deny": ["cron", "nodes", "gateway"]
   },
   "skills": {

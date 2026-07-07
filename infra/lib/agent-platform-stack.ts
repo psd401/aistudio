@@ -1113,6 +1113,24 @@ export class AgentPlatformStack extends cdk.Stack {
       iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
     );
 
+    // Attachment delivery (#1138 F1): the router writes Chat-upload bytes to
+    // s3://<workspace-bucket>/<workspacePrefix>/attachments/. This CANNOT rely
+    // on the ServiceRoleFactory s3Buckets grant above — that grant conditions
+    // object actions on `aws:ResourceTag/Environment|ManagedBy`, and S3 object
+    // operations provide NO resource tags at authorization time (the bucket's
+    // tags do not satisfy the key, despite the factory comment claiming they
+    // do), so every s3:PutObject through it is denied. Observed live:
+    // AccessDenied on .../attachments/...pdf, 2026-07-07 (#1138 follow-up).
+    // Grant the write narrowly (attachments keys only) without the inert
+    // condition. AbortMultipartUpload lets lib-storage clean up a failed
+    // multipart upload instead of leaving orphaned parts.
+    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'WorkspaceAttachmentWrite',
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:PutObject', 's3:AbortMultipartUpload'],
+      resources: [`${this.workspaceBucket.bucketArn}/*/attachments/*`],
+    }));
+
     // Grant Secrets Manager read access directly (not through ServiceRoleFactory).
     // CDK cross-stack refs and new Secret() produce tokens that don't start with
     // "arn:" at synth time, causing ServiceRoleFactory to double-wrap the ARN.
