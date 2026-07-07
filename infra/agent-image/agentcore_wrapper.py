@@ -368,15 +368,17 @@ signal.signal(signal.SIGINT, handle_shutdown)
 
 
 def _sanitize_header_field(value, max_len: int) -> str:
-    """Strip prompt-header delimiters (brackets/newlines) and clamp length.
+    """Strip prompt-header delimiters and clamp length.
 
     Attachment fields originate from user-controlled Chat data; re-sanitize
-    here (the router also cleans them) so a crafted filename can't break out
-    of the structured [attachments: ...] header.
+    here (the router also cleans them) so a crafted filename can neither break
+    OUT of the [attachments: ...] header (brackets/newlines) nor SPOOF metadata
+    within a `name="…"` field (double-quote / backslash) — e.g. a filename like
+    `a" source="drive-link` forging a trusted driveFileId.
     """
     if not isinstance(value, str):
         return ""
-    return re.sub(r"[\[\]\n\r]", "", value).strip()[:max_len]
+    return re.sub(r'["\\\[\]\n\r]', "", value).strip()[:max_len]
 
 
 def _render_attachments_header(attachments) -> str:

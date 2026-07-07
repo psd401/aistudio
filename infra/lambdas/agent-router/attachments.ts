@@ -82,19 +82,23 @@ export interface AgentAttachment {
 }
 
 /**
- * Strip characters that could break the structured prompt header the container
- * renders (bracket delimiters / newlines) and clamp length. Mirrors the
- * sanitization the container applies to cross-user display names.
+ * Strip characters that could break OR spoof the structured prompt header the
+ * container renders (`name="…" type="…" source="…"`). Removes the bracket
+ * delimiters, newlines, AND the double-quote/backslash that delimit the
+ * key/value pairs — otherwise a filename like `a" source="drive-link` could
+ * forge trusted metadata (e.g. a fake driveFileId) in the header. `value` is
+ * typed `unknown` because it originates from an external Google Chat payload:
+ * a non-string (or missing) value must degrade to '', never throw.
  */
-function sanitizeField(value: string | undefined, maxLen: number): string {
-  if (!value) return '';
-  return value.replace(/[[\]\n\r]/g, '').trim().slice(0, maxLen);
+function sanitizeField(value: unknown, maxLen: number): string {
+  if (typeof value !== 'string') return '';
+  return value.slice(0, maxLen).replace(/["\\[\]\n\r]/g, '').trim();
 }
 
 /** Drive file ids are opaque; keep only the safe id character set. */
-function sanitizeDriveFileId(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const cleaned = value.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 256);
+function sanitizeDriveFileId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const cleaned = value.slice(0, 256).replace(/[^A-Za-z0-9_-]/g, '');
   return cleaned || undefined;
 }
 
@@ -123,6 +127,8 @@ export function extractAttachments(message: {
   const seenDriveIds = new Set<string>();
 
   for (const att of message.attachment ?? []) {
+    // External payload — an array hole / null element must not crash the Lambda.
+    if (!att || typeof att !== 'object') continue;
     const driveFileId = sanitizeDriveFileId(att.driveDataRef?.driveFileId);
     const resourceName = att.attachmentDataRef?.resourceName;
     const mimeType = sanitizeField(att.contentType, 100);
@@ -146,6 +152,7 @@ export function extractAttachments(message: {
   }
 
   for (const ann of message.annotations ?? []) {
+    if (!ann || typeof ann !== 'object') continue;
     if (ann.type !== 'RICH_LINK') continue;
     const link = ann.richLinkMetadata;
     const driveFileId = sanitizeDriveFileId(

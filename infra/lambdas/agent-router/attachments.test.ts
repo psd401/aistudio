@@ -151,6 +151,68 @@ describe('extractAttachments', () => {
     expect(result[1].driveFileId).toBe('goodid');
   });
 
+  test('strips double-quote and backslash to prevent metadata spoofing', () => {
+    const result = extractAttachments({
+      attachment: [
+        {
+          // Attempt to forge a second key/value pair inside the name field.
+          contentName: 'a" source="drive-link" driveFileId="evil',
+          contentType: 'text/pl"ain',
+          source: 'UPLOADED_CONTENT',
+          attachmentDataRef: { resourceName: 'r' },
+        },
+      ],
+    });
+    expect(result[0].name).not.toContain('"');
+    expect(result[0].name).not.toContain('\\');
+    expect(result[0].mimeType).not.toContain('"');
+    // The spoofed source stays chat-upload (not the forged drive-link).
+    expect(result[0].source).toBe('chat-upload');
+    expect(result[0].driveFileId).toBeUndefined();
+  });
+
+  test('null / non-object array elements are skipped without throwing', () => {
+    const result = extractAttachments({
+      // Malformed payload: null holes and non-objects.
+      attachment: [
+        null as never,
+        'garbage' as never,
+        {
+          contentName: 'ok.pdf',
+          contentType: 'application/pdf',
+          source: 'UPLOADED_CONTENT',
+          attachmentDataRef: { resourceName: 'r' },
+        },
+      ],
+      annotations: [null as never, 42 as never],
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe('ok.pdf');
+  });
+
+  test('non-string fields degrade to safe defaults', () => {
+    const result = extractAttachments({
+      attachment: [
+        {
+          contentName: 123 as never,
+          contentType: { evil: true } as never,
+          source: 'UPLOADED_CONTENT',
+          attachmentDataRef: { resourceName: 'r' },
+        },
+        {
+          contentName: 'doc',
+          source: 'DRIVE_FILE',
+          driveDataRef: { driveFileId: 999 as never },
+        },
+      ],
+    });
+    // Non-string name falls back; non-string mime → ''.
+    expect(result[0].name).toBe('uploaded file');
+    expect(result[0].mimeType).toBe('');
+    // Non-string driveFileId → treated as no id → not a drive-link entry.
+    expect(result.some((a) => a.source === 'drive-link')).toBe(false);
+  });
+
   test('attachment with no usable ref/source is skipped', () => {
     expect(
       extractAttachments({
