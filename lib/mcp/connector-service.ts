@@ -96,9 +96,6 @@ export async function getAvailableConnectors(
     "getAvailableConnectors"
   )
 
-  timer({ status: "success", count: accessible.length })
-  log.info("Connectors retrieved", { requestId, count: accessible.length })
-
   // Isolate per-row failures: a single malformed row (unknown transport/authType — e.g.
   // a new enum from a future migration or a manual DB edit) must not fail the whole
   // listing (REV-COR-620). toMcpConnector keeps its invariant guard; we skip + warn the
@@ -115,6 +112,14 @@ export async function getAvailableConnectors(
       })
     }
   }
+
+  timer({ status: "success", count: connectors.length })
+  log.info("Connectors retrieved", {
+    requestId,
+    count: connectors.length,
+    rowCount: accessible.length,
+  })
+
   return connectors
 }
 
