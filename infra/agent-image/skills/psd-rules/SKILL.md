@@ -269,6 +269,14 @@ Finding a tool runs a short JS body in an isolated subprocess that exposes **onl
 
 **Why:** malformed search bodies (object query, `require`, `setTimeout`) error and retry, and every retry re-reads the entire context — a top token-waste source (observed 2026-07-02).
 
+**Long-running calls (the 60-second sandbox ceiling).** The sandbox kills any `tool_search_code` body after 60 s of execution — a slow inner call (Plaud digest, big gws write, a long exec) dies with `tool_search_code timed out` and you get nothing back, even though the underlying command may have kept running (side effects included).
+
+- **Never block on a slow call.** For any exec that could take more than ~30 s, pass a SHORT `yieldMs` (5000–10000). The call suspends and returns `status: "waiting"` with a `runId` well before the ceiling; resume it with `wait` on that `runId` to collect the result.
+- **Never poll with a long timeout.** A `process poll` timeout must stay ≤ 30000; poll repeatedly in separate tool calls rather than once with 90 s.
+- **If a call times out anyway**, assume its side effects MAY have happened — check before re-running anything that creates or sends.
+
+**Why:** observed 2026-07-06 (#1138): a Plaud digest exec with `yieldMs: 60000` and a 90 s poll both hit the sandbox timeout, the bridge looked "unresponsive," and a multi-step task died mid-run with documents half-created.
+
 ---
 
 ## Self-check before send

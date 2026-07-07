@@ -206,13 +206,134 @@ function splitCommand(cmd) {
   return tokens;
 }
 
+// ============================================================================
+// Payload files — safe transport for arbitrary text (#1138 follow-up)
+// ============================================================================
+//
+// splitCommand supports quoted segments but has NO escape syntax: a quote
+// character inside a same-quoted value terminates the token, so any content
+// with an apostrophe, mixed quotes, or newlines (i.e. real document text)
+// cannot ride inside --command at all. Observed live 2026-07-06: the agent
+// could not write Google Doc content ("no way to pass multi-word text via
+// this shim") and the task died. The fix: the model writes the content to a
+// file and references it with `--json-file <abs-path>` (JSON payloads) or
+// `--body-file <abs-path>` (plain-text bodies, e.g. +draft). The file's
+// content is delivered to gws as exactly ONE argv token — quoting rules
+// never apply to it.
+//
+// Ordering contract (see run.js): the resolved JSON is inlined into a
+// synthetic command string FIRST so Phase 1 gates (incl. the share-to-caller
+// payload validation) and marker injection see the real payload; execution
+// then swaps a whitespace-free placeholder token for the payload AFTER
+// splitCommand, so tokenization never touches the content.
+
+const PAYLOAD_PLACEHOLDERS = {
+  '--json-file': { flag: '--json', placeholder: '@@PSD_PAYLOAD_JSON@@', kind: 'json' },
+  '--body-file': { flag: '--body', placeholder: '@@PSD_PAYLOAD_BODY@@', kind: 'text' },
+};
+
+/**
+ * Resolve `--json-file` / `--body-file` references in a --command string.
+ *
+ * Returns null when neither flag is present. Otherwise returns:
+ *   {
+ *     execCommand:      command with each file flag replaced by
+ *                       `--json @@PSD_PAYLOAD_JSON@@` / `--body @@…@@`,
+ *     syntheticCommand: command with each file flag replaced by the REAL
+ *                       content inline (gates + markers run against this),
+ *     payloads:         { [placeholderToken]: content }
+ *   }
+ *
+ * Fails (exit 1) on: relative path, unreadable file, invalid JSON in a
+ * --json-file, duplicate use of the same flag, or --json-file alongside an
+ * inline --json (ambiguous — exactly one payload source allowed).
+ */
+function resolvePayloadFiles(commandString) {
+  if (!commandString || typeof commandString !== 'string') return null;
+  let execCommand = commandString;
+  let syntheticCommand = commandString;
+  const payloads = {};
+
+  for (const [fileFlag, spec] of Object.entries(PAYLOAD_PLACEHOLDERS)) {
+    const re = new RegExp(`(^|\\s)${fileFlag}\\s+(\\S+)`, 'g');
+    const matches = [...commandString.matchAll(re)];
+    if (matches.length === 0) continue;
+    if (matches.length > 1) {
+      fail(`${fileFlag} may appear at most once per command`);
+    }
+    // Exactly one payload source per flag: reject the file form alongside its
+    // inline counterpart (--json + --json-file, --body + --body-file) —
+    // otherwise gws would receive two occurrences of the same flag and pick
+    // one silently. `--json\s` does not match `--json-file` (hyphen, not
+    // whitespace, follows), so the file flag never trips its own check.
+    const inlineRe = new RegExp(`(^|\\s)${spec.flag}\\s`);
+    if (inlineRe.test(commandString)) {
+      fail(`use either ${spec.flag} or ${fileFlag}, not both`);
+    }
+    let filePath = matches[0][2];
+    // Models habitually quote flag values (every SKILL.md example quotes
+    // --params). \S+ captures those quotes, so strip one matching
+    // surrounding pair before validating — otherwise a valid quoted path
+    // fails the absolute-path check with a misleading error.
+    if (
+      filePath.length >= 2 &&
+      ((filePath.startsWith("'") && filePath.endsWith("'")) ||
+        (filePath.startsWith('"') && filePath.endsWith('"')))
+    ) {
+      filePath = filePath.slice(1, -1);
+    }
+    if (!filePath.startsWith('/')) {
+      fail(`${fileFlag} requires an absolute path (got "${filePath}")`);
+    }
+    let content;
+    try {
+      content = fs.readFileSync(filePath, 'utf8');
+    } catch (err) {
+      fail(`${fileFlag}: cannot read ${filePath}: ${err.message}`);
+    }
+    if (spec.kind === 'json') {
+      try {
+        // Minify so the synthetic inline command is single-line — the
+        // marker injector's brace scanner and the gate regexes both operate
+        // on it, and a compact form keeps their behavior identical to the
+        // inline --json path.
+        content = JSON.stringify(JSON.parse(content));
+      } catch (err) {
+        fail(`${fileFlag}: ${filePath} is not valid JSON: ${err.message}`);
+      }
+    }
+    payloads[spec.placeholder] = content;
+    execCommand = execCommand.replace(
+      re,
+      (m, lead) => `${lead}${spec.flag} ${spec.placeholder}`
+    );
+    syntheticCommand = syntheticCommand.replace(
+      re,
+      (m, lead) => `${lead}${spec.flag} ${content}`
+    );
+  }
+
+  return Object.keys(payloads).length > 0
+    ? { execCommand, syntheticCommand, payloads }
+    : null;
+}
+
 /**
  * Exec gws with GOOGLE_WORKSPACE_CLI_TOKEN set. Streams stdout; returns exit
  * code. gws ignores GOOGLE_ACCESS_TOKEN — must be GOOGLE_WORKSPACE_CLI_TOKEN
  * per the gws README "Pre-obtained Access Token" section.
+ *
+ * `payloads` (optional) maps placeholder tokens to payload-file contents
+ * (see resolvePayloadFiles). Substitution happens AFTER splitCommand, so the
+ * content becomes exactly one argv token regardless of quotes/newlines.
  */
-function execGws(commandString, accessToken) {
-  const tokens = splitCommand(commandString);
+function execGws(commandString, accessToken, payloads) {
+  let tokens = splitCommand(commandString);
+  if (payloads && typeof payloads === 'object') {
+    tokens = tokens.map((t) =>
+      Object.prototype.hasOwnProperty.call(payloads, t) ? payloads[t] : t
+    );
+  }
   if (tokens.length === 0) {
     fail('--command is empty');
   }
@@ -502,17 +623,17 @@ function injectMarkers(commandString) {
 }
 
 /**
- * Find the --json '{...}' argument in a gws command string and apply
- * `mutator` to the parsed object. Re-encode and splice back.
- *
- * Returns the original string if no --json arg or the JSON parse fails.
+ * Locate the --json '{...}' argument in a gws command string via a
+ * balanced-brace scan. Returns {jsonStart, jsonEnd, openQuote} (end
+ * inclusive) or null when there is no parseable --json object. Shared by
+ * mutateJsonField (marker injection) and extractJsonArg (payload-file flow).
  */
-function mutateJsonField(commandString, mutator) {
+function findJsonSpan(commandString) {
   // Match --json followed by a single-quoted or double-quoted JSON object.
   // The simple/robust approach: find --json, then balanced-brace scan from
   // the next non-quote character forward.
   const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
-  if (jsonFlagIdx === -1) return commandString;
+  if (jsonFlagIdx === -1) return null;
 
   // Find the start of the JSON object (`{`). Skip the `--json` token,
   // any whitespace, and any opening quote.
@@ -524,7 +645,7 @@ function mutateJsonField(commandString, mutator) {
     i++;
   }
   const jsonStart = i;
-  if (commandString[jsonStart] !== '{') return commandString;
+  if (commandString[jsonStart] !== '{') return null;
 
   // Brace-balance scan to find the matching close.
   let depth = 0;
@@ -551,7 +672,32 @@ function mutateJsonField(commandString, mutator) {
       if (depth === 0) { jsonEnd = j; break; }
     }
   }
-  if (jsonEnd === -1) return commandString;
+  if (jsonEnd === -1) return null;
+  return { jsonStart, jsonEnd, openQuote };
+}
+
+/**
+ * Return the raw --json object substring from a command string, or null.
+ * Used by the payload-file flow to pull a marker-mutated JSON payload back
+ * out of the synthetic inline command before execution.
+ */
+function extractJsonArg(commandString) {
+  if (!commandString || typeof commandString !== 'string') return null;
+  const span = findJsonSpan(commandString);
+  if (!span) return null;
+  return commandString.slice(span.jsonStart, span.jsonEnd + 1);
+}
+
+/**
+ * Find the --json '{...}' argument in a gws command string and apply
+ * `mutator` to the parsed object. Re-encode and splice back.
+ *
+ * Returns the original string if no --json arg or the JSON parse fails.
+ */
+function mutateJsonField(commandString, mutator) {
+  const span = findJsonSpan(commandString);
+  if (!span) return commandString;
+  const { jsonStart, jsonEnd, openQuote } = span;
 
   const jsonStr = commandString.slice(jsonStart, jsonEnd + 1);
   let obj;
@@ -599,5 +745,7 @@ module.exports = {
   execGws,
   enforcePhase1Gates,
   injectMarkers,
+  resolvePayloadFiles,
+  extractJsonArg,
   PHASE1_FORBIDDEN,
 };

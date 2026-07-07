@@ -95,6 +95,41 @@ node /opt/psd-skills/psd-workspace/run.js \
 node /opt/psd-skills/psd-workspace/run.js --user hagelk@psd401.net --command "--help"
 ```
 
+## Passing real text: `--json-file` / `--body-file` (REQUIRED for content writes)
+
+The `--command` tokenizer has **no escape syntax**: an apostrophe inside a
+single-quoted value, mixed quotes, or a newline breaks tokenization, and there
+is no way to fix it with more quoting. **Never inline document/email/event
+body text in `--json` or `--body`.** Instead, write the payload to a file
+first and reference it:
+
+```bash
+# 1. Write the payload to a file (any quotes/newlines/emoji are fine here)
+cat > /tmp/doc-payload.json <<'PAYLOAD'
+{"requests":[{"insertText":{"location":{"index":1},"text":"It's fine to use \"both\" quote kinds.\n\nNew paragraphs too."}}]}
+PAYLOAD
+
+# 2. Reference it with --json-file (replaces --json)
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command "docs documents batchUpdate --params '{\"documentId\":\"<id>\"}' --json-file /tmp/doc-payload.json"
+
+# Plain-text bodies (e.g. +draft) use --body-file (replaces --body)
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command "gmail +draft --to bill@psd401.net --subject 'Follow up' --body-file /tmp/draft-body.txt"
+```
+
+Rules: the path must be absolute; use `--json-file` OR `--json`, never both;
+one of each flag per command. The file content is handed to gws as exactly one
+argv token — quoting rules never apply to it. Phase 1 gates and marker
+injection still see the real payload (they run against the resolved content),
+so this is a transport mechanism, not a bypass: forbidden operations are still
+refused, and file-based payloads still get audit markers.
+
+Use inline `--json` only for short, quote-free payloads you compose yourself
+(IDs, dates, enum values). Anything containing prose goes through a file.
+
 ## Phase 1 boundaries (hard gates — refused at the skill layer)
 
 These cannot be bypassed by phrasing. The skill returns exit code 13 with `status: phase1-forbidden`:

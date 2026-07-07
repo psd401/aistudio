@@ -250,6 +250,17 @@ RUN mkdir -p /home/node/.openclaw/memory
 #   TODO: give the sub-agent a dedicated fast model (Haiku/Nova) via
 #   config.model — requires adding a second model to bedrock-proxy. Until
 #   then the sub-agent adds ~5-10s to every turn's wall-clock latency.
+#
+#   tools.codeMode.timeoutMs=60000 — code-mode (tool_search_code) VM
+#   execution ceiling, raised from the 10s default to the documented max
+#   (docs/reference/code-mode.md range 100–60000). At 10s, any skill command
+#   slower than ~10s (Plaud digest, large gws call) died with
+#   "tool_search_code timed out" BEFORE exec could suspend into the
+#   status:"waiting" yield path — observed 2026-07-06 (#1138 follow-up): the
+#   agent's exec used yieldMs=60000, so the VM was killed at 10s, 50s before
+#   it would have yielded. 60s is a ceiling, not a delay: fast calls return
+#   as before. Pair with psd-rules guidance to use SHORT yieldMs (≤10s) so
+#   long commands suspend early instead of racing this timeout.
 COPY openclaw.json /home/node/.openclaw/openclaw.json
 # Build-time config sanity check (post-2026-07-02 config-risk hardening): surface
 # any openclaw.json schema/key errors at BUILD time instead of at runtime (a
