@@ -133,7 +133,19 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
     }
 
     if (row.encryptedRefreshToken) {
-      tokens.refresh_token = await decryptToken(row.encryptedRefreshToken)
+      // Guard the refresh-token decrypt like the access token above (REV-COR-626): a
+      // corrupt/rotated-key ciphertext must degrade to "no refresh token" (which just
+      // forces re-auth when the access token expires), not reject the whole tokens()
+      // promise and surface an unhandled decryption error to the @ai-sdk/mcp flow.
+      try {
+        tokens.refresh_token = await decryptToken(row.encryptedRefreshToken)
+      } catch (err) {
+        log.warn("Failed to decrypt stored refresh token — omitting from tokens", {
+          serverId: this.serverId,
+          userId: this.userId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
     }
 
     if (row.tokenExpiresAt) {
@@ -257,10 +269,21 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
       return undefined
     }
 
-    // Decrypt client_secret if present
+    // Decrypt client_secret if present. Guard like tokens() (REV-COR-626): a corrupt or
+    // rotated-key client secret degrades to "no registration" (return undefined), which
+    // makes the SDK perform a fresh dynamic client registration — the same recovery as the
+    // stale-redirect_uri branch above — rather than rejecting with an opaque decrypt error.
     let clientSecret: string | undefined
     if (reg.encrypted_client_secret) {
-      clientSecret = await decryptToken(reg.encrypted_client_secret)
+      try {
+        clientSecret = await decryptToken(reg.encrypted_client_secret)
+      } catch (err) {
+        log.warn("Failed to decrypt stored client secret — treating registration as invalid to trigger re-registration", {
+          serverId: this.serverId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        return undefined
+      }
     }
 
     return {
