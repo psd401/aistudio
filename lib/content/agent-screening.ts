@@ -42,7 +42,7 @@ export type AgentScreenVerdict =
  * fail OPEN (allow + log) on a degraded/unavailable evaluation, log detected PII
  * (telemetry only — never tokenize-replace, a
  * persisted document keeps its real text). Returns a verdict; callers map it to
- * their surface (the bridge to 422/503 responses, the services to a thrown
+ * their surface (the bridge to a 422 response, the services to a thrown
  * `ValidationError` via `screenAgentBodyForWrite`).
  *
  * `objectId` is a correlation ref for logs/guardrail session scoping; pass null

@@ -25,11 +25,11 @@ export interface SafetyCheckResult {
   /**
    * True when guardrails were ENABLED but the evaluation could not complete
    * (AWS error/timeout/throttle) and the service fell open to `allowed: true`
-   * as graceful degradation. Lets stricter callers (e.g. the Atrium agent
-   * bridge writing into a live K-12 document) fail CLOSED on this signal while
-   * latency-sensitive paths like chat keep failing open. Never set when
-   * guardrails are simply disabled — that is a deliberate "allowed", not a
-   * degraded one.
+   * as graceful degradation. As of the agent-screening fail-open fix, every
+   * consumer — including the Atrium agent bridge writing into a live K-12
+   * document — treats a degraded evaluation as telemetry-only and allows the
+   * content; none fail CLOSED on this signal. Never set when guardrails are
+   * simply disabled — that is a deliberate "allowed", not a degraded one.
    */
   degraded?: boolean;
 }
