@@ -9,11 +9,15 @@
  * `versionService.snapshot` — screens through one implementation instead of the
  * bridge alone.
  *
- * FAIL CLOSED: the shared guardrails service fails OPEN (returns allowed:true
- * with `degraded:true`) when an AWS error/timeout/throttle prevents evaluation —
- * acceptable for latency-sensitive chat, but NOT for unscreened agent content
- * persisted into K-12 documents. A degraded evaluation is treated as blocked
- * here; the agent retries once guardrails recover.
+ * FAIL OPEN: guardrails are telemetry-only on this path — they must never block
+ * a write on their own unavailability. When an AWS error / timeout / throttle /
+ * IAM denial prevents evaluation the shared service returns `degraded:true`;
+ * this core ALLOWS the content and logs the skipped evaluation as telemetry,
+ * rather than rejecting the write. Only a POSITIVE guardrails detection
+ * (`allowed:false`) refuses content. (A prior revision failed CLOSED on
+ * `degraded` — that turned an `ApplyGuardrail` AccessDenied into a 100% write
+ * outage: every workspace/agent edit rejected with "could not be safety-screened
+ * right now". See the guardrail-profile IAM incident.)
  *
  * The safety/PII services are imported LAZILY inside `screenAgentContent` so
  * importing the content services (or the `lib/content` barrel) does not
@@ -27,20 +31,18 @@ import type { Requester } from "./types";
 
 /** User-facing message when guardrails blocked but supplied no message. */
 export const AGENT_SCREEN_BLOCKED_MESSAGE = "The proposed content was blocked.";
-/** User-facing message when screening itself is unavailable (fail closed). */
-export const AGENT_SCREEN_DEGRADED_MESSAGE =
-  "Content could not be safety-screened right now. Please retry shortly.";
 
 /** The outcome of screening one piece of agent-authored content. */
 export type AgentScreenVerdict =
   | { allowed: true }
-  | { allowed: false; reason: "blocked" | "degraded"; message: string };
+  | { allowed: false; reason: "blocked"; message: string };
 
 /**
- * Screen agent-authored text: block on guardrails, fail closed on a degraded
- * evaluation, log detected PII (telemetry only — never tokenize-replace, a
+ * Screen agent-authored text: refuse only on a POSITIVE guardrails detection,
+ * fail OPEN (allow + log) on a degraded/unavailable evaluation, log detected PII
+ * (telemetry only — never tokenize-replace, a
  * persisted document keeps its real text). Returns a verdict; callers map it to
- * their surface (the bridge to 422/503 responses, the services to a thrown
+ * their surface (the bridge to a 422 block, the services to a thrown
  * `ValidationError` via `screenAgentBodyForWrite`).
  *
  * `objectId` is a correlation ref for logs/guardrail session scoping; pass null
@@ -80,18 +82,17 @@ export async function screenAgentContent(
       message: safety.blockedMessage ?? AGENT_SCREEN_BLOCKED_MESSAGE,
     };
   }
-  // FAIL CLOSED on degraded guardrails (see module JSDoc): a transient Bedrock
-  // failure must never let hate speech / CSAM / etc. through; reject and let the
-  // agent retry.
+  // FAIL OPEN on degraded guardrails (see module JSDoc): guardrails are
+  // telemetry-only here and must never block a write on their own unavailability
+  // (an ApplyGuardrail AccessDenied / throttle / timeout). Log the skipped
+  // guardrails evaluation, then FALL THROUGH to PII detection — the write WILL
+  // persist, so it must still get PII telemetry (Comprehend is independent of the
+  // degraded Bedrock guardrail); a degraded guardrail must not also suppress the
+  // student-data telemetry the clean-pass path provides.
   if (safety.degraded) {
-    log.error("Agent write rejected: guardrails unavailable (failing closed)", {
+    log.warn("Agent write screening degraded — allowing (fail open)", {
       objectId,
     });
-    return {
-      allowed: false,
-      reason: "degraded",
-      message: AGENT_SCREEN_DEGRADED_MESSAGE,
-    };
   }
   // PII: detect + log only. A document keeps its real text; never tokenize-replace.
   try {
@@ -127,11 +128,11 @@ export async function screenAgentContent(
  * Human authors: zero behavior change — this returns without touching the
  * safety stack (the lazy import never even runs).
  *
- * Throws a fail-closed `ValidationError` with the same user-facing semantics as
- * the agent-bridge route: blocked content → "Content blocked by safety policy",
- * degraded screening → "Safety screening unavailable" (retryable). Callers MUST
- * invoke this BEFORE their write transaction — screening is external IO
- * (Bedrock) and must never hold a pooled connection.
+ * Throws a `ValidationError` ("Content blocked by safety policy") ONLY on a
+ * positive guardrails detection — a degraded/unavailable evaluation fails OPEN
+ * (see `screenAgentContent`) and never throws. Callers MUST invoke this BEFORE
+ * their write transaction — screening is external IO (Bedrock) and must never
+ * hold a pooled connection.
  */
 export async function screenAgentBodyForWrite(
   req: Requester,
@@ -144,11 +145,11 @@ export async function screenAgentBodyForWrite(
 
   const verdict = await screenAgentContent(body, objectId, requestId);
   if (!verdict.allowed) {
-    throw new ValidationError(
-      verdict.reason === "blocked"
-        ? "Content blocked by safety policy"
-        : "Safety screening unavailable",
-      { reason: verdict.reason, message: verdict.message, objectId }
-    );
+    // Only a positive guardrails detection reaches here (degraded fails open).
+    throw new ValidationError("Content blocked by safety policy", {
+      reason: verdict.reason,
+      message: verdict.message,
+      objectId,
+    });
   }
 }
