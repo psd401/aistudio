@@ -127,12 +127,13 @@ describe("screenAgentContent", () => {
   it("FAILS OPEN on a degraded evaluation (guardrails unavailable → allowed)", async () => {
     // Guardrails are telemetry-only here: a degraded evaluation (AWS error /
     // ApplyGuardrail AccessDenied / throttle) must NOT block the write. The core
-    // allows the content and logs the skipped evaluation; it does not run PII
-    // detection on the degraded path.
+    // allows the content, logs the skipped guardrails evaluation, and STILL runs
+    // PII detection — the write persists, so it must keep its student-data
+    // telemetry (Comprehend is independent of the degraded Bedrock guardrail).
     checkResult = { allowed: true, degraded: true };
     const verdict = await screenAgentContent("any text", "obj-1");
     expect(verdict).toEqual({ allowed: true });
-    expect(detectPIIMock).not.toHaveBeenCalled();
+    expect(detectPIIMock).toHaveBeenCalledWith("any text");
   });
 
   it("allows clean content and runs PII detection as telemetry", async () => {

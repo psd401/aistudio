@@ -42,7 +42,7 @@ export type AgentScreenVerdict =
  * fail OPEN (allow + log) on a degraded/unavailable evaluation, log detected PII
  * (telemetry only — never tokenize-replace, a
  * persisted document keeps its real text). Returns a verdict; callers map it to
- * their surface (the bridge to a 422 response, the services to a thrown
+ * their surface (the bridge to a 422 block, the services to a thrown
  * `ValidationError` via `screenAgentBodyForWrite`).
  *
  * `objectId` is a correlation ref for logs/guardrail session scoping; pass null
@@ -85,12 +85,14 @@ export async function screenAgentContent(
   // FAIL OPEN on degraded guardrails (see module JSDoc): guardrails are
   // telemetry-only here and must never block a write on their own unavailability
   // (an ApplyGuardrail AccessDenied / throttle / timeout). Log the skipped
-  // evaluation as telemetry and allow the content through.
+  // guardrails evaluation, then FALL THROUGH to PII detection — the write WILL
+  // persist, so it must still get PII telemetry (Comprehend is independent of the
+  // degraded Bedrock guardrail); a degraded guardrail must not also suppress the
+  // student-data telemetry the clean-pass path provides.
   if (safety.degraded) {
     log.warn("Agent write screening degraded — allowing (fail open)", {
       objectId,
     });
-    return { allowed: true };
   }
   // PII: detect + log only. A document keeps its real text; never tokenize-replace.
   try {
