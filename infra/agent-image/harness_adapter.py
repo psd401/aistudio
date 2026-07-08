@@ -238,6 +238,7 @@ class OpenClawAdapter(HarnessAdapter):
         session_id: str,
         model_override: Optional[str] = None,
         deadline_s: Optional[int] = None,
+        _is_nudge: bool = False,
     ) -> TurnResult:
         """Send a message to OpenClaw via WebSocket and return a TurnResult.
 
@@ -625,6 +626,15 @@ class OpenClawAdapter(HarnessAdapter):
                             # ("...in Plaud.Good, done..."), issue #1138 F4.
                             if agent_assistant_accum:
                                 assistant_boundary_pending = True
+                            # Native-tool mode (#1138 r12+) reports tool
+                            # execution ONLY here — record it so telemetry's
+                            # tool_calls and the empty-turn nudge below see
+                            # native-mode activity (the legacy tool_call/
+                            # tool_result streams stay handled underneath).
+                            if stream == "item" and isinstance(data, dict)                                     and data.get("kind") == "tool":
+                                self._record_item_tool_event(
+                                    data, tool_starts, tool_calls
+                                )
                         elif stream == "tool_call" and isinstance(data, dict):
                             # Same boundary rule for protocol-v3 tool events.
                             if agent_assistant_accum:
@@ -931,6 +941,36 @@ class OpenClawAdapter(HarnessAdapter):
 
         if response_text.strip():
             return _result(_format_for_chat(response_text.strip()))
+        if not _is_nudge and tool_calls:
+            # The turn DID work (tool calls ran) but produced no reply —
+            # nudge once for the user-facing summary instead of sending the
+            # canned fallback (#1138, observed live on r12). Recursive call
+            # is bounded by _is_nudge; a short deadline is plenty at direct-
+            # Mantle serving speeds.
+            logger.warning(
+                "empty final after %d tool calls — sending one nudge",
+                len(tool_calls),
+            )
+            nudged = self.process(
+                self.EMPTY_TURN_NUDGE,
+                session_id,
+                model_override,
+                deadline_s=180,
+                _is_nudge=True,
+            )
+            if nudged.text.strip():
+                merged_tools = tool_calls + nudged.tool_calls
+                return TurnResult(
+                    text=nudged.text,
+                    model=nudged.model or observed_model,
+                    tokens_in=tokens_in + nudged.tokens_in,
+                    tokens_out=tokens_out + nudged.tokens_out,
+                    latency_ms=int((time.time() - chat_send_at) * 1000),
+                    messages=messages_log + nudged.messages,
+                    tool_calls=merged_tools,
+                    failed=nudged.failed,
+                    error_class=nudged.error_class,
+                )
         record_failure(
             source="harness",
             severity="empty_response",
@@ -951,6 +991,54 @@ class OpenClawAdapter(HarnessAdapter):
             failed=True,
             error_class="EmptyAgentResponse",
         )
+
+    @staticmethod
+    def _record_item_tool_event(data, tool_starts, tool_calls) -> None:
+        """Track a native-mode tool item (stream="item", kind="tool").
+
+        phase="start" registers the call; a later phase ("end"/"error"/
+        anything terminal with a status) completes it into tool_calls. The
+        item stream is the ONLY place beta.2 reports tool execution when
+        toolSearch/code-mode is off, so without this the Conversations tab
+        showed zero tool calls and the empty-turn nudge couldn't tell a
+        silent WORKING turn from a truly idle one.
+        """
+        item_id = data.get("itemId") or data.get("toolCallId") or ""
+        phase = data.get("phase")
+        if phase == "start":
+            tool_starts[item_id] = {
+                "name": data.get("name") or data.get("title") or "unknown",
+                "args": data.get("meta"),
+                "started_at": time.time(),
+            }
+            return
+        start = tool_starts.pop(item_id, None)
+        now = time.time()
+        started_at = start["started_at"] if start else now
+        tool_calls.append({
+            "name": (start or {}).get("name") or data.get("name") or "unknown",
+            "args": (start or {}).get("args"),
+            "result": data.get("output") or data.get("result"),
+            "status": "error" if (data.get("status") in ("error", "failed")) else "success",
+            "error_text": (
+                str(data.get("error"))[:2000] if data.get("error") else None
+            ),
+            "duration_ms": int(max(0, (now - started_at) * 1000)),
+            "started_at": datetime.fromtimestamp(started_at, tz=timezone.utc).isoformat(),
+            "finished_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        })
+
+    # Sent as a one-shot follow-up when a turn completes tool work but ends
+    # with no user-visible text (observed live on r12: the model executed
+    # every grant, then a provider timeout ate the closing message and the
+    # user got the canned empty-response fallback). One nudge only — if the
+    # model stays silent twice, the canned fallback stands.
+    EMPTY_TURN_NUDGE = (
+        "[system-nudge] Your previous turn finished tool work but sent the "
+        "user NO reply — they saw nothing. Send the user-facing summary of "
+        "what you just did (and its outcome) now, as plain text. Do not "
+        "re-run any tools unless something genuinely failed."
+    )
 
     @staticmethod
     def _resolve_deadline_s(override) -> int:

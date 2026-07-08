@@ -6,6 +6,7 @@
         "api": "anthropic-messages",
         "auth": "api-key",
         "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
+        "timeoutSeconds": 300,
         "models": [
           {
             "id": "anthropic.claude-sonnet-5",
@@ -25,6 +26,8 @@
       "model": {
         "primary": "amazon-bedrock-mantle/anthropic.claude-sonnet-5"
       },
+      "bootstrapMaxChars": 32000,
+      "bootstrapTotalMaxChars": 80000,
       "params": {
         "cacheRetention": "long"
       },
