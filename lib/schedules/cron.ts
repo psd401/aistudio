@@ -77,8 +77,12 @@ export function validateCustomCronExpression(cron: string): string[] {
     errors.push("Invalid hour field in cron expression")
   }
 
-  // Validate day field (1-31) - supports comma-separated lists, ReDoS-safe
-  const dayRegex = /^\*$|^(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])-(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])\/\d+$|^\*\/\d+$/
+  // Validate day field (1-31, no leading-zero "0") - supports comma-separated
+  // lists, ReDoS-safe. The single-digit alternative is restricted to [1-9] (not
+  // [12]?\d) so "0" is rejected — day-of-month has no zero value, and accepting
+  // it let an invalid POSIX cron like "0 0 0 * *" pass validation and then be
+  // converted into an AWS cron that EventBridge rejects at create/update time.
+  const dayRegex = /^\*$|^(?:[1-9]|[12]\d|3[01])$|^(?:[1-9]|[12]\d|3[01])-(?:[1-9]|[12]\d|3[01])$|^(?:[1-9]|[12]\d|3[01])\/\d+$|^\*\/\d+$/
   if (day.split(",").some(p => !dayRegex.test(p))) {
     errors.push("Invalid day field in cron expression")
   }
@@ -89,8 +93,10 @@ export function validateCustomCronExpression(cron: string): string[] {
     errors.push("Invalid month field in cron expression")
   }
 
-  // Validate day-of-week field (0-6) - supports comma-separated lists, ReDoS-safe
-  const dayOfWeekRegex = /^\*$|^[0-6]$|^[0-6]-[0-6]$|^[0-6]\/\d+$|^\*\/\d+$/
+  // Validate day-of-week field (0-6) - supports comma-separated lists, ReDoS-safe,
+  // and — unlike the other fields' regexes — combined ranges-with-step (e.g.
+  // "1-5/2"), which the previous pattern rejected outright.
+  const dayOfWeekRegex = /^(\*|[0-6](-[0-6])?)(\/\d+)?$/
   if (dayOfWeek.split(",").some(p => !dayOfWeekRegex.test(p))) {
     errors.push("Invalid day-of-week field in cron expression")
   }
@@ -107,9 +113,11 @@ export function validateCustomCronExpression(cron: string): string[] {
 }
 
 /**
- * Translate a POSIX day-of-week field (0-6, 0=Sun; 7 also treated as Sun) to
- * AWS EventBridge numbering (1-7, 1=Sun), preserving comma lists, ranges, and
- * steps. Step VALUES are not day numbers and are left unshifted.
+ * Translate a POSIX day-of-week field (0-6, 0=Sun — the only range
+ * `validateCustomCronExpression` accepts) to AWS EventBridge numbering (1-7,
+ * 1=Sun), preserving comma lists, ranges, and steps. Step VALUES are not day
+ * numbers and are left unshifted. The `% 7` in `shift()` incidentally also
+ * maps a literal `7` to Sun, but that input never reaches here validated.
  */
 function translateDowFieldPosixToAws(dowField: string): string {
   const shift = (tok: string): string =>

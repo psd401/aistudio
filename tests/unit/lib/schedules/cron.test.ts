@@ -88,4 +88,16 @@ describe('validateCustomCronExpression (REV-COR-047)', () => {
       validateCustomCronExpression('0 12 ? * *').some(e => /invalid characters/i.test(e))
     ).toBe(true)
   })
+  it('rejects day-of-month 0 (no zero value; 1-31 only)', () => {
+    expect(
+      validateCustomCronExpression('0 0 0 * *').some(e => /invalid day field/i.test(e))
+    ).toBe(true)
+  })
+  it('accepts day-of-month 1 and 31 (boundary values)', () => {
+    expect(validateCustomCronExpression('0 0 1 * *')).toEqual([])
+    expect(validateCustomCronExpression('0 0 31 * *')).toEqual([])
+  })
+  it('accepts a day-of-week range combined with a step (e.g. 1-5/2)', () => {
+    expect(validateCustomCronExpression('0 0 * * 1-5/2')).toEqual([])
+  })
 })
