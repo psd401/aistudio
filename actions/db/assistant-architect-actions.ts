@@ -441,12 +441,26 @@ export async function getAssistantArchitectsAction(): Promise<
     if (!session?.sub) {
       return { isSuccess: false, message: "Unauthorized" };
     }
-    if (!(await hasRole("administrator")) && !(await hasCapabilityAccess("assistant-architect"))) {
+    const isAdmin = await hasRole("administrator");
+    if (!isAdmin && !(await hasCapabilityAccess("assistant-architect"))) {
       return { isSuccess: false, message: "Access denied" };
     }
 
-    // Get all architects with creator info via Drizzle
-    const architects = await drizzleGetAssistantArchitects();
+    // Scope the result set (Codex P1, follow-up on REV-COR-034): the generic
+    // "assistant-architect" capability is held by every staff/capability user,
+    // so returning every record here — not just the ones an admin gate would
+    // catch — let any capability holder read other users' draft/pending/
+    // rejected prompt contents. Non-admins only ever see approved tools plus
+    // their own; admins keep full visibility (approvals, moderation).
+    const allArchitects = await drizzleGetAssistantArchitects();
+    let callerId: number | undefined
+    if (!isAdmin) {
+      const currentUser = await getCurrentUserAction();
+      callerId = currentUser.isSuccess ? currentUser.data?.user?.id : undefined;
+    }
+    const architects = isAdmin
+      ? allArchitects
+      : allArchitects.filter((architect) => architect.status === "approved" || architect.userId === callerId);
 
     // For each architect, get input fields and prompts in parallel
     const architectsWithRelations = await Promise.all(
