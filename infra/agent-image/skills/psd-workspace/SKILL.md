@@ -166,21 +166,26 @@ These cannot be bypassed by phrasing. The skill returns exit code 13 with `statu
 - **No deletes.** Mail (delete/trash/batchDelete), events, calendars, Drive files, drive trash, tasks, tasklists.
 - **No permission changes.** `drive.permissions.create/update/delete`.
 
-**Narrow exception — share-to-caller handoff.** `drive.permissions.create` is permitted in ONE case: the agent shares a file it owns back to the conversation's caller, read-only. ALL of the following must be true:
+**Exception — explicit in-district shares of YOUR OWN files.** `drive.permissions.create` is permitted only on files the agent owns (`--scope agent`), only as `create` (never update/delete), and only in these explicit shapes:
 
-- `--scope agent` (file is in the agent's own Drive)
-- payload `type: "user"` (no domain / group / anyone)
-- payload `role: "reader"` or `"commenter"` (no writer / owner)
-- payload `emailAddress` matches the `--user` arg exactly (caller only; no third parties)
+- **Named person in the district:** `type: "user"`, `role: "reader"` or `"commenter"`, `emailAddress` ending `@psd401.net` — the caller or any district colleague.
+- **Whole district, read-only:** `type: "domain"`, `domain: "psd401.net"`, `role: "reader"` — use when a doc's link is going into a shared Chat space so every member can open it.
 
-Use this when you've created an artifact for the user (investigation report, generated doc, etc.) in your own Drive and need to hand it back. Example:
+Never allowed: `type: "anyone"` or `"group"`, external addresses/domains, `writer`/`owner` roles, or any permission change on user-owned files.
+
+Examples:
 
 ```bash
+# Hand an artifact back to the caller
 gws drive.permissions.create --scope agent --user hagelk@psd401.net \
   --json '{"fileId":"<id>","type":"user","role":"reader","emailAddress":"hagelk@psd401.net"}'
+
+# Make a doc readable district-wide before posting its link in a Chat space
+gws drive.permissions.create --scope agent --user hagelk@psd401.net \
+  --json '{"fileId":"<id>","type":"domain","role":"reader","domain":"psd401.net"}'
 ```
 
-Anything outside the narrow shape is still blocked.
+When you post a doc link into a shared Chat space, share it district-wide (domain/reader) FIRST — otherwise members hit "request access". Anything outside these shapes is still blocked.
 
 If a user explicitly asks the agent to send something, post the draft + a clear "I drafted it; reply 'send' if it's right" in Chat instead. The user clicks send themselves.
 
