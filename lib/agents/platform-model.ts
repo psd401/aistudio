@@ -32,12 +32,16 @@
 export const AGENT_MODEL_ID = "claude-sonnet-5"
 
 /**
- * The model id OpenClaw SENDS to Mantle (the provider model `id` in
- * openclaw.json). Bedrock requires the `anthropic.` foundation-model form on
- * the request; `claude-sonnet-5` alone 404s ("model does not exist"). Distinct
- * from AGENT_MODEL_ID, which is the response/recorded form.
+ * The model id OpenClaw SENDS (the provider model `id` in openclaw.json).
+ * As of the #1138 native-provider program this is the Bedrock CROSS-REGION
+ * INFERENCE PROFILE form (`us.anthropic.…`) used with the native
+ * `amazon-bedrock` Converse provider — the plain foundation-model form is
+ * not invocable on-demand for Sonnet 5. Distinct from AGENT_MODEL_ID, the
+ * wrapper's recorded-fallback form; migration 092 seeds pricing for both
+ * plus the `anthropic.…` alias, and notes Converse echoes the `us.…` form
+ * on responses.
  */
-export const AGENT_REQUEST_MODEL_ID = "anthropic.claude-sonnet-5"
+export const AGENT_REQUEST_MODEL_ID = "us.anthropic.claude-sonnet-5"
 
 /** Human label for AGENT_MODEL_ID shown in the cost UI. */
 export const AGENT_MODEL_LABEL = "Claude Sonnet 5"

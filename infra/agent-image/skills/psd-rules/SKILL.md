@@ -260,39 +260,24 @@ The reply can be one character. It cannot be zero.
 
 ---
 
-## Rule 14 — `tool_search_code` runs in a locked sandbox
+## Rule 14 — Call tools directly; batch multi-item work in ONE call
 
-Finding a tool runs a short JS body in an isolated subprocess that exposes **only** `console.log/warn/error` and `openclaw.tools.search`, `openclaw.tools.describe`, `openclaw.tools.call`. There is **no** `require`, `setTimeout`, `fetch`, `fs`, or network — using them throws `not defined` and wastes a full model round-trip.
+Your tools are exposed natively with schemas — call them directly. There is no `tool_search_code` sandbox, no `openclaw.tools.search/describe/call` API; do not write JavaScript to reach a tool.
 
-- **Search takes a plain string**, never an object: ✅ `openclaw.tools.search("create a calendar event")` ❌ `openclaw.tools.search({query: "..."})`.
-- Pattern: `const hits = await openclaw.tools.search("…"); if (!hits.length) return "No tools found"; const t = await openclaw.tools.describe(hits[0].id); return await openclaw.tools.call(t.id, {…});`
-- Do not import modules or use timers. Keep the body to search → describe → call.
+**Batch multi-item operations in ONE tool call.** Every model round-trip costs seconds of serving latency. N similar operations — sharing a doc with N people, N permission grants, N lookups — run as ONE `exec` call whose command loops, never N separate calls:
 
-**Why:** malformed search bodies (object query, `require`, `setTimeout`) error and retry, and every retry re-reads the entire context — a top token-waste source (observed 2026-07-02).
-
-**Batch multi-item operations in ONE script.** Every `tool_search_code` round-trip costs a full model iteration (~40s+ of serving latency). N similar operations — sharing a doc with N people, N permission grants, N lookups, N sends — go in ONE body with a loop, never N separate calls:
-
-```js
-const people = ["a@psd401.net", "b@psd401.net", "c@psd401.net"];
-const docs = ["<id1>", "<id2>"];
-const results = [];
-for (const doc of docs) for (const email of people) {
-  const r = await openclaw.tools.call("openclaw:core:exec", {command:
-    `node /opt/psd-skills/psd-workspace/run.js --user <caller> --scope agent --command "drive permissions create --json '{\"fileId\":\"${doc}\",\"type\":\"user\",\"role\":\"writer\",\"emailAddress\":\"${email}\"}'"`});
-  results.push({doc, email, ok: !r.error});
-}
-return results;
+```bash
+for EMAIL in whiteb@psd401.net herberr@psd401.net pratzm@psd401.net; do
+  for DOC in <id1> <id2>; do
+    node /opt/psd-skills/psd-workspace/run.js --user <caller> --scope agent \
+      --command "drive permissions create --json '{\"fileId\":\"$DOC\",\"type\":\"user\",\"role\":\"writer\",\"emailAddress\":\"$EMAIL\"}'"
+  done
+done
 ```
 
-**Why:** observed 2026-07-08: granting 2 docs × 4 people as separate calls burned 19 model iterations ≈ 14 minutes on a 30-second task — it hit the platform turn limit and had to be rescued by a background job. Batched, the same task is 3–4 iterations. Stay under the 60s sandbox ceiling: for more than ~10 sequential items, split into chunks of ~8 per call.
+Multi-line payloads still go through `--json-file`/`--body-file`/`--text-file` (write the file first in the same exec).
 
-**Long-running calls (the 60-second sandbox ceiling).** The sandbox kills any `tool_search_code` body after 60 s of execution — a slow inner call (Plaud digest, big gws write, a long exec) dies with `tool_search_code timed out` and you get nothing back, even though the underlying command may have kept running (side effects included).
-
-- **Never block on a slow call.** For any exec that could take more than ~30 s, pass a SHORT `yieldMs` (5000–10000). The call suspends and returns `status: "waiting"` with a `runId` well before the ceiling; resume it with `wait` on that `runId` to collect the result.
-- **Never poll with a long timeout.** A `process poll` timeout must stay ≤ 30000; poll repeatedly in separate tool calls rather than once with 90 s.
-- **If a call times out anyway**, assume its side effects MAY have happened — check before re-running anything that creates or sends.
-
-**Why:** observed 2026-07-06 (#1138): a Plaud digest exec with `yieldMs: 60000` and a 90 s poll both hit the sandbox timeout, the bridge looked "unresponsive," and a multi-step task died mid-run with documents half-created.
+**Why:** observed 2026-07-08 (#1138): granting 2 docs × 4 people as separate calls burned 35 model round-trips ≈ 22 minutes on a 30-second task and ended in a timeout crash. Batched, it is 2–3 round-trips.
 
 ---
 
@@ -303,7 +288,7 @@ return results;
 **Subagents are allowed — under a hard contract: HOLD YOUR TURN.**
 
 - Spawn subagents freely for parallel or isolated work (fan-out research, per-item processing).
-- **Never end your turn while any subagent is still running.** Wait for every child to report, collect the results, and deliver them in THIS turn's reply. A subagent that finishes after your turn ends is invisible — its announcement lands in the session where no one is listening (observed 2026-07-07: a completed audit never reached the user).
+- **Never end your turn while any subagent is still running.** Wait with `sessions_yield` (the supported mechanism — never busy-poll sessions_list/history or shell sleeps), collect every child's report, and deliver the results in THIS turn's reply. A subagent that finishes after your turn ends is invisible — its announcement lands in the session where no one is listening (observed 2026-07-07: a completed audit never reached the user).
 - Waiting past the platform's turn limit is fine: the platform moves the turn to a background job ("⏳ moved to a background job…") and the job keeps waiting for your children and posts the result. That path can deliver later; a bare promise cannot.
 - Never end a turn whose last sentence is a promise of future work (also Rule 4).
 

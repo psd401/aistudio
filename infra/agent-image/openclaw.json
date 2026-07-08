@@ -1,18 +1,17 @@
 {
   "models": {
     "providers": {
-      "amazon-bedrock-mantle": {
-        "baseUrl": "http://127.0.0.1:18791/anthropic",
-        "api": "anthropic-messages",
-        "auth": "api-key",
-        "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
+      "amazon-bedrock": {
+        "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "api": "bedrock-converse-stream",
+        "auth": "aws-sdk",
         "models": [
           {
-            "id": "anthropic.claude-sonnet-5",
-            "name": "Claude Sonnet 5 (via Bedrock Mantle)",
+            "id": "us.anthropic.claude-sonnet-5",
+            "name": "Claude Sonnet 5 (Bedrock Converse, us. cross-region profile)",
             "reasoning": false,
             "input": ["text"],
-            "contextWindow": 1000000,
+            "contextWindow": 200000,
             "maxTokens": 32768,
             "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 6 }
           }
@@ -23,10 +22,17 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "amazon-bedrock-mantle/anthropic.claude-sonnet-5"
+        "primary": "amazon-bedrock/us.anthropic.claude-sonnet-5"
+      },
+      "params": {
+        "cacheRetention": "long"
       },
       "workspace": "/home/node/.openclaw",
-      "contextTokens": 200000,
+      "contextTokens": 180000,
+      "contextPruning": {
+        "mode": "cache-ttl",
+        "ttl": "1h"
+      },
       "heartbeat": {
         "every": "0m"
       },
@@ -37,7 +43,7 @@
     }
   },
   "tools": {
-    "toolSearch": true,
+    "toolSearch": false,
     "codeMode": {
       "timeoutMs": 60000
     },
