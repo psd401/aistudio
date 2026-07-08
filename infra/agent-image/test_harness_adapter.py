@@ -125,3 +125,29 @@ class TestAccumulateAssistant(unittest.TestCase):
 
     def test_boundary_with_empty_accum_adds_no_leading_separator(self):
         self.assertEqual(self.acc("", "First words", False, True), "First words")
+
+
+class TestResolveDeadline(unittest.TestCase):
+    """Turn-deadline resolution incl. the async-job override (#1138)."""
+
+    resolve = staticmethod(OpenClawAdapter._resolve_deadline_s)
+
+    def test_no_override_defaults_to_840(self):
+        self.assertEqual(self.resolve(None), 840)
+
+    def test_job_override_passes_within_ceiling(self):
+        self.assertEqual(self.resolve(7200), 7200)
+        self.assertEqual(self.resolve(3600), 3600)
+
+    def test_job_override_clamps_to_bounds(self):
+        self.assertEqual(self.resolve(50000), 7200)
+        self.assertEqual(self.resolve(5), 60)
+
+    def test_garbage_override_degrades_to_default(self):
+        self.assertEqual(self.resolve("not-a-number"), 840)
+
+    def test_env_path_still_clamped_to_840(self):
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"OPENCLAW_CHAT_DEADLINE_S": "7200"}):
+            self.assertEqual(self.resolve(None), 840)

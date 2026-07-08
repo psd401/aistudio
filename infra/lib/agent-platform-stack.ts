@@ -2,6 +2,8 @@ import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
+import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
+import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -2146,6 +2148,125 @@ export class AgentPlatformStack extends cdk.Stack {
 
     cdk.Tags.of(this.routerLambda).add('Environment', environment);
     cdk.Tags.of(this.routerLambda).add('ManagedBy', 'cdk');
+
+    // -------------------------------------------------------------------------
+    // Async job-runner (issue #1138 — "the 14-minute wall")
+    //
+    // A multi-step agent turn that hits the router's 14-minute deadline is
+    // promoted ONCE to an on-demand Fargate task (promoteToJob in the router).
+    // The task runs the SAME compiled agent-router package with a different
+    // entrypoint (dist/job-main.js), resumes the same AgentCore session with a
+    // 2-hour deadline (AgentCore invocations may run up to 8h — only the
+    // Lambda caller was capped at 15 min), and posts the final answer to the
+    // originating Chat space. No always-on compute: the cluster is free and
+    // tasks exist only while a job runs.
+    // -------------------------------------------------------------------------
+    const jobCluster = new ecs.Cluster(this, 'JobRunnerCluster', {
+      clusterName: `psd-agent-jobs-${environment}`,
+      vpc,
+      containerInsightsV2: ecs.ContainerInsights.DISABLED,
+    });
+
+    const jobLogGroup = new logs.LogGroup(this, 'JobRunnerLogGroup', {
+      logGroupName: `/ecs/psd-agent-job-runner-${environment}`,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const jobTaskDef = new ecs.FargateTaskDefinition(this, 'JobRunnerTaskDef', {
+      family: `psd-agent-job-runner-${environment}`,
+      // I/O-bound: the task mostly holds an SSE stream open while the
+      // AgentCore microVM does the work. 512/1024 is generous headroom.
+      cpu: 512,
+      memoryLimitMiB: 1024,
+      runtimePlatform: {
+        cpuArchitecture: ecs.CpuArchitecture.ARM64,
+        operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+      },
+    });
+
+    jobTaskDef.addContainer('job-runner', {
+      containerName: 'job-runner',
+      image: ecs.ContainerImage.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-router'),
+        { file: 'Dockerfile', platform: ecrAssets.Platform.LINUX_ARM64 },
+      ),
+      logging: ecs.LogDrivers.awsLogs({
+        logGroup: jobLogGroup,
+        streamPrefix: 'job',
+      }),
+      environment: {
+        ENVIRONMENT: environment,
+        // Region for the SDK clients the shared router module constructs.
+        AWS_REGION: this.region,
+        AWS_ACCOUNT_ID: this.account,
+        NODE_ENV: 'production',
+        SESSION_LOCKS_TABLE: this.sessionLocksTable.tableName,
+        GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
+        DATABASE_HOST: props.databaseHost,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: props.databaseName || 'aistudio',
+        // The undici dispatcher must outlive the 2h job deadline: 2h05m.
+        AGENTCORE_TIMEOUT_MS_OVERRIDE: String((2 * 60 + 5) * 60 * 1000),
+        // JOB_PAYLOAD is injected per-run via RunTask containerOverrides.
+      },
+    });
+
+    // Task role — mirrors ONLY what job-main.ts touches: AgentCore invoke,
+    // the two secrets, the session-locks table, and (via awslogs) the log
+    // group on the execution role.
+    jobTaskDef.addToTaskRolePolicy(new iam.PolicyStatement({
+      sid: 'AgentCoreInvoke',
+      effect: iam.Effect.ALLOW,
+      actions: ['bedrock-agentcore:InvokeAgentRuntime', 'bedrock-agentcore:InvokeAgentRuntimeForUser'],
+      resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
+    }));
+    this.googleCredentialsSecret.grantRead(jobTaskDef.taskRole);
+    dbSecret.grantRead(jobTaskDef.taskRole);
+    this.sessionLocksTable.grantReadWriteData(jobTaskDef.taskRole);
+
+    const jobRunnerSg = new ec2.SecurityGroup(this, 'JobRunnerSg', {
+      vpc,
+      description:
+        'psd-agent job-runner Fargate tasks — egress only (Aurora ingress is VPC-CIDR-wide)',
+      allowAllOutbound: true,
+    });
+
+    // Router promotes turns by launching the task. RunTask needs the task-def
+    // ARN and PassRole on both roles the task assumes.
+    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'JobRunnerLaunch',
+      effect: iam.Effect.ALLOW,
+      actions: ['ecs:RunTask'],
+      resources: [jobTaskDef.taskDefinitionArn],
+    }));
+    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'JobRunnerPassRole',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:PassRole'],
+      resources: [
+        jobTaskDef.taskRole.roleArn,
+        jobTaskDef.obtainExecutionRole().roleArn,
+      ],
+      conditions: {
+        StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' },
+      },
+    }));
+
+    this.routerLambda.addEnvironment('JOB_CLUSTER_ARN', jobCluster.clusterArn);
+    this.routerLambda.addEnvironment('JOB_TASK_DEF_ARN', jobTaskDef.taskDefinitionArn);
+    this.routerLambda.addEnvironment(
+      'JOB_SUBNETS',
+      vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS })
+        .subnetIds.join(','),
+    );
+    this.routerLambda.addEnvironment('JOB_SECURITY_GROUP', jobRunnerSg.securityGroupId);
+    this.routerLambda.addEnvironment('JOB_CONTAINER_NAME', 'job-runner');
+
+    cdk.Tags.of(jobCluster).add('Environment', environment);
+    cdk.Tags.of(jobCluster).add('ManagedBy', 'cdk');
+    cdk.Tags.of(jobLogGroup).add('Environment', environment);
+    cdk.Tags.of(jobLogGroup).add('ManagedBy', 'cdk');
 
     // Wire SQS → Lambda trigger
     // NOTE on duplicate processing: With batchSize=1 and 18-min visibility timeout
