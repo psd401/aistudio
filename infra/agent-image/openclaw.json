@@ -41,7 +41,7 @@
     "codeMode": {
       "timeoutMs": 60000
     },
-    "deny": ["cron", "nodes", "gateway", "sessions_spawn", "subagents"]
+    "deny": ["cron", "nodes", "gateway"]
   },
   "skills": {
     "load": {
