@@ -205,3 +205,35 @@ class TestSanitizeHeaderField(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInlineBearerToken(unittest.TestCase):
+    """Boot must not abort when the native aws-sdk provider is active (#1138 r10 regression)."""
+
+    def _run(self, cfg):
+        import json as _json
+        import tempfile, os
+        from agentcore_wrapper import _inline_bearer_token
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            _json.dump(cfg, f)
+        try:
+            result = _inline_bearer_token(path, "tok-123")
+            with open(path) as f:
+                return result, _json.load(f)
+        finally:
+            os.unlink(path)
+
+    def test_native_provider_config_returns_false_untouched(self):
+        cfg = {"models": {"providers": {"amazon-bedrock": {"auth": "aws-sdk"}}}}
+        result, after = self._run(cfg)
+        self.assertFalse(result)
+        self.assertEqual(after, cfg)
+
+    def test_mantle_provider_gets_token_inlined(self):
+        cfg = {"models": {"providers": {"amazon-bedrock-mantle": {"apiKey": "env:X"}}}}
+        result, after = self._run(cfg)
+        self.assertTrue(result)
+        self.assertEqual(
+            after["models"]["providers"]["amazon-bedrock-mantle"]["apiKey"], "tok-123"
+        )
