@@ -90,7 +90,12 @@ export async function createJobAction(
         log.warn("Non-admin attempted to attribute a job to another user", { requested })
         throw ErrorFactories.authzInsufficientPermissions("create jobs for other users")
       }
-      userIdNum = requested
+      // Assign the trusted, session-derived callerId rather than the
+      // tainted `requested` value — the equality check above proves they're
+      // the same number, but reusing `requested` here is what CodeQL's
+      // js/user-controlled-bypass rule keeps flagging (a user-controlled
+      // value reaching the sink, regardless of the preceding guard).
+      userIdNum = callerId
     } else {
       userIdNum = callerId
     }
