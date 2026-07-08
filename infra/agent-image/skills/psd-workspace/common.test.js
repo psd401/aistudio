@@ -142,7 +142,10 @@ describe('user-scope file creation is impersonation — hard blocked (2026-07-07
   test('same creations are allowed on the agent slot', () => {
     for (const cmd of [
       `drive files create --json '{"name":"[Agent] x"}'`,
+      `drive files copy --params '{"fileId":"f1"}'`,
       `docs documents create --json '{"title":"Summary"}'`,
+      `sheets spreadsheets create --json '{"properties":{"title":"x"}}'`,
+      `slides presentations create --json '{"title":"x"}'`,
     ]) {
       expect(enforcePhase1Gates(cmd, AGENT_CTX).allowed).toBe(true);
     }
