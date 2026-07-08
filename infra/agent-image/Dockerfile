@@ -35,18 +35,26 @@
 #     smoke test (docs/operations/agent-platform-setup.md) before trusting it.
 #
 # Multi-arch index digest (Docker picks arm64 at build time via --platform):
-#   ghcr.io/openclaw/openclaw:2026.6.11
-#   index: sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
-#   arm64: sha256:0d5a5edced0af33baea44e0612d72f4d2cf75251613b48ea68ca14727faf2373
+#   ghcr.io/openclaw/openclaw:2026.7.1-beta.2
+#   index: sha256:0e5680d7d58d3b6c08afa0fc992f4ad319b5586f60923e1985b7c6f838c535d5
 #
-# Rollback target (previous good pin):
+# Why a PRERELEASE pin (2026-07-08, #1138): 2026.6.11 (last stable) ships the
+# P1 packaging bug openclaw#99677 — "reconcile is not a function" after every
+# auto-compaction — which aborted a live production run (the 7/6 Plaud task).
+# The fix (openclaw PR #99678) landed in 2026.7.1-beta.2, alongside fixes for
+# empty-reply surfacing (#100456) and compaction prechecks/mid-stream
+# recovery, all of which match failure classes we observed. Move this pin to
+# 2026.7.1 STABLE as soon as it publishes.
+#
+# Rollback targets (previous pins):
+#   2026.6.11  index sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
 #   2026.4.20  index sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
 #
 # DO NOT revert to `:latest` or bump without (a) confirming the workspace
 # double-nesting fix by commit ancestry and (b) a clean end-to-end test that
 # includes the Morning Brief payload — a trivial "respond OK" prompt masks
 # session-completion regressions.
-FROM ghcr.io/openclaw/openclaw@sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7
+FROM ghcr.io/openclaw/openclaw@sha256:0e5680d7d58d3b6c08afa0fc992f4ad319b5586f60923e1985b7c6f838c535d5
 
 # Switch to root for installations
 USER root
@@ -199,11 +207,28 @@ RUN mkdir -p /home/node/.openclaw/memory
 # openclaw.json tuning notes (keep here — JSON can't carry comments and
 # OpenClaw's config validator rejects "//" pseudo-keys):
 #
-#   providers.amazon-bedrock — points at Bedrock Mantle, AWS's
-#   OpenAI-compatible endpoint for Bedrock. We used to run a local
-#   bedrock-proxy.js that translated OpenAI → Converse; Mantle removes that
-#   translation layer entirely. Result: we own no per-model format adapter
-#   code; any Bedrock model works by changing the `id` below.
+#   providers.amazon-bedrock — OpenClaw's NATIVE Bedrock provider
+#   (api bedrock-converse-stream, auth aws-sdk → execution-role credentials;
+#   AWS_REGION comes from runtimeEnvVars). Replaced the amazon-bedrock-mantle
+#   route through our local mantle_proxy on 2026-07-08 (#1138): measured
+#   17.7 tok/s median through the proxy path vs ~46 tok/s on Converse with
+#   the us. profile, and the proxy's 300s upstream timeout aborted a live
+#   background job. mantle_proxy.py is still LAUNCHED by the wrapper but is
+#   inert (no provider points at it) — kept as the config-only rollback path;
+#   remove after the native provider has a clean week.
+#   contextWindow is set to the HONEST 200k Converse limit (the prior 1M
+#   claim caused a real "Context overflow" abort); contextTokens 180000
+#   leaves compaction margin below it. params.cacheRetention "long" +
+#   contextPruning cache-ttl are the documented production caching pattern
+#   (heartbeat stays 0m: AgentCore microVMs idle out at 15 min, so a 55m
+#   cache-warm heartbeat can never fire). Model swaps remain one id string.
+#   tools.toolSearch=false (2026-07-08, #1138): toolSearch is an EXPERIMENTAL
+#   off-by-default mode we enabled for the GLM-5 token diet; with it every
+#   action costs search/describe/call round-trips through a JS sandbox
+#   (measured 35 model calls for an 8-API-call task). OpenClaw's docs:
+#   "Direct tool exposure is still the right default for small catalogs" —
+#   ours is ~30 tools, and Sonnet 5's prompt caching makes the schema prefix
+#   cheap. codeMode.timeoutMs is retained (inert unless code-mode returns).
 #
 #   agents.defaults.memorySearch — embedding provider for semantic search over
 #   the agent's local ~/.openclaw/memory/ files. OpenClaw's default provider is

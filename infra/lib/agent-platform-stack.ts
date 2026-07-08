@@ -491,7 +491,13 @@ export class AgentPlatformStack extends cdk.Stack {
               'bedrock:ConverseStream',
             ],
             resources: [
-              `arn:aws:bedrock:${this.region}::foundation-model/*`,
+              // Cross-region inference profiles (us.*) authorize against the
+              // DESTINATION region's foundation-model ARN — grant all three
+              // regions the us.* profiles span (same lesson as the guardrail
+              // profile, #1138).
+              `arn:aws:bedrock:us-east-1::foundation-model/*`,
+              `arn:aws:bedrock:us-east-2::foundation-model/*`,
+              `arn:aws:bedrock:us-west-2::foundation-model/*`,
               `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
             ],
           }),
@@ -741,7 +747,12 @@ export class AgentPlatformStack extends cdk.Stack {
         'bedrock:ConverseStream',
       ],
       resources: [
-        `arn:aws:bedrock:${this.region}::foundation-model/*`,
+        // Cross-region us.* profiles authorize against the DESTINATION
+        // region's foundation-model ARN (verified live for the guardrail
+        // profile, #1138) — grant all three regions the profiles span.
+        `arn:aws:bedrock:us-east-1::foundation-model/*`,
+        `arn:aws:bedrock:us-east-2::foundation-model/*`,
+        `arn:aws:bedrock:us-west-2::foundation-model/*`,
         `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
         // Cross-region inference profiles use region-less format (us, eu, ap)
         // See: https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html
