@@ -120,6 +120,51 @@ describe('resolvePayloadFiles', () => {
   });
 });
 
+describe('user-scope file creation is impersonation — hard blocked (2026-07-07)', () => {
+  const USER_CTX = { scope: 'user_account', ownerEmail: 'hagelk@psd401.net' };
+  const AGENT_CTX = { scope: 'agent_account', ownerEmail: 'hagelk@psd401.net' };
+
+  test('drive/docs/sheets/slides creation blocked on the user slot', () => {
+    for (const cmd of [
+      `drive files create --json '{"name":"[Agent] x"}'`,
+      `drive files copy --params '{"fileId":"f1"}'`,
+      `docs documents create --json '{"title":"Summary"}'`,
+      `sheets spreadsheets create --json '{"properties":{"title":"x"}}'`,
+      `slides presentations create --json '{"title":"x"}'`,
+      'drive.files.create --json \'{"name":"x"}\'',
+    ]) {
+      const gate = enforcePhase1Gates(cmd, USER_CTX);
+      expect(gate.allowed).toBe(false);
+      expect(gate.reason).toContain('owned by the user');
+    }
+  });
+
+  test('same creations are allowed on the agent slot', () => {
+    for (const cmd of [
+      `drive files create --json '{"name":"[Agent] x"}'`,
+      `docs documents create --json '{"title":"Summary"}'`,
+    ]) {
+      expect(enforcePhase1Gates(cmd, AGENT_CTX).allowed).toBe(true);
+    }
+  });
+
+  test('missing/unknown scope fails closed to the user-slot rules', () => {
+    expect(enforcePhase1Gates(`docs documents create --json '{"title":"x"}'`, undefined).allowed).toBe(false);
+    expect(enforcePhase1Gates(`docs documents create --json '{"title":"x"}'`, { scope: 'weird' }).allowed).toBe(false);
+  });
+
+  test('user-slot reads and non-file writes are unaffected', () => {
+    for (const cmd of [
+      'drive files list --params \'{"q":"name contains x"}\'',
+      `calendar events insert --json '{"summary":"Standup"}'`,
+      `gmail +draft --to a@psd401.net --subject Hi --body ok`,
+      `tasks tasks insert --json '{"title":"x"}'`,
+    ]) {
+      expect(enforcePhase1Gates(cmd, USER_CTX).allowed).toBe(true);
+    }
+  });
+});
+
 describe('explicit in-district sharing (widened gate, 2026-07-07)', () => {
   const CTX = { scope: 'agent_account', ownerEmail: 'hagelk@psd401.net' };
   const share = (perm) =>

@@ -13,7 +13,7 @@ Google Workspace access for the user's data, gated by Phase 1 boundaries (#912).
 
 Phase 1 introduces two parallel OAuth identities per user. The `--scope` flag selects which:
 
-- `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Scopes: `gmail.modify` (read + draft + send + archive/label, no permanent delete), `calendar`, `tasks`, `drive.file`. Use this for reading the user's mail, managing their tasks, writing to their calendar, creating new Drive files for them. Sending is gated by behavioral rules — always confirm before actually sending.
+- `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Scopes: `gmail.modify` (read + draft + send + archive/label, no permanent delete), `calendar`, `tasks`, `drive.file`. Use this for reading the user's mail, managing their tasks, writing to their calendar. **NEVER for creating Drive files/Docs/Sheets/Slides** — a file created on this slot is OWNED BY THE USER, which is impersonation (hard-blocked at the skill layer, 2026-07-07). Every document you produce is created with `--scope agent` and shared explicitly. Sending is gated by behavioral rules — always confirm before actually sending.
 - `--scope agent` — OAuth on the agent identity (e.g. `agnt_hagelk@psd401.net`). Broad scopes. Use this for actions the agent takes *as itself* (the agent's own calendar, drafts owned by the agent, agent-owned Drive folder).
 
 If you omit `--scope`, the skill defaults to `user`. Phase 1 work is overwhelmingly on user data.
@@ -164,7 +164,8 @@ These cannot be bypassed by phrasing. The skill returns exit code 13 with `statu
 
 - **No sending mail.** `gmail.users.messages.send`, `gmail.users.drafts.send`, `+send`, `+reply`, `+reply-all`, `+forward` — all blocked. Drafts only.
 - **No deletes.** Mail (delete/trash/batchDelete), events, calendars, Drive files, drive trash, tasks, tasklists.
-- **No permission changes.** `drive.permissions.create/update/delete`.
+- **No permission changes.** `drive.permissions.create/update/delete` (except the explicit in-district shapes below).
+- **No file creation as the user.** `drive files create/copy`, `docs documents create`, `sheets spreadsheets create`, `slides presentations create` on `--scope user` are hard-blocked — a file created there is owned by the user's account (impersonation; no attribution trail). Create with `--scope agent`, then share explicitly. This has NO exception and no phrasing gets around it.
 
 **Exception — explicit in-district shares of YOUR OWN files.** `drive.permissions.create` is permitted only on files the agent owns (`--scope agent`), only as `create` (never update/delete), and only in these explicit shapes:
 

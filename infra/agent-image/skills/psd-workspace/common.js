@@ -382,6 +382,27 @@ function execGws(commandString, accessToken, payloads) {
 // `pattern` matches against the SPACE-JOINED argv tokens, lowercased — so
 // `gws gmail users messages send` and `gws gmail.users.messages.send` both
 // trigger the same rule.
+// Operations forbidden ONLY on the user OAuth slot (scope === 'user_account').
+//
+// Added 2026-07-07 (Hagel, #1138): the agent recreated documents OWNED BY THE
+// USER's account to route around the sharing gate ("do not create documents
+// as my account, that's a huge hole security-wise"). File creation as the
+// user is impersonation — every artifact must be owned by the agent identity
+// (auditable, gate-enforced sharing) and shared explicitly via
+// isPermittedExplicitShare. Drafts/calendar/tasks on the user slot remain
+// allowed: they are marker-stamped, land in review surfaces (Drafts folder,
+// own calendar), and were explicitly designed as user-slot writes.
+const USER_SCOPE_FORBIDDEN = [
+  { pattern: /\bdrive[\s.]+files[\s.]+(create|copy)\b/i,
+    reason: 'creating files owned by the user (create as the agent and share explicitly instead)' },
+  { pattern: /\bdocs[\s.]+documents[\s.]+create\b/i,
+    reason: 'creating a Google Doc owned by the user (create as the agent and share explicitly instead)' },
+  { pattern: /\bsheets[\s.]+spreadsheets[\s.]+create\b/i,
+    reason: 'creating a Google Sheet owned by the user (create as the agent and share explicitly instead)' },
+  { pattern: /\bslides[\s.]+presentations[\s.]+create\b/i,
+    reason: 'creating a Google Slides deck owned by the user (create as the agent and share explicitly instead)' },
+];
+
 const PHASE1_FORBIDDEN = [
   // Send mail — any path that puts a message on the wire
   { pattern: /\bgmail[\s.]+users[\s.]+messages[\s.]+send\b/i,
@@ -517,6 +538,18 @@ function isPermittedExplicitShare(commandString, context) {
 function enforcePhase1Gates(commandString, context) {
   if (!commandString || typeof commandString !== 'string') {
     return { allowed: true };
+  }
+  // Scope-conditional gates: file creation as the USER is impersonation
+  // (2026-07-07, see USER_SCOPE_FORBIDDEN). Checked first — these have no
+  // exceptions. Fail-closed default: when scope is missing/unknown we still
+  // apply the user-slot rules (run.js always passes a resolved scope; only
+  // a buggy caller would omit it, and the agent slot is the privileged one).
+  if (!context || context.scope !== 'agent_account') {
+    for (const { pattern, reason } of USER_SCOPE_FORBIDDEN) {
+      if (pattern.test(commandString)) {
+        return { allowed: false, reason };
+      }
+    }
   }
   for (const { pattern, reason } of PHASE1_FORBIDDEN) {
     if (pattern.test(commandString)) {
