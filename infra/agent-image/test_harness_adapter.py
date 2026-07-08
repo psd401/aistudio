@@ -151,3 +151,50 @@ class TestResolveDeadline(unittest.TestCase):
         from unittest import mock
         with mock.patch.dict(os.environ, {"OPENCLAW_CHAT_DEADLINE_S": "7200"}):
             self.assertEqual(self.resolve(None), 840)
+
+
+class TestRecordItemToolEvent(unittest.TestCase):
+    """Native-mode tool items must land in tool_calls telemetry (#1138 r12)."""
+
+    def test_start_then_end_records_one_call(self):
+        starts, calls = {}, []
+        OpenClawAdapter._record_item_tool_event(
+            {"itemId": "t1", "phase": "start", "kind": "tool", "name": "exec", "meta": "run grants"},
+            starts, calls,
+        )
+        self.assertIn("t1", starts)
+        OpenClawAdapter._record_item_tool_event(
+            {"itemId": "t1", "phase": "end", "kind": "tool", "status": "completed", "output": "done"},
+            starts, calls,
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "exec")
+        self.assertEqual(calls[0]["status"], "success")
+        self.assertEqual(calls[0]["result"], "done")
+
+    def test_error_status_recorded(self):
+        starts, calls = {}, []
+        OpenClawAdapter._record_item_tool_event(
+            {"itemId": "t2", "phase": "start", "kind": "tool", "name": "read"}, starts, calls)
+        OpenClawAdapter._record_item_tool_event(
+            {"itemId": "t2", "phase": "end", "kind": "tool", "status": "error", "error": "boom"},
+            starts, calls,
+        )
+        self.assertEqual(calls[0]["status"], "error")
+        self.assertEqual(calls[0]["error_text"], "boom")
+
+    def test_end_without_start_still_records(self):
+        starts, calls = {}, []
+        OpenClawAdapter._record_item_tool_event(
+            {"itemId": "t3", "phase": "end", "kind": "tool", "name": "write", "status": "completed"},
+            starts, calls,
+        )
+        self.assertEqual(calls[0]["name"], "write")
+
+
+class TestEmptyTurnNudge(unittest.TestCase):
+    def test_nudge_text_demands_summary_without_rerunning_tools(self):
+        n = OpenClawAdapter.EMPTY_TURN_NUDGE
+        self.assertIn("[system-nudge]", n)
+        self.assertIn("NO reply", n)
+        self.assertIn("Do not", n)
