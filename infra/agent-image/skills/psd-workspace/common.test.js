@@ -191,11 +191,19 @@ describe('explicit in-district sharing (widened gate, 2026-07-07)', () => {
     expect(share({ fileId: 'f', type: 'domain', role: 'reader', domain: 'gmail.com' })).toBe(false);
   });
 
-  test('external, anyone, group, and writer stay blocked', () => {
+  test('writer allowed for explicitly NAMED district users (2026-07-08)', () => {
+    expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'hagelk@psd401.net' })).toBe(true);
+    expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'songstadw@psd401.net' })).toBe(true);
+    // Writer never crosses the district boundary or widens to domain/owner.
+    expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'evil@outside.com' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'domain', role: 'writer', domain: 'psd401.net' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'user', role: 'owner', emailAddress: 'hagelk@psd401.net' })).toBe(false);
+  });
+
+  test('external, anyone, and group stay blocked', () => {
     expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'evil@outside.com' })).toBe(false);
     expect(share({ fileId: 'f', type: 'anyone', role: 'reader' })).toBe(false);
     expect(share({ fileId: 'f', type: 'group', role: 'reader', emailAddress: 'staff@psd401.net' })).toBe(false);
-    expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'hagelk@psd401.net' })).toBe(false);
   });
 
   test('user scope and update/delete remain fully blocked', () => {

@@ -467,11 +467,14 @@ const AGENT_SHARE_DOMAIN = (process.env.AGENT_SHARE_DOMAIN || 'psd401.net').toLo
  *     permission changes on user-owned files remain fully blocked)
  *   - create only (update/delete remain blocked)
  *   - EITHER type === 'user' with an @psd401.net emailAddress,
- *     role ∈ {reader, commenter}
+ *     role ∈ {reader, commenter, writer} (writer added 2026-07-08, Hagel:
+ *     explicitly NAMED district individuals may edit agent-owned docs —
+ *     team collaboration on posted docs)
  *   - OR     type === 'domain' with domain === psd401.net, role === 'reader'
- *     (broad in-district visibility for docs posted to shared spaces)
+ *     (broad in-district visibility for docs posted to shared spaces;
+ *     domain-wide stays read-only — district-wide edit is vandalism surface)
  *   - NEVER: type 'anyone' or 'group', external addresses/domains,
- *     writer/owner roles.
+ *     owner transfer.
  *
  * Returns true if the share request fits the explicit in-district shape;
  * false otherwise. False means fall through to the existing block.
@@ -510,8 +513,11 @@ function isPermittedExplicitShare(commandString, context) {
   const domain = typeof perm.domain === 'string' ? perm.domain.toLowerCase() : '';
 
   if (type === 'user') {
-    // Explicit named recipient — must be in-district; reader/commenter only.
-    if (role !== 'reader' && role !== 'commenter') return false;
+    // Explicit named recipient — must be in-district. Writer allowed for
+    // named individuals (2026-07-08); owner transfer never.
+    if (role !== 'reader' && role !== 'commenter' && role !== 'writer') {
+      return false;
+    }
     return emailAddress.endsWith(`@${AGENT_SHARE_DOMAIN}`);
   }
   if (type === 'domain') {

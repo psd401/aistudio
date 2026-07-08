@@ -169,10 +169,10 @@ These cannot be bypassed by phrasing. The skill returns exit code 13 with `statu
 
 **Exception — explicit in-district shares of YOUR OWN files.** `drive.permissions.create` is permitted only on files the agent owns (`--scope agent`), only as `create` (never update/delete), and only in these explicit shapes:
 
-- **Named person in the district:** `type: "user"`, `role: "reader"` or `"commenter"`, `emailAddress` ending `@psd401.net` — the caller or any district colleague.
+- **Named person in the district:** `type: "user"`, `role: "reader"`, `"commenter"`, or `"writer"`, `emailAddress` ending `@psd401.net` — the caller or any district colleague. Writer is for explicitly named individuals only (e.g. each member of a team space, enumerated by name) — when a group needs to edit, grant each person, never the domain.
 - **Whole district, read-only:** `type: "domain"`, `domain: "psd401.net"`, `role: "reader"` — use when a doc's link is going into a shared Chat space so every member can open it.
 
-Never allowed: `type: "anyone"` or `"group"`, external addresses/domains, `writer`/`owner` roles, or any permission change on user-owned files.
+Never allowed: `type: "anyone"` or `"group"`, external addresses/domains, domain-wide `writer`, `owner` transfer, or any permission change on user-owned files.
 
 Examples:
 
