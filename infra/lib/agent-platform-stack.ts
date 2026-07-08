@@ -2227,8 +2227,11 @@ export class AgentPlatformStack extends cdk.Stack {
 
     const jobRunnerSg = new ec2.SecurityGroup(this, 'JobRunnerSg', {
       vpc,
+      // EC2 GroupDescription is ASCII-only — a unicode dash here failed the
+      // whole 2026-07-07 deploy (CREATE_FAILED: "Character sets beyond ASCII
+      // are not supported"). Keep this string plain ASCII.
       description:
-        'psd-agent job-runner Fargate tasks — egress only (Aurora ingress is VPC-CIDR-wide)',
+        'psd-agent job-runner Fargate tasks - egress only (Aurora ingress is VPC-CIDR-wide)',
       allowAllOutbound: true,
     });
 
