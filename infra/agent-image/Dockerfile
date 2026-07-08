@@ -251,14 +251,18 @@ RUN mkdir -p /home/node/.openclaw/memory
 #   config.model — requires adding a second model to bedrock-proxy. Until
 #   then the sub-agent adds ~5-10s to every turn's wall-clock latency.
 #
-#   tools.deny += sessions_spawn, subagents (2026-07-07, #1138) — OpenClaw
-#   subagents complete silently in THIS deployment: their "results
-#   auto-announce to your requester" lands in the OpenClaw session, but only
-#   an active chat turn can post to Google Chat, so the user never sees it.
-#   Observed live: a skill-audit ran to completion in a subagent and never
-#   reached the user. Long work must stay inline where the router's async-job
-#   promotion (#1147) can catch it. Tool ids verified against
-#   docs/gateway/config-tools.md (group:sessions table).
+#   Subagents (sessions_spawn) are ENABLED — with a behavioral contract.
+#   History (2026-07-07, #1138): they were briefly denied after a subagent's
+#   finished work never reached the user (completion announcements land in
+#   the OpenClaw session; only an ACTIVE chat turn can post to Google Chat).
+#   Product decision (Hagel): the capability is wanted — the failure was the
+#   USAGE pattern (main agent ended its turn while children ran). psd-rules
+#   Rule 15 now enforces hold-your-turn: spawn freely, but keep the turn
+#   open until every subagent reports, then reply. Long waits compose with
+#   the async-job promotion (#1147), which keeps the session delivering past
+#   the 14-min router ceiling. If silent-completion recurs DESPITE Rule 15,
+#   the deny list entries were "sessions_spawn", "subagents" (ids per
+#   OpenClaw docs/gateway/config-tools.md group:sessions).
 #
 #   tools.codeMode.timeoutMs=60000 — code-mode (tool_search_code) VM
 #   execution ceiling, raised from the 10s default to the documented max
