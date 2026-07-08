@@ -22,14 +22,11 @@ export async function getServerSession(): Promise<CognitoSession | null> {
   const context = await createRequestContext();
   
   try {
-    // logger.debug("Creating auth instance", { requestId: context.requestId });
-    
     // Create new auth instance per request
     const { auth } = createAuth();
     const session = await auth();
-    
+
     if (!session?.user?.id) {
-      // logger.debug("No session found", { requestId: context.requestId });
       return null;
     }
 
