@@ -426,28 +426,36 @@ const PHASE1_FORBIDDEN = [
     reason: 'modifying Drive sharing permissions (Phase 1: no permission changes)' },
 ];
 
+// District domain for the explicit-share exception. Env-overridable so
+// non-prod environments could narrow/redirect it; the default is the only
+// domain the platform serves.
+const AGENT_SHARE_DOMAIN = (process.env.AGENT_SHARE_DOMAIN || 'psd401.net').toLowerCase();
+
 /**
- * Narrow exception to the `drive.permissions.create` block: the agent is
- * permitted to share files it owns (scope === 'agent_account') back to the
- * caller who initiated the conversation, as `reader` or `commenter` only.
+ * Exception to the `drive.permissions.create` block: the agent may grant
+ * EXPLICIT, bounded permissions on files it owns (scope === 'agent_account').
  *
- * Rationale: when the agent creates artifacts on a user's behalf — investigation
- * reports, drafts, generated docs — it stores them in its own agent_account
- * Drive (because user_account scopes are intentionally narrow). Without this
- * exception, the user has no way to view the artifact, since the broad
- * `drive.permissions.create` block prevents even hand-back-to-owner sharing.
+ * Rationale: the agent stores artifacts it creates (reports, generated docs,
+ * meeting summaries) on its own agent_account Drive. Originally it could
+ * share them only back to the CALLER; product decision 2026-07-07 (Hagel,
+ * #1138 — team docs must land in shared Chat spaces) widened this to
+ * in-district sharing with explicit grants.
  *
  * Hard constraints (ALL must be true to allow):
- *   - context.scope is 'agent_account'  (sharing FROM the agent's own Drive)
- *   - context.ownerEmail matches the permission's emailAddress (caller only;
- *     no third-party shares, no domain shares, no anyone-with-link)
- *   - permission.type === 'user'        (no domain / group / anyone)
- *   - permission.role ∈ {reader, commenter}  (no writer/owner transfer)
+ *   - context.scope is 'agent_account'  (sharing FROM the agent's own Drive;
+ *     permission changes on user-owned files remain fully blocked)
+ *   - create only (update/delete remain blocked)
+ *   - EITHER type === 'user' with an @psd401.net emailAddress,
+ *     role ∈ {reader, commenter}
+ *   - OR     type === 'domain' with domain === psd401.net, role === 'reader'
+ *     (broad in-district visibility for docs posted to shared spaces)
+ *   - NEVER: type 'anyone' or 'group', external addresses/domains,
+ *     writer/owner roles.
  *
- * Returns true if the share request is the narrow caller-only handoff;
+ * Returns true if the share request fits the explicit in-district shape;
  * false otherwise. False means fall through to the existing block.
  */
-function isShareToCallerHandoff(commandString, context) {
+function isPermittedExplicitShare(commandString, context) {
   if (!context || context.scope !== 'agent_account' || !context.ownerEmail) {
     return false;
   }
@@ -456,36 +464,13 @@ function isShareToCallerHandoff(commandString, context) {
     return false;
   }
 
-  // Extract the --json payload without mutating it. We reuse the same brace-
-  // balanced parser idea as mutateJsonField but read-only.
-  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
-  if (jsonFlagIdx === -1) return false;
-  let i = jsonFlagIdx + '--json'.length;
-  while (i < commandString.length && /\s/.test(commandString[i])) i++;
-  if (commandString[i] === "'" || commandString[i] === '"') i++;
-  const jsonStart = i;
-  if (commandString[jsonStart] !== '{') return false;
-  let depth = 0;
-  let inString = false;
-  let stringChar = '';
-  let escape = false;
-  let jsonEnd = -1;
-  for (let j = jsonStart; j < commandString.length; j++) {
-    const ch = commandString[j];
-    if (escape) { escape = false; continue; }
-    if (ch === '\\') { escape = true; continue; }
-    if (inString) {
-      if (ch === stringChar) inString = false;
-      continue;
-    }
-    if (ch === '"' || ch === "'") { inString = true; stringChar = ch; continue; }
-    if (ch === '{') depth++;
-    else if (ch === '}') { depth--; if (depth === 0) { jsonEnd = j; break; } }
-  }
-  if (jsonEnd === -1) return false;
+  // Extract the --json payload without mutating it (shared helper — same
+  // brace-balanced scan marker injection uses).
+  const jsonStr = extractJsonArg(commandString);
+  if (!jsonStr) return false;
   let payload;
   try {
-    payload = JSON.parse(commandString.slice(jsonStart, jsonEnd + 1));
+    payload = JSON.parse(jsonStr);
   } catch {
     return false;
   }
@@ -501,12 +486,20 @@ function isShareToCallerHandoff(commandString, context) {
   const emailAddress = typeof perm.emailAddress === 'string'
     ? perm.emailAddress.toLowerCase()
     : '';
+  const domain = typeof perm.domain === 'string' ? perm.domain.toLowerCase() : '';
 
-  if (type !== 'user') return false;
-  if (role !== 'reader' && role !== 'commenter') return false;
-  if (emailAddress !== context.ownerEmail.toLowerCase()) return false;
-
-  return true;
+  if (type === 'user') {
+    // Explicit named recipient — must be in-district; reader/commenter only.
+    if (role !== 'reader' && role !== 'commenter') return false;
+    return emailAddress.endsWith(`@${AGENT_SHARE_DOMAIN}`);
+  }
+  if (type === 'domain') {
+    // Whole-district visibility (docs linked in shared Chat spaces) —
+    // read-only, and ONLY our own domain.
+    return role === 'reader' && domain === AGENT_SHARE_DOMAIN;
+  }
+  // 'anyone', 'group', and everything else stay blocked.
+  return false;
 }
 
 /**
@@ -527,10 +520,11 @@ function enforcePhase1Gates(commandString, context) {
   }
   for (const { pattern, reason } of PHASE1_FORBIDDEN) {
     if (pattern.test(commandString)) {
-      // Narrow exception: agent shares its own file with the caller, read-only.
+      // Exception: agent grants explicit, bounded in-district permissions
+      // on files it owns (see isPermittedExplicitShare).
       if (
         /\bdrive[\s.]+permissions[\s.]+create\b/i.test(commandString) &&
-        isShareToCallerHandoff(commandString, context)
+        isPermittedExplicitShare(commandString, context)
       ) {
         return { allowed: true };
       }

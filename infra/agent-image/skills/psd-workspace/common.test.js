@@ -83,8 +83,8 @@ describe('resolvePayloadFiles', () => {
   });
 
   test('gates see the real payload through the synthetic command', () => {
-    // A share-to-caller handoff via --json-file: the gate's payload
-    // validation must be able to read type/role/emailAddress.
+    // An explicit share via --json-file: the gate's payload validation must
+    // be able to read type/role/emailAddress through the file indirection.
     const p = tmpFile(JSON.stringify({
       fileId: 'f1', type: 'user', role: 'reader', emailAddress: 'hagelk@psd401.net',
     }));
@@ -96,9 +96,9 @@ describe('resolvePayloadFiles', () => {
       ownerEmail: 'hagelk@psd401.net',
     });
     expect(gate.allowed).toBe(true);
-    // Same command with a third-party recipient must stay blocked.
+    // External recipients must stay blocked even through a file payload.
     const p2 = tmpFile(JSON.stringify({
-      fileId: 'f1', type: 'user', role: 'reader', emailAddress: 'other@psd401.net',
+      fileId: 'f1', type: 'user', role: 'reader', emailAddress: 'evil@outside.com',
     }));
     const resolved2 = resolvePayloadFiles(`drive permissions create --json-file ${p2}`);
     const gate2 = enforcePhase1Gates(resolved2.syntheticCommand, {
@@ -117,6 +117,55 @@ describe('resolvePayloadFiles', () => {
     const mutated = extractJsonArg(marked);
     expect(mutated).toContain('Created by your agent');
     expect(JSON.parse(mutated).description).toContain('Daily sync');
+  });
+});
+
+describe('explicit in-district sharing (widened gate, 2026-07-07)', () => {
+  const CTX = { scope: 'agent_account', ownerEmail: 'hagelk@psd401.net' };
+  const share = (perm) =>
+    enforcePhase1Gates(
+      `drive permissions create --json '${JSON.stringify(perm)}'`,
+      CTX
+    ).allowed;
+
+  test('named district colleague (not the caller) is now allowed', () => {
+    expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'songstadw@psd401.net' })).toBe(true);
+    expect(share({ fileId: 'f', type: 'user', role: 'commenter', emailAddress: 'colleague@psd401.net' })).toBe(true);
+  });
+
+  test('domain-wide reader for psd401.net is allowed', () => {
+    expect(share({ fileId: 'f', type: 'domain', role: 'reader', domain: 'psd401.net' })).toBe(true);
+  });
+
+  test('domain shares are reader-only and our-domain-only', () => {
+    expect(share({ fileId: 'f', type: 'domain', role: 'commenter', domain: 'psd401.net' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'domain', role: 'writer', domain: 'psd401.net' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'domain', role: 'reader', domain: 'gmail.com' })).toBe(false);
+  });
+
+  test('external, anyone, group, and writer stay blocked', () => {
+    expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'evil@outside.com' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'anyone', role: 'reader' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'group', role: 'reader', emailAddress: 'staff@psd401.net' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'hagelk@psd401.net' })).toBe(false);
+  });
+
+  test('user scope and update/delete remain fully blocked', () => {
+    const userScope = enforcePhase1Gates(
+      `drive permissions create --json '{"fileId":"f","type":"user","role":"reader","emailAddress":"hagelk@psd401.net"}'`,
+      { scope: 'user_account', ownerEmail: 'hagelk@psd401.net' }
+    );
+    expect(userScope.allowed).toBe(false);
+    const update = enforcePhase1Gates(
+      `drive permissions update --json '{"fileId":"f","type":"domain","role":"reader","domain":"psd401.net"}'`,
+      CTX
+    );
+    expect(update.allowed).toBe(false);
+  });
+
+  test('a subtly-external email that merely CONTAINS the domain is blocked', () => {
+    expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'x@psd401.net.evil.com' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'psd401.net@gmail.com' })).toBe(false);
   });
 });
 
