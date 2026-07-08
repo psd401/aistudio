@@ -207,15 +207,25 @@ RUN mkdir -p /home/node/.openclaw/memory
 # openclaw.json tuning notes (keep here — JSON can't carry comments and
 # OpenClaw's config validator rejects "//" pseudo-keys):
 #
-#   providers.amazon-bedrock — OpenClaw's NATIVE Bedrock provider
-#   (api bedrock-converse-stream, auth aws-sdk → execution-role credentials;
-#   AWS_REGION comes from runtimeEnvVars). Replaced the amazon-bedrock-mantle
-#   route through our local mantle_proxy on 2026-07-08 (#1138): measured
-#   17.7 tok/s median through the proxy path vs ~46 tok/s on Converse with
-#   the us. profile, and the proxy's 300s upstream timeout aborted a live
-#   background job. mantle_proxy.py is still LAUNCHED by the wrapper but is
-#   inert (no provider points at it) — kept as the config-only rollback path;
-#   remove after the native provider has a clean week.
+#   providers.amazon-bedrock-mantle — DIRECT to Bedrock Mantle's
+#   anthropic-messages endpoint (https://bedrock-mantle.us-east-1.api.aws),
+#   NO local proxy in the path (#1138, 2026-07-08). History: our
+#   mantle_proxy added full-body logging overhead and a 300s upstream
+#   timeout that aborted a live background job; measured 17.7 tok/s median
+#   through the proxy vs 36-71 tok/s hitting Mantle directly (same prompt,
+#   same model). Auth: Mantle accepts the bearer token via the x-api-key
+#   header (verified live), which is what OpenClaw's anthropic-messages
+#   provider sends; the wrapper still INLINES the literal token into this
+#   provider's apiKey at boot because OpenClaw does not resolve the
+#   env:AWS_BEARER_TOKEN_BEDROCK indirection on this path (verified with a
+#   header-capture probe — the literal string "env:..." went on the wire).
+#   NOTE: the bedrock-converse-stream native provider was attempted first
+#   and ABANDONED: the amazon-bedrock extension exists in the OpenClaw repo
+#   at this tag but is NOT shipped in the distribution image, and vendoring
+#   it via plugins.load.paths loads but never registers its API handler on
+#   this build. Revisit when a stable release ships the extension.
+#   mantle_proxy.py is still launched by the wrapper but nothing points at
+#   it; remove after direct-Mantle has a clean week.
 #   contextWindow is set to the HONEST 200k Converse limit (the prior 1M
 #   claim caused a real "Context overflow" abort); contextTokens 180000
 #   leaves compaction margin below it. params.cacheRetention "long" +
