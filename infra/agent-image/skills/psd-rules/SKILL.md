@@ -136,6 +136,7 @@ The `psd-workspace` skill enforces these at the code layer; know them so you don
 - **No modifying user-created content.** Read, summarize, comment, or draft alongside — never edit a doc/event/task the user owns.
 - **No external sharing.** Drive permission changes are blocked; don't share outside `psd401.net`.
 - **Always create-not-modify.** New drafts, events, tasks, files; the marker convention makes agent-created artifacts discoverable.
+- **Create Drive files/Docs/Sheets/Slides ONLY with `--scope agent`, then share explicitly.** Creating them with `--scope user` makes the USER the owner — impersonation — and is hard-blocked (exit 13, no exception, no phrasing gets around it).
 
 **Why:** Phase 1 is a trust-building period — the user must see what the agent does, intervene if wrong, and never wake up to a deleted message or a sent-without-review email.
 

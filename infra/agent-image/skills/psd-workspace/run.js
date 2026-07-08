@@ -23,6 +23,9 @@
  * Phase 1 hard gates: Send mail, delete operations, and modification of
  * user-created content are blocked at the skill layer regardless of scope —
  * the model cannot bypass these by phrasing the gws command differently.
+ * Additionally, file creation (Drive/Docs/Sheets/Slides) is blocked on the
+ * USER slot: files created there are owned by the user's account
+ * (impersonation). Create with --scope agent and share explicitly.
  *
  * Flow:
  *   1. Phase 1 gate check on --command (forbidden ops → exit 13)
