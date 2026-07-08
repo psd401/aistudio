@@ -40,6 +40,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DeleteCommand,
   DynamoDBDocumentClient,
+  GetCommand,
   PutCommand,
   QueryCommand,
   UpdateCommand,
@@ -54,6 +55,7 @@ import { SignatureV4 } from '@smithy/signature-v4';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { HttpRequest } from '@smithy/protocol-http';
+import { ECSClient, RunTaskCommand } from '@aws-sdk/client-ecs';
 import { S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { Context as LambdaContext, SQSBatchResponse, SQSEvent, SQSRecord } from 'aws-lambda';
@@ -70,6 +72,10 @@ import {
   type ChatAnnotation,
   type ChatAttachment,
 } from './attachments';
+import {
+  buildJobPayload,
+  shouldPromoteToJob,
+} from './job-promotion';
 
 // ---------------------------------------------------------------------------
 // Structured logging (Lambda-compatible, no console.* per CLAUDE.md exception)
@@ -116,6 +122,7 @@ const dynamoClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const secretsClient = new SecretsManagerClient({});
 const ssmClient = new SSMClient({});
 const s3Client = new S3Client({});
+const ecsClient = new ECSClient({});
 
 // SigV4 signer — promoted to module scope to avoid re-creating the credential
 // provider chain on every invocation. In a Lambda context credentials are stable
@@ -142,7 +149,13 @@ const agentCoreSigner = new SignatureV4({
 // timeout, and the Lambda's own 15-min ceiling is the only upper bound.
 // `connectTimeout` stays at 10s because establishing the TLS handshake
 // should always be fast; if it isn't, that's a real networking problem.
-const AGENTCORE_TIMEOUT_MS = 14 * 60 * 1000;
+//
+// AGENTCORE_TIMEOUT_MS_OVERRIDE (issue #1138 async jobs): the job-runner
+// Fargate task reuses this module outside Lambda and must hold the SSE
+// stream for up to the 2h job deadline + margin — it sets this env var.
+// The Lambda path leaves it unset and keeps the 14-min default.
+const AGENTCORE_TIMEOUT_MS =
+  parseInt(process.env.AGENTCORE_TIMEOUT_MS_OVERRIDE || '', 10) || 14 * 60 * 1000;
 const agentCoreDispatcher = new UndiciAgent({
   headersTimeout: AGENTCORE_TIMEOUT_MS,
   bodyTimeout: AGENTCORE_TIMEOUT_MS,
@@ -483,7 +496,8 @@ const LOCK_PASS_THROUGH = '__lock-pass-through__';
  */
 async function tryAcquireSessionLock(
   sessionId: string,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  kind: 'turn' | 'job' = 'turn'
 ): Promise<string | null> {
   const tableName = process.env.SESSION_LOCKS_TABLE;
   if (!tableName) return LOCK_PASS_THROUGH; // Lock disabled (e.g. local) — pass through.
@@ -494,7 +508,11 @@ async function tryAcquireSessionLock(
     await dynamoClient.send(
       new PutCommand({
         TableName: tableName,
-        Item: { sessionId, expiresAt, lockToken, claimedAt: new Date().toISOString() },
+        // `kind: 'job'` marks a lock held by the async job-runner (#1138) —
+        // the router replies "still working on your earlier task" instantly
+        // instead of making the user wait out the 13-min lock poll. The
+        // runner renews expiresAt every ~10 min (renewSessionLock).
+        Item: { sessionId, expiresAt, lockToken, kind, claimedAt: new Date().toISOString() },
         ConditionExpression: 'attribute_not_exists(sessionId) OR expiresAt < :now',
         ExpressionAttributeValues: { ':now': Math.floor(Date.now() / 1000) },
       })
@@ -545,6 +563,81 @@ async function releaseSessionLock(
     log.warn('Session lock release failed; relying on TTL backstop', {
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+/**
+ * Renew a held session lock by extending expiresAt another 14 minutes,
+ * conditioned on still owning it (lockToken match). The async job-runner
+ * (#1138) calls this every ~10 min for up to the 2h job ceiling so the
+ * `kind='job'` marker stays live while the job runs. Returns false when the
+ * lock was lost (expired + re-acquired by someone else) — the runner keeps
+ * going regardless (losing the lock affects messaging UX, not correctness;
+ * OpenClaw serializes the session itself).
+ */
+async function renewSessionLock(
+  sessionId: string,
+  lockToken: string,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  const tableName = process.env.SESSION_LOCKS_TABLE;
+  if (!tableName || lockToken === LOCK_PASS_THROUGH) return true;
+  try {
+    await dynamoClient.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { sessionId },
+        UpdateExpression: 'SET expiresAt = :exp',
+        ConditionExpression: 'lockToken = :tok',
+        ExpressionAttributeValues: {
+          ':exp': Math.floor(Date.now() / 1000) + 14 * 60,
+          ':tok': lockToken,
+        },
+      })
+    );
+    return true;
+  } catch (error) {
+    const errName = (error as { name?: string } | null)?.name;
+    if (errName === 'ConditionalCheckFailedException') {
+      log.warn('Session lock renewal lost ownership — continuing without lock');
+      return false;
+    }
+    log.warn('Session lock renewal failed; will retry on next interval', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return true; // Transient DDB error — keep renewing.
+  }
+}
+
+/**
+ * True when an ACTIVE `kind='job'` lock holds this session — a background
+ * job is still running (#1138). Fail-open on errors: a DDB blip must not
+ * block normal message processing.
+ */
+async function isJobLockActive(
+  sessionId: string,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  const tableName = process.env.SESSION_LOCKS_TABLE;
+  if (!tableName) return false;
+  try {
+    const result = await dynamoClient.send(
+      new GetCommand({ TableName: tableName, Key: { sessionId } })
+    );
+    const item = result.Item as
+      | { kind?: string; expiresAt?: number }
+      | undefined;
+    return (
+      !!item &&
+      item.kind === 'job' &&
+      typeof item.expiresAt === 'number' &&
+      item.expiresAt > Math.floor(Date.now() / 1000)
+    );
+  } catch (error) {
+    log.warn('Job-lock check failed; treating as no job', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
   }
 }
 
@@ -1125,6 +1218,14 @@ async function invokeAgentCore(
     /** Files the user attached in Chat (issue #1138 F1). Rendered into the
      * prompt header by the container so the agent knows a file arrived. */
     attachments?: AgentAttachment[];
+    /**
+     * Turn-deadline override in seconds (async job-runner only, #1138).
+     * The wrapper passes it to the harness, which clamps to [60, 7200].
+     * Interactive turns omit it (container default: 840s).
+     */
+    deadlineS?: number;
+    /** Pre-resolved runtime id — skips the env/SSM lookup (job-runner). */
+    runtimeIdOverride?: string;
   }
 ): Promise<{
   response: string;
@@ -1164,10 +1265,12 @@ async function invokeAgentCore(
    */
   errorSource?: 'harness' | 'router';
 }> {
-  // Resolve the AgentCore Runtime ID — check env var, then module-level cache,
-  // then SSM. Cached at module scope with TTL to avoid redundant SSM API calls
-  // on every invocation (~5–20ms + cost per call).
-  let runtimeId = process.env.AGENTCORE_RUNTIME_ID || '';
+  // Resolve the AgentCore Runtime ID — explicit override (job-runner passes
+  // the id the router already resolved), then env var, then module-level
+  // cache, then SSM. Cached at module scope with TTL to avoid redundant SSM
+  // API calls on every invocation (~5–20ms + cost per call).
+  let runtimeId =
+    userContext?.runtimeIdOverride || process.env.AGENTCORE_RUNTIME_ID || '';
   if (!runtimeId) {
     if (
       cachedRuntimeId &&
@@ -1245,6 +1348,9 @@ async function invokeAgentCore(
       ...(userContext?.attachments?.length
         ? { attachments: userContext.attachments }
         : {}),
+      // Turn-deadline override (async job-runner only, #1138): harness
+      // clamps to [60, 7200]. Interactive turns omit it (default 840s).
+      ...(userContext?.deadlineS ? { deadline_s: userContext.deadlineS } : {}),
     });
 
     const request = new HttpRequest({
@@ -1534,6 +1640,132 @@ async function fetchChatUploads(
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+}
+
+/**
+ * Promote a deadline-expired turn to a background ECS job (#1138).
+ *
+ * Called when a MESSAGE turn returns ChatDeadlineExpired(Partial): instead
+ * of posting the failure-framed partial, the router pre-acquires a
+ * `kind='job'` session lock, launches the job-runner Fargate task with a
+ * JOB_PAYLOAD env override, and posts a background ack. The runner resumes
+ * the SAME AgentCore session with a 2-hour deadline and posts the final
+ * answer when done.
+ *
+ * Returns true when the job launched (caller returns; nothing more to send).
+ * Returns false on ANY failure — missing config, no runtime id, lock
+ * contention, RunTask error — and the caller falls through to today's
+ * behavior (post the failure frame). Promotion must never make things
+ * worse than the status quo.
+ */
+async function promoteToJob(
+  input: {
+    sessionId: string;
+    userEmail: string;
+    displayName: string;
+    workspacePrefix: string;
+    spaceName: string;
+    threadName?: string;
+    isDM: boolean;
+    originalPrompt: string;
+  },
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  const clusterArn = process.env.JOB_CLUSTER_ARN || '';
+  const taskDefArn = process.env.JOB_TASK_DEF_ARN || '';
+  const subnets = (process.env.JOB_SUBNETS || '').split(',').filter(Boolean);
+  const securityGroup = process.env.JOB_SECURITY_GROUP || '';
+  const containerName = process.env.JOB_CONTAINER_NAME || 'job-runner';
+  if (!clusterArn || !taskDefArn || subnets.length === 0 || !securityGroup) {
+    log.warn('Job promotion not configured — falling back to failure frame');
+    return false;
+  }
+
+  // The turn that just expired resolved the runtime id moments ago — reuse
+  // the env value or the warm module cache; no fresh SSM call.
+  const runtimeId = process.env.AGENTCORE_RUNTIME_ID || cachedRuntimeId || '';
+  if (!runtimeId) {
+    log.warn('Job promotion aborted — no resolved AgentCore runtime id');
+    return false;
+  }
+
+  // Pre-acquire the job lock so there is no unlocked gap between promotion
+  // and the runner's first renewal (~60s task cold start). If someone else
+  // grabbed the session in the meantime, skip promotion.
+  const jobLockToken = await tryAcquireSessionLock(input.sessionId, log, 'job');
+  if (jobLockToken === null) {
+    log.warn('Job promotion aborted — session lock contended');
+    return false;
+  }
+
+  try {
+    const payload = buildJobPayload({
+      sessionId: input.sessionId,
+      lockToken: jobLockToken,
+      runtimeId,
+      userEmail: input.userEmail,
+      displayName: input.displayName,
+      workspacePrefix: input.workspacePrefix,
+      spaceName: input.spaceName,
+      threadName: input.threadName,
+      isDM: input.isDM,
+      originalPrompt: input.originalPrompt,
+    });
+
+    const result = await ecsClient.send(
+      new RunTaskCommand({
+        cluster: clusterArn,
+        taskDefinition: taskDefArn,
+        launchType: 'FARGATE',
+        count: 1,
+        startedBy: 'agent-router-promotion',
+        networkConfiguration: {
+          awsvpcConfiguration: {
+            subnets,
+            securityGroups: [securityGroup],
+            assignPublicIp: 'DISABLED',
+          },
+        },
+        overrides: {
+          containerOverrides: [
+            {
+              name: containerName,
+              environment: [{ name: 'JOB_PAYLOAD', value: payload }],
+            },
+          ],
+        },
+      })
+    );
+    if (result.failures && result.failures.length > 0) {
+      throw new Error(
+        `RunTask failures: ${result.failures
+          .map((f) => `${f.reason ?? 'unknown'}${f.detail ? ` (${f.detail})` : ''}`)
+          .join('; ')}`
+      );
+    }
+
+    await sendGoogleChatResponse(
+      input.spaceName,
+      input.threadName,
+      '⏳ This is taking longer than one pass allows — I\'ve moved it to a ' +
+        'background job and will post the result here when it\'s done.',
+      log
+    );
+
+    log.info('Turn promoted to background job', {
+      sessionId: input.sessionId,
+      taskArn: result.tasks?.[0]?.taskArn ?? 'unknown',
+    });
+    return true;
+  } catch (error) {
+    // Roll back the job lock so the fallback path (and the user's next
+    // message) isn't blocked behind a job that never started.
+    await releaseSessionLock(input.sessionId, jobLockToken, log);
+    log.error('Job promotion failed — falling back to failure frame', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
   }
 }
 
@@ -2802,6 +3034,18 @@ async function processRecord(
   // place (adds workspacePath on success); never throws.
   await fetchChatUploads(attachments, user.workspacePrefix, log);
 
+  // Background job in flight (#1138)? Reply instantly instead of making the
+  // user wait out the 13-minute lock poll below just to hear "busy".
+  if (await isJobLockActive(sessionId, log)) {
+    await sendGoogleChatResponse(
+      spaceName, threadName,
+      "I'm still working on your earlier task in the background — I'll post " +
+        'the result here when it\'s done.',
+      log,
+    );
+    return;
+  }
+
   // Serialize per-session invocations. Two messages back-to-back from the
   // same user/space share this session ID and would otherwise hit the same
   // OpenClaw turn loop concurrently — the second turn comes back empty.
@@ -2844,6 +3088,52 @@ async function processRecord(
       totalTokens,
       threshold: TOKEN_LIMIT,
     });
+  }
+
+  // Step 5b: Async-job promotion (#1138). A turn that ran out of clock —
+  // not one that broke — moves to a background job that resumes the SAME
+  // session with a 2-hour budget. On success: log first-leg telemetry and
+  // stop (the ack was posted inside promoteToJob; the runner posts the
+  // final answer). On ANY promotion failure: fall through and deliver the
+  // failure-framed partial exactly as before.
+  if (shouldPromoteToJob(agentResult.errorClass)) {
+    const promoted = await promoteToJob(
+      {
+        sessionId,
+        userEmail: senderEmail,
+        displayName: senderDisplayName,
+        workspacePrefix: user.workspacePrefix,
+        spaceName,
+        threadName,
+        isDM: chatEvent.space.type === 'DM',
+        originalPrompt: messageText,
+      },
+      log
+    );
+    if (promoted) {
+      const promotedLatencyMs = agentResult.latencyMs > 0
+        ? agentResult.latencyMs
+        : Date.now() - startTime;
+      await logTelemetry(
+        {
+          userId: senderEmail,
+          sessionId,
+          model: agentResult.model,
+          inputTokens: agentResult.inputTokens,
+          outputTokens: agentResult.outputTokens,
+          cacheReadInputTokens: agentResult.cacheReadInputTokens,
+          cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
+          latencyMs: promotedLatencyMs,
+          guardrailBlocked: guardrailResult.wouldHaveBlocked,
+          spaceName,
+          topic,
+          messages: agentResult.messages,
+          toolCalls: agentResult.toolCalls,
+        },
+        log
+      );
+      return;
+    }
   }
 
   // KNOWN GAP: Output is not run through Bedrock Guardrails.
@@ -2915,3 +3205,19 @@ async function processRecord(
     });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Exports for the async job-runner entrypoint (job-main.ts, issue #1138).
+// The runner is the same compiled package running as an ECS Fargate task —
+// it reuses the router's AgentCore invocation, Chat delivery, telemetry,
+// failure recording, and session-lock helpers outside Lambda.
+// ---------------------------------------------------------------------------
+export {
+  createLogger,
+  invokeAgentCore,
+  sendGoogleChatResponse,
+  logTelemetry,
+  recordFailure,
+  renewSessionLock,
+  releaseSessionLock,
+};

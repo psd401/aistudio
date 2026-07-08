@@ -109,10 +109,12 @@ class HarnessAdapter(abc.ABC):
         message: str,
         session_id: str,
         model_override: Optional[str] = None,
+        deadline_s: Optional[int] = None,
     ) -> Union[str, TurnResult]:
         """Send a message to the harness and return either a plain string
         (legacy contract) or a TurnResult (preferred). Wrapper accepts
-        both."""
+        both. `deadline_s` (async-job path, #1138) overrides the turn
+        deadline; None keeps the interactive default."""
 
     @abc.abstractmethod
     def configure(self, config: dict) -> None:
@@ -235,6 +237,7 @@ class OpenClawAdapter(HarnessAdapter):
         message: str,
         session_id: str,
         model_override: Optional[str] = None,
+        deadline_s: Optional[int] = None,
     ) -> TurnResult:
         """Send a message to OpenClaw via WebSocket and return a TurnResult.
 
@@ -488,15 +491,7 @@ class OpenClawAdapter(HarnessAdapter):
                 # 14 min — 30s under the cron Lambda's 14:30 AbortSignal so
                 # the harness gets a chance to return whatever it has
                 # accumulated before the client kills the connection.
-                default_deadline_s = 840
-                try:
-                    deadline_s = int(os.environ.get(
-                        "OPENCLAW_CHAT_DEADLINE_S",
-                        str(default_deadline_s),
-                    ))
-                except ValueError:
-                    deadline_s = default_deadline_s
-                deadline_s = max(60, min(840, deadline_s))
+                deadline_s = self._resolve_deadline_s(deadline_s)
                 deadline = time.time() + deadline_s
                 got_final = False
                 event_counts: dict = {}
@@ -956,6 +951,32 @@ class OpenClawAdapter(HarnessAdapter):
             failed=True,
             error_class="EmptyAgentResponse",
         )
+
+    @staticmethod
+    def _resolve_deadline_s(override) -> int:
+        """Resolve the turn deadline in seconds.
+
+        `override` is the payload-supplied deadline from the async-job runner
+        (#1138): the promoted job leg holds the SSE stream for up to 2 hours,
+        so the override clamps to [60, 7200] (ceiling approved 2026-07-07).
+        Interactive turns send no override and keep the env-var/default path
+        clamped to [60, 840] — bounded by the router Lambda's 15-min ceiling.
+        Garbage values degrade to the 840s default, never raise.
+        """
+        default_deadline_s = 840
+        if override is not None:
+            try:
+                return max(60, min(7200, int(override)))
+            except (TypeError, ValueError):
+                return default_deadline_s
+        try:
+            value = int(os.environ.get(
+                "OPENCLAW_CHAT_DEADLINE_S",
+                str(default_deadline_s),
+            ))
+        except ValueError:
+            value = default_deadline_s
+        return max(60, min(840, value))
 
     @staticmethod
     def _accumulate_assistant(

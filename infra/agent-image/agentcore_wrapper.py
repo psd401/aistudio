@@ -547,6 +547,14 @@ def main():
         display_name = payload.get("user_display_name", "")
         workspace_prefix = payload.get("workspace_prefix", "")
         model_override = payload.get("model")
+        # Optional turn-deadline override (async-job runner, #1138). Only the
+        # job runner sends this; interactive router turns omit it and get the
+        # 840s default. Non-int garbage degrades to None (default behavior).
+        raw_deadline = payload.get("deadline_s")
+        try:
+            deadline_s = int(raw_deadline) if raw_deadline is not None else None
+        except (TypeError, ValueError):
+            deadline_s = None
         # Cross-user invocation fields
         invoked_by_email = payload.get("invoked_by_email", "")
         invoked_by_display_name = payload.get("invoked_by_display_name", "")
@@ -688,7 +696,8 @@ def main():
         # baseline must be fully read before process_task is scheduled.
         usage_baseline = await loop.run_in_executor(None, read_proxy_usage)
         process_task = loop.run_in_executor(
-            None, adapter.process, framed, session_id, model_override
+            None, adapter.process, framed, session_id, model_override,
+            deadline_s,
         )
 
         # Heartbeat every 30s while adapter.process runs in the executor.
