@@ -83,23 +83,12 @@ jest.mock("@/lib/logger", () => ({
   sanitizeForLogging: jest.fn((d: unknown) => d),
 }))
 
-// The route's `@/lib/db/schema` import pulls in the full ~90-file Drizzle
-// barrel export (transitively reaching the Atrium markdown-render pipeline,
-// which imports the pure-ESM unified/remark/rehype ecosystem next/jest (SWC)
-// cannot transform — see jest.config.js). The route only uses these three
-// tables as column-reference objects inside query builder callbacks that this
-// suite's `executeQuery` mock never actually invokes, so a lightweight mock
-// with just the referenced columns is sufficient and avoids depending on the
-// real barrel file loading cleanly under Jest's CJS transform at all.
-jest.mock("@/lib/db/schema", () => ({
-  promptResults: { executionId: "execution_id", id: "id", outputData: "output_data" },
-  scheduledExecutions: {
-    userId: "user_id",
-    assistantArchitectId: "assistant_architect_id",
-    id: "id",
-    name: "name",
-  },
-  executionResults: { scheduledExecutionId: "scheduled_execution_id", status: "status", id: "id" },
+// The route's `@/lib/db/schema` import transitively reaches the Atrium
+// markdown-render pipeline, which imports the pure-ESM unified/remark/rehype
+// ecosystem next/jest (SWC) cannot transform (see jest.config.js). Mock it
+// directly, matching the established pattern (e.g. tests/unit/atrium-rollback.test.ts).
+jest.mock("@/lib/content/render/markdown-render", () => ({
+  renderMarkdownToHtml: () => "<p>unused</p>",
 }))
 
 import type { NextRequest } from "next/server"
