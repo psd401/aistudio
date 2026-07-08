@@ -191,6 +191,13 @@ export async function getOidcProvider(
       Grant: 86400,
     },
 
+    // Refresh-token rotation (REV-DB-164): `rotateRefreshToken` is intentionally left at
+    // node-oidc-provider's default (false) — refresh tokens are single-use-per-TTL, not
+    // rotated. The Drizzle adapter's `consume('RefreshToken')` nonetheless stamps
+    // `rotated_at` (so `findRefreshToken` returns a non-null `consumed`), keeping the
+    // adapter correct-by-construction: enabling rotation here is safe without further
+    // adapter changes, and replay of a rotated token would be detected.
+
     // ==========================================
     // Claims
     // ==========================================
