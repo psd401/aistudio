@@ -251,6 +251,15 @@ RUN mkdir -p /home/node/.openclaw/memory
 #   config.model — requires adding a second model to bedrock-proxy. Until
 #   then the sub-agent adds ~5-10s to every turn's wall-clock latency.
 #
+#   tools.deny += sessions_spawn, subagents (2026-07-07, #1138) — OpenClaw
+#   subagents complete silently in THIS deployment: their "results
+#   auto-announce to your requester" lands in the OpenClaw session, but only
+#   an active chat turn can post to Google Chat, so the user never sees it.
+#   Observed live: a skill-audit ran to completion in a subagent and never
+#   reached the user. Long work must stay inline where the router's async-job
+#   promotion (#1147) can catch it. Tool ids verified against
+#   docs/gateway/config-tools.md (group:sessions table).
+#
 #   tools.codeMode.timeoutMs=60000 — code-mode (tool_search_code) VM
 #   execution ceiling, raised from the 10s default to the documented max
 #   (docs/reference/code-mode.md range 100–60000). At 10s, any skill command
