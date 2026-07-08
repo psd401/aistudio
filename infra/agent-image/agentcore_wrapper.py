@@ -310,37 +310,57 @@ def hydrate_bedrock_api_key() -> None:
         os.environ["AWS_BEARER_TOKEN_BEDROCK"] = value
         version = resp.get("VersionId", "?")
 
-        # Inline the literal token into openclaw.json. OpenClaw rewrites
-        # this file on gateway startup (see `Config overwrite` logs), but
-        # it preserves the `apiKey` string as written. Substituting the
-        # literal here means every OpenClaw code path that reads the
-        # provider config — main pipeline, embedded runner, plugins —
-        # sees an identical, already-resolved value.
+        # Inline the literal token into openclaw.json IF the config still
+        # uses the token-authenticated mantle provider. The native
+        # `amazon-bedrock` provider (#1138 native program) authenticates via
+        # the aws-sdk credential chain (execution role) and has no apiKey
+        # field — nothing to inline, and its absence is NOT an error. The
+        # env var above stays hydrated either way (memorySearch's native
+        # bedrock path consumes AWS_BEARER_TOKEN_BEDROCK).
+        # BOOT-ABORT REGRESSION (2026-07-08, r10): this step used to
+        # sys.exit(1) when amazon-bedrock-mantle was absent, which killed
+        # every microVM boot after the provider switch (AgentCore 424
+        # "error when starting"). Absent provider now logs and continues.
         config_path = "/home/node/.openclaw/openclaw.json"
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            providers = cfg.get("models", {}).get("providers", {})
-            mantle = providers.get("amazon-bedrock-mantle")
-            if not mantle:
-                logger.error(
-                    "openclaw.json has no amazon-bedrock-mantle provider — "
-                    "cannot inline token"
-                )
-                sys.exit(1)
-            mantle["apiKey"] = value
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=2)
+        inlined = _inline_bearer_token(config_path, value)
+        if inlined:
             logger.info(
                 "Bedrock API key hydrated + inlined (secret=%s version=%s "
                 "config=%s)",
                 secret_arn.split(":")[-1], version, config_path,
             )
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.error("failed to inline API key into %s: %s", config_path, exc)
-            sys.exit(1)
+        else:
+            logger.info(
+                "Bedrock API key hydrated to env only (no token-auth "
+                "provider in openclaw.json — native aws-sdk provider active)"
+            )
     except Exception as exc:  # noqa: BLE001
         logger.error("failed to hydrate Bedrock API key: %s", exc)
+        sys.exit(1)
+
+
+def _inline_bearer_token(config_path: str, value: str) -> bool:
+    """Inline the bearer token into the mantle provider's apiKey, if present.
+
+    Returns True when a token-auth provider existed and was updated, False
+    when the config has no `amazon-bedrock-mantle` provider (the native
+    aws-sdk-auth provider path — nothing to inline). Config read/write
+    errors are fatal: a half-written openclaw.json would break the gateway
+    in stranger ways than a clean abort.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        providers = cfg.get("models", {}).get("providers", {})
+        mantle = providers.get("amazon-bedrock-mantle")
+        if not mantle:
+            return False
+        mantle["apiKey"] = value
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        return True
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("failed to inline API key into %s: %s", config_path, exc)
         sys.exit(1)
 
 
