@@ -37,12 +37,46 @@ import {
 
 const RENEW_INTERVAL_MS = 10 * 60 * 1000;
 
+/**
+ * Best-effort lock release when JOB_PAYLOAD fails full validation (review,
+ * #1147): the router pre-acquired the kind='job' lock BEFORE launching this
+ * task, so bailing on a malformed payload without releasing would leave
+ * users hearing "still working on your earlier task" until the 14-min TTL
+ * expires. sessionId/lockToken are extracted loosely — independent of the
+ * rest of the payload being valid.
+ */
+async function releaseLockFromRawPayload(
+  raw: string | undefined,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  if (!raw) return;
+  try {
+    const loose = JSON.parse(raw) as Record<string, unknown>;
+    if (
+      typeof loose.sessionId === 'string' && loose.sessionId &&
+      typeof loose.lockToken === 'string' && loose.lockToken
+    ) {
+      await releaseSessionLock(loose.sessionId, loose.lockToken, log);
+      log.warn('Released job lock after payload validation failure');
+    }
+  } catch {
+    // Not even loosely parseable — nothing recoverable; TTL self-heals.
+  }
+}
+
 async function main(): Promise<number> {
   const log = createLogger({ service: 'agent-job-runner' });
 
   // A broken payload means there is no Chat destination to post to —
-  // log loudly and exit nonzero (CloudWatch is the record).
-  const job = parseJobPayload(process.env.JOB_PAYLOAD);
+  // log loudly, release the pre-acquired lock if recoverable, and exit
+  // nonzero (CloudWatch is the record).
+  let job: ReturnType<typeof parseJobPayload>;
+  try {
+    job = parseJobPayload(process.env.JOB_PAYLOAD);
+  } catch (error) {
+    await releaseLockFromRawPayload(process.env.JOB_PAYLOAD, log);
+    throw error;
+  }
 
   log.info('Background job started', {
     sessionId: job.sessionId,
