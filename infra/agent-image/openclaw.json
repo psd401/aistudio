@@ -1,14 +1,15 @@
 {
   "models": {
     "providers": {
-      "amazon-bedrock": {
-        "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
-        "api": "bedrock-converse-stream",
-        "auth": "aws-sdk",
+      "amazon-bedrock-mantle": {
+        "baseUrl": "https://bedrock-mantle.us-east-1.api.aws/anthropic",
+        "api": "anthropic-messages",
+        "auth": "api-key",
+        "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
         "models": [
           {
-            "id": "us.anthropic.claude-sonnet-5",
-            "name": "Claude Sonnet 5 (Bedrock Converse, us. cross-region profile)",
+            "id": "anthropic.claude-sonnet-5",
+            "name": "Claude Sonnet 5 (Bedrock Mantle, direct)",
             "reasoning": false,
             "input": ["text"],
             "contextWindow": 200000,
@@ -22,7 +23,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "amazon-bedrock/us.anthropic.claude-sonnet-5"
+        "primary": "amazon-bedrock-mantle/anthropic.claude-sonnet-5"
       },
       "params": {
         "cacheRetention": "long"
