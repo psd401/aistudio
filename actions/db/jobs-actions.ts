@@ -65,19 +65,26 @@ export async function createJobAction(
     // Attribute the job to the caller. A caller-supplied userId is honored only
     // for administrators (create-on-behalf-of); everyone else is pinned to their
     // own id, so a job can never be framed as another user (REV-COR-038).
+    //
+    // The tainted `requested` value is only ever assigned to `userIdNum` inside
+    // the `isAdmin` branch (a trusted, session-derived gate) — never as the
+    // result of comparing it against `callerId` — so a non-admin cannot
+    // influence the sink value no matter what userId they send (CodeQL
+    // js/user-controlled-bypass).
     const { userId: callerId, isAdmin } = await resolveJobCaller()
     let userIdNum = callerId
     if (job.userId !== undefined && job.userId !== null && job.userId !== '') {
       const requested = typeof job.userId === 'string' ? Number.parseInt(job.userId, 10) : job.userId
-      if (Number.isNaN(requested)) {
+      if (typeof requested !== 'number' || Number.isNaN(requested)) {
         log.warn("Invalid userId provided", { userId: job.userId })
         return { isSuccess: false, message: "Invalid userId provided." };
       }
-      if (requested !== callerId && !isAdmin) {
+      if (isAdmin) {
+        userIdNum = requested
+      } else if (requested !== callerId) {
         log.warn("Non-admin attempted to attribute a job to another user", { requested })
         throw ErrorFactories.authzInsufficientPermissions("create jobs for other users")
       }
-      userIdNum = requested
     }
 
     log.info("Creating job in database", {
