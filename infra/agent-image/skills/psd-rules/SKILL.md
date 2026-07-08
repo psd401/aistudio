@@ -270,6 +270,22 @@ Finding a tool runs a short JS body in an isolated subprocess that exposes **onl
 
 **Why:** malformed search bodies (object query, `require`, `setTimeout`) error and retry, and every retry re-reads the entire context — a top token-waste source (observed 2026-07-02).
 
+**Batch multi-item operations in ONE script.** Every `tool_search_code` round-trip costs a full model iteration (~40s+ of serving latency). N similar operations — sharing a doc with N people, N permission grants, N lookups, N sends — go in ONE body with a loop, never N separate calls:
+
+```js
+const people = ["a@psd401.net", "b@psd401.net", "c@psd401.net"];
+const docs = ["<id1>", "<id2>"];
+const results = [];
+for (const doc of docs) for (const email of people) {
+  const r = await openclaw.tools.call("openclaw:core:exec", {command:
+    `node /opt/psd-skills/psd-workspace/run.js --user <caller> --scope agent --command "drive permissions create --json '{\"fileId\":\"${doc}\",\"type\":\"user\",\"role\":\"writer\",\"emailAddress\":\"${email}\"}'"`});
+  results.push({doc, email, ok: !r.error});
+}
+return results;
+```
+
+**Why:** observed 2026-07-08: granting 2 docs × 4 people as separate calls burned 19 model iterations ≈ 14 minutes on a 30-second task — it hit the platform turn limit and had to be rescued by a background job. Batched, the same task is 3–4 iterations. Stay under the 60s sandbox ceiling: for more than ~10 sequential items, split into chunks of ~8 per call.
+
 **Long-running calls (the 60-second sandbox ceiling).** The sandbox kills any `tool_search_code` body after 60 s of execution — a slow inner call (Plaud digest, big gws write, a long exec) dies with `tool_search_code timed out` and you get nothing back, even though the underlying command may have kept running (side effects included).
 
 - **Never block on a slow call.** For any exec that could take more than ~30 s, pass a SHORT `yieldMs` (5000–10000). The call suspends and returns `status: "waiting"` with a `runId` well before the ceiling; resume it with `wait` on that `runId` to collect the result.
