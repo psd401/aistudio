@@ -1204,6 +1204,8 @@ paths:
         requested `public` was applied or downgraded to `private`. (This differs
         from `POST /content/{id}/publish` and `set_visibility`, which still return
         **HTTP 202** `approval_required` because there is an existing object to gate.)
+        The MCP `create_document` / `create_artifact` tool results include the same
+        `visibilityLevel` field for the same reason.
       security:
         - BearerAuth: []
       requestBody:
