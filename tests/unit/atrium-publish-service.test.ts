@@ -32,6 +32,11 @@ let publishableRows: Array<{
   collectionId: string | null;
 }> = [];
 
+// executeQuery also serves the unpublish pre-gate live-publication check (issue
+// #1118 P2). Default: a live publication exists, so the unpublish gate/tx run;
+// set to [] to model an already-offline destination (the pre-gate no-op).
+let liveCheckRows: Array<{ id: string }> = [{ id: "pub-live" }];
+
 let setLevelInTxCalls = 0;
 let lastSetLevelVisibility: unknown = null;
 let lastSetLevelExtraSet: unknown = null;
@@ -42,7 +47,7 @@ jest.mock("@/lib/db/drizzle-client", () => ({
   // post-commit `.set({ externalRef })` UPDATE (persist-external-ref) payload can
   // be asserted, then resolves to `publishableRows` exactly as before —
   // loadPublishable is unaffected; only side-effect capture is added.
-  executeQuery: jest.fn(async (cb?: (db: unknown) => unknown) => {
+  executeQuery: jest.fn(async (cb?: (db: unknown) => unknown, label?: string) => {
     if (typeof cb === "function") {
       try {
         cb(setRecorder);
@@ -51,6 +56,9 @@ jest.mock("@/lib/db/drizzle-client", () => ({
         // future callback shape can't break the (unchanged) return value.
       }
     }
+    // The unpublish pre-gate live-publication check (issue #1118 P2) reads its own
+    // configurable result; every other executeQuery (loadPublishable, …) is unchanged.
+    if (label === "publish.unpublish.liveCheck") return liveCheckRows;
     return publishableRows;
   }),
   executeTransaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
@@ -91,11 +99,15 @@ jest.mock("drizzle-orm", () => ({
 // provider-factory → settings-manager); the index/prune internals are covered by
 // atrium-retrieval-permission-aware.test.ts / atrium-retrieval-index-pruning.test.ts.
 const removeFromIndexMock = jest.fn(async (_objectId: string) => undefined);
+const indexObjectMock = jest.fn(
+  async (_objectId: string, _versionId?: string) => undefined
+);
 jest.mock("@/lib/content/retrieval-service", () => ({
   retrievalService: {
-    indexObject: jest.fn(async () => undefined),
-    // Deref the outer mock lazily (jest.mock factories are hoisted above the
-    // const declaration — a direct reference is a TDZ error).
+    // Deref the outer mocks lazily (jest.mock factories are hoisted above the
+    // const declarations — a direct reference is a TDZ error).
+    indexObject: (objectId: string, versionId?: string) =>
+      indexObjectMock(objectId, versionId),
     removeFromIndex: (objectId: string) => removeFromIndexMock(objectId),
   },
 }));
@@ -301,6 +313,7 @@ beforeEach(() => {
     },
   ];
   canViewResult = true;
+  liveCheckRows = [{ id: "pub-live" }];
   setLevelInTxCalls = 0;
   lastSetLevelVisibility = null;
   lastSetLevelExtraSet = null;
@@ -511,6 +524,9 @@ describe("publishService.publish", () => {
       publishedVersionId: "v-reviewed",
     });
     expect(getVersionByIdMock).toHaveBeenCalled();
+    // Retrieval must index the PUBLISHED (pinned) version, not the head — else it
+    // would surface the unreviewed head text to assistant search (issue #1118 P1).
+    expect(indexObjectMock).toHaveBeenCalledWith("o1", "v-reviewed");
   });
 
   it("throws ValidationError when the pinned versionId does not belong to the object", async () => {
@@ -586,10 +602,28 @@ describe("publishService.unpublish", () => {
   });
 
   it("is a no-op (unpublished:false) and does NOT run the adapter when there is no live publication", async () => {
-    // tx queue: FOR UPDATE lock row, then the live-publication lookup returns [].
-    txResults = [[{ id: "o1" }], []];
+    // No live publication anywhere → the pre-gate check short-circuits (issue
+    // #1118 P2) and returns the no-op WITHOUT opening the transaction.
+    liveCheckRows = [];
     const result = await publishService.unpublish(owner, "o1", "intranet");
     expect(result).toEqual({ unpublished: false });
+    expect(adapterUnpublishCalls).toBe(0);
+  });
+
+  it("an already-offline public_web unpublish by an unauthorized caller is a no-op — NOT gated or queued (issue #1118 P2)", async () => {
+    // Nothing live at public_web → there is no exposure to gate. The §26.4 gate
+    // must NOT fire and must NOT queue a doomed approval whose replay would only
+    // re-run this same no-op. `owner` is a non-admin without publish_public.
+    liveCheckRows = [];
+    const result = await publishService.unpublish(owner, "o1", "public_web");
+    expect(result).toEqual({ unpublished: false });
+    // Let any fire-and-forget settle, then assert NO approval request was written.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      executeQueryMock.mock.calls.some(
+        (call: unknown[]) => call[1] === "content.publishApprovalRequest"
+      )
+    ).toBe(false);
     expect(adapterUnpublishCalls).toBe(0);
   });
 

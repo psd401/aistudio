@@ -189,7 +189,11 @@ async function runPublishSideEffects(args: {
 }): Promise<void> {
   const { req, objectId, slug, publishedVersionId, destination, log } = args;
   try {
-    await retrievalService.indexObject(objectId);
+    // Index the version we just made LIVE, not the object's head — a §26.4
+    // approval replay can publish an OLDER pinned version while the author has a
+    // newer head (issue #1118); indexing the head would leak the unreviewed head
+    // text to assistant retrieval while readers serve the reviewed version.
+    await retrievalService.indexObject(objectId, publishedVersionId);
   } catch (indexError) {
     log.warn("Failed to index published content for retrieval", {
       objectId,
@@ -314,6 +318,39 @@ async function runPublishAdapter(args: {
 // `raisePublishApprovalRequired` (in `./helpers`, also used by
 // `visibilityService.setLevel`) so the message + emitted event shape stay
 // identical across every §26.4 gate site.
+
+/**
+ * §26.4 — taking a public-facing destination (public_web/schoology/google) offline
+ * requires the same authority as putting it up. Without this, `content:publish_internal`
+ * alone could tear down already-live public content it could never have published,
+ * which is backwards from a review-safety standpoint. Routes through the shared raise
+ * (issue #1118 item 2) so a blocked unpublish PERSISTS a durable
+ * `content_publish_requests` row (kind `unpublish`, replayed cleanly via `unpublish`
+ * on approve) and appears in /admin/atrium — previously this was a raw throw that
+ * queued nothing. The caller only invokes this once a live publication is confirmed,
+ * so an already-offline destination is never gated or queued. `never`-typed when it
+ * raises; a no-op when the destination is internal or the caller is authorized. Safe
+ * pre-tx (no lock held), so no deadlock concern.
+ */
+function assertMayUnpublishPublicOrRaise(
+  req: Requester,
+  obj: PublishableObject,
+  objectId: string,
+  destination: PublishDestination,
+  opts: { hasPublishPublicCapability?: boolean }
+): void {
+  if (
+    isPublicDestination(destination) &&
+    !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
+  ) {
+    raisePublishApprovalRequired(
+      req,
+      "Unpublishing from a public destination requires approval",
+      { objectId, slug: obj.slug, destination },
+      { destination, objectId, requestKind: "unpublish" }
+    );
+  }
+}
 
 export const publishService = {
   /**
@@ -603,26 +640,37 @@ export const publishService = {
     }
     assertCanEdit(req, obj.ownerUserId);
 
-    // §26.4 — taking a public-facing destination (public_web/schoology/google)
-    // offline requires the same authority as putting it up in the first place.
-    // Without this, `content:publish_internal` alone could tear down already-live
-    // public content it could never have published, which is backwards from a
-    // review-safety standpoint. Route through the shared raise (issue #1118 item
-    // 2) so a blocked unpublish PERSISTS a durable `content_publish_requests` row
-    // (kind `unpublish`, replayed cleanly via `unpublish` on approve) and appears
-    // in /admin/atrium — previously this was a raw throw that queued nothing. Safe
-    // pre-tx (no lock held here), so no deadlock concern.
-    if (
-      isPublicDestination(destination) &&
-      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
-    ) {
-      raisePublishApprovalRequired(
-        req,
-        "Unpublishing from a public destination requires approval",
-        { objectId, slug: obj.slug, destination },
-        { destination, objectId, requestKind: "unpublish" }
-      );
+    // Idempotent no-op check BEFORE the §26.4 gate (issue #1118 review, P2): if
+    // nothing is LIVE at this destination there is nothing to take offline and no
+    // public exposure to gate — return the documented `{ unpublished: false }`
+    // rather than throwing ApprovalRequiredError and queuing an approval whose
+    // replay would only re-run the same no-op. This read leaks nothing (the caller
+    // already passed assertCanEdit) and mirrors item 6's "don't queue doomed
+    // requests" discipline. Read outside the tx (no lock); the transaction below
+    // re-checks the live row under FOR UPDATE, so a concurrent publish landing
+    // between this read and the tx is still handled correctly there.
+    const liveNow = await executeQuery(
+      (db) =>
+        db
+          .select({ id: contentPublications.id })
+          .from(contentPublications)
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.destination, destination),
+              eq(contentPublications.status, "live")
+            )
+          )
+          .limit(1),
+      "publish.unpublish.liveCheck"
+    );
+    if (!liveNow[0]) {
+      return { unpublished: false };
     }
+
+    // §26.4 gate (only reached when a live publication actually exists — see the
+    // no-op check above, so an already-offline destination is never gated/queued).
+    assertMayUnpublishPublicOrRaise(req, obj, objectId, destination, opts);
 
     const adapter = adapters[destination];
 
