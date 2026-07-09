@@ -490,6 +490,8 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - Remove outdated content
 - Update index when adding docs
 
+**OpenWiki (agent wiki):** `openwiki/` is an auto-maintained, agent-navigable index of this codebase — start at [openwiki/quickstart.md](openwiki/quickstart.md) for a structured map before spelunking. It coexists with `/docs` (human-oriented). The tree is refreshed by `.github/workflows/openwiki-update.yml` on every `dev` push (opens a rolling `openwiki/update` PR, served by Bedrock GLM-5). Do not hand-edit `openwiki/`; it is regenerated.
+
 ## 🎯 Repository Knowledge System
 
 **Assistant Architect**: Processes repository context for AI assistants
