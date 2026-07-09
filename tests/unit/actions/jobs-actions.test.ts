@@ -15,6 +15,7 @@ const mockGetGenericJobById = jest.fn<() => Promise<unknown>>()
 const mockGetGenericJobsByUserId = jest.fn<() => Promise<unknown[]>>(() => Promise.resolve([]))
 const mockUpdateGenericJob = jest.fn<() => Promise<unknown>>()
 const mockDeleteGenericJob = jest.fn<() => Promise<unknown>>()
+const mockGetUserById = jest.fn<(userId: number) => Promise<unknown>>()
 
 jest.mock('@/lib/auth/server-session', () => ({ getServerSession: mockGetServerSession }))
 jest.mock('@/actions/db/get-current-user-action', () => ({ getCurrentUserAction: mockGetCurrentUserAction }))
@@ -25,6 +26,7 @@ jest.mock('@/lib/db/drizzle', () => ({
   getGenericJobsByUserId: mockGetGenericJobsByUserId,
   updateGenericJob: mockUpdateGenericJob,
   deleteGenericJob: mockDeleteGenericJob,
+  getUserById: mockGetUserById,
 }))
 jest.mock('@/lib/logger', () => ({
   createLogger: () => ({ info: jest.fn(), debug: jest.fn(), warn: jest.fn(), error: jest.fn() }),
@@ -53,6 +55,24 @@ describe('jobs-actions ownership (REV-COR-038)', () => {
     const res = await mod.createJobAction({ type: 't', input: {} } as never)
     expect(res.isSuccess).toBe(true)
     expect(mockCreateGenericJob).toHaveBeenCalledWith(expect.objectContaining({ userId: 1 }))
+  })
+
+  it('an administrator may create a job on behalf of an existing user', async () => {
+    mockHasRole.mockResolvedValue(true)
+    mockGetUserById.mockResolvedValue({ id: 999 })
+    mockCreateGenericJob.mockResolvedValue({ id: 6, type: 't', status: 'pending' })
+    const res = await mod.createJobAction({ type: 't', input: {}, userId: 999 } as never)
+    expect(res.isSuccess).toBe(true)
+    expect(mockGetUserById).toHaveBeenCalledWith(999)
+    expect(mockCreateGenericJob).toHaveBeenCalledWith(expect.objectContaining({ userId: 999 }))
+  })
+
+  it('createJobAction rejects an administrator targeting a nonexistent user', async () => {
+    mockHasRole.mockResolvedValue(true)
+    mockGetUserById.mockRejectedValue(new Error('not found'))
+    const res = await mod.createJobAction({ type: 't', input: {}, userId: 999 } as never)
+    expect(res.isSuccess).toBe(false)
+    expect(mockCreateGenericJob).not.toHaveBeenCalled()
   })
 
   it("getJobAction returns not-found for another user's job", async () => {

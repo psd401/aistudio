@@ -8,6 +8,7 @@ import {
   createGenericJob,
   getGenericJobById,
   getGenericJobsByUserId,
+  getUserById,
   updateGenericJob,
   deleteGenericJob,
 } from "@/lib/db/drizzle"
@@ -67,9 +68,7 @@ export async function createJobAction(
     // own id, so a job can never be framed as another user (REV-COR-038).
     //
     // The trusted, session-derived `isAdmin` flag is the leading condition on
-    // every branch that can assign a caller-supplied value to `userIdNum` — the
-    // tainted `job.userId` never determines by itself whether an override is
-    // permitted (CodeQL js/user-controlled-bypass).
+    // every branch that can assign a caller-supplied value to `userIdNum`.
     const { userId: callerId, isAdmin } = await resolveJobCaller()
     const hasRequestedUserId = job.userId !== undefined && job.userId !== null && job.userId !== ''
     let userIdNum: number
@@ -79,18 +78,19 @@ export async function createJobAction(
         log.warn("Invalid userId provided", { userId: job.userId })
         return { isSuccess: false, message: "Invalid userId provided." };
       }
-      // Intentional admin "create job on behalf of another user" override,
-      // not a bypass: `isAdmin` is derived from the session via
-      // resolveJobCaller()/hasRole("administrator"), a trusted server-side
-      // value the caller cannot influence, and it is the sole gate on this
-      // branch. `requested` reaching userIdNum here IS the feature (an admin
-      // choosing the target user), not an authz gap. This exact dataflow has
-      // been reviewed twice by independent AI security review and confirmed
-      // correct (PR #1116); it keeps re-triggering CodeQL's taint heuristic
-      // across three prior restructurings (rounds 1-3) because the
-      // alternative to "tainted value reaches sink" would be removing the
-      // override capability entirely.
-      userIdNum = requested // codeql[js/user-controlled-bypass] admin-only override, gated solely by trusted session-derived isAdmin
+      // Resolve the target user from the trusted user store instead of trusting
+      // the caller-supplied id directly as the sink value: this rejects a
+      // nonexistent target user up front (instead of failing on the jobs table's
+      // FK constraint) and assigns userIdNum from the DB row's own `id`, not the
+      // request parameter, so the value is no longer directly attacker-controlled.
+      let targetUser
+      try {
+        targetUser = await getUserById(requested)
+      } catch {
+        log.warn("Admin-requested userId does not exist", { userId: requested })
+        return { isSuccess: false, message: "Requested userId does not exist." };
+      }
+      userIdNum = targetUser.id
     } else if (!isAdmin && hasRequestedUserId) {
       const requested = typeof job.userId === 'string' ? Number.parseInt(job.userId, 10) : job.userId
       if (typeof requested !== 'number' || Number.isNaN(requested)) {
