@@ -107,7 +107,9 @@ describe('isBlockedAddress — SSRF address ranges (REV-COR-434)', () => {
     'fe80::1',
     'fc00::1',
     'fd12:3456::1',
-    '::ffff:10.0.0.1', // IPv4-mapped
+    '::ffff:10.0.0.1', // IPv4-mapped (dotted-decimal)
+    '::ffff:7f00:1', // IPv4-mapped 127.0.0.1, hex-normalized (Gemini finding, PR #1130)
+    '::ffff:a9fe:a9fe', // IPv4-mapped 169.254.169.254 (cloud metadata), hex-normalized
     'not-an-ip',
   ])('blocks %s', (ip) => {
     expect(isBlockedAddress(ip)).toBe(true);
@@ -178,6 +180,32 @@ describe('safeFetch redirect re-validation (REV-COR-434)', () => {
     (global as unknown as { fetch: jest.Mock }).fetch = jest.fn().mockResolvedValueOnce(resp(200));
     const r = await safeFetch('https://public.example/ok', new AbortController().signal);
     expect(r.status).toBe(200);
+  });
+
+  it('follows exactly MAX_REDIRECTS (5) hops then throws on a 6th redirect (Copilot off-by-one finding, PR #1130)', async () => {
+    mockLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+    const fetchMock = jest.fn();
+    for (let i = 1; i <= 6; i++) {
+      fetchMock.mockResolvedValueOnce(resp(302, `https://public.example/hop-${i}`));
+    }
+    (global as unknown as { fetch: jest.Mock }).fetch = fetchMock;
+    await expect(
+      safeFetch('https://public.example/start', new AbortController().signal)
+    ).rejects.toThrow(/Too many redirects/);
+    expect(fetchMock).toHaveBeenCalledTimes(6); // 5 followed redirects + the 6th that trips the cap
+  });
+
+  it('succeeds when exactly MAX_REDIRECTS (5) redirects are followed before a final 200', async () => {
+    mockLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+    const fetchMock = jest.fn();
+    for (let i = 1; i <= 5; i++) {
+      fetchMock.mockResolvedValueOnce(resp(302, `https://public.example/hop-${i}`));
+    }
+    fetchMock.mockResolvedValueOnce(resp(200));
+    (global as unknown as { fetch: jest.Mock }).fetch = fetchMock;
+    const r = await safeFetch('https://public.example/start', new AbortController().signal);
+    expect(r.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 });
 

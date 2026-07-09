@@ -139,8 +139,21 @@ function ipv4IsBlocked(ip: string): boolean {
 function ipv6IsBlocked(ip: string): boolean {
   const lower = ip.toLowerCase();
   if (lower === '::1' || lower === '::') return true; // loopback / unspecified
-  const mapped = lower.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (mapped) return ipv4IsBlocked(mapped[1]);        // IPv4-mapped IPv6
+
+  // IPv4-mapped IPv6, either dotted-decimal (::ffff:127.0.0.1) or Node's
+  // hex-normalized form (::ffff:7f00:1) — the URL parser rewrites the former
+  // to the latter, so both must be checked or the dotted-decimal-only regex
+  // is trivially bypassed (REV: Gemini SSRF finding on PR #1130).
+  const dotted = lower.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (dotted) return ipv4IsBlocked(dotted[1]);
+  const hex = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (hex) {
+    const high = parseInt(hex[1], 16);
+    const low = parseInt(hex[2], 16);
+    const asIpv4 = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+    return ipv4IsBlocked(asIpv4);
+  }
+
   if (/^fe[89ab]/.test(lower)) return true;           // fe80::/10 link-local
   if (/^f[cd]/.test(lower)) return true;              // fc00::/7 unique-local
   return false;
@@ -203,7 +216,8 @@ export async function assertUrlAllowed(rawUrl: string): Promise<void> {
 // Exported for tests.
 export async function safeFetch(rawUrl: string, signal: AbortSignal): Promise<Response> {
   let currentUrl = rawUrl;
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+  let redirects = 0;
+  for (;;) {
     await assertUrlAllowed(currentUrl);
     const response = await fetch(currentUrl, {
       signal,
@@ -215,12 +229,16 @@ export async function safeFetch(rawUrl: string, signal: AbortSignal): Promise<Re
     const isRedirect = response.status >= 300 && response.status < 400;
     const location = response.headers.get('location');
     if (isRedirect && location) {
+      await response.body?.cancel(); // drain the unused redirect body before following it
+      if (redirects >= MAX_REDIRECTS) {
+        throw new Error(`Too many redirects (> ${MAX_REDIRECTS})`);
+      }
+      redirects++;
       currentUrl = new URL(location, currentUrl).toString(); // resolve relative Location
       continue;
     }
     return response;
   }
-  throw new Error(`Too many redirects (> ${MAX_REDIRECTS})`);
 }
 
 // Fetch and extract text content from URL
