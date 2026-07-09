@@ -42,9 +42,10 @@ import {
   raisePublishApprovalRequired,
 } from "./helpers";
 import { visibilityService } from "./visibility-service";
+import { versionService } from "./version-service";
 import { retrievalService } from "./retrieval-service";
 import { contentEvents } from "./events";
-import { NotFoundError, ValidationError, ApprovalRequiredError } from "./errors";
+import { NotFoundError, ValidationError } from "./errors";
 import {
   isPublicDestination,
   type PublishAdapter,
@@ -73,6 +74,14 @@ export interface PublishInput {
     level: VisibilityLevel;
     grants?: VisibilityGrant[];
   };
+  /**
+   * Publish a SPECIFIC version rather than the object's current head. Used by
+   * the §26.4 approval replay (issue #1118): a request pins the raise-time head
+   * so approving it publishes the REVIEWED version even if the author has since
+   * edited a newer head. The version must belong to the object (validated below,
+   * ValidationError otherwise). Omit to publish the current head (the default).
+   */
+  versionId?: string;
 }
 
 /**
@@ -127,6 +136,36 @@ async function loadPublishable(
     "publish.loadPublishable"
   );
   return rows[0] ?? null;
+}
+
+/**
+ * Resolve which version a publish will make live: the caller's pinned
+ * `input.versionId` (an approval replay of the raise-time head — issue #1118), or
+ * the object's current working head. A pinned version MUST belong to the object
+ * (an approval row could name a version of a different object only via corruption)
+ * — `versionService.getById` scopes by object and returns null otherwise, which
+ * we map to a ValidationError. A null head (no version) is "nothing to publish".
+ * Runs OUTSIDE the transaction (a plain read), before the §26.4 gate.
+ */
+async function resolvePublishVersionId(
+  objectId: string,
+  obj: PublishableObject,
+  input: PublishInput
+): Promise<string> {
+  if (input.versionId != null) {
+    const version = await versionService.getById(objectId, input.versionId);
+    if (!version) {
+      throw new ValidationError("Version not found for this object", {
+        objectId,
+        versionId: input.versionId,
+      });
+    }
+    return input.versionId;
+  }
+  if (obj.currentVersionId == null) {
+    throw new ValidationError("Nothing to publish", { objectId });
+  }
+  return obj.currentVersionId;
 }
 
 /**
@@ -324,54 +363,64 @@ export const publishService = {
       opts.hasPublishPublicCapability ?? false
     );
 
-    // §26.4 gate — PART 1 (destination), evaluated pre-transaction because it does
-    // NOT depend on the object's current visibility (a public-facing destination —
-    // public_web/schoology/google, `isPublicDestination` — is ALWAYS a public
-    // exposure) and so is race-free here. It runs BEFORE the adapter-not-implemented
-    // check below so an unauthorized caller (including every autonomous agent) gets
-    // the approval signal, not a "not yet available" error. PART 2 — widening
-    // visibility to `public` — DOES depend on the current level, so it is evaluated
-    // inside the transaction against the FOR-UPDATE-locked row (see below), closing
-    // the TOCTOU hole where a concurrent narrow (public → internal) between a
-    // pre-read and the locked write would skip the gate on a real widen-back.
-    if (isPublicDestination(input.destination) && !mayPublishPublic) {
-      raisePublishApprovalRequired(
-        req,
-        "Publishing to a public destination requires approval",
-        { objectId, slug: obj.slug, destination: input.destination },
-        { destination: input.destination, objectId }
-      );
-    }
-
-    // Nothing is live without a working head: the publication's
-    // `published_version_id` is NOT NULL, so a null head cannot be published.
-    if (obj.currentVersionId == null) {
-      throw new ValidationError("Nothing to publish", { objectId });
-    }
-    const publishedVersionId = obj.currentVersionId;
-
-    // The actor recording the publish. Guests/autonomous agents have no user id;
-    // `published_by` is nullable, so a null here is persisted as "system".
-    const publishedBy = authorUserIdOf(req);
-
     const adapter = adapters[input.destination];
 
-    // A destination whose adapter is not yet implemented (public_web/schoology/
-    // google — later phases) must fail BEFORE the transaction. Otherwise the
-    // status/visibility widening below commits, then the post-commit adapter call
-    // throws, and the object is left flagged `public` (canView treats
-    // visibilityLevel === "public" as world-readable regardless of publication
-    // status) with no live publication — a "failed" publish that silently exposed
-    // the content. Blocking here writes nothing. This runs AFTER the §26.4 gate so
-    // an unauthorized caller still gets the approval signal, not this error. (When
-    // a real external adapter lands, its runtime failures will instead need
-    // compensating revert of the committed status/visibility.)
+    // Resolve the version to publish (the current head, or the specific version an
+    // approval replay pinned — issue #1118). This CHEAP business validation runs
+    // BEFORE the §26.4 gate (issue #1118 item 6): a request that can never
+    // succeed — nothing to publish (null head), or a pinned version that does not
+    // belong to the object — must fail with a plain ValidationError instead of
+    // being persisted to the approval queue as a doomed row that just re-hits the
+    // same error on approve. It leaks nothing the caller (already past
+    // `assertCanEdit`) doesn't know. The §26.4 authorization ORDER is unchanged
+    // (canView → assertCanEdit → gate); only this validation moved ahead of it.
+    const publishedVersionId = await resolvePublishVersionId(objectId, obj, input);
+
+    // A destination whose adapter is not yet implemented (schoology/google — later
+    // phases) must fail BEFORE any write, and — issue #1118 item 6 — BEFORE the
+    // §26.4 gate so an unauthorized schoology/google publish (doomed: the adapter
+    // throws on approve too) is not queued. The revealed fact ("destination not
+    // yet wired") is static and non-sensitive. Otherwise the status/visibility
+    // widening below would commit, the post-commit adapter call would throw, and
+    // the object would be left flagged `public` with no live publication — a
+    // "failed" publish that silently exposed content.
     if (adapter.implemented === false) {
       throw new ValidationError(
         `Publishing to '${input.destination}' is not yet available`,
         { destination: input.destination }
       );
     }
+
+    // §26.4 gate — PART 1 (destination), evaluated pre-transaction because it does
+    // NOT depend on the object's current visibility (a public-facing destination —
+    // public_web/schoology/google, `isPublicDestination` — is ALWAYS a public
+    // exposure) and so is race-free here. PART 2 — widening visibility to `public`
+    // — DOES depend on the current level, so it is evaluated inside the transaction
+    // against the FOR-UPDATE-locked row (see below), closing the TOCTOU hole where
+    // a concurrent narrow (public → internal) between a pre-read and the locked
+    // write would skip the gate on a real widen-back.
+    if (isPublicDestination(input.destination) && !mayPublishPublic) {
+      raisePublishApprovalRequired(
+        req,
+        "Publishing to a public destination requires approval",
+        { objectId, slug: obj.slug, destination: input.destination },
+        {
+          destination: input.destination,
+          objectId,
+          // Pin the raise-time head so approve publishes the REVIEWED version
+          // even after later edits (#1118 item 1).
+          versionId: publishedVersionId,
+          // Record the caller's bundled widen so approve applies it too, and the
+          // approve message is accurate (#1118 item 5) — the pre-tx gate is the
+          // one site that would otherwise drop the widen intent.
+          wantsPublicWiden: input.visibility?.level === "public",
+        }
+      );
+    }
+
+    // The actor recording the publish. Guests/autonomous agents have no user id;
+    // `published_by` is nullable, so a null here is persisted as "system".
+    const publishedBy = authorUserIdOf(req);
 
     const publicationId = await executeTransaction(
       async (tx: DbTransaction) => {
@@ -412,7 +461,14 @@ export const publishService = {
             req,
             "Publishing to a public destination requires approval",
             { objectId, slug: obj.slug, destination: input.destination },
-            { destination: input.destination, objectId }
+            {
+              destination: input.destination,
+              objectId,
+              // Pin the raise-time head for the replay (#1118 item 1); the widen
+              // is recorded automatically (this branch fires only for a non-public
+              // destination bundling a public widen).
+              versionId: publishedVersionId,
+            }
           );
         }
 
@@ -551,14 +607,20 @@ export const publishService = {
     // offline requires the same authority as putting it up in the first place.
     // Without this, `content:publish_internal` alone could tear down already-live
     // public content it could never have published, which is backwards from a
-    // review-safety standpoint.
+    // review-safety standpoint. Route through the shared raise (issue #1118 item
+    // 2) so a blocked unpublish PERSISTS a durable `content_publish_requests` row
+    // (kind `unpublish`, replayed cleanly via `unpublish` on approve) and appears
+    // in /admin/atrium — previously this was a raw throw that queued nothing. Safe
+    // pre-tx (no lock held here), so no deadlock concern.
     if (
       isPublicDestination(destination) &&
       !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
     ) {
-      throw new ApprovalRequiredError(
+      raisePublishApprovalRequired(
+        req,
         "Unpublishing from a public destination requires approval",
-        { destination, objectId }
+        { objectId, slug: obj.slug, destination },
+        { destination, objectId, requestKind: "unpublish" }
       );
     }
 

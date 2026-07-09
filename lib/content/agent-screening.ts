@@ -32,6 +32,30 @@ import type { Requester } from "./types";
 /** User-facing message when guardrails blocked but supplied no message. */
 export const AGENT_SCREEN_BLOCKED_MESSAGE = "The proposed content was blocked.";
 
+/**
+ * Proof that content passed (or did not require) §28.3 screening before a write.
+ * Branded with a MODULE-PRIVATE symbol so it can only be produced by
+ * `screenAgentBodyForWrite` in this file — a future caller of the shared write
+ * primitive (`snapshotInTx`) cannot fabricate one, which is what makes the
+ * screening guard un-bypassable (issue #1118 item 3).
+ */
+const SCREENED = Symbol("atrium.screeningProof");
+
+export interface ScreeningProof {
+  readonly [SCREENED]: true;
+  /**
+   * The exact body that was screened, or null when screening was not required
+   * (a human/non-agent writer, or an empty body). `assertScreened` matches this
+   * against the body being written, so a proof for body A cannot wave body B in.
+   */
+  readonly screenedBody: string | null;
+}
+
+/** A proof that screening was NOT required (human/non-agent writer, empty body). */
+function screeningNotRequired(): ScreeningProof {
+  return { [SCREENED]: true, screenedBody: null };
+}
+
 /** The outcome of screening one piece of agent-authored content. */
 export type AgentScreenVerdict =
   | { allowed: true }
@@ -133,15 +157,22 @@ export async function screenAgentContent(
  * (see `screenAgentContent`) and never throws. Callers MUST invoke this BEFORE
  * their write transaction — screening is external IO (Bedrock) and must never
  * hold a pooled connection.
+ *
+ * Returns a `ScreeningProof` the caller passes into the shared write primitive
+ * (`snapshotInTx` via `assertScreened`) as evidence screening ran (issue #1118
+ * item 3). The proof captures the exact screened body so it cannot be reused for
+ * a different one.
  */
 export async function screenAgentBodyForWrite(
   req: Requester,
   body: string | undefined,
   objectId: string | null,
   requestId?: string
-): Promise<void> {
-  if (!isAgentRequester(req)) return;
-  if (typeof body !== "string" || body.trim().length === 0) return;
+): Promise<ScreeningProof> {
+  if (!isAgentRequester(req)) return screeningNotRequired();
+  if (typeof body !== "string" || body.trim().length === 0) {
+    return screeningNotRequired();
+  }
 
   const verdict = await screenAgentContent(body, objectId, requestId);
   if (!verdict.allowed) {
@@ -151,5 +182,36 @@ export async function screenAgentBodyForWrite(
       message: verdict.message,
       objectId,
     });
+  }
+  return { [SCREENED]: true, screenedBody: body };
+}
+
+/**
+ * §28.3 defense-in-depth (issue #1118 item 3): assert INSIDE the shared write
+ * primitive (`snapshotInTx`) that agent-authored content was screened before it
+ * reaches the DB. Screening is pre-tx external IO (Bedrock) and cannot move
+ * inside the transaction, so instead every write path funnels its
+ * `ScreeningProof` here. A future `snapshotInTx` caller that skips
+ * `screenAgentBodyForWrite` cannot produce a valid proof (the brand is
+ * module-private) and fails LOUDLY here, rather than silently writing unscreened
+ * agent content.
+ *
+ * No-op for non-agent writers and empty bodies (screening was never required).
+ * For an agent body it requires a genuine proof whose `screenedBody` is the EXACT
+ * body being written — a stale or mismatched proof throws `ValidationError`.
+ */
+export function assertScreened(
+  req: Requester,
+  body: string | undefined,
+  proof: ScreeningProof,
+  objectId: string | null
+): void {
+  if (!isAgentRequester(req)) return;
+  if (typeof body !== "string" || body.trim().length === 0) return;
+  if (proof?.[SCREENED] !== true || proof.screenedBody !== body) {
+    throw new ValidationError(
+      "Agent content reached the write primitive without screening",
+      { objectId }
+    );
   }
 }

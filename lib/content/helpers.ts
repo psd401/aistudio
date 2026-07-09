@@ -339,26 +339,30 @@ export interface PublishApprovalRequestFields {
 
 /**
  * Classify a §26.4 raise into a queue row (pure — exported for unit tests).
- * The raise sites cannot be edited to pass richer inputs (their contract is
- * frozen across services), so the kind is DERIVED from what each site already
- * passes — the discriminators are airtight per site:
+ * The kind is DERIVED from what each raise site passes (`eventPayload` +
+ * `errorContext`); the discriminators are airtight per site:
  *
  * - okf/export.ts (collection exporter): `destination: "okf"` with NO object id
  *   (it raises with `objectId: ""` and `errorContext.collectionId`). → `export`,
  *   object-less, deduped on the collection. (A single-OBJECT publish to the
  *   `okf` destination carries a real objectId and falls through to `publish`.)
- * - publishService pre-tx gate: a PUBLIC destination (`isPublicDestination`) is
- *   itself the exposure. → `publish`; replay = publish to that destination. The
- *   original call's optional visibility input is not visible here, so it is NOT
- *   recorded — an approve replays the destination publish only, and any widen
- *   remains a separate visibility decision for the admin.
- * - publishService in-tx gate: reachable only when the destination is NOT
- *   public (a public one throws pre-tx first), so the gated part was the
- *   bundled `visibility.level === "public"` widen — which IS knowable here and
- *   is recorded for replay. → `publish` with `context.visibility`.
- * - visibilityService.setLevel gate: no destination at all; the level being
- *   widened to is always `public`. → `visibility_widen`, destination `'public'`
- *   (the exposure target — recorded so the pending-dedupe key stays 3-column).
+ * - publishService UNPUBLISH gate: passes an explicit `errorContext.requestKind
+ *   === "unpublish"` (a publish and an unpublish gate carry the same
+ *   destination+objectId shape, so the kind cannot be derived). → `unpublish`;
+ *   replay = `publishService.unpublish` from that destination.
+ * - publishService pre-tx PUBLISH gate: a PUBLIC destination (`isPublicDestination`)
+ *   is itself the exposure. → `publish`. The raise-time head is pinned via
+ *   `errorContext.versionId` so approve replays the REVIEWED version (issue
+ *   #1118); the bundled visibility widen is recorded when the caller also asked
+ *   to widen (`errorContext.wantsPublicWiden`).
+ * - publishService in-tx PUBLISH gate: reachable only when the destination is NOT
+ *   public (a public one throws pre-tx first), so the gated part was the bundled
+ *   `visibility.level === "public"` widen — recorded for replay. → `publish` with
+ *   `context.visibility` (and the pinned `versionId`).
+ * - visibilityService.setLevel gate (and the create-as-private widen queue): no
+ *   destination at all; the level being widened to is always `public`. →
+ *   `visibility_widen`, destination `'public'` (the exposure target — recorded so
+ *   the pending-dedupe key stays 3-column).
  */
 export function approvalRequestFieldsOf(
   eventPayload: {
@@ -369,6 +373,15 @@ export function approvalRequestFieldsOf(
   errorContext: Record<string, unknown>
 ): PublishApprovalRequestFields {
   const { objectId, slug, destination } = eventPayload;
+  const explicitKind =
+    typeof errorContext.requestKind === "string"
+      ? errorContext.requestKind
+      : undefined;
+  const versionId =
+    typeof errorContext.versionId === "string"
+      ? errorContext.versionId
+      : undefined;
+  const wantsPublicWiden = errorContext.wantsPublicWiden === true;
 
   if (destination === "okf" && !objectId) {
     const collectionId =
@@ -386,7 +399,22 @@ export function approvalRequestFieldsOf(
     };
   }
 
+  // Unpublish is object+destination-shaped just like publish, so it MUST be
+  // flagged explicitly by the raise site rather than derived.
+  if (explicitKind === "unpublish" && destination) {
+    return {
+      objectId,
+      requestKind: "unpublish",
+      destination,
+      context: { destination },
+    };
+  }
+
   if (destination) {
+    // Record the visibility widen when the caller bundled one (in-tx gate, or a
+    // public destination whose caller ALSO asked to widen) — a non-public
+    // destination only ever reaches the gate via the widen, so it always records.
+    const recordWiden = wantsPublicWiden || !isPublicDestination(destination);
     return {
       objectId,
       requestKind: "publish",
@@ -394,9 +422,8 @@ export function approvalRequestFieldsOf(
       context: {
         destination,
         ...(slug ? { slug } : {}),
-        ...(isPublicDestination(destination)
-          ? {}
-          : { visibility: { level: "public" as const } }),
+        ...(versionId ? { versionId } : {}),
+        ...(recordWiden ? { visibility: { level: "public" as const } } : {}),
       },
     };
   }

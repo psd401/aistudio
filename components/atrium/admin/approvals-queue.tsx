@@ -31,7 +31,20 @@ import {
 const KIND_LABELS: Record<PendingApprovalDTO["requestKind"], string> = {
   publish: "Publish",
   visibility_widen: "Visibility widen",
+  unpublish: "Unpublish",
   export: "Export",
+}
+
+/**
+ * Whether approving a `publish` request will ALSO widen the object's visibility
+ * to public (the caller bundled a widen — issue #1118 item 5). Surfaced in the
+ * queue so the admin sees that approving changes visibility, not just publishes.
+ */
+function widensVisibility(request: PendingApprovalDTO): boolean {
+  return (
+    request.requestKind === "publish" &&
+    request.context.visibility?.level === "public"
+  )
 }
 
 function formatTime(iso: string | null): string {
@@ -141,6 +154,11 @@ function RequestCells({ request }: { request: PendingApprovalDTO }) {
       </TableCell>
       <TableCell>
         <Badge variant="outline">{KIND_LABELS[request.requestKind]}</Badge>
+        {widensVisibility(request) ? (
+          <Badge variant="secondary" className="ml-1">
+            + widen to public
+          </Badge>
+        ) : null}
         {request.requestKind === "export" ? (
           <div className="text-xs text-muted-foreground mt-1 max-w-[200px]">
             Approval is recorded only — the exporter must re-run the export.
