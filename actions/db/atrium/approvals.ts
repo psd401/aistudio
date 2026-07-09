@@ -11,8 +11,14 @@
  * Replay semantics on approve:
  * - `publish`          → `publishService.publish(admin, objectId, context)` —
  *   the admin requester passes the §26.4 gate via `isAdmin`, so the exact
- *   blocked publish (destination + any recorded visibility widen) goes through.
+ *   blocked publish (destination + any recorded visibility widen) goes through,
+ *   PINNED to the raise-time version (`context.versionId`, issue #1118) so the
+ *   admin publishes the reviewed content, not a newer unreviewed head.
  * - `visibility_widen` → `visibilityService.setLevel(admin, objectId, level)`.
+ *   Also the row an unauthorized public CREATE lands on (the object was created
+ *   private; approve widens it to public).
+ * - `unpublish`        → `publishService.unpublish(admin, objectId, destination)`
+ *   — a removal, idempotent (a no-op if already offline).
  * - `export`           → NOT replayed. The OKF bundle is produced and handed to
  *   the ORIGINAL caller at call time (inline JSON + presigned URL) — a bundle
  *   built here by the approving admin would go nowhere (there is no channel back
@@ -107,6 +113,82 @@ function assertPublishDestination(
 }
 
 /**
+ * Return the request's object id or throw — every replayable kind is
+ * object-scoped (only `export` is object-less, and it never replays).
+ */
+function requireRequestObjectId(
+  request: ContentPublishRequestRow,
+  kindLabel: string
+): string {
+  if (!request.objectId) {
+    throw ErrorFactories.invalidInput(
+      "objectId",
+      null,
+      `${kindLabel} request has no object`
+    );
+  }
+  return request.objectId;
+}
+
+/**
+ * Replay a `publish` request: publish the recorded destination, applying any
+ * recorded visibility widen and — issue #1118 — PINNING the raise-time version
+ * (`context.versionId`) so the admin publishes the reviewed content, not a newer
+ * head. `versionId` is absent on pre-#1118 rows → publish the current head.
+ */
+async function replayPublish(
+  requester: AdminRequester,
+  request: ContentPublishRequestRow
+): Promise<void> {
+  const objectId = requireRequestObjectId(request, "publish");
+  const context = request.context ?? {};
+  const destination = assertPublishDestination(
+    context.destination ?? request.destination
+  );
+  const visibility =
+    context.visibility?.level === "public"
+      ? { level: "public" as const }
+      : undefined;
+  const versionId =
+    typeof context.versionId === "string" ? context.versionId : undefined;
+  await publishService.publish(requester, objectId, {
+    destination,
+    ...(visibility ? { visibility } : {}),
+    ...(versionId ? { versionId } : {}),
+  });
+}
+
+/**
+ * Replay an `unpublish` request: take the recorded destination offline. A
+ * removal — idempotent (a no-op if the object is already offline there).
+ */
+async function replayUnpublish(
+  requester: AdminRequester,
+  request: ContentPublishRequestRow
+): Promise<void> {
+  const objectId = requireRequestObjectId(request, "unpublish");
+  const context = request.context ?? {};
+  const destination = assertPublishDestination(
+    context.destination ?? request.destination
+  );
+  await publishService.unpublish(requester, objectId, destination);
+}
+
+/**
+ * Replay a `visibility_widen` request: widen the object to the recorded level.
+ * The gate only ever fires for a widen to `public`; the recorded level is read
+ * back (rather than hard-coded) so the row remains the single source of truth.
+ */
+async function replayVisibilityWiden(
+  requester: AdminRequester,
+  request: ContentPublishRequestRow
+): Promise<void> {
+  const objectId = requireRequestObjectId(request, "visibility");
+  const level = (request.context ?? {}).level ?? "public";
+  await visibilityService.setLevel(requester, objectId, { level });
+}
+
+/**
  * Replay the request's recorded action as the approving admin. Returns whether
  * anything was replayed (`export` is decision-only — see the module header).
  * Throws when the recorded row is malformed or the replayed service call fails;
@@ -117,43 +199,16 @@ async function replayApprovedRequest(
   request: ContentPublishRequestRow,
   log: ReturnType<typeof createLogger>
 ): Promise<boolean> {
-  const context = request.context ?? {};
   switch (request.requestKind) {
-    case "publish": {
-      if (!request.objectId) {
-        throw ErrorFactories.invalidInput(
-          "objectId",
-          null,
-          "publish request has no object"
-        );
-      }
-      const destination = assertPublishDestination(
-        context.destination ?? request.destination
-      );
-      const visibility =
-        context.visibility?.level === "public"
-          ? { level: "public" as const }
-          : undefined;
-      await publishService.publish(requester, request.objectId, {
-        destination,
-        ...(visibility ? { visibility } : {}),
-      });
+    case "publish":
+      await replayPublish(requester, request);
       return true;
-    }
-    case "visibility_widen": {
-      if (!request.objectId) {
-        throw ErrorFactories.invalidInput(
-          "objectId",
-          null,
-          "visibility request has no object"
-        );
-      }
-      // The gate only ever fires for a widen to `public`; the recorded level is
-      // read back (rather than hard-coded) so the row remains the single truth.
-      const level = context.level ?? "public";
-      await visibilityService.setLevel(requester, request.objectId, { level });
+    case "unpublish":
+      await replayUnpublish(requester, request);
       return true;
-    }
+    case "visibility_widen":
+      await replayVisibilityWiden(requester, request);
+      return true;
     case "export":
       // Decision-only — see the module header for why exports never replay.
       log.info("Export request approved without replay", { id: request.id });

@@ -17,8 +17,12 @@ jest.mock("@/actions/db/atrium/requester", () => ({
 }));
 
 const publishMock = jest.fn();
+const unpublishMock = jest.fn();
 jest.mock("@/lib/content/publish-service", () => ({
-  publishService: { publish: (...a: unknown[]) => publishMock(...a) },
+  publishService: {
+    publish: (...a: unknown[]) => publishMock(...a),
+    unpublish: (...a: unknown[]) => unpublishMock(...a),
+  },
 }));
 
 const setLevelMock = jest.fn();
@@ -90,6 +94,7 @@ beforeEach(() => {
     publicationId: "pub-1",
     publishedVersionId: "v-1",
   });
+  unpublishMock.mockReset().mockResolvedValue({ unpublished: true });
   setLevelMock.mockReset().mockResolvedValue({ visibilityLevel: "public" });
   executeQueryMock.mockClear();
   queryResults.clear();
@@ -151,6 +156,44 @@ describe("approvePublishRequestAction — replay", () => {
     expect(publishMock).toHaveBeenCalledWith(ADMIN, "obj-1", {
       destination: "public_web",
     });
+  });
+
+  it("PINS the recorded version on a publish replay (issue #1118 item 1)", async () => {
+    queryResults.set("atrium.approvals.load", [
+      {
+        ...BASE_ROW,
+        destination: "public_web",
+        context: {
+          destination: "public_web",
+          slug: "s",
+          versionId: "v-reviewed",
+        },
+      },
+    ]);
+    const result = await approvePublishRequestAction("req-1");
+    expect(result.isSuccess).toBe(true);
+    // The admin publishes the REVIEWED version, not the (possibly newer) head.
+    expect(publishMock).toHaveBeenCalledWith(ADMIN, "obj-1", {
+      destination: "public_web",
+      versionId: "v-reviewed",
+    });
+  });
+
+  it("replays an unpublish request via publishService.unpublish (issue #1118 item 2)", async () => {
+    queryResults.set("atrium.approvals.load", [
+      {
+        ...BASE_ROW,
+        requestKind: "unpublish",
+        destination: "public_web",
+        context: { destination: "public_web" },
+      },
+    ]);
+    const result = await approvePublishRequestAction("req-1");
+    expect(result.isSuccess).toBe(true);
+    if (!result.isSuccess) return;
+    expect(result.data.replayed).toBe(true);
+    expect(unpublishMock).toHaveBeenCalledWith(ADMIN, "obj-1", "public_web");
+    expect(publishMock).not.toHaveBeenCalled();
   });
 
   it("replays a visibility_widen via visibilityService.setLevel with the recorded level", async () => {

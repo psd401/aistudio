@@ -142,18 +142,30 @@ async function loadIndexableText(
 }
 
 /**
- * Index (or re-index) one published object: chunk + embed its current
- * version's text, upsert the backing `repository_item`/`repository_item_chunks`,
- * link via `content_index_links`, and stamp `content_objects.indexed_at`.
+ * Index (or re-index) one published object: chunk + embed the LIVE version's
+ * text, upsert the backing `repository_item`/`repository_item_chunks`, link via
+ * `content_index_links`, and stamp `content_objects.indexed_at`.
  *
- * No-op when the object doesn't exist, isn't published, or has no current
- * version/text. Safe to call repeatedly (idempotent re-index on new versions).
+ * `versionId` pins WHICH version is indexed (issue #1118): the publish path passes
+ * the version it made live so retrieval mirrors what readers actually serve. When
+ * a §26.4 approval replay publishes an OLDER pinned version while the author has
+ * edited a newer head, indexing the head instead would surface the unreviewed head
+ * text to assistant retrieval/search (and, with a public widen, to everyone who can
+ * view public content) even though readers serve the reviewed version — defeating
+ * the pin. Omit `versionId` to index the current head (the re-index-after-rollback
+ * caller, where the head IS the intended live text). A pinned version that no
+ * longer belongs to the object falls back to the head.
+ *
+ * No-op when the object doesn't exist, isn't published, or has no version/text.
+ * Safe to call repeatedly (idempotent re-index).
  */
-async function indexObject(objectId: string): Promise<void> {
+async function indexObject(objectId: string, versionId?: string): Promise<void> {
   const obj = await contentService.loadByIdOrSlug(objectId);
   if (!obj || obj.status !== "published") return;
 
-  const version = await versionService.current(obj.id);
+  const version =
+    (versionId ? await versionService.getById(obj.id, versionId) : null) ??
+    (await versionService.current(obj.id));
   if (!version) return;
 
   const text = await loadIndexableText(obj, version);
