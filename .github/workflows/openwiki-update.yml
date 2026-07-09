@@ -1,8 +1,9 @@
 # OpenWiki Update workflow
-# Runs the OpenWiki documentation agent (langchain-ai/openwiki) on a schedule to
-# keep the agent-navigable `openwiki/` wiki current, then opens/refreshes a single
-# rolling PR against `dev`. Not native to Bedrock: OpenWiki talks to OpenRouter by
-# default, so this job needs a provider API key stored as a repo secret.
+# Runs the OpenWiki documentation agent (langchain-ai/openwiki) on every push to
+# `dev` (plus a weekly backstop) to keep the agent-navigable `openwiki/` wiki
+# current, then opens/refreshes a single rolling PR against `dev`. Not native to
+# Bedrock: OpenWiki talks to OpenRouter by default, so this job needs a provider
+# API key stored as a repo secret.
 #
 # Manual prerequisites (one-time, out of code — see issue #1101):
 #   1. Add the `OPENROUTER_API_KEY` repo secret (or the chosen provider's key).
@@ -18,9 +19,23 @@ name: OpenWiki Update
 
 on:
   workflow_dispatch:
+  push:
+    branches: [dev]
   schedule:
-    # UTC. 08:00 UTC = midnight PST. Weekly (Mon) to bound LLM cost + review noise.
+    # UTC. 08:00 UTC = midnight PST. Weekly (Mon) backstop in case push-driven
+    # runs were skipped (e.g. the provider secret was temporarily absent).
     - cron: "0 8 * * 1"
+
+# One update at a time. A push landing mid-run queues exactly one follow-up
+# (GitHub coalesces pending runs per group), which then covers every commit
+# that arrived meanwhile. No cancel-in-progress: killing a mid-flight LLM run
+# wastes its spend without saving anything. Self-trigger note: merging the
+# rolling openwiki/update PR pushes to dev and re-runs this workflow, but
+# openwiki's no-op detection (git diff from the recorded gitHead) sees only
+# openwiki/ paths changed and skips the LLM pass.
+concurrency:
+  group: openwiki-update
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -35,7 +50,23 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # Graceful gate: until the OPENROUTER_API_KEY secret is configured (manual
+      # prerequisite 1 above), every dev push would otherwise fail this workflow
+      # red. Skip cleanly instead — the remaining steps are conditioned on this.
+      - name: Check provider secret
+        id: gate
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_KEY" ]; then
+            echo "OPENROUTER_API_KEY not configured — skipping OpenWiki update (see workflow header for one-time setup)."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check out repository
+        if: steps.gate.outputs.configured == 'true'
         uses: actions/checkout@v7
         with:
           # Generate from, and propose against, the same branch. create-pull-request
@@ -58,11 +89,13 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node.js
+        if: steps.gate.outputs.configured == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: "22"
 
       - name: Install OpenWiki
+        if: steps.gate.outputs.configured == 'true'
         # Version-pinned: this job runs on a schedule with a provider secret, so we
         # do not auto-adopt an unreviewed OpenWiki release. Bump deliberately.
         #
@@ -77,6 +110,7 @@ jobs:
         run: npm install --global openwiki@0.0.4
 
       - name: Run OpenWiki
+        if: steps.gate.outputs.configured == 'true'
         run: openwiki --update --print
         env:
           OPENWIKI_PROVIDER: openrouter
@@ -88,6 +122,7 @@ jobs:
           # LANGCHAIN_TRACING_V2: "true"
 
       - name: Create OpenWiki update pull request
+        if: steps.gate.outputs.configured == 'true'
         # Third-party action — SHA-pinned per ci.yml convention (oven-sh/setup-bun).
         # v8+ required: declares node24, ahead of GitHub's 2026 removal of the
         # node20 action runtime from hosted runners.
