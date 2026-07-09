@@ -38,6 +38,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
+          # Generate from, and propose against, the same branch. create-pull-request
+          # builds the PR branch from the checked-out HEAD, so pin `ref` to the PR
+          # base (`dev`): scheduled runs use the default branch and a manual dispatch
+          # can be launched from any ref, but this PR always targets `dev`. Without
+          # this, a dispatch from another ref would open a PR full of that ref's delta
+          # rather than just the regenerated wiki.
+          ref: dev
           # Harden: do not leave the GITHUB_TOKEN in .git/config while the OpenWiki
           # agent runs arbitrary LLM-driven code with filesystem access. The
           # create-pull-request step below authenticates via its own `token` input
