@@ -196,6 +196,23 @@ jest.mock("@/lib/content/publish-adapters/okf", () => ({
   },
 }));
 
+// publish-service imports versionService (to validate a PINNED version on the
+// approval-replay path — issue #1118). The REAL module pulls mappers →
+// drizzle-helpers, which needs `sql` (not in this suite's minimal drizzle-orm
+// mock), so stub it. `getById` returns a version by default so a `versionId`
+// publish validates; individual tests override it (e.g. null → not-found).
+const getVersionByIdMock = jest.fn(
+  async (): Promise<{ id: string; versionNumber: number } | null> => ({
+    id: "v-pinned",
+    versionNumber: 3,
+  })
+);
+jest.mock("@/lib/content/version-service", () => ({
+  versionService: {
+    getById: (...args: unknown[]) => getVersionByIdMock(...(args as [])),
+  },
+}));
+
 // A chainable tx stub. The TERMINAL builder methods `.limit()` and `.returning()`
 // each shift the next queued result off `txResults` (in call order): a `.limit()`
 // terminates a SELECT (the FOR UPDATE lock, the live-publication lookup), and a
@@ -395,14 +412,19 @@ describe("publishService.publish", () => {
     expect(publicWebPublishCalls).toBe(0);
   });
 
-  it("gates schoology/google behind the §26.4 public gate for an unauthorized caller (Phase 7)", async () => {
-    // Phase 7 (#1057): schoology & google are PUBLIC (family-facing) destinations
-    // now, so a non-admin owner without publish_public is routed through the
-    // approval gate — BEFORE the not-implemented check — exactly like public_web.
+  it("fails a schoology/google publish with ValidationError BEFORE the gate for an unauthorized caller (issue #1118 item 6 — doomed requests are not queued)", async () => {
+    // schoology & google are not-yet-implemented connector STUBS. Issue #1118 item
+    // 6 reorders the cheap adapter-not-implemented check AHEAD of the §26.4 gate:
+    // a publish to a stub can NEVER succeed (approving it just re-hits the stub
+    // error), so it must fail with a plain ValidationError and NOT be persisted as
+    // a doomed approval-queue row. The revealed fact ("destination not yet wired")
+    // is static/non-sensitive. (public_web IS implemented, so an unauthorized
+    // public_web publish still reaches the gate — see the ApprovalRequiredError
+    // test above.) No write, no queued request, no adapter.
     for (const destination of ["schoology", "google"] as const) {
       await expect(
         publishService.publish(owner, "o1", { destination })
-      ).rejects.toThrow(ApprovalRequiredError);
+      ).rejects.toThrow(ValidationError);
     }
     expect(setLevelInTxCalls).toBe(0);
     expect(adapterPublishCalls).toBe(0);
@@ -473,6 +495,33 @@ describe("publishService.publish", () => {
     expect(adapterPublishCalls).toBe(1);
     // No visibility provided -> setLevelInTx must NOT run (publish doesn't widen).
     expect(setLevelInTxCalls).toBe(0);
+  });
+
+  it("publishes a PINNED version (input.versionId), not the head — approval replay (issue #1118 item 1)", async () => {
+    // An approval replay pins the raise-time version so the admin publishes the
+    // REVIEWED content even though the current head is v1. getById validates the
+    // pinned version belongs to the object.
+    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    const result = await publishService.publish(admin, "o1", {
+      destination: "intranet",
+      versionId: "v-reviewed",
+    });
+    expect(result).toEqual({
+      publicationId: "pub1",
+      publishedVersionId: "v-reviewed",
+    });
+    expect(getVersionByIdMock).toHaveBeenCalled();
+  });
+
+  it("throws ValidationError when the pinned versionId does not belong to the object", async () => {
+    // getById scopes by object and returns null for a version of another object.
+    getVersionByIdMock.mockResolvedValueOnce(null);
+    await expect(
+      publishService.publish(admin, "o1", {
+        destination: "intranet",
+        versionId: "not-mine",
+      })
+    ).rejects.toThrow(ValidationError);
   });
 
   it("widens visibility via setLevelInTx only when visibility is provided", async () => {
@@ -569,10 +618,19 @@ describe("publishService.unpublish", () => {
   // §26.4 — taking a public destination offline requires the same authority as
   // putting it up: content:publish_internal alone must not be enough to tear
   // down already-live public_web content.
-  it("throws ApprovalRequiredError unpublishing public_web without publish_public, and never touches the tx", async () => {
+  it("throws ApprovalRequiredError unpublishing public_web without publish_public, PERSISTS a durable request (issue #1118 item 2), and never touches the tx", async () => {
     await expect(
       publishService.unpublish(owner, "o1", "public_web")
     ).rejects.toThrow(ApprovalRequiredError);
+    // Let the fire-and-forget persist settle, then assert the unpublish request was
+    // written to the durable queue — previously this gate raw-threw and queued
+    // NOTHING, so a blocked unpublish never appeared in /admin/atrium.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      executeQueryMock.mock.calls.some(
+        (call: unknown[]) => call[1] === "content.publishApprovalRequest"
+      )
+    ).toBe(true);
     expect(adapterUnpublishCalls).toBe(0);
   });
 

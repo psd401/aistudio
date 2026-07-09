@@ -1,21 +1,23 @@
 /**
  * Regression tests for the §26.4 public-visibility gate on the CREATE and
- * SET_VISIBILITY write paths (Issue #1055, Phase 5 — PR #1088 review finding).
+ * SET_VISIBILITY write paths (Issue #1055, Phase 5 — PR #1088 review finding;
+ * create path updated for issue #1118 create-as-private).
  *
- * The public-publish approval gate must not be bypassable through side doors:
- * before this fix it was enforced ONLY in `publishService.publish`, so an
- * under-scoped caller could reach `visibility.level = "public"` directly via
+ * The public-publish authority must not be bypassable through side doors: an
+ * under-scoped caller must not make content public directly via
  * `contentService.create` (scope `content:create`) or `visibilityService.setLevel`
- * (scope `content:update`), making content public with no `ApprovalRequiredError`,
- * no approval-queue event, and no admin review.
+ * (scope `content:update`) without admin review.
  *
- * These tests prove the gate now fires on BOTH paths for callers WITHOUT
- * `content:publish_public`, and that authorized callers (admin / explicit
- * capability / delegated-with-grant) still pass. On the `create` path the gate
- * runs BEFORE any DB write (`executeTransactionCalls` stays 0 on rejection). On
- * the `setLevel` path the gate runs INSIDE the transaction against the
- * FOR-UPDATE-locked row (race-free — see #1090), so a rejection still opens a
- * transaction; `txUpdateCalls` instead asserts the row UPDATE itself never runs.
+ * - `setLevel`: the gate THROWS `ApprovalRequiredError` — runs INSIDE the
+ *   transaction against the FOR-UPDATE-locked row (race-free — see #1090), so a
+ *   rejection still opens a transaction; `txUpdateCalls` asserts the row UPDATE
+ *   itself never runs.
+ * - `create`: issue #1118 item 2 changed this from THROW to create-as-private —
+ *   an unauthorized public create is NOT blocked; it is downgraded to private and
+ *   a `visibility_widen` is queued. So the create path here only asserts it never
+ *   SHORT-CIRCUITS with `ApprovalRequiredError` (the "not a public side door"
+ *   property still holds — the object is created private). The downgrade +
+ *   queued-widen end-to-end behaviour lives in tests/unit/atrium-create-as-private.test.ts.
  */
 
 // --- mocks (hoisted above imports by jest) ---
@@ -144,52 +146,68 @@ beforeEach(() => {
   emitCalls = [];
   txResults = [];
   executeQueryResults = [];
+  // An autonomous agent owns content as the configured system user (§26.5). With
+  // create-as-private (issue #1118), an autonomous public create now proceeds to
+  // the write path (owner = system user) instead of short-circuiting at the old
+  // gate — so ownerFor() must resolve. Set the env the real `systemUserId()` reads.
+  process.env.ATRIUM_SYSTEM_USER_ID = "999";
   jest.clearAllMocks();
 });
 
-describe("§26.4 gate — contentService.create with visibility.level = 'public'", () => {
+afterAll(() => {
+  delete process.env.ATRIUM_SYSTEM_USER_ID;
+});
+
+describe("§26.4 create-as-private — contentService.create with visibility.level = 'public'", () => {
+  // Issue #1118 item 2: an unauthorized public create is NO LONGER blocked — it is
+  // downgraded to private and a visibility_widen is queued. So the §26.4 create
+  // path must never SHORT-CIRCUIT with ApprovalRequiredError; it reaches the write
+  // path instead. (The downgrade-to-private + queued-widen end-to-end behaviour is
+  // verified in tests/unit/atrium-create-as-private.test.ts; the crude tx mock here
+  // fails downstream, so we only assert the failure is NOT an ApprovalRequiredError.)
   const publicDoc = {
     kind: "document" as const,
     title: "Public doc",
     visibility: { level: "public" as const },
   };
 
-  it("REJECTS a non-admin user without publish_public (ApprovalRequiredError, no write)", async () => {
-    await expect(contentService.create(staffUser, publicDoc)).rejects.toThrow(
-      ApprovalRequiredError
-    );
-    expect(executeTransactionCalls).toBe(0); // nothing created
-    expect(emitCalls.map((c) => c.type)).toContain(
-      "content.public_publish_requested"
-    );
+  it("does NOT block a non-admin user (create-as-private; reaches the write path)", async () => {
+    await expect(
+      contentService.create(staffUser, publicDoc)
+    ).rejects.not.toThrow(ApprovalRequiredError);
+    expect(executeTransactionCalls).toBeGreaterThan(0);
   });
 
-  it("REJECTS an autonomous agent (can never publish public)", async () => {
+  it("does NOT block an autonomous agent", async () => {
     await expect(
       contentService.create(autonomousAgent, publicDoc)
-    ).rejects.toThrow(ApprovalRequiredError);
-    expect(executeTransactionCalls).toBe(0);
+    ).rejects.not.toThrow(ApprovalRequiredError);
+    expect(executeTransactionCalls).toBeGreaterThan(0);
   });
 
-  it("REJECTS a delegated agent lacking the publish_public grant", async () => {
+  it("does NOT block a delegated agent lacking the publish_public grant", async () => {
     await expect(
       contentService.create(delegatedNoGrant, publicDoc)
-    ).rejects.toThrow(ApprovalRequiredError);
-    expect(executeTransactionCalls).toBe(0);
+    ).rejects.not.toThrow(ApprovalRequiredError);
+    expect(executeTransactionCalls).toBeGreaterThan(0);
   });
 
-  it("REJECTS a user even WITH the wildcard-derived flag left false (session must pass explicit capability)", async () => {
-    // The surfaces derive `hasPublishPublicCapability` from the EXPLICIT scope, so
-    // omitting it (default false) must reject — proving the wildcard cannot leak in.
+  it("does NOT block when a COLLECTION DEFAULT resolves to public (Gate 2, no explicit visibility)", async () => {
+    // The seeded `public-site` collection has default_visibility_level = 'public',
+    // so a create into it with NO explicit visibility resolves to "public" via the
+    // collection default — the same create-as-private downgrade applies.
+    executeQueryResults = [[{ level: "public" }]]; // collection-default lookup -> public
     await expect(
-      contentService.create(staffUser, publicDoc, {})
-    ).rejects.toThrow(ApprovalRequiredError);
+      contentService.create(staffUser, {
+        kind: "document",
+        title: "Doc into the public-site collection",
+        collectionId: "col-public-site",
+      })
+    ).rejects.not.toThrow(ApprovalRequiredError);
+    expect(executeTransactionCalls).toBeGreaterThan(0);
   });
 
   it("ALLOWS an admin past the gate (proceeds to the write path)", async () => {
-    // The gate passes for an admin; the write then runs (and fails in the mocked
-    // slug/collection resolution, which is fine — we only assert the gate did not
-    // short-circuit with ApprovalRequiredError).
     await expect(
       contentService.create(adminUser, publicDoc)
     ).rejects.not.toThrow(ApprovalRequiredError);
@@ -211,27 +229,7 @@ describe("§26.4 gate — contentService.create with visibility.level = 'public'
     ).rejects.not.toThrow(ApprovalRequiredError);
   });
 
-  it("REJECTS + emits the approval event when a COLLECTION DEFAULT resolves to public (Gate 2, no explicit visibility)", async () => {
-    // The seeded `public-site` collection has default_visibility_level = 'public',
-    // so a create into it with NO explicit visibility resolves to "public" via the
-    // collection default (Gate 2) rather than the explicit path (Gate 1). Both
-    // gates must behave identically: fail closed AND emit the approval-queue signal
-    // (regression for the Gate-2 path that previously threw WITHOUT emitting).
-    executeQueryResults = [[{ level: "public" }]]; // collection-default lookup -> public
-    await expect(
-      contentService.create(staffUser, {
-        kind: "document",
-        title: "Doc into the public-site collection",
-        collectionId: "col-public-site",
-      })
-    ).rejects.toThrow(ApprovalRequiredError);
-    expect(executeTransactionCalls).toBe(0); // nothing created
-    expect(emitCalls.map((c) => c.type)).toContain(
-      "content.public_publish_requested"
-    );
-  });
-
-  it("does NOT gate a non-public create (internal level passes the gate)", async () => {
+  it("does NOT gate a non-public create (internal level proceeds normally)", async () => {
     await expect(
       contentService.create(staffUser, {
         kind: "document",

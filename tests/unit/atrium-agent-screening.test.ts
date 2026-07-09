@@ -55,7 +55,9 @@ jest.mock("@/lib/safety", () => ({
 import {
   screenAgentContent,
   screenAgentBodyForWrite,
+  assertScreened,
   AGENT_SCREEN_BLOCKED_MESSAGE,
+  type ScreeningProof,
 } from "@/lib/content/agent-screening";
 import { ValidationError } from "@/lib/content/errors";
 import { createLogger } from "@/lib/logger";
@@ -181,9 +183,10 @@ describe("screenAgentContent", () => {
 describe("screenAgentBodyForWrite (the content-service write gate)", () => {
   it("never screens a human author (zero behavior change)", async () => {
     checkResult = { allowed: false }; // would block IF screened
+    // Returns a "screening not required" proof (screenedBody null) — no screening.
     await expect(
       screenAgentBodyForWrite(humanUser, "# anything", null)
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ screenedBody: null });
     expect(checkInputSafetyMock).not.toHaveBeenCalled();
   });
 
@@ -200,9 +203,10 @@ describe("screenAgentBodyForWrite (the content-service write gate)", () => {
 
   it("allows a clean delegated-agent body (screened and passed)", async () => {
     checkResult = { allowed: true };
+    // The proof binds to the EXACT screened body (issue #1118 item 3).
     await expect(
       screenAgentBodyForWrite(delegatedAgent, "# clean", "obj-1")
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ screenedBody: "# clean" });
     expect(checkInputSafetyMock).toHaveBeenCalledTimes(1);
   });
 
@@ -215,7 +219,7 @@ describe("screenAgentBodyForWrite (the content-service write gate)", () => {
   it("allows a clean autonomous-agent body", async () => {
     await expect(
       screenAgentBodyForWrite(autonomousAgent, "# clean", "obj-1")
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ screenedBody: "# clean" });
     expect(checkInputSafetyMock).toHaveBeenCalledTimes(1);
   });
 
@@ -231,9 +235,10 @@ describe("screenAgentBodyForWrite (the content-service write gate)", () => {
 
   it("does NOT throw (fails open) when screening is degraded/unavailable", async () => {
     checkResult = { allowed: true, degraded: true };
+    // Fails open → returns a proof (content allowed) rather than throwing.
     await expect(
       screenAgentBodyForWrite(autonomousAgent, "# any", "obj-1")
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ screenedBody: "# any" });
     // Screening was attempted (telemetry) even though it degraded to allow.
     expect(checkInputSafetyMock).toHaveBeenCalledTimes(1);
   });
@@ -247,5 +252,41 @@ describe("screenAgentBodyForWrite (the content-service write gate)", () => {
       module: "atrium-agent-screening",
       requestId: "req-write-9",
     });
+  });
+});
+
+describe("assertScreened (the shared-write-primitive guard, issue #1118 item 3)", () => {
+  it("passes when the proof matches the exact screened agent body", async () => {
+    checkResult = { allowed: true };
+    const proof = await screenAgentBodyForWrite(autonomousAgent, "# clean", "o1");
+    expect(() => assertScreened(autonomousAgent, "# clean", proof, "o1")).not.toThrow();
+  });
+
+  it("THROWS when the proof was for a DIFFERENT body (stale/mismatched proof)", async () => {
+    checkResult = { allowed: true };
+    const proof = await screenAgentBodyForWrite(autonomousAgent, "# screened", "o1");
+    // A future caller screens body A then snapshots body B — must fail loudly.
+    expect(() =>
+      assertScreened(autonomousAgent, "# DIFFERENT body", proof, "o1")
+    ).toThrow(ValidationError);
+  });
+
+  it("THROWS on a fabricated proof (missing the module-private brand)", () => {
+    // A caller cannot forge a ScreeningProof: the brand symbol is module-private,
+    // so a hand-built object fails the guard even if screenedBody matches.
+    const fake = { screenedBody: "# agent body" } as unknown as ScreeningProof;
+    expect(() =>
+      assertScreened(autonomousAgent, "# agent body", fake, "o1")
+    ).toThrow(ValidationError);
+  });
+
+  it("is a NO-OP for a human writer (screening never required)", () => {
+    const fake = {} as unknown as ScreeningProof;
+    expect(() => assertScreened(humanUser, "# human wrote this", fake, "o1")).not.toThrow();
+  });
+
+  it("is a NO-OP for an empty agent body (nothing to screen)", () => {
+    const fake = {} as unknown as ScreeningProof;
+    expect(() => assertScreened(autonomousAgent, "   ", fake, "o1")).not.toThrow();
   });
 });
