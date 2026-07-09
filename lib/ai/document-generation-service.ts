@@ -134,8 +134,10 @@ function wrapPdfLines(
  * Greek, most math/arrow symbols). Replace those code points with "?" so a single
  * such character no longer fails the entire PDF request (REV-COR-499). ASCII/CP1252
  * text is returned unchanged via the whole-string fast path.
+ *
+ * Exported for unit testing.
  */
-function sanitizeForWinAnsi(
+export function sanitizeForWinAnsi(
   text: string,
   font: { encodeText(t: string): unknown }
 ): string {
@@ -145,11 +147,30 @@ function sanitizeForWinAnsi(
   } catch {
     let out = "";
     let replaced = 0;
+    // Cache per-character encodability: natural-language text is highly repetitive,
+    // so this turns the fallback from O(N) encodeText calls into O(unique chars).
+    const cache = new Map<string, boolean>();
     for (const ch of text) {
-      try {
-        font.encodeText(ch);
+      // \r/\n never reach drawText directly — wrapPdfLines splits on them first —
+      // so preserve them unconditionally instead of letting the WinAnsi control-
+      // character rejection turn every line break into "?".
+      if (ch === "\n" || ch === "\r") {
         out += ch;
-      } catch {
+        continue;
+      }
+      let ok = cache.get(ch);
+      if (ok === undefined) {
+        try {
+          font.encodeText(ch);
+          ok = true;
+        } catch {
+          ok = false;
+        }
+        cache.set(ch, ok);
+      }
+      if (ok) {
+        out += ch;
+      } else {
         out += "?";
         replaced++;
       }

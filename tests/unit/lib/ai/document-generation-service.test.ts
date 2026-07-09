@@ -38,8 +38,21 @@ jest.mock("@/lib/settings-manager", () => ({
 import {
   generateDocument,
   isDocumentFormat,
+  sanitizeForWinAnsi,
 } from "@/lib/ai/document-generation-service";
 import { DOCUMENT_FORMATS } from "@/lib/agents/agent-tools/descriptors";
+
+/** A font stub that rejects a fixed set of "non-WinAnsi" characters, like pdf-lib's StandardFonts. */
+function makeFontStub(unencodable: Set<string>) {
+  return {
+    encodeText(t: string) {
+      for (const ch of t) {
+        if (unencodable.has(ch)) throw new Error(`cannot encode ${ch}`);
+      }
+      return t;
+    },
+  };
+}
 
 describe("generateDocument", () => {
   beforeEach(() => {
@@ -127,6 +140,33 @@ describe("generateDocument", () => {
     });
     expect(result.format).toBe("pdf");
     expect(result.bytes).toBeGreaterThan(0);
+  });
+
+  describe("sanitizeForWinAnsi", () => {
+    // pdf-lib's real StandardFonts reject "\n" too, which is what drives both bugs
+    // this covers: line breaks surviving the fallback, and the fallback being cached.
+    const font = makeFontStub(new Set(["\n", "😀"]));
+
+    it("preserves line breaks when the fallback path is triggered by an unencodable character", () => {
+      const result = sanitizeForWinAnsi("Hello 😀\n\nSecond paragraph.", font);
+      expect(result).toBe("Hello ?\n\nSecond paragraph.");
+    });
+
+    it("returns ASCII/CP1252 text unchanged via the whole-string fast path", () => {
+      expect(sanitizeForWinAnsi("Plain text, no issues.", font)).toBe(
+        "Plain text, no issues."
+      );
+    });
+
+    it("caches per-character encodability instead of re-checking repeated characters", () => {
+      const encodeTextSpy = jest.spyOn(font, "encodeText");
+      const repeated = "😀".repeat(50);
+      encodeTextSpy.mockClear();
+      sanitizeForWinAnsi(repeated, font);
+      // 1 call for the whole-string fast-path attempt, then 1 more per UNIQUE
+      // character in the fallback (just "😀") — not 50.
+      expect(encodeTextSpy).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe("isDocumentFormat", () => {
