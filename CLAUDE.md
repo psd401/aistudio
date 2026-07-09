@@ -490,7 +490,7 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - Remove outdated content
 - Update index when adding docs
 
-**OpenWiki (agent wiki):** once initialized, `openwiki/` is an auto-maintained, agent-navigable index of this codebase — when the directory is present, start there for a structured map before spelunking. It coexists with `/docs` (human-oriented). The initial tree is generated on demand (`bunx openwiki --init`, needs a provider key) and thereafter refreshed by the scheduled `.github/workflows/openwiki-update.yml` (opens a rolling `openwiki/update` PR). Do not hand-edit `openwiki/`; it is regenerated.
+**OpenWiki (agent wiki):** `openwiki/` is an auto-maintained, agent-navigable index of this codebase — start at [openwiki/quickstart.md](openwiki/quickstart.md) for a structured map before spelunking. It coexists with `/docs` (human-oriented). The tree is refreshed by `.github/workflows/openwiki-update.yml` on every `dev` push (opens a rolling `openwiki/update` PR, served by Bedrock GLM-5). Do not hand-edit `openwiki/`; it is regenerated.
 
 ## 🎯 Repository Knowledge System
 
