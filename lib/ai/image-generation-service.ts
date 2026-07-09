@@ -36,6 +36,42 @@ interface GeminiGenerateTextResult {
 const log = createLogger({ module: 'image-generation-service' });
 
 const MAX_REFERENCE_REDIRECTS = 5;
+/** Mirrors `lib/agents/agent-tools/web-fetch.ts` FETCH_TIMEOUT_MS/MAX_BYTES bounds. */
+const REFERENCE_IMAGE_TIMEOUT_MS = 10_000;
+const REFERENCE_IMAGE_MAX_BYTES = 10_000_000;
+/** Actual HTTP redirect codes — excludes 304 Not Modified and other non-redirect 3xx. */
+const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
+
+/** Read a response body without buffering past `maxBytes`, aborting the stream early. */
+async function readBoundedArrayBuffer(res: Response, maxBytes: number): Promise<ArrayBuffer> {
+  if (!res.body) {
+    const buffer = await res.arrayBuffer();
+    if (buffer.byteLength > maxBytes) {
+      throw createImageError('NO_IMAGE', 'Reference image exceeds maximum allowed size');
+    }
+    return buffer;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const result = await reader.read();
+    if (result.done) break;
+    total += result.value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw createImageError('NO_IMAGE', 'Reference image exceeds maximum allowed size');
+    }
+    chunks.push(result.value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out.buffer;
+}
 
 /**
  * Fetch a caller-supplied reference-image URL with SSRF protection (REV-COR-497).
@@ -47,6 +83,11 @@ const MAX_REFERENCE_REDIRECTS = 5;
  * can 302 to an internal one — by following redirects manually. Returns the raw
  * bytes + content-type so callers can pass base64 to the AI SDK instead of a raw URL
  * (so the SDK never fetches an unguarded URL server-side).
+ *
+ * Bounded like the sibling `web-fetch.ts` guard: a request timeout so a slow/stalled
+ * origin can't hang the request indefinitely, and a streamed size cap so a large
+ * response can't exhaust memory (checked incrementally, not just via Content-Length,
+ * since that header can be absent or lie).
  *
  * Exported for unit testing.
  */
@@ -63,19 +104,31 @@ export async function fetchReferenceImageSafely(
       });
       throw createImageError('NO_IMAGE', 'Reference image URL is not allowed');
     }
-    const res = await fetch(currentUrl, { redirect: 'manual' });
-    if (res.status >= 300 && res.status < 400) {
+    const res = await fetch(currentUrl, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(REFERENCE_IMAGE_TIMEOUT_MS),
+    });
+    if (REDIRECT_STATUS_CODES.has(res.status)) {
       const location = res.headers.get('location');
-      if (!location) break;
+      if (!location) {
+        throw createImageError(
+          'NO_IMAGE',
+          `Redirect response missing Location header (status ${res.status})`
+        );
+      }
       currentUrl = new URL(location, currentUrl).toString();
       continue;
     }
     if (!res.ok) {
       throw createImageError('NO_IMAGE', `Failed to fetch reference image (status ${res.status})`);
     }
-    const arrayBuffer = await res.arrayBuffer();
-    const mimeType = res.headers.get('content-type') || 'image/png';
-    return { data: arrayBuffer, mimeType };
+    const contentLength = res.headers.get('content-length');
+    if (contentLength && Number(contentLength) > REFERENCE_IMAGE_MAX_BYTES) {
+      throw createImageError('NO_IMAGE', 'Reference image exceeds maximum allowed size');
+    }
+    const data = await readBoundedArrayBuffer(res, REFERENCE_IMAGE_MAX_BYTES);
+    const mimeType = (res.headers.get('content-type') || 'image/png').split(';')[0].trim();
+    return { data, mimeType };
   }
   throw createImageError('NO_IMAGE', 'Too many redirects fetching reference image');
 }

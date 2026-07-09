@@ -67,4 +67,97 @@ describe("fetchReferenceImageSafely — SSRF guard (REV-COR-497)", () => {
     // Hop 0 (public) fetched; hop 1 (metadata) blocked before fetching.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("passes an AbortSignal so a hanging origin cannot stall the request indefinitely", async () => {
+    fetchMock.mockResolvedValueOnce({
+      status: 200,
+      ok: true,
+      headers: { get: (k: string) => (k.toLowerCase() === "content-type" ? "image/png" : null) },
+      arrayBuffer: async () => new ArrayBuffer(0),
+    });
+    await fetchReferenceImageSafely("https://example.com/ref.png");
+    const options = fetchMock.mock.calls[0][1];
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("rejects a 304 Not Modified instead of treating it as a redirect", async () => {
+    fetchMock.mockResolvedValueOnce({
+      status: 304,
+      ok: false,
+      headers: { get: () => null },
+    });
+    await expect(fetchReferenceImageSafely("https://example.com/ref.png")).rejects.toThrow(
+      /status 304/
+    );
+  });
+
+  it("rejects a redirect response with no Location header instead of silently stopping", async () => {
+    fetchMock.mockResolvedValueOnce({
+      status: 302,
+      ok: false,
+      headers: { get: () => null },
+    });
+    await expect(fetchReferenceImageSafely("https://example.com/redirect")).rejects.toThrow(
+      /Location/
+    );
+  });
+
+  it("rejects a response whose Content-Length exceeds the size cap before buffering", async () => {
+    const arrayBuffer = jest.fn();
+    fetchMock.mockResolvedValueOnce({
+      status: 200,
+      ok: true,
+      headers: {
+        get: (k: string) => {
+          const key = k.toLowerCase();
+          if (key === "content-type") return "image/png";
+          if (key === "content-length") return "50000000";
+          return null;
+        },
+      },
+      arrayBuffer,
+    });
+    await expect(
+      fetchReferenceImageSafely("https://example.com/huge.png")
+    ).rejects.toThrow(/exceeds maximum allowed size/);
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it("bounds a streamed response with no Content-Length by size, not just the header", async () => {
+    const bigChunk = new Uint8Array(6_000_000);
+    let call = 0;
+    const reader = {
+      read: jest.fn(async () => {
+        call += 1;
+        if (call <= 2) return { done: false, value: bigChunk };
+        return { done: true, value: undefined };
+      }),
+      cancel: jest.fn(async () => {}),
+    };
+    fetchMock.mockResolvedValueOnce({
+      status: 200,
+      ok: true,
+      headers: { get: (k: string) => (k.toLowerCase() === "content-type" ? "image/png" : null) },
+      body: { getReader: () => reader },
+    });
+    await expect(
+      fetchReferenceImageSafely("https://example.com/stream.png")
+    ).rejects.toThrow(/exceeds maximum allowed size/);
+    expect(reader.cancel).toHaveBeenCalled();
+  });
+
+  it("strips Content-Type parameters so the mime type is canonical", async () => {
+    const body = new TextEncoder().encode("PNGDATA").buffer;
+    fetchMock.mockResolvedValueOnce({
+      status: 200,
+      ok: true,
+      headers: {
+        get: (k: string) =>
+          k.toLowerCase() === "content-type" ? "image/png; charset=binary" : null,
+      },
+      arrayBuffer: async () => body,
+    });
+    const { mimeType } = await fetchReferenceImageSafely("https://example.com/ref.png");
+    expect(mimeType).toBe("image/png");
+  });
 });
