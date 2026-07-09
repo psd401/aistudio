@@ -90,8 +90,7 @@ export async function createJobAction(
       // across three prior restructurings (rounds 1-3) because the
       // alternative to "tainted value reaches sink" would be removing the
       // override capability entirely.
-      // codeql[js/user-controlled-bypass] admin-only override, gated solely by trusted session-derived isAdmin
-      userIdNum = requested
+      userIdNum = requested // codeql[js/user-controlled-bypass] admin-only override, gated solely by trusted session-derived isAdmin
     } else if (!isAdmin && hasRequestedUserId) {
       const requested = typeof job.userId === 'string' ? Number.parseInt(job.userId, 10) : job.userId
       if (typeof requested !== 'number' || Number.isNaN(requested)) {
