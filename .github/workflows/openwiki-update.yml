@@ -52,6 +52,15 @@ jobs:
       - name: Install OpenWiki
         # Version-pinned: this job runs on a schedule with a provider secret, so we
         # do not auto-adopt an unreviewed OpenWiki release. Bump deliberately.
+        #
+        # Transitive deps stay caret-ranged (global install has no lockfile) — this
+        # is inherent to the issue's chosen "global CLI via npm -g" design. We do
+        # NOT pass --ignore-scripts: OpenWiki depends directly on
+        # @langchain/langgraph-checkpoint-sqlite -> better-sqlite3, whose install
+        # script builds a required native binding; skipping it breaks OpenWiki at
+        # runtime. Residual supply-chain risk is bounded by the job-scoped
+        # GITHUB_TOKEN (contents+PR write on this repo only), the human-reviewed PR,
+        # and `add-paths: openwiki` capping where generated content can land.
         run: npm install --global openwiki@0.0.4
 
       - name: Run OpenWiki
