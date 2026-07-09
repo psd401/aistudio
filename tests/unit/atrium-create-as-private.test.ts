@@ -97,7 +97,11 @@ jest.mock("@/lib/content/events", () => ({
 }));
 
 import { contentService } from "@/lib/content/content-service";
+import { versionService } from "@/lib/content/version-service";
 import type { Requester } from "@/lib/content/types";
+
+const flushSnapshotWritesMock =
+  versionService.flushSnapshotWrites as jest.Mock;
 
 const staffUser: Requester = {
   kind: "user",
@@ -151,6 +155,29 @@ describe("contentService.create — create-as-private for an unauthorized public
     await contentService.create(staffUser, publicDoc, {});
     expect(insertedObjectValues?.visibilityLevel).toBe("private");
     expect(persistedApprovalValues?.requestKind).toBe("visibility_widen");
+  });
+
+  it("queues the visibility_widen BEFORE the S3 flush — a blob-write failure cannot drop the approval row", async () => {
+    // flushSnapshotWrites throws on any S3 write failure (documented). The
+    // object row is already committed by then; if the widen queue ran after
+    // the flush, the private object would be stranded with no admin-visible
+    // approval request.
+    flushSnapshotWritesMock.mockRejectedValueOnce(
+      new AggregateError([new Error("S3 throttled")], "snapshot flush failed")
+    );
+
+    await expect(contentService.create(staffUser, publicDoc)).rejects.toThrow(
+      "snapshot flush failed"
+    );
+
+    // The widen request was queued despite the failed flush.
+    expect(persistedApprovalValues).toMatchObject({
+      objectId: "obj-new",
+      requestKind: "visibility_widen",
+    });
+    expect(emitCalls.map((c) => c.type)).toContain(
+      "content.public_publish_requested"
+    );
   });
 });
 

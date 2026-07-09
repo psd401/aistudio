@@ -435,15 +435,18 @@ export const contentService = {
       "content.create"
     );
 
-    // S3 IO happens AFTER the transaction commits (never inside it).
-    await versionService.flushSnapshotWrites(s3Writes);
-
     // §26.4 create-as-private (issue #1118 item 2): the object was created private
     // because the caller lacked public-publish authority — queue a durable widen
     // request now that its id exists. Post-commit + best-effort (never throws).
+    // MUST run before the S3 flush: flushSnapshotWrites throws on blob-write
+    // failure, and the committed-but-unqueued object would otherwise be stuck
+    // private with no admin-visible approval row.
     if (publicWidenRequested) {
       await queuePublicWidenForCreate(req, object.id);
     }
+
+    // S3 IO happens AFTER the transaction commits (never inside it).
+    await versionService.flushSnapshotWrites(s3Writes);
 
     return { ...object, version };
   },
