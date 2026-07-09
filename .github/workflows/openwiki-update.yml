@@ -45,6 +45,12 @@ jobs:
           # this, a dispatch from another ref would open a PR full of that ref's delta
           # rather than just the regenerated wiki.
           ref: dev
+          # Full history: openwiki --update reads the previous run's gitHead from
+          # openwiki/.last-update.json and runs `git diff <gitHead>..HEAD` for its
+          # no-op detection and changed-paths summary (dist/agent/utils.js). With
+          # the default depth-1 clone that SHA is absent after the first merged
+          # update PR, degrading every later run's diff to a fatal git error.
+          fetch-depth: 0
           # Harden: do not leave the GITHUB_TOKEN in .git/config while the OpenWiki
           # agent runs arbitrary LLM-driven code with filesystem access. The
           # create-pull-request step below authenticates via its own `token` input
