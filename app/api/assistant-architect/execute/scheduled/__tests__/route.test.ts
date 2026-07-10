@@ -57,6 +57,11 @@ jest.mock("@/lib/streaming/unified-streaming-service", () => ({
 jest.mock("@/lib/assistant-architect/knowledge-retrieval", () => ({
   retrieveKnowledgeForPrompt: jest.fn(),
   formatKnowledgeContext: jest.fn(() => ""),
+  retrieveAtriumKnowledgeForPrompt: jest.fn(() => Promise.resolve([])),
+  formatAtriumKnowledgeContext: jest.fn(() => ""),
+  // Atrium Phase 6: resolved before the schedule-binding checks; null = no
+  // Atrium retrieval requester (the schedule specifies no agent identity).
+  resolveScheduledAtriumRetrievalRequester: jest.fn(() => Promise.resolve(null)),
 }))
 jest.mock("@/lib/tools/repository-tools", () => ({
   createRepositoryTools: jest.fn(() => ({})),
