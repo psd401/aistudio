@@ -60,8 +60,21 @@ export interface CapabilityCatalogAction {
   description: string;
   /** Surfaces this action is exposed on. */
   surfaces: ToolSurface[];
-  /** Base API scope(s) a caller must hold to invoke it (the MCP-surface scopes). */
+  /**
+   * API scope(s) a caller must hold to invoke it. When the catalog was built with
+   * a `surface` filter, these are the scopes for THAT surface (e.g. REST's
+   * `assistants:execute`, not MCP's `mcp:execute_assistant`); otherwise they are
+   * the base scopes (the MCP-surface scopes). Use {@link scopesBySurface} for the
+   * unambiguous per-surface picture.
+   */
   requiredScopes: string[];
+  /**
+   * The scopes required on EACH surface this action exposes. A multi-surface tool
+   * often needs a different scope per surface (e.g. `mcp:execute_assistant` on
+   * `mcp` vs `assistants:execute` on `rest`), so reporting only the base scopes
+   * would mislead a REST/other-surface caller about what its key must hold.
+   */
+  scopesBySurface: Partial<Record<ToolSurface, string[]>>;
   /** True when the action writes/deletes/has external side effects. */
   destructive: boolean;
   /** True when reachable over `/api/mcp` (surface includes `mcp`). */
@@ -130,6 +143,20 @@ export interface BuildCapabilityCatalogOptions {
 }
 
 /**
+ * Resolve the scopes a caller must hold for a tool on a given surface. A
+ * `surfaceScopes` override REPLACES the base `requiredScopes` for that surface
+ * (e.g. REST `assistants:execute` vs MCP `mcp:execute_assistant`); otherwise the
+ * base scopes apply. Mirrors `requiredScopesForSurface` in the runtime catalog so
+ * the advertised scope matches what actually authorizes the call.
+ */
+function scopesForSurface(
+  entry: (typeof TOOL_MANIFEST)[number],
+  surface: ToolSurface
+): string[] {
+  return entry.surfaceScopes?.[surface] ?? entry.requiredScopes;
+}
+
+/**
  * Collapse `TOOL_MANIFEST` to one entry per identifier, keeping the highest
  * version. All manifest entries are `v1` today, but this keeps the projection
  * correct once multiple versions of a tool coexist.
@@ -145,15 +172,22 @@ function latestActionsPerIdentifier(): CapabilityCatalogAction[] {
       byIdentifier.set(entry.identifier, entry);
     }
   }
-  return [...byIdentifier.values()].map((entry) => ({
-    identifier: entry.identifier,
-    name: entry.name,
-    description: entry.description,
-    surfaces: entry.surfaces,
-    requiredScopes: entry.requiredScopes,
-    destructive: entry.destructive ?? false,
-    agentInvocable: entry.surfaces.includes("mcp"),
-  }));
+  return [...byIdentifier.values()].map((entry) => {
+    const scopesBySurface: Partial<Record<ToolSurface, string[]>> = {};
+    for (const surface of entry.surfaces) {
+      scopesBySurface[surface] = scopesForSurface(entry, surface);
+    }
+    return {
+      identifier: entry.identifier,
+      name: entry.name,
+      description: entry.description,
+      surfaces: entry.surfaces,
+      requiredScopes: entry.requiredScopes,
+      scopesBySurface,
+      destructive: entry.destructive ?? false,
+      agentInvocable: entry.surfaces.includes("mcp"),
+    };
+  });
 }
 
 /** Project `CAPABILITY_MANIFEST` into feature entries. */
@@ -212,7 +246,15 @@ export function buildCapabilityCatalog(
 
   if (opts.surface) {
     const surface = opts.surface;
-    actions = actions.filter((a) => a.surfaces.includes(surface));
+    // Narrow to the surface AND report that surface's scopes as `requiredScopes`
+    // (not the base MCP scopes), so a REST/etc. caller is told the scope its key
+    // actually needs. The full per-surface picture stays in `scopesBySurface`.
+    actions = actions
+      .filter((a) => a.surfaces.includes(surface))
+      .map((a) => ({
+        ...a,
+        requiredScopes: a.scopesBySurface[surface] ?? a.requiredScopes,
+      }));
   }
 
   if (opts.query) {

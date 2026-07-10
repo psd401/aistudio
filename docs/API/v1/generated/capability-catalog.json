@@ -18,6 +18,17 @@
       "requiredScopes": [
         "mcp:execute_assistant"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:execute_assistant"
+        ],
+        "internal": [
+          "mcp:execute_assistant"
+        ],
+        "rest": [
+          "assistants:execute"
+        ]
+      },
       "destructive": false,
       "agentInvocable": true
     },
@@ -33,6 +44,17 @@
       "requiredScopes": [
         "mcp:list_assistants"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:list_assistants"
+        ],
+        "internal": [
+          "mcp:list_assistants"
+        ],
+        "rest": [
+          "assistants:list"
+        ]
+      },
       "destructive": false,
       "agentInvocable": true
     },
@@ -46,6 +68,11 @@
       "requiredScopes": [
         "chat:write"
       ],
+      "scopesBySurface": {
+        "ai_sdk": [
+          "chat:write"
+        ]
+      },
       "destructive": false,
       "agentInvocable": false
     },
@@ -59,6 +86,11 @@
       "requiredScopes": [
         "chat:write"
       ],
+      "scopesBySurface": {
+        "ai_sdk": [
+          "chat:write"
+        ]
+      },
       "destructive": false,
       "agentInvocable": false
     },
@@ -70,6 +102,9 @@
         "ai_sdk"
       ],
       "requiredScopes": [],
+      "scopesBySurface": {
+        "ai_sdk": []
+      },
       "destructive": false,
       "agentInvocable": false
     },
@@ -83,6 +118,11 @@
       "requiredScopes": [
         "chat:write"
       ],
+      "scopesBySurface": {
+        "ai_sdk": [
+          "chat:write"
+        ]
+      },
       "destructive": false,
       "agentInvocable": false
     },
@@ -97,6 +137,14 @@
       "requiredScopes": [
         "content:create"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:create"
+        ],
+        "internal": [
+          "content:create"
+        ]
+      },
       "destructive": true,
       "agentInvocable": true
     },
@@ -111,6 +159,14 @@
       "requiredScopes": [
         "content:create"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:create"
+        ],
+        "internal": [
+          "content:create"
+        ]
+      },
       "destructive": true,
       "agentInvocable": true
     },
@@ -125,6 +181,14 @@
       "requiredScopes": [
         "content:update"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:update"
+        ],
+        "internal": [
+          "content:update"
+        ]
+      },
       "destructive": true,
       "agentInvocable": true
     },
@@ -139,6 +203,14 @@
       "requiredScopes": [
         "content:read"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:read"
+        ],
+        "internal": [
+          "content:read"
+        ]
+      },
       "destructive": false,
       "agentInvocable": true
     },
@@ -153,6 +225,14 @@
       "requiredScopes": [
         "content:read"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:read"
+        ],
+        "internal": [
+          "content:read"
+        ]
+      },
       "destructive": false,
       "agentInvocable": true
     },
@@ -167,6 +247,14 @@
       "requiredScopes": [
         "content:create"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:create"
+        ],
+        "internal": [
+          "content:create"
+        ]
+      },
       "destructive": true,
       "agentInvocable": true
     },
@@ -181,6 +269,14 @@
       "requiredScopes": [
         "content:read"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:read"
+        ],
+        "internal": [
+          "content:read"
+        ]
+      },
       "destructive": false,
       "agentInvocable": true
     },
@@ -195,6 +291,14 @@
       "requiredScopes": [
         "content:publish_internal"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:publish_internal"
+        ],
+        "internal": [
+          "content:publish_internal"
+        ]
+      },
       "destructive": true,
       "agentInvocable": true
     },
@@ -209,6 +313,14 @@
       "requiredScopes": [
         "content:update"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:update"
+        ],
+        "internal": [
+          "content:update"
+        ]
+      },
       "destructive": true,
       "agentInvocable": true
     },
@@ -223,6 +335,14 @@
       "requiredScopes": [
         "content:publish_internal"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:publish_internal"
+        ],
+        "internal": [
+          "content:publish_internal"
+        ]
+      },
       "destructive": true,
       "agentInvocable": true
     },
@@ -237,6 +357,14 @@
       "requiredScopes": [
         "content:update"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:update"
+        ],
+        "internal": [
+          "content:update"
+        ]
+      },
       "destructive": true,
       "agentInvocable": true
     },
@@ -251,6 +379,14 @@
       "requiredScopes": [
         "mcp:capture_decision"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:capture_decision"
+        ],
+        "internal": [
+          "mcp:capture_decision"
+        ]
+      },
       "destructive": true,
       "agentInvocable": true
     },
@@ -265,6 +401,14 @@
       "requiredScopes": [
         "mcp:get_decision_graph"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:get_decision_graph"
+        ],
+        "internal": [
+          "mcp:get_decision_graph"
+        ]
+      },
       "destructive": false,
       "agentInvocable": true
     },
@@ -279,6 +423,14 @@
       "requiredScopes": [
         "mcp:search_decisions"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:search_decisions"
+        ],
+        "internal": [
+          "mcp:search_decisions"
+        ]
+      },
       "destructive": false,
       "agentInvocable": true
     },
@@ -292,6 +444,11 @@
       "requiredScopes": [
         "chat:write"
       ],
+      "scopesBySurface": {
+        "internal": [
+          "chat:write"
+        ]
+      },
       "destructive": false,
       "agentInvocable": false
     },
@@ -305,6 +462,11 @@
       "requiredScopes": [
         "chat:write"
       ],
+      "scopesBySurface": {
+        "internal": [
+          "chat:write"
+        ]
+      },
       "destructive": false,
       "agentInvocable": false
     },
@@ -319,6 +481,14 @@
       "requiredScopes": [
         "platform:read"
       ],
+      "scopesBySurface": {
+        "mcp": [
+          "platform:read"
+        ],
+        "internal": [
+          "platform:read"
+        ]
+      },
       "destructive": false,
       "agentInvocable": true
     },
@@ -332,6 +502,11 @@
       "requiredScopes": [
         "chat:write"
       ],
+      "scopesBySurface": {
+        "internal": [
+          "chat:write"
+        ]
+      },
       "destructive": false,
       "agentInvocable": false
     }

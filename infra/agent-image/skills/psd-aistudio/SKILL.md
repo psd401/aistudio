@@ -22,9 +22,12 @@ web-app feature.
 `capabilities` returns three clearly separated sections:
 
 - **`actions[]`** — invocable tools. Each carries the `surfaces` it is exposed
-  on, the `requiredScopes` to call it, `destructive` (writes/deletes), and
-  **`agentInvocable`** — `true` when *you* can invoke it over MCP (surface
-  includes `mcp`), `false` when it exists but isn't reachable from here.
+  on, `requiredScopes` (the scope for the requested `--surface`, else the base
+  MCP scope), `scopesBySurface` (the exact scope needed on *each* surface — e.g.
+  `assistants:execute` on REST vs `mcp:execute_assistant` on MCP), `destructive`
+  (writes/deletes), and **`agentInvocable`** — `true` when *you* can invoke it
+  over MCP (surface includes `mcp`), `false` when it exists but isn't reachable
+  from here.
 - **`features[]`** — role-gated **web-app** features (Assistant Architect, Model
   Compare, Knowledge Repositories, Voice Mode, Atrium, …). These are
   human-driven UI you **steer the user to**; you cannot invoke them. Each lists

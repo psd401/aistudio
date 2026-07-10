@@ -53,6 +53,35 @@ describe("buildCapabilityCatalog", () => {
     expect(aiSdkOnly?.agentInvocable).toBe(false)
   })
 
+  it("REST-surface view reports the REST override scope, not the base MCP scope", () => {
+    // Regression for the codex P2: describe_capabilities({surface:"rest"}) must not
+    // tell a REST/API-key caller to request the MCP scope, which won't authorize
+    // the REST endpoint.
+    const exec = buildCapabilityCatalog({
+      section: "actions",
+      surface: "rest",
+    }).actions?.find((a) => a.identifier === "assistants.execute")
+    expect(exec).toBeDefined()
+    expect(exec?.requiredScopes).toEqual(["assistants:execute"])
+    expect(exec?.scopesBySurface.rest).toEqual(["assistants:execute"])
+    expect(exec?.scopesBySurface.mcp).toEqual(["mcp:execute_assistant"])
+  })
+
+  it("unfiltered actions expose scopesBySurface for every surface, base requiredScopes default", () => {
+    const exec = buildCapabilityCatalog().actions?.find(
+      (a) => a.identifier === "assistants.execute"
+    )
+    // Default (no surface filter) reports the base scopes...
+    expect(exec?.requiredScopes).toEqual(["mcp:execute_assistant"])
+    // ...but the per-surface truth is always available.
+    expect(Object.keys(exec?.scopesBySurface ?? {}).sort()).toEqual([
+      "internal",
+      "mcp",
+      "rest",
+    ])
+    expect(exec?.scopesBySurface.rest).toEqual(["assistants:execute"])
+  })
+
   it("FRESHNESS: every CAPABILITY_MANIFEST entry is projected — no per-feature code", () => {
     // The core promise of #1100: the catalog is a projection, not a hand list.
     // Adding a CAPABILITY_MANIFEST entry surfaces here with zero other changes.
