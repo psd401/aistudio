@@ -171,7 +171,9 @@ else
       echo "ERROR: REQUIRE_PROBE_GATE=1 but ${MSG}" >&2
       exit 1
     fi
+    PROBE_RAN="false"
   else
+    PROBE_RAN="true"
     PROBE_TIMEOUT="${PROBE_BOOT_TIMEOUT:-120}"
     CANARY_MESSAGE="${CANARY_MESSAGE:-Reply with exactly: OK}"
     CID=""
@@ -222,25 +224,66 @@ else
     fi
     echo "  Boot probe PASSED (BOOT_OK in ${BOOT_ELAPSED}s)."
 
-    # Canary turn: a one-shot agent turn. A non-answer fails the build.
-    # Capture the real exit status (do NOT `|| true` it away): a crashed exec
-    # (e.g. auth failure) must fail the build. Match the reply with a word-
-    # bounded, case-SENSITIVE 'OK' — a bare `grep -qi ok` false-passes on error
-    # strings that merely CONTAIN the substring ("token", "broken",
-    # "ExpiredTokenException", "look").
-    echo "Canary turn: '${CANARY_MESSAGE}'..."
+    # Canary turn: a one-shot agent turn through the wrapper's /invocations
+    # HTTP endpoint — the exact path AgentCore InvokeAgentRuntime drives in
+    # production. Deliberately NOT `openclaw agent`: the gateway auth token is
+    # generated per container inside the wrapper process and never written to
+    # disk (REV-INFRA-005, harness_adapter.py), so no docker-exec CLI can ever
+    # authenticate to the gateway. /invocations needs no token and exercises
+    # wrapper -> adapter -> gateway -> model end to end.
+    #
+    # BOOT_OK is emitted just BEFORE app.run() binds the HTTP listener
+    # (agentcore_wrapper.py, tail of main), so poll briefly until the port
+    # accepts. Any HTTP response (even 404) means the listener is up; only
+    # connection failures keep polling.
+    for _ in $(seq 1 15); do
+      docker exec "${CID}" curl -s -o /dev/null -m 2 "http://127.0.0.1:8080/ping" 2>/dev/null && break
+      sleep 2
+    done
+
+    # Capture the real exit status (do NOT `|| true` it away): a failed curl
+    # (HTTP error, timeout) must fail the build. The endpoint streams SSE
+    # `data: {...}` events; the answer is the `result` field of the final
+    # event. Extract JUST that field before matching — the raw stream echoes
+    # the prompt inside metadata.messages, so grepping the whole body would
+    # false-pass on the echoed "Reply with exactly: OK".
+    echo "Canary turn: '${CANARY_MESSAGE}' (via /invocations)..."
+    CANARY_TIMEOUT="${PROBE_CANARY_TIMEOUT:-120}"
+    CANARY_PAYLOAD=$("${PYTHON}" -c \
+      'import json, sys; print(json.dumps({"prompt": sys.argv[1], "user_email": "canary@build-gate"}))' \
+      "${CANARY_MESSAGE}")
     CANARY_START=$(date +%s)
-    CANARY_OUT=$(docker exec "${CID}" openclaw agent --message "${CANARY_MESSAGE}" 2>&1) \
+    CANARY_OUT=$(docker exec "${CID}" curl -sS -f -m "${CANARY_TIMEOUT}" \
+      -X POST "http://127.0.0.1:8080/invocations" \
+      -H "Content-Type: application/json" -d "${CANARY_PAYLOAD}" 2>&1) \
       && CANARY_STATUS=0 || CANARY_STATUS=$?
     CANARY_ELAPSED=$(( $(date +%s) - CANARY_START ))
-    echo "${CANARY_OUT}" | sed 's/^/    [canary] /'
+    CANARY_ANSWER=$(printf '%s' "${CANARY_OUT}" | "${PYTHON}" -c '
+import json, sys
+answer = ""
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("data: "):
+        continue
+    try:
+        event = json.loads(line[len("data: "):])
+    except ValueError:
+        continue
+    if isinstance(event, dict) and "result" in event:
+        answer = str(event.get("result") or "")
+print(answer)')
+    echo "    [canary] answer: ${CANARY_ANSWER:-<none>}"
 
+    # Match the extracted answer with a word-bounded, case-SENSITIVE 'OK' — a
+    # bare `grep -qi ok` false-passes on strings that merely CONTAIN the
+    # substring ("token", "broken", "ExpiredTokenException", "look").
     if [ "${CANARY_STATUS}" -eq 0 ] \
-       && printf '%s' "${CANARY_OUT}" | grep -Eq '(^|[^A-Za-z])OK([^A-Za-z]|$)'; then
+       && printf '%s' "${CANARY_ANSWER}" | grep -Eq '(^|[^A-Za-z])OK([^A-Za-z]|$)'; then
       echo "  Canary turn PASSED (answered in ${CANARY_ELAPSED}s)."
       CANARY_OK="true"
     else
       echo "ERROR: canary turn failed (exit=${CANARY_STATUS}) or produced no 'OK' answer." >&2
+      printf '%s\n' "${CANARY_OUT}" | tail -5 | sed 's/^/    [canary-raw] /' >&2
       CANARY_OK="false"
     fi
 
@@ -253,7 +296,11 @@ else
       exit 1
     fi
   fi
-  echo "=== Eval gate PASSED — image is boot-verified and answers ==="
+  if [ "${PROBE_RAN}" = "true" ]; then
+    echo "=== Eval gate PASSED — image is boot-verified and answers ==="
+  else
+    echo "=== Eval gate PASSED (static checks only — runtime probe skipped; image NOT boot-verified) ==="
+  fi
   echo ""
 fi
 
