@@ -1,0 +1,23 @@
+# Issue #1105 (FS#162359) — live production header verification
+# Command: curl -sI https://aistudio.psd401.ai/
+# Captured: 2026-07-10T19:28:24Z
+
+HTTP/2 200 
+date: Fri, 10 Jul 2026 19:28:25 GMT
+content-type: text/html; charset=utf-8
+x-frame-options: DENY
+x-content-type-options: nosniff
+strict-transport-security: max-age=31536000; includeSubDomains
+referrer-policy: strict-origin-when-cross-origin
+permissions-policy: camera=(), microphone=(self), geolocation=()
+content-security-policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com; frame-src 'self' https://www.canva.com; frame-ancestors 'none';
+cache-control: no-store, no-cache, must-revalidate, private
+expires: 0
+pragma: no-cache
+set-cookie: authjs.csrf-token=8f5e08379f242a400a1f566e7f61cac6c1c228cc9f8637906a3b983bdba1a62d%7C845e089e3ca6ac193a8ff3e96e4ffcb76a085e3a965055afe4394545af432dc8; Path=/; HttpOnly; Secure; SameSite=Lax
+set-cookie: authjs.callback-url=https%3A%2F%2Faistudio.psd401.ai; Path=/; HttpOnly; Secure; SameSite=Lax
+x-xss-protection: 1; mode=block
+vary: rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding
+link: </_next/static/media/e4af272ccee01ff0-s.p.woff2>; rel=preload; as="font"; crossorigin=""; type="font/woff2"
+x-powered-by: Next.js
+
