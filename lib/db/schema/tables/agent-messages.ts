@@ -32,8 +32,10 @@ export const agentMessages = pgTable("agent_messages", {
   latencyMs: integer("latency_ms").notNull().default(0),
   // Iteration telemetry (migration 100, issue #1161) — the measurement half of
   // the harness self-improvement loop.
-  // model_call_count = upstream Mantle model round-trips this turn (from the
-  //   proxy's usage_events delta); avg/p95 drive the dashboard's "how many
+  // model_call_count = upstream Mantle model round-trips this turn (proxy
+  //   usage_events delta when the proxy is in-path, else a harness-derived
+  //   len(tool_calls)+1 on the direct-Mantle path where the proxy is bypassed —
+  //   see agentcore_wrapper.py); avg/p95 drive the dashboard's "how many
   //   iterations does a turn take" view.
   // duration_ms = full turn wall-clock (wrapper invocation_start -> final yield),
   //   DISTINCT from latency_ms (harness chat.send -> final): includes the

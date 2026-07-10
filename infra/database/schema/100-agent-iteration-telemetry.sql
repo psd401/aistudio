@@ -8,11 +8,12 @@
 -- you cannot improve instructions you cannot measure.
 --
 --   1. model_call_count — number of upstream model calls (Mantle round-trips)
---      the harness made in this turn. Captured by mantle_proxy.py's cumulative
---      `usage_events` counter and threaded as a before/after delta through
---      agentcore_wrapper.py -> agent-router (the exact same delta mechanism 092
---      used for cache_read/write tokens). Powers the dashboard's avg/p95
---      model-calls-per-turn aggregates.
+--      the harness made in this turn. Sourced in agentcore_wrapper.py: the
+--      mantle_proxy `usage_events` delta when the proxy is in the serving path,
+--      else (the current direct-Mantle path, #1159, where the proxy is bypassed)
+--      a harness-derived count = one call per tool round + the final response
+--      (len(tool_calls) + 1). Powers the dashboard's avg/p95 model-calls-per-turn
+--      aggregates and the trace-export.
 --
 --   2. duration_ms — wall-clock milliseconds for the whole turn, measured in
 --      the wrapper from invocation_start to the final yield. This is DISTINCT

@@ -138,6 +138,20 @@ class VerifyBootAndEmitOkTests(unittest.TestCase):
         emit.assert_any_call("BootTruncationWarn")
 
 
+class ResolveModelCallCountTests(unittest.TestCase):
+    def test_prefers_proxy_delta_when_positive(self):
+        # Proxy in the serving path — its usage_events delta is authoritative.
+        self.assertEqual(agentcore_wrapper.resolve_model_call_count(8, 3), 8)
+
+    def test_falls_back_to_tool_rounds_when_proxy_zero(self):
+        # Direct-Mantle path (#1159): proxy bypassed -> delta 0 -> harness count.
+        self.assertEqual(agentcore_wrapper.resolve_model_call_count(0, 5), 6)
+
+    def test_no_tools_no_proxy_is_one_call(self):
+        # A simple Q&A turn: no tools, proxy bypassed -> exactly one model call.
+        self.assertEqual(agentcore_wrapper.resolve_model_call_count(0, 0), 1)
+
+
 class ReadProxyUsageTests(unittest.TestCase):
     def test_usage_events_threaded_from_proxy(self):
         payload = json.dumps({

@@ -126,6 +126,22 @@ def start_mantle_proxy() -> None:
     logger.error("Mantle proxy did not become ready within 20s")
     sys.exit(1)
 
+def resolve_model_call_count(proxy_model_calls: int, tool_call_count: int) -> int:
+    """Per-turn model-call count (issue #1161), robust to the serving path.
+
+    The mantle_proxy `usage_events` delta is authoritative WHEN OpenClaw routes
+    through the proxy — but #1159 ("direct-Mantle provider") pointed the baseUrl
+    at the real Bedrock Mantle endpoint, so on the current image the proxy sees
+    no model traffic and its delta is 0. Fall back to a harness-derived count
+    from the real event stream: one model call per tool round plus the final
+    response (tool_call_count + 1). Prefer the proxy value only when it's > 0, so
+    this stays correct if the proxy is ever restored to the serving path.
+    """
+    if proxy_model_calls > 0:
+        return proxy_model_calls
+    return tool_call_count + 1
+
+
 def read_proxy_usage() -> dict:
     """Read cumulative token usage from the Mantle proxy's /usage endpoint
     (issue #1083). Returns a dict with input_tokens / output_tokens / model and
@@ -910,9 +926,10 @@ def main():
                 # no cache numbers), so they're 0 when the delta is untrusted.
                 "cache_read_input_tokens": proxy_cache_read,
                 "cache_write_input_tokens": proxy_cache_write,
-                # Iteration telemetry (issue #1161). model_call_count from the
-                # proxy delta; duration_ms is the full turn wall-clock. The
-                # legacy-str adapter surfaces no nudge signal, so nudged=False.
+                # Iteration telemetry (issue #1161). The legacy-str adapter
+                # exposes no tool-call list, so model_call_count can only use the
+                # proxy delta (0 on the direct-Mantle path — see the TurnResult
+                # branch); duration_ms is the full turn wall-clock; no nudge signal.
                 "model_call_count": proxy_model_calls,
                 "duration_ms": int((time.time() - invocation_start) * 1000),
                 "nudged": False,
@@ -939,13 +956,25 @@ def main():
                 "cache_read_input_tokens": proxy_cache_read if usage_trustworthy else 0,
                 "cache_write_input_tokens": proxy_cache_write if usage_trustworthy else 0,
                 # Iteration telemetry (issue #1161).
-                # model_call_count: proxy delta when trustworthy, else 0 (the
-                #   harness has no round-trip count, matching the token fallback).
+                # model_call_count: the proxy's usage_events delta is authoritative
+                #   WHEN the proxy is in the serving path — but #1159 ("direct-
+                #   Mantle provider") pointed OpenClaw's baseUrl at the real
+                #   Bedrock Mantle endpoint, not the 127.0.0.1:18791 proxy, so on
+                #   the current image the proxy sees no model traffic and
+                #   usage_events stays 0. Fall back to a harness-derived count
+                #   from the real event stream: one model call per tool round plus
+                #   the final response (len(tool_calls) + 1). Prefer the proxy
+                #   value only when it's > 0 so this stays correct if the proxy is
+                #   ever restored to the serving path. (The nudge-recovered turn's
+                #   tool_calls already include the nudge leg's tools, so the +1
+                #   still under- rather than over-counts on that path.)
                 # duration_ms: full turn wall-clock in the wrapper — distinct
                 #   from result.latency_ms (harness chat.send -> final); this
                 #   also counts the proxy reads and the empty-turn nudge retry.
                 # nudged: the harness fired its one empty-turn nudge this turn.
-                "model_call_count": proxy_model_calls if usage_trustworthy else 0,
+                "model_call_count": resolve_model_call_count(
+                    proxy_model_calls, len(result.tool_calls)
+                ),
                 "duration_ms": int((time.time() - invocation_start) * 1000),
                 "nudged": result.nudged,
                 "latency_ms": result.latency_ms,
