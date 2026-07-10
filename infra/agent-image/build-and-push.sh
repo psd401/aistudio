@@ -173,29 +173,33 @@ else
     trap cleanup_probe EXIT
 
     echo "Starting probe container (secret=${CANARY_SECRET_ARN##*:})..."
-    CID=$(docker run -d --platform linux/arm64 \
-      -e ENVIRONMENT="${ENVIRONMENT}" \
-      -e AWS_REGION="${REGION}" \
-      -e BUILD_MARKER="${TAG}@probe" \
-      -e BEDROCK_API_KEY_SECRET_ARN="${CANARY_SECRET_ARN}" \
-      ${AWS_ACCESS_KEY_ID:+-e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}"} \
-      ${AWS_SECRET_ACCESS_KEY:+-e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}"} \
-      ${AWS_SESSION_TOKEN:+-e AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN}"} \
-      "${ECR_URI}:${TAG}")
+    # Pass through host AWS creds only when present. Build an array (rather than
+    # unquoted ${VAR:+...} word-splitting) so the args are robust regardless of
+    # the credential alphabet / IFS.
+    PROBE_ENV_ARGS=(-e "ENVIRONMENT=${ENVIRONMENT}" -e "AWS_REGION=${REGION}"
+      -e "BUILD_MARKER=${TAG}@probe" -e "BEDROCK_API_KEY_SECRET_ARN=${CANARY_SECRET_ARN}")
+    [ -n "${AWS_ACCESS_KEY_ID:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}")
+    [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}")
+    [ -n "${AWS_SESSION_TOKEN:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}")
+    CID=$(docker run -d --platform linux/arm64 "${PROBE_ENV_ARGS[@]}" "${ECR_URI}:${TAG}")
 
     # Boot probe: wait for BOOT_OK. BUILD_MARKER logged but no BOOT_OK within the
     # timeout is the r10 dead-boot signature -> fail the build (don't push).
+    # Check the LOG for BOOT_OK before checking whether the container is still
+    # running, so a container that logs BOOT_OK then crashes within a poll window
+    # is diagnosed as "reached BOOT_OK then exited" (a distinct, real bug) rather
+    # than misreported as a never-booted image.
     echo "Boot probe: waiting up to ${PROBE_TIMEOUT}s for BOOT_OK..."
     BOOT_START=$(date +%s)
     BOOT_OK="false"
+    BOOT_FAIL_REASON="no BOOT_OK in ${PROBE_TIMEOUT}s"
     while [ "$(( $(date +%s) - BOOT_START ))" -lt "${PROBE_TIMEOUT}" ]; do
-      if ! docker ps -q --no-trunc | grep -q "${CID}"; then
-        echo "ERROR: probe container exited during boot (dead-boot)." >&2
-        docker logs "${CID}" 2>&1 | tail -40 >&2
-        break
-      fi
       if docker logs "${CID}" 2>&1 | grep -q "BOOT_OK"; then
         BOOT_OK="true"
+        break
+      fi
+      if ! docker ps -q --no-trunc | grep -q "${CID}"; then
+        BOOT_FAIL_REASON="container exited before logging BOOT_OK"
         break
       fi
       sleep 3
@@ -203,7 +207,7 @@ else
     BOOT_ELAPSED=$(( $(date +%s) - BOOT_START ))
 
     if [ "${BOOT_OK}" != "true" ]; then
-      echo "ERROR: dead-boot — BUILD_MARKER present but no BOOT_OK in ${PROBE_TIMEOUT}s." >&2
+      echo "ERROR: dead-boot — ${BOOT_FAIL_REASON} (BUILD_MARKER present)." >&2
       docker logs "${CID}" 2>&1 | tail -40 >&2
       printf '{"tag":"%s","boot_ok":false,"boot_elapsed_s":%s,"canary_ok":false}\n' \
         "${TAG}" "${BOOT_ELAPSED}" > "${PROBE_ARTIFACT}"
@@ -212,17 +216,24 @@ else
     echo "  Boot probe PASSED (BOOT_OK in ${BOOT_ELAPSED}s)."
 
     # Canary turn: a one-shot agent turn. A non-answer fails the build.
+    # Capture the real exit status (do NOT `|| true` it away): a crashed exec
+    # (e.g. auth failure) must fail the build. Match the reply with a word-
+    # bounded, case-SENSITIVE 'OK' — a bare `grep -qi ok` false-passes on error
+    # strings that merely CONTAIN the substring ("token", "broken",
+    # "ExpiredTokenException", "look").
     echo "Canary turn: '${CANARY_MESSAGE}'..."
     CANARY_START=$(date +%s)
-    CANARY_OUT=$(docker exec "${CID}" openclaw agent --message "${CANARY_MESSAGE}" 2>&1 || true)
+    CANARY_OUT=$(docker exec "${CID}" openclaw agent --message "${CANARY_MESSAGE}" 2>&1) \
+      && CANARY_STATUS=0 || CANARY_STATUS=$?
     CANARY_ELAPSED=$(( $(date +%s) - CANARY_START ))
     echo "${CANARY_OUT}" | sed 's/^/    [canary] /'
 
-    if echo "${CANARY_OUT}" | grep -qi "OK"; then
+    if [ "${CANARY_STATUS}" -eq 0 ] \
+       && printf '%s' "${CANARY_OUT}" | grep -Eq '(^|[^A-Za-z])OK([^A-Za-z]|$)'; then
       echo "  Canary turn PASSED (answered in ${CANARY_ELAPSED}s)."
       CANARY_OK="true"
     else
-      echo "ERROR: canary turn produced a non-answer (no 'OK' in output)." >&2
+      echo "ERROR: canary turn failed (exit=${CANARY_STATUS}) or produced no 'OK' answer." >&2
       CANARY_OK="false"
     fi
 

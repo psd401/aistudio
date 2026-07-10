@@ -51,9 +51,26 @@ class StripFrontmatterTests(unittest.TestCase):
         text = "---\nname: psd-rules\n---\nBODY LINE 1\nBODY LINE 2\n"
         self.assertEqual(cbb._strip_frontmatter(text), "BODY LINE 1\nBODY LINE 2\n")
 
-    def test_no_frontmatter_returns_unchanged(self):
-        text = "just a body\nno fences\n"
-        self.assertEqual(cbb._strip_frontmatter(text), text)
+    def test_fewer_than_two_fences_yields_empty_body(self):
+        # Must match the Dockerfile awk `f>=2{print}`: with <2 fence lines the
+        # awk prints nothing, so the reconstructed body is empty (NOT the
+        # original text). This is the malformed-frontmatter silent-truncation
+        # case the gate must model faithfully.
+        self.assertEqual(cbb._strip_frontmatter("just a body\nno fences\n"), "")
+        self.assertEqual(cbb._strip_frontmatter("---\nonly opening fence\n"), "")
+
+    def test_trailing_whitespace_fence_matches(self):
+        # `---   ` (trailing whitespace) IS a fence per `^---[[:space:]]*$`.
+        self.assertEqual(
+            cbb._strip_frontmatter("---   \nk: v\n---\t\nBODY\n"), "BODY\n"
+        )
+
+    def test_leading_whitespace_is_not_a_fence(self):
+        # `  ---` (indented) is NOT a fence, so only one real fence is seen and
+        # the body is empty — matching awk's `^---` anchor.
+        self.assertEqual(
+            cbb._strip_frontmatter("  ---\nk: v\n  ---\nBODY\n"), ""
+        )
 
 
 class EffectiveSizesTests(unittest.TestCase):

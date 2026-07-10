@@ -100,20 +100,27 @@ def read_budgets(config_path: str) -> Tuple[int, int]:
 def _strip_frontmatter(text: str) -> str:
     """Return everything after the SECOND `---` line (the closing YAML fence).
 
-    Mirrors the Dockerfile awk: `BEGIN{f=0} /^---$/{f++; next} f>=2{print}`.
-    If the file has no frontmatter, nothing is stripped.
+    Mirrors the Dockerfile awk EXACTLY (build.sh must measure what it builds):
+      awk 'BEGIN{f=0} /^---[[:space:]]*$/{f++; next} f>=2{print}'
+    The awk only prints once it has seen the second fence, so a file with fewer
+    than two fence lines produces an EMPTY body — NOT the original text. A fence
+    line is `---` anchored at the start with only trailing whitespace allowed
+    (`^---[[:space:]]*$`), so a leading-indented `  ---` is NOT a fence. Using
+    `line.rstrip()` (trailing only) rather than `.strip()` (both sides) matches
+    that anchoring.
     """
     lines = text.splitlines(keepends=True)
     fence_count = 0
     body_start = 0
     for i, line in enumerate(lines):
-        if line.strip() == "---":
+        if line.rstrip() == "---":
             fence_count += 1
             if fence_count == 2:
                 body_start = i + 1
                 break
     if fence_count < 2:
-        return text
+        # awk never reached f>=2, so it printed nothing — the body is empty.
+        return ""
     return "".join(lines[body_start:])
 
 
