@@ -231,6 +231,28 @@ export function selectListedTools<T extends VersionedEntry>(
 // tools/call
 // ============================================
 
+/**
+ * Rebuilds a user-supplied JSON-RPC `arguments` object with a NULL prototype and
+ * without the prototype-pollution keys (`__proto__` / `constructor` / `prototype`),
+ * so a crafted `tools/call` payload cannot smuggle those own-keys into any
+ * downstream code that spreads, `Object.assign`es, or `for..in`-copies the
+ * arguments into another object (REV-SEC-190). Defense-in-depth for future tool
+ * handlers — current handlers read specific keys by direct access and are not
+ * vulnerable on their own. Non-object input (absent/primitive/array) collapses to
+ * an empty null-proto object, preserving the previous `?? {}` default; a shallow
+ * scrub is sufficient because handlers read their own top-level keys.
+ */
+function sanitizeToolArguments(args: unknown): Record<string, unknown> {
+  const safe: Record<string, unknown> = Object.create(null)
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    const entries = Object.entries(args as Record<string, unknown>).filter(
+      ([key]) => key !== "__proto__" && key !== "constructor" && key !== "prototype"
+    )
+    Object.assign(safe, Object.fromEntries(entries))
+  }
+  return safe
+}
+
 async function handleToolsCall(
   rpcRequest: JsonRpcRequest,
   context: McpToolContext,
@@ -253,7 +275,7 @@ async function handleToolsCall(
     // message text.
     const dispatchResult = await toolCatalogInstance.dispatch(
       params.name,
-      params.arguments ?? {},
+      sanitizeToolArguments(params.arguments),
       context
     )
 

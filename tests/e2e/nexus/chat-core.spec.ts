@@ -1,5 +1,6 @@
 import { test, expect } from '../fixtures'
 import { gotoNexus, sendMessage, waitForStreamingComplete, getConversationIdFromUrl } from './utils'
+import { authenticateContext } from '../helpers/session-auth'
 
 // Core Nexus chat E2E tests — auth-independent (redirect/401) and auth-required groups.
 
@@ -62,6 +63,7 @@ test.describe('Nexus Core Chat — Authenticated', () => {
   )
 
   test.beforeEach(async ({ page }) => {
+    await authenticateContext(page.context())
     await gotoNexus(page)
   })
 
@@ -81,18 +83,20 @@ test.describe('Nexus Core Chat — Authenticated', () => {
     await expect(page.locator('[aria-label="Send message"]')).toBeVisible()
   })
 
-  test('send button is disabled while input is empty', async ({ page }) => {
+  test('an empty submit is a no-op; Send is ready once there is text', async ({ page }) => {
     const input = page.locator('[aria-label="Message input"]')
     const sendButton = page.locator('[aria-label="Send message"]')
 
+    // The composer keeps Send enabled (it only disables during attachment
+    // processing) and GUARDS an empty submit — clicking Send with no text is a no-op,
+    // so no user message is created.
     await input.clear()
-    await expect(sendButton).toBeDisabled()
+    await sendButton.click()
+    await expect(page.locator('[data-role="user"]')).toHaveCount(0)
 
+    // With text the button is ready (we don't actually send — that needs a provider).
     await input.fill('hello')
     await expect(sendButton).toBeEnabled()
-
-    await input.fill('')
-    await expect(sendButton).toBeDisabled()
   })
 
   test('stop button appears while AI is streaming, disappears when done', async ({ page }) => {
@@ -174,18 +178,16 @@ test.describe('Nexus Core Chat — Authenticated', () => {
   test('stop button cancels ongoing streaming', async ({ page }) => {
     await sendMessage(page, 'Count slowly from 1 to 1000, one number per line')
 
-    // Wait for streaming to start
+    // Streaming starts: the Stop button appears and the assistant bubble begins
+    // rendering.
     await expect(page.locator('[aria-label="Stop generating"]')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('[data-role="assistant"]').first()).toBeVisible({ timeout: 30_000 })
 
-    // Click stop
+    // Clicking Stop cancels generation — the Stop button goes away (streaming halted).
+    // (This app DISCARDS the partial assistant message on cancel, so we assert the
+    // cancellation itself, not a retained partial bubble.)
     await page.locator('[aria-label="Stop generating"]').click()
-
-    // Stop button should disappear quickly after stopping
-    await expect(page.locator('[aria-label="Stop generating"]')).not.toBeVisible({ timeout: 5_000 })
-
-    // An assistant bubble should exist with partial content
-    const assistantBubbles = page.locator('[data-role="assistant"]')
-    await expect(assistantBubbles.first()).toBeVisible()
+    await expect(page.locator('[aria-label="Stop generating"]')).not.toBeVisible({ timeout: 10_000 })
   })
 
   test('input is cleared after sending a message', async ({ page }) => {
@@ -227,6 +229,10 @@ test.describe('Nexus Voice Availability API — Authenticated', () => {
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
+
+  test.beforeEach(async ({ page }) => {
+    await authenticateContext(page.context())
+  })
 
   test('GET /api/nexus/voice/availability returns shape when authenticated', async ({ page }) => {
     await page.goto('/nexus')

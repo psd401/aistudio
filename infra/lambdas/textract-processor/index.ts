@@ -139,26 +139,30 @@ function chunkText(text: string, maxChunkSize: number = 2000): Array<{
   
   const lines = text.split('\n');
   let currentChunk = '';
-  const chunkIndex = 0;
-  
+  let lineStart = 0;            // source line where the current chunk begins
+  let currentChunkLines = 0;    // number of lines accumulated into the current chunk
+
   for (const line of lines) {
     if ((currentChunk + line).length > maxChunkSize && currentChunk.length > 0) {
       chunks.push({
         content: currentChunk.trim(),
-        metadata: { lineStart: chunkIndex },
+        metadata: { lineStart },
         chunkIndex: chunks.length,
         tokens: Math.ceil(currentChunk.length / 4), // Rough token estimate
       });
+      lineStart += currentChunkLines; // next chunk starts after the flushed lines
       currentChunk = line + '\n';
+      currentChunkLines = 1;
     } else {
       currentChunk += line + '\n';
+      currentChunkLines++;
     }
   }
-  
+
   if (currentChunk.trim().length > 0) {
     chunks.push({
       content: currentChunk.trim(),
-      metadata: { lineStart: chunkIndex },
+      metadata: { lineStart },
       chunkIndex: chunks.length,
       tokens: Math.ceil(currentChunk.length / 4),
     });

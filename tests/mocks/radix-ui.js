@@ -15,6 +15,7 @@ const DialogContent = ({ children, ...props }) => React.createElement('div', { .
 const DialogHeader = ({ children, ...props }) => React.createElement('div', { ...props, 'data-testid': 'dialog-header' }, children);
 const DialogTitle = ({ children, ...props }) => React.createElement('h2', { ...props, 'data-testid': 'dialog-title' }, children);
 const DialogDescription = ({ children, ...props }) => React.createElement('p', { ...props, 'data-testid': 'dialog-description' }, children);
+const DialogFooter = ({ children, ...props }) => React.createElement('div', { ...props, 'data-testid': 'dialog-footer' }, children);
 
 // Mock Label
 const Label = ({ children, ...props }) => React.createElement('label', { ...props, 'data-testid': 'label' }, children);
@@ -94,6 +95,7 @@ module.exports = {
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
   Label,
   Button,
   Input,

@@ -25,32 +25,52 @@
  *   checks.
  *
  * ## Rendering / security
- * The markdown is re-rendered on every request from `source.md` through
- * `renderMarkdownToHtml`, which returns sanitized HTML (no `<script>`/`<style>`/
- * event handlers — see `lib/content/render/markdown-render.ts`). That output is
- * the only thing passed to `dangerouslySetInnerHTML`; raw author HTML never
- * reaches the DOM. If `source.md` is missing (e.g. S3 `NoSuchKey`), we render an
- * empty body rather than surfacing the raw S3 error.
+ * - DOCUMENTS: the markdown is re-rendered on every request from `source.md`
+ *   through `renderMarkdownToHtml`, which returns sanitized HTML (no
+ *   `<script>`/`<style>`/event handlers — see
+ *   `lib/content/render/markdown-render.ts`). That output is the only thing
+ *   passed to `dangerouslySetInnerHTML`; raw author HTML never reaches the DOM.
+ *   If `source.md` is missing (e.g. S3 `NoSuchKey`), we render an empty body
+ *   rather than surfacing the raw S3 error.
+ * - ARTIFACTS (#1052): the UNTRUSTED artifact code is loaded server-side
+ *   (inline or S3) and handed to the client `<ArtifactSandbox>`, which renders it
+ *   in a cross-origin sandboxed iframe (`sandbox="allow-scripts"`, no
+ *   `allow-same-origin`) served from a separate origin (§19.2 / §28.1). The code
+ *   is NEVER passed to `dangerouslySetInnerHTML` or served as text/html on the
+ *   app origin — the public reader applies the same containment.
+ *
+ * ## Reader chrome (Epic #1059 completion)
+ * - An owner/editor-gated "Edit" link (the same `canEdit` predicate the authoring
+ *   page's save controls use) renders in the header; non-editors see nothing.
+ * - When the object belongs to a collection, the visibility-filtered
+ *   `CollectionTree` mounts as a left sidebar (hidden on small screens); section
+ *   clicks navigate to the library filtered to that section.
  *
  * `dynamic = "force-dynamic"`: visibility depends on the caller's session, so the
  * page must never be statically cached or shared across principals.
  */
 
 import { notFound } from "next/navigation";
+import Link from "next/link";
 import { and, eq } from "drizzle-orm";
 import type { Metadata } from "next";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   contentObjects,
   contentPublications,
-  contentVersions,
 } from "@/lib/db/schema";
 import { renderMarkdownToHtml } from "@/lib/content/render/markdown-render";
 import { s3Store } from "@/lib/content/storage/s3-store";
 import { visibilityService } from "@/lib/content/visibility-service";
+import { versionService } from "@/lib/content/version-service";
+import { canEdit } from "@/lib/content/helpers";
 import { getOptionalRequester } from "@/actions/db/atrium/requester";
+import { countUnresolvedCommentThreadsAction } from "@/actions/db/atrium/comments";
 import { createLogger } from "@/lib/logger";
 import { ProvenanceFooter } from "@/components/atrium/ProvenanceFooter";
+import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
+import { ReaderCollectionSidebar } from "@/components/atrium/ReaderCollectionSidebar";
+import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import "@/styles/atrium-content.css";
 import "katex/dist/katex.min.css";
 
@@ -73,9 +93,11 @@ interface ReaderPageProps {
  */
 async function loadPublishedObject(slug: string): Promise<{
   id: string;
+  kind: "document" | "artifact";
   ownerUserId: number;
   visibilityLevel: "private" | "group" | "internal" | "public";
   title: string;
+  collectionId: string | null;
   publishedVersionId: string;
 } | null> {
   const [obj] = await executeQuery(
@@ -83,9 +105,11 @@ async function loadPublishedObject(slug: string): Promise<{
       db
         .select({
           id: contentObjects.id,
+          kind: contentObjects.kind,
           ownerUserId: contentObjects.ownerUserId,
           visibilityLevel: contentObjects.visibilityLevel,
           title: contentObjects.title,
+          collectionId: contentObjects.collectionId,
         })
         .from(contentObjects)
         .where(eq(contentObjects.slug, slug))
@@ -130,6 +154,86 @@ export async function generateMetadata(_props: ReaderPageProps): Promise<Metadat
 }
 
 /**
+ * Shared reader chrome (Epic #1059 completion): the optional collection-tree
+ * sidebar (mounted only when the object belongs to a section; hidden on small
+ * screens) around the kind-specific `<main>`, and the header row with the
+ * owner/editor-gated Edit link. Server-rendered — `showEdit` was computed with
+ * the same `canEdit` predicate the authoring page uses for its Save controls,
+ * so a viewer who could not edit sees nothing (the edit page re-checks anyway).
+ */
+function ReaderShell({
+  title,
+  editHref,
+  commentCount,
+  collectionId,
+  mainClassName,
+  children,
+}: {
+  title: string;
+  /** The `/atrium/[id]/edit` link, or null when the viewer may not edit. */
+  editHref: string | null;
+  /** Unresolved root-comment threads; the editors-only chip is hidden when 0. */
+  commentCount: number;
+  collectionId: string | null;
+  mainClassName: string;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <div className="mx-auto flex w-full max-w-6xl gap-6 px-4 py-8">
+      {collectionId && (
+        <aside className="hidden w-60 shrink-0 border-r pr-4 md:block">
+          <ReaderCollectionSidebar collectionId={collectionId} />
+        </aside>
+      )}
+      <main className={mainClassName}>
+        <header className="mb-6 flex items-start justify-between gap-3">
+          <h1 className="text-3xl font-semibold">{title}</h1>
+          {editHref && (
+            <div className="flex shrink-0 items-center gap-2">
+              {/* Editors-only comment chip (editHref is null for non-editors, so
+                  this whole block never renders for them) linking to the editor. */}
+              {commentCount > 0 && (
+                <Link
+                  href={editHref}
+                  className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted"
+                  data-testid="reader-comment-chip"
+                >
+                  {commentCount} comment{commentCount === 1 ? "" : "s"}
+                </Link>
+              )}
+              <Link
+                href={editHref}
+                className="rounded-md border px-3 py-1.5 text-sm hover:bg-muted"
+                data-testid="reader-edit-link"
+              >
+                Edit
+              </Link>
+            </div>
+          )}
+        </header>
+        {children}
+      </main>
+    </div>
+  );
+}
+
+/**
+ * Unresolved root-comment count for the editors-only reader chip. Uses the cheap
+ * COUNT action (backed by idx_adc_object_resolved) — NOT listCommentThreadsAction,
+ * which would load + serialize every comment body just to size a number on the hot
+ * reader render. Degrades to 0 on any failure so a comments outage never breaks the
+ * reader.
+ */
+async function unresolvedCommentCount(idOrSlug: string): Promise<number> {
+  try {
+    const result = await countUnresolvedCommentThreadsAction(idOrSlug);
+    return result.isSuccess ? result.data : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * The internal reader. See the file header for the full 403/404 decision tree.
  */
 export default async function ReaderPage({
@@ -165,19 +269,12 @@ export default async function ReaderPage({
     notFound();
   }
 
-  // (e) Load the published version row for its version number, then read the
-  // canonical markdown from S3 and render it through the sanitizing pipeline.
-  const [version] = await executeQuery(
-    (db) =>
-      db
-        .select({
-          objectId: contentVersions.objectId,
-          versionNumber: contentVersions.versionNumber,
-        })
-        .from(contentVersions)
-        .where(eq(contentVersions.id, published.publishedVersionId))
-        .limit(1),
-    "atrium.reader.publishedVersion"
+  // (e) Load the published version (object-scoped) for its body. Documents read
+  // their canonical markdown from S3; artifacts resolve their untrusted code
+  // (inline or S3) for the cross-origin sandbox.
+  const version = await versionService.getById(
+    published.id,
+    published.publishedVersionId
   );
   if (!version) {
     // The publication points at a version that no longer exists — treat as not
@@ -185,6 +282,49 @@ export default async function ReaderPage({
     notFound();
   }
 
+  // Owner/editor-gated Edit link (Epic #1059 completion): the SAME `canEdit`
+  // predicate the authoring page uses (owner / admin / delegated-for-owner).
+  // A guest requester (userId null) can never pass it. Computed only AFTER the
+  // visibility gate above, so it never runs for a masked object.
+  const editHref = canEdit(requester, published.ownerUserId)
+    ? `/atrium/${published.id}/edit`
+    : null;
+
+  // Editors-only comment chip count. Only read when the viewer may edit (the chip
+  // is editor-gated) so a non-editor render never issues the comments query.
+  const commentCount = editHref ? await unresolvedCommentCount(published.id) : 0;
+
+  // ARTIFACT reader: load the untrusted code server-side and render it ONLY in
+  // the cross-origin sandbox. The code is never placed in app-origin HTML.
+  if (published.kind === "artifact") {
+    let code = "";
+    try {
+      code = await versionService.loadArtifactCode(version);
+    } catch (error) {
+      // Missing/unreadable artifact body degrades to an empty preview rather than
+      // surfacing the raw S3 error to the reader.
+      log.warn("artifact body unavailable; rendering empty preview", {
+        objectId: version.objectId,
+        versionNumber: version.versionNumber,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return (
+      <ReaderShell
+        title={published.title}
+        editHref={editHref}
+        commentCount={commentCount}
+        collectionId={published.collectionId}
+        mainClassName="min-w-0 max-w-4xl flex-1"
+      >
+        <ArtifactSandbox code={code} src={getArtifactSandboxRenderUrl()} className="atrium-artifact-preview" />
+        <ProvenanceFooter objectId={published.id} publishedVersionNumber={version.versionNumber} />
+      </ReaderShell>
+    );
+  }
+
+  // DOCUMENT reader: read the canonical markdown from S3 and render it through
+  // the sanitizing pipeline.
   let markdown = "";
   try {
     const sourceKey = s3Store.key(
@@ -208,16 +348,19 @@ export default async function ReaderPage({
   const html = renderMarkdownToHtml(markdown);
 
   return (
-    <main className="mx-auto max-w-3xl px-4 py-8">
-      <header className="mb-6">
-        <h1 className="text-3xl font-semibold">{published.title}</h1>
-      </header>
+    <ReaderShell
+      title={published.title}
+      editHref={editHref}
+      commentCount={commentCount}
+      collectionId={published.collectionId}
+      mainClassName="min-w-0 max-w-3xl flex-1"
+    >
       {/* `.atrium-content` is the single rendered-body sink (and the test anchor). */}
       <article
         className="atrium-content"
         dangerouslySetInnerHTML={{ __html: html }}
       />
-      <ProvenanceFooter objectId={published.id} />
-    </main>
+      <ProvenanceFooter objectId={published.id} publishedVersionNumber={version.versionNumber} />
+    </ReaderShell>
   );
 }

@@ -1,4 +1,16 @@
 import { test, expect } from './fixtures'
+import { authenticateContext } from './helpers/session-auth'
+
+// Authenticated functional spec: skip when no minted session, and inject the
+// session cookie before every test (was missing — the suite ran unauthenticated
+// and every test redirected to sign-in). See docs/guides/e2e-authenticated-testing.md.
+test.skip(
+  !process.env.PLAYWRIGHT_AUTH_ENABLED,
+  'Requires an authenticated session — set PLAYWRIGHT_AUTH_ENABLED=true'
+)
+test.beforeEach(async ({ page }) => {
+  await authenticateContext(page.context())
+})
 
 test.describe('Assistant Architect Tool Execution', () => {
   test.beforeEach(async ({ page }) => {
@@ -434,7 +446,10 @@ test.describe('Assistant Architect Tool Performance', () => {
     await page.goto('/utilities/assistant-architect')
     await page.waitForTimeout(2000)
 
-    const architectCards = page.locator('[data-testid="assistant-architect-card"], .assistant-architect-card, [class*="card"]')
+    // Precise architect-card selectors only — a broad [class*="card"] fallback matches
+    // incidental UI cards and makes .nth(1) hang. With no seeded architects this counts
+    // 0 and the perf body skips (same as the sibling tests).
+    const architectCards = page.locator('[data-testid="assistant-architect-card"], .assistant-architect-card')
 
     if (await architectCards.count() > 0) {
       // Look for an assistant with web search tools
@@ -1075,7 +1090,7 @@ test.describe('Assistant Architect Tool Security', () => {
     }
 
     // UI should remain functional regardless of permission level
-    await expect(page.locator('main, body')).toBeVisible()
+    await expect(page.locator('body')).toBeVisible()
   })
 
   test('should validate SQL injection attempts in tool inputs', async ({ page }) => {

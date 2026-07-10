@@ -47,6 +47,17 @@ jest.mock("@/lib/db/drizzle/utils", () => ({
     mockGetUserIdByCognitoSubAsNumber(...args),
 }))
 
+const mockGetUserRolesByCognitoSub = jest.fn<(...args: unknown[]) => Promise<string[]>>()
+jest.mock("@/lib/db/drizzle/users", () => ({
+  getUserRolesByCognitoSub: (...args: unknown[]) => mockGetUserRolesByCognitoSub(...args),
+}))
+
+// JWT path (REV-SEC-164): mock the dynamic imports verifyJwtToken pulls in.
+const mockJwtVerify = jest.fn<(...args: unknown[]) => Promise<unknown>>()
+jest.mock("jose", () => ({ jwtVerify: (...args: unknown[]) => mockJwtVerify(...args) }))
+jest.mock("@/lib/oauth/jwks-cache", () => ({ getJwksKeySet: jest.fn(async () => ({})) }))
+jest.mock("@/lib/oauth/issuer-config", () => ({ getIssuerUrl: () => "https://issuer.example" }))
+
 const mockExecuteQuery = jest.fn<(...args: unknown[]) => Promise<unknown>>()
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: (...args: unknown[]) => mockExecuteQuery(...args),
@@ -64,6 +75,9 @@ jest.mock("@/lib/db/schema", () => ({
 // (next/jest SWC transform may not properly hoist jest.mock before static imports)
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { authenticateRequest, requireScope, createErrorResponse, createApiResponse } = require("@/lib/api/auth-middleware")
+// Real role→scope mapping (single source of truth) for asserting session scopes.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { getScopesForRoles } = require("@/lib/api-keys/scopes")
 
 // ============================================
 // Fix global Headers mock (tests/setup.ts drops constructor init)
@@ -111,6 +125,7 @@ describe("API Auth Middleware", () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockUpdateKeyLastUsed.mockResolvedValue(undefined)
+    mockGetUserRolesByCognitoSub.mockResolvedValue([])
   })
 
   // ------------------------------------------
@@ -249,12 +264,13 @@ describe("API Auth Middleware", () => {
   // Session Authentication (fallback)
   // ------------------------------------------
   describe("Session authentication fallback", () => {
-    it("should authenticate via session when no Authorization header", async () => {
+    it("should authenticate via session with role-derived scopes, not wildcard (REV-SEC-161)", async () => {
       mockGetServerSession.mockResolvedValue({
         sub: "test-cognito-sub",
         email: "test@example.com",
       })
       mockGetUserIdByCognitoSubAsNumber.mockResolvedValue(42)
+      mockGetUserRolesByCognitoSub.mockResolvedValue(["administrator"])
 
       const request = createMockRequest({})
 
@@ -264,9 +280,35 @@ describe("API Auth Middleware", () => {
       const auth = result as Exclude<typeof result, NextResponse>
       expect(auth.userId).toBe(42)
       expect(auth.authType).toBe("session")
-      expect(auth.scopes).toEqual(["*"])
+      // No longer a blanket "*" — scopes come from the role→scope mapping.
+      expect(auth.scopes).not.toEqual(["*"])
+      expect(auth.scopes).toEqual(getScopesForRoles(["administrator"]))
       expect(auth.cognitoSub).toBe("test-cognito-sub")
       expect(auth.apiKeyId).toBeUndefined()
+    })
+
+    it("a student session gets only student scopes, never graph:write or wildcard (REV-SEC-161)", async () => {
+      mockGetServerSession.mockResolvedValue({ sub: "student-sub" })
+      mockGetUserIdByCognitoSubAsNumber.mockResolvedValue(7)
+      mockGetUserRolesByCognitoSub.mockResolvedValue(["student"])
+
+      const result = await authenticateRequest(createMockRequest({}) as never)
+
+      const auth = result as Exclude<typeof result, NextResponse>
+      expect(auth.scopes).toEqual(getScopesForRoles(["student"]))
+      expect(auth.scopes).not.toContain("*")
+      expect(auth.scopes).not.toContain("graph:write")
+    })
+
+    it("an administrator session gets graph:write (REV-SEC-161)", async () => {
+      mockGetServerSession.mockResolvedValue({ sub: "admin-sub" })
+      mockGetUserIdByCognitoSubAsNumber.mockResolvedValue(1)
+      mockGetUserRolesByCognitoSub.mockResolvedValue(["administrator"])
+
+      const result = await authenticateRequest(createMockRequest({}) as never)
+
+      const auth = result as Exclude<typeof result, NextResponse>
+      expect(auth.scopes).toContain("graph:write")
     })
 
     it("should return 401 when no session exists", async () => {
@@ -344,6 +386,43 @@ describe("API Auth Middleware", () => {
   // ------------------------------------------
   // Scope Enforcement
   // ------------------------------------------
+  // ------------------------------------------
+  // JWT Bearer Authentication (REV-SEC-164)
+  // ------------------------------------------
+  describe("JWT bearer authentication", () => {
+    it("verifies the token with explicit issuer + audience constraints (REV-SEC-164)", async () => {
+      mockJwtVerify.mockResolvedValue({
+        payload: { sub: "5", scope: "chat:read chat:write", client_id: "agent-1" },
+      })
+      mockExecuteQuery.mockResolvedValue([{ cognitoSub: "cognito-5" }])
+
+      const request = createMockRequest({ authorization: "Bearer eyJhdGVzdC5qd3Q" })
+      const result = await authenticateRequest(request as never)
+
+      // The fix: jwtVerify is now called with { issuer, audience } (was signature-only),
+      // so ID tokens / wrong-audience tokens signed by the same key are rejected.
+      expect(mockJwtVerify).toHaveBeenCalledWith(
+        "eyJhdGVzdC5qd3Q",
+        expect.anything(),
+        { issuer: "https://issuer.example", audience: "https://issuer.example" }
+      )
+      const auth = result as Exclude<typeof result, NextResponse>
+      expect(auth.authType).toBe("jwt")
+      expect(auth.scopes).toEqual(["chat:read", "chat:write"])
+    })
+
+    it("returns 401 when verify rejects on an iss/aud mismatch (REV-SEC-164)", async () => {
+      mockJwtVerify.mockRejectedValue(new Error('unexpected "aud" claim value'))
+
+      const request = createMockRequest({ authorization: "Bearer eyJ3cm9uZy5hdWQ" })
+      const result = await authenticateRequest(request as never)
+
+      expect(isAuthContext(result)).toBe(false)
+      expect((result as unknown as { status: number }).status).toBe(401)
+      expect(mockGetServerSession).not.toHaveBeenCalled()
+    })
+  })
+
   describe("requireScope", () => {
     it("should return null when scope matches", () => {
       mockHasScope.mockReturnValue(true)

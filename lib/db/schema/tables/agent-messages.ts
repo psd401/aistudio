@@ -22,6 +22,13 @@ export const agentMessages = pgTable("agent_messages", {
   model: varchar("model", { length: 128 }),
   inputTokens: integer("input_tokens").notNull().default(0),
   outputTokens: integer("output_tokens").notNull().default(0),
+  // Bedrock prompt-caching token split (migration 092, issue #1089). Captured
+  // by mantle_proxy.py's /usage delta and threaded through the wrapper/router.
+  // cache_read = tokens served from the cached prefix (~0.1x input price);
+  // cache_write = tokens written to the cache (2x input price at 1h TTL).
+  // Zero on GLM-5 rows (no caching) and on any turn with no cache activity.
+  cacheReadInputTokens: integer("cache_read_input_tokens").notNull().default(0),
+  cacheWriteInputTokens: integer("cache_write_input_tokens").notNull().default(0),
   latencyMs: integer("latency_ms").notNull().default(0),
   guardrailBlocked: boolean("guardrail_blocked").notNull().default(false),
   spaceName: varchar("space_name", { length: 512 }),

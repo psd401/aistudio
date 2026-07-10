@@ -63,15 +63,23 @@ jest.mock("@/lib/content/helpers", () => ({
 
 jest.mock("@/lib/content/version-service", () => ({
   snapshotInTx: jest.fn(),
-  versionService: { snapshot: jest.fn() },
+  versionService: { snapshotScreened: jest.fn() },
+}));
+// createVersion screens ONCE, OUTSIDE the conflict-retry (issue #1118 item 7),
+// then passes the proof to each `snapshotScreened` attempt. A `user` requester
+// needs no real screening, so the mock returns a placeholder proof.
+jest.mock("@/lib/content/agent-screening", () => ({
+  screenAgentBodyForWrite: jest.fn(async () => ({ screenedBody: null })),
 }));
 
 import { contentService } from "@/lib/content/content-service";
 import { versionService } from "@/lib/content/version-service";
+import { screenAgentBodyForWrite } from "@/lib/content/agent-screening";
 import { ConflictError, NotFoundError } from "@/lib/content/errors";
 import type { Requester } from "@/lib/content/types";
 
-const snapshot = versionService.snapshot as jest.Mock;
+const snapshot = versionService.snapshotScreened as jest.Mock;
+const screen = screenAgentBodyForWrite as jest.Mock;
 
 const req: Requester = {
   kind: "user",
@@ -94,6 +102,7 @@ const newVersion = { id: "v1", versionNumber: 2 };
 beforeEach(() => {
   loadRows.length = 0;
   snapshot.mockReset();
+  screen.mockClear();
 });
 
 describe("contentService.createVersion concurrency handling", () => {
@@ -109,6 +118,9 @@ describe("contentService.createVersion concurrency handling", () => {
     });
 
     expect(snapshot).toHaveBeenCalledTimes(2);
+    // §28.3 screened ONCE despite the retry (issue #1118 item 7): the unmemoized
+    // Bedrock/Comprehend IO must not fire twice for one logical write.
+    expect(screen).toHaveBeenCalledTimes(1);
     expect(result.version).toEqual(newVersion);
     expect(result.currentVersionId).toBe("v1");
     // Post-snapshot reload's fresh updatedAt is returned (not the pre-snapshot one).

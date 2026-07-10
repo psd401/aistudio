@@ -14,6 +14,8 @@ import { PowerTuningStack } from '../lib/power-tuning-stack';
 import { SecretsManagerStack } from '../lib/secrets-manager-stack';
 import { GuardrailsStack } from '../lib/guardrails-stack';
 import { AgentPlatformStack } from '../lib/agent-platform-stack';
+import { AtriumSandboxStack } from '../lib/atrium-sandbox-stack';
+import { AtriumEventsStack } from '../lib/atrium-events-stack';
 import { SecretValue } from 'aws-cdk-lib';
 import { PermissionBoundaryConstruct } from '../lib/constructs/security';
 import { AccessAnalyzerStack } from '../lib/stacks/access-analyzer-stack';
@@ -32,6 +34,17 @@ const baseDomain = app.node.tryGetContext('baseDomain');
 const alertEmail = app.node.tryGetContext('alertEmail');
 const brandingOrgName = app.node.tryGetContext('brandingOrgName');
 const brandingAppName = app.node.tryGetContext('brandingAppName');
+
+// Atrium artifact sandbox (#1052): comma-separated CDN origins the sandbox CSP
+// permits for artifact script-src/style-src (e.g. "https://cdnjs.cloudflare.com").
+// Empty => inline-only artifacts. Same value should be set as
+// ATRIUM_ALLOWED_ARTIFACT_CDNS on the app for parity.
+const atriumAllowedArtifactCdns: string[] = String(
+  app.node.tryGetContext('atriumAllowedArtifactCdns') || ''
+)
+  .split(',')
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
 
 // Helper to get callback/logout URLs for any environment
 function getCallbackAndLogoutUrls(environment: string, baseDomain?: string): { callbackUrls: string[], logoutUrls: string[] } {
@@ -145,6 +158,38 @@ const devStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Dev', {
 });
 cdk.Tags.of(devStorageStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devStorageStack).add(key, value));
+
+// Atrium artifact sandbox origin (#1052): separate-origin static host for the
+// cross-origin sandboxed artifact iframe. Decoupled from the app/ECS stack so the
+// two never share an origin. The app reads its origin from the SSM param this
+// stack writes (wired to ATRIUM_SANDBOX_ORIGIN / NEXT_PUBLIC_ mirror).
+const devAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandboxStack-Dev', {
+  environment: 'dev',
+  allowedParentOrigins: [
+    ...(baseDomain ? [`https://dev.${baseDomain}`] : []),
+    // DEV ONLY — plain HTTP localhost is intentional for local development.
+    // This origin is baked into the sandbox's parent-origin allowlist and its
+    // CSP frame-ancestors directive. It must NEVER appear in staging or prod
+    // configs (the prod stack below enforces https-only). HTTP origins mean a
+    // local page at :3000 could drive the sandbox, but the sandbox serves no
+    // real user data and has no credentials in this dev deployment.
+    'http://localhost:3000',
+  ],
+  allowedArtifactCdns: atriumAllowedArtifactCdns,
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(devAtriumSandboxStack).add('Environment', 'Dev');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAtriumSandboxStack).add(key, value));
+
+// Atrium content events (#1055): SNS topic the app publishes content lifecycle
+// events to (injected as ATRIUM_EVENTS_TOPIC_ARN). Dedicated stack for clean
+// separation; downstream subscribers (Phase 6 retrieval indexer, notifiers) attach here.
+const devAtriumEventsStack = new AtriumEventsStack(app, 'AIStudio-AtriumEventsStack-Dev', {
+  environment: 'dev',
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(devAtriumEventsStack).add('Environment', 'Dev');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAtriumEventsStack).add(key, value));
 
 // K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
 const guardrailNotificationEmail = app.node.tryGetContext('guardrailNotificationEmail') || alertEmail;
@@ -290,6 +335,24 @@ const prodStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Prod', {
 cdk.Tags.of(prodStorageStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodStorageStack).add(key, value));
 
+// Atrium artifact sandbox origin (#1052): separate-origin static host (prod).
+const prodAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandboxStack-Prod', {
+  environment: 'prod',
+  allowedParentOrigins: baseDomain ? [`https://${baseDomain}`] : [],
+  allowedArtifactCdns: atriumAllowedArtifactCdns,
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(prodAtriumSandboxStack).add('Environment', 'Prod');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAtriumSandboxStack).add(key, value));
+
+// Atrium content events (#1055) — prod SNS topic.
+const prodAtriumEventsStack = new AtriumEventsStack(app, 'AIStudio-AtriumEventsStack-Prod', {
+  environment: 'prod',
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(prodAtriumEventsStack).add('Environment', 'Prod');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAtriumEventsStack).add(key, value));
+
 // K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
 const prodGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-Prod', {
   environment: 'prod',
@@ -400,6 +463,8 @@ if (baseDomain) {
     customSubdomain: 'dev', // Creates dev.<baseDomain>
     documentsBucketName: devStorageStack.documentsBucketName,
     agentWorkspaceBucketName: devAgentPlatformStack.workspaceBucket.bucketName, // #925
+    atriumSandboxOrigin: devAtriumSandboxStack.sandboxOrigin, // #1052
+    atriumEventsTopicArn: devAtriumEventsStack.topicArn, // #1055
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -409,6 +474,8 @@ if (baseDomain) {
   devFrontendStack.addDependency(devAuthStack); // Need auth secret ARN export
   devFrontendStack.addDependency(devGuardrailsStack); // Need guardrails config exports
   devFrontendStack.addDependency(devAgentPlatformStack); // Need agent workspace bucket name (#925)
+  devFrontendStack.addDependency(devAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
+  devFrontendStack.addDependency(devAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devFrontendStack).add(key, value));
 
@@ -421,6 +488,8 @@ if (baseDomain) {
     // No customSubdomain for prod - uses root baseDomain
     documentsBucketName: prodStorageStack.documentsBucketName,
     agentWorkspaceBucketName: prodAgentPlatformStack.workspaceBucket.bucketName, // #925
+    atriumSandboxOrigin: prodAtriumSandboxStack.sandboxOrigin, // #1052
+    atriumEventsTopicArn: prodAtriumEventsStack.topicArn, // #1055
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -430,6 +499,8 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodAuthStack); // Need auth secret ARN export
   prodFrontendStack.addDependency(prodGuardrailsStack); // Need guardrails config exports
   prodFrontendStack.addDependency(prodAgentPlatformStack); // Need agent workspace bucket name (#925)
+  prodFrontendStack.addDependency(prodAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
+  prodFrontendStack.addDependency(prodAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodFrontendStack).add(key, value));
 

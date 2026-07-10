@@ -9,7 +9,8 @@ import {
 import { ActionState } from "@/types"
 import type { InsertNavigationItem, SelectNavigationItem } from "@/types/db-types"
 import { getServerSession } from "@/lib/auth/server-session"
-import { 
+import { hasRole } from "@/utils/roles"
+import {
   handleError,
   ErrorFactories,
   createSuccess
@@ -178,6 +179,13 @@ export async function createNavigationItemAction(
       log.warn("Unauthorized navigation item creation attempt")
       throw ErrorFactories.authNoSession()
     }
+
+    // Navigation is GLOBAL shared state; managing it is an administrative
+    // function. Gate on administrator, not mere authentication (REV-COR-039).
+    if (!(await hasRole("administrator"))) {
+      log.warn("Non-admin attempted to create a navigation item", { userId: session.sub })
+      throw ErrorFactories.authzInsufficientPermissions("administrator")
+    }
     
     log.debug("User authenticated", { userId: session.sub })
     
@@ -262,6 +270,13 @@ export async function updateNavigationItemAction(
       log.warn("Unauthorized navigation item update attempt")
       throw ErrorFactories.authNoSession()
     }
+
+    // Admin-only: updating a nav item can clear its capability/role gate
+    // (ungate a privileged entry) — a privilege-escalation surface (REV-COR-039).
+    if (!(await hasRole("administrator"))) {
+      log.warn("Non-admin attempted to update a navigation item", { userId: session.sub })
+      throw ErrorFactories.authzInsufficientPermissions("administrator")
+    }
     
     log.debug("User authenticated", { userId: session.sub })
     // Convert null values to undefined for updateNavigationItem
@@ -331,6 +346,13 @@ export async function deleteNavigationItemAction(
     if (!session) {
       log.warn("Unauthorized navigation item deletion attempt")
       throw ErrorFactories.authNoSession()
+    }
+
+    // Admin-only: deleting a nav item breaks navigation for everyone
+    // (REV-COR-039).
+    if (!(await hasRole("administrator"))) {
+      log.warn("Non-admin attempted to delete a navigation item", { userId: session.sub })
+      throw ErrorFactories.authzInsufficientPermissions("administrator")
     }
     
     log.debug("User authenticated", { userId: session.sub })

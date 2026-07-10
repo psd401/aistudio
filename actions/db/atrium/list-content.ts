@@ -7,6 +7,13 @@
  * `contentService.list` — returns exactly the objects visible to the caller,
  * with permission filtering pushed into SQL (no load-then-drop, §12.3).
  *
+ * Pagination: `filter.limit` / `filter.offset` flow through to
+ * `visibilityService.listVisible`, which clamps limit to [1, 200] (default 50)
+ * and coerces non-finite values to the defaults. Ordering is deterministic
+ * (`updated_at DESC, id DESC` — unique-PK tiebreak), so sequential offset pages
+ * neither skip nor repeat rows; the LibraryView "Load more" control pages this
+ * way at 50/page.
+ *
  * See docs/features/atrium-design-spec.md §11.2 / §12.3.
  */
 

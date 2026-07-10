@@ -81,7 +81,10 @@ test.describe('Capability layout guards — authorized access (auth-gated)', () 
   // (the seeded admin holds model-compare via the manifest).
   test('authorized user reaches /compare', async ({ page }) => {
     await page.goto('/compare')
-    await page.waitForLoadState('networkidle')
+    // No networkidle — the page may hold a connection open and never go idle under
+    // concurrent test load. Wait for the app shell to mount, then assert the guard
+    // did not redirect the authorized user off the route.
+    await expect(page.getByRole('main').first()).toBeVisible({ timeout: 15_000 })
     expect(new URL(page.url()).pathname).toBe('/compare')
   })
 })

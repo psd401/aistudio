@@ -38,7 +38,9 @@ export default defineConfig({
   testIgnore: process.env.E2E_EXCLUDE_EXTERNAL ? EXTERNAL_PROVIDER_SPECS : undefined,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0,
+  // Retry locally too: the host :3100 dev server compiles routes on demand and is
+  // slow under the parallel suite, so a first-attempt timeout often passes on retry.
+  retries: 2,
   workers: process.env.CI ? 1 : undefined,
   reporter: process.env.CI ? [['github'], ['list']] : 'list',
   timeout: 60_000,

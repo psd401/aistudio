@@ -200,8 +200,11 @@ export async function saveUserMessage(params: {
 }): Promise<void> {
   const { conversationId, content, parts, dbModelId } = params;
 
-  await executeQuery(
-    (db) => db.insert(nexusMessages)
+  // REV-DB-046 / REV-COR-220: insert the message and bump the conversation stats in
+  // one transaction so a failure between them can never leave message_count out of
+  // sync with the actual nexus_messages rows. Mirrors saveConversationSteps.
+  await executeTransaction(async (tx) => {
+    await tx.insert(nexusMessages)
       .values({
         conversationId,
         role: 'user',
@@ -210,21 +213,16 @@ export async function saveUserMessage(params: {
         modelId: dbModelId,
         metadata: sql`${safeJsonbStringify({})}::jsonb`,
         createdAt: new Date()
-      }),
-    'saveUserMessage'
-  );
+      });
 
-  // Update conversation's last_message_at and message_count
-  await executeQuery(
-    (db) => db.update(nexusConversations)
+    await tx.update(nexusConversations)
       .set({
         lastMessageAt: new Date(),
         messageCount: sql`${nexusConversations.messageCount} + 1`,
         updatedAt: new Date()
       })
-      .where(eq(nexusConversations.id, conversationId)),
-    'updateConversationAfterUserMessage'
-  );
+      .where(eq(nexusConversations.id, conversationId));
+  }, 'saveUserMessage');
 
   log.debug('User message saved to nexus_messages');
 }
@@ -391,8 +389,11 @@ export async function saveAssistantMessage(params: {
   }
 
   const now = new Date();
-  await executeQuery(
-    (db) => db.insert(nexusMessages)
+  // REV-DB-046 / REV-COR-220: insert the message and bump message_count / total_tokens
+  // atomically so a failure between them cannot desync the conversation counters from
+  // the actual nexus_messages rows. Mirrors saveConversationSteps.
+  await executeTransaction(async (tx) => {
+    await tx.insert(nexusMessages)
       .values({
         conversationId,
         role: 'assistant',
@@ -404,21 +405,17 @@ export async function saveAssistantMessage(params: {
         metadata: sql`${safeJsonbStringify({})}::jsonb`,
         createdAt: now,
         updatedAt: now
-      }),
-    'saveAssistantMessage'
-  );
+      });
 
-  await executeQuery(
-    (db) => db.update(nexusConversations)
+    await tx.update(nexusConversations)
       .set({
         messageCount: sql`${nexusConversations.messageCount} + 1`,
         totalTokens: sql`${nexusConversations.totalTokens} + ${usage?.totalTokens || 0}`,
         lastMessageAt: new Date(),
         updatedAt: new Date()
       })
-      .where(eq(nexusConversations.id, conversationId)),
-    'updateConversationAfterAssistantMessage'
-  );
+      .where(eq(nexusConversations.id, conversationId));
+  }, 'saveAssistantMessage');
 
   log.info('Assistant message saved successfully', {
     conversationId,

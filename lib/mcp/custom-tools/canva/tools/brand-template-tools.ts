@@ -62,7 +62,7 @@ export function createBrandTemplateTools(client: CanvaApiClient): Record<string,
         "thumbnail, page count, and metadata.",
       inputSchema: getBrandTemplateSchema,
       execute: async ({ brand_template_id }) => {
-        return client.get(`/v1/brand-templates/${brand_template_id}`)
+        return client.get(`/v1/brand-templates/${encodeURIComponent(brand_template_id)}`)
       },
     }),
 
@@ -73,7 +73,7 @@ export function createBrandTemplateTools(client: CanvaApiClient): Record<string,
         "understand what data can be injected before calling autofill.",
       inputSchema: getTemplateDatasetSchema,
       execute: async ({ brand_template_id }) => {
-        return client.get(`/v1/brand-templates/${brand_template_id}/dataset`)
+        return client.get(`/v1/brand-templates/${encodeURIComponent(brand_template_id)}/dataset`)
       },
     }),
 

@@ -339,3 +339,67 @@ describe("selectListedTools (#927)", () => {
     expect(result[0].version).toBe("v1")
   })
 })
+
+// Prototype-pollution hardening at the tools/call boundary (REV-SEC-190): the
+// user-controlled `arguments` object is rebuilt with a null prototype and without
+// __proto__/constructor/prototype keys before it reaches the dispatcher.
+describe("MCP tools/call argument hardening (REV-SEC-190)", () => {
+  beforeEach(() => {
+    dbRows = []
+    searchHandler.mockClear()
+    toolCatalogInstance.invalidate()
+  })
+
+  it("strips dangerous keys and passes a null-prototype args object to the handler", async () => {
+    // JSON.parse (unlike an object literal) gives `arguments` an OWN "__proto__" key,
+    // exactly as a crafted HTTP JSON body would after parsing.
+    const maliciousArgs = JSON.parse(
+      '{"__proto__": {"isAdmin": true}, "constructor": {"bad": 1}, "query": "x"}'
+    )
+
+    const res = await handleJsonRpcRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        id: 100,
+        params: { name: "search_decisions", arguments: maliciousArgs },
+      },
+      ctx(["mcp:search_decisions"])
+    )
+
+    // Dispatch still reached the handler and returned normally.
+    expect(searchHandler).toHaveBeenCalledTimes(1)
+    expect(res.result).toEqual({ content: [{ type: "text", text: "ok" }] })
+
+    const received = searchHandler.mock.calls[0][0] as Record<string, unknown>
+    // Legitimate key preserved.
+    expect(received.query).toBe("x")
+    // Null-prototype container; dangerous own-keys dropped.
+    expect(Object.getPrototypeOf(received)).toBeNull()
+    expect(Object.prototype.hasOwnProperty.call(received, "__proto__")).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(received, "constructor")).toBe(false)
+    // The injected prototype did not leak in as a readable property.
+    expect((received as { isAdmin?: unknown }).isAdmin).toBeUndefined()
+
+    // Global Object.prototype is not polluted.
+    expect(({} as { isAdmin?: unknown }).isAdmin).toBeUndefined()
+  })
+
+  it("defaults missing arguments to an empty null-prototype object", async () => {
+    const res = await handleJsonRpcRequest(
+      {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        id: 101,
+        params: { name: "search_decisions" },
+      },
+      ctx(["mcp:search_decisions"])
+    )
+
+    expect(res.error).toBeUndefined()
+    expect(searchHandler).toHaveBeenCalledTimes(1)
+    const received = searchHandler.mock.calls[0][0] as Record<string, unknown>
+    expect(Object.getPrototypeOf(received)).toBeNull()
+    expect(Object.keys(received)).toEqual([])
+  })
+})

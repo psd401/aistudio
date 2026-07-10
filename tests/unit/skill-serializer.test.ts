@@ -6,8 +6,10 @@
 import {
   slugifySkillName,
   deriveAllowedTools,
+  findInvalidAllowedToolEntries,
   buildSummary,
   serializeAssistantToSkill,
+  isValidAllowedToolEntry,
   type SerializerAssistant,
 } from "@/lib/skills/skill-serializer"
 
@@ -59,6 +61,73 @@ describe("deriveAllowedTools", () => {
       { name: "p2", content: "y", enabledTools: null },
     ])
     expect(tools).toEqual(["code"])
+  })
+
+  // Epic #922 completion audit: the allowed-tools frontmatter line is emitted
+  // UNQUOTED, so entries outside the strict charset (whitespace, newlines,
+  // YAML-breaking chars) are dropped to prevent frontmatter key injection.
+  it("drops entries with whitespace/newlines/YAML-breaking chars, keeping valid ones", () => {
+    const tools = deriveAllowedTools([
+      {
+        name: "p1",
+        content: "x",
+        enabledTools: [
+          "foo\nbar: baz",
+          "a b",
+          "tool@2",
+          "tool@v0",
+          "documents.create",
+          "documents.create@v1",
+          "connector:canva:design",
+          "search_decisions",
+        ],
+      },
+    ])
+    expect(tools).toEqual([
+      "connector:canva:design",
+      "documents.create",
+      "documents.create@v1",
+      "search_decisions",
+    ])
+  })
+
+  it("isValidAllowedToolEntry accepts only the strict identifier@vN grammar", () => {
+    expect(isValidAllowedToolEntry("documents.create@v1")).toBe(true)
+    expect(isValidAllowedToolEntry("connector:canva:design")).toBe(true)
+    expect(isValidAllowedToolEntry("tool@v0")).toBe(false)
+    expect(isValidAllowedToolEntry("a b")).toBe(false)
+    expect(isValidAllowedToolEntry("foo\nbar: baz")).toBe(false)
+  })
+})
+
+describe("findInvalidAllowedToolEntries", () => {
+  it("returns exactly the entries deriveAllowedTools would drop, deduped", () => {
+    const invalid = findInvalidAllowedToolEntries([
+      {
+        name: "p1",
+        content: "x",
+        enabledTools: ["a b", "tool@2", "documents.create"],
+      },
+      {
+        name: "p2",
+        content: "y",
+        enabledTools: ["a b", "tool@v0", "search_decisions"],
+      },
+    ])
+    expect(invalid).toEqual(["a b", "tool@2", "tool@v0"])
+  })
+
+  it("returns empty when every entry is valid (or blank)", () => {
+    expect(
+      findInvalidAllowedToolEntries([
+        { name: "p1", content: "x", enabledTools: ["documents.create", "  ", ""] },
+        { name: "p2", content: "y", enabledTools: null },
+      ])
+    ).toEqual([])
+  })
+
+  it("returns empty for no prompts", () => {
+    expect(findInvalidAllowedToolEntries([])).toEqual([])
   })
 })
 
@@ -187,5 +256,27 @@ describe("serializeAssistantToSkill", () => {
     expect(() =>
       serializeAssistantToSkill({ name: "!!!", description: "x", prompts: [] })
     ).toThrow(/valid skill slug/)
+  })
+
+  it("a hostile allowed-tools entry cannot inject a frontmatter key", () => {
+    const { skillMd, allowedTools } = serializeAssistantToSkill({
+      name: "Hostile",
+      description: "x",
+      prompts: [
+        {
+          name: "P",
+          content: "y",
+          enabledTools: ["x\ninjected: true", "safe.tool"],
+        },
+      ],
+    })
+    // The hostile entry is dropped from the derived pin entirely.
+    expect(allowedTools).toEqual(["safe.tool"])
+
+    // The frontmatter block (between the --- delimiters) must contain no line
+    // starting "injected:" — the newline in the entry may not smuggle a key in.
+    const frontmatter = skillMd.split(/^---$/m)[1]
+    expect(frontmatter).toContain("allowed-tools: safe.tool")
+    expect(/^injected:/m.test(frontmatter)).toBe(false)
   })
 })

@@ -69,6 +69,16 @@ jest.mock("@/lib/content/visibility-service", () => ({
   },
 }));
 
+// retrieval-service is imported LAZILY by version-service (to avoid the
+// content<->retrieval module cycle); jest intercepts the dynamic import through
+// the module registry. rollback re-indexes the rolled-back head best-effort.
+const indexObjectMock = jest.fn(async (..._args: unknown[]): Promise<void> => undefined);
+jest.mock("@/lib/content/retrieval-service", () => ({
+  retrievalService: {
+    indexObject: (...args: unknown[]) => indexObjectMock(...args),
+  },
+}));
+
 // A chainable tx stub. Each query step ends in `.limit()` (the SELECTs) or
 // `.returning()` (the UPDATE); those terminals shift the next queued result off
 // `txResults`. The order rollback issues them: 1) target-version SELECT,
@@ -153,5 +163,33 @@ describe("versionService.rollback", () => {
     await expect(
       versionService.rollback(owner, "o1", "v1")
     ).resolves.toBeUndefined();
+  });
+
+  it("re-indexes the retrieval snapshot after a successful rollback", async () => {
+    // The index stores a persisted snapshot of the head's chunked text, so a
+    // rollback must refresh it. indexObject self-guards on published status, so a
+    // draft/archived object is a safe no-op inside indexObject (never wrongly added).
+    txResults = [[{ id: "v1" }], [{ id: "o1" }]];
+    await versionService.rollback(owner, "o1", "v1");
+    expect(indexObjectMock).toHaveBeenCalledTimes(1);
+    expect(indexObjectMock).toHaveBeenCalledWith("o1");
+  });
+
+  it("does not fail the rollback when the retrieval re-index throws (best-effort)", async () => {
+    // The head change already committed; a re-index failure is logged, never thrown.
+    txResults = [[{ id: "v1" }], [{ id: "o1" }]];
+    indexObjectMock.mockRejectedValueOnce(new Error("vector store down"));
+    await expect(
+      versionService.rollback(owner, "o1", "v1")
+    ).resolves.toBeUndefined();
+  });
+
+  it("does NOT re-index when the rollback itself fails (no committed head change)", async () => {
+    // Object not found -> throws before the head-advance, so nothing to refresh.
+    ownerLoadResult = [];
+    await expect(versionService.rollback(owner, "o1", "v1")).rejects.toThrow(
+      NotFoundError
+    );
+    expect(indexObjectMock).not.toHaveBeenCalled();
   });
 });

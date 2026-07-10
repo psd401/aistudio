@@ -1,7 +1,12 @@
-"use server"
+// REV-COR-035: NOT a "use server" module. These are internal helpers (imported
+// only by other server modules), and both accept a `preResolvedSession` that is
+// trusted verbatim — as a server action that parameter would be attacker-
+// controlled, letting a caller resolve any victim's Requester by cognito_sub.
+// `import "server-only"` makes a client-component import fail at build time.
+import "server-only";
 
 /**
- * Atrium server-action requester resolution
+ * Atrium requester resolution (server-only helper)
  *
  * Issue #1058 (Epic #1059, Atrium Phase 0). Builds the content service's
  * `Requester` (kind "user") from the current Cognito session: resolves the
@@ -134,8 +139,17 @@ export async function getUserRequester(
  * access is bounded entirely by `canView`, not by the presence of a session.
  */
 export async function getOptionalRequester(
-  requestId?: string
+  requestId?: string,
+  /**
+   * Optional pre-resolved session, threaded through to avoid a second
+   * `getServerSession()` when the caller also runs a capability check against the
+   * same session (e.g. `getVisibilityAction`).
+   */
+  preResolvedSession?: CognitoSession | null
 ): Promise<Requester> {
-  const requester = await resolveAuthenticatedRequester(requestId);
+  const requester = await resolveAuthenticatedRequester(
+    requestId,
+    preResolvedSession
+  );
   return requester ?? GUEST_REQUESTER;
 }
