@@ -64,28 +64,45 @@ describe("ECS Service — ALB stickiness regression guard (#1105)", () => {
     // below would pass vacuously).
     expect(Object.keys(targetGroups).length).toBeGreaterThan(0)
 
-    for (const resource of Object.values(targetGroups)) {
+    for (const resource of Object.values(targetGroups) as Record<
+      string,
+      unknown
+    >[]) {
       const attributes: Array<{ Key?: string; Value?: unknown }> =
-        resource.Properties?.TargetGroupAttributes ?? []
+        (
+          resource as {
+            Properties?: {
+              TargetGroupAttributes?: Array<{ Key?: string; Value?: unknown }>
+            }
+          }
+        ).Properties?.TargetGroupAttributes ?? []
 
       const stickinessEnabled = attributes.find(
         (attr) => attr.Key === "stickiness.enabled"
       )
 
-      // CDK emits `stickiness.enabled: "false"` for the default (disabled)
-      // state and omits it only in older versions. Either is acceptable — the
+      // The default (disabled) state synthesizes `stickiness.enabled: "false"`;
+      // the attribute may be absent instead. Both are acceptable — the
       // regression to guard against is the value flipping to "true", which is
-      // what re-adding `stickinessCookieDuration` (the pre-#879 config) would
-      // produce and which makes AWS inject the AWSALB/AWSALBCORS cookies.
+      // what re-adding `stickinessCookieDuration` (the pre-#879 config)
+      // produces and which makes AWS inject the AWSALB/AWSALBCORS cookies.
       if (stickinessEnabled !== undefined) {
         expect(String(stickinessEnabled.Value)).toBe("false")
       }
 
-      // No duration-based stickiness cookie attribute should ever be set.
-      const cookieDuration = attributes.find(
-        (attr) => attr.Key === "stickiness.lb_cookie.duration_seconds"
-      )
-      expect(cookieDuration).toBeUndefined()
+      // Belt-and-suspenders: no stickiness cookie configuration of any kind
+      // should be present. Covers both duration-based (`stickiness.lb_cookie.*`,
+      // the literal pre-#879 vector) and application-based (`stickiness.app_cookie.*`)
+      // stickiness — either would reintroduce a scanner-flagged cookie.
+      const stickinessCookieKeys = attributes
+        .map((attr) => attr.Key)
+        .filter(
+          (key): key is string =>
+            key !== undefined &&
+            key.startsWith("stickiness.") &&
+            key !== "stickiness.enabled"
+        )
+      expect(stickinessCookieKeys).toEqual([])
     }
   })
 })
