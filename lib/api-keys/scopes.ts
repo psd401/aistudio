@@ -20,6 +20,14 @@ export const API_SCOPES = {
   "assistants:execute": "Execute any assistant via API",
   "models:read": "List available AI models",
   "tools:read": "List and view tool catalog entries and their versions",
+  // Platform capability catalog (Issue #1100). A low-sensitivity read scope over
+  // non-sensitive PRODUCT METADATA — the live projection of AI Studio's own
+  // registries (invocable actions, role-gated UI features, and the scope
+  // reference). Granted broadly (student/staff/administrator) so any authenticated
+  // caller — including the OpenClaw agent holding a scoped key — can discover what
+  // the platform can do via the `describe_capabilities` MCP meta-tool. It exposes
+  // no user data, only the shape of the app.
+  "platform:read": "Read the AI Studio capability catalog (actions, features, scopes)",
   "documents:read": "Read documents and attachments",
   "documents:write": "Upload and manage documents",
   "graph:read": "Read context graph nodes and edges",
@@ -60,7 +68,7 @@ export type ApiScope = keyof typeof API_SCOPES;
 const ALL_SCOPES = Object.keys(API_SCOPES) as ApiScope[];
 
 export const ROLE_SCOPES: Record<string, ApiScope[]> = {
-  student: ["chat:read", "chat:write"],
+  student: ["chat:read", "chat:write", "platform:read"],
   staff: [
     "chat:read",
     "chat:write",
@@ -69,6 +77,7 @@ export const ROLE_SCOPES: Record<string, ApiScope[]> = {
     "assistants:execute",
     "models:read",
     "tools:read",
+    "platform:read",
     "documents:read",
     "graph:read",
     "mcp:search_decisions",

@@ -182,6 +182,39 @@ Example:
       required: ["nodeId"],
     },
   },
+  {
+    // Platform capability catalog (Issue #1100). A read-only meta-tool: a LIVE
+    // projection of AI Studio's own source-of-truth registries so the agent's
+    // understanding of what the platform can do never drifts from the deployed
+    // code. Returns `actions[]` (invocable tools, each flagged `agentInvocable`
+    // when reachable over MCP), `features[]` (role-gated UI features the agent
+    // steers users to), and a `scopes[]` reference.
+    name: "describe_capabilities",
+    description:
+      "Describe what AI Studio can do, live from the app's own registries. Returns invocable actions (with the surfaces/scopes each needs and whether the agent can invoke it over MCP), role-gated UI features to steer users toward, and a scope reference. Use this to discover current capabilities instead of relying on a static list.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        section: {
+          type: "string",
+          description:
+            "Limit the response to one section. Defaults to 'all'.",
+          enum: ["actions", "features", "scopes", "all"],
+        },
+        surface: {
+          type: "string",
+          description:
+            "Only include actions exposed on this surface (does not affect features/scopes).",
+          enum: ["mcp", "ai_sdk", "rest", "internal"],
+        },
+        query: {
+          type: "string",
+          description:
+            "Case-insensitive substring filter across identifier, name, description, and scope.",
+        },
+      },
+    },
+  },
   // Atrium content tools (Phase 5, Issue #1055) — listed so scoped callers
   // discover them via tools/list.
   ...CONTENT_MCP_TOOLS,
