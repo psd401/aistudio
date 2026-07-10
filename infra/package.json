@@ -5,11 +5,12 @@
     "infra": "bin/infra.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && bun run test:lambdas",
     "build:lambdas": "./build-lambdas.sh",
     "build:all": "bun run build && bun run build:lambdas",
     "watch": "tsc -w",
     "test": "jest",
+    "test:lambdas": "cd lambdas/agent-skill-builder && bun install && bun run test",
     "cdk": "cdk"
   },
   "devDependencies": {
