@@ -210,7 +210,12 @@ async function createContent(
       outcome: "ok",
       requestId: context.requestId,
     });
-    return ok({ id: created.id, slug: created.slug, url: contentDeepLink(created.slug) });
+    return ok({
+      id: created.id,
+      slug: created.slug,
+      url: contentDeepLink(created.slug),
+      visibilityLevel: created.visibilityLevel,
+    });
   } catch (err) {
     return fail(err, { req, action: "create", requestId: context.requestId });
   }

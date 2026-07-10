@@ -75,10 +75,12 @@ export interface AssistantListResult {
  * Returns { allowed: true } or { allowed: false, reason: string }.
  */
 export function validateAssistantAccess(
-  assistant: { userId: number; status: string },
+  assistant: { userId: number | null; status: string },
   userId: number,
   isAdmin: boolean
 ): { allowed: boolean; reason?: string } {
+  // A null owner never matches a numeric userId, so an orphan assistant is granted
+  // access only via the admin or approved-status branches below (REV-COR-524).
   const isOwner = assistant.userId === userId
   if (isOwner) return { allowed: true }
   if (isAdmin) return { allowed: true }
@@ -286,7 +288,7 @@ export async function getAssistantById(
  */
 export async function getAssistantForAccessCheck(
   assistantId: number
-): Promise<{ userId: number; status: string } | null> {
+): Promise<{ userId: number | null; status: string } | null> {
   const rows = await executeQuery(
     (db) =>
       db
@@ -301,7 +303,11 @@ export async function getAssistantForAccessCheck(
   )
 
   const row = rows[0]
-  if (!row || row.userId === null) return null
+  // Only a genuinely missing row is "not found" (404). A null owner (e.g. a
+  // system/seeded assistant, or one whose owner row was deleted) is a real row —
+  // return it and let validateAssistantAccess decide (an approved orphan is still
+  // runnable; the owner check simply fails) rather than 404-ing it (REV-COR-524).
+  if (!row) return null
 
   return { userId: row.userId, status: row.status }
 }

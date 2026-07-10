@@ -36,6 +36,7 @@ You do not handle authentication directly. The skill:
 |------|---------|----------------|
 | 0 | Success — JSON-RPC result on stdout | Use the result |
 | 1 | Config / usage error | Surface the error, do not retry |
+| 1 | Unqualified `NUMERIC`/`DECIMAL` cast — `query`/`call` rejected your SQL client-side, before it reached the server | This one **is** safe to self-correct: add precision to the flagged cast (e.g. `NUMERIC(10,2)`) and retry the same call immediately — unlike other exit-1 errors, this isn't a malformed invocation |
 | 10 | needs-auth: no token, or token revoked | Paste `consent_chat_hyperlink` on its own line |
 | 12 | Upstream MCP error (JSON-RPC error or unexpected HTTP) | Surface the error verbatim |
 | 13 | Forbidden: user not in `userpermissions` table | Tell the user to ping the data team |
@@ -131,7 +132,21 @@ intent in plain English; do not pad with fluff.
 - Only `SELECT` queries are accepted; DDL / DML are rejected
 - Row-level security rewrites your query — do not write your own access
   filters; let the server do it
-- Casts to `NUMERIC` / `DECIMAL` without precision are rejected
+- **Always specify precision on `NUMERIC`/`DECIMAL` casts** — e.g.
+  `CAST(score AS NUMERIC(10,2))` or `score::NUMERIC(10,2)`, never bare
+  `CAST(score AS NUMERIC)` or `score::NUMERIC`. The server rejects
+  unqualified casts, and the leading hypothesis for a numeric column
+  going missing from a result set or `--export` CSV (looking
+  blank/missing rather than erroring) is exactly this pattern — though
+  the server's own logic hasn't been directly inspected, so treat this as
+  the best-known lead rather than a confirmed root cause. The skill
+  validates explicit `CAST(...)`/`::` casts client-side (both in `query`
+  and in `call --tool query_data`) and fails fast with the offending
+  fragment; it does **not** catch every way an unqualified `NUMERIC` can
+  arise — e.g. `AVG()`/`SUM()` over a numeric column can produce an
+  unqualified `NUMERIC` result with no `CAST`/`::` in the SQL text at all.
+  If you see a numeric column missing from an export and your SQL has no
+  bare cast, that's the next thing to suspect.
 
 ### Lessons
 

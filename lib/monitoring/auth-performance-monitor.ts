@@ -4,7 +4,10 @@
  */
 
 import { createLogger } from '@/lib/logger';
-import { getAuthCacheStats } from '@/lib/auth/optimized-polling-auth';
+// Import the leaf cache directly (not getAuthCacheStats from optimized-polling-auth)
+// to break the optimized-polling-auth ↔ auth-performance-monitor import cycle
+// (REV-ARCH-004). polling-session-cache imports neither module, so the cycle is gone.
+import { pollingSessionCache } from '@/lib/auth/polling-session-cache';
 
 const log = createLogger({ module: 'auth-performance-monitor' });
 
@@ -128,7 +131,7 @@ class AuthPerformanceMonitor {
    */
   getPerformanceSummary() {
     const metrics = this.getMetrics();
-    const cacheStats = getAuthCacheStats();
+    const cacheStats = pollingSessionCache.getStats();
 
     return {
       authentication: {

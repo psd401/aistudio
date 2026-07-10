@@ -32,6 +32,11 @@ let publishableRows: Array<{
   collectionId: string | null;
 }> = [];
 
+// executeQuery also serves the unpublish pre-gate live-publication check (issue
+// #1118 P2). Default: a live publication exists, so the unpublish gate/tx run;
+// set to [] to model an already-offline destination (the pre-gate no-op).
+let liveCheckRows: Array<{ id: string }> = [{ id: "pub-live" }];
+
 let setLevelInTxCalls = 0;
 let lastSetLevelVisibility: unknown = null;
 let lastSetLevelExtraSet: unknown = null;
@@ -42,7 +47,7 @@ jest.mock("@/lib/db/drizzle-client", () => ({
   // post-commit `.set({ externalRef })` UPDATE (persist-external-ref) payload can
   // be asserted, then resolves to `publishableRows` exactly as before —
   // loadPublishable is unaffected; only side-effect capture is added.
-  executeQuery: jest.fn(async (cb?: (db: unknown) => unknown) => {
+  executeQuery: jest.fn(async (cb?: (db: unknown) => unknown, label?: string) => {
     if (typeof cb === "function") {
       try {
         cb(setRecorder);
@@ -51,6 +56,9 @@ jest.mock("@/lib/db/drizzle-client", () => ({
         // future callback shape can't break the (unchanged) return value.
       }
     }
+    // The unpublish pre-gate live-publication check (issue #1118 P2) reads its own
+    // configurable result; every other executeQuery (loadPublishable, …) is unchanged.
+    if (label === "publish.unpublish.liveCheck") return liveCheckRows;
     return publishableRows;
   }),
   executeTransaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
@@ -91,11 +99,15 @@ jest.mock("drizzle-orm", () => ({
 // provider-factory → settings-manager); the index/prune internals are covered by
 // atrium-retrieval-permission-aware.test.ts / atrium-retrieval-index-pruning.test.ts.
 const removeFromIndexMock = jest.fn(async (_objectId: string) => undefined);
+const indexObjectMock = jest.fn(
+  async (_objectId: string, _versionId?: string) => undefined
+);
 jest.mock("@/lib/content/retrieval-service", () => ({
   retrievalService: {
-    indexObject: jest.fn(async () => undefined),
-    // Deref the outer mock lazily (jest.mock factories are hoisted above the
-    // const declaration — a direct reference is a TDZ error).
+    // Deref the outer mocks lazily (jest.mock factories are hoisted above the
+    // const declarations — a direct reference is a TDZ error).
+    indexObject: (objectId: string, versionId?: string) =>
+      indexObjectMock(objectId, versionId),
     removeFromIndex: (objectId: string) => removeFromIndexMock(objectId),
   },
 }));
@@ -196,6 +208,23 @@ jest.mock("@/lib/content/publish-adapters/okf", () => ({
   },
 }));
 
+// publish-service imports versionService (to validate a PINNED version on the
+// approval-replay path — issue #1118). The REAL module pulls mappers →
+// drizzle-helpers, which needs `sql` (not in this suite's minimal drizzle-orm
+// mock), so stub it. `getById` returns a version by default so a `versionId`
+// publish validates; individual tests override it (e.g. null → not-found).
+const getVersionByIdMock = jest.fn(
+  async (): Promise<{ id: string; versionNumber: number } | null> => ({
+    id: "v-pinned",
+    versionNumber: 3,
+  })
+);
+jest.mock("@/lib/content/version-service", () => ({
+  versionService: {
+    getById: (...args: unknown[]) => getVersionByIdMock(...(args as [])),
+  },
+}));
+
 // A chainable tx stub. The TERMINAL builder methods `.limit()` and `.returning()`
 // each shift the next queued result off `txResults` (in call order): a `.limit()`
 // terminates a SELECT (the FOR UPDATE lock, the live-publication lookup), and a
@@ -284,6 +313,7 @@ beforeEach(() => {
     },
   ];
   canViewResult = true;
+  liveCheckRows = [{ id: "pub-live" }];
   setLevelInTxCalls = 0;
   lastSetLevelVisibility = null;
   lastSetLevelExtraSet = null;
@@ -395,14 +425,19 @@ describe("publishService.publish", () => {
     expect(publicWebPublishCalls).toBe(0);
   });
 
-  it("gates schoology/google behind the §26.4 public gate for an unauthorized caller (Phase 7)", async () => {
-    // Phase 7 (#1057): schoology & google are PUBLIC (family-facing) destinations
-    // now, so a non-admin owner without publish_public is routed through the
-    // approval gate — BEFORE the not-implemented check — exactly like public_web.
+  it("fails a schoology/google publish with ValidationError BEFORE the gate for an unauthorized caller (issue #1118 item 6 — doomed requests are not queued)", async () => {
+    // schoology & google are not-yet-implemented connector STUBS. Issue #1118 item
+    // 6 reorders the cheap adapter-not-implemented check AHEAD of the §26.4 gate:
+    // a publish to a stub can NEVER succeed (approving it just re-hits the stub
+    // error), so it must fail with a plain ValidationError and NOT be persisted as
+    // a doomed approval-queue row. The revealed fact ("destination not yet wired")
+    // is static/non-sensitive. (public_web IS implemented, so an unauthorized
+    // public_web publish still reaches the gate — see the ApprovalRequiredError
+    // test above.) No write, no queued request, no adapter.
     for (const destination of ["schoology", "google"] as const) {
       await expect(
         publishService.publish(owner, "o1", { destination })
-      ).rejects.toThrow(ApprovalRequiredError);
+      ).rejects.toThrow(ValidationError);
     }
     expect(setLevelInTxCalls).toBe(0);
     expect(adapterPublishCalls).toBe(0);
@@ -475,6 +510,36 @@ describe("publishService.publish", () => {
     expect(setLevelInTxCalls).toBe(0);
   });
 
+  it("publishes a PINNED version (input.versionId), not the head — approval replay (issue #1118 item 1)", async () => {
+    // An approval replay pins the raise-time version so the admin publishes the
+    // REVIEWED content even though the current head is v1. getById validates the
+    // pinned version belongs to the object.
+    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    const result = await publishService.publish(admin, "o1", {
+      destination: "intranet",
+      versionId: "v-reviewed",
+    });
+    expect(result).toEqual({
+      publicationId: "pub1",
+      publishedVersionId: "v-reviewed",
+    });
+    expect(getVersionByIdMock).toHaveBeenCalled();
+    // Retrieval must index the PUBLISHED (pinned) version, not the head — else it
+    // would surface the unreviewed head text to assistant search (issue #1118 P1).
+    expect(indexObjectMock).toHaveBeenCalledWith("o1", "v-reviewed");
+  });
+
+  it("throws ValidationError when the pinned versionId does not belong to the object", async () => {
+    // getById scopes by object and returns null for a version of another object.
+    getVersionByIdMock.mockResolvedValueOnce(null);
+    await expect(
+      publishService.publish(admin, "o1", {
+        destination: "intranet",
+        versionId: "not-mine",
+      })
+    ).rejects.toThrow(ValidationError);
+  });
+
   it("widens visibility via setLevelInTx only when visibility is provided", async () => {
     // tx queue: FOR UPDATE lock row, then the publication upsert RETURNING id.
     txResults = [[{ id: "o1" }], [{ id: "pub2" }]];
@@ -537,10 +602,28 @@ describe("publishService.unpublish", () => {
   });
 
   it("is a no-op (unpublished:false) and does NOT run the adapter when there is no live publication", async () => {
-    // tx queue: FOR UPDATE lock row, then the live-publication lookup returns [].
-    txResults = [[{ id: "o1" }], []];
+    // No live publication anywhere → the pre-gate check short-circuits (issue
+    // #1118 P2) and returns the no-op WITHOUT opening the transaction.
+    liveCheckRows = [];
     const result = await publishService.unpublish(owner, "o1", "intranet");
     expect(result).toEqual({ unpublished: false });
+    expect(adapterUnpublishCalls).toBe(0);
+  });
+
+  it("an already-offline public_web unpublish by an unauthorized caller is a no-op — NOT gated or queued (issue #1118 P2)", async () => {
+    // Nothing live at public_web → there is no exposure to gate. The §26.4 gate
+    // must NOT fire and must NOT queue a doomed approval whose replay would only
+    // re-run this same no-op. `owner` is a non-admin without publish_public.
+    liveCheckRows = [];
+    const result = await publishService.unpublish(owner, "o1", "public_web");
+    expect(result).toEqual({ unpublished: false });
+    // Let any fire-and-forget settle, then assert NO approval request was written.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      executeQueryMock.mock.calls.some(
+        (call: unknown[]) => call[1] === "content.publishApprovalRequest"
+      )
+    ).toBe(false);
     expect(adapterUnpublishCalls).toBe(0);
   });
 
@@ -569,10 +652,19 @@ describe("publishService.unpublish", () => {
   // §26.4 — taking a public destination offline requires the same authority as
   // putting it up: content:publish_internal alone must not be enough to tear
   // down already-live public_web content.
-  it("throws ApprovalRequiredError unpublishing public_web without publish_public, and never touches the tx", async () => {
+  it("throws ApprovalRequiredError unpublishing public_web without publish_public, PERSISTS a durable request (issue #1118 item 2), and never touches the tx", async () => {
     await expect(
       publishService.unpublish(owner, "o1", "public_web")
     ).rejects.toThrow(ApprovalRequiredError);
+    // Let the fire-and-forget persist settle, then assert the unpublish request was
+    // written to the durable queue — previously this gate raw-threw and queued
+    // NOTHING, so a blocked unpublish never appeared in /admin/atrium.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      executeQueryMock.mock.calls.some(
+        (call: unknown[]) => call[1] === "content.publishApprovalRequest"
+      )
+    ).toBe(true);
     expect(adapterUnpublishCalls).toBe(0);
   });
 

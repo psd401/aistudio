@@ -153,6 +153,51 @@ describe("approvalRequestFieldsOf — raise-site classification", () => {
       context: { collectionId: "col-9", audience: "public" },
     });
   });
+
+  it("PINS the raise-time version into a publish request context (issue #1118 item 1)", () => {
+    // The pre-tx public gate passes the head version id so approve replays the
+    // REVIEWED version, not a later edit.
+    const fields = approvalRequestFieldsOf(
+      { objectId: "o1", slug: "s", destination: "public_web" },
+      { destination: "public_web", objectId: "o1", versionId: "ver-42" }
+    );
+    expect(fields.requestKind).toBe("publish");
+    expect(fields.context.versionId).toBe("ver-42");
+  });
+
+  it("records the bundled widen for a PUBLIC destination when wantsPublicWiden (issue #1118 item 5)", () => {
+    // A public_web publish that ALSO bundled visibility.level='public' must record
+    // the widen so approve applies it and the queue reflects it — previously the
+    // pre-tx public gate dropped the widen intent.
+    const fields = approvalRequestFieldsOf(
+      { objectId: "o1", slug: "s", destination: "public_web" },
+      { destination: "public_web", objectId: "o1", wantsPublicWiden: true }
+    );
+    expect(fields.context.visibility).toEqual({ level: "public" });
+  });
+
+  it("does NOT record a widen for a public destination WITHOUT wantsPublicWiden", () => {
+    const fields = approvalRequestFieldsOf(
+      { objectId: "o1", slug: "s", destination: "public_web" },
+      { destination: "public_web", objectId: "o1" }
+    );
+    expect(fields.context.visibility).toBeUndefined();
+  });
+
+  it("classifies an explicit unpublish gate as kind 'unpublish' (issue #1118 item 2)", () => {
+    // Unpublish is object+destination-shaped like publish, so the raise site flags
+    // it explicitly via errorContext.requestKind.
+    const fields = approvalRequestFieldsOf(
+      { objectId: "o1", slug: "s", destination: "public_web" },
+      { destination: "public_web", objectId: "o1", requestKind: "unpublish" }
+    );
+    expect(fields).toEqual({
+      objectId: "o1",
+      requestKind: "unpublish",
+      destination: "public_web",
+      context: { destination: "public_web" },
+    });
+  });
 });
 
 describe("raisePublishApprovalRequired — queue-row persistence", () => {

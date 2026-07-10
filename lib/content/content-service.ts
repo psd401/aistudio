@@ -26,6 +26,7 @@ import {
   assertCanCreate,
   assertCanEdit,
   canPublishPublic,
+  persistPublishApprovalRequest,
   slugCandidate,
   slugifyTitle,
   systemUserId,
@@ -40,7 +41,6 @@ import {
 import { snapshotInTx, versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
 import {
-  ApprovalRequiredError,
   ConflictError,
   ForbiddenError,
   NotFoundError,
@@ -217,41 +217,48 @@ function assertValidCreateInput(input: CreateObjectInput): void {
 }
 
 /**
- * §26.4 — emit the approval-queue signal and throw for an unauthorized public
- * CREATE. Shared by both of `create`'s gate sites (the explicit-`public` input
- * gate and the resolved-level gate) so the emitted event shape and fail-closed
- * behavior stay identical. Fire-and-forget emit (`void`, not `await`): `emit`
- * swallows its own errors, so awaiting only adds an SNS round-trip. No object
- * exists yet to carry an id/slug on the event (unlike `publish`/`setLevel`,
- * which gate an already-persisted object) — the surface layer's audit write
- * still records the attempted (denied) create.
+ * §26.4 create-as-private (issue #1118 item 2). An unauthorized public CREATE is
+ * NOT blocked: the object is created PRIVATE (the caller downgrades the resolved
+ * level, see `resolveCreateVisibility`) and this queues a durable
+ * `visibility_widen` request for the now-existing object. Previously the create
+ * gate threw with NOTHING persisted, so the request never reached /admin/atrium
+ * and the caller's content was lost.
+ *
+ * Runs POST-commit (the object id must exist to reference it) and is best-effort:
+ * `persistPublishApprovalRequest` never rejects (it log.warns), so a queue-write
+ * failure cannot fail an already-successful create. Emits the same approval-queue
+ * event the other §26.4 gates emit — now carrying the real object id (a
+ * `visibility_widen` on the created object) rather than the old object-less
+ * `destination: "create"` placeholder.
  */
-function raiseCreateApprovalRequired(
+async function queuePublicWidenForCreate(
   req: Requester,
-  details: Record<string, unknown>
-): never {
+  objectId: string
+): Promise<void> {
+  await persistPublishApprovalRequest(req, { objectId }, { objectId });
   void contentEvents.emit("content.public_publish_requested", {
-    objectId: "",
-    destination: "create",
+    objectId,
     actorKind: actorKindOf(req),
     agentLabel: req.kind === "user" ? null : req.agentLabel,
   });
-  throw new ApprovalRequiredError(
-    "Creating public content requires approval",
-    details
-  );
 }
 
 /**
  * Resolve the visibility level + grants a create persists, enforcing the
- * grant/level invariants and the §26.4 resolved-level gate. Extracted from
- * `create` (complexity budget); the ordering vs. `ownerFor` is unchanged.
+ * grant/level invariants and the §26.4 create-as-private downgrade. Extracted
+ * from `create` (complexity budget); the ordering vs. `ownerFor` is unchanged.
+ * `publicWidenRequested` is true when an unauthorized public create was
+ * downgraded to private — the caller queues a `visibility_widen` post-commit.
  */
 async function resolveCreateVisibility(
   req: Requester,
   input: CreateObjectInput,
   mayPublishPublic: boolean
-): Promise<{ visibilityLevel: VisibilityLevel; grants: VisibilityGrant[] }> {
+): Promise<{
+  visibilityLevel: VisibilityLevel;
+  grants: VisibilityGrant[];
+  publicWidenRequested: boolean;
+}> {
   const explicitLevel = input.visibility?.level;
   const grants = input.visibility?.grants ?? [];
 
@@ -292,22 +299,19 @@ async function resolveCreateVisibility(
   // above only catches the explicit-`group` case.
   visibilityService.assertWritableLevel(visibilityLevel, grants);
 
-  // §26.4 — creating directly at `public` (explicitly, or via a collection
-  // whose admin-set default is `public`) is the same privilege boundary as
-  // widening to public through `publish`/`set_visibility`; gate it the same
-  // way rather than letting a `content:create`-only caller reach "public"
-  // by skipping straight to creation. Parity with Gate 1 (explicit
-  // `input.visibility.level === "public"`): a collection whose admin-set
-  // default is `public` (e.g. the seeded `public-site` collection,
-  // default_visibility_level = 'public') resolves to "public" HERE without an
-  // explicit visibility, so emit the same approval-queue signal before failing
-  // closed — otherwise SNS consumers miss this denied-public-create case that
-  // Gate 1 covers.
+  // §26.4 create-as-private (issue #1118 item 2): creating directly at `public`
+  // (explicitly, or via a collection whose admin-set default is `public`)
+  // without authority is NOT blocked. Downgrade to `private` — always the safe
+  // direction (no exposure) — and signal the caller to queue a `visibility_widen`
+  // once the object exists. `grants` are dropped: a public object carries none.
+  // Covers BOTH an explicit `public` input and a public collection default (e.g.
+  // the seeded `public-site` collection, default_visibility_level = 'public'),
+  // since `visibilityLevel` here is the RESOLVED level.
   if (visibilityLevel === "public" && !mayPublishPublic) {
-    raiseCreateApprovalRequired(req, { title: input.title });
+    return { visibilityLevel: "private", grants: [], publicWidenRequested: true };
   }
 
-  return { visibilityLevel, grants };
+  return { visibilityLevel, grants, publicWidenRequested: false };
 }
 
 export const contentService = {
@@ -317,13 +321,15 @@ export const contentService = {
    * Create a content object. When `input.body` is supplied, an initial version
    * (v1) is snapshotted in the same transaction and becomes the object's head.
    *
-   * §26.4 — creating an object directly at `visibility.level === "public"` is a
-   * public exposure and runs the SAME gate as a `public_web` publish: without
-   * authority (`content:publish_public` / admin) it throws `ApprovalRequiredError`
-   * and emits the approval-queue event, so `create` cannot become a side door
-   * around `publish`. The caller passes `hasPublishPublicCapability` (the session's
-   * explicit capability); agent requesters are resolved from `req` alone. A
-   * collection default is never `public`, so only an explicit `public` input gates.
+   * §26.4 create-as-private (issue #1118 item 2) — creating an object directly at
+   * `visibility.level === "public"` (explicitly, or via a public collection
+   * default) without authority (`content:publish_public` / admin) is NOT blocked:
+   * the object is created PRIVATE and a durable `visibility_widen` request is
+   * queued for it (visible in /admin/atrium, replayed on approve). So `create`
+   * still cannot become a side door around `publish` — an unauthorized caller
+   * never lands public content — but its content is preserved and the request is
+   * durable. The caller passes `hasPublishPublicCapability` (the session's
+   * explicit capability); agent requesters are resolved from `req` alone.
    */
   async create(
     req: Requester,
@@ -339,12 +345,6 @@ export const contentService = {
       opts.hasPublishPublicCapability ?? false
     );
 
-    // The §26.4 public-visibility gate (Gate 1, explicit `public` input),
-    // BEFORE any write — nothing is created.
-    if (input.visibility?.level === "public" && !mayPublishPublic) {
-      raiseCreateApprovalRequired(req, { level: input.visibility.level });
-    }
-
     const ownerUserId = ownerFor(req);
     // Use the shared resolvers so object-level provenance matches version-level
     // (snapshotInTx uses the same helpers): actor === 'agent' iff an agent id is
@@ -352,21 +352,20 @@ export const contentService = {
     const createdByActor = actorKindOf(req);
     const createdByAgentId = agentIdOf(req);
 
-    // Resolve level + grants, enforcing the grant/level invariants and the
-    // §26.4 resolved-level gate (Gate 2 — e.g. a public collection default).
-    const { visibilityLevel, grants } = await resolveCreateVisibility(
-      req,
-      input,
-      mayPublishPublic
-    );
+    // Resolve level + grants. An unauthorized public create is downgraded to
+    // private here (create-as-private, §26.4); `publicWidenRequested` then drives
+    // the post-commit `visibility_widen` queue below.
+    const { visibilityLevel, grants, publicWidenRequested } =
+      await resolveCreateVisibility(req, input, mayPublishPublic);
 
     // §28.3 — agent-authored bodies (a document's markdown AND an artifact's
     // code) are guardrails/PII-screened BEFORE any write, mirroring the agent
     // bridge. No-op for human/delegated authors and bodyless creates. Runs
     // pre-transaction: screening is external IO (Bedrock) that must never hold
     // a pooled connection. Fail-closed: blocked or unscreenable content throws
-    // ValidationError and nothing is created.
-    await screenAgentBodyForWrite(req, input.body, null);
+    // ValidationError and nothing is created. The returned proof is asserted
+    // inside `snapshotInTx` (issue #1118 item 3).
+    const screeningProof = await screenAgentBodyForWrite(req, input.body, null);
 
     const { object, version, s3Writes } = await executeTransaction(
       async (tx) => {
@@ -424,7 +423,8 @@ export const contentService = {
             tx,
             req,
             { id: dto.id, kind: input.kind },
-            { body: input.body, bodyFormat: input.bodyFormat }
+            { body: input.body, bodyFormat: input.bodyFormat },
+            screeningProof
           );
           // Reflect the new head id without a re-select.
           dto.currentVersionId = snap.version.id;
@@ -434,6 +434,16 @@ export const contentService = {
       },
       "content.create"
     );
+
+    // §26.4 create-as-private (issue #1118 item 2): the object was created private
+    // because the caller lacked public-publish authority — queue a durable widen
+    // request now that its id exists. Post-commit + best-effort (never throws).
+    // MUST run before the S3 flush: flushSnapshotWrites throws on blob-write
+    // failure, and the committed-but-unqueued object would otherwise be stuck
+    // private with no admin-visible approval row.
+    if (publicWidenRequested) {
+      await queuePublicWidenForCreate(req, object.id);
+    }
 
     // S3 IO happens AFTER the transaction commits (never inside it).
     await versionService.flushSnapshotWrites(s3Writes);
@@ -457,25 +467,36 @@ export const contentService = {
     await assertViewable(req, obj, id);
     assertCanEdit(req, obj.ownerUserId);
 
+    // §28.3 — screen ONCE, OUTSIDE the conflict-retry (issue #1118 item 7).
+    // Screening is unmemoized external IO (Bedrock Guardrails + Comprehend); a
+    // back-to-back autosave that loses the version-number race and retries would
+    // otherwise screen the identical body twice (extra latency/cost, and a
+    // transient "degraded" verdict on the 2nd call could reject already-passed
+    // content). The proof is reused across both snapshot attempts.
+    const proof = await screenAgentBodyForWrite(req, input.body, obj.id);
+
     // The version-number allocation (`MAX(version_number) + 1`) is intentionally
     // race-prone and the unique constraint maps a loser to ConflictError (409).
     // Back-to-back writers (e.g. an autosave firing twice) would otherwise surface
     // an unrecoverable error toast. A single transparent retry re-reads the head
     // version and almost always wins the second time; a still-conflicting second
-    // attempt (sustained contention) re-throws so the caller can decide.
-    let version: Awaited<ReturnType<typeof versionService.snapshot>>;
+    // attempt (sustained contention) re-throws so the caller can decide. Both
+    // attempts reuse the single screening proof above.
+    let version: Awaited<ReturnType<typeof versionService.snapshotScreened>>;
     try {
-      version = await versionService.snapshot(
+      version = await versionService.snapshotScreened(
         req,
         { id: obj.id, kind: obj.kind },
-        input
+        input,
+        proof
       );
     } catch (err) {
       if (!(err instanceof ConflictError)) throw err;
-      version = await versionService.snapshot(
+      version = await versionService.snapshotScreened(
         req,
         { id: obj.id, kind: obj.kind },
-        input
+        input,
+        proof
       );
     }
     // Re-load so the returned object carries the post-snapshot updatedAt and

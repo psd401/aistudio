@@ -5,7 +5,7 @@ import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getAssistantArchitectByIdAction } from '@/actions/db/assistant-architect-actions';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
-import { getAIModelById } from '@/lib/db/drizzle';
+import { getAIModelById, getUserById } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { sql } from 'drizzle-orm';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
@@ -700,6 +700,35 @@ async function runExecutionAndBuildResponse(args: {
 }
 
 /**
+ * Resolve the architect owner's Cognito sub (REV-COR-181 / REV-COR-511).
+ * assistantOwnerSub is matched against users.cognito_sub by knowledge
+ * retrieval / repository tools, so a numeric users.id here never matched and
+ * silently disabled owner-repository access on non-owner executions. Only
+ * looked up when the executor is not the owner — owner === executor is
+ * already covered by userCognitoSub = session.sub. getUserById throws if the
+ * owner row is gone (e.g. deleted user) — treat that as no owner sub rather
+ * than failing the execution.
+ */
+async function resolveAssistantOwnerSub(
+  architectUserId: number | null | undefined,
+  executorUserId: number,
+  log: ReturnType<typeof createLogger>
+): Promise<string | undefined> {
+  if (architectUserId == null || architectUserId === executorUserId) {
+    return undefined;
+  }
+  try {
+    return (await getUserById(architectUserId))?.cognitoSub ?? undefined;
+  } catch (error) {
+    log.warn('Failed to resolve assistant owner sub', {
+      userId: architectUserId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return undefined;
+  }
+}
+
+/**
  * Assistant Architect Execution API - Native SSE Streaming
  *
  * Replaces polling-based execution with native streaming, supporting:
@@ -760,12 +789,17 @@ export async function POST(req: Request) {
     // 8. Execute with streaming. Caller scopes (role-derived) are needed for
     // agentic tool resolution; harmless to compute for prompt-chain mode too.
     const callerRoleNames = currentUserData.roles.map(r => r.name);
+
+    // Owner's cognito_sub for owner-based repository access on non-owner runs
+    // (REV-COR-181 / REV-COR-511) — see resolveAssistantOwnerSub.
+    const assistantOwnerSub = await resolveAssistantOwnerSub(architect.userId, userId, log);
+
     const context: PromptExecutionContext = {
       previousOutputs: new Map(),
       accumulatedMessages: [],
       executionId,
       userCognitoSub: session.sub,
-      assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
+      assistantOwnerSub,
       userId,
       executionStartTime: Date.now(),
       assistantId: toolId,
@@ -1803,23 +1837,20 @@ async function savePromptResultRow(args: {
   executionTimeMs: number;
 }): Promise<void> {
   const { prompt, context, processedContent, repositoryContext, text, startedAt, executionTimeMs } = args;
-  // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
-  // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
-  // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+  // JSONB + enum written via bound parameters (postgres.js binds these correctly).
+  // The old sql.raw() + manual single-quote escaping was a retired RDS Data API
+  // workaround and injection-adjacent for user-influenced processedContent — matches
+  // createToolExecutionRecord / persistAgenticResult. REV-DB-023 / REV-SEC-105.
   const promptInputData = {
     originalContent: prompt.content,
     processedContent,
     repositoryContext: repositoryContext ? 'included' : 'none'
   };
   const inputDataJson = JSON.stringify(promptInputData);
-  // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
-  const escapedInputJson = inputDataJson.replace(/'/g, "''");
-  // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
-  // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
   await executeQuery(
     (db) => db.execute(sql`
       INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
-      VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text}, ${sql.raw("'completed'::execution_status")}, ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
+      VALUES (${context.executionId}, ${prompt.id}, ${inputDataJson}::jsonb, ${text}, ${'completed'}::execution_status, ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
     `),
     'savePromptResult'
   );
@@ -2136,21 +2167,16 @@ async function handlePromptFailure(
     details: promptError instanceof Error ? promptError.stack : undefined
   }).catch(err => log.error('Failed to store prompt error event', { error: err }));
 
-  // Save failed prompt result
-  // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
-  // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
-  // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+  // Save failed prompt result — JSONB + enum bound as parameters, not sql.raw
+  // (REV-DB-023 / REV-SEC-105).
   const now = new Date();
   const failedInputData = { prompt: prompt.content };
   const failedInputJson = JSON.stringify(failedInputData);
-  // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
-  const escapedFailedJson = failedInputJson.replace(/'/g, "''");
   const errorMsg = promptError instanceof Error ? promptError.message : String(promptError);
-  // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
   await executeQuery(
     (db) => db.execute(sql`
       INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at)
-      VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedFailedJson}'::jsonb`)}, '', ${sql.raw("'failed'::execution_status")}, ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
+      VALUES (${context.executionId}, ${prompt.id}, ${failedInputJson}::jsonb, '', ${'failed'}::execution_status, ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
     `),
     'saveFailedPromptResult'
   );

@@ -36,6 +36,11 @@ yarn-error.log*
 .env*
 !.env.example
 
+# OpenWiki local config/secrets (canonical location is ~/.openwiki/.env; this
+# guards against an accidental in-repo .openwiki/ holding a provider API key).
+# The generated openwiki/ wiki tree itself IS committed and is not ignored.
+.openwiki/
+
 # vercel
 .vercel
 

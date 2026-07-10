@@ -23,6 +23,9 @@
  * Phase 1 hard gates: Send mail, delete operations, and modification of
  * user-created content are blocked at the skill layer regardless of scope —
  * the model cannot bypass these by phrasing the gws command differently.
+ * Additionally, file creation (Drive/Docs/Sheets/Slides) is blocked on the
+ * USER slot: files created there are owned by the user's account
+ * (impersonation). Create with --scope agent and share explicitly.
  *
  * Flow:
  *   1. Phase 1 gate check on --command (forbidden ops → exit 13)
@@ -60,6 +63,8 @@ const {
   execGws,
   enforcePhase1Gates,
   injectMarkers,
+  resolvePayloadFiles,
+  extractJsonArg,
 } = require('./common');
 
 async function main() {
@@ -86,11 +91,23 @@ async function main() {
   const ownerEmail = args.user;
   let command = args.command;
 
+  // 0. Payload files (#1138 follow-up) — `--json-file` / `--body-file`
+  // deliver arbitrary text (quotes, apostrophes, newlines) that cannot ride
+  // inside the --command string (splitCommand has no escape syntax). The
+  // gates and marker injection below run against `syntheticCommand`, which
+  // has the REAL file content inlined, so neither protection is blinded by
+  // the indirection; execution uses the placeholder form + payload map so
+  // tokenization never touches the content.
+  const resolvedPayloads = resolvePayloadFiles(command);
+  let guardedCommand = resolvedPayloads
+    ? resolvedPayloads.syntheticCommand
+    : command;
+
   // 1. Phase 1 hard gates — refused at the skill layer regardless of scope
   // or how the model phrases the request. The scope+ownerEmail context lets
   // the gate apply a narrow exception for share-to-caller handoffs (the
   // agent shares files it owns back to the conversation owner, read-only).
-  const gateCheck = enforcePhase1Gates(command, { scope, ownerEmail });
+  const gateCheck = enforcePhase1Gates(guardedCommand, { scope, ownerEmail });
   if (!gateCheck.allowed) {
     emit({
       status: 'phase1-forbidden',
@@ -104,8 +121,22 @@ async function main() {
   }
 
   // 2. Marker injection — calendar/drafts/tasks/drive get auto-markers so
-  // every artifact the agent touches is auditable as agent-touched.
-  command = injectMarkers(command);
+  // every artifact the agent touches is auditable as agent-touched. Runs on
+  // the synthetic (payload-inlined) form so file-based JSON payloads get
+  // markers too; the mutated JSON is pulled back into the payload map below.
+  guardedCommand = injectMarkers(guardedCommand);
+  if (resolvedPayloads) {
+    const jsonPlaceholder = '@@PSD_PAYLOAD_JSON@@';
+    if (resolvedPayloads.payloads[jsonPlaceholder]) {
+      const mutatedJson = extractJsonArg(guardedCommand);
+      if (mutatedJson) {
+        resolvedPayloads.payloads[jsonPlaceholder] = mutatedJson;
+      }
+    }
+    command = resolvedPayloads.execCommand;
+  } else {
+    command = guardedCommand;
+  }
 
   // 3. Per-user refresh-token record for the requested slot
   const tokenRecord = await getUserWorkspaceToken(ownerEmail, scope);
@@ -180,8 +211,13 @@ async function main() {
     fail('Token refresh returned no access_token');
   }
 
-  // Exec gws with the (possibly marker-injected) command
-  const code = execGws(command, access.access_token);
+  // Exec gws with the (possibly marker-injected) command. Payload-file
+  // contents are substituted as single argv tokens after tokenization.
+  const code = execGws(
+    command,
+    access.access_token,
+    resolvedPayloads ? resolvedPayloads.payloads : undefined
+  );
   process.exit(code);
 }
 

@@ -17,6 +17,7 @@ error bodies.
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -610,6 +611,121 @@ def repair_tool_call_ids(payload: dict) -> int:
 # but lines of that size make CLI consumption painful — so we cap at 80KB per
 # log event and, when the body exceeds, we emit it across multiple chunks
 # that can be reassembled offline.
+# Verbose request-body / per-message logging is a debugging aid only and is
+# DISABLED by default. Enabling it dumps raw request bodies and message content
+# (which includes tool-result content — e.g. credential values returned by the
+# psd-credentials skill, and student PII) to CloudWatch, so it must never be on
+# in a normal prod deployment. Set MANTLE_PROXY_LOG_BODIES=1 in the task
+# definition only for a bounded debugging window. (REV-INFRA-001)
+LOG_BODIES = os.environ.get("MANTLE_PROXY_LOG_BODIES", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+# Even when body logging is enabled, content of these message roles is never
+# emitted — tool results carry secrets/PII; system prompts are not useful signal.
+_REDACTED_ROLES = {"tool", "system"}
+
+
+def _redact_messages_for_log(parsed):
+    """Return a shallow-redacted copy of a parsed chat body safe(r) for logging.
+    Covers both message shapes this proxy sees: OpenAI-style role="tool"/"system"
+    messages (whole `content` replaced with a length placeholder) and Anthropic
+    Messages API `tool_result` content blocks embedded in a user/assistant
+    message's `content` list (only that block's payload is redacted — sibling
+    `tool_use`/`text` blocks stay visible for debugging). Used only when
+    LOG_BODIES is explicitly enabled."""
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("messages"), list):
+        return None
+    redacted = dict(parsed)
+    out_msgs = []
+    for m in parsed["messages"]:
+        if not isinstance(m, dict):
+            out_msgs.append(m)
+            continue
+        content = m.get("content")
+        if m.get("role") in _REDACTED_ROLES:
+            clen = len(content) if isinstance(content, str) else None
+            rm = dict(m)
+            rm["content"] = f"<redacted {m.get('role')} content, len={clen}>"
+            out_msgs.append(rm)
+        elif isinstance(content, list):
+            rm = dict(m)
+            new_blocks = []
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    nb = dict(b)
+                    payload = nb.get("content")
+                    n = len(json.dumps(payload, ensure_ascii=False)) if payload is not None else 0
+                    nb["content"] = f"[tool_result content redacted — {n} chars]"
+                    new_blocks.append(nb)
+                else:
+                    new_blocks.append(b)
+            rm["content"] = new_blocks
+            out_msgs.append(rm)
+        else:
+            out_msgs.append(m)
+    redacted["messages"] = out_msgs
+    return redacted
+
+
+def _log_request_body(req_id, req_body, parsed):
+    """Verbose per-request body/message logging — a debugging aid gated OFF by
+    default (REV-INFRA-001). Emits nothing unless MANTLE_PROXY_LOG_BODIES is set.
+    When enabled, tool/system message content is redacted so credential values /
+    student PII never reach CloudWatch."""
+    if not (req_body and LOG_BODIES):
+        return
+
+    # Prefer a redacted, re-serialized copy of the parsed body so the raw dump
+    # does not contain tool-result content. If the body isn't parseable we
+    # cannot redact per-role content, so we log only its size.
+    redacted = _redact_messages_for_log(parsed)
+    body_str = json.dumps(redacted, ensure_ascii=False) if redacted is not None else None
+    if body_str is None:
+        log.info(j("req_body_unparseable", req_id=req_id, total_len=len(req_body)))
+    else:
+        total_len = len(body_str)
+        # Log the body as numbered chunks; reassemble offline as concat part 0..N-1.
+        capped = body_str[:MAX_REQ_LOG]
+        n_parts = (len(capped) + MAX_REQ_CHUNK_LOG - 1) // MAX_REQ_CHUNK_LOG or 1
+        for i in range(n_parts):
+            start = i * MAX_REQ_CHUNK_LOG
+            log.info(j("req_body_part", req_id=req_id, part=i, n_parts=n_parts,
+                       total_len=total_len,
+                       body=capped[start:start + MAX_REQ_CHUNK_LOG]))
+        if total_len > MAX_REQ_LOG:
+            log.warning(j("req_body_truncated", req_id=req_id,
+                          total_len=total_len, logged=MAX_REQ_LOG))
+
+    # Emit each message individually for role/content/tool_call shape. `raw`
+    # comes from the redacted messages (see _redact_messages_for_log above) so
+    # neither whole tool/system content nor embedded tool_result blocks reach
+    # this log line; content_type/content_len are computed from the original
+    # message since shape/length metadata is not sensitive.
+    if isinstance(parsed, dict) and isinstance(parsed.get("messages"), list):
+        log_msgs = (redacted or {}).get("messages") if isinstance(redacted, dict) else None
+        if not isinstance(log_msgs, list) or len(log_msgs) != len(parsed["messages"]):
+            log_msgs = parsed["messages"]
+        for idx, msg in enumerate(parsed["messages"]):
+            # A malformed/untrusted body can put a non-dict entry in `messages`;
+            # this is a debugging aid, not request validation, so log what we
+            # can rather than raising AttributeError out of a logging helper
+            # (copilot-pull-request-reviewer review).
+            if not isinstance(msg, dict):
+                log.info(j("req_message", req_id=req_id, idx=idx, role=None,
+                           has_tool_calls=False, content_type=type(msg).__name__,
+                           content_len=None, raw=json.dumps(msg, ensure_ascii=False)[:8000]))
+                continue
+            role = msg.get("role")
+            raw = json.dumps(log_msgs[idx], ensure_ascii=False)[:8000]
+            log.info(j("req_message", req_id=req_id, idx=idx, role=role,
+                       has_tool_calls=bool(msg.get("tool_calls")),
+                       content_type=("string" if isinstance(msg.get("content"), str)
+                                     else type(msg.get("content")).__name__),
+                       content_len=(len(msg["content"]) if isinstance(msg.get("content"), str)
+                                     else None),
+                       raw=raw))
+
+
 MAX_REQ_LOG = 80000
 # Max bytes per individual log record (keeps each CloudWatch line small enough
 # for interactive grep but still fits the proxy's biggest realistic request).
@@ -852,87 +968,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         log.info(j("req", req_id=req_id, method=request.method, path=f"/{path}",
                    body_size=len(req_body) if req_body else 0))
 
-    if req_body:
-        # Redact tool_result CONTENT from the LOGGED body only — the forwarded
-        # wire body (req_body) is untouched. Sensitive tool output (Plaud
-        # transcripts, fetched records) must never land in CloudWatch; tool_use
-        # (the call + args) stays visible for debugging. Best-effort: any shape
-        # surprise falls back to the raw body.
-        def _redact_tool_results(p):
-            if not isinstance(p, dict) or not isinstance(p.get("messages"), list):
-                return None
-            red = dict(p)
-            new_msgs = []
-            for m in p["messages"]:
-                if isinstance(m, dict) and isinstance(m.get("content"), list):
-                    nm = dict(m)
-                    nc = []
-                    for b in m["content"]:
-                        if isinstance(b, dict) and b.get("type") == "tool_result":
-                            nb = dict(b)
-                            payload = nb.get("content")
-                            n = len(json.dumps(payload, ensure_ascii=False)) if payload is not None else 0
-                            nb["content"] = f"[tool_result content redacted — {n} chars]"
-                            nc.append(nb)
-                        else:
-                            nc.append(b)
-                    nm["content"] = nc
-                    new_msgs.append(nm)
-                else:
-                    new_msgs.append(m)
-            red["messages"] = new_msgs
-            return red
-
-        try:
-            _redacted = _redact_tool_results(parsed)
-        except Exception:
-            _redacted = None
-        body_str = (
-            json.dumps(_redacted, ensure_ascii=False)
-            if _redacted is not None
-            else req_body.decode(errors="replace")
-        )
-        total_len = len(body_str)
-        # Log the body as a sequence of numbered chunks. The offline
-        # reassembly rule is: concat `part 0..N-1` where N == n_parts.
-        # This preserves the full body up to MAX_REQ_LOG without blowing
-        # past the per-CloudWatch-event size ceiling.
-        capped = body_str[:MAX_REQ_LOG]
-        n_parts = (len(capped) + MAX_REQ_CHUNK_LOG - 1) // MAX_REQ_CHUNK_LOG or 1
-        for i in range(n_parts):
-            start = i * MAX_REQ_CHUNK_LOG
-            log.info(j("req_body_part",
-                       req_id=req_id,
-                       part=i,
-                       n_parts=n_parts,
-                       total_len=total_len,
-                       body=capped[start:start + MAX_REQ_CHUNK_LOG]))
-        if total_len > MAX_REQ_LOG:
-            log.warning(j("req_body_truncated",
-                          req_id=req_id,
-                          total_len=total_len,
-                          logged=MAX_REQ_LOG))
-
-        # Parallel path: emit each message individually so we can reason
-        # about role/content/tool_call structure without reassembling.
-        if isinstance(parsed, dict) and isinstance(parsed.get("messages"), list):
-            # Use the tool_result-redacted messages (see _redacted above) so the
-            # per-message log never carries raw tool output either.
-            _log_msgs = (_redacted or parsed).get("messages", [])
-            for idx, msg in enumerate(_log_msgs):
-                # Shrink any single message to 8KB. We want shape visibility,
-                # not the full tool output blob.
-                m_json = json.dumps(msg, ensure_ascii=False)
-                log.info(j("req_message",
-                           req_id=req_id,
-                           idx=idx,
-                           role=msg.get("role"),
-                           has_tool_calls=bool(msg.get("tool_calls")),
-                           content_type=("string" if isinstance(msg.get("content"), str)
-                                         else type(msg.get("content")).__name__),
-                           content_len=(len(msg["content"]) if isinstance(msg.get("content"), str)
-                                         else None),
-                           raw=m_json[:8000]))
+    _log_request_body(req_id, req_body, parsed)
 
     # Forward — preserve auth + content-type, drop hop-by-hop headers
     fwd_headers = {}

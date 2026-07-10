@@ -3,6 +3,7 @@ import { POST } from '@/app/api/documents/query/route';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getDocumentsByConversationId, getDocumentChunksByDocumentId } from '@/lib/db/queries/documents';
+import { getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 
 // Mock dependencies
 jest.mock('@/lib/auth/server-session', () => ({
@@ -10,6 +11,7 @@ jest.mock('@/lib/auth/server-session', () => ({
 }));
 jest.mock('@/actions/db/get-current-user-action');
 jest.mock('@/lib/db/queries/documents');
+jest.mock('@/lib/db/drizzle/nexus-conversations');
 jest.mock('@/lib/logger', () => ({
   __esModule: true,
   default: {
@@ -39,6 +41,13 @@ const TEST_CONVERSATION_ID = '550e8400-e29b-41d4-a716-446655440000';
 describe('POST /api/documents/query', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // REV-SEC-121 added a conversation-ownership check ahead of the document
+    // lookup; default it to "found" so existing suites exercise the same
+    // paths they did before that check was added.
+    (getConversationById as jest.Mock).mockResolvedValue({
+      id: TEST_CONVERSATION_ID,
+      userId: 1
+    } as any);
   });
 
   describe('Authentication and Authorization', () => {
@@ -350,7 +359,9 @@ describe('POST /api/documents/query', () => {
       const response = await POST(request);
       expect(response.status).toBe(500);
       const data = await response.json();
-      expect(data.error).toBe('Database connection failed');
+      // REV-COR-208: route returns a fixed generic message instead of the raw
+      // exception detail; the real error is logged server-side, not echoed.
+      expect(data.error).toBe('Failed to query documents');
     });
 
     it('should handle invalid JSON gracefully', async () => {

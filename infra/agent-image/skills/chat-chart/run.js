@@ -125,29 +125,46 @@ function chooseEngine(args, dataText) {
   if (!ALLOWED_ENGINES.has(requested)) {
     fail(`--engine must be one of ${[...ALLOWED_ENGINES].join(', ')}`);
   }
-  if (requested !== 'auto') return { engine: requested, reason: 'explicit' };
-  // Local engine is currently disabled in this build (matplotlib + the
-  // chat-chart npm install were removed because they tripped AgentCore's
-  // overlay snapshotter — see 2026-05-18 incident). Route auto to
-  // QuickChart regardless of sensitivity. When local is reinstated, restore
-  // the prior logic: route to `local` if --sensitive set OR if data trips
-  // detectPII(), else QuickChart.
+  // `local` never leaves the district, so an explicit request bypasses the
+  // sensitivity gate below outright — it's also currently unreachable since
+  // the local engine is disabled in this build (see comment below).
+  if (requested === 'local') return { engine: 'local', reason: 'explicit' };
+  // Local (on-host, matplotlib) engine is currently disabled in this build
+  // (matplotlib + the chat-chart npm install were removed because they tripped
+  // AgentCore's overlay snapshotter — see 2026-05-18 incident). QuickChart is
+  // therefore the only reachable engine, and it transmits the chart data
+  // (including the user's values) to the third-party quickchart.io. So both
+  // `auto` and explicit `--engine quickchart` FAIL CLOSED here: refuse to
+  // render anything flagged --sensitive or matching a PII pattern rather than
+  // silently leaking it off-district (REV-INFRA-002). An explicit
+  // `--engine quickchart` must not be usable to route around this check —
+  // `local` isn't reachable anyway, so there's no legitimate reason to prefer
+  // quickchart over auto for sensitive data. Genuinely public data still
+  // renders via QuickChart either way. When the local engine is reinstated,
+  // restore the prior routing: route to `local` if --sensitive set OR if data
+  // trips detectPII(), else QuickChart.
   if (args['--sensitive']) {
     return {
-      engine: 'quickchart',
-      reason: '--sensitive set — but local engine is disabled in this build, ' +
-              'falling back to QuickChart. Avoid charting PII until local is restored.',
+      engine: 'refuse',
+      reason: '--sensitive is set and the local on-host engine is disabled in ' +
+              'this build, so the only available engine (QuickChart) would ' +
+              'transmit the data to third-party quickchart.io. Refusing to ' +
+              'render sensitive data off-district — restore the local engine ' +
+              'to chart sensitive data.',
     };
   }
   const hit = detectPII(dataText);
   if (hit) {
     return {
-      engine: 'quickchart',
-      reason: `data matched ${hit} pattern — but local engine is disabled in this build, ` +
-              'falling back to QuickChart. Caller should reconsider whether to chart at all.',
+      engine: 'refuse',
+      reason: `data matched the ${hit} pattern and the local on-host engine is ` +
+              'disabled in this build, so the only available engine (QuickChart) ' +
+              'would transmit it to third-party quickchart.io. Refusing to render ' +
+              'likely-PII off-district — pass verified-public data or restore the ' +
+              'local engine.',
     };
   }
-  return { engine: 'quickchart', reason: 'auto: data looks public' };
+  return { engine: 'quickchart', reason: requested === 'quickchart' ? 'explicit' : 'auto: data looks public' };
 }
 
 /**
@@ -324,6 +341,11 @@ async function main() {
   }
 
   const { engine, reason } = chooseEngine(args, dataJson);
+  if (engine === 'refuse') {
+    // Fail closed: never fall through to QuickChart for sensitive/PII data
+    // (REV-INFRA-002). Non-zero exit so the agent sees the chart was not made.
+    fail(reason, 3);
+  }
   process.stderr.write(`chat-chart: engine=${engine} (${reason})\n`);
 
   const config = buildChartJsConfig(type, data, args['--title']);
@@ -342,7 +364,13 @@ async function main() {
   process.stdout.write(emitEnvelope(imageUrl, args['--title'], args['--text-fallback'], type));
 }
 
-main().catch(err => {
-  process.stderr.write(`chat-chart: unexpected error: ${err && err.message ? err.message : err}\n`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch(err => {
+    process.stderr.write(`chat-chart: unexpected error: ${err && err.message ? err.message : err}\n`);
+    process.exit(1);
+  });
+}
+
+// Exported for unit tests (run.test.js). Requiring this module does not run
+// main() thanks to the require.main guard above.
+module.exports = { chooseEngine, detectPII, buildChartJsConfig, renderQuickChart };

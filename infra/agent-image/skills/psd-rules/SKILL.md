@@ -136,6 +136,7 @@ The `psd-workspace` skill enforces these at the code layer; know them so you don
 - **No modifying user-created content.** Read, summarize, comment, or draft alongside — never edit a doc/event/task the user owns.
 - **No external sharing.** Drive permission changes are blocked; don't share outside `psd401.net`.
 - **Always create-not-modify.** New drafts, events, tasks, files; the marker convention makes agent-created artifacts discoverable.
+- **Create Drive files/Docs/Sheets/Slides ONLY with `--scope agent`, then share explicitly.** Creating them with `--scope user` makes the USER the owner — impersonation — and is hard-blocked (exit 13, no exception, no phrasing gets around it).
 
 **Why:** Phase 1 is a trust-building period — the user must see what the agent does, intervene if wrong, and never wake up to a deleted message or a sent-without-review email.
 
@@ -243,8 +244,15 @@ The reply can be one character. It cannot be zero.
 - `gh repo delete`, `gh repo edit`, `gh repo archive`
 - `gh release delete`, `git tag -d ... && git push --delete`
 - Branch deletion on `main`, `dev`, or any protected branch
-- Editing branch protection via `gh api ... /branches/*/protection`
-- Raw-API merges (`gh api ... /pulls/<N>/merge`)
+- Editing branch protection rules via `gh api ... /branches/*/protection`
+- Raw-API merges (`gh api ... /pulls/<N>/merge`) — including via a full
+  `https://api.github.com/...` URL, and regardless of `-X` method casing
+- Raw-API repo edits (`gh api -X PATCH|PUT /repos/{owner}/{repo}`)
+- GraphQL mutations (`gh api graphql ... mutation ...`, e.g. `mergePullRequest`,
+  `deleteRef`) — the wrapper blocks any GraphQL call whose body contains a mutation
+- Creating `gh` aliases (`gh alias set`/`gh alias import`) — aliases expand
+  inside `gh` and would bypass the blocklist, so they are refused and any
+  existing aliases are stripped from the config on every run
 
 **Closing issues IS allowed.** Issues are reversible; merges are not.
 
@@ -259,15 +267,39 @@ The reply can be one character. It cannot be zero.
 
 ---
 
-## Rule 14 — `tool_search_code` runs in a locked sandbox
+## Rule 14 — Call tools directly; batch multi-item work in ONE call
 
-Finding a tool runs a short JS body in an isolated subprocess that exposes **only** `console.log/warn/error` and `openclaw.tools.search`, `openclaw.tools.describe`, `openclaw.tools.call`. There is **no** `require`, `setTimeout`, `fetch`, `fs`, or network — using them throws `not defined` and wastes a full model round-trip.
+Your tools are exposed natively with schemas — call them directly. There is no `tool_search_code` sandbox, no `openclaw.tools.search/describe/call` API; do not write JavaScript to reach a tool.
 
-- **Search takes a plain string**, never an object: ✅ `openclaw.tools.search("create a calendar event")` ❌ `openclaw.tools.search({query: "..."})`.
-- Pattern: `const hits = await openclaw.tools.search("…"); if (!hits.length) return "No tools found"; const t = await openclaw.tools.describe(hits[0].id); return await openclaw.tools.call(t.id, {…});`
-- Do not import modules or use timers. Keep the body to search → describe → call.
+**Batch multi-item operations in ONE tool call.** Every model round-trip costs seconds of serving latency. N similar operations — sharing a doc with N people, N permission grants, N lookups — run as ONE `exec` call whose command loops, never N separate calls:
 
-**Why:** malformed search bodies (object query, `require`, `setTimeout`) error and retry, and every retry re-reads the entire context — a top token-waste source (observed 2026-07-02).
+```bash
+for EMAIL in whiteb@psd401.net herberr@psd401.net pratzm@psd401.net; do
+  for DOC in <id1> <id2>; do
+    node /opt/psd-skills/psd-workspace/run.js --user <caller> --scope agent \
+      --command "drive permissions create --json '{\"fileId\":\"$DOC\",\"type\":\"user\",\"role\":\"writer\",\"emailAddress\":\"$EMAIL\"}'"
+  done
+done
+```
+
+Multi-line payloads still go through `--json-file`/`--body-file`/`--text-file` (write the file first in the same exec).
+
+**Why:** observed 2026-07-08 (#1138): granting 2 docs × 4 people as separate calls burned 35 model round-trips ≈ 22 minutes on a 30-second task and ended in a timeout crash. Batched, it is 2–3 round-trips.
+
+---
+
+## Rule 15 — No background promises; subagents must finish INSIDE your turn
+
+**Never tell the user you will "work in the background," "report back," or "send it when it's done" and then end your turn.** You cannot start a turn on your own — once your turn ends, you are frozen until the user messages again, so every such promise is broken by construction.
+
+**Subagents are allowed — under a hard contract: HOLD YOUR TURN.**
+
+- Spawn subagents freely for parallel or isolated work (fan-out research, per-item processing).
+- **Never end your turn while any subagent is still running.** Wait with `sessions_yield` (the supported mechanism — never busy-poll sessions_list/history or shell sleeps), collect every child's report, and deliver the results in THIS turn's reply. A subagent that finishes after your turn ends is invisible — its announcement lands in the session where no one is listening (observed 2026-07-07: a completed audit never reached the user).
+- Waiting past the platform's turn limit is fine: the platform moves the turn to a background job ("⏳ moved to a background job…") and the job keeps waiting for your children and posts the result. That path can deliver later; a bare promise cannot.
+- Never end a turn whose last sentence is a promise of future work (also Rule 4).
+
+**Why:** the model saying "I'll notify you when it's done" is misleading unless the platform's own promotion path is the thing doing the notifying. Spawn-and-exit breaks delivery; spawn-and-wait composes with it.
 
 ---
 

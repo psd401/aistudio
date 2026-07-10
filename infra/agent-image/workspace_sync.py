@@ -183,6 +183,10 @@ def pull_workspace(prefix: str) -> int:
     to_download: list[tuple[str, Path]] = []
     skipped = 0
     s3_prefix = f"{prefix.rstrip('/')}/"
+    # Resolve the workspace root once so every destination can be checked for
+    # containment against it (REV-COR-358 / Zip-Slip). WORKSPACE_DIR was just
+    # mkdir'd above, so .resolve() yields its real absolute path.
+    workspace_root = WORKSPACE_DIR.resolve()
     for page in paginator.paginate(Bucket=bucket, Prefix=s3_prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
@@ -194,7 +198,25 @@ def pull_workspace(prefix: str) -> int:
                 # override the image-provided version.
                 skipped += 1
                 continue
-            dest = WORKSPACE_DIR / relative
+            # Path-traversal guard (REV-COR-358): S3 keys are attacker-
+            # influencable — each user's prefix round-trips through
+            # agent-writable state — so a key with ".." segments could
+            # otherwise resolve outside WORKSPACE_DIR and let a restore write
+            # arbitrary files. Reject ".." segments outright, then verify the
+            # resolved destination stays inside the workspace root. Skip-and-
+            # warn (do not abort the whole pull), matching per-file failure
+            # handling.
+            if ".." in Path(relative).parts:
+                logger.warning("workspace pull skip (path escape) %s", key)
+                skipped += 1
+                continue
+            dest = (WORKSPACE_DIR / relative).resolve()
+            try:
+                dest.relative_to(workspace_root)
+            except ValueError:
+                logger.warning("workspace pull skip (path escape) %s", key)
+                skipped += 1
+                continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             to_download.append((key, dest))
 
@@ -226,6 +248,52 @@ def pull_workspace(prefix: str) -> int:
         prefix, count, skipped, elapsed,
     )
     return count
+
+
+def pull_files(prefix: str, relative_paths: list) -> int:
+    """Download specific workspace-relative files from s3://bucket/prefix/.
+
+    Per-turn attachment delivery (issue #1138 F1): the router uploads Chat
+    attachment bytes to s3://bucket/<prefix>/attachments/... at message time,
+    which is AFTER this microVM's one-time pull_workspace() ran — a warm
+    microVM would never see them. This fetches just the named keys so the
+    files exist at /home/node/.openclaw/<relative_path> before the turn.
+
+    Refuses paths that escape the workspace dir (traversal) or that map to
+    gateway-owned config (_should_skip_relative) — the relative paths arrive
+    from the router payload, so treat them as untrusted input. Failures on
+    individual files are logged and skipped; returns the count downloaded.
+    """
+    bucket = _bucket()
+    if not bucket or not prefix or not relative_paths:
+        return 0
+
+    s3 = _s3()
+    workspace_root = WORKSPACE_DIR.resolve()
+    pulled = 0
+    for rel in relative_paths:
+        if not isinstance(rel, str) or not rel:
+            continue
+        rel = rel.lstrip("/")
+        dest = (WORKSPACE_DIR / rel).resolve()
+        if not dest.is_relative_to(workspace_root):
+            logger.warning("pull_files: refusing path outside workspace: %s", rel)
+            continue
+        if _should_skip_relative(rel):
+            logger.warning("pull_files: refusing gateway-owned path: %s", rel)
+            continue
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket, f"{prefix.rstrip('/')}/{rel}", str(dest))
+            pulled += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pull_files: failed %s: %s", rel, str(exc)[:200])
+
+    logger.info(
+        "pull_files: prefix=%s requested=%d pulled=%d",
+        prefix, len(relative_paths), pulled,
+    )
+    return pulled
 
 
 def push_workspace(prefix: str) -> int:
@@ -278,17 +346,31 @@ def push_workspace(prefix: str) -> int:
 
 
 _periodic_thread: Optional[threading.Thread] = None
-_periodic_stop = threading.Event()
+# Stop signal for the current periodic-push thread. A fresh Event is created per
+# start_periodic_push() and captured in that thread's closure, so stopping and
+# restarting the pusher never reuses an already-set Event — which previously left
+# a restarted pusher permanently short-circuited (its wait() returned True on the
+# first tick, so it exited without ever pushing). See REV-COR-358.
+_periodic_stop: Optional[threading.Event] = None
 
 
 def start_periodic_push(prefix: str, interval_s: int = 120) -> None:
-    """Background thread that pushes the workspace every interval_s seconds."""
-    global _periodic_thread
-    if _periodic_thread is not None:
+    """Background thread that pushes the workspace every interval_s seconds.
+
+    Restart-safe: each call owns a fresh stop Event captured in its worker
+    closure, so a stopped-then-started pusher is always a live thread rather
+    than a silently-dead one. This is a no-op only while a pusher is already
+    alive.
+    """
+    global _periodic_thread, _periodic_stop
+    if _periodic_thread is not None and _periodic_thread.is_alive():
         return  # already running
 
+    stop = threading.Event()
+    _periodic_stop = stop
+
     def _run():
-        while not _periodic_stop.wait(interval_s):
+        while not stop.wait(interval_s):
             try:
                 push_workspace(prefix)
             except Exception as exc:  # noqa: BLE001
@@ -302,4 +384,15 @@ def start_periodic_push(prefix: str, interval_s: int = 120) -> None:
 
 
 def stop_periodic_push() -> None:
-    _periodic_stop.set()
+    """Signal the periodic push thread to stop, join it, and reset state so a
+    later start_periodic_push() can cleanly restart it. Joining (bounded by a
+    timeout so shutdown can't hang forever) avoids a window where the old
+    thread is still mid-push_workspace() concurrently with a freshly started
+    replacement thread (gemini-code-assist review)."""
+    global _periodic_thread
+    stop = _periodic_stop
+    if stop is not None:
+        stop.set()
+    if _periodic_thread is not None and _periodic_thread.is_alive():
+        _periodic_thread.join(timeout=15)
+    _periodic_thread = None
