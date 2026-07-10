@@ -98,6 +98,38 @@ class FetchGuardTests(unittest.TestCase):
                      "api.github.com", "news.google.com"):
             self.assertIn(host, last30days.ALLOWED_HOSTS)
 
+    def test_check_url_reused_by_guard(self):
+        # _check_url is the single gate used by both _fetch and the redirect handler.
+        last30days._check_url("https://api.github.com/search/repositories")  # no raise
+        with self.assertRaises(ValueError):
+            last30days._check_url("https://internal.evil/x")
+
+    def test_redirect_off_allowlist_is_refused(self):
+        handler = last30days._GuardedRedirectHandler()
+        with self.assertRaises(ValueError):
+            handler.redirect_request(
+                mock.Mock(), mock.Mock(), 302, "Found", {},
+                "https://169.254.169.254/latest/meta-data/")
+
+    def test_oversized_response_is_rejected(self):
+        big = b"x" * (last30days.MAX_RESPONSE_BYTES + 10)
+
+        class _Resp:
+            def read(self, n=-1):
+                return big[:n] if n and n > 0 else big
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        class _Opener:
+            def open(self, *a, **k):
+                return _Resp()
+
+        with mock.patch.object(last30days.urllib.request, "build_opener", return_value=_Opener()):
+            with self.assertRaises(ValueError):
+                last30days._fetch("https://hn.algolia.com/api/v1/search")
+
 
 _HN_PAYLOAD = json.dumps({
     "hits": [

@@ -77,6 +77,9 @@ MAX_DAYS = 90
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 25
 FETCH_TIMEOUT = 15  # seconds per HTTP request
+# Cap each response body so a hostile/misbehaving endpoint can't exhaust memory.
+# The feeds we fetch are JSON/XML in the tens-to-hundreds of KB; 8 MB is generous.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_TOPIC_CHARS = 300
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -116,20 +119,42 @@ def valid_email(email):
 # HTTP
 # --------------------------------------------------------------------------- #
 
-def _fetch(url, headers=None):
-    """Fetch bytes from an allowlisted https host. Raises ValueError for a
-    disallowed scheme/host, urllib.error.* for transport failures."""
+def _check_url(url):
+    """Enforce https + the exact-host allowlist. Raises ValueError otherwise."""
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https":
         raise ValueError(f"refusing non-https url: {url}")
     if parsed.hostname not in ALLOWED_HOSTS:
         raise ValueError(f"refusing fetch to non-allowlisted host: {parsed.hostname}")
+
+
+class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validate every redirect hop against the https+host allowlist. Without
+    this, urllib follows 3xx by default and a redirect from an allowlisted host
+    to an internal/other host would slip past the one-time check in _fetch —
+    an SSRF escape. None of our source endpoints legitimately redirect, so a
+    redirect off the allowlist is refused outright."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _check_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _fetch(url, headers=None):
+    """Fetch bytes from an allowlisted https host, size-capped. Raises ValueError
+    for a disallowed scheme/host (including on any redirect hop), urllib.error.*
+    for transport failures."""
+    _check_url(url)
     req_headers = {"User-Agent": USER_AGENT}
     if headers:
         req_headers.update(headers)
     req = urllib.request.Request(url, headers=req_headers)
-    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:  # noqa: S310 (https + host allowlisted above)
-        return resp.read()
+    opener = urllib.request.build_opener(_GuardedRedirectHandler)
+    with opener.open(req, timeout=FETCH_TIMEOUT) as resp:  # noqa: S310 (https + host allowlisted; redirects re-checked)
+        body = resp.read(MAX_RESPONSE_BYTES + 1)
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise ValueError(f"response body exceeds {MAX_RESPONSE_BYTES} bytes")
+    return body
 
 
 # --------------------------------------------------------------------------- #
