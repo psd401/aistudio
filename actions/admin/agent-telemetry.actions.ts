@@ -17,6 +17,7 @@ import { sql, desc, count, gte, and, eq } from "drizzle-orm"
 import { agentMessages } from "@/lib/db/schema/tables/agent-messages"
 import { agentSessions } from "@/lib/db/schema/tables/agent-sessions"
 import { agentFeedback } from "@/lib/db/schema/tables/agent-feedback"
+import { agentFailures } from "@/lib/db/schema/tables/agent-failures"
 import { getDateThreshold } from "@/lib/date-utils"
 
 // ============================================
@@ -54,6 +55,16 @@ export interface AgentTelemetryStats {
   messages7d: number
   guardrailFlags: number
   avgLatencyMs: number
+  // Iteration telemetry (issue #1161) — the measurement half of the harness
+  // self-improvement loop. You can't improve instructions you don't measure.
+  /** Mean upstream model round-trips per turn (from agent_messages.model_call_count). */
+  avgModelCallsPerTurn: number
+  /** p95 model round-trips per turn — surfaces the 47-call tail turns hand-found in #1138. */
+  p95ModelCallsPerTurn: number
+  /** Fraction of turns that ended empty (agent_failures severity='empty_response' / turns). */
+  emptyTurnRate: number
+  /** Fraction of turns where the empty-turn nudge fired (agent_messages.nudged / turns). */
+  nudgeFireRate: number
 }
 
 export interface DailyUsagePoint {
@@ -80,6 +91,10 @@ export interface UserUsageItem {
   totalTokens: number
   sessionCount: number
   lastActive: string | null
+  /** Per-user mean model round-trips per turn (iteration telemetry, #1161). */
+  avgModelCallsPerTurn: number
+  /** Per-user nudge-fire rate — fraction of this user's turns that fired the empty-turn nudge. */
+  nudgeFireRate: number
 }
 
 export interface GuardrailEvent {
@@ -138,6 +153,72 @@ function getDailyUsageThreshold(range: TelemetryDateRange): Date | null {
   return getDateRangeThreshold(range)
 }
 
+/**
+ * Iteration-telemetry aggregates (issue #1161) — the measurement half of the
+ * harness self-improvement loop. Extracted from getAgentTelemetryStats so that
+ * action stays within the size/complexity budget. Not a server action: the
+ * only caller already enforced the administrator role.
+ *
+ * model-calls avg/p95 + nudge-fire rate come from agent_messages; empty-turn
+ * rate comes from agent_failures (severity='empty_response'), since a turn the
+ * nudge recovered writes no failure row (nudge-fire counts it, empty-turn does
+ * not). Both queries run in parallel.
+ */
+async function getIterationStats(
+  threshold: Date | null
+): Promise<
+  Pick<
+    AgentTelemetryStats,
+    | "avgModelCallsPerTurn"
+    | "p95ModelCallsPerTurn"
+    | "emptyTurnRate"
+    | "nudgeFireRate"
+  >
+> {
+  const [callStats, emptyTurns] = await Promise.all([
+    executeQuery(
+      (db) =>
+        db
+          .select({
+            totalMessages: count(agentMessages.id),
+            avgModelCalls: sql<number>`COALESCE(AVG(${agentMessages.modelCallCount}), 0)`,
+            p95ModelCalls: sql<number>`COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ${agentMessages.modelCallCount}), 0)`,
+            nudgeCount: sql<number>`COUNT(CASE WHEN ${agentMessages.nudged} THEN 1 END)`,
+          })
+          .from(agentMessages)
+          .where(threshold ? gte(agentMessages.createdAt, threshold) : undefined),
+      "agentTelemetry.iterationCallStats"
+    ),
+    executeQuery(
+      (db) =>
+        db
+          .select({ cnt: count(agentFailures.id) })
+          .from(agentFailures)
+          .where(
+            threshold
+              ? and(
+                  eq(agentFailures.severity, "empty_response"),
+                  gte(agentFailures.occurredAt, threshold)
+                )
+              : eq(agentFailures.severity, "empty_response")
+          ),
+      "agentTelemetry.emptyTurnStats"
+    ),
+  ])
+
+  const row = callStats[0]
+  const totalMessages = Number(row?.totalMessages ?? 0)
+  const nudgeCount = Number(row?.nudgeCount ?? 0)
+  const emptyTurnCount = Number(emptyTurns[0]?.cnt ?? 0)
+
+  return {
+    avgModelCallsPerTurn: Math.round(Number(row?.avgModelCalls ?? 0) * 10) / 10,
+    p95ModelCallsPerTurn: Math.round(Number(row?.p95ModelCalls ?? 0)),
+    emptyTurnRate: totalMessages > 0 ? emptyTurnCount / totalMessages : 0,
+    nudgeFireRate: totalMessages > 0 ? nudgeCount / totalMessages : 0,
+  }
+}
+
 // ============================================
 // Actions
 // ============================================
@@ -169,6 +250,7 @@ export async function getAgentTelemetryStats(
       messages24h,
       messages7d,
       guardrailFlags,
+      iterationStats,
     ] = await Promise.all([
       // Total messages + tokens + avg latency
       executeQuery(
@@ -271,6 +353,10 @@ export async function getAgentTelemetryStats(
             ),
         "agentTelemetry.guardrailFlags"
       ),
+
+      // Iteration telemetry (#1161) — extracted to keep this action within the
+      // complexity/size budget. Own parallel queries; see getIterationStats.
+      getIterationStats(threshold),
     ])
 
     const msgRow = messageStats[0]
@@ -290,6 +376,7 @@ export async function getAgentTelemetryStats(
       messages7d: Number(messages7d[0]?.cnt ?? 0),
       guardrailFlags: Number(guardrailFlags[0]?.cnt ?? 0),
       avgLatencyMs: Math.round(Number(msgRow?.avgLatencyMs ?? 0)),
+      ...iterationStats,
     }
 
     timer({ status: "success" })
@@ -457,6 +544,11 @@ export async function getAgentUserUsage(
             sessionCount:
               sql<number>`COUNT(DISTINCT ${agentMessages.sessionId})`,
             lastActive: pgTimestampAsText(sql`MAX(${agentMessages.createdAt})`),
+            // Per-user iteration telemetry (#1161).
+            avgModelCalls:
+              sql<number>`COALESCE(AVG(${agentMessages.modelCallCount}), 0)`,
+            nudgeCount:
+              sql<number>`COUNT(CASE WHEN ${agentMessages.nudged} THEN 1 END)`,
           })
           .from(agentMessages)
           .where(
@@ -468,13 +560,19 @@ export async function getAgentUserUsage(
       "agentTelemetry.userUsage"
     )
 
-    const data: UserUsageItem[] = rows.map((r) => ({
-      userId: String(r.userId),
-      messageCount: Number(r.messageCount),
-      totalTokens: Number(r.totalTokens),
-      sessionCount: Number(r.sessionCount),
-      lastActive: stripJsonQuotes(r.lastActive),
-    }))
+    const data: UserUsageItem[] = rows.map((r) => {
+      const messageCount = Number(r.messageCount)
+      return {
+        userId: String(r.userId),
+        messageCount,
+        totalTokens: Number(r.totalTokens),
+        sessionCount: Number(r.sessionCount),
+        lastActive: stripJsonQuotes(r.lastActive),
+        avgModelCallsPerTurn: Math.round(Number(r.avgModelCalls) * 10) / 10,
+        nudgeFireRate:
+          messageCount > 0 ? Number(r.nudgeCount) / messageCount : 0,
+      }
+    })
 
     timer({ status: "success" })
     log.info("Agent user usage loaded", { range: safeRange, users: data.length })

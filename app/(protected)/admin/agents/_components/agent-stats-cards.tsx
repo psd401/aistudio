@@ -9,6 +9,10 @@ import {
   IconShield,
   IconThumbUp,
   IconActivity,
+  IconRepeat,
+  IconChartBar,
+  IconAlertTriangle,
+  IconBellRinging,
 } from "@tabler/icons-react"
 import type { AgentTelemetryStats } from "@/actions/admin/agent-telemetry.actions"
 
@@ -102,17 +106,66 @@ export function AgentStatsCards({ stats, loading = false }: AgentStatsCardsProps
     },
   ]
 
+  // Iteration telemetry (issue #1161) — the measurement half of the harness
+  // self-improvement loop. Grouped in its own labeled row so the "how many
+  // iterations does a turn take" view is distinct from raw volume/latency.
+  const pct = (r: number) => `${(r * 100).toFixed(1)}%`
+  const iterationCards = [
+    {
+      label: "Avg Model Calls / Turn",
+      value: stats.avgModelCallsPerTurn.toFixed(1),
+      subValue: "mean upstream round-trips",
+      icon: <IconRepeat className="h-5 w-5 text-blue-600" />,
+    },
+    {
+      label: "p95 Model Calls / Turn",
+      value: stats.p95ModelCallsPerTurn,
+      subValue: "the long-tail turns",
+      icon: <IconChartBar className="h-5 w-5 text-indigo-600" />,
+    },
+    {
+      label: "Empty-Turn Rate",
+      value: pct(stats.emptyTurnRate),
+      subValue: "ended with no reply",
+      icon: <IconAlertTriangle className="h-5 w-5 text-amber-600" />,
+    },
+    {
+      label: "Nudge-Fire Rate",
+      value: pct(stats.nudgeFireRate),
+      subValue: "empty-turn nudge fired",
+      icon: <IconBellRinging className="h-5 w-5 text-rose-600" />,
+    },
+  ]
+
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-      {cards.map((card) => (
-        <StatCard
-          key={card.label}
-          label={card.label}
-          value={card.value}
-          subValue={card.subValue}
-          icon={card.icon}
-        />
-      ))}
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+        {cards.map((card) => (
+          <StatCard
+            key={card.label}
+            label={card.label}
+            value={card.value}
+            subValue={card.subValue}
+            icon={card.icon}
+          />
+        ))}
+      </div>
+      <div>
+        <p className="text-sm font-semibold text-muted-foreground mb-2">
+          Iteration telemetry (per turn)
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {iterationCards.map((card) => (
+            <StatCard
+              key={card.label}
+              label={card.label}
+              value={card.value}
+              subValue={card.subValue}
+              icon={card.icon}
+            />
+          ))}
+        </div>
+      </div>
     </div>
   )
 }
