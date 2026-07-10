@@ -48,6 +48,23 @@ export interface TriageStateSummary {
   labelIdsByKey?: Record<string, string>
   lastHistoryId?: string
   lastPollAt?: string
+  /** Per-user escalation policy (#1172). */
+  escalationMode: string
+  escalationConfidenceThreshold: number
+  /** Initial-inbox-sweep progress (#1172). */
+  sweep?: {
+    status: string
+    processed: number
+    labeled: number
+    cap: number
+    windowDays: number
+    pageToken?: string | null
+    startedAt?: string
+    updatedAt?: string
+    error?: string
+  } | null
+  /** ISO timestamp of the last nightly learning run. */
+  learnedAt?: string
   digest?: {
     enabled: boolean
     time?: string
@@ -62,7 +79,26 @@ export interface TriageStateSummary {
     recentDecisions: number
     recentCorrections: number
     learnedPatterns: number
+    pendingSuggestions: number
   }
+  /** Weighted learned patterns (soft LLM hints), strongest first. */
+  learnedPatterns: Array<{
+    pattern: string
+    weight: number
+    kind?: string
+    count?: number
+    source?: string
+  }>
+  /** Pending, user-approvable rule suggestions. */
+  pendingSuggestions: Array<{
+    id: string
+    kind: string
+    target: string
+    reason: string
+    count: number
+    weight: number
+    createdAt: string
+  }>
   recentDecisions: Array<{
     messageId: string
     label: string
@@ -79,6 +115,78 @@ export interface TriageStateSummary {
     toLabel: string
     ts: string
   }>
+}
+
+/** Raw DynamoDB shape read by getTriageState (subset we surface). */
+type TriageRowItem = {
+  userEmail: string
+  enabled?: boolean
+  enabledAt?: string
+  disabledAt?: string | null
+  labels?: Record<string, string>
+  labelIdsByKey?: Record<string, string>
+  lastHistoryId?: string
+  lastPollAt?: string
+  escalationMode?: string
+  escalationConfidenceThreshold?: number
+  sweep?: TriageStateSummary["sweep"]
+  learnedAt?: string
+  digestEnabled?: boolean
+  digestTime?: string
+  digestTz?: string
+  rules?: { vipSenders?: unknown[]; muteSenders?: unknown[]; keywordRules?: unknown[] }
+  escalation?: { senders?: unknown[]; keywords?: unknown[] }
+  recentDecisions?: TriageStateSummary["recentDecisions"]
+  recentCorrections?: TriageStateSummary["recentCorrections"]
+  learnedPatterns?: TriageStateSummary["learnedPatterns"]
+  pendingSuggestions?: TriageStateSummary["pendingSuggestions"]
+}
+
+/** Length of a possibly-absent array. Keeps the mappers below flat so the
+ * lint `complexity` rule isn't tripped by the many `?.length ?? 0` chains. */
+function count(a?: unknown[]): number {
+  return a?.length ?? 0
+}
+
+/** Map a raw triage row to the admin-page summary. Absent per-user policy
+ * fields fall back to the classifier's defaults ('all' / 0.85). */
+function buildTriageSummary(row: TriageRowItem): TriageStateSummary {
+  const rules = row.rules ?? {}
+  const escalation = row.escalation ?? {}
+  return {
+    userEmail: row.userEmail,
+    enabled: Boolean(row.enabled),
+    enabledAt: row.enabledAt,
+    disabledAt: row.disabledAt ?? null,
+    labels: row.labels,
+    labelIdsByKey: row.labelIdsByKey,
+    lastHistoryId: row.lastHistoryId,
+    lastPollAt: row.lastPollAt,
+    escalationMode: row.escalationMode ?? "all",
+    escalationConfidenceThreshold: row.escalationConfidenceThreshold ?? 0.85,
+    sweep: row.sweep ?? null,
+    learnedAt: row.learnedAt,
+    digest: {
+      enabled: row.digestEnabled !== false,
+      time: row.digestTime,
+      tz: row.digestTz,
+    },
+    counts: {
+      vipSenders: count(rules.vipSenders),
+      muteSenders: count(rules.muteSenders),
+      keywordRules: count(rules.keywordRules),
+      escalationSenders: count(escalation.senders),
+      escalationKeywords: count(escalation.keywords),
+      recentDecisions: count(row.recentDecisions),
+      recentCorrections: count(row.recentCorrections),
+      learnedPatterns: count(row.learnedPatterns),
+      pendingSuggestions: count(row.pendingSuggestions),
+    },
+    learnedPatterns: (row.learnedPatterns ?? []).slice(0, 25),
+    pendingSuggestions: (row.pendingSuggestions ?? []).slice(0, 25),
+    recentDecisions: (row.recentDecisions ?? []).slice(-20).reverse(),
+    recentCorrections: (row.recentCorrections ?? []).slice(-20).reverse(),
+  }
 }
 
 /**
@@ -168,6 +276,8 @@ export async function getTriageSummaryList(): Promise<
       }>) {
         const recent = item.recentDecisions ?? []
         const last = recent.length > 0 ? recent[recent.length - 1] : null
+        const rules = item.rules ?? {}
+        const escalation = item.escalation ?? {}
         rows.push({
           userEmail: item.userEmail,
           enabled: Boolean(item.enabled),
@@ -176,14 +286,12 @@ export async function getTriageSummaryList(): Promise<
           lastPollAt: item.lastPollAt,
           digestEnabled: item.digestEnabled !== false,
           ruleCount:
-            (item.rules?.vipSenders?.length ?? 0) +
-            (item.rules?.muteSenders?.length ?? 0) +
-            (item.rules?.keywordRules?.length ?? 0),
-          escalationCount:
-            (item.escalation?.senders?.length ?? 0) +
-            (item.escalation?.keywords?.length ?? 0),
+            count(rules.vipSenders) +
+            count(rules.muteSenders) +
+            count(rules.keywordRules),
+          escalationCount: count(escalation.senders) + count(escalation.keywords),
           recentDecisionsCount: recent.length,
-          learnedPatternsCount: item.learnedPatterns?.length ?? 0,
+          learnedPatternsCount: count(item.learnedPatterns),
           lastDecision: last
             ? {
                 ts: last.ts,
@@ -236,59 +344,7 @@ export async function getTriageState(
     )) as GetCommandOutput
     if (!resp.Item) return createSuccess(null, "No triage row found")
 
-    const row = resp.Item as {
-      userEmail: string
-      enabled?: boolean
-      enabledAt?: string
-      disabledAt?: string | null
-      labels?: Record<string, string>
-      labelIdsByKey?: Record<string, string>
-      lastHistoryId?: string
-      lastPollAt?: string
-      digestEnabled?: boolean
-      digestTime?: string
-      digestTz?: string
-      rules?: {
-        vipSenders?: unknown[]
-        muteSenders?: unknown[]
-        keywordRules?: unknown[]
-      }
-      escalation?: {
-        senders?: unknown[]
-        keywords?: unknown[]
-      }
-      recentDecisions?: TriageStateSummary["recentDecisions"]
-      recentCorrections?: TriageStateSummary["recentCorrections"]
-      learnedPatterns?: unknown[]
-    }
-
-    const summary: TriageStateSummary = {
-      userEmail: row.userEmail,
-      enabled: Boolean(row.enabled),
-      enabledAt: row.enabledAt,
-      disabledAt: row.disabledAt ?? null,
-      labels: row.labels,
-      labelIdsByKey: row.labelIdsByKey,
-      lastHistoryId: row.lastHistoryId,
-      lastPollAt: row.lastPollAt,
-      digest: {
-        enabled: row.digestEnabled !== false,
-        time: row.digestTime,
-        tz: row.digestTz,
-      },
-      counts: {
-        vipSenders: row.rules?.vipSenders?.length ?? 0,
-        muteSenders: row.rules?.muteSenders?.length ?? 0,
-        keywordRules: row.rules?.keywordRules?.length ?? 0,
-        escalationSenders: row.escalation?.senders?.length ?? 0,
-        escalationKeywords: row.escalation?.keywords?.length ?? 0,
-        recentDecisions: row.recentDecisions?.length ?? 0,
-        recentCorrections: row.recentCorrections?.length ?? 0,
-        learnedPatterns: row.learnedPatterns?.length ?? 0,
-      },
-      recentDecisions: (row.recentDecisions ?? []).slice(-20).reverse(),
-      recentCorrections: (row.recentCorrections ?? []).slice(-20).reverse(),
-    }
+    const summary = buildTriageSummary(resp.Item as TriageRowItem)
 
     timer({ status: "success" })
     return createSuccess(summary, "Triage state retrieved")
