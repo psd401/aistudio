@@ -1,8 +1,9 @@
 /**
- * Email Triage Classifier Lambda
+ * Email Triage — per-user processing library.
  *
- * Triggered every 5 minutes by an EventBridge Rule. For each opted-in
- * user in the triage table:
+ * As of #1172 this file is a LIBRARY, not a Lambda entry point. The 5-minute
+ * poll is fanned out (dispatcher.ts → SQS → worker.ts); the worker imports
+ * `processUser` from here to do the actual per-user work:
  *   1. Mint a fresh Gmail access token (via lib/agent/workspace-token).
  *   2. Pull the user's Gmail history since their last cursor.
  *   3. For each new message: apply rules → maybe LLM → apply label →
@@ -10,12 +11,11 @@
  *   4. For each user-driven label change: record as training signal.
  *   5. Advance cursor.
  *
- * The Lambda processes users in parallel batches of TRIAGE_USER_BATCH so
- * one slow user doesn't block the rest. Per-user errors are logged and
- * skipped — the next 5-minute tick picks up where it left off.
+ * The old in-Lambda serial `TRIAGE_USER_BATCH` loop is gone — one message
+ * per user on a FIFO queue (group = userEmail) gives per-user single-flight
+ * (the cursor-safety invariant the old reservedConcurrency=1 provided) while
+ * running users in parallel.
  */
-
-import type { ScheduledHandler } from "aws-lambda";
 
 import {
   getFreshAccessTokenForUser,
@@ -52,7 +52,6 @@ import {
   releaseTaskGestureClaim,
   getGoogleIdentityForEmail,
   getUserProfile,
-  listEnabledUsers,
   recordPollResult,
   recordTaskCreated,
   resetCursor,
@@ -67,9 +66,12 @@ import type {
 
 const ENV = process.env.ENVIRONMENT ?? "dev";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
-const USER_BATCH = parseInt(process.env.TRIAGE_USER_BATCH ?? "10", 10);
 
-function log(level: "INFO" | "WARN" | "ERROR", evt: string, fields: Record<string, unknown>) {
+export function log(
+  level: "INFO" | "WARN" | "ERROR",
+  evt: string,
+  fields: Record<string, unknown>,
+) {
   // eslint-disable-next-line no-console
   console.log(
     JSON.stringify({
@@ -82,64 +84,55 @@ function log(level: "INFO" | "WARN" | "ERROR", evt: string, fields: Record<strin
   );
 }
 
-export const handler: ScheduledHandler = async () => {
-  const startedAt = Date.now();
-  const users = await listEnabledUsers();
-  log("INFO", "tick_start", { opted_in: users.length });
+/** Shared region constant for the worker/sweep paths. */
+export { ENV as TRIAGE_ENV, REGION as TRIAGE_REGION };
 
-  for (let i = 0; i < users.length; i += USER_BATCH) {
-    const batch = users.slice(i, i + USER_BATCH);
-    await Promise.all(batch.map((row) => processUserSafe(row)));
-  }
-
-  log("INFO", "tick_complete", {
-    opted_in: users.length,
-    elapsed_ms: Date.now() - startedAt,
-  });
-};
-
-async function processUserSafe(row: TriageRow): Promise<void> {
-  try {
-    await processUser(row);
-  } catch (err) {
-    log("ERROR", "user_processing_failed", {
-      user: row.userEmail,
-      err: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
-
-async function processUser(row: TriageRow): Promise<void> {
-  const t0 = Date.now();
-
-  // Acquire access token.
-  let accessToken: string;
+/**
+ * Mint a fresh Gmail access token for a user. Returns null and logs when
+ * the token is missing or the grant was revoked (invalid_grant) — the
+ * caller should skip that user, not crash the whole invocation. Exported
+ * so the sweep path reuses the identical acquisition + skip semantics.
+ */
+export async function acquireUserAccessToken(
+  userEmail: string,
+): Promise<string | null> {
   try {
     const token = await getFreshAccessTokenForUser(
-      row.userEmail,
+      userEmail,
       ENV,
       "user_account",
       REGION,
     );
     if (!token) {
       log("WARN", "no_token", {
-        user: row.userEmail,
-        secretId: workspaceSecretId(row.userEmail, ENV, "user_account"),
+        user: userEmail,
+        secretId: workspaceSecretId(userEmail, ENV, "user_account"),
       });
-      return;
+      return null;
     }
-    accessToken = token.access_token;
+    return token.access_token;
   } catch (err) {
     const errAny = err as Error & { code?: string };
     if (errAny.code === "invalid_grant") {
-      // The user needs to re-consent. Phase 1 doesn't auto-disable —
-      // we just log and skip; the next tick will skip again. The
-      // agent will surface this when the user next interacts.
-      log("WARN", "invalid_grant", { user: row.userEmail });
-      return;
+      // The user needs to re-consent. We just log and skip; the agent
+      // will surface this when the user next interacts.
+      log("WARN", "invalid_grant", { user: userEmail });
+      return null;
     }
     throw err;
   }
+}
+
+/**
+ * Process one enabled user's live-triage tick. Exported for the SQS worker
+ * (worker.ts) which invokes it once per `poll` message.
+ */
+export async function processUser(row: TriageRow): Promise<void> {
+  const t0 = Date.now();
+
+  // Acquire access token.
+  const accessToken = await acquireUserAccessToken(row.userEmail);
+  if (!accessToken) return;
 
   // Anchor cursor — when missing or on first run we capture "now" so we
   // only classify forward.
@@ -361,7 +354,7 @@ function shouldSkipMessage(
   return { skip: false };
 }
 
-async function classifyAndLabel(
+export async function classifyAndLabel(
   row: TriageRow,
   accessToken: string,
   msgRef: { id: string; threadId: string; labelIds?: string[] },
