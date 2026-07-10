@@ -23,11 +23,20 @@
 // Load the AWS SDK from psd-workspace's already-installed copy. Both skills
 // would otherwise install the same `@aws-sdk/client-secrets-manager` tree;
 // importing absolutely keeps the image file-count identical to a no-psd-data
-// build. See Dockerfile for the rationale.
+// build. See Dockerfile for the rationale. Falls back to a bare require so
+// the skill is loadable/testable outside the container (e.g. from the repo
+// tree), matching the pattern in psd-plaud/common.js.
+function requireSecretsManager() {
+  try {
+    return require('/opt/psd-skills/psd-workspace/node_modules/@aws-sdk/client-secrets-manager');
+  } catch {
+    return require('@aws-sdk/client-secrets-manager');
+  }
+}
 const {
   SecretsManagerClient,
   GetSecretValueCommand,
-} = require('/opt/psd-skills/psd-workspace/node_modules/@aws-sdk/client-secrets-manager');
+} = requireSecretsManager();
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
@@ -51,6 +60,158 @@ function fail(message, code = 1) {
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
+}
+
+// psd-data-mcp rejects NUMERIC/DECIMAL casts that don't specify precision
+// (see SKILL.md's "Hard rules"). This is the leading, medium-confidence
+// hypothesis for FS#162394 / issue #1106 (numeric columns disappearing from
+// query results/CSV exports) — the external Lambda's own source couldn't be
+// inspected during triage, so this check guards against the suspected
+// trigger, it does not confirm the server's actual behavior.
+const CAST_OPEN_RE = /\b(?:TRY_)?CAST\s*\(/gi;
+const UNQUALIFIED_CAST_TAIL_RE = /\bAS\s+(NUMERIC|DECIMAL)\s*$/i;
+const UNQUALIFIED_SHORTHAND_RE = /::\s*(NUMERIC|DECIMAL)\b(?!\s*\()/gi;
+
+// Blank out single-quoted string literal contents and SQL comments
+// (preserving length/offsets so match indices still line up with the
+// original string) so neither regex above fires on SQL text that merely
+// *mentions* a cast inside a literal or a comment, e.g.
+// `WHERE note LIKE '%CAST(x AS NUMERIC)%'` or `-- CAST(x AS NUMERIC)`.
+// Handles '' doubled-quote escapes in all string literals, and backslash
+// escapes only inside E'...' literals (matching Postgres's actual
+// standard_conforming_strings=on semantics); does not handle dollar-quoted
+// strings (rare in this context).
+function blankStringLiterals(sql) {
+  let out = '';
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (ch === '-' && next === '-') {
+      out += '  ';
+      i += 2;
+      while (i < sql.length && sql[i] !== '\n') {
+        out += ' ';
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === '/' && next === '*') {
+      // Postgres block comments nest, so track depth rather than stopping
+      // at the first `*/` — otherwise a nested `/* ... */` would end the
+      // blanked region early and expose the remaining "still-outer-comment"
+      // text as live SQL to scan.
+      let depth = 1;
+      out += '  ';
+      i += 2;
+      while (i < sql.length && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') {
+          depth++;
+          out += '  ';
+          i += 2;
+        } else if (sql[i] === '*' && sql[i + 1] === '/') {
+          depth--;
+          out += '  ';
+          i += 2;
+        } else {
+          out += sql[i] === '\n' ? '\n' : ' ';
+          i++;
+        }
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      // Postgres only applies backslash-escaping inside E'...' literals
+      // (standard_conforming_strings = on, the default, makes backslash a
+      // plain character in a bare '...' literal — only '' doubling escapes
+      // a quote). Detect the E prefix so a plain '...' literal containing a
+      // stray backslash-quote sequence terminates where Postgres would
+      // actually terminate it, rather than swallowing the rest of the SQL.
+      const prevChar = sql[i - 1];
+      const prevPrevChar = sql[i - 2];
+      const isEscapeString =
+        prevChar !== undefined &&
+        /[eE]/.test(prevChar) &&
+        (prevPrevChar === undefined || !/[A-Za-z0-9_]/.test(prevPrevChar));
+      out += ' ';
+      i++;
+      while (i < sql.length) {
+        const curr = sql[i];
+        if (isEscapeString && curr === '\\') {
+          out += '  ';
+          i += 2;
+        } else if (curr === "'" && sql[i + 1] === "'") {
+          out += '  ';
+          i += 2;
+        } else if (curr === "'") {
+          out += ' ';
+          i++;
+          break;
+        } else {
+          out += curr === '\n' ? '\n' : ' ';
+          i++;
+        }
+      }
+      continue;
+    }
+
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+// Find the index of the ')' that closes the '(' at openIndex, accounting for
+// nested parens (e.g. `CAST(ROUND(x, 2) AS NUMERIC)`). Returns -1 if
+// unmatched (malformed SQL — the MCP server will reject it on its own).
+function findMatchingClose(sql, openIndex) {
+  let depth = 1;
+  for (let i = openIndex + 1; i < sql.length; i++) {
+    if (sql[i] === '(') depth++;
+    else if (sql[i] === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Scan a SQL string for NUMERIC/DECIMAL casts with no explicit precision.
+ * Only flags actual `CAST(...)`/`TRY_CAST(...)` calls and `::TYPE` shorthand
+ * — not bare `... AS numeric`/`... AS decimal` column aliases (which share
+ * the same `AS <TYPE>)` text but aren't a cast at all) — and ignores
+ * anything inside a string literal or a SQL comment. Returns the matched
+ * fragments (empty if none).
+ */
+function findUnqualifiedNumericCasts(sql) {
+  if (typeof sql !== 'string') return [];
+  const scan = blankStringLiterals(sql);
+  const matches = [];
+
+  CAST_OPEN_RE.lastIndex = 0;
+  let m;
+  while ((m = CAST_OPEN_RE.exec(scan))) {
+    const openParenIndex = m.index + m[0].length - 1;
+    const closeParenIndex = findMatchingClose(scan, openParenIndex);
+    if (closeParenIndex === -1) continue;
+    const inner = scan.slice(openParenIndex + 1, closeParenIndex);
+    if (UNQUALIFIED_CAST_TAIL_RE.test(inner)) {
+      matches.push(
+        sql.slice(m.index, closeParenIndex + 1).replace(/\s+/g, ' ').trim()
+      );
+    }
+  }
+
+  UNQUALIFIED_SHORTHAND_RE.lastIndex = 0;
+  while ((m = UNQUALIFIED_SHORTHAND_RE.exec(scan))) {
+    matches.push(sql.slice(m.index, m.index + m[0].length).trim());
+  }
+
+  return matches;
 }
 
 /**
@@ -366,5 +527,6 @@ module.exports = {
   emitNeedsAuthAndExit,
   callMcp,
   cognitoRefreshSecretId,
+  findUnqualifiedNumericCasts,
   PSD_DATA_MCP_URL,
 };

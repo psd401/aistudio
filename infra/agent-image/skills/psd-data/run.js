@@ -38,6 +38,7 @@ const {
   parseArgs,
   validateUserEmail,
   callMcp,
+  findUnqualifiedNumericCasts,
 } = require('./common');
 
 function usage() {
@@ -90,6 +91,22 @@ function requireArg(args, name) {
   return args[name];
 }
 
+// Shared by both the typed `query` subcommand and the `call` passthrough
+// (when it targets `query_data` directly) so a bare `CAST(x AS NUMERIC)`
+// can't slip through via the passthrough route — see SKILL.md's
+// "Hardcoded subcommands are a convenience, not a fence" note.
+function checkSqlOrFail(sql) {
+  const unqualifiedCasts = findUnqualifiedNumericCasts(sql);
+  if (unqualifiedCasts.length > 0) {
+    fail(
+      `SQL contains unqualified NUMERIC/DECIMAL cast(s): ${unqualifiedCasts.join(', ')}. ` +
+        'The psd-data-mcp server rejects casts without explicit precision, which drops ' +
+        'that column from the result set (and any CSV export). Add precision, e.g. ' +
+        'CAST(col AS NUMERIC(10,2)) or col::NUMERIC(10,2), then retry.'
+    );
+  }
+}
+
 async function main() {
   const subcommand = process.argv[2];
   if (!subcommand || subcommand === '--help' || subcommand === '-h') {
@@ -123,6 +140,9 @@ async function main() {
       const toolName = requireArg(args, 'tool');
       const argsRaw = args.args === undefined || args.args === true ? '{}' : args.args;
       const toolArgs = parseJsonArg('args', argsRaw);
+      if (toolName === 'query_data' && toolArgs && typeof toolArgs.sql_query === 'string') {
+        checkSqlOrFail(toolArgs.sql_query);
+      }
       const params = { name: toolName, arguments: toolArgs };
       await callMcp('tools/call', params, ownerEmail);
       return;
@@ -169,6 +189,7 @@ async function main() {
     case 'query': {
       const reason = requireArg(args, 'reason');
       const sql = requireArg(args, 'sql');
+      checkSqlOrFail(sql);
       const toolArgs = { reason, sql_query: sql };
       // parseArgs returns the string "false" for `--flag false`, which is
       // truthy. Explicitly convert to boolean so --export false / --view-results false work.
@@ -248,6 +269,10 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  fail(err instanceof Error ? err.message : String(err), 2);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    fail(err instanceof Error ? err.message : String(err), 2);
+  });
+}
+
+module.exports = { main };
