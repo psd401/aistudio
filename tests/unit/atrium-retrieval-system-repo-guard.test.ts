@@ -24,6 +24,13 @@ jest.mock("@/lib/auth/server-session", () => ({
   getServerSession: jest.fn(async () => ({ sub: "user-123" })),
 }));
 
+// searchRepository now also requires the knowledge-repositories capability
+// (REV-COR-062); grant it so this suite keeps exercising the access guard.
+jest.mock("@/utils/roles", () => ({
+  hasCapabilityAccess: jest.fn(async () => true),
+  hasRole: jest.fn(async () => true),
+}));
+
 jest.mock("@/lib/repositories/search-service", () => {
   const hit = { chunkId: 1, itemId: 1, itemName: "x", content: "secret", similarity: 0.9, chunkIndex: 0, metadata: {} };
   return {
