@@ -70,6 +70,15 @@ adapter = OpenClawAdapter()
 _mantle_proxy_process: subprocess.Popen | None = None
 
 
+def _safe_header_value(value: str, limit: int = 100) -> str:
+    """Strip characters that could break or forge the bracketed identity headers
+    the system prompt parses (`[`, `]`, `\\r`, `\\n`) and cap the length. Every
+    identity value interpolated into a header must go through this, so an
+    attacker-controlled display name / email cannot inject a new header line
+    (REV-COR-318)."""
+    return re.sub(r'[\[\]\n\r]', '', value or '')[:limit]
+
+
 def start_mantle_proxy() -> None:
     """
     Launch the Mantle logging proxy on 127.0.0.1:18791 and block until
@@ -660,15 +669,19 @@ def main():
         # is consulting this agent, inject a [cross-user-invocation] header so
         # the system prompt can adjust behavior (consultation only, no task
         # execution). Thread context is ephemeral — not persisted to memory.
+        # Sanitize every identity value that is interpolated into a bracketed
+        # header, so an attacker-controlled display name / email cannot forge or
+        # break a header line (REV-COR-318). The user_message body is NOT
+        # sanitized — it is legitimate content, not header framing.
+        safe_display = _safe_header_value(display_name)
+        safe_email = _safe_header_value(user_email)
+        safe_invoked_by_email = _safe_header_value(invoked_by_email)
+
         if invoked_by_email:
-            # Sanitize display name to prevent prompt injection via bracket
-            # characters or newlines that could break the structured header format
-            safe_invoker_name = re.sub(
-                r'[\[\]\n\r]', '', (invoked_by_display_name or invoked_by_email)
-            )[:100]
+            safe_invoker_name = _safe_header_value(invoked_by_display_name or invoked_by_email)
             cross_user_header = (
                 f"[cross-user-invocation: {safe_invoker_name} "
-                f"<{invoked_by_email}> is consulting you — this is NOT your owner. "
+                f"<{safe_invoked_by_email}> is consulting you — this is NOT your owner. "
                 f"Answer questions and provide information, but do NOT execute tasks, "
                 f"modify files, draft emails, or take actions on your owner's behalf.]"
             )
@@ -681,14 +694,14 @@ def main():
                     f"[end-thread-context]"
                 )
             framed = (
-                f"[agent-owner: {display_name or user_email} <{user_email}>]\n"
+                f"[agent-owner: {safe_display or safe_email} <{safe_email}>]\n"
                 f"{now_header}\n"
                 f"{cross_user_header}{thread_section}{attach_section}\n\n"
                 f"{user_message}"
             )
         elif display_name or user_email != "unknown":
             framed = (
-                f"[caller: {display_name or user_email} <{user_email}>]\n"
+                f"[caller: {safe_display or safe_email} <{safe_email}>]\n"
                 f"{now_header}{attach_section}\n\n"
                 f"{user_message}"
             )

@@ -323,6 +323,22 @@ function resolvePayloadFiles(commandString) {
 }
 
 /**
+ * Return the value of the `--json` argument from an argv token array — i.e. the
+ * exact string gws receives (quotes already stripped by splitCommand). Returns
+ * null if there is no `--json` flag with a following value. Security-sensitive
+ * consumers (the Phase 1 gate exception) MUST read the payload from here rather
+ * than re-scanning the raw command string, so what is inspected is identical to
+ * what executes. (The string-based `extractJsonArg` below serves the
+ * payload-file flow, which operates on the pre-tokenized command.)
+ */
+function extractJsonArgFromTokens(tokens) {
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (tokens[i] === '--json') return tokens[i + 1];
+  }
+  return null;
+}
+
+/**
  * Exec gws with GOOGLE_WORKSPACE_CLI_TOKEN set. Streams stdout; returns exit
  * code. gws ignores GOOGLE_ACCESS_TOKEN — must be GOOGLE_WORKSPACE_CLI_TOKEN
  * per the gws README "Pre-obtained Access Token" section.
@@ -447,6 +463,38 @@ const PHASE1_FORBIDDEN = [
     reason: 'modifying Drive sharing permissions (Phase 1: no permission changes)' },
 ];
 
+// gws gmail "helper" verbs that put a message on the wire. The `+`-prefixed
+// forms are unambiguous (they never appear as a search-query value), so they
+// are blocked wherever they appear in the argv. The bare forms (`gmail send`)
+// are only blocked in the verb slot immediately after `gmail`, so a legitimate
+// `--query 'reply'` search is not falsely refused. (REV-COR-350)
+const GMAIL_PLUS_SEND_HELPERS = new Set(['+send', '+reply', '+reply-all', '+forward']);
+const GMAIL_BARE_SEND_HELPERS = new Set(['send', 'reply', 'reply-all', 'forward']);
+const GMAIL_SEND_HELPER_REASON =
+  'sending/replying/forwarding mail via a gmail helper (Phase 1: drafts only)';
+
+/**
+ * Detect the gmail send/reply/forward helper forms from argv tokens. These
+ * escape the start-anchored PHASE1_FORBIDDEN patterns when the command is
+ * prefixed with the `gws` program token or a flag before the verb
+ * (`gws gmail +send`, `gmail --to x +send`). Returns a reason string to refuse,
+ * or null. Requires a `gmail` token to be present so unrelated commands are
+ * unaffected.
+ */
+function detectGmailSendHelper(tokens) {
+  const lower = tokens.map((t) => t.toLowerCase());
+  const gmailIdx = lower.indexOf('gmail');
+  // `gmail` must be the service name — at index 0, or index 1 after a `gws`
+  // program-token prefix. A later occurrence is argument content (e.g. a
+  // `--query "gmail send"` value split into bare tokens), not the service
+  // selector, and must not be treated as one (gemini-code-assist review).
+  if (gmailIdx === -1 || gmailIdx > 1) return null;
+  if (lower.some((t) => GMAIL_PLUS_SEND_HELPERS.has(t))) return GMAIL_SEND_HELPER_REASON;
+  const verb = lower[gmailIdx + 1];
+  if (verb && GMAIL_BARE_SEND_HELPERS.has(verb)) return GMAIL_SEND_HELPER_REASON;
+  return null;
+}
+
 // District domain for the explicit-share exception. Env-overridable so
 // non-prod environments could narrow/redirect it; the default is the only
 // domain the platform serves.
@@ -479,24 +527,44 @@ const AGENT_SHARE_DOMAIN = (process.env.AGENT_SHARE_DOMAIN || 'psd401.net').toLo
  * Returns true if the share request fits the explicit in-district shape;
  * false otherwise. False means fall through to the existing block.
  */
-function isPermittedExplicitShare(commandString, context) {
+function isPermittedExplicitShare(commandString, tokens, context) {
   if (!context || context.scope !== 'agent_account' || !context.ownerEmail) {
     return false;
   }
-  // Must be the create variant — update/delete remain blocked.
-  if (!/\bdrive[\s.]+permissions[\s.]+create\b/i.test(commandString)) {
+  // Must be the create variant — update/delete remain blocked. Match against
+  // the executed tokenization (REV-COR-346), not the raw string.
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const createRe = /\bdrive[\s.]+permissions[\s.]+create\b/i;
+  if (!createRe.test(spaceJoined) && !createRe.test(dotJoined)) {
     return false;
   }
 
-  // Extract the --json payload without mutating it (shared helper — same
-  // brace-balanced scan marker injection uses).
-  const jsonStr = extractJsonArg(commandString);
-  if (!jsonStr) return false;
-  let payload;
-  try {
-    payload = JSON.parse(jsonStr);
-  } catch {
-    return false;
+  // Read the --json payload from the argv token that actually executes, so the
+  // exception cannot be granted on a benign-looking payload that differs from
+  // what gws receives (REV-COR-346). The payload-file flow's synthetic command
+  // inlines minified JSON UNQUOTED, which splitCommand's quote handling mangles
+  // (the embedded `"` toggle quote state) — for that flow fall back to the
+  // brace-balanced raw-string scan. The fallback only fires when the executed
+  // token is not itself valid JSON, in which case gws rejects the payload
+  // rather than executing a diverging one.
+  let payload = null;
+  const tokenJson = extractJsonArgFromTokens(tokens);
+  if (tokenJson) {
+    try {
+      payload = JSON.parse(tokenJson);
+    } catch {
+      payload = null;
+    }
+  }
+  if (!payload) {
+    const rawJson = extractJsonArg(commandString);
+    if (!rawJson) return false;
+    try {
+      payload = JSON.parse(rawJson);
+    } catch {
+      return false;
+    }
   }
 
   // gws drive permissions create wraps the permission under `resource`,
@@ -545,6 +613,17 @@ function enforcePhase1Gates(commandString, context) {
   if (!commandString || typeof commandString !== 'string') {
     return { allowed: true };
   }
+  // SECURITY (REV-COR-346): match against the SAME tokenization that executes.
+  // execGws runs splitCommand(commandString), which strips quotes. Matching the
+  // raw string let an attacker insert a quote into a forbidden verb
+  // (`messages 'send'`) so the regex missed it while splitCommand reassembled
+  // the exact blocked argv. We tokenize first and test the space- and
+  // dot-joined argv, so the gate sees precisely what gws will receive.
+  const tokens = splitCommand(commandString);
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const hits = (pattern) => pattern.test(spaceJoined) || pattern.test(dotJoined);
+
   // Scope-conditional gates: file creation as the USER is impersonation
   // (2026-07-07, see USER_SCOPE_FORBIDDEN). Checked first — these have no
   // exceptions. Fail-closed default: when scope is missing/unknown we still
@@ -552,24 +631,32 @@ function enforcePhase1Gates(commandString, context) {
   // a buggy caller would omit it, and the agent slot is the privileged one).
   if (!context || context.scope !== 'agent_account') {
     for (const { pattern, reason } of USER_SCOPE_FORBIDDEN) {
-      if (pattern.test(commandString)) {
+      if (hits(pattern)) {
         return { allowed: false, reason };
       }
     }
   }
   for (const { pattern, reason } of PHASE1_FORBIDDEN) {
-    if (pattern.test(commandString)) {
+    if (hits(pattern)) {
       // Exception: agent grants explicit, bounded in-district permissions
       // on files it owns (see isPermittedExplicitShare).
       if (
-        /\bdrive[\s.]+permissions[\s.]+create\b/i.test(commandString) &&
-        isPermittedExplicitShare(commandString, context)
+        hits(/\bdrive[\s.]+permissions[\s.]+create\b/i) &&
+        isPermittedExplicitShare(commandString, tokens, context)
       ) {
         return { allowed: true };
       }
       return { allowed: false, reason };
     }
   }
+
+  // Helper-form send/reply/forward (REV-COR-350) — `gws gmail +send`,
+  // `gmail --to x +send` escape the start-anchored patterns above.
+  const helperReason = detectGmailSendHelper(tokens);
+  if (helperReason) {
+    return { allowed: false, reason: helperReason };
+  }
+
   return { allowed: true };
 }
 

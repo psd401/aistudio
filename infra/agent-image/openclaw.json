@@ -76,7 +76,7 @@
     "trustedProxies": ["127.0.0.1"],
     "auth": {
       "mode": "token",
-      "token": "psd-agent-internal-gateway-token"
+      "token": ""
     },
     "controlUi": {
       "enabled": false,

@@ -244,8 +244,15 @@ The reply can be one character. It cannot be zero.
 - `gh repo delete`, `gh repo edit`, `gh repo archive`
 - `gh release delete`, `git tag -d ... && git push --delete`
 - Branch deletion on `main`, `dev`, or any protected branch
-- Editing branch protection via `gh api ... /branches/*/protection`
-- Raw-API merges (`gh api ... /pulls/<N>/merge`)
+- Editing branch protection rules via `gh api ... /branches/*/protection`
+- Raw-API merges (`gh api ... /pulls/<N>/merge`) — including via a full
+  `https://api.github.com/...` URL, and regardless of `-X` method casing
+- Raw-API repo edits (`gh api -X PATCH|PUT /repos/{owner}/{repo}`)
+- GraphQL mutations (`gh api graphql ... mutation ...`, e.g. `mergePullRequest`,
+  `deleteRef`) — the wrapper blocks any GraphQL call whose body contains a mutation
+- Creating `gh` aliases (`gh alias set`/`gh alias import`) — aliases expand
+  inside `gh` and would bypass the blocklist, so they are refused and any
+  existing aliases are stripped from the config on every run
 
 **Closing issues IS allowed.** Issues are reversible; merges are not.
 

@@ -316,3 +316,47 @@ describe('quoted file paths (review finding 2)', () => {
     }
   });
 });
+
+describe('tokenization hardening (REV-COR-346) — gate matches the executed argv', () => {
+  const USER_CTX = { scope: 'user_account', ownerEmail: 'hagelk@psd401.net' };
+
+  test('quote-split forbidden verbs are refused', () => {
+    // splitCommand strips quotes, so these all execute the blocked argv; the
+    // gate must see the same tokenization instead of the raw string.
+    expect(enforcePhase1Gates("gmail users messages 'send' --json '{}'", USER_CTX).allowed).toBe(false);
+    expect(enforcePhase1Gates("gmail users messages se'nd", USER_CTX).allowed).toBe(false);
+    expect(enforcePhase1Gates('gmail users messages "send"', USER_CTX).allowed).toBe(false);
+    expect(enforcePhase1Gates("drive files 'delete' --fileId x", USER_CTX).allowed).toBe(false);
+    expect(enforcePhase1Gates('calendar events dele"te" --eventId x', USER_CTX).allowed).toBe(false);
+  });
+
+  test('dot-separated invocation style still matches', () => {
+    expect(enforcePhase1Gates('gmail.users.messages.send --json {}', USER_CTX).allowed).toBe(false);
+  });
+
+  test('user-scope creation rules also see through quote-split verbs', () => {
+    expect(enforcePhase1Gates('docs documents \'create\' --json \'{"title":"x"}\'', USER_CTX).allowed).toBe(false);
+  });
+
+  test('positive control — legitimate quoted --query values still pass', () => {
+    expect(enforcePhase1Gates("gmail users messages list --query 'is:unread'", USER_CTX).allowed).toBe(true);
+    expect(enforcePhase1Gates("gmail users messages list --query 'reply'", USER_CTX).allowed).toBe(true);
+  });
+});
+
+describe('gmail helper send forms (REV-COR-350) — prefixes cannot dodge the anchors', () => {
+  const USER_CTX = { scope: 'user_account', ownerEmail: 'hagelk@psd401.net' };
+
+  test('+send/+reply/+forward refused with a gws prefix or flags before the verb', () => {
+    expect(enforcePhase1Gates('gws gmail +send --to x@y', USER_CTX).allowed).toBe(false);
+    expect(enforcePhase1Gates('gmail --to x@y +send', USER_CTX).allowed).toBe(false);
+    expect(enforcePhase1Gates('gmail +reply --thread t', USER_CTX).allowed).toBe(false);
+    expect(enforcePhase1Gates('gws gmail +reply-all --thread t', USER_CTX).allowed).toBe(false);
+    expect(enforcePhase1Gates('gmail --to x +forward', USER_CTX).allowed).toBe(false);
+  });
+
+  test('"gmail send" as bare query content on another service is not blocked', () => {
+    // `gmail` deep in the argv is argument content, not the service selector.
+    expect(enforcePhase1Gates('drive files list --query gmail send', USER_CTX).allowed).toBe(true);
+  });
+});

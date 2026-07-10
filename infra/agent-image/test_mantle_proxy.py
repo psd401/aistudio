@@ -523,7 +523,3 @@ class TestParseAnthropicResponse(unittest.TestCase):
         # Delegates to the stream parser when SSE data lines are present.
         content, *_ = _parse_anthropic_response(TestParseAnthropicStream.STREAM)
         self.assertEqual(content, "Hello")
-
-
-if __name__ == "__main__":
-    unittest.main()
