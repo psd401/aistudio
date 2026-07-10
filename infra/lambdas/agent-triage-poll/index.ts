@@ -34,7 +34,11 @@ import {
   threadHasUserReply,
   type HistoryEvent,
 } from "./gmail";
-import { classifyWithLLM } from "./llm";
+import {
+  classifyWithLLM,
+  finalizeLLMLabel,
+  BODY_EXCERPT_MAX,
+} from "./llm";
 import {
   applyRules,
   shouldEscalate,
@@ -64,7 +68,6 @@ import type {
 const ENV = process.env.ENVIRONMENT ?? "dev";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const USER_BATCH = parseInt(process.env.TRIAGE_USER_BATCH ?? "10", 10);
-const RULES_CONFIDENCE_FLOOR = 0.6;
 
 function log(level: "INFO" | "WARN" | "ERROR", evt: string, fields: Record<string, unknown>) {
   // eslint-disable-next-line no-console
@@ -362,6 +365,7 @@ async function classifyAndLabel(
   row: TriageRow,
   accessToken: string,
   msgRef: { id: string; threadId: string; labelIds?: string[] },
+  opts: { suppressEscalation?: boolean } = {},
 ): Promise<{ decision: DecisionRecord; escalated: boolean } | null> {
   // Fetch metadata — needed for sender + subject + snippet.
   const meta = await getMessageMetadata(accessToken, msgRef.id);
@@ -394,18 +398,33 @@ async function classifyAndLabel(
       source: "rule",
     };
   } else {
-    // Step 2: LLM fallback.
+    // Step 2: LLM fallback. Fetch the fuller body excerpt (#1172) so the
+    // classifier sees more than the 200-char snippet; feed the learned
+    // patterns + recent corrections as soft hints.
     const internalDomain = row.internalDomain ?? row.userEmail.split("@")[1] ?? "";
-    const llm = await classifyWithLLM(features, row.rules, internalDomain);
-    // Safety net: anything below the confidence floor defaults to `later`
-    // so we never blast something into `important` on a guess.
-    const finalLabel: Label = llm.confidence >= RULES_CONFIDENCE_FLOOR ? llm.label : "later";
+    let bodyExcerpt: string | undefined;
+    try {
+      const full = await getMessageFullBody(accessToken, msgRef.id, BODY_EXCERPT_MAX);
+      if (full && full.trim()) bodyExcerpt = full;
+    } catch (err) {
+      log("WARN", "body_fetch_failed", {
+        user: row.userEmail,
+        messageId: msgRef.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    const llm = await classifyWithLLM(features, row.rules, internalDomain, {
+      bodyExcerpt,
+      learnedPatterns: row.learnedPatterns ?? [],
+      recentCorrections: row.recentCorrections ?? [],
+    });
+    // Apply the confidence floors: global 0.6 floor + the higher 0.75 bar
+    // for LLM-sourced `important` ("important isn't always important").
+    const finalized = finalizeLLMLabel(llm);
     result = {
-      label: finalLabel,
-      confidence: llm.confidence,
-      reason: llm.confidence < RULES_CONFIDENCE_FLOOR
-        ? `low-confidence (${llm.reason})`
-        : llm.reason,
+      label: finalized.label,
+      confidence: finalized.confidence,
+      reason: finalized.reason,
       source: "llm",
     };
   }
@@ -438,9 +457,20 @@ async function classifyAndLabel(
     subject: features.subject,
   };
 
-  // Step 3: maybe escalate to Chat.
+  // Step 3: maybe escalate to Chat. Sweeps (bulk backfill) never escalate
+  // — a 1000-message backfill must not ping-storm the user (#1172).
   let escalated = false;
-  const esc = shouldEscalate(result.label, features, row.escalation);
+  const esc = opts.suppressEscalation
+    ? ({ escalate: false } as const)
+    : shouldEscalate({
+        label: result.label,
+        source: result.source,
+        confidence: result.confidence,
+        features,
+        escalation: row.escalation,
+        mode: row.escalationMode,
+        confidenceThreshold: row.escalationConfidenceThreshold,
+      });
   if (esc.escalate) {
     // Resolve the DM space lazily — enable flow doesn't populate it,
     // so the first escalation for a new user triggers the lookup and
@@ -543,6 +573,10 @@ function detectCorrection(
   if (!prior) return null;
 
   const inboxInEvent = evt.labelIds.includes("INBOX");
+  // Snapshot the sender from the prior decision so the nightly learning
+  // job (#1172) can attribute the correction to a sender/domain.
+  const fromEmail = prior.fromEmail;
+  const fromDomain = fromEmail ? fromEmail.split("@")[1] : undefined;
 
   // Direction "added" + INBOX in labelIds = user moved message back to
   // inbox (un-archived) after we classified it as later/news → we got
@@ -553,6 +587,8 @@ function detectCorrection(
       fromLabel: prior.label,
       toLabel: "inbox",
       ts: new Date().toISOString(),
+      fromEmail,
+      fromDomain,
     };
   }
 
@@ -565,6 +601,8 @@ function detectCorrection(
       fromLabel: prior.label,
       toLabel: "archived",
       ts: new Date().toISOString(),
+      fromEmail,
+      fromDomain,
     };
   }
 

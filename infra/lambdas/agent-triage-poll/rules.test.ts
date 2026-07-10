@@ -177,45 +177,179 @@ describe("shouldEscalate", () => {
     labelTriggers: ["important"],
   };
 
-  test("non-important labels never escalate", () => {
-    expect(shouldEscalate("later", makeFeatures(), base)).toEqual({ escalate: false });
-    expect(shouldEscalate("news", makeFeatures(), base)).toEqual({ escalate: false });
+  // Convenience wrapper — most tests exercise the legacy `all` mode with an
+  // LLM-source `important` at confidence 1.
+  function esc(
+    label: Parameters<typeof shouldEscalate>[0]["label"],
+    features = makeFeatures(),
+    escalation: EscalationConfig = base,
+    extra: Partial<Parameters<typeof shouldEscalate>[0]> = {},
+  ) {
+    return shouldEscalate({
+      label,
+      source: "llm",
+      confidence: 1,
+      features,
+      escalation,
+      ...extra,
+    });
+  }
+
+  describe("mode: all (default, legacy behaviour)", () => {
+    test("non-important labels never escalate", () => {
+      expect(esc("later")).toEqual({ escalate: false });
+      expect(esc("news")).toEqual({ escalate: false });
+    });
+
+    test("important + empty sender/keyword lists → escalate (label-only trigger)", () => {
+      expect(esc("important")).toMatchObject({
+        escalate: true,
+        reason: "label:important",
+      });
+    });
+
+    test("important + sender in escalation list → escalate", () => {
+      const r = esc(
+        "important",
+        makeFeatures({ fromEmail: "ceo@psd401.net" }),
+        { ...base, senders: ["ceo@psd401.net"] },
+      );
+      expect(r).toMatchObject({ escalate: true, reason: "sender:ceo@psd401.net" });
+    });
+
+    test("important + sender NOT in list (list non-empty) → no escalate", () => {
+      const r = esc(
+        "important",
+        makeFeatures({ fromEmail: "intern@psd401.net" }),
+        { ...base, senders: ["ceo@psd401.net"] },
+      );
+      expect(r).toEqual({ escalate: false });
+    });
+
+    test("important + subject contains escalation keyword → escalate", () => {
+      const r = esc(
+        "important",
+        makeFeatures({ subjectLower: "p0: outage" }),
+        { ...base, keywords: ["p0"] },
+      );
+      expect(r).toMatchObject({ escalate: true, reason: "keyword:p0" });
+    });
+
+    test("important label not in labelTriggers → no escalate", () => {
+      const r = esc("important", makeFeatures(), { ...base, labelTriggers: [] });
+      expect(r).toEqual({ escalate: false });
+    });
+
+    test("explicit mode 'all' matches the default", () => {
+      expect(esc("important", makeFeatures(), base, { mode: "all" })).toMatchObject({
+        escalate: true,
+        reason: "label:important",
+      });
+    });
   });
 
-  test("important + empty sender/keyword lists → escalate (label-only trigger)", () => {
-    const r = shouldEscalate("important", makeFeatures(), base);
-    expect(r).toMatchObject({ escalate: true, reason: "label:important" });
+  describe("mode: none", () => {
+    test("never escalates, even a rule-source important", () => {
+      expect(
+        shouldEscalate({
+          label: "important",
+          source: "rule",
+          confidence: 1,
+          features: makeFeatures(),
+          escalation: base,
+          mode: "none",
+        }),
+      ).toEqual({ escalate: false });
+    });
+
+    test("does not escalate even for an explicit escalation sender", () => {
+      expect(
+        esc(
+          "important",
+          makeFeatures({ fromEmail: "ceo@psd401.net" }),
+          { ...base, senders: ["ceo@psd401.net"] },
+          { mode: "none" },
+        ),
+      ).toEqual({ escalate: false });
+    });
   });
 
-  test("important + sender in escalation list → escalate", () => {
-    const r = shouldEscalate(
-      "important",
-      makeFeatures({ fromEmail: "ceo@psd401.net" }),
-      { ...base, senders: ["ceo@psd401.net"] },
-    );
-    expect(r).toMatchObject({ escalate: true, reason: "sender:ceo@psd401.net" });
+  describe("mode: rules-only", () => {
+    test("rule-source important escalates", () => {
+      expect(
+        shouldEscalate({
+          label: "important",
+          source: "rule",
+          confidence: 1,
+          features: makeFeatures(),
+          escalation: base,
+          mode: "rules-only",
+        }),
+      ).toMatchObject({ escalate: true, reason: "rule:important" });
+    });
+
+    test("plain LLM important never pings (even at confidence 1)", () => {
+      expect(esc("important", makeFeatures(), base, { mode: "rules-only" })).toEqual({
+        escalate: false,
+      });
+    });
+
+    test("explicit escalation sender still pings", () => {
+      const r = esc(
+        "important",
+        makeFeatures({ fromEmail: "ceo@psd401.net" }),
+        { ...base, senders: ["ceo@psd401.net"] },
+        { mode: "rules-only" },
+      );
+      expect(r).toMatchObject({ escalate: true, reason: "sender:ceo@psd401.net" });
+    });
   });
 
-  test("important + sender NOT in list (list non-empty) → no escalate", () => {
-    const r = shouldEscalate(
-      "important",
-      makeFeatures({ fromEmail: "intern@psd401.net" }),
-      { ...base, senders: ["ceo@psd401.net"] },
-    );
-    expect(r).toEqual({ escalate: false });
-  });
+  describe("mode: high-confidence", () => {
+    test("rule-source always pings", () => {
+      expect(
+        shouldEscalate({
+          label: "important",
+          source: "rule",
+          confidence: 1,
+          features: makeFeatures(),
+          escalation: base,
+          mode: "high-confidence",
+        }),
+      ).toMatchObject({ escalate: true, reason: "rule:important" });
+    });
 
-  test("important + subject contains escalation keyword → escalate", () => {
-    const r = shouldEscalate(
-      "important",
-      makeFeatures({ subjectLower: "p0: outage" }),
-      { ...base, keywords: ["p0"] },
-    );
-    expect(r).toMatchObject({ escalate: true, reason: "keyword:p0" });
-  });
+    test("LLM at the default threshold (0.85) pings", () => {
+      expect(
+        esc("important", makeFeatures(), base, {
+          mode: "high-confidence",
+          confidence: 0.85,
+        }),
+      ).toMatchObject({ escalate: true });
+    });
 
-  test("important label not in labelTriggers → no escalate", () => {
-    const r = shouldEscalate("important", makeFeatures(), { ...base, labelTriggers: [] });
-    expect(r).toEqual({ escalate: false });
+    test("LLM just below the default threshold does NOT ping", () => {
+      expect(
+        esc("important", makeFeatures(), base, {
+          mode: "high-confidence",
+          confidence: 0.84,
+        }),
+      ).toEqual({ escalate: false });
+    });
+
+    test("custom threshold boundary is honoured", () => {
+      const below = esc("important", makeFeatures(), base, {
+        mode: "high-confidence",
+        confidence: 0.7,
+        confidenceThreshold: 0.75,
+      });
+      expect(below).toEqual({ escalate: false });
+      const atBar = esc("important", makeFeatures(), base, {
+        mode: "high-confidence",
+        confidence: 0.75,
+        confidenceThreshold: 0.75,
+      });
+      expect(atBar).toMatchObject({ escalate: true });
+    });
   });
 });
