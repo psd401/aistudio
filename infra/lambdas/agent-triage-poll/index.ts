@@ -84,9 +84,6 @@ export function log(
   );
 }
 
-/** Shared region constant for the worker/sweep paths. */
-export { ENV as TRIAGE_ENV, REGION as TRIAGE_REGION };
-
 /**
  * Mint a fresh Gmail access token for a user. Returns null and logs when
  * the token is missing or the grant was revoked (invalid_grant) — the
