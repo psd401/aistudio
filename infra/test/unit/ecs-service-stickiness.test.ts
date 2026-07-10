@@ -98,7 +98,7 @@ describe("ECS Service — ALB stickiness regression guard (#1105)", () => {
         .map((attr) => attr.Key)
         .filter(
           (key): key is string =>
-            key !== undefined &&
+            typeof key === "string" &&
             key.startsWith("stickiness.") &&
             key !== "stickiness.enabled"
         )
