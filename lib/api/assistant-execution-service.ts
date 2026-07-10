@@ -12,11 +12,18 @@ import { UIMessage } from "ai"
 import { z } from "zod"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import { createLogger, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { getAIModelById } from "@/lib/db/drizzle"
+import { getAIModelById, getUserById } from "@/lib/db/drizzle"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { sql } from "drizzle-orm"
 import { unifiedStreamingService } from "@/lib/streaming/unified-streaming-service"
-import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from "@/lib/assistant-architect/knowledge-retrieval"
+import {
+  retrieveKnowledgeForPrompt,
+  formatKnowledgeContext,
+  retrieveAtriumKnowledgeForPrompt,
+  formatAtriumKnowledgeContext,
+} from "@/lib/assistant-architect/knowledge-retrieval"
+import { requesterForUserId } from "@/lib/content/requester-from-auth"
+import type { Requester } from "@/lib/content/types"
 import { ErrorFactories } from "@/lib/error-utils"
 import { createRepositoryTools } from "@/lib/tools/repository-tools"
 import type { StreamRequest } from "@/lib/streaming/types"
@@ -75,6 +82,14 @@ interface PromptExecutionContext {
   assistantOwnerSub?: string
   userId: number
   executionStartTime: number
+  /** The assistant being executed — keys the Atrium retrieval_scope lookup. */
+  assistantId: number
+  /**
+   * The key owner's content Requester, or null when unresolvable. Atrium
+   * retrieval is bounded per hit by THIS caller's canView; null skips it
+   * entirely (fail closed to nothing) without failing the execution.
+   */
+  atriumRequester: Requester | null
 }
 
 // ============================================
@@ -199,15 +214,37 @@ async function prepareAssistantExecution(
     toolName: architect.name,
   })
 
-  // 4. Build execution context
+  // 4. Build execution context. The Atrium requester resolves the key owner's
+  // roles/org for canView-bounded content retrieval (Phase 6, #1056);
+  // requesterForUserId never throws — a failed resolve yields null, which
+  // skips Atrium retrieval without failing the execution.
+  // Resolve the assistant creator's cognito_sub so owner-based repository access
+  // resolves for non-owner runs. This was String(architect.userId) — a numeric
+  // users.id, which never equals the users.cognito_sub the knowledge/repository
+  // access predicates compare against, so owner-shared private repos silently
+  // returned zero chunks (REV-COR-511).
+  let assistantOwnerSub: string | undefined
+  if (architect.userId) {
+    try {
+      assistantOwnerSub = (await getUserById(architect.userId))?.cognitoSub ?? undefined
+    } catch (error) {
+      log.warn("Failed to resolve assistant owner sub", {
+        userId: architect.userId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
   const context: PromptExecutionContext = {
     previousOutputs: new Map(),
     accumulatedMessages: [],
     executionId,
     userCognitoSub: cognitoSub,
-    assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
+    assistantOwnerSub,
     userId,
     executionStartTime: Date.now(),
+    assistantId,
+    atriumRequester: await requesterForUserId(userId),
   }
 
   return { prompts: prompts as ChainPrompt[], context, executionId, log }
@@ -454,6 +491,75 @@ async function executePromptChainForText(
 // Single Prompt Execution (Streaming)
 // ============================================
 
+/**
+ * Build the knowledge context injected ahead of a prompt: repository chunks
+ * (hybrid search over the prompt's repositoryIds) plus Atrium content-as-context
+ * (Phase 6, #1056 — off unless the assistant has a retrieval_scope; skipped when
+ * no requester resolved; bounded per hit by the caller's canView). Shared by the
+ * streaming and collect-text execution paths; `withEvents` controls the
+ * execution-event emission only the streaming path performs.
+ */
+async function buildPromptKnowledgeContext(
+  prompt: ChainPrompt,
+  context: PromptExecutionContext,
+  requestId: string,
+  withEvents: boolean
+): Promise<string> {
+  let repositoryContext = ""
+  if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+    if (withEvents) {
+      await storeExecutionEvent(context.executionId, "knowledge-retrieval-start", {
+        promptId: prompt.id,
+        repositories: prompt.repositoryIds,
+        searchType: "hybrid",
+      })
+    }
+
+    const knowledgeChunks = await retrieveKnowledgeForPrompt(
+      prompt.content,
+      prompt.repositoryIds,
+      context.userCognitoSub,
+      context.assistantOwnerSub,
+      {
+        maxChunks: 10,
+        maxTokens: 4000,
+        similarityThreshold: 0.7,
+        searchType: "hybrid",
+        vectorWeight: 0.8,
+      },
+      requestId
+    )
+
+    if (knowledgeChunks.length > 0) {
+      repositoryContext = "\n\n" + formatKnowledgeContext(knowledgeChunks)
+      if (withEvents) {
+        const totalTokens = knowledgeChunks.reduce((sum, chunk) => sum + Math.ceil(chunk.content.length / 4), 0)
+        const avgRelevance = knowledgeChunks.reduce((sum, chunk) => sum + chunk.similarity, 0) / knowledgeChunks.length
+
+        await storeExecutionEvent(context.executionId, "knowledge-retrieved", {
+          promptId: prompt.id,
+          documentsFound: knowledgeChunks.length,
+          relevanceScore: avgRelevance,
+          tokens: totalTokens,
+        })
+      }
+    }
+  }
+
+  const atriumHits = await retrieveAtriumKnowledgeForPrompt(
+    context.atriumRequester,
+    context.assistantId,
+    prompt.content,
+    { maxChunks: 10, maxTokens: 4000 },
+    requestId
+  )
+  if (atriumHits.length > 0) {
+    repositoryContext += "\n\n" + formatAtriumKnowledgeContext(atriumHits)
+  }
+
+  return repositoryContext
+}
+
 async function executeSinglePromptWithCompletion(
   prompt: ChainPrompt,
   inputs: Record<string, unknown>,
@@ -485,43 +591,13 @@ async function executeSinglePromptWithCompletion(
       }])
     }
 
-    // 1. Repository context
-    let repositoryContext = ""
-    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
-      await storeExecutionEvent(context.executionId, "knowledge-retrieval-start", {
-        promptId: prompt.id,
-        repositories: prompt.repositoryIds,
-        searchType: "hybrid",
-      })
-
-      const knowledgeChunks = await retrieveKnowledgeForPrompt(
-        prompt.content,
-        prompt.repositoryIds,
-        context.userCognitoSub,
-        context.assistantOwnerSub,
-        {
-          maxChunks: 10,
-          maxTokens: 4000,
-          similarityThreshold: 0.7,
-          searchType: "hybrid",
-          vectorWeight: 0.8,
-        },
-        requestId
-      )
-
-      if (knowledgeChunks.length > 0) {
-        repositoryContext = "\n\n" + formatKnowledgeContext(knowledgeChunks)
-        const totalTokens = knowledgeChunks.reduce((sum, chunk) => sum + Math.ceil(chunk.content.length / 4), 0)
-        const avgRelevance = knowledgeChunks.reduce((sum, chunk) => sum + chunk.similarity, 0) / knowledgeChunks.length
-
-        await storeExecutionEvent(context.executionId, "knowledge-retrieved", {
-          promptId: prompt.id,
-          documentsFound: knowledgeChunks.length,
-          relevanceScore: avgRelevance,
-          tokens: totalTokens,
-        })
-      }
-    }
+    // 1. Knowledge context (repository chunks + Atrium content-as-context)
+    const repositoryContext = await buildPromptKnowledgeContext(
+      prompt,
+      context,
+      requestId,
+      true
+    )
 
     // 2. Variable substitution
     const inputMapping = (prompt.inputMapping || {}) as Record<string, string>
@@ -749,22 +825,14 @@ async function executeSinglePromptCollectText(
       }])
     }
 
-    // Repository context
-    let repositoryContext = ""
-    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
-      const knowledgeChunks = await retrieveKnowledgeForPrompt(
-        prompt.content,
-        prompt.repositoryIds,
-        context.userCognitoSub,
-        context.assistantOwnerSub,
-        { maxChunks: 10, maxTokens: 4000, similarityThreshold: 0.7, searchType: "hybrid", vectorWeight: 0.8 },
-        requestId
-      )
-
-      if (knowledgeChunks.length > 0) {
-        repositoryContext = "\n\n" + formatKnowledgeContext(knowledgeChunks)
-      }
-    }
+    // Knowledge context (repository chunks + Atrium content-as-context) —
+    // same behavior as the streaming path, minus execution events.
+    const repositoryContext = await buildPromptKnowledgeContext(
+      prompt,
+      context,
+      requestId,
+      false
+    )
 
     // Variable substitution
     const inputMapping = (prompt.inputMapping || {}) as Record<string, string>
@@ -926,7 +994,8 @@ function slugify(str: string): string {
     .replace(/(^-|-$)+/g, "")
 }
 
-function substituteVariables(
+// Exported for unit testing (REV-COR-517).
+export function substituteVariables(
   content: string,
   inputs: Record<string, unknown>,
   previousOutputs: Map<number, string>,
@@ -962,8 +1031,7 @@ function substituteVariables(
     .filter(p => p.position < currentPromptPosition)
     .sort((a, b) => a.position - b.position)
 
-  for (let i = 0; i < sortedPrevPrompts.length; i++) {
-    const prevPrompt = sortedPrevPrompts[i]
+  for (const [i, prevPrompt] of sortedPrevPrompts.entries()) {
     const output = previousOutputs.get(prevPrompt.id)
     // Always map position → prompt ID for prompt_N_output (even if no output yet)
     positionToPromptId.set(i, prevPrompt.id)
@@ -979,8 +1047,10 @@ function substituteVariables(
   return decoded.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
     const varName = dollarVar || braceVar
 
-    // Path 1: Explicit inputMapping (backward compatible)
-    if (mapping[varName]) {
+    // Path 1: Explicit inputMapping (backward compatible). Guard with Object.hasOwn
+    // so a placeholder naming an inherited member (${constructor}) does not read
+    // Object.prototype.constructor off the mapping and fire this branch (REV-COR-517).
+    if (Object.hasOwn(mapping, varName) && mapping[varName]) {
       const mappedPath = mapping[varName]
       const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/)
       if (promptMatch) {
@@ -993,8 +1063,11 @@ function substituteVariables(
       if (value !== undefined && value !== null) return String(value)
     }
 
-    // Path 2: User input fields
-    if (varName in inputs) {
+    // Path 2: User input fields. Use Object.hasOwn (not `in`, which walks the
+    // prototype chain) so placeholders naming inherited Object.prototype members
+    // (${constructor}, ${toString}, …) are treated as unknown and left literal
+    // (REV-COR-517).
+    if (Object.hasOwn(inputs, varName)) {
       const value = inputs[varName]
       return value !== undefined && value !== null ? String(value) : match
     }
@@ -1027,7 +1100,10 @@ function resolvePath(
   let current: unknown = context
 
   for (const part of parts) {
-    if (current && typeof current === "object") {
+    // Guard with Object.hasOwn so a mapping path (e.g. inputs.constructor,
+    // previousOutputs.__proto__) cannot traverse into an inherited prototype
+    // member (REV-COR-517).
+    if (current && typeof current === "object" && Object.hasOwn(current, part)) {
       current = (current as Record<string, unknown>)[part]
     } else {
       return undefined

@@ -72,6 +72,9 @@ export class DatabaseStack extends cdk.Stack {
         excludePunctuation: true,
         includeSpace: false,
       },
+      // Mirror the cluster's removal policy so a retained prod cluster never outlives
+      // its master-credentials secret (REV-COR-478). Dev stays DESTROY.
+      removalPolicy: props.environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
     // Check if we should restore from snapshot (for one-time testing/migration)

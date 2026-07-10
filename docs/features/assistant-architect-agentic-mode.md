@@ -50,10 +50,20 @@ When agentic mode is selected, the editor shows:
 - **Tools** — a multi-select populated from the catalog's `internal` surface,
   filtered to tools that are `agentCallable` **and** the author's role-derived
   scopes permit. An author can only enable tools they could themselves invoke.
+- **MCP connectors** — a multi-select of the external MCP servers the author may
+  use (same access source as the Nexus chat connector list). Shown only when the
+  author has at least one accessible connector. Validated again on save
+  (`validateAgentConnectors`) and re-resolved per executing caller at run time.
 - **Max steps** — tool-use round-trips per run (1–50, default 10). Caps runaway
   loops.
 - **Timeout** — wall-clock limit per run in seconds (1–900, default 300).
-- **Cost cap** — per-run cost ceiling in USD (blank = no cap).
+- **Cost cap** — per-run cost ceiling in USD (blank = no cap). The cap is
+  enforced in-loop from the model's per-token rates; if the driving model has no
+  complete pricing, the cap cannot be enforced — the run proceeds bounded by
+  steps/timeout and a structured `Agentic cost cap configured but NOT
+  enforceable` warning is logged. Each run's estimated spend is persisted
+  (`prompt_results.input_data.estimatedCostCents` and the `execution-complete`
+  event) for audit/reconciliation.
 - **Runs per hour** — per-**assistant** rate limit, separate from any per-user
   limit (blank = no limit). Author-set; there is no platform-imposed default.
 
@@ -66,7 +76,9 @@ CHECK-constrained.
 
 Beyond the catalog's MCP tools (decision search/capture, assistant list/execute)
 and per-user MCP connectors, agentic assistants can call three built-in platform
-tools exposed on the catalog's `internal` surface (each requires `chat:write`):
+tools exposed on the catalog's `internal` surface (each requires `chat:write`),
+plus any admin-approved **skill** (`skill.{slug}` catalog entries — invoking one
+loads the skill's SKILL.md instructions into the loop as the tool result):
 
 - **`images.generate`** — generate an image from a prompt using the deployment's
   configured image model (reuses `generateImageForNexus`); returns a time-limited
@@ -80,6 +92,12 @@ tools exposed on the catalog's `internal` surface (each requires `chat:write`):
 These are agent-platform tools only — they are **not** advertised on the external
 MCP server. Their handlers live in `lib/agents/agent-tools/` and resolve lazily at
 dispatch time.
+
+**No agentic recursion.** `assistants.execute` is agent-callable, but the
+execution surface it dispatches to (`executeAssistantForJobCompletion`) rejects
+`mode: 'agentic'` assistants outright — an agentic loop can only invoke
+prompt-chain assistants, which cannot call tools, so nesting is bounded at one
+level by construction (`lib/api/assistant-execution-service.ts`, mode check).
 
 ## Destructive tools & human-in-the-loop confirmation
 

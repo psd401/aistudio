@@ -99,7 +99,7 @@ ON CONFLICT (user_id, role_id) DO NOTHING;
 -- ============================================================================
 -- Capabilities (role-gated UI features; successor to the legacy tools table)
 -- ============================================================================
--- hasCapabilityAccess() reads from capabilities/role_capabilities. Seed ALL 7
+-- hasCapabilityAccess() reads from capabilities/role_capabilities. Seed ALL 8
 -- identifiers from CAPABILITY_MANIFEST (lib/capabilities/manifest.ts) so local
 -- test users keep access immediately on a freshly seeded DB — before the
 -- boot-time manifest sync has run:
@@ -107,6 +107,7 @@ ON CONFLICT (user_id, role_id) DO NOTHING;
 -- - model-compare: compare feature
 -- - knowledge-repositories: repositories, prompt library
 -- - decision-capture, voice-mode: Nexus features
+-- - atrium-content: Atrium content workspace (/atrium)
 -- - internal-performance-monitoring, internal-system-administration: internal
 --   monitoring/admin APIs (would 403 for admin until first server boot otherwise)
 -- These are marked source='manual' here; the boot-time manifest sync flips
@@ -118,6 +119,7 @@ INSERT INTO capabilities (identifier, name, description, is_active, source) VALU
 ('knowledge-repositories', 'Knowledge Repositories', 'Manage knowledge bases for AI assistants', true, 'manual'),
 ('decision-capture', 'Decision Capture', 'Extract and capture decisions from meeting transcripts into the context graph', true, 'manual'),
 ('voice-mode', 'Voice Mode', 'Real-time voice conversations in Nexus using AI speech providers', true, 'manual'),
+('atrium-content', 'Atrium Content', 'Create and manage Atrium documents, artifacts, and collections', true, 'manual'),
 ('internal-performance-monitoring', 'Internal Performance Monitoring', 'Access internal performance monitoring dashboards and metrics.', true, 'manual'),
 ('internal-system-administration', 'Internal System Administration', 'Access internal system administration tooling and diagnostics.', true, 'manual')
 ON CONFLICT (identifier) DO UPDATE SET
@@ -132,7 +134,7 @@ SELECT r.id, c.id
 FROM roles r
 CROSS JOIN capabilities c
 WHERE r.name = 'administrator'
-  AND c.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture', 'voice-mode', 'internal-performance-monitoring', 'internal-system-administration')
+  AND c.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture', 'voice-mode', 'atrium-content', 'internal-performance-monitoring', 'internal-system-administration')
 ON CONFLICT (role_id, capability_id) DO NOTHING;
 
 -- Grant assistant-architect and model-compare to staff role

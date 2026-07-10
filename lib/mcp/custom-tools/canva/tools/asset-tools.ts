@@ -27,7 +27,7 @@ export function createAssetTools(client: CanvaApiClient): Record<string, unknown
         "type, thumbnail URL, dimensions, and tags.",
       inputSchema: getAssetSchema,
       execute: async ({ asset_id }) => {
-        return client.get(`/v1/assets/${asset_id}`)
+        return client.get(`/v1/assets/${encodeURIComponent(asset_id)}`)
       },
     }),
 

@@ -135,9 +135,9 @@ function validateEmail(email) {
  * OpenClaw's static catalog at container init, so users without the
  * `skill.image-gen` capability still see the tool advertised. This
  * check is the actual enforcement: it queries the AI Studio
- * `tools`/`role_tools`/`user_roles` tables via psd-credentials and
- * refuses invocation if the caller lacks the grant. Database errors
- * are treated as denials.
+ * `capabilities`/`role_capabilities`/`user_roles` tables via
+ * psd-credentials and refuses invocation if the caller lacks the
+ * grant. Database errors are treated as denials.
  *
  * Catalog-level filtering (so the skill is not even visible) is a
  * future change once OpenClaw exposes a per-session catalog hook.

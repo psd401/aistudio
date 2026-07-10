@@ -1,5 +1,5 @@
 import { createOpenAI } from '@ai-sdk/openai'
-import { google } from '@ai-sdk/google'
+import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { Settings } from '@/lib/settings-manager'
 import { createLogger } from '@/lib/logger'
 import type { ToolSet } from 'ai'
@@ -116,8 +116,9 @@ async function createGoogleNativeTools(enabledTools: string[]): Promise<ToolSet>
       return {}
     }
 
-    // Set environment variable for Google SDK
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY = apiKey
+    // Scope the key to a per-call client instead of mutating process.env
+    // (REV-REF-034). Mirrors gemini-adapter.ts / provider-factory.ts.
+    const google = createGoogleGenerativeAI({ apiKey })
 
     // Web search tool - accept both friendly name and provider name
     const hasWebSearch = enabledTools.some(t =>

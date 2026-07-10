@@ -1,0 +1,14 @@
+bedrock-agentcore==1.15.1
+websocket-client>=1.7.0
+boto3>=1.34.0
+aiohttp>=3.9.0
+# psd-pdf-to-markdown engine. PIN TO THE PRE-1.0 LINE ON PURPOSE: pymupdf4llm 1.x
+# (>=1.28) pulls in onnxruntime + numpy + networkx + protobuf for ML layout
+# analysis — a heavy native stack that both bloats the image and mirrors the
+# matplotlib footprint that tripped AgentCore's overlay-mount snapshotter
+# (2026-05-18). The pre-1.0 line (resolves to 0.3.4) depends only on PyMuPDF
+# (one native .so, few files) + tabulate, and does no runtime model download.
+# Even so, PyMuPDF is native — the
+# image MUST be boot-tested in AgentCore before trusting this; if boot fails,
+# drop back to a pure-Python engine (pdfplumber/pypdf).
+pymupdf4llm>=0.0.17,<1.0

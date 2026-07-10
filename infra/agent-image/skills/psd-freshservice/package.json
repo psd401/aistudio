@@ -3,5 +3,8 @@
   "version": "1.0.0",
   "description": "OpenClaw skill: Freshservice ticket / approval / agent management with per-user API key from Secrets Manager",
   "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {}
 }

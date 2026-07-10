@@ -27,18 +27,28 @@ export const OIDC_SCOPES = Object.keys(OIDC_SCOPE_LABELS)
 
 const MCP_SCOPES = Object.keys(API_SCOPES).filter((s) => s.startsWith("mcp:"))
 
-/** All scopes the OAuth provider supports (standard OIDC + MCP) */
-export const ALL_OAUTH_SCOPES = [...OIDC_SCOPES, ...MCP_SCOPES]
+// Atrium content scopes (Phase 5, Issue #1055) — so autonomous agent OAuth
+// clients (client-credentials) can request content:create / publish_internal etc.
+const CONTENT_SCOPES = Object.keys(API_SCOPES).filter((s) =>
+  s.startsWith("content:")
+)
+
+/** All scopes the OAuth provider supports (standard OIDC + MCP + Atrium content) */
+export const ALL_OAUTH_SCOPES = [...OIDC_SCOPES, ...MCP_SCOPES, ...CONTENT_SCOPES]
 
 /**
  * Get a human-readable label for a scope.
  * Falls back to the raw scope string if no label is found.
  */
 export function getScopeLabel(scope: string): string {
-  if (scope in OIDC_SCOPE_LABELS) {
+  // Own-property checks, not `in` (REV-COR-637): `scope` comes from client/consent-supplied
+  // scope lists, and `in` walks the prototype chain — so "constructor"/"toString"/"__proto__"
+  // would match an inherited Object.prototype member and return a Function (or other non-label
+  // value) instead of the intended label or the raw-string fallback.
+  if (Object.hasOwn(OIDC_SCOPE_LABELS, scope)) {
     return OIDC_SCOPE_LABELS[scope]
   }
-  if (scope in API_SCOPES) {
+  if (Object.hasOwn(API_SCOPES, scope)) {
     return API_SCOPES[scope as keyof typeof API_SCOPES]
   }
   return scope

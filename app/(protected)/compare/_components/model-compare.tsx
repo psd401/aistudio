@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react"
 import { CompareInput } from "./compare-input"
 import { DualResponse } from "./dual-response"
-import { useToast } from "@/components/ui/use-toast"
+import { toast } from "sonner"
 import { useModelsWithPersistence } from "@/lib/hooks/use-models"
 import { PageBranding } from "@/components/ui/page-branding"
 import { createLogger } from "@/lib/client-logger"
@@ -44,7 +44,6 @@ export function ModelCompare() {
   const [model2Complete, setModel2Complete] = useState(false)
   const [model1Error, setModel1Error] = useState<string | undefined>()
   const [model2Error, setModel2Error] = useState<string | undefined>()
-  const { toast } = useToast()
 
   // Memoize image model detection — isImageModel does JSON.parse on every call
   const model1IsImage = useMemo(() => isImageModel(model1State.selectedModel), [model1State.selectedModel])
@@ -55,28 +54,22 @@ export function ModelCompare() {
 
   const handleSubmit = useCallback(async () => {
     if (!model1State.selectedModel || !model2State.selectedModel) {
-      toast({
-        title: "Select both models",
+      toast.error("Select both models", {
         description: "Please select two models to compare",
-        variant: "destructive"
       })
       return
     }
 
     if (!prompt.trim()) {
-      toast({
-        title: "Enter a prompt",
+      toast.error("Enter a prompt", {
         description: "Please enter a prompt to send to the models",
-        variant: "destructive"
       })
       return
     }
 
     if (model1State.selectedModel.id === model2State.selectedModel.id) {
-      toast({
-        title: "Select different models",
+      toast.error("Select different models", {
         description: "Please select two different models to compare",
-        variant: "destructive"
       })
       return
     }
@@ -183,8 +176,7 @@ export function ModelCompare() {
                     // always emits finish after warning, but we don't rely on that
                     // sequence in case the finish event is dropped mid-stream.
                     setModel1Complete(true)
-                    toast({
-                      title: `${model1State.selectedModel?.name ?? 'First model'} unavailable`,
+                    toast.warning(`${model1State.selectedModel?.name ?? 'First model'} unavailable`, {
                       description: data.warning ?? "Comparison unavailable — model response could not be generated",
                     })
                   } else if (data.type === 'error') {
@@ -208,8 +200,7 @@ export function ModelCompare() {
                     // Mark complete before the finish event arrives — same defensive
                     // guard as the model1 warning handler above.
                     setModel2Complete(true)
-                    toast({
-                      title: `${model2State.selectedModel?.name ?? 'Second model'} unavailable`,
+                    toast.warning(`${model2State.selectedModel?.name ?? 'Second model'} unavailable`, {
                       description: data.warning ?? "Comparison unavailable — model response could not be generated",
                     })
                   } else if (data.type === 'error') {
@@ -245,15 +236,13 @@ export function ModelCompare() {
       }
 
     } catch (error) {
-      toast({
-        title: "Comparison Failed",
+      toast.error("Comparison Failed", {
         description: error instanceof Error ? error.message : "Failed to compare models",
-        variant: "destructive"
       })
       setIsStreaming(false)
       setIsLoading(false)
     }
-  }, [model1State.selectedModel, model2State.selectedModel, prompt, toast])
+  }, [model1State.selectedModel, model2State.selectedModel, prompt])
 
   const handleNewComparison = useCallback(() => {
     // Close any active stream

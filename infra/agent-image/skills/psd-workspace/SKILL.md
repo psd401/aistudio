@@ -1,7 +1,7 @@
 ---
 name: psd-workspace
 summary: Google Workspace operations (Gmail, Calendar, Drive, Docs, Meet, Chat) via the user's dedicated agent account.
-description: Wraps the `gws` CLI. Fetches a refresh token from AWS Secrets Manager, exchanges it for an access token, and executes `gws` subcommands against Google APIs as the agent's own Workspace identity (e.g. `agnt_hagelk@psd401.net`). If the agent has no token yet — or the token is stale — the skill mints a one-time consent URL and returns a structured error. Your job in that case is to paste the `consent_url` verbatim into your Chat reply and ask the user to click it.
+description: Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Meet, Chat) as the user's agent account. Use for reading or writing email, calendar events, files, or any Workspace data.
 allowed-tools: Bash(node:*)
 ---
 
@@ -13,10 +13,45 @@ Google Workspace access for the user's data, gated by Phase 1 boundaries (#912).
 
 Phase 1 introduces two parallel OAuth identities per user. The `--scope` flag selects which:
 
-- `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Scopes: `gmail.modify` (read + draft + send + archive/label, no permanent delete), `calendar`, `tasks`, `drive.file`. Use this for reading the user's mail, managing their tasks, writing to their calendar, creating new Drive files for them. Sending is gated by behavioral rules — always confirm before actually sending.
+- `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Scopes: `gmail.modify` (read + draft + send + archive/label, no permanent delete), `calendar`, `tasks`, `drive.file`. Use this for reading the user's mail, managing their tasks, writing to their calendar. **NEVER for creating Drive files/Docs/Sheets/Slides** — a file created on this slot is OWNED BY THE USER, which is impersonation (hard-blocked at the skill layer, 2026-07-07). Every document you produce is created with `--scope agent` and shared explicitly. Sending is gated by behavioral rules — always confirm before actually sending.
 - `--scope agent` — OAuth on the agent identity (e.g. `agnt_hagelk@psd401.net`). Broad scopes. Use this for actions the agent takes *as itself* (the agent's own calendar, drafts owned by the agent, agent-owned Drive folder).
 
 If you omit `--scope`, the skill defaults to `user`. Phase 1 work is overwhelmingly on user data.
+
+## Reading a Drive file the user already has — the `drive.file` 404
+
+The **user** slot's `drive.file` scope only exposes files this OAuth client
+created or that the user explicitly opened through it. So `files.get` (or any
+read) on a **pre-existing** doc the user already owns returns Drive's
+`404 File not found`. **This is a scope limitation, not a sharing problem** —
+the user owns the file, and sharing it with their own account changes nothing.
+
+When you hit a 404 reading a Drive file or a Drive chip on the **user** slot:
+
+1. **Retry with `--scope agent`.** Your agent identity is
+   `agnt_<caller-uniqname>@psd401.net` (for caller `hagelk@psd401.net` that is
+   `agnt_hagelk@psd401.net`). It can read anything shared with it.
+2. **If that still 404s,** the file simply hasn't been shared with your agent
+   account yet. Ask the user to **share it with your agent account** —
+   e.g. `agnt_hagelk@psd401.net` — Reader (view) access is enough.
+
+**Never** tell the user to share the file with their **own** address
+(`hagelk@psd401.net`): they already own it, so that guidance sends them in
+circles. Name the **agent** account (`agnt_…`) every time.
+
+Do **not** describe a 404 as "the file doesn't exist" or "you need to share it
+with yourself." Say instead: *"I can't open that file with the access I have
+yet — share it with my agent account `agnt_<you>@psd401.net` (Reader is fine)
+and I'll read it."*
+
+Chat message attachments arrive to you as an `[attachments: …]` header at the
+top of the turn. A Drive chip / Drive-file attachment carries a `driveFileId` —
+read it with the steps above. A file **uploaded directly in Chat**
+(`source="chat-upload"`) is downloaded into your workspace for you: the header
+carries `path="/home/node/.openclaw/attachments/…"` — read that file directly
+with your file tools; no Drive access is involved. If the header instead marks
+the upload `download failed`, the fetch didn't work this time — tell the user
+and ask them to re-attach the file (or share it via Drive as a fallback).
 
 ## Invocation
 
@@ -60,29 +95,98 @@ node /opt/psd-skills/psd-workspace/run.js \
 node /opt/psd-skills/psd-workspace/run.js --user hagelk@psd401.net --command "--help"
 ```
 
+## Passing real text: `--json-file` / `--body-file` (REQUIRED for content writes)
+
+The `--command` tokenizer has **no escape syntax**: an apostrophe inside a
+single-quoted value, mixed quotes, or a newline breaks tokenization, and there
+is no way to fix it with more quoting. **Never inline document/email/event
+body text in `--json` or `--body`.** Instead, write the payload to a file
+first and reference it:
+
+```bash
+# 1. Write the payload to a file (any quotes/newlines/emoji are fine here)
+cat > /tmp/doc-payload.json <<'PAYLOAD'
+{"requests":[{"insertText":{"location":{"index":1},"text":"It's fine to use \"both\" quote kinds.\n\nNew paragraphs too."}}]}
+PAYLOAD
+
+# 2. Reference it with --json-file (replaces --json)
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command "docs documents batchUpdate --params '{\"documentId\":\"<id>\"}' --json-file /tmp/doc-payload.json"
+
+# Plain-text bodies (e.g. +draft) use --body-file (replaces --body)
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command "gmail +draft --to bill@psd401.net --subject 'Follow up' --body-file /tmp/draft-body.txt"
+
+# Chat message text (+send) uses --text-file (replaces --text)
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net --scope agent \
+  --command "chat +send --space spaces/XXXX --text-file /tmp/chatmsg.txt"
+```
+
+Rules: the path must be absolute; use the file form OR the inline flag, never
+both (`--json`/`--json-file`, `--body`/`--body-file`, `--text`/`--text-file`);
+one of each flag per command. The file content is handed to gws as exactly one
+argv token — quoting rules never apply to it. Phase 1 gates and marker
+injection still see the real payload (they run against the resolved content),
+so this is a transport mechanism, not a bypass: forbidden operations are still
+refused, and file-based payloads still get audit markers.
+
+Use inline `--json` only for short, quote-free payloads you compose yourself
+(IDs, dates, enum values). Anything containing prose goes through a file.
+
+## Writing Google Docs: NATIVE formatting, never markdown
+
+Google Docs does not render markdown — `# Heading`, `**bold**`, and `- bullet`
+pasted as text show up literally and read as broken. When writing doc content
+via `docs documents batchUpdate`:
+
+- Insert plain text with `insertText` (no markdown syntax in the text).
+- Make headings with `updateParagraphStyle` +
+  `paragraphStyle.namedStyleType: "HEADING_1"` (…`HEADING_6`) over the
+  heading's range.
+- Make bullet/numbered lists with `createParagraphBullets`
+  (`bulletPreset: "BULLET_DISC_CIRCLE_SQUARE"` or
+  `"NUMBERED_DECIMAL_ALPHA_ROMAN"`) over the paragraphs' range.
+- Bold/italic with `updateTextStyle` (`textStyle.bold: true`, `italic`) +
+  `fields`.
+
+Batch ALL requests for a section into ONE `batchUpdate` call (one `--json-file`
+payload with a `requests` array) — one call per doc, not one call per
+formatting operation. Compose the payload in a file and pass it with
+`--json-file` (see above); index math is easiest when you insert text first
+and style ranges immediately after, back-to-front.
+
 ## Phase 1 boundaries (hard gates — refused at the skill layer)
 
 These cannot be bypassed by phrasing. The skill returns exit code 13 with `status: phase1-forbidden`:
 
 - **No sending mail.** `gmail.users.messages.send`, `gmail.users.drafts.send`, `+send`, `+reply`, `+reply-all`, `+forward` — all blocked. Drafts only.
 - **No deletes.** Mail (delete/trash/batchDelete), events, calendars, Drive files, drive trash, tasks, tasklists.
-- **No permission changes.** `drive.permissions.create/update/delete`.
+- **No permission changes.** `drive.permissions.create/update/delete` (except the explicit in-district shapes below).
+- **No file creation as the user.** `drive files create/copy`, `docs documents create`, `sheets spreadsheets create`, `slides presentations create` on `--scope user` are hard-blocked — a file created there is owned by the user's account (impersonation; no attribution trail). Create with `--scope agent`, then share explicitly. This has NO exception and no phrasing gets around it.
 
-**Narrow exception — share-to-caller handoff.** `drive.permissions.create` is permitted in ONE case: the agent shares a file it owns back to the conversation's caller, read-only. ALL of the following must be true:
+**Exception — explicit in-district shares of YOUR OWN files.** `drive.permissions.create` is permitted only on files the agent owns (`--scope agent`), only as `create` (never update/delete), and only in these explicit shapes:
 
-- `--scope agent` (file is in the agent's own Drive)
-- payload `type: "user"` (no domain / group / anyone)
-- payload `role: "reader"` or `"commenter"` (no writer / owner)
-- payload `emailAddress` matches the `--user` arg exactly (caller only; no third parties)
+- **Named person in the district:** `type: "user"`, `role: "reader"`, `"commenter"`, or `"writer"`, `emailAddress` ending `@psd401.net` — the caller or any district colleague. Writer is for explicitly named individuals only (e.g. each member of a team space, enumerated by name) — when a group needs to edit, grant each person, never the domain.
+- **Whole district, read-only:** `type: "domain"`, `domain: "psd401.net"`, `role: "reader"` — use when a doc's link is going into a shared Chat space so every member can open it.
 
-Use this when you've created an artifact for the user (investigation report, generated doc, etc.) in your own Drive and need to hand it back. Example:
+Never allowed: `type: "anyone"` or `"group"`, external addresses/domains, domain-wide `writer`, `owner` transfer, or any permission change on user-owned files.
+
+Examples:
 
 ```bash
+# Hand an artifact back to the caller
 gws drive.permissions.create --scope agent --user hagelk@psd401.net \
   --json '{"fileId":"<id>","type":"user","role":"reader","emailAddress":"hagelk@psd401.net"}'
+
+# Make a doc readable district-wide before posting its link in a Chat space
+gws drive.permissions.create --scope agent --user hagelk@psd401.net \
+  --json '{"fileId":"<id>","type":"domain","role":"reader","domain":"psd401.net"}'
 ```
 
-Anything outside the narrow shape is still blocked.
+When you post a doc link into a shared Chat space, share it district-wide (domain/reader) FIRST — otherwise members hit "request access". Anything outside these shapes is still blocked.
 
 If a user explicitly asks the agent to send something, post the draft + a clear "I drafted it; reply 'send' if it's right" in Chat instead. The user clicks send themselves.
 

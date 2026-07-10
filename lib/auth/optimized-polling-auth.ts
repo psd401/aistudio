@@ -5,7 +5,7 @@
 
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
-import { pollingSessionCache, generateSessionCacheKey } from './polling-session-cache';
+import { pollingSessionCache, generateSessionCacheKey, sessionCacheKeyForSub } from './polling-session-cache';
 import { authPerformanceMonitor } from '@/lib/monitoring/auth-performance-monitor';
 import { createLogger } from '@/lib/logger';
 
@@ -165,8 +165,11 @@ export function validateJobOwnership(
  * Invalidate cached sessions (call on logout, role changes)
  */
 export function invalidateUserSessions(userSub: string): void {
-  const cacheKey = `session:${userSub}`;
-  pollingSessionCache.invalidateSession(cacheKey);
+  // Derive the key the SAME way the producer does (sessionCacheKeyForSub) so the
+  // delete actually matches the stored entry — previously it built `session:${sub}`
+  // while entries were stored as `session:${sub}:${iat}`, making invalidation a
+  // silent no-op (REV-SEC-165 / REV-SEC-181 / REV-COR-512).
+  pollingSessionCache.invalidateSession(sessionCacheKeyForSub(userSub));
   log.info('User sessions invalidated', { userSub });
 }
 

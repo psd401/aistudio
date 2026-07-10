@@ -187,7 +187,10 @@ describe('POST /api/documents/upload', () => {
   const createMockRequest = (formData: FormData): NextRequest => {
     return {
       formData: async () => formData,
-    } as NextRequest;
+      headers: {
+        get: (_name: string) => null,
+      },
+    } as unknown as NextRequest;
   };
 
   describe('Authentication', () => {

@@ -319,7 +319,13 @@ export async function getActivityStats(
             .where(gte(nexusConversations.createdAt, sevenDaysAgo)),
         "getActivityStats-activeUsers"
       ),
-      // Conversation-level token cost (for conversations with totalTokens > 0)
+      // Conversation-level token cost (for conversations with totalTokens > 0).
+      // ESTIMATE: nexus_conversations stores only a single totalTokens value, so
+      // cost is a blended 0.5/0.5 input/output split (the `/ 2.0`). This mirrors
+      // blendedTokenCostUsd(total, in, out, 0.5) in lib/costs/token-cost.ts — the
+      // SQL aggregation can't import the TS helper. The exact per-direction path
+      // (lib/costs/token-cost.ts exactTokenCostUsd) applies only where the split
+      // is stored (e.g. agent_messages), not here.
       executeQuery(
         (db) =>
           db

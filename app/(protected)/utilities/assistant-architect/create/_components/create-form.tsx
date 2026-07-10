@@ -43,6 +43,7 @@ function toAgenticPayload(agentic: AgenticConfigState) {
   return {
     mode: agentic.mode,
     agentEnabledTools: agentic.mode === "agentic" ? agentic.enabledTools : [],
+    agentEnabledConnectors: agentic.mode === "agentic" ? agentic.enabledConnectors : [],
     agentMaxSteps: agentic.maxSteps,
     agentTimeoutSeconds: agentic.timeoutSeconds,
     agentCostCapCents:
@@ -66,6 +67,7 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
   const [agentic, setAgentic] = useState<AgenticConfigState>(() => ({
     mode: (initialData?.mode as AgenticConfigState["mode"]) || "prompt_chain",
     enabledTools: initialData?.agentEnabledTools ?? [],
+    enabledConnectors: initialData?.agentEnabledConnectors ?? [],
     maxSteps: initialData?.agentMaxSteps ?? 10,
     timeoutSeconds: initialData?.agentTimeoutSeconds ?? 300,
     costCapDollars:

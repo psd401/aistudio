@@ -142,8 +142,8 @@ export async function POST(request: NextRequest) {
 
   // Validate kind. Default to 'agent_account' for backwards compatibility
   // with skills that haven't been updated to pass kind explicitly.
-  type Kind = "agent_account" | "user_account" | "cognito_data"
-  const allowedKinds: Kind[] = ["agent_account", "user_account", "cognito_data"]
+  type Kind = "agent_account" | "user_account" | "cognito_data" | "plaud"
+  const allowedKinds: Kind[] = ["agent_account", "user_account", "cognito_data", "plaud"]
   const kind: Kind = body.kind === undefined
     ? "agent_account"
     : (allowedKinds as readonly string[]).includes(body.kind)
@@ -151,7 +151,7 @@ export async function POST(request: NextRequest) {
       : "agent_account"
   if (body.kind !== undefined && !(allowedKinds as readonly string[]).includes(body.kind)) {
     return NextResponse.json(
-      { error: "kind must be 'agent_account', 'user_account', or 'cognito_data' if provided" },
+      { error: "kind must be 'agent_account', 'user_account', 'cognito_data', or 'plaud' if provided" },
       { status: 400 }
     )
   }
@@ -176,6 +176,11 @@ export async function POST(request: NextRequest) {
   // see migration 072).
   const nonce = randomBytes(32).toString("hex")
 
+  // PKCE (S256) code_verifier for the Plaud flow only. base64url(32 bytes) =
+  // 43 chars, within RFC 7636's 43–128 range. Stored server-side; only the
+  // S256 challenge ever leaves in a URL.
+  const codeVerifier = kind === "plaud" ? randomBytes(32).toString("base64url") : null
+
   await executeQuery(
     (db) =>
       db
@@ -185,6 +190,7 @@ export async function POST(request: NextRequest) {
           ownerEmail,
           agentEmail,
           tokenKind: kind,
+          codeVerifier,
         }),
     "insertConsentNonce"
   )
@@ -204,7 +210,10 @@ export async function POST(request: NextRequest) {
   // captures a NextAuth session's Cognito refresh token; the other kinds
   // route to the Google Workspace OAuth start page.
   const baseUrl = getIssuerUrl()
-  const path = kind === "cognito_data" ? "/agent-connect-data" : "/agent-connect"
+  const path =
+    kind === "cognito_data" ? "/agent-connect-data"
+    : kind === "plaud" ? "/agent-connect-plaud"
+    : "/agent-connect"
   const url = `${baseUrl}${path}?token=${encodeURIComponent(token)}`
 
   log.info("Consent link generated", sanitizeForLogging({ ownerEmail, agentEmail, kind, requestId }))

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getDocumentsByConversationId, getDocumentChunksByDocumentId } from '@/lib/db/queries/documents';
+import { getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
 // Request validation schema
@@ -61,6 +62,23 @@ export async function POST(request: NextRequest) {
     const { conversationId, query } = validationResult.data;
     log.debug("Processing query", { conversationId, queryLength: query.length });
 
+    // Authorization (REV-SEC-121): verify the caller owns the conversation before
+    // returning any document chunk text. Without this, an authenticated user could
+    // read the full extracted text of any conversation's documents by supplying its
+    // UUID. Mirrors the link/process routes; return 404 (not 403) to avoid
+    // confirming existence of other users' conversations.
+    const conversation = await getConversationById(conversationId, currentUser.data.user.id);
+    if (!conversation) {
+      log.warn("Unauthorized conversation query attempt", {
+        conversationId, userId: currentUser.data.user.id
+      });
+      timer({ status: "error", reason: "conversation_not_found" });
+      return NextResponse.json(
+        { error: 'Conversation not found' },
+        { status: 404, headers: { "X-Request-Id": requestId } }
+      );
+    }
+
     // Get documents for the conversation (conversationId is UUID string - Issue #549)
     const documents = await getDocumentsByConversationId({ conversationId });
     
@@ -116,9 +134,12 @@ export async function POST(request: NextRequest) {
     }, { headers: { "X-Request-Id": requestId } });
   } catch (error) {
     timer({ status: "error" });
+    // REV-COR-208: log the full error server-side but return a fixed generic
+    // message — never echo raw exception detail (DB/ORM internals) to the client.
+    // Correlate via the X-Request-Id header.
     log.error("Failed to query documents", error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to query documents' },
+      { error: 'Failed to query documents' },
       { status: 500, headers: { "X-Request-Id": requestId } }
     );
   }

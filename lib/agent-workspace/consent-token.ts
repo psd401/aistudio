@@ -24,7 +24,7 @@ const log = createLogger({ module: "consent-token" })
  *                     Captured by the /agent-connect-data page, stored at
  *                     psd-agent-creds/{env}/user/{email}/cognito-refresh.
  */
-export type ConsentTokenKind = "agent_account" | "user_account" | "cognito_data"
+export type ConsentTokenKind = "agent_account" | "user_account" | "cognito_data" | "plaud"
 
 export interface ConsentTokenPayload {
   /** Human user email (e.g. hagelk@psd401.net) */
@@ -128,7 +128,8 @@ export async function verifyConsentToken(token: string): Promise<ConsentTokenPay
     if (
       kind === "agent_account" ||
       kind === "user_account" ||
-      kind === "cognito_data"
+      kind === "cognito_data" ||
+      kind === "plaud"
     ) {
       resolvedKind = kind
     } else if (kind !== undefined) {
