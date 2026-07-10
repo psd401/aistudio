@@ -20,7 +20,7 @@ erDiagram
     }
 
     roles ||--o{ user_roles : assigned
-    roles ||--o{ role_tools : grants
+    roles ||--o{ role_capabilities : grants
     roles {
         int id PK
         varchar name UK
@@ -29,13 +29,14 @@ erDiagram
         timestamp created_at
     }
 
-    tools ||--o{ role_tools : "restricted by"
-    tools {
+    capabilities ||--o{ role_capabilities : "restricted by"
+    capabilities {
         int id PK
         varchar identifier UK
         varchar name
         text description
         boolean is_active
+        varchar source
     }
 
     user_roles {
@@ -45,10 +46,10 @@ erDiagram
         timestamp created_at
     }
 
-    role_tools {
+    role_capabilities {
         int id PK
         int role_id FK
-        int tool_id FK
+        int capability_id FK
         timestamp created_at
     }
 ```

@@ -83,17 +83,33 @@ jest.mock("@/actions/db/atrium/requester", () => ({
   getOptionalRequester: (...a: unknown[]) => getOptionalRequesterMock(...a),
 }));
 
+// The reader now reads an editors-only unresolved-comment count via this action;
+// the real module drags the whole content/DB stack (drizzle sql helpers) into the
+// unit test, so mock it to an empty thread list (count 0 → no chip).
+const listCommentThreadsMock = jest.fn((..._a: unknown[]) =>
+  Promise.resolve({ isSuccess: true, message: "", data: [] })
+);
+jest.mock("@/actions/db/atrium/comments", () => ({
+  listCommentThreadsAction: (...a: unknown[]) => listCommentThreadsMock(...a),
+}));
+
 jest.mock("@/lib/content/artifact-sandbox-config", () => ({
   getArtifactSandboxRenderUrl: () => "https://sandbox.example.test/render",
 }));
 
 // Presentational components — render to inert stand-ins so the page returns a tree
-// without pulling real component internals into the unit test.
+// without pulling real component internals into the unit test. The sidebar mock
+// also matters structurally: the real ReaderCollectionSidebar imports the
+// collection-tree action, whose `@/lib/content` barrel would drag the whole
+// content stack (okf/retrieval/embeddings) into this unit test.
 jest.mock("@/components/atrium/ProvenanceFooter", () => ({
   ProvenanceFooter: () => null,
 }));
 jest.mock("@/components/atrium/ArtifactSandbox", () => ({
   ArtifactSandbox: () => null,
+}));
+jest.mock("@/components/atrium/ReaderCollectionSidebar", () => ({
+  ReaderCollectionSidebar: () => null,
 }));
 
 import ReaderPage from "@/app/(protected)/c/[slug]/page";
@@ -195,5 +211,81 @@ describe("Atrium reader page — 404 existence masking", () => {
 
     expect(mockNotFound).toHaveBeenCalledTimes(1);
     expect(getTextMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Reader chrome gating (Epic #1059 completion): the page computes the Edit link
+ * with the REAL `canEdit` predicate (the same one the authoring page's save
+ * controls use) and threads the object's collection into the sidebar slot. The
+ * page returns a `<ReaderShell>` element, so both decisions are directly
+ * inspectable on its props without rendering the tree.
+ */
+describe("Atrium reader page — Edit link + collection sidebar gating", () => {
+  /** The ReaderShell props the page's returned element carries. */
+  interface ShellProps {
+    editHref: string | null;
+    collectionId: string | null;
+  }
+
+  function shellProps(result: unknown): ShellProps {
+    return (result as { props: ShellProps }).props;
+  }
+
+  function viewableDoc(collectionId: string | null = null): void {
+    withLookups({ ...OBJ_ROW, collectionId }, PUBLICATION_ROW);
+    canViewMock.mockResolvedValue(true);
+    getByIdMock.mockResolvedValue({ objectId: "obj-1", versionNumber: 3 });
+    getTextMock.mockResolvedValue("# hello");
+  }
+
+  it("renders the Edit link for the OWNER (canEdit predicate: owner passes)", async () => {
+    viewableDoc();
+    // The default requester (userId 100) is not the owner; make them the owner.
+    getOptionalRequesterMock.mockResolvedValue({
+      kind: "user",
+      userId: OBJ_ROW.ownerUserId,
+      roles: [],
+      isAdmin: false,
+    });
+
+    const result = await render();
+    expect(shellProps(result).editHref).toBe("/atrium/obj-1/edit");
+  });
+
+  it("renders the Edit link for an ADMIN non-owner", async () => {
+    viewableDoc();
+    getOptionalRequesterMock.mockResolvedValue({
+      kind: "user",
+      userId: 999,
+      roles: ["administrator"],
+      isAdmin: true,
+    });
+
+    const result = await render();
+    expect(shellProps(result).editHref).toBe("/atrium/obj-1/edit");
+  });
+
+  it("renders NO Edit link for a viewer who cannot edit (non-owner, non-admin)", async () => {
+    viewableDoc();
+    getOptionalRequesterMock.mockResolvedValue({
+      kind: "user",
+      userId: 100, // in-audience viewer, but not the owner
+      roles: ["staff"],
+      isAdmin: false,
+    });
+
+    const result = await render();
+    expect(shellProps(result).editHref).toBeNull();
+  });
+
+  it("threads the object's collection into the sidebar slot (and null when uncollected)", async () => {
+    viewableDoc("col-1");
+    const withCollection = await render();
+    expect(shellProps(withCollection).collectionId).toBe("col-1");
+
+    viewableDoc(null);
+    const withoutCollection = await render();
+    expect(shellProps(withoutCollection).collectionId).toBeNull();
   });
 });

@@ -11,6 +11,11 @@ import {
   deleteRepositoryItem,
   updateRepositoryItemStatus
 } from "@/lib/db/drizzle"
+import {
+  assertRepositoryReadAccess,
+  assertItemRepositoryReadAccess,
+  assertNotSystemManagedRepository
+} from "@/lib/repositories/repository-access-guard"
 import { type ActionState } from "@/types/actions-types"
 import { hasCapabilityAccess } from "@/utils/roles"
 import {
@@ -212,6 +217,11 @@ export async function addDocumentItem(
     log.debug("Getting user ID from session")
     const userId = await getUserIdFromSession(session.sub)
 
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API — a foreign item would pollute the retrieval
+    // index. Runs BEFORE the ownership check (404-mask precedes 403).
+    await assertNotSystemManagedRepository(input.repository_id)
+
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
     const canModify = await canModifyRepository(input.repository_id, userId)
@@ -354,6 +364,10 @@ export async function addDocumentWithPresignedUrl(
     // Get the user ID from the cognito_sub
     const userId = await getUserIdFromSession(session.sub)
 
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
+
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
     const canModify = await canModifyRepository(input.repository_id, userId)
@@ -495,6 +509,10 @@ export async function addUrlItem(
     // Get the user ID from the cognito_sub
     const userId = await getUserIdFromSession(session.sub)
 
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
+
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
     const canModify = await canModifyRepository(input.repository_id, userId)
@@ -612,6 +630,10 @@ export async function addTextItem(
     // Get the user ID from the cognito_sub
     log.debug("Getting user ID from session")
     const userId = await getUserIdFromSession(session.sub)
+
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
 
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
@@ -745,6 +767,10 @@ export async function removeRepositoryItem(
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
 
+    // Never mutate a system-managed repo's items (the Atrium index, #1056)
+    // through the generic API — deleting one would desync the retrieval index.
+    await assertNotSystemManagedRepository(itemRaw.repositoryId)
+
     // Convert to action type
     const item: RepositoryItem = {
       id: itemRaw.id,
@@ -847,6 +873,12 @@ export async function listRepositoryItems(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // Per-repository authorization: the caller must be able to access this
+    // repository (public / owner / grant). Also excludes system-managed repos
+    // (the Atrium index, #1056). Closes the IDOR where any capability holder
+    // could list a private repo they don't own.
+    await assertRepositoryReadAccess(repositoryId, session.sub)
+
     // Fetch repository items via Drizzle
     log.debug("Fetching repository items from database", { repositoryId })
     const itemsRaw = await getRepositoryItems(repositoryId)
@@ -917,6 +949,10 @@ export async function searchRepositoryItems(
       })
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
+
+    // Per-repository authorization (public / owner / grant); also excludes
+    // system-managed repos (#1056). Closes the IDOR on item search.
+    await assertRepositoryReadAccess(repositoryId, session.sub)
 
     // Search in item names via Drizzle
     log.debug("Searching item names", { repositoryId, query })
@@ -1038,6 +1074,13 @@ export async function getItemChunks(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // A chunk read is a DIRECT read of raw indexed text. Require access to the
+    // item's repository (public / owner / grant) — closes the IDOR where any
+    // capability holder could read another repo's chunks by item id. Also
+    // excludes system-managed repos (the Atrium index, #1056), whose per-object
+    // visibility is enforced by retrievalService/canView, not repo-level access.
+    await assertItemRepositoryReadAccess(itemId, session.sub)
+
     // Fetch chunks via Drizzle
     log.debug("Fetching chunks from database", { itemId })
     const chunksRaw = await getRepositoryItemChunks(itemId)
@@ -1106,6 +1149,31 @@ export async function updateItemProcessingStatus(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // A status write keyed by itemId is a cross-repo write path: without a
+    // per-item guard any capability holder could flip processing status on an
+    // arbitrary item (IDOR), including rows of the system-managed Atrium index
+    // (#1056). Mirror removeRepositoryItem: resolve the item (404 on miss),
+    // reject system-managed repos (404-mask), then require ownership (403).
+    log.debug("Fetching item for status update", { itemId })
+    const itemRaw = await getRepositoryItemById(itemId)
+    if (!itemRaw) {
+      log.warn("Item not found for status update", { itemId })
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+    }
+    await assertNotSystemManagedRepository(itemRaw.repositoryId)
+
+    const userId = await getUserIdFromSession(session.sub)
+    log.debug("Checking repository ownership", { repositoryId: itemRaw.repositoryId, userId })
+    const canModify = await canModifyRepository(itemRaw.repositoryId, userId)
+    if (!canModify) {
+      log.warn("Status update denied - not owner", {
+        userId,
+        repositoryId: itemRaw.repositoryId,
+        itemId
+      })
+      throw ErrorFactories.authzOwnerRequired("update items in repository")
+    }
+
     // Update processing status via Drizzle
     log.info("Updating processing status in database", {
       itemId,
@@ -1166,6 +1234,11 @@ export async function getDocumentDownloadUrl(
       log.warn("Item not found for download URL", { itemId })
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
+
+    // A download URL is a content-access path. Require access to the item's
+    // repository (public / owner / grant) — closes the IDOR by item id. Also
+    // excludes system-managed repos (the Atrium index, #1056).
+    await assertRepositoryReadAccess(itemRaw.repositoryId, session.sub)
 
     // Convert to action type
     const item: RepositoryItem = mapToRepositoryItem(itemRaw)

@@ -14,6 +14,7 @@ import {
   sanitizeForLogging
 } from "@/lib/logger"
 import { vectorSearch, keywordSearch, hybridSearch, SearchResult } from "@/lib/repositories/search-service"
+import { assertRepositoryReadAccess } from "@/lib/repositories/repository-access-guard"
 
 export interface SearchRepositoryParams {
   query: string
@@ -48,6 +49,15 @@ export async function searchRepository(
     }
 
     log.debug("User authenticated", { userId: session.sub })
+
+    // Per-repository authorization: the caller must be able to access this
+    // repository (public / owner / `repository_access` grant) before searching
+    // its chunks. Closes the IDOR where ANY authenticated user could search a
+    // private repo by id. Also excludes system-managed repos (the Atrium index,
+    // #1056) — the access model filters them, so this single check prevents a
+    // direct search of the shared index that would bypass `canView`. Throws
+    // `dbRecordNotFound` (existence-masked); handled by the outer catch.
+    await assertRepositoryReadAccess(repositoryId, session.sub)
 
     if (!query || query.trim().length === 0) {
       log.warn("Empty search query provided")

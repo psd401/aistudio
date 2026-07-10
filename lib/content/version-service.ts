@@ -34,9 +34,15 @@ import { contentObjects, contentVersions } from "@/lib/db/schema";
 import { pgTimestampAsText } from "@/lib/db/drizzle-helpers";
 import { createLogger } from "@/lib/logger";
 import { actorKindOf, agentIdOf, assertCanEdit, authorUserIdOf } from "./helpers";
+import {
+  assertScreened,
+  screenAgentBodyForWrite,
+  type ScreeningProof,
+} from "./agent-screening";
 import { rowToVersionDTO, type VersionRowAsText } from "./mappers";
 import { renderMarkdownToHtml } from "./render/markdown-render";
 import { s3Store } from "./storage/s3-store";
+import { contentEvents } from "./events";
 import { visibilityService } from "./visibility-service";
 import {
   ConflictError,
@@ -149,18 +155,29 @@ function assertHumanAuthorId(
  *
  * Used by `content-service.create` (sharing its transaction) and by the public
  * `snapshot` wrapper below; both flush the returned writes post-commit.
+ *
+ * `proof` is the §28.3 screening evidence (issue #1118 item 3): this primitive
+ * itself asserts (via `assertScreened`) that agent-authored content was screened
+ * BEFORE reaching the DB. Screening is pre-tx external IO (Bedrock) and cannot
+ * move inside the transaction, so the guard is an assertion the proof ran rather
+ * than the screening call itself — a future caller that skips
+ * `screenAgentBodyForWrite` cannot forge a proof and fails loudly here.
  */
 export async function snapshotInTx(
   tx: DbTransaction,
   req: Requester,
   obj: { id: string; kind: "document" | "artifact" },
-  input: SnapshotInput
+  input: SnapshotInput,
+  proof: ScreeningProof
 ): Promise<SnapshotResult> {
   // Reject empty AND whitespace-only bodies, mirroring the `.trim()` title check
   // in content-service so "   " is not silently snapshotted as content.
   if (typeof input.body !== "string" || input.body.trim().length === 0) {
     throw new ValidationError("Version body is required");
   }
+  // §28.3 defense in depth (issue #1118 item 3): agent content must have been
+  // screened before reaching this shared write primitive. No-op for human writers.
+  assertScreened(req, input.body, proof, obj.id);
   const bodyFormat = input.bodyFormat ?? defaultBodyFormat(obj.kind);
   // The downstream branches assume documents are markdown (rendered via
   // renderMarkdownToHtml) and artifacts are html/jsx (content-type + filename).
@@ -317,8 +334,44 @@ export async function flushSnapshotWrites(
   }
 }
 
+/**
+ * Snapshot a new version in a standalone transaction given a pre-computed
+ * screening `proof` — does the tx + S3 flush + event emit but NO screening
+ * (issue #1118 item 7). Splitting screening out lets a caller that RETRIES the
+ * transaction (createVersion's version-number-conflict retry) re-run only the DB
+ * work without re-invoking the unmemoized external screening IO — which would
+ * otherwise double the Bedrock/Comprehend calls and could reject already-passed
+ * content if the 2nd call transiently degraded.
+ */
+async function snapshotScreened(
+  req: Requester,
+  obj: { id: string; kind: "document" | "artifact" },
+  input: SnapshotInput,
+  proof: ScreeningProof
+): Promise<ContentVersionDTO> {
+  const { version, s3Writes } = await executeTransaction(
+    (tx) => snapshotInTx(tx, req, obj, input, proof),
+    "content.snapshot"
+  );
+  await flushSnapshotWrites(s3Writes);
+
+  // Emit after the row commits + blobs flush (§27): drives re-index of the new
+  // head. Best-effort — never rolls back a committed version. Fire-and-forget
+  // (`void`, not `await`): `emit` swallows its own errors, so awaiting only holds
+  // the response open for an SNS round-trip (matches the audit-write pattern).
+  void contentEvents.emit("content.version_created", {
+    objectId: obj.id,
+    versionId: version.id,
+    actorKind: actorKindOf(req),
+    agentLabel: req.kind === "user" ? null : req.agentLabel,
+  });
+
+  return version;
+}
+
 export const versionService = {
   snapshotInTx,
+  snapshotScreened,
   flushSnapshotWrites,
 
   /**
@@ -331,12 +384,13 @@ export const versionService = {
     obj: { id: string; kind: "document" | "artifact" },
     input: SnapshotInput
   ): Promise<ContentVersionDTO> {
-    const { version, s3Writes } = await executeTransaction(
-      (tx) => snapshotInTx(tx, req, obj, input),
-      "content.snapshot"
-    );
-    await flushSnapshotWrites(s3Writes);
-    return version;
+    // §28.3 — agent-authored bodies (document markdown AND artifact code) are
+    // guardrails/PII-screened BEFORE the write, mirroring the agent bridge.
+    // No-op for human/delegated authors. Runs pre-transaction: screening is
+    // external IO (Bedrock) that must never hold a pooled connection.
+    // Fail-closed: blocked or unscreenable content throws ValidationError.
+    const proof = await screenAgentBodyForWrite(req, input.body, obj.id);
+    return snapshotScreened(req, obj, input, proof);
   },
 
   /** Load the current (head) version of an object, or null if none exists. */
@@ -513,5 +567,40 @@ export const versionService = {
       }
     }, "content.rollback");
     log.info("Rolled back content head", { objectId, toVersionId });
+
+    // Refresh the retrieval index (§16). The index stores a PERSISTED snapshot of
+    // the head version's chunked text, so repointing the working head above changes
+    // what "current" means without touching that snapshot — a published,
+    // retrieval-scoped object would keep surfacing the STALE pre-rollback text to
+    // assistants until some unrelated republish re-indexed it. Best-effort: the
+    // rollback has already committed, so a re-index failure is logged, never thrown.
+    await reindexAfterRollbackBestEffort(objectId);
   },
 };
+
+/**
+ * Best-effort retrieval-index refresh after a rollback repoints the working head.
+ * `retrievalService.indexObject` self-guards on `status === "published"` (and on a
+ * missing object / current version), so this is a safe no-op for a draft/archived
+ * or unindexed object — it never wrongly ADDS an unpublished object to the index —
+ * while a published object is re-indexed to reflect the rolled-back head. Mirrors
+ * the publish path's inline `indexObject` and content-service's
+ * `pruneRetrievalIndexBestEffort`: the head change has already committed, so a
+ * re-index failure is logged, never thrown. Lazy import: retrieval-service
+ * statically imports THIS module, so a static import back would create a cycle.
+ */
+async function reindexAfterRollbackBestEffort(objectId: string): Promise<void> {
+  try {
+    const { retrievalService } = await import("./retrieval-service");
+    await retrievalService.indexObject(objectId);
+  } catch (indexError) {
+    createLogger({ action: "content.rollback" }).warn(
+      "Failed to re-index retrieval snapshot after rollback",
+      {
+        objectId,
+        error:
+          indexError instanceof Error ? indexError.message : String(indexError),
+      }
+    );
+  }
+}

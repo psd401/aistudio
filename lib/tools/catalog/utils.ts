@@ -10,9 +10,14 @@
  * Numeric rank of a version string. Versions are `v1`, `v2`, ...; the trailing
  * digits are parsed numerically. Non-`vN` values return `NaN` so the comparator
  * can fall back to a deterministic string compare.
+ *
+ * The token grammar is strict: versions start at `v1` and carry no leading
+ * zeros. `v0` and `v01` are rejected (NaN) — `parseToolRef` treats a NaN rank
+ * as a malformed pin, matching the REST route's `normalizeVersionParam`, so the
+ * two validation layers cannot disagree (epic #922 audit).
  */
 export function versionRank(version: string): number {
-  const m = /^v(\d+)$/.exec(version);
+  const m = /^v([1-9]\d*)$/.exec(version);
   return m ? Number(m[1]) : Number.NaN;
 }
 

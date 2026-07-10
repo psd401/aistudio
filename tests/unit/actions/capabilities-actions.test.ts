@@ -16,6 +16,7 @@ var mockSetCapabilityActive: jest.Mock
 var mockAssignCapabilityToRole: jest.Mock
 var mockRemoveCapabilityFromRole: jest.Mock
 var mockGetCapabilityRoleIds: jest.Mock
+var mockGetRoleById: jest.Mock
 /* eslint-enable no-var */
 
 mockRequireRole = jest.fn(() => Promise.resolve({ user: { id: 1 } }))
@@ -31,6 +32,8 @@ mockSetCapabilityActive = jest.fn((id: number, isActive: boolean) =>
 mockAssignCapabilityToRole = jest.fn(() => Promise.resolve(true))
 mockRemoveCapabilityFromRole = jest.fn(() => Promise.resolve(true))
 mockGetCapabilityRoleIds = jest.fn(() => Promise.resolve([]))
+// Role existence is validated before mutating grants (epic #922 audit).
+mockGetRoleById = jest.fn(() => Promise.resolve({ id: 2, name: "staff" }))
 
 jest.mock("@/lib/auth/role-helpers", () => ({
   requireRole: (...args: unknown[]) => mockRequireRole(...args),
@@ -50,6 +53,7 @@ jest.mock("@/lib/db/drizzle", () => ({
     mockAssignCapabilityToRole(...args),
   removeCapabilityFromRole: (...args: unknown[]) =>
     mockRemoveCapabilityFromRole(...args),
+  getRoleById: (...args: unknown[]) => mockGetRoleById(...args),
 }))
 
 jest.mock("next/cache", () => ({
@@ -224,6 +228,18 @@ describe("capability admin actions", () => {
       )
       expect(result.isSuccess).toBe(true)
       expect(mockRemoveCapabilityFromRole).toHaveBeenCalledWith(2, MANUAL_CAP.id)
+    })
+
+    it("rejects an unknown roleId before mutating grants (epic #922 audit)", async () => {
+      mockGetCapabilityById.mockResolvedValue({ ...CODE_CAP })
+      mockGetRoleById.mockRejectedValueOnce(new Error("Record not found"))
+      const result = await setCapabilityRoleAssignmentAction(
+        CODE_CAP.id,
+        999,
+        true
+      )
+      expect(result.isSuccess).toBe(false)
+      expect(mockAssignCapabilityToRole).not.toHaveBeenCalled()
     })
   })
 })

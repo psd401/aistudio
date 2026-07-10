@@ -33,6 +33,9 @@ import { EditorToolbar } from "./EditorToolbar";
 import { useEditorActions } from "./use-editor-actions";
 import { AuthoredTracker } from "./authored-tracker";
 import { ProvenanceRail } from "./provenance-rail";
+import { SuggestionMode, useSuggestionState } from "./suggestion-mode";
+import { CommentSidebar } from "./CommentSidebar";
+import { acceptAllSuggestions } from "@/lib/content/collab/suggestions";
 import "@/styles/atrium-content.css";
 
 interface CollabSession {
@@ -49,9 +52,21 @@ export interface DocumentEditorProps {
   idOrSlug: string;
   /** The current user's id, stamped on their edits (green rail). */
   userId: number;
+  /**
+   * Layout context (Epic #1059 §17). `"page"` (default) is the full-width
+   * `/atrium/[id]/edit` page: the 288px comment rail sits BESIDE the editor.
+   * `"panel"` is the narrow Nexus workspace sibling (~380–720px), where a fixed
+   * 288px side rail would collapse the editor to an unreadable sliver — so the
+   * rail stacks BELOW the editor at full width instead.
+   */
+  layout?: "page" | "panel";
 }
 
-export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
+export function DocumentEditor({
+  idOrSlug,
+  userId,
+  layout = "page",
+}: DocumentEditorProps) {
   // Lazily create the Y.Doc once (a null ref initializer reads clearer than the
   // `undefined as unknown as Y.Doc` cast). The lazy init below runs on the first
   // render before any consumer, so `ydoc` is always a live doc by use.
@@ -80,6 +95,13 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
         Markdown,
         Collaboration.configure({ document: ydoc }),
         AuthoredTracker.configure({ by: makeAuthorTag("human", userId) }),
+        // §18.1 track-changes: a client-only plugin layer (no schema change) that
+        // turns edits into pending suggestions while its toggle is on. Coexists
+        // with AuthoredTracker/ProvenanceRail as a separate visual layer.
+        SuggestionMode.configure({
+          by: makeAuthorTag("human", userId),
+          defaultOn: false,
+        }),
         ProvenanceRail,
       ],
     },
@@ -184,31 +206,62 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
   const {
     message,
     actionError,
+    pendingApproval,
     busy,
     handleSnapshot,
     handlePublish,
     handleUnpublish,
   } = useEditorActions({ editor, idOrSlug, docNameRef });
 
+  // Live track-changes toggle state + pending-suggestion count for the toolbar.
+  const { suggesting, count: suggestionCount } = useSuggestionState(editor);
+
   return (
-    <div className="flex flex-col gap-2">
+    <div className={cn("flex flex-col gap-2", layout === "panel" && "p-3")}>
       <EditorToolbar
         status={status}
         canEdit={canEdit}
         busy={busy}
+        suggesting={suggesting}
+        suggestionCount={suggestionCount}
         onSnapshot={handleSnapshot}
         onPublish={handlePublish}
         onUnpublish={handleUnpublish}
+        onToggleSuggesting={() => editor?.commands.toggleSuggesting()}
+        onAcceptAll={() => {
+          if (editor) acceptAllSuggestions(editor);
+        }}
       />
-      <div className="atrium-editor">
-        <EditorContent editor={editor} className="atrium-content" />
+      <div className={cn("flex gap-4", layout === "panel" && "flex-col")}>
+        <div className="atrium-editor min-w-0 flex-1">
+          <EditorContent editor={editor} className="atrium-content" />
+        </div>
+        {/* Comment threads: a 288px right rail on the full PAGE (hidden on small
+            viewports); stacked full-width BELOW the editor in the narrow §17
+            workspace panel so the editor keeps the whole panel width. */}
+        <div
+          className={cn(
+            "shrink-0",
+            layout === "panel" ? "w-full border-t pt-3" : "hidden w-72 md:block"
+          )}
+        >
+          <CommentSidebar idOrSlug={idOrSlug} editor={editor} canEdit={canEdit} />
+        </div>
       </div>
       {message && (
         <p
+          // A pending-approval outcome is announced as a status (not an error) and
+          // styled amber — distinct from the red error and the neutral success
+          // captions, mirroring VisibilityChip's §26.4 pending notice.
           aria-live="polite"
+          role={pendingApproval ? "status" : undefined}
           className={cn(
             "text-xs",
-            actionError ? "text-destructive" : "text-muted-foreground"
+            actionError
+              ? "text-destructive"
+              : pendingApproval
+                ? "text-amber-600"
+                : "text-muted-foreground"
           )}
         >
           {message}

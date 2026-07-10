@@ -52,6 +52,12 @@ export interface ToolCatalogSyncResult {
   inserted: string[];
   updated: string[];
   deactivated: string[];
+  /**
+   * `identifier@version` keys whose manifest entry changed a PUBLISHED version's
+   * input/output schema (Issue #927 immutability). The row is left untouched —
+   * the fix is to bump the version, never to mutate a published contract.
+   */
+  schemaViolations: string[];
 }
 
 /** Composite key for a logical tool. */
@@ -149,7 +155,7 @@ async function upsertEntry(
   tx: Tx,
   entry: NormalizedEntry,
   existingRow: ExistingRow | undefined
-): Promise<"inserted" | "updated" | "unchanged"> {
+): Promise<"inserted" | "updated" | "unchanged" | "schema_frozen"> {
   const handlerRef = entry.identifier; // manifest dispatches by identifier
 
   if (existingRow === undefined) {
@@ -168,6 +174,19 @@ async function upsertEntry(
       isActive: true,
     });
     return "inserted";
+  }
+
+  // Version immutability (Issue #927 — epic #922 completion audit): once a
+  // version exists in the catalog, its input/output schema is FROZEN. A manifest
+  // edit that changes a published version's schema is refused wholesale (the row
+  // is left untouched) — the contract fix is a version bump, never an in-place
+  // mutation. This applies to retired rows being re-claimed too: the version was
+  // published; re-adding it with a different schema is the same violation.
+  const schemaChanged =
+    !sameJson(existingRow.inputSchema, entry.inputSchema) ||
+    !sameJson(existingRow.outputSchema, entry.outputSchema ?? null);
+  if (schemaChanged) {
+    return "schema_frozen";
   }
 
   // Claiming a released/foreign row (source != 'code') re-activates it.
@@ -303,11 +322,12 @@ export async function syncToolCatalogManifest(
           log.warn(
             "Empty tool catalog manifest — skipping sync to avoid mass deactivation"
           );
-          return { inserted: [], updated: [], deactivated: [] };
+          return { inserted: [], updated: [], deactivated: [], schemaViolations: [] };
         }
 
         const inserted: string[] = [];
         const updated: string[] = [];
+        const schemaViolations: string[] = [];
 
         // Snapshot existing rows for the manifest identifiers in one query.
         const existing = (await tx
@@ -340,11 +360,22 @@ export async function syncToolCatalogManifest(
           const action = await upsertEntry(tx, entry, existingByKey.get(key));
           if (action === "inserted") inserted.push(key);
           else if (action === "updated") updated.push(key);
+          else if (action === "schema_frozen") {
+            schemaViolations.push(key);
+            // ERROR, not warn: a published version's contract was edited without
+            // a version bump. The row is untouched; the runtime keeps serving the
+            // published schema, so the manifest and DB now disagree until the
+            // author bumps the version.
+            log.error(
+              "Tool version immutability violation: manifest changed a published version's schema; refusing update — bump the version instead",
+              { tool: key }
+            );
+          }
         }
 
         const deactivated = await deactivateOrphans(tx, manifestKeys);
 
-        return { inserted, updated, deactivated };
+        return { inserted, updated, deactivated, schemaViolations };
       },
       "syncToolCatalogManifest"
     );
@@ -354,6 +385,7 @@ export async function syncToolCatalogManifest(
       inserted: result.inserted.length,
       updated: result.updated.length,
       deactivated: result.deactivated.length,
+      schemaViolations: result.schemaViolations.length,
     });
     return result;
   } catch (error) {

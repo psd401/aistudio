@@ -1,0 +1,104 @@
+<!doctype html>
+<!--
+  base-scaffold.html — STRUCTURAL starting point for an html-artifact.
+  This file intentionally ships NO visual identity (no brand colors, no chosen
+  fonts, no decorative style). That is deliberate: a styled template would push
+  every artifact toward the same look. Replace the :root tokens and add the
+  aesthetic the brief calls for. Keep the reset, a11y, reduced-motion, and print
+  rules below — they are correctness, not taste.
+
+  PRE-FLIGHT (delete this block before delivery, after you have checked each):
+  [ ] No banned fonts (Inter/Roboto/Arial default, Fraunces, Instrument Serif, Space Grotesk)
+  [ ] ONE accent color, locked, used on the whole page (no stray second accent)
+  [ ] Not the beige/cream + brass/clay default palette (unless brief names it)
+  [ ] Eyebrows (small uppercase tracked labels) <= ceil(sectionCount / 3)
+  [ ] Hero fits the first viewport: <=2-line headline, <=20-word subtext, CTA above the fold
+  [ ] Every button: text on one line at desktop, contrast >= 4.5:1 (3:1 for >=18px)
+  [ ] No em-dashes anywhere in visible copy
+  [ ] No invented "fake-precise" stats (92%, 4.1x) unless real or labeled mock
+  [ ] Images are real (or honest placeholders), never fake <div> screenshots
+  [ ] Responsive at 375 / 768 / 1024 / 1440; no horizontal overflow on mobile
+  [ ] prefers-reduced-motion honored for every animation
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TITLE</title>
+
+  <!--
+    Fonts: load the distinctive pair you chose for THIS brief. Example pattern:
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=...&display=swap" rel="stylesheet">
+  -->
+
+  <style>
+    /* ---- tokens (REPLACE with the palette + type for this artifact) ---- */
+    :root {
+      color-scheme: light;            /* set "dark" or "light dark" as designed */
+      --bg: Canvas;
+      --fg: CanvasText;
+      --muted: color-mix(in oklch, CanvasText 60%, Canvas);
+      --accent: AccentColor;          /* pick ONE real accent and lock it */
+      --measure: 68ch;                /* body line length 65-75ch */
+      --step--1: clamp(0.83rem, 0.8rem + 0.15vw, 0.94rem);
+      --step-0:  clamp(1rem, 0.95rem + 0.25vw, 1.13rem);
+      --step-1:  clamp(1.2rem, 1.1rem + 0.5vw, 1.5rem);
+      --step-2:  clamp(1.44rem, 1.3rem + 0.9vw, 2rem);
+      --step-3:  clamp(1.73rem, 1.5rem + 1.4vw, 2.67rem);
+      --step-4:  clamp(2.07rem, 1.7rem + 2.1vw, 3.56rem);  /* display ceiling ~ stay under 6rem */
+      --space: clamp(1rem, 0.8rem + 1vw, 1.75rem);
+    }
+
+    /* ---- reset (keep) ---- */
+    *, *::before, *::after { box-sizing: border-box; }
+    * { margin: 0; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-size: var(--step-0);
+      line-height: 1.6;
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+    }
+    img, svg, video, canvas { display: block; max-width: 100%; height: auto; }
+    a { color: inherit; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* ---- prose defaults (keep, restyle freely) ---- */
+    h1, h2, h3 { line-height: 1.1; text-wrap: balance; letter-spacing: -0.02em; }
+    h1 { font-size: var(--step-4); }
+    h2 { font-size: var(--step-3); }
+    h3 { font-size: var(--step-2); }
+    p, li { text-wrap: pretty; max-width: var(--measure); }
+
+    /* ---- motion (keep this guard for every animation you add) ---- */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
+
+    /* ---- print (keep; makes the artifact a clean PDF too) ---- */
+    @media print {
+      :root { --bg: #fff; --fg: #000; }
+      body { font-size: 11pt; }
+      a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 0.85em; color: #555; }
+      .no-print { display: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <!-- content -->
+  </main>
+
+  <!-- Inline any interactivity here as vanilla JS so the file works on file://. -->
+  <!-- <script> ... </script> -->
+</body>
+</html>

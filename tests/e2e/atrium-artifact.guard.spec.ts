@@ -1,4 +1,5 @@
 import { test, expect } from "./fixtures";
+import { authenticateContext } from "./helpers/session-auth";
 
 /**
  * E2E guard: Atrium Phase 2 artifact surfaces (#1052) — always-run, CI-safe.
@@ -59,5 +60,60 @@ test.describe("Atrium artifact surfaces — route auth-gating (always-run)", () 
     const res = await request.get(`/atrium/${SOME_ID}/edit`, { maxRedirects: 0 });
     expect(res.status()).toBe(307);
     expect(res.headers()["location"]).toContain("/api/auth/signin");
+  });
+});
+
+// The seeded inline artifact (tests/e2e/fixtures/atrium-editor-seed.sql), owned
+// by the admin so the minted session can open its authoring canvas.
+const SEEDED_ARTIFACT_ID =
+  process.env.ATRIUM_ARTIFACT_E2E_ID ?? "a7100000-0000-4000-8000-000000007070";
+
+test.describe("Atrium artifact sandbox — runtime isolation attributes (gated)", () => {
+  test.skip(
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
+    "Requires an authenticated session + seeded artifact — see tests/e2e/fixtures/atrium-editor-seed.sql"
+  );
+
+  test("the rendered sandbox iframe carries sandbox=allow-scripts only and an empty allow", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await authenticateContext(context); // default admin = the artifact's owner
+    try {
+      const page = await context.newPage();
+      await page.goto(`/atrium/${SEEDED_ARTIFACT_ID}/edit`);
+
+      // The canvas resolves to exactly one of: the live sandbox iframe, the
+      // fail-closed "sandbox unconfigured" notice, or the frame-load error.
+      const frame = page.getByTestId("artifact-sandbox-frame");
+      const unavailable = page.getByTestId("artifact-sandbox-unavailable");
+      const frameError = page.getByTestId("artifact-sandbox-frame-error");
+      await expect(
+        frame.or(unavailable).or(frameError).first()
+      ).toBeVisible({ timeout: 30000 });
+
+      // Fail-closed states are the CORRECT behavior when ATRIUM_SANDBOX_ORIGIN
+      // is not configured (or the sandbox host is unreachable) on the host dev
+      // server — there is no frame to inspect, so the attribute proof cannot
+      // run. Skip loudly rather than pass vacuously.
+      test.skip(
+        await unavailable.isVisible(),
+        "ATRIUM_SANDBOX_ORIGIN not configured on the host server — fail-closed notice rendered instead of the frame"
+      );
+      test.skip(
+        await frameError.isVisible(),
+        "Sandbox host unreachable — frame-error notice rendered instead of the frame"
+      );
+
+      // RUNTIME attribute proof of the §28.1 isolation config (not just source
+      // inspection): scripts may run, but with NO allow-same-origin the framed
+      // document is an opaque origin (an exact-match assertion also proves no
+      // other sandbox keyword was added), and the empty allow pins the frame to
+      // zero Permissions-Policy feature grants regardless of the parent page.
+      await expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+      await expect(frame).toHaveAttribute("allow", "");
+    } finally {
+      await context.close();
+    }
   });
 });

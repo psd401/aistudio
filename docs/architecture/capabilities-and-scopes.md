@@ -44,6 +44,7 @@ Current capability identifiers (from the manifest):
 | `knowledge-repositories` | Knowledge Repositories + Prompt Library |
 | `decision-capture` | Nexus Decision Capture |
 | `voice-mode` | Nexus voice conversations |
+| `atrium-content` | Atrium content workspace (documents, artifacts, collections) |
 | `internal-performance-monitoring` | Internal performance dashboards |
 | `internal-system-administration` | Internal system admin tooling |
 

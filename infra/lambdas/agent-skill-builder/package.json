@@ -5,7 +5,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "prebuild": "rm -rf dist"
+    "prebuild": "rm -rf dist",
+    "test": "bun test"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.0.0",

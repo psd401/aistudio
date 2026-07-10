@@ -147,8 +147,8 @@ await getSetting('OPENAI_API_KEY')
 - `users` - User accounts linked to Cognito
 - `roles` - Available roles (Admin, Staff)
 - `user_roles` - User-role associations
-- `tools` - Feature-specific permissions
-- `role_tools` - Role-tool associations
+- `capabilities` - Role-gated UI feature registry (synced from `lib/capabilities/manifest.ts`)
+- `role_capabilities` - Role-capability associations
 
 #### AI & Chat
 - `models` - AI model configurations

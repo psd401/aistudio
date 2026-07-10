@@ -73,7 +73,20 @@
       "Action": "iam:PassRole",
       "Resource": "arn:aws:iam::*:role/psd-agent-scheduler-invoke-*",
       "Condition": {
-        "StringEquals": { "iam:PassedToService": "scheduler.amazonaws.com" }
+        "StringEquals": {
+          "iam:PassedToService": "scheduler.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "AllowPassRoleToEcsTasks",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/*JobRunner*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
       }
     },
     {

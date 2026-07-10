@@ -1,7 +1,7 @@
 ---
 name: psd-freshservice
 summary: Manage Freshservice tickets, approvals, and team summaries — uses each caller's own personal API key, stored per-user in Secrets Manager.
-description: Operate against the PSD Freshservice instance (psd401.freshservice.com) with the caller's personal API key. On first invocation per user, the skill prompts the user to paste their Freshservice API key (Profile → API Key) and stores it via psd-credentials so future calls are silent. Supports listing/searching/getting/creating/updating tickets, adding notes, agent and workspace lookup, approval queues, and daily/weekly Technology workspace summaries.
+description: Manage PSD Freshservice tickets — list/search/create/update, notes, approvals, and Technology-workspace summaries. Use for helpdesk/IT tickets, approvals, or ticket lookups.
 allowed-tools: Bash(node:*)
 ---
 

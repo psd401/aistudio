@@ -81,28 +81,36 @@ const req: Requester = {
 const doc = { id: "o1", kind: "document" as const };
 const art = { id: "o2", kind: "artifact" as const };
 
+// These tests exercise the pre-DB validation guards with `user`/guest requesters;
+// the §28.3 screening assertion (issue #1118 item 3) is a NO-OP for non-agent
+// writers, so the ScreeningProof is irrelevant here. Pass a placeholder typed to
+// snapshotInTx's 5th parameter — `assertScreened` returns before inspecting it for
+// a non-agent requester. (Agent-writer proof enforcement is covered separately in
+// the agent-screening tests.)
+const noProof = {} as unknown as Parameters<typeof snapshotInTx>[4];
+
 describe("snapshotInTx body-format validation", () => {
   it("rejects an empty body", async () => {
-    await expect(snapshotInTx(tx, req, doc, { body: "" })).rejects.toThrow(
+    await expect(snapshotInTx(tx, req, doc, { body: "" }, noProof)).rejects.toThrow(
       ValidationError
     );
   });
 
   it("rejects a whitespace-only body", async () => {
     await expect(
-      snapshotInTx(tx, req, doc, { body: "   \n\t " })
+      snapshotInTx(tx, req, doc, { body: "   \n\t " }, noProof)
     ).rejects.toThrow(ValidationError);
   });
 
   it("rejects a document with a non-markdown bodyFormat", async () => {
     await expect(
-      snapshotInTx(tx, req, doc, { body: "<h1>hi</h1>", bodyFormat: "html" })
+      snapshotInTx(tx, req, doc, { body: "<h1>hi</h1>", bodyFormat: "html" }, noProof)
     ).rejects.toThrow(/Documents must use bodyFormat 'markdown'/);
   });
 
   it("rejects an artifact with a markdown bodyFormat", async () => {
     await expect(
-      snapshotInTx(tx, req, art, { body: "# code", bodyFormat: "markdown" })
+      snapshotInTx(tx, req, art, { body: "# code", bodyFormat: "markdown" }, noProof)
     ).rejects.toThrow(/Artifacts must use bodyFormat 'html' or 'jsx'/);
   });
 });
@@ -121,7 +129,7 @@ describe("snapshotInTx human author-id invariant", () => {
 
   it("rejects a guest (null userId) human author with a valid body", async () => {
     await expect(
-      snapshotInTx(tx, guest, doc, { body: "# hello" })
+      snapshotInTx(tx, guest, doc, { body: "# hello" }, noProof)
     ).rejects.toThrow(ForbiddenError);
   });
 });

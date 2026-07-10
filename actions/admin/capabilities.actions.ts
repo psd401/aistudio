@@ -24,6 +24,7 @@ import {
   getCapabilityRoleIds,
   assignCapabilityToRole,
   removeCapabilityFromRole,
+  getRoleById,
 } from "@/lib/db/drizzle"
 import type { Capability } from "@/lib/db/schema"
 import { revalidatePath } from "next/cache"
@@ -344,8 +345,12 @@ export async function setCapabilityRoleAssignmentAction(
     })
     await requireRole("administrator")
 
-    // Validate the capability exists before mutating grants.
+    // Validate the capability AND role exist before mutating grants — a bad
+    // roleId otherwise surfaced as a raw FK violation instead of a clean
+    // validation error (epic #922 completion audit). getRoleById throws
+    // record-not-found, which handleError maps to a user-facing message.
     await getCapabilityById(capabilityId)
+    await getRoleById(roleId)
 
     if (assigned) {
       await assignCapabilityToRole(roleId, capabilityId)

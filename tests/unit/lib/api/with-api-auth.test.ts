@@ -122,7 +122,7 @@ describe("withApiAuth", () => {
   // Successful request flow
   // ------------------------------------------
   describe("successful request flow", () => {
-    it("should call handler with auth context and requestId", async () => {
+    it("should call handler with auth context, requestId, and resolved params", async () => {
       const handler = jest.fn<(...args: unknown[]) => Promise<unknown>>().mockResolvedValue(
         NextResponse.json({ data: "success" })
       )
@@ -131,10 +131,37 @@ describe("withApiAuth", () => {
       const request = createMockRequest()
       await wrappedHandler(request as never)
 
+      // No route context → the handler receives an empty params object as the 4th arg.
       expect(handler).toHaveBeenCalledWith(
         request,
         mockAuth,
-        expect.any(String) // requestId
+        expect.any(String), // requestId
+        {} // params (no dynamic segments)
+      )
+    })
+
+    it("should await and forward Next.js dynamic route params to the handler", async () => {
+      // A dynamic route ([id]/publish/[destination]) receives its params via the
+      // route context's `params` Promise. The wrapper must await it and hand the
+      // handler a plain object — so a route can read `params.id` collision-free
+      // instead of parsing the URL by segment name.
+      const handler = jest.fn<(...args: unknown[]) => Promise<unknown>>().mockResolvedValue(
+        NextResponse.json({ data: "ok" })
+      )
+
+      const wrappedHandler = withApiAuth(handler)
+      const request = createMockRequest()
+      // Mimic Next's context: params is a Promise (App Router, Next 15+). Use a
+      // slug that collides with a path literal to prove real params win.
+      await wrappedHandler(request as never, {
+        params: Promise.resolve({ id: "publish", destination: "schoology" }),
+      } as never)
+
+      expect(handler).toHaveBeenCalledWith(
+        request,
+        mockAuth,
+        expect.any(String),
+        { id: "publish", destination: "schoology" }
       )
     })
 

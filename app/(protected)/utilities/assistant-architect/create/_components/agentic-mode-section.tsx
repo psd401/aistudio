@@ -8,7 +8,9 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { MultiSelect, type MultiSelectOption } from "@/components/ui/multi-select"
 import {
   getAvailableAgentToolsAction,
+  getAvailableAgentConnectorsAction,
   type AvailableAgentTool,
+  type AvailableAgentConnector,
 } from "@/actions/db/assistant-architect-actions"
 
 export type AssistantMode = "prompt_chain" | "agentic"
@@ -17,6 +19,8 @@ export type AssistantMode = "prompt_chain" | "agentic"
 export interface AgenticConfigState {
   mode: AssistantMode
   enabledTools: string[]
+  /** Per-user MCP connector IDs the assistant may use (epic #922 audit). */
+  enabledConnectors: string[]
   maxSteps: number
   timeoutSeconds: number
   /** Cost cap in whole US dollars (UI unit); converted to cents on save. */
@@ -49,10 +53,11 @@ export function AgenticModeSection({
   disabled = false,
 }: AgenticModeSectionProps) {
   const [availableTools, setAvailableTools] = useState<AvailableAgentTool[]>([])
+  const [availableConnectors, setAvailableConnectors] = useState<AvailableAgentConnector[]>([])
   const [loadingTools, setLoadingTools] = useState(false)
-  // Fetch the author-allowed agent tools at most once (the first time agentic
-  // mode is selected). An ID-tracking ref prevents a re-fetch when the user
-  // toggles mode back and forth.
+  // Fetch the author-allowed agent tools + connectors at most once (the first
+  // time agentic mode is selected). An ID-tracking ref prevents a re-fetch when
+  // the user toggles mode back and forth.
   const fetchedRef = useRef(false)
 
   useEffect(() => {
@@ -61,13 +66,21 @@ export function AgenticModeSection({
     const load = async () => {
       setLoadingTools(true)
       try {
-        const result = await getAvailableAgentToolsAction()
-        if (!cancelled && result.isSuccess && result.data) {
-          setAvailableTools(result.data)
+        const [toolsResult, connectorsResult] = await Promise.all([
+          getAvailableAgentToolsAction(),
+          getAvailableAgentConnectorsAction(),
+        ])
+        if (!cancelled && toolsResult.isSuccess && toolsResult.data) {
+          setAvailableTools(toolsResult.data)
           // Mark fetched only after a successful apply, so a cancelled/failed
           // first attempt (e.g. StrictMode unmount mid-fetch) can retry on
           // remount rather than leaving the picker permanently empty.
           fetchedRef.current = true
+        }
+        // Connectors are optional; a failed fetch leaves the picker empty
+        // without blocking the tools picker (and vice versa).
+        if (!cancelled && connectorsResult.isSuccess && connectorsResult.data) {
+          setAvailableConnectors(connectorsResult.data)
         }
       } finally {
         if (!cancelled) setLoadingTools(false)
@@ -83,6 +96,11 @@ export function AgenticModeSection({
     value: t.identifier,
     label: t.name,
     description: t.description,
+  }))
+
+  const connectorOptions: MultiSelectOption[] = availableConnectors.map((c) => ({
+    value: c.id,
+    label: c.name,
   }))
 
   const update = (patch: Partial<AgenticConfigState>) =>
@@ -153,6 +171,24 @@ export function AgenticModeSection({
                 className="w-full"
               />
             </div>
+
+            {connectorOptions.length > 0 && (
+              <div className="space-y-2" data-testid="agent-connectors">
+                <Label htmlFor="agent-connectors">MCP connectors</Label>
+                <p className="text-sm text-muted-foreground">
+                  External MCP servers the assistant may use. Runs use the
+                  connector access of whoever executes the assistant.
+                </p>
+                <MultiSelect
+                  options={connectorOptions}
+                  value={value.enabledConnectors}
+                  onChange={(connectors) => update({ enabledConnectors: connectors })}
+                  placeholder="Select connectors"
+                  disabled={disabled || loadingTools}
+                  className="w-full"
+                />
+              </div>
+            )}
 
             <AgentLimitsGrid value={value} disabled={disabled} update={update} />
           </div>

@@ -9,7 +9,14 @@ import { getAIModelById, getUserById } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { sql } from 'drizzle-orm';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
-import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
+import {
+  retrieveKnowledgeForPrompt,
+  formatKnowledgeContext,
+  retrieveAtriumKnowledgeForPrompt,
+  formatAtriumKnowledgeContext,
+} from '@/lib/assistant-architect/knowledge-retrieval';
+import { getUserRequester } from '@/actions/db/atrium/requester';
+import type { Requester } from '@/lib/content/types';
 import { hasCapabilityAccess, hasRole } from '@/utils/roles';
 import { ErrorFactories } from '@/lib/error-utils';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
@@ -101,6 +108,15 @@ interface PromptExecutionContext {
   assistantOwnerSub?: string;
   userId: number;
   executionStartTime: number;
+  /** The executing assistant's id, for the Atrium retrieval-scope gate (§16.4). */
+  assistantId: number;
+  /**
+   * The Atrium content Requester the execution retrieves as (Phase 6, Issue
+   * #1056): the session user, so every Atrium hit is bounded by THEIR
+   * `canView`. Null when no requester was derivable — Atrium retrieval then
+   * skips entirely (fail closed to nothing); repository retrieval is unaffected.
+   */
+  atriumRequester: Requester | null;
   conversation?: {
     conversationId: string;
     assistantId: number;
@@ -728,6 +744,19 @@ export async function POST(req: Request) {
       architect, toolId, userId, inputs, executionId, log
     });
 
+    // 7.6. Resolve the Atrium content Requester for permission-aware retrieval
+    // (Phase 6, Issue #1056). Resolution failure (e.g. no matching user row)
+    // must never fail the execution: Atrium retrieval simply skips (fail closed
+    // to nothing) while repository retrieval proceeds unchanged.
+    let atriumRequester: Requester | null = null;
+    try {
+      atriumRequester = await getUserRequester(requestId, session);
+    } catch (requesterError) {
+      log.warn('Could not resolve Atrium requester; skipping Atrium retrieval', {
+        error: requesterError instanceof Error ? requesterError.message : String(requesterError)
+      });
+    }
+
     // 8. Execute with streaming. Caller scopes (role-derived) are needed for
     // agentic tool resolution; harmless to compute for prompt-chain mode too.
     const callerRoleNames = currentUserData.roles.map(r => r.name);
@@ -752,6 +781,8 @@ export async function POST(req: Request) {
       assistantOwnerSub,
       userId,
       executionStartTime: Date.now(),
+      assistantId: toolId,
+      atriumRequester,
       conversation: nexusConversationId ? {
         conversationId: nexusConversationId,
         assistantId: toolId,
@@ -1161,13 +1192,27 @@ async function persistAgenticResult(args: {
   usage?: AgenticFinishUsage;
   finishReason: string;
   steps: Array<{ toolCalls?: unknown[] }>;
+  /** Per-token USD rates used by the in-loop cost cap; null = model unpriced. */
+  costRates: { inputPerToken: number; outputPerToken: number } | null;
   log: ReturnType<typeof createLogger>;
 }): Promise<void> {
-  const { context, drivingPromptId, agentStartTime, text, usage, finishReason, steps, log } = args;
+  const { context, drivingPromptId, agentStartTime, text, usage, finishReason, steps, costRates, log } = args;
   const executionTimeMs = Date.now() - agentStartTime;
   const toolCallCount = steps.reduce((n, s) => n + (s.toolCalls?.length || 0), 0);
+  // Persist the run's estimated spend (#926 — epic #922 completion audit): the
+  // cap was enforced in-loop but the actual cost was never recorded for audit /
+  // reconciliation. Same rates and formula as the adapter's cost predicate.
+  // Null when the model is unpriced or usage was not reported.
+  const estimatedCostCents =
+    costRates && usage
+      ? Math.round(
+          (usage.promptTokens * costRates.inputPerToken +
+            usage.completionTokens * costRates.outputPerToken) * 100
+        )
+      : null;
   log.info('Agentic execution finished', {
     executionId: context.executionId,
+    estimatedCostCents,
     finishReason,
     steps: steps.length,
     toolCalls: toolCallCount,
@@ -1176,7 +1221,14 @@ async function persistAgenticResult(args: {
 
   // Persist the final output as a single prompt_result attributed to the driving
   // prompt. Per-tool detail lives in the events table (the audit sink).
-  const promptInputData = { mode: 'agentic', toolCalls: toolCallCount, steps: steps.length };
+  const promptInputData = {
+    mode: 'agentic',
+    toolCalls: toolCallCount,
+    steps: steps.length,
+    // Estimated run cost in cents (null when unpriceable) — queryable per-run
+    // spend for audit/reconciliation (#926).
+    estimatedCostCents,
+  };
   // Bind every value as a parameter (never sql.raw + manual escaping, which is
   // fragile and bypasses Drizzle's parameterization). The jsonb and enum casts
   // are applied to bound placeholders so untrusted-shaped data can't break out.
@@ -1231,6 +1283,7 @@ async function persistAgenticResult(args: {
   await storeExecutionEvent(context.executionId, 'execution-complete', {
     executionId: context.executionId,
     totalTokens: usage?.totalTokens || 0,
+    estimatedCostCents,
     duration: Date.now() - context.executionStartTime,
     success: true,
   }).catch(err => log.error('Failed to store agentic execution-complete event', { error: err }));
@@ -1441,6 +1494,19 @@ async function executeAgenticAssistant(args: {
   };
 
   const agentStartTime = Date.now();
+  // Hoisted so onFinish can persist the run's estimated cost with the SAME rates
+  // the in-loop cap used. When the author configured a cap but the model has no
+  // complete pricing, the cap is unenforceable — say so loudly (structured warn →
+  // CloudWatch) instead of silently skipping it (epic #922 completion audit).
+  const costRates = buildCostRates(modelData);
+  if (typeof config.costCapCents === 'number' && config.costCapCents > 0 && costRates === null) {
+    log.warn('Agentic cost cap configured but NOT enforceable: model has no complete pricing', {
+      executionId: context.executionId,
+      assistantName: architect.name,
+      modelId: String(modelData.modelId),
+      costCapCents: config.costCapCents,
+    });
+  }
   const connectorResults: McpConnectorToolsResult[] = resolved.connectorResults;
   let cleanedUp = false;
   const cleanupConnectors = async () => {
@@ -1465,7 +1531,7 @@ async function executeAgenticAssistant(args: {
       // estimated cost reaches the cap. Rates come from the model row (per-1k →
       // per-token). Skipped when the model has no cost data or no cap is set.
       costCapCents: config.costCapCents,
-      costRates: buildCostRates(modelData),
+      costRates,
       timeout: config.timeoutSeconds * 1000,
       callbacks: {
         // onFinish/onError run asynchronously AFTER the HTTP response has already
@@ -1477,7 +1543,7 @@ async function executeAgenticAssistant(args: {
           try {
             await persistAgenticResult({
               context, drivingPromptId: drivingPrompt.id, agentStartTime,
-              text: text || '', usage, finishReason, steps: steps || [], log,
+              text: text || '', usage, finishReason, steps: steps || [], costRates, log,
             });
           } catch (saveError) {
             log.error('Failed to finalize agentic execution', { error: saveError, executionId: context.executionId });
@@ -1597,6 +1663,12 @@ async function resolvePromptModelAndTools(
  * Emits the knowledge-retrieval-start / knowledge-retrieved events and returns
  * the formatted context string ('' when no repositories or no chunks). Logic and
  * event ordering are identical to the original inline block.
+ *
+ * Also appends Atrium content context (Phase 6, Issue #1056): permission-aware
+ * retrieval over published Atrium content, gated by the assistant's stored
+ * `retrieval_scope` (null scope = off, so default behavior is unchanged) and
+ * bounded by the session user's `canView` via `context.atriumRequester` (null
+ * requester = skip, fail closed).
  */
 async function injectRepositoryKnowledge(
   prompt: ChainPrompt,
@@ -1656,6 +1728,25 @@ async function injectRepositoryKnowledge(
       });
     }
   }
+
+  // Atrium content-as-context (Phase 6, Issue #1056). Off unless the assistant
+  // has a retrieval_scope; skipped when no requester was derivable. Same caps
+  // as the repository block; distinct `atrium:<slug>` source labels.
+  const atriumHits = await retrieveAtriumKnowledgeForPrompt(
+    context.atriumRequester,
+    context.assistantId,
+    prompt.content,
+    { maxChunks: 10, maxTokens: 4000 },
+    requestId
+  );
+  if (atriumHits.length > 0) {
+    repositoryContext += '\n\n' + formatAtriumKnowledgeContext(atriumHits);
+    log.debug('Atrium content context retrieved', {
+      promptId: prompt.id,
+      hitCount: atriumHits.length
+    });
+  }
+
   return repositoryContext;
 }
 

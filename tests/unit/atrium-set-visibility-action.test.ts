@@ -148,9 +148,13 @@ describe("setVisibilityAction — write", () => {
     });
     expect(result.isSuccess).toBe(true);
     expect(setLevelMock).toHaveBeenCalledTimes(1);
-    // First arg is the RESOLVED uuid (not the input slug).
-    expect(setLevelMock.mock.calls[0][0]).toBe("uuid-1");
-    const visibility = setLevelMock.mock.calls[0][1] as {
+    // First arg is the requester (§26.4 gate lives inside setLevel now); second
+    // is the RESOLVED uuid (not the input slug).
+    expect(setLevelMock.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ kind: "user", userId: 7 })
+    );
+    expect(setLevelMock.mock.calls[0][1]).toBe("uuid-1");
+    const visibility = setLevelMock.mock.calls[0][2] as {
       level: string;
       grants: { kind: string; value: string }[];
     };
@@ -175,7 +179,7 @@ describe("setVisibilityAction — write", () => {
     });
     // The forwarding contract: the level + grants reach setLevel unchanged...
     expect(setLevelMock).toHaveBeenCalledTimes(1);
-    const visibility = setLevelMock.mock.calls[0][1] as {
+    const visibility = setLevelMock.mock.calls[0][2] as {
       level: string;
       grants: { kind: string; value: string }[];
     };
@@ -183,5 +187,22 @@ describe("setVisibilityAction — write", () => {
     expect(visibility.grants).toEqual([{ kind: "role", value: "staff" }]);
     // ...and the service's rejection surfaces as a failed ActionState, not success.
     expect(result.isSuccess).toBe(false);
+  });
+
+  it("surfaces the §26.4 gate as a distinct approval_required state, not a generic error", async () => {
+    // A non-admin widening to `public` is denied by the gate as an
+    // ApprovalRequiredError. The action must map it to `approvalRequired: true`
+    // (with an approval-worded message) so the UI shows a distinct "submitted for
+    // review" notice rather than a red "Failed to update visibility" error.
+    const { ApprovalRequiredError } = jest.requireActual("@/lib/content/errors");
+    setLevelMock.mockRejectedValueOnce(
+      new ApprovalRequiredError("Widening to public requires approval")
+    );
+    const result = await setVisibilityAction("o1", { level: "public" });
+    expect(result.isSuccess).toBe(false);
+    expect(
+      (result as { approvalRequired?: boolean }).approvalRequired
+    ).toBe(true);
+    expect(result.message).toMatch(/approval/i);
   });
 });

@@ -6,6 +6,7 @@ import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as bedrock from 'aws-cdk-lib/aws-bedrock';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import { usGuardrailProfileArns } from './constructs/security';
 
 export interface GuardrailsStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
@@ -278,7 +279,16 @@ export class GuardrailsStack extends cdk.Stack {
             'bedrock:ApplyGuardrail',
             'bedrock:GetGuardrail',
           ],
-          resources: [this.guardrail.attrGuardrailArn],
+          // Cross-region inference (crossRegionConfig above) makes
+          // ApplyGuardrail authorize against BOTH the guardrail ARN and the
+          // system-defined guardrail-profile ARN in the DESTINATION region
+          // Bedrock routes to. Consumers of this policy (e.g. the ECS frontend)
+          // otherwise get AccessDenied whenever routing leaves the stack region
+          // (issue #1138 F5). Grant the whole fixed US fan-out set.
+          resources: [
+            this.guardrail.attrGuardrailArn,
+            ...usGuardrailProfileArns(cdk.Stack.of(this).account),
+          ],
         }),
         // Comprehend PII detection (requires wildcard - AWS limitation)
         new iam.PolicyStatement({
