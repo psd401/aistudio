@@ -259,8 +259,20 @@ export function buildCapabilityCatalog(
 
   if (opts.query) {
     const query = opts.query;
+    // Scope is a documented query field (the tool inputSchema + SKILL.md say the
+    // filter spans "identifier, name, description, and scope"), so an action must
+    // also match on the scopes it requires — e.g. query "platform:read" or
+    // "assistants:execute" should surface the actions gated by that scope, not
+    // just the scope reference entry.
     actions = actions.filter((a) =>
-      matchesQuery(query, a.identifier, a.name, a.description)
+      matchesQuery(
+        query,
+        a.identifier,
+        a.name,
+        a.description,
+        ...a.requiredScopes,
+        ...Object.values(a.scopesBySurface).flat()
+      )
     );
     features = features.filter((f) =>
       matchesQuery(query, f.identifier, f.name, f.description)

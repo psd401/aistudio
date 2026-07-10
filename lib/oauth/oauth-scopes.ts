@@ -33,8 +33,25 @@ const CONTENT_SCOPES = Object.keys(API_SCOPES).filter((s) =>
   s.startsWith("content:")
 )
 
-/** All scopes the OAuth provider supports (standard OIDC + MCP + Atrium content) */
-export const ALL_OAUTH_SCOPES = [...OIDC_SCOPES, ...MCP_SCOPES, ...CONTENT_SCOPES]
+// Platform capability-catalog scope (Issue #1100) — so OAuth/JWT MCP callers
+// (incl. the agent authenticating with an OAuth access token) can request
+// platform:read and reach the describe_capabilities meta-tool. Without this the
+// OIDC provider would neither advertise nor accept platform:read, and every
+// OAuth-authenticated tools/call for that tool would fail the scope check.
+const PLATFORM_SCOPES = Object.keys(API_SCOPES).filter((s) =>
+  s.startsWith("platform:")
+)
+
+/**
+ * All scopes the OAuth provider supports (standard OIDC + MCP + Atrium content +
+ * platform capability catalog).
+ */
+export const ALL_OAUTH_SCOPES = [
+  ...OIDC_SCOPES,
+  ...MCP_SCOPES,
+  ...CONTENT_SCOPES,
+  ...PLATFORM_SCOPES,
+]
 
 /**
  * Get a human-readable label for a scope.

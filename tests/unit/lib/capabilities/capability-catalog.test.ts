@@ -144,6 +144,28 @@ describe("buildCapabilityCatalog", () => {
     )
   })
 
+  it("query filter also matches actions by required scope (docs say scope is searchable)", () => {
+    // A scope query surfaces the actions gated by that scope, not just the scope
+    // reference entry.
+    const byBaseScope = buildCapabilityCatalog({
+      section: "actions",
+      query: "platform:read",
+    })
+    expect(
+      byBaseScope.actions?.some(
+        (a) => a.identifier === "platform.describe_capabilities"
+      )
+    ).toBe(true)
+    // A per-surface (REST) scope also matches the action that requires it.
+    const byRestScope = buildCapabilityCatalog({
+      section: "actions",
+      query: "assistants:execute",
+    })
+    expect(
+      byRestScope.actions?.some((a) => a.identifier === "assistants.execute")
+    ).toBe(true)
+  })
+
   it("summary counts match the returned arrays, incl. agentInvocableActions", () => {
     const cat = buildCapabilityCatalog()
     expect(cat.summary.actions).toBe(cat.actions?.length)
