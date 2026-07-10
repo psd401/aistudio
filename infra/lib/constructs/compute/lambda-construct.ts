@@ -6,6 +6,13 @@ import * as ec2 from "aws-cdk-lib/aws-ec2"
 import { Construct } from "constructs"
 import { IEnvironmentConfig } from "../config/environment-config"
 
+/**
+ * Shared Lambda runtime for the agent platform. Bump this ONE constant to migrate
+ * every agent Lambda + the LambdaConstruct default off a deprecated runtime
+ * (REV-INFRA-125). nodejs20.x was deprecated 2026-04-30; nodejs22.x is the current LTS.
+ */
+export const AGENT_LAMBDA_RUNTIME = lambda.Runtime.NODEJS_22_X
+
 export interface LambdaConstructProps {
   functionName: string
   handler: string
@@ -45,7 +52,7 @@ export class LambdaConstruct extends Construct {
     // Create Lambda function with optimized settings
     this.function = new lambda.Function(this, "Function", {
       functionName: props.functionName,
-      runtime: props.runtime || lambda.Runtime.NODEJS_20_X,
+      runtime: props.runtime || AGENT_LAMBDA_RUNTIME,
       handler: props.handler,
       code: lambda.Code.fromAsset(props.codePath, {
         bundling: this.createBundlingOptions(props.runtime),
@@ -87,7 +94,7 @@ export class LambdaConstruct extends Construct {
 
     if (isNodejs) {
       return {
-        image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+        image: AGENT_LAMBDA_RUNTIME.bundlingImage,
         command: [
           "bash",
           "-c",

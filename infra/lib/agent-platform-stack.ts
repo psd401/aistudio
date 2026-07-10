@@ -38,6 +38,7 @@ import {
   IEnvironmentConfig,
 } from './constructs';
 import { ServiceRoleFactory, usGuardrailProfileArns } from './constructs/security';
+import { AGENT_LAMBDA_RUNTIME } from './constructs/compute/lambda-construct';
 
 export interface AgentPlatformStackProps extends cdk.StackProps {
   environment: 'dev' | 'staging' | 'prod';
@@ -596,6 +597,36 @@ export class AgentPlatformStack extends cdk.Stack {
       cdk.Tags.of(this.agentAlarmTopic).add('ManagedBy', 'cdk');
     }
 
+    // Shared dead-letter queue for the async-invoked agent Lambdas (EventBridge
+    // Rules/Scheduler, custom-resource invoke, cross-Lambda async invoke). Without it
+    // a failed async invocation is retried twice by Lambda and then DROPPED with no
+    // trace — silently losing key rotations, scheduled crons, digests, and the
+    // health/prune/pattern/nonce scans (REV-INFRA-128). One queue + one alarm.
+    const agentAsyncDlq = new sqs.Queue(this, 'AgentAsyncDLQ', {
+      queueName: `psd-agent-async-dlq-${environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+    cdk.Tags.of(agentAsyncDlq).add('Environment', environment);
+    cdk.Tags.of(agentAsyncDlq).add('ManagedBy', 'cdk');
+
+    const agentAsyncDlqAlarm = new cloudwatch.Alarm(this, 'AgentAsyncDlqAlarm', {
+      alarmName: `psd-agent-async-dlq-${environment}`,
+      alarmDescription:
+        'Async agent Lambda DLQ received messages — a scheduled/async invocation failed and was dropped',
+      metric: agentAsyncDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(1),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    if (this.agentAlarmTopic) {
+      agentAsyncDlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.agentAlarmTopic));
+    }
+
     const bedrockKeyManagerLogGroup = new logs.LogGroup(this, 'BedrockKeyManagerLogGroup', {
       logGroupName: `/aws/lambda/psd-agent-bedrock-key-manager-${environment}`,
       retention: config.monitoring.logRetention,
@@ -605,15 +636,16 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     const bedrockKeyManager = new lambda.Function(this, 'BedrockKeyManagerLambda', {
+      deadLetterQueue: agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
       functionName: `psd-agent-bedrock-key-manager-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'bedrock-api-key-manager'),
         {
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
@@ -1419,15 +1451,17 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(skillBuilderLogGroup).add('ManagedBy', 'cdk');
 
     const skillBuilderLambda = new lambda.Function(this, 'SkillBuilderLambda', {
+      deadLetterQueue: agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
+      reservedConcurrentExecutions: 1, // serialize async promotions (REV-INFRA-128)
       functionName: skillBuilderFunctionName,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-skill-builder'),
         {
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
@@ -1502,15 +1536,17 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(cronLogGroup).add('ManagedBy', 'cdk');
 
     const cronLambda = new lambda.Function(this, 'CronLambda', {
+      deadLetterQueue: agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
+      reservedConcurrentExecutions: 1, // prevent overlapping scheduled runs (REV-INFRA-128)
       functionName: cronFunctionName,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-cron'),
         {
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
@@ -1788,14 +1824,14 @@ export class AgentPlatformStack extends cdk.Stack {
 
     const triagePollLambda = new lambda.Function(this, 'TriagePollLambda', {
       functionName: `psd-agent-triage-poll-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-triage-poll'),
         {
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
@@ -1925,15 +1961,16 @@ export class AgentPlatformStack extends cdk.Stack {
     }));
 
     const triageDigestLambda = new lambda.Function(this, 'TriageDigestLambda', {
+      deadLetterQueue: agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
       functionName: triageDigestFunctionName,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-triage-digest'),
         {
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
@@ -2047,7 +2084,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // is the primary path. CI/CD should run build-lambdas.sh before cdk synth.
     this.routerLambda = new lambda.Function(this, 'RouterLambda', {
       functionName: `psd-agent-router-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-router'),
@@ -2057,7 +2094,7 @@ export class AgentPlatformStack extends cdk.Stack {
           // Lambda code updates when only TypeScript source changes.
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
@@ -2327,14 +2364,14 @@ export class AgentPlatformStack extends cdk.Stack {
 
     const bridgeLambda = new lambda.Function(this, 'ChatBridgeLambda', {
       functionName: `psd-agent-chat-bridge-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-chat-bridge'),
         {
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
@@ -2590,15 +2627,17 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     const healthLambda = new lambda.Function(this, 'AgentHealthDailyLambda', {
+      deadLetterQueue: agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
+      reservedConcurrentExecutions: 1, // singleton daily scan (REV-INFRA-128)
       functionName: `psd-agent-health-daily-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-health-daily'),
         {
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
@@ -2692,15 +2731,17 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     const nonceCleanupLambda = new lambda.Function(this, 'AgentWorkspaceNonceCleanupLambda', {
+      deadLetterQueue: agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
+      reservedConcurrentExecutions: 1, // singleton cleanup sweep (REV-INFRA-128)
       functionName: `psd-agent-workspace-nonce-cleanup-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-workspace-nonce-cleanup'),
         {
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
@@ -2793,15 +2834,17 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     const patternLambda = new lambda.Function(this, 'AgentPatternScannerLambda', {
+      deadLetterQueue: agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
+      reservedConcurrentExecutions: 1, // singleton weekly scan (REV-INFRA-128)
       functionName: `psd-agent-pattern-scanner-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-pattern-scanner'),
         {
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
@@ -2905,15 +2948,17 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     const pruneLambda = new lambda.Function(this, 'AgentTelemetryPruneLambda', {
+      deadLetterQueue: agentAsyncDlq, // async-invoke failures → DLQ + alarm (REV-INFRA-128)
+      reservedConcurrentExecutions: 1, // singleton prune job (REV-INFRA-128)
       functionName: `psd-agent-telemetry-prune-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-telemetry-prune'),
         {
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
@@ -3054,14 +3099,14 @@ export class AgentPlatformStack extends cdk.Stack {
 
     const skillInitLambda = new lambda.Function(this, 'AgentSkillInitializerLambda', {
       functionName: `psd-agent-skill-initializer-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: AGENT_LAMBDA_RUNTIME,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-skill-initializer'),
         {
           assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
