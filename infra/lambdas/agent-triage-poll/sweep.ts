@@ -114,8 +114,10 @@ export async function runSweepSlice(
   let labeled = prior.labeled ?? 0;
   const decisions: DecisionRecord[] = [];
 
-  let status: SweepState["status"] = "running";
-  let nextPageToken: string | null | undefined = prior.pageToken ?? undefined;
+  // status + nextPageToken are assigned in every try branch AND the catch,
+  // so no initializer is needed (and a dead one trips CodeQL).
+  let status: SweepState["status"];
+  let nextPageToken: string | null | undefined;
   let shouldContinue = false;
   let errorMsg: string | undefined;
 

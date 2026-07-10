@@ -28,11 +28,14 @@ interface DispatchEvent {
  * re-kicked from its saved page cursor. */
 const SWEEP_STALE_MS = 15 * 60_000;
 
-function sweepNeedsKick(s: SweepState | undefined, now: number): boolean {
+export function sweepNeedsKick(s: SweepState | undefined, now: number): boolean {
   if (!s) return false;
   if (s.status === "pending") return true;
   if (s.status === "running") {
-    const updated = s.updatedAt ? new Date(s.updatedAt).getTime() : 0;
+    const parsed = s.updatedAt ? new Date(s.updatedAt).getTime() : 0;
+    // An unparseable updatedAt → NaN → every comparison is false, which would
+    // strand the stalled sweep. Treat NaN as "very old" so it gets re-kicked.
+    const updated = Number.isNaN(parsed) ? 0 : parsed;
     return now - updated > SWEEP_STALE_MS;
   }
   return false; // complete / error → dispatcher leaves it alone

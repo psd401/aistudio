@@ -29,7 +29,9 @@ export async function runLearning(row: TriageRow): Promise<void> {
   const { learnedPatterns, suggestions } = computeLearning({
     corrections: row.recentCorrections ?? [],
     decisions: row.recentDecisions ?? [],
-    rules: row.rules,
+    // Defensive: a row missing `rules` (shouldn't happen post-enable) would
+    // otherwise throw in computeLearning's alreadyRuled().
+    rules: row.rules ?? { vipSenders: [], muteSenders: [], keywordRules: [] },
     dismissedSuggestionIds: row.dismissedSuggestions,
     appliedSuggestionIds: row.appliedSuggestions,
   });
