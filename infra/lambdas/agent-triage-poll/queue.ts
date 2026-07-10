@@ -14,6 +14,8 @@
  *   - learn : nightly correction-driven learning (dispatcher, daily rule)
  */
 
+import { createHash } from "crypto";
+
 import {
   SQSClient,
   SendMessageCommand,
@@ -37,9 +39,17 @@ function sqs(): SQSClient {
   return cached;
 }
 
-/** SQS caps a MessageDeduplicationId at 128 chars. */
-function clampDedupId(id: string): string {
-  return id.length <= 128 ? id : id.slice(0, 128);
+/**
+ * Fit a dedup id under SQS's 128-char MessageDeduplicationId limit WITHOUT
+ * dropping the discriminating suffix. Right-truncation would lop off the
+ * `:${pageToken}` / `:${bucket}` tail that makes consecutive messages
+ * distinct — collapsing sweep continuations for long user emails. When the
+ * id is too long we hash the WHOLE id (suffix included) so distinct ids stay
+ * distinct and identical ids still dedupe.
+ */
+export function clampDedupId(id: string): string {
+  if (id.length <= 128) return id;
+  return `h:${createHash("sha256").update(id).digest("hex")}`; // 66 chars
 }
 
 /**

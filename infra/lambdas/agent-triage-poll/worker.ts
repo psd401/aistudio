@@ -21,34 +21,58 @@ import { runLearning } from "./learn";
 import { getTriageRow } from "./storage";
 import { enqueue, type QueueMessage } from "./queue";
 
-export const handler: SQSHandler = async (event) => {
+export interface BatchRecord {
+  messageId: string;
+  /** FIFO MessageGroupId (userEmail); falls back to messageId if absent. */
+  group: string;
+  body: string;
+}
+
+/**
+ * Process a batch of records with FIFO-correct partial-failure reporting.
+ * Records arrive in per-group order. Once a message in a group fails, every
+ * LATER message in the SAME group must also be reported as a failure and
+ * left unprocessed — otherwise SQS redelivers the retried message out of
+ * order relative to same-group work the handler already succeeded (a user's
+ * `poll` + `sweep`/`learn` can share a batch/group). Records in OTHER groups
+ * are unaffected. Pure orchestration (handler injected) so it's unit-testable.
+ */
+export async function processBatch(
+  records: BatchRecord[],
+  handle: (msg: QueueMessage) => Promise<void>,
+): Promise<{ itemIdentifier: string }[]> {
   const batchItemFailures: { itemIdentifier: string }[] = [];
-  // FIFO ordering: once a message in a group fails, every LATER message in
-  // the same group (userEmail) must also be reported as a failure and NOT
-  // processed — otherwise SQS would deliver them out of order relative to
-  // the retried one. Records arrive in per-group order within the batch.
   const failedGroups = new Set<string>();
 
-  for (const record of event.Records) {
-    const group = record.attributes?.MessageGroupId ?? record.messageId;
-    if (failedGroups.has(group)) {
+  for (const record of records) {
+    if (failedGroups.has(record.group)) {
       batchItemFailures.push({ itemIdentifier: record.messageId });
       continue;
     }
     try {
       const msg = JSON.parse(record.body) as QueueMessage;
-      await handleMessage(msg);
+      await handle(msg);
     } catch (err) {
       log("ERROR", "worker_message_failed", {
         messageId: record.messageId,
-        group,
+        group: record.group,
         err: err instanceof Error ? err.message : String(err),
       });
-      failedGroups.add(group);
+      failedGroups.add(record.group);
       batchItemFailures.push({ itemIdentifier: record.messageId });
     }
   }
 
+  return batchItemFailures;
+}
+
+export const handler: SQSHandler = async (event) => {
+  const records: BatchRecord[] = event.Records.map((r) => ({
+    messageId: r.messageId,
+    group: r.attributes?.MessageGroupId ?? r.messageId,
+    body: r.body,
+  }));
+  const batchItemFailures = await processBatch(records, handleMessage);
   return { batchItemFailures };
 };
 
