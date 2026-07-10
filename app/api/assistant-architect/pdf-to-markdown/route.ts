@@ -10,14 +10,15 @@ import { ErrorFactories } from "@/lib/error-utils"
 // Easily change the model id here
 const PDF_TO_MARKDOWN_MODEL_ID = 20
 
-// Limit request body size to 25MB for uploads
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: "25mb"
-    }
-  }
-}
+// NOTE: `export const config = { api: { bodyParser } }` was removed (REV-COR-201).
+// That is a Pages-Router API config; App Router route handlers ignore it, so it
+// enforced nothing. Size is capped by an early Content-Length check plus the
+// authoritative post-formData file.size check below.
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+// The early Content-Length guard below sees the whole multipart body (boundaries,
+// headers, other fields), not just the file bytes, so it needs slack above the
+// authoritative file.size limit or a file right at the limit gets rejected early.
+const MAX_UPLOAD_CONTENT_LENGTH_BYTES = MAX_UPLOAD_BYTES + 64 * 1024
 
 export const runtime = 'nodejs'
 
@@ -57,6 +58,19 @@ export async function POST(req: NextRequest) {
   }
   
   try {
+    // Reject obviously-oversized uploads via Content-Length BEFORE buffering the
+    // whole body (REV-COR-201). Content-Length can be spoofed/absent, so the
+    // post-formData file.size check below stays the authoritative guard.
+    const contentLength = Number(req.headers.get('content-length') || 0);
+    if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_CONTENT_LENGTH_BYTES) {
+      log.warn('Upload rejected by Content-Length', { contentLength });
+      timer({ status: "error", reason: "file_too_large" });
+      return new NextResponse(
+        JSON.stringify({ error: 'File size exceeds 25MB limit.' }),
+        { status: 413, headers }
+      );
+    }
+
     // Parse multipart form data
     log.debug('Parsing form data');
     const formData = await req.formData()
@@ -80,7 +94,7 @@ export async function POST(req: NextRequest) {
         { status: 400, headers }
       );
     }
-    if (file.size > 25 * 1024 * 1024) {
+    if (file.size > MAX_UPLOAD_BYTES) {
       log.warn('File too large', { fileSize: file.size });
       timer({ status: "error", reason: "file_too_large" });
       return new NextResponse(

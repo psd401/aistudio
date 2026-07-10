@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
-import { getChainPromptById, getAIModelById, getActiveAIModels } from "@/lib/db/drizzle"
+import { getChainPromptById, getAIModelById, getActiveAIModels, getAssistantArchitectById } from "@/lib/db/drizzle"
+import { hasCapabilityAccess, hasRole } from "@/utils/roles"
+import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -39,6 +41,37 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       timer({ status: "error", reason: "not_found" });
       return new NextResponse("Prompt not found", { status: 404, headers: { "X-Request-Id": requestId } })
     }
+
+    // Authorization (REV-SEC-102): a prompt's content/systemContext is the
+    // architect author's IP. Require the assistant-architect capability and access
+    // to the PARENT architect — owner OR admin OR approved — and return 404 (not
+    // 403) so unauthorized prompt ids are not enumerable.
+    const notFound = () => {
+      timer({ status: "error", reason: "forbidden" });
+      return new NextResponse("Prompt not found", { status: 404, headers: { "X-Request-Id": requestId } })
+    }
+    if (!(await hasCapabilityAccess("assistant-architect", session.sub))) {
+      log.warn("Prompt access denied - missing capability", { userId: session.sub });
+      return notFound()
+    }
+    const architect = prompt.assistantArchitectId != null
+      ? await getAssistantArchitectById(prompt.assistantArchitectId)
+      : null
+    if (!architect) {
+      log.warn("Prompt access denied - parent architect not found", { userId: session.sub, promptId: promptIdInt });
+      return notFound()
+    }
+    const isApproved = architect.status === "approved"
+    if (!isApproved) {
+      const currentUser = await getCurrentUserAction()
+      const callerId = currentUser.isSuccess ? currentUser.data?.user?.id : undefined
+      const isOwner = architect.userId != null && architect.userId === callerId
+      if (!isOwner && !(await hasRole("administrator"))) {
+        log.warn("Prompt access denied - no access to parent architect", { userId: session.sub, promptId: promptIdInt });
+        return notFound()
+      }
+    }
+
     let actualModelId: string | null = null;
 
     // If the prompt has a model ID integer reference, fetch the corresponding AI model's text model_id
