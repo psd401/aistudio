@@ -73,3 +73,6 @@ infra/**/package-lock.json
 .claude/worktrees/
 docs/learnings/.evolve-state.json
 tests/e2e/.auth/
+
+# Agent-image build-time eval-gate probe artifacts (#1161)
+infra/agent-image/.build-probes/

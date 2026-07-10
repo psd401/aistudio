@@ -93,6 +93,7 @@
     "096-atrium-publish-approvals.sql",
     "097-atrium-nav-entry.sql",
     "098-atrium-comments.sql",
-    "099-atrium-publish-approvals-unpublish-kind.sql"
+    "099-atrium-publish-approvals-unpublish-kind.sql",
+    "100-agent-iteration-telemetry.sql"
   ]
 }
