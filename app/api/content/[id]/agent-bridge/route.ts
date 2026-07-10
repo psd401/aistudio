@@ -198,10 +198,11 @@ async function loadEditableObject(
 }
 
 /** Screen agent markdown via the shared §28.3 core (`lib/content/agent-screening`
- * — guardrails fail-closed + PII telemetry, logging included). `requestId` threads
- * this request's correlation onto the core's blocked/degraded log lines. This
- * wrapper only maps the verdict to HTTP: 422 for blocked content, 503 for a
- * degraded (unavailable) screening evaluation. Returns null to proceed. */
+ * — guardrails fail-OPEN + PII telemetry, logging included). `requestId` threads
+ * this request's correlation onto the core's blocked log lines. This wrapper maps
+ * the verdict to HTTP: 422 for a positive guardrails detection. A degraded
+ * (unavailable) evaluation fails open in the core and never reaches here — the
+ * write proceeds. Returns null to proceed. */
 async function screenAgentMarkdown(
   markdown: string,
   objectId: string,
@@ -209,15 +210,10 @@ async function screenAgentMarkdown(
 ): Promise<NextResponse | null> {
   const verdict = await screenAgentContent(markdown, objectId, requestId);
   if (verdict.allowed) return null;
-  if (verdict.reason === "blocked") {
-    return NextResponse.json(
-      { error: "Content blocked by safety policy", message: verdict.message },
-      { status: 422 }
-    );
-  }
+  // Only a positive guardrails detection is non-allowed (degraded fails open).
   return NextResponse.json(
-    { error: "Safety screening unavailable", message: verdict.message },
-    { status: 503 }
+    { error: "Content blocked by safety policy", message: verdict.message },
+    { status: 422 }
   );
 }
 
@@ -429,7 +425,7 @@ async function postHandler(
     });
 
     if (!result.ok) {
-      // screenAgentMarkdown returned a blocked/degraded response inside the lock.
+      // screenAgentMarkdown returned a blocked (422) response inside the lock.
       timer({ status: "error" });
       return result.response;
     }

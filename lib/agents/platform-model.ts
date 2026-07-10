@@ -32,10 +32,13 @@
 export const AGENT_MODEL_ID = "claude-sonnet-5"
 
 /**
- * The model id OpenClaw SENDS to Mantle (the provider model `id` in
- * openclaw.json). Bedrock requires the `anthropic.` foundation-model form on
- * the request; `claude-sonnet-5` alone 404s ("model does not exist"). Distinct
- * from AGENT_MODEL_ID, which is the response/recorded form.
+ * The model id OpenClaw SENDS (the provider model `id` in openclaw.json).
+ * The provider talks DIRECTLY to Bedrock Mantle's anthropic-messages
+ * endpoint (#1138: the local logging proxy is out of the path; Mantle
+ * accepts x-api-key with the bearer token — verified live), and Mantle
+ * requires the `anthropic.` foundation-model form on the request. The
+ * short-lived us.-profile form from the abandoned bedrock-converse-stream
+ * attempt is still priced in migration 092 as an alias.
  */
 export const AGENT_REQUEST_MODEL_ID = "anthropic.claude-sonnet-5"
 

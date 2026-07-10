@@ -310,37 +310,57 @@ def hydrate_bedrock_api_key() -> None:
         os.environ["AWS_BEARER_TOKEN_BEDROCK"] = value
         version = resp.get("VersionId", "?")
 
-        # Inline the literal token into openclaw.json. OpenClaw rewrites
-        # this file on gateway startup (see `Config overwrite` logs), but
-        # it preserves the `apiKey` string as written. Substituting the
-        # literal here means every OpenClaw code path that reads the
-        # provider config — main pipeline, embedded runner, plugins —
-        # sees an identical, already-resolved value.
+        # Inline the literal token into openclaw.json IF the config still
+        # uses the token-authenticated mantle provider. The native
+        # `amazon-bedrock` provider (#1138 native program) authenticates via
+        # the aws-sdk credential chain (execution role) and has no apiKey
+        # field — nothing to inline, and its absence is NOT an error. The
+        # env var above stays hydrated either way (memorySearch's native
+        # bedrock path consumes AWS_BEARER_TOKEN_BEDROCK).
+        # BOOT-ABORT REGRESSION (2026-07-08, r10): this step used to
+        # sys.exit(1) when amazon-bedrock-mantle was absent, which killed
+        # every microVM boot after the provider switch (AgentCore 424
+        # "error when starting"). Absent provider now logs and continues.
         config_path = "/home/node/.openclaw/openclaw.json"
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            providers = cfg.get("models", {}).get("providers", {})
-            mantle = providers.get("amazon-bedrock-mantle")
-            if not mantle:
-                logger.error(
-                    "openclaw.json has no amazon-bedrock-mantle provider — "
-                    "cannot inline token"
-                )
-                sys.exit(1)
-            mantle["apiKey"] = value
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=2)
+        inlined = _inline_bearer_token(config_path, value)
+        if inlined:
             logger.info(
                 "Bedrock API key hydrated + inlined (secret=%s version=%s "
                 "config=%s)",
                 secret_arn.split(":")[-1], version, config_path,
             )
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.error("failed to inline API key into %s: %s", config_path, exc)
-            sys.exit(1)
+        else:
+            logger.info(
+                "Bedrock API key hydrated to env only (no token-auth "
+                "provider in openclaw.json — native aws-sdk provider active)"
+            )
     except Exception as exc:  # noqa: BLE001
         logger.error("failed to hydrate Bedrock API key: %s", exc)
+        sys.exit(1)
+
+
+def _inline_bearer_token(config_path: str, value: str) -> bool:
+    """Inline the bearer token into the mantle provider's apiKey, if present.
+
+    Returns True when a token-auth provider existed and was updated, False
+    when the config has no `amazon-bedrock-mantle` provider (the native
+    aws-sdk-auth provider path — nothing to inline). Config read/write
+    errors are fatal: a half-written openclaw.json would break the gateway
+    in stranger ways than a clean abort.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        providers = cfg.get("models", {}).get("providers", {})
+        mantle = providers.get("amazon-bedrock-mantle")
+        if not mantle:
+            return False
+        mantle["apiKey"] = value
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        return True
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("failed to inline API key into %s: %s", config_path, exc)
         sys.exit(1)
 
 
@@ -365,6 +385,113 @@ def handle_shutdown(signum, frame):
 
 signal.signal(signal.SIGTERM, handle_shutdown)
 signal.signal(signal.SIGINT, handle_shutdown)
+
+
+def _sanitize_header_field(value, max_len: int) -> str:
+    """Strip prompt-header delimiters and clamp length.
+
+    Attachment fields originate from user-controlled Chat data; re-sanitize
+    here (the router also cleans them) so a crafted filename can neither break
+    OUT of the [attachments: ...] header (brackets/newlines) nor SPOOF metadata
+    within a `name="…"` field (double-quote / backslash) — e.g. a filename like
+    `a" source="drive-link` forging a trusted driveFileId.
+    """
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r'["\\\[\]\n\r]', "", value).strip()[:max_len]
+
+
+def _attachment_workspace_paths(attachments) -> list:
+    """Collect valid workspace-relative paths of router-fetched Chat uploads.
+
+    Router-generated (`attachments/<stamp>-<idx>-<name>`), but treated as
+    untrusted since the payload crosses a service boundary: only plain
+    relative paths under attachments/ with a safe character set pass.
+    workspace_sync.pull_files() re-validates against traversal independently.
+    """
+    if not isinstance(attachments, list):
+        return []
+    paths = []
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        path = att.get("workspacePath")
+        if (
+            isinstance(path, str)
+            and path.startswith("attachments/")
+            and ".." not in path
+            and re.fullmatch(r"[A-Za-z0-9._/-]+", path)
+        ):
+            paths.append(path)
+    return paths
+
+
+def _render_attachments_header(attachments) -> str:
+    """Render forwarded Chat attachments into a prompt header (issue #1138 F1).
+
+    Tells the agent what arrived and how to reach it:
+      - Chat uploads the router fetched carry `path="…"` — the file already
+        exists in the workspace (pulled per-turn via workspace_sync.pull_files)
+        and the agent reads it directly with its file tools.
+      - Chat uploads WITHOUT a path failed to download — the agent should say
+        so and ask the user to re-attach, never pretend the file is absent.
+      - Drive files/chips are metadata-only by design (the Drive barrier):
+        readable via the psd-workspace skill, subject to sharing with the
+        agent account.
+    """
+    if not isinstance(attachments, list) or not attachments:
+        return ""
+    lines = []
+    fetched = 0
+    failed_uploads = 0
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        name = _sanitize_header_field(att.get("name"), 256) or "unnamed"
+        mime = _sanitize_header_field(att.get("mimeType"), 100) or "unknown type"
+        if att.get("source") == "drive-link":
+            drive_id = _sanitize_header_field(att.get("driveFileId"), 256)
+            loc = f' driveFileId="{drive_id}"' if drive_id else ""
+            lines.append(
+                f'- name="{name}" type="{mime}" source="drive-link"{loc}'
+            )
+        else:
+            path = _sanitize_header_field(att.get("workspacePath"), 512)
+            if path and path.startswith("attachments/"):
+                fetched += 1
+                lines.append(
+                    f'- name="{name}" type="{mime}" source="chat-upload" '
+                    f'path="/home/node/.openclaw/{path}"'
+                )
+            else:
+                failed_uploads += 1
+                lines.append(
+                    f'- name="{name}" type="{mime}" source="chat-upload" '
+                    f"(download failed — file NOT available)"
+                )
+    if not lines:
+        return ""
+    body = "\n".join(lines)
+    guidance = []
+    if fetched:
+        guidance.append(
+            "Files with a path= are already downloaded into your workspace — "
+            "read them directly with your file tools at that path."
+        )
+    if failed_uploads:
+        guidance.append(
+            "Files marked download failed could not be retrieved — tell the "
+            "user and ask them to re-attach."
+        )
+    guidance.append(
+        "To read a Google Drive file or chip, use the psd-workspace skill "
+        "(the file may need to be shared with your agent account first)."
+    )
+    return (
+        f"[attachments: the user attached {len(lines)} file(s) to this "
+        f"message]\n{body}\n"
+        f"[{' '.join(guidance)}]"
+    )
 
 
 def main():
@@ -428,6 +555,9 @@ def main():
             invoked_by_email          — cross-user: email of the person consulting this agent
             invoked_by_display_name   — cross-user: display name of the invoker
             thread_context            — cross-user: ephemeral thread context from the Chat space
+            attachments               — Chat files/Drive chips (issue #1138 F1):
+                                        [{name, mimeType, source, driveFileId?,
+                                          attachmentResourceName?}]
         """
         global _current_workspace_prefix
 
@@ -437,15 +567,27 @@ def main():
         display_name = payload.get("user_display_name", "")
         workspace_prefix = payload.get("workspace_prefix", "")
         model_override = payload.get("model")
+        # Optional turn-deadline override (async-job runner, #1138). Only the
+        # job runner sends this; interactive router turns omit it and get the
+        # 840s default. Non-int garbage degrades to None (default behavior).
+        raw_deadline = payload.get("deadline_s")
+        try:
+            deadline_s = int(raw_deadline) if raw_deadline is not None else None
+        except (TypeError, ValueError):
+            deadline_s = None
         # Cross-user invocation fields
         invoked_by_email = payload.get("invoked_by_email", "")
         invoked_by_display_name = payload.get("invoked_by_display_name", "")
         thread_context = payload.get("thread_context", "")
+        # Chat attachments / Drive chips the router forwarded (issue #1138 F1).
+        attachments_header = _render_attachments_header(payload.get("attachments"))
 
         logger.info(
-            "Invocation received: session=%s user=%s prefix=%s msg_length=%d cross_user=%s",
+            "Invocation received: session=%s user=%s prefix=%s msg_length=%d "
+            "cross_user=%s attachments=%d",
             session_id, user_email, workspace_prefix or "-", len(user_message),
             invoked_by_email or "no",
+            len(payload.get("attachments") or []),
         )
 
         if not user_message.strip():
@@ -475,6 +617,27 @@ def main():
             except Exception as exc:  # noqa: BLE001
                 logger.warning("workspace mount failed: %s", exc)
 
+        # Per-turn attachment delivery (issue #1138 F1): the router uploaded
+        # Chat attachment bytes to S3 AFTER this microVM's one-time workspace
+        # pull, so fetch exactly those keys now — the header below points the
+        # agent at /home/node/.openclaw/<workspacePath> and the file must
+        # exist there before the turn starts. Failures are non-fatal: the
+        # agent still gets the metadata and reports the file as unavailable.
+        attachment_paths = _attachment_workspace_paths(payload.get("attachments"))
+        if attachment_paths and workspace_prefix:
+            try:
+                pulled = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    workspace_sync.pull_files,
+                    workspace_prefix,
+                    attachment_paths,
+                )
+                logger.info(
+                    "attachments pulled: %d/%d", pulled, len(attachment_paths)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("attachment pull failed: %s", exc)
+
         # Inject per-turn context: the caller's identity AND the current
         # Pacific local time. The LLM has no real clock — without this header
         # it falls back to whatever timestamps it sees in system metadata
@@ -487,6 +650,11 @@ def main():
             f"[now: {pacific_now.strftime('%A, %B %d, %Y %-I:%M %p')} "
             f"Pacific ({pacific_now.strftime('%Y-%m-%dT%H:%M:%S%z')})]"
         )
+
+        # Attachment header goes between the identity/time headers and the
+        # user's message so the agent sees what arrived before reading the
+        # request (issue #1138 F1). Empty when there are no attachments.
+        attach_section = f"\n{attachments_header}" if attachments_header else ""
 
         # Cross-user invocation: when someone other than the agent owner
         # is consulting this agent, inject a [cross-user-invocation] header so
@@ -515,17 +683,17 @@ def main():
             framed = (
                 f"[agent-owner: {display_name or user_email} <{user_email}>]\n"
                 f"{now_header}\n"
-                f"{cross_user_header}{thread_section}\n\n"
+                f"{cross_user_header}{thread_section}{attach_section}\n\n"
                 f"{user_message}"
             )
         elif display_name or user_email != "unknown":
             framed = (
                 f"[caller: {display_name or user_email} <{user_email}>]\n"
-                f"{now_header}\n\n"
+                f"{now_header}{attach_section}\n\n"
                 f"{user_message}"
             )
         else:
-            framed = f"{now_header}\n\n{user_message}"
+            framed = f"{now_header}{attach_section}\n\n{user_message}"
 
         # Flush the SSE headers immediately. Without an early yield the SDK
         # waits for the first chunk before sending headers, defeating the
@@ -548,7 +716,8 @@ def main():
         # baseline must be fully read before process_task is scheduled.
         usage_baseline = await loop.run_in_executor(None, read_proxy_usage)
         process_task = loop.run_in_executor(
-            None, adapter.process, framed, session_id, model_override
+            None, adapter.process, framed, session_id, model_override,
+            deadline_s,
         )
 
         # Heartbeat every 30s while adapter.process runs in the executor.

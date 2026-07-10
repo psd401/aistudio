@@ -6,6 +6,7 @@ import {
   getDocumentById,
   deleteDocumentById
 } from '@/lib/db/queries/documents';
+import { getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
@@ -155,10 +156,31 @@ export async function GET(request: NextRequest) {
         );
       }
 
+      // Authorization (REV-SEC-122 / REV-COR-211): verify the caller owns the
+      // conversation before returning its documents and freshly-minted signed S3
+      // URLs. Without this, any authenticated user could enumerate a conversation
+      // UUID and download another user's uploaded files. Mirrors the ownership gate
+      // used by the link/process routes. Return 404 (not 403) to avoid confirming
+      // existence of conversations the caller cannot see.
+      const conversation = await getConversationById(
+        validationResult.data.conversationId,
+        userId
+      );
+      if (!conversation) {
+        log.warn("Unauthorized conversation documents access attempt", {
+          conversationId, userId
+        });
+        timer({ status: "error", reason: "conversation_not_found" });
+        return NextResponse.json(
+          { success: false, error: 'Conversation not found' },
+          { status: 404, headers: { "X-Request-Id": requestId } }
+        );
+      }
+
       const documents = await getDocumentsByConversationId({
         conversationId: validationResult.data.conversationId
       });
-      
+
       // Get fresh signed URLs for all documents
       const documentsWithSignedUrls = await Promise.all(
         documents.map(async (doc) => {
@@ -206,10 +228,11 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     timer({ status: "error" });
     log.error("Error fetching documents", error);
+    // REV-COR-208: never echo raw exception detail to the client.
     return NextResponse.json(
-      { 
-        success: false, 
-        error: error instanceof Error ? error.message : 'Failed to fetch documents' 
+      {
+        success: false,
+        error: 'Failed to fetch documents'
       },
       { status: 500, headers: { "X-Request-Id": requestId } }
     );
@@ -335,12 +358,13 @@ export async function DELETE(request: NextRequest) {
   } catch (error) {
     timer({ status: "error" });
     log.error("Error deleting document", error);
+    // REV-COR-208: never echo raw exception detail to the client.
     return NextResponse.json(
-      { 
-        success: false, 
-        error: error instanceof Error ? error.message : 'Failed to delete document' 
+      {
+        success: false,
+        error: 'Failed to delete document'
       },
       { status: 500, headers: { "X-Request-Id": requestId } }
     );
   }
-} 
+}

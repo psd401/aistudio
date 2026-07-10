@@ -68,6 +68,8 @@ interface ConversationRuntimeProviderProps {
   enabledTools: string[]
   enabledConnectors: string[]
   skillId?: string
+  /** The open workspace object id/slug (`?workspace=`); binds §1087 content tools server-side. */
+  workspaceId?: string
   attachmentAdapter: AttachmentAdapter
   voiceAdapter?: RealtimeVoiceAdapter
   initialMessages?: UIMessage[]
@@ -88,6 +90,7 @@ function ConversationRuntimeProvider({
   enabledTools,
   enabledConnectors,
   skillId,
+  workspaceId,
   attachmentAdapter,
   voiceAdapter,
   initialMessages = [],
@@ -101,6 +104,13 @@ function ConversationRuntimeProvider({
   // causing duplicate message rendering. (Issue #868)
   const conversationIdRef = useRef(conversationId)
   conversationIdRef.current = conversationId
+
+  // Track the open workspace id via ref so the transport body always sends the
+  // CURRENT value: the runtime is created once (stable), but the user can open /
+  // close / switch the workspace panel mid-conversation (§1087). Reading a ref
+  // keeps the sent workspaceId fresh without recreating the transport.
+  const workspaceIdRef = useRef(workspaceId)
+  workspaceIdRef.current = workspaceId
 
   // Track session status via ref for use inside customFetch without adding to deps.
   // useSession is safe here — SessionProvider wraps this component tree.
@@ -323,6 +333,8 @@ function ConversationRuntimeProvider({
           enabledConnectors,
           // Bind the session to a skill so the server enforces its allowed-tools pin (#925).
           skillId,
+          // Bind the open workspace object so the server offers §1087 read/edit tools.
+          workspaceId: workspaceIdRef.current || undefined,
           conversationId: conversationIdRef.current || undefined
         }
       }
@@ -353,6 +365,8 @@ interface NexusRuntimeWrapperProps {
   enabledTools: string[]
   enabledConnectors: string[]
   skillId?: string
+  /** Open workspace object id/slug (`?workspace=`); passed to the runtime for §1087 tools. */
+  workspaceId?: string
   attachmentAdapter: AttachmentAdapter
   voiceAvailable: boolean
   voiceUnavailableReason?: string
@@ -372,6 +386,7 @@ function NexusRuntimeWrapper({
   enabledTools,
   enabledConnectors,
   skillId,
+  workspaceId,
   attachmentAdapter,
   voiceAvailable,
   voiceUnavailableReason,
@@ -452,6 +467,7 @@ function NexusRuntimeWrapper({
       enabledTools={enabledTools}
       enabledConnectors={enabledConnectors}
       skillId={skillId}
+      workspaceId={workspaceId}
       attachmentAdapter={attachmentAdapter}
       voiceAdapter={voiceAdapter}
       initialMessages={initialMessages}
@@ -668,7 +684,13 @@ function NexusPageContent() {
     // component state is reset — equivalent to the previous reload() but targeting
     // the clean URL without ?id=.
     if (model && selectedModel && model.modelId !== selectedModel.modelId) {
-      window.location.href = '/nexus';
+      // Preserve an open workspace across the model-change reload (§1087): the
+      // clean-URL reset must not silently close the document/artifact the user is
+      // editing beside the chat (it would also drop the workspace content tools).
+      const workspace = new URLSearchParams(window.location.search).get('workspace');
+      window.location.href = workspace
+        ? `/nexus?workspace=${encodeURIComponent(workspace)}`
+        : '/nexus';
     }
   }, [originalSetSelectedModel, selectedModel])
 
@@ -837,6 +859,7 @@ function NexusPageContent() {
                           enabledTools={enabledTools}
                           enabledConnectors={enabledConnectors}
                           skillId={urlSkillId}
+                          workspaceId={urlWorkspaceId ?? undefined}
                           attachmentAdapter={attachmentAdapter}
                           voiceAvailable={voiceAvailability.available}
                           voiceUnavailableReason={!voiceAvailability.available && !voiceAvailability.loading ? voiceAvailability.reason : undefined}
