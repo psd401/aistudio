@@ -30,9 +30,20 @@
 'use strict';
 
 const {
-  fail, emit, validateUserEmail, parseArgs, authorizeUser,
+  fail, validateUserEmail, parseArgs, authorizeUser,
   canvaFetch, startAndPollJob, pollJob, failFromCanvaError, emitNeedsAuthAndExit,
 } = require('./common');
+
+/**
+ * Read a value-carrying flag. A flag passed without a value parses as boolean
+ * true — fail loudly instead of silently ignoring what the caller clearly
+ * intended to pass. Returns the string value or undefined when absent.
+ */
+function flagValue(args, name) {
+  const v = args[name];
+  if (v === true) fail(`--${name.replace(/_/g, '-')} requires a value`);
+  return v;
+}
 
 /**
  * Resolve an access token, run `fn(accessToken)`, and normalize failures:
@@ -89,10 +100,14 @@ async function main() {
 
     case 'list-designs': {
       const query = {};
-      if (args.query && args.query !== true) query.query = args.query;
-      if (args.ownership && args.ownership !== true) query.ownership = args.ownership;
-      if (args.sort_by && args.sort_by !== true) query.sort_by = args.sort_by;
-      if (args.continuation && args.continuation !== true) query.continuation = args.continuation;
+      const q = flagValue(args, 'query');
+      if (q) query.query = q;
+      const ownership = flagValue(args, 'ownership');
+      if (ownership) query.ownership = ownership;
+      const sortBy = flagValue(args, 'sort_by');
+      if (sortBy) query.sort_by = sortBy;
+      const continuation = flagValue(args, 'continuation');
+      if (continuation) query.continuation = continuation;
       const result = await withAuth(userEmail, 'list-designs', (token) =>
         canvaFetch(token, 'GET', '/v1/designs', { query }));
       ok(result);
@@ -103,12 +118,16 @@ async function main() {
       // POST /v1/designs requires the top-level "type" discriminator alongside
       // design_type/asset_id; at least one of the two must be set.
       const body = { type: 'type_and_asset' };
-      if (args.title && args.title !== true) body.title = args.title;
-      if (args.asset_id && args.asset_id !== true) body.asset_id = String(args.asset_id);
-      const preset = args.design_type;
-      const width = args.width && args.width !== true ? Number(args.width) : null;
-      const height = args.height && args.height !== true ? Number(args.height) : null;
-      if (preset && preset !== true) {
+      const title = flagValue(args, 'title');
+      if (title) body.title = title;
+      const assetId = flagValue(args, 'asset_id');
+      if (assetId) body.asset_id = String(assetId);
+      const preset = flagValue(args, 'design_type');
+      const widthRaw = flagValue(args, 'width');
+      const heightRaw = flagValue(args, 'height');
+      const width = widthRaw ? Number(widthRaw) : null;
+      const height = heightRaw ? Number(heightRaw) : null;
+      if (preset) {
         body.design_type = { type: 'preset', name: preset };
       } else if (width && height && !Number.isNaN(width) && !Number.isNaN(height)) {
         body.design_type = { type: 'custom', width, height };
@@ -122,12 +141,14 @@ async function main() {
     }
 
     case 'export': {
-      if (!args.design_id || args.design_id === true) fail('export requires --design-id <id>');
-      const format = (args.format && args.format !== true ? String(args.format) : '').toLowerCase();
+      const designId = flagValue(args, 'design_id');
+      if (!designId) fail('export requires --design-id <id>');
+      const format = String(flagValue(args, 'format') || '').toLowerCase();
       if (format !== 'pdf' && format !== 'png') fail('export requires --format pdf|png');
-      const body = { design_id: args.design_id, format: { type: format } };
-      if (args.pages && args.pages !== true) {
-        const pages = String(args.pages).split(',').map((p) => Number(p.trim())).filter((n) => Number.isInteger(n) && n > 0);
+      const body = { design_id: designId, format: { type: format } };
+      const pagesRaw = flagValue(args, 'pages');
+      if (pagesRaw) {
+        const pages = String(pagesRaw).split(',').map((p) => Number(p.trim())).filter((n) => Number.isInteger(n) && n > 0);
         // A supplied-but-unusable page list must fail loudly — silently
         // dropping it would export ALL pages against the caller's intent.
         if (!pages.length) fail('export --pages must be a comma-separated list of positive page numbers (e.g. 1,2,3)');
@@ -141,13 +162,14 @@ async function main() {
     }
 
     case 'upload-asset': {
-      if (!args.file || args.file === true) fail('upload-asset requires --file <local-path>');
+      const file = flagValue(args, 'file');
+      if (!file) fail('upload-asset requires --file <local-path>');
       const fs = require('node:fs');
       const path = require('node:path');
       let bytes;
-      try { bytes = fs.readFileSync(args.file); }
-      catch (err) { fail(`cannot read --file "${args.file}": ${err.message}`); }
-      const name = args.name && args.name !== true ? String(args.name) : path.basename(String(args.file));
+      try { bytes = fs.readFileSync(file); }
+      catch (err) { fail(`cannot read --file "${file}": ${err.message}`); }
+      const name = flagValue(args, 'name') || path.basename(String(file));
       // Canva asset upload: RAW BINARY body + Asset-Upload-Metadata header
       // (name_base64), NOT a JSON url-based upload. Returns an async job.
       const meta = JSON.stringify({ name_base64: Buffer.from(name, 'utf8').toString('base64') });

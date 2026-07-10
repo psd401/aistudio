@@ -54,6 +54,8 @@ const CANVA_OAUTH_TOKEN_URL =
 const CANVA_OAUTH_SECRET_ID =
   process.env.CANVA_OAUTH_SECRET_ID || `psd-agent/${ENVIRONMENT}/canva-oauth-client`;
 
+// Keep in sync with lib/agent-workspace/validation.ts (standalone CJS skill —
+// can't import from the Next.js module graph).
 const SAFE_EMAIL_RE = /^[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}$/;
 
 const smClient = new SecretsManagerClient({ region: REGION });
@@ -136,7 +138,7 @@ async function getCanvaClientCreds() {
     const creds = await getSecretJson(CANVA_OAUTH_SECRET_ID);
     const id = creds && creds.client_id;
     const secret = creds && creds.client_secret;
-    if (id && secret && id !== 'PLACEHOLDER' && secret !== 'PLACEHOLDER') {
+    if (id && secret && !id.startsWith('PLACEHOLDER') && !secret.startsWith('PLACEHOLDER')) {
       return { client_id: id, client_secret: secret };
     }
     return null;
@@ -184,6 +186,8 @@ async function refreshCanvaAccessToken(refreshToken, clientId, clientSecret) {
       Authorization: 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64'),
     },
     body: body.toString(),
+    // Bound the refresh so an unresponsive token endpoint can't hang the turn.
+    signal: AbortSignal.timeout(15_000),
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
@@ -235,6 +239,8 @@ async function mintConsentUrl(ownerEmail) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ ownerEmail, kind: 'canva' }),
+    // Bound the mint call so a slow web app can't hang the needs-auth path.
+    signal: AbortSignal.timeout(15_000),
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok || !data.url) throw new Error(`Consent-link API failed: ${resp.status} ${data.error || ''}`);

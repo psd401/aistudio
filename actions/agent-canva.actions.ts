@@ -138,6 +138,7 @@ export async function verifyCanvaConsentAndGetOAuthUrl(
           .from(psdAgentWorkspaceConsentNonces)
           .where(
             sql`${psdAgentWorkspaceConsentNonces.nonce} = ${payload.nonce}
+                AND ${psdAgentWorkspaceConsentNonces.tokenKind} = 'canva'
                 AND ${psdAgentWorkspaceConsentNonces.consumedAt} IS NULL
                 AND ${psdAgentWorkspaceConsentNonces.createdAt} > ${oneHourAgo}::timestamptz`
           )
@@ -251,6 +252,8 @@ export async function handleCanvaCallback(
         Authorization: basicAuthHeader(creds.client_id, creds.client_secret),
       },
       body: body.toString(),
+      // Bound the exchange so an unresponsive Canva can't hang the server action.
+      signal: AbortSignal.timeout(15_000),
     })
     const data = (await resp.json().catch(() => ({}))) as {
       refresh_token?: string

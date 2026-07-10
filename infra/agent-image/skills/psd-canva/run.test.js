@@ -151,6 +151,25 @@ test('withAuth maps any other Canva failure to canva-error (exit 12)', async () 
   expect(emitted.http_status).toBe(500);
 });
 
+test('a value-flag passed without a value fails loudly instead of being ignored', async () => {
+  const originalExit = process.exit.bind(process);
+  const originalErrWrite = process.stderr.write.bind(process.stderr);
+  let exitCode;
+  const errChunks = [];
+  process.exit = (code) => { exitCode = code; throw new Error('__test_exit__'); };
+  process.stderr.write = (chunk) => { errChunks.push(chunk); return true; };
+  process.argv = ['node', 'run.js', '--user', EMAIL, 'list-designs', '--query'];
+  try {
+    await expect(main()).rejects.toThrow('__test_exit__');
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalErrWrite;
+  }
+  expect(exitCode).toBe(1);
+  expect(errChunks.join('')).toContain('--query requires a value');
+  expect(fetchCalls).toHaveLength(0);
+});
+
 test('list-designs forwards query/ownership/sort-by as GET params', async () => {
   await runCli(['--user', EMAIL, 'list-designs', '--query', 'poster', '--ownership', 'owned', '--sort-by', 'modified_descending']);
   expect(fetchCalls).toHaveLength(1);
@@ -213,12 +232,15 @@ test('export --pages parses a CSV page list into format.pages', async () => {
 });
 
 test('upload-asset reads the file and POSTs binary to /v1/asset-uploads with metadata header', async () => {
-  const tmp = path.join(os.tmpdir(), `psd-canva-test-${Date.now()}.txt`);
+  // mkdtemp creates a unique, owner-only (0700) directory — avoids the
+  // predictable-path-in-shared-tmp pattern CodeQL flags (js/insecure-temporary-file).
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'psd-canva-test-'));
+  const tmp = path.join(tmpDir, 'asset.txt');
   fs.writeFileSync(tmp, 'hello-canva');
   try {
     await runCli(['--user', EMAIL, 'upload-asset', '--file', tmp, '--name', 'My Asset']);
   } finally {
-    fs.unlinkSync(tmp);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
   expect(fetchCalls).toHaveLength(1);
   expect(fetchCalls[0].method).toBe('POST');
