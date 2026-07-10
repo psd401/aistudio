@@ -652,8 +652,10 @@ paths:
             default: 50
         - name: cursor
           in: query
+          description: Opaque assistant-id cursor from a previous response's `meta.nextCursor`. Must be a positive integer string.
           schema:
             type: string
+            pattern: "^[1-9]\\d*$"
       responses:
         "200":
           description: List of assistants
@@ -676,6 +678,12 @@ paths:
                       nextCursor:
                         type: string
                         nullable: true
+        "400":
+          description: Invalid query parameters (e.g. non-numeric `cursor`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

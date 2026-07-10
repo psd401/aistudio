@@ -520,12 +520,27 @@ export async function POST(req: NextRequest) {
     log.info('Tool execution created for scheduled run', { executionId, toolId, scheduleId });
 
     // 7. Execute prompt chain server-side (no SSE)
+    // Owner's cognito_sub (not the numeric users.id) so owner-based repository
+    // access resolves for non-owner scheduled runs (REV-COR-511). getUserById
+    // throws if the owner row is gone — treat that as no owner sub rather than
+    // failing the scheduled run (REV-COR-511 follow-up).
+    let assistantOwnerSub: string | undefined;
+    if (architect.userId) {
+      try {
+        assistantOwnerSub = (await getUserById(architect.userId))?.cognitoSub ?? undefined;
+      } catch (error) {
+        log.warn('Failed to resolve assistant owner sub', {
+          userId: architect.userId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const context: PromptExecutionContext = {
       previousOutputs: new Map(),
       accumulatedMessages: [],
       executionId,
       userCognitoSub,
-      assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
+      assistantOwnerSub,
       userId,
       assistantId: toolId,
       // The resolved service-identity Requester (null when the schedule runs as the

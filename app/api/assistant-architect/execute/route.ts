@@ -700,6 +700,35 @@ async function runExecutionAndBuildResponse(args: {
 }
 
 /**
+ * Resolve the architect owner's Cognito sub (REV-COR-181 / REV-COR-511).
+ * assistantOwnerSub is matched against users.cognito_sub by knowledge
+ * retrieval / repository tools, so a numeric users.id here never matched and
+ * silently disabled owner-repository access on non-owner executions. Only
+ * looked up when the executor is not the owner — owner === executor is
+ * already covered by userCognitoSub = session.sub. getUserById throws if the
+ * owner row is gone (e.g. deleted user) — treat that as no owner sub rather
+ * than failing the execution.
+ */
+async function resolveAssistantOwnerSub(
+  architectUserId: number | null | undefined,
+  executorUserId: number,
+  log: ReturnType<typeof createLogger>
+): Promise<string | undefined> {
+  if (architectUserId == null || architectUserId === executorUserId) {
+    return undefined;
+  }
+  try {
+    return (await getUserById(architectUserId))?.cognitoSub ?? undefined;
+  } catch (error) {
+    log.warn('Failed to resolve assistant owner sub', {
+      userId: architectUserId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return undefined;
+  }
+}
+
+/**
  * Assistant Architect Execution API - Native SSE Streaming
  *
  * Replaces polling-based execution with native streaming, supporting:
@@ -761,17 +790,9 @@ export async function POST(req: Request) {
     // agentic tool resolution; harmless to compute for prompt-chain mode too.
     const callerRoleNames = currentUserData.roles.map(r => r.name);
 
-    // Resolve the architect owner's Cognito sub (REV-COR-181). assistantOwnerSub is
-    // matched against users.cognito_sub by knowledge retrieval / repository tools, so
-    // the previous String(architect.userId) (a numeric id) never matched and silently
-    // disabled owner-repository access on non-owner executions. Only look it up when
-    // the executor is not the owner — owner === executor is already covered by
-    // userCognitoSub = session.sub.
-    let assistantOwnerSub: string | undefined;
-    if (architect.userId != null && architect.userId !== userId) {
-      const ownerRow = await getUserById(architect.userId);
-      assistantOwnerSub = ownerRow?.cognitoSub ?? undefined;
-    }
+    // Owner's cognito_sub for owner-based repository access on non-owner runs
+    // (REV-COR-181 / REV-COR-511) — see resolveAssistantOwnerSub.
+    const assistantOwnerSub = await resolveAssistantOwnerSub(architect.userId, userId, log);
 
     const context: PromptExecutionContext = {
       previousOutputs: new Map(),

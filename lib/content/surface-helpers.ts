@@ -96,12 +96,14 @@ export const ATRIUM_CONTENT_CAPABILITY = "atrium-content";
  * Gate a CONTENT-AUTHORING call (create/update/version/visibility/publish) by the
  * `atrium-content` feature capability — for SESSION callers only.
  *
- * A browser session gets `scopes: ["*"]` (`authenticateRequest`), which trivially
- * satisfies every `requireScope("content:*")` check, so scope enforcement alone
- * lets ANY logged-in user (e.g. a `student`, who does not hold `atrium-content`)
- * author content through the REST v1 / MCP surfaces — bypassing the capability
- * check that EVERY Atrium UI server action already enforces. This closes that
- * gap by requiring the same capability for session-authenticated humans.
+ * Session scopes are role-derived (REV-SEC-161, `lib/api/auth-middleware.ts`), not
+ * a wildcard, so `requireScope("content:*")` is no longer a pure no-op for a
+ * session caller. But role-derived scopes and the `atrium-content` capability are
+ * two independent grants (see capabilities-vs-scopes separation below) — a role's
+ * scope mapping is not guaranteed to track the capability, so a logged-in user
+ * whose role happens to carry a content scope could still lack `atrium-content`.
+ * This function is the capability-side gate that every Atrium UI server action
+ * already enforces, applied to session callers on the REST v1 / MCP surfaces too.
  *
  * `api_key` (`sk-`) and `jwt` (OIDC) callers are intentionally NOT gated here:
  * their access is scoped by an explicitly granted `content:*` scope (issuing an
@@ -112,19 +114,20 @@ export const ATRIUM_CONTENT_CAPABILITY = "atrium-content";
  * NOTE on the capabilities-vs-scopes separation: CLAUDE.md says do NOT gate
  * API/MCP endpoints with `hasCapabilityAccess()`. This is a deliberate, bounded
  * exception scoped to the ONE case that rule can't cover: a browser session on an
- * API/MCP surface authenticates with the wildcard `["*"]` scope, so `requireScope`
- * is a no-op for it and scopes provide NO gating at all. The capability check is
- * applied ONLY to that session path (the `authType !== "session"` early-return
- * keeps every genuine api_key/jwt/MCP-token caller purely scope-gated). Do NOT
- * extend this to non-session callers — that WOULD violate the separation.
+ * API/MCP surface authenticates via role-derived scopes, not a capability grant,
+ * so `requireScope` alone cannot confirm `atrium-content` specifically. The
+ * capability check is applied ONLY to that session path (the `authType !==
+ * "session"` early-return keeps every genuine api_key/jwt/MCP-token caller purely
+ * scope-gated) as a second, independent layer — not a substitute for scopes. Do
+ * NOT extend this to non-session callers — that WOULD violate the separation.
  */
 export async function assertContentAuthoringCapability(auth: {
   authType?: "session" | "api_key" | "jwt";
   cognitoSub: string;
 }): Promise<void> {
-  // Only browser sessions carry the wildcard ["*"] scope that bypasses granular
-  // scope checks; a missing authType is an internal (non-HTTP) caller — neither
-  // is gated on scope, so neither is a session and the gate does not apply.
+  // Only browser sessions need the capability gate — their scopes come from role
+  // mapping, not an explicit content grant; a missing authType is an internal
+  // (non-HTTP) caller, so neither is a session and the gate does not apply.
   if (auth.authType !== "session") return;
   const allowed = await hasCapabilityAccess(
     ATRIUM_CONTENT_CAPABILITY,
