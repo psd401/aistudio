@@ -1,6 +1,6 @@
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAzure } from '@ai-sdk/azure';
-import { google } from '@ai-sdk/google';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
@@ -97,8 +97,10 @@ async function createGoogleModel(modelId: string): Promise<LanguageModel> {
     }
 
     log.debug(`Creating Google model: ${modelId}`);
-    // Set environment variable for Google SDK
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY = apiKey;
+    // Scope the DB-sourced key to this client instead of mutating process.env at
+    // request time (REV-COR-505 / REV-REF-034). Mirrors gemini-adapter.ts and
+    // image-generation-service.ts.
+    const google = createGoogleGenerativeAI({ apiKey });
     return google(modelId);
   } catch (error) {
     log.error('Failed to create Google model', { modelId, error });
