@@ -266,7 +266,7 @@ graph TB
 - **Multi-AZ**: Nodes in both availability zones
 - **SSL/TLS**: Certificate auto-renewal via ACM
 - **Connection draining**: 300-second timeout
-- **Stickiness**: Session-based routing enabled
+- **Stickiness**: Disabled — the app is stateless (JWT sessions), so duration-based stickiness was removed to eliminate the AWSALB/AWSALBCORS cookies Qualys flagged for missing Secure/HttpOnly (issues #878/#1009, PR #879)
 
 ## Security Architecture
 
