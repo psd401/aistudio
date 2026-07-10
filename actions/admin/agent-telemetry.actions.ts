@@ -214,7 +214,11 @@ async function getIterationStats(
   return {
     avgModelCallsPerTurn: Math.round(Number(row?.avgModelCalls ?? 0) * 10) / 10,
     p95ModelCallsPerTurn: Math.round(Number(row?.p95ModelCalls ?? 0)),
-    emptyTurnRate: totalMessages > 0 ? emptyTurnCount / totalMessages : 0,
+    // emptyTurnCount comes from agent_failures while the denominator is
+    // agent_messages; that cross-table pairing is 1:1 in practice, but clamp to
+    // [0,1] so a transient mismatch can never render a >100% rate.
+    emptyTurnRate:
+      totalMessages > 0 ? Math.min(1, emptyTurnCount / totalMessages) : 0,
     nudgeFireRate: totalMessages > 0 ? nudgeCount / totalMessages : 0,
   }
 }

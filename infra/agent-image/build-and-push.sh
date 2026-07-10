@@ -61,14 +61,21 @@ echo ""
 # Would have stopped r10 (dead-boot), r11 (missing provider), and the weeks-long
 # SOUL.md truncation on a laptop instead of in prod.
 #
-# SKIP_PROBE_GATE=1 bypasses the ENTIRE gate — reserved for emergencies (a
-# broken gate must never block all image releases). Static gates run fail-fast
-# here (before the expensive ECR/build steps); the runtime probe runs after the
-# image is built, before push.
+# Two separate bypasses, so an emergency doesn't disable more than it must:
+#   SKIP_PROBE_GATE=1   skips only the RUNTIME boot-probe + canary turn (checks
+#                       3-4) — reserved for a broken probe blocking releases.
+#   SKIP_STATIC_GATE=1  skips the cheap STATIC checks (1-2). These are pure file
+#                       checks with no external dependency and essentially never
+#                       need bypassing — this exists only for a true emergency,
+#                       and is deliberately a DIFFERENT flag so SKIP_PROBE_GATE
+#                       can't silently disable the instruction-budget /
+#                       config-consistency gates that guard the #1138 class.
+# Static gates run fail-fast here (before the expensive ECR/build steps); the
+# runtime probe runs after the image is built, before push.
 PYTHON="${PYTHON:-python3}"
 
-if [ "${SKIP_PROBE_GATE:-0}" = "1" ]; then
-  echo "WARNING: SKIP_PROBE_GATE=1 — build-time eval gate BYPASSED (emergency only)."
+if [ "${SKIP_STATIC_GATE:-0}" = "1" ]; then
+  echo "WARNING: SKIP_STATIC_GATE=1 — static eval gates BYPASSED (emergency only)."
   echo ""
 else
   echo "=== Build-time eval gate (1161): static checks ==="

@@ -95,13 +95,20 @@ def check_apikey_hydration(config: dict, wrapper_path: str) -> List[str]:
         if not env_var:
             violations.append(f"{provider_name}: apiKey 'env:' has no variable name")
             continue
-        # The wrapper must actually set this env var (hydration). Matching the
-        # bare name is enough — a provider pointing at an env var the wrapper
-        # never mentions has no hydration path.
-        if env_var not in wrapper_src:
+        # The wrapper must actually SET this env var (hydration), i.e. contain an
+        # `os.environ["VAR"]` reference — not merely the bare name as a substring.
+        # A bare-name match false-passes when the var is a substring of another
+        # name (e.g. `TOKEN` inside `AWS_BEARER_TOKEN_BEDROCK`) or appears only in
+        # a comment, exactly the r11 "missing provider" class this gate exists to
+        # catch. Accept single- or double-quoted subscript.
+        hydration_markers = (
+            f'os.environ["{env_var}"]',
+            f"os.environ['{env_var}']",
+        )
+        if not any(marker in wrapper_src for marker in hydration_markers):
             violations.append(
-                f"{provider_name}: apiKey env:{env_var} has no hydration path in "
-                f"{os.path.basename(wrapper_path)}"
+                f"{provider_name}: apiKey env:{env_var} has no hydration path "
+                f'(os.environ["{env_var}"]) in {os.path.basename(wrapper_path)}'
             )
     return violations
 

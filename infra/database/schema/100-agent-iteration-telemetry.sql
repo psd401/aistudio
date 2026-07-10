@@ -33,8 +33,8 @@
 -- DO $$ blocks (the migration runner's statement splitter cannot handle
 -- dollar-quoted blocks -- see migration 079). agent_messages is owned by the
 -- migration role (created in 065), so ALTER TABLE ADD COLUMN is permitted
--- (unlike the postgres-owned 001-005 objects — see 2026-07 owner-privilege
--- learning).
+-- (the migration role cannot ALTER objects owned by postgres, i.e. the
+-- 001-005 tables/types, but 065-owned tables like this one are fine).
 
 ALTER TABLE agent_messages
   ADD COLUMN IF NOT EXISTS model_call_count INTEGER NOT NULL DEFAULT 0;
