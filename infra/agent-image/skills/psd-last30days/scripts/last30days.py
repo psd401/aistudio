@@ -16,9 +16,11 @@ Design (why this differs from upstream):
   image footprint stays lean and the AgentCore Firecracker microVM boot is not
   put at risk (the matplotlib/pymupdf1.x precedent). boto3 (already baked into
   the venv) is used only for the optional S3 HTML upload.
-- No env/.env/~/.config secret reads. GitHub optionally borrows the caller's
-  `gh auth token` for a higher rate limit, but every source works without any
-  key. If a paid source is ever provisioned, its key must come from
+- No secret reads from env/.env/~/.config. The only environment reads are
+  non-secret deployment config (WORKSPACE_BUCKET, AWS_REGION) for the optional
+  S3 upload. GitHub optionally borrows the container's `gh auth token` for a
+  higher rate limit, but every source works without any key. If a paid source
+  is ever provisioned, its key must come from
   `psd-credentials get --shared --name <key>` — never the environment.
 
 The engine is deliberately synthesis-light: it fetches, filters to the window,
@@ -41,7 +43,6 @@ Usage:
 """
 
 import argparse
-import concurrent.futures
 import datetime as dt
 import html
 import json
@@ -49,7 +50,8 @@ import os
 import re
 import subprocess
 import sys
-import urllib.error
+import threading
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -76,7 +78,10 @@ DEFAULT_DAYS = 30
 MAX_DAYS = 90
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 25
-FETCH_TIMEOUT = 15  # seconds per HTTP request
+FETCH_TIMEOUT = 15  # seconds per socket operation within one HTTP request
+# Overall budget for ALL sources combined. FETCH_TIMEOUT only bounds each
+# socket op, so a slow-dripping endpoint could otherwise stall the run forever.
+GATHER_DEADLINE = 60  # seconds
 # Cap each response body so a hostile/misbehaving endpoint can't exhaust memory.
 # The feeds we fetch are JSON/XML in the tens-to-hundreds of KB; 8 MB is generous.
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -111,8 +116,14 @@ def _emit(obj):
 
 
 def valid_email(email):
-    # Reject '/' because the email is interpolated into the S3 key path.
-    return bool(email) and bool(_EMAIL_RE.match(email)) and "/" not in email
+    # Length cap (RFC 5321 ceiling) bounds the regex work; reject '/' because
+    # the email is interpolated into the S3 key path.
+    return (
+        bool(email)
+        and len(email) <= 254
+        and bool(_EMAIL_RE.match(email))
+        and "/" not in email
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -137,7 +148,15 @@ class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _check_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None and (
+            urllib.parse.urlparse(newurl).hostname
+            != urllib.parse.urlparse(req.full_url).hostname
+        ):
+            # Never forward credentials across hosts — urllib copies request
+            # headers (including the GitHub bearer token) onto redirects.
+            new_req.headers.pop("Authorization", None)
+        return new_req
 
 
 def _fetch(url, headers=None):
@@ -232,10 +251,30 @@ def _text(node, name):
 # --------------------------------------------------------------------------- #
 
 def _clean(text):
-    """Collapse whitespace and strip tags from a fetched title/snippet."""
-    text = re.sub(r"<[^>]+>", " ", text or "")
-    text = html.unescape(text)
+    """Collapse whitespace and strip tags from a fetched title/snippet.
+    Entities are decoded BEFORE tag-stripping: feeds routinely entity-encode
+    embedded HTML, and stripping first would let '&lt;b&gt;' survive as a
+    literal tag in the (unescaped) Markdown brief."""
+    text = html.unescape(text or "")
+    text = re.sub(r"<[^>]+>", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _int(value):
+    """Coerce an API numeric field defensively — one malformed value must not
+    sink the source's whole result set (run_source's catch is per-source)."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _too_old(published, cutoff):
+    """True only when an item is definitively older than the window. Undated
+    items are KEPT: every source query is already server-side window-scoped,
+    so an unparseable date more likely means feed format drift than an ancient
+    item — failing closed on None would silently lose current results."""
+    return published is not None and published < cutoff
 
 
 def source_hackernews(query, cutoff, limit):
@@ -253,8 +292,8 @@ def source_hackernews(query, cutoff, limit):
             continue
         object_id = hit.get("objectID") or ""
         discussion = f"https://news.ycombinator.com/item?id={object_id}"
-        points = int(hit.get("points") or 0)
-        comments = int(hit.get("num_comments") or 0)
+        points = _int(hit.get("points"))
+        comments = _int(hit.get("num_comments"))
         items.append({
             "source": "hackernews",
             "title": title,
@@ -268,9 +307,12 @@ def source_hackernews(query, cutoff, limit):
     return items[:limit]
 
 
-def source_reddit(query, cutoff, limit):
+def source_reddit(query, cutoff, limit, days):
     q = urllib.parse.quote(query)
-    url = f"https://www.reddit.com/search.rss?q={q}&sort=new&t=month&limit={min(limit * 2, 50)}"
+    # Reddit's server-side window is coarse (t=week/month/year): pick the
+    # smallest one covering --days; the exact cutoff filter below trims the rest.
+    window = "week" if days <= 7 else "month" if days <= 31 else "year"
+    url = f"https://www.reddit.com/search.rss?q={q}&sort=new&t={window}&limit={min(limit * 2, 50)}"
     root = ET.fromstring(_fetch(url))
     # Reddit search feeds are Atom (<feed><entry>).
     entries = _find_all(root, "entry")
@@ -279,10 +321,15 @@ def source_reddit(query, cutoff, limit):
         title = _clean(_text(entry, "title"))
         if not title:
             continue
-        link_el = _find_first(entry, "link")
-        link = link_el.get("href") if link_el is not None else ""
+        # Atom entries may carry several <link> elements; only rel="alternate"
+        # (or no rel) is the content link — same guard as the arXiv adapter.
+        link = ""
+        for link_el in _find_all(entry, "link"):
+            if link_el.get("rel") in (None, "alternate"):
+                link = link_el.get("href") or ""
+                break
         published = parse_iso(_text(entry, "updated") or _text(entry, "published"))
-        if published and published < cutoff:
+        if _too_old(published, cutoff):
             continue
         subreddit = ""
         for cat in _find_all(entry, "category"):
@@ -315,7 +362,7 @@ def source_arxiv(query, cutoff, limit):
         if not title:
             continue
         published = parse_iso(_text(entry, "published"))
-        if published and published < cutoff:
+        if _too_old(published, cutoff):
             continue
         link = ""
         for link_el in _find_all(entry, "link"):
@@ -359,7 +406,7 @@ def source_github(query, cutoff, limit):
     q = urllib.parse.quote(f"{query} pushed:>={since}")
     url = (
         f"https://api.github.com/search/repositories?q={q}"
-        f"&sort=updated&order=desc&per_page={min(limit, MAX_LIMIT)}"
+        f"&sort=updated&order=desc&per_page={limit}"
     )
     headers = {"Accept": "application/vnd.github+json"}
     token = _github_token()
@@ -371,12 +418,17 @@ def source_github(query, cutoff, limit):
         name = _clean(repo.get("full_name") or "")
         if not name:
             continue
-        stars = int(repo.get("stargazers_count") or 0)
+        published = parse_iso(repo.get("pushed_at"))
+        if _too_old(published, cutoff):
+            # The pushed:>= qualifier is day-granular; enforce the exact cutoff
+            # here like the other adapters do.
+            continue
+        stars = _int(repo.get("stargazers_count"))
         items.append({
             "source": "github",
             "title": name,
             "url": repo.get("html_url") or f"https://github.com/{name}",
-            "published": parse_iso(repo.get("pushed_at")),
+            "published": published,
             "score": stars,
             "score_label": f"★{stars}",
             "snippet": _clean(repo.get("description") or "")[:280],
@@ -398,7 +450,7 @@ def source_web(query, cutoff, limit, days):
         if not title:
             continue
         published = parse_rfc822(_text(item, "pubDate"))
-        if published and published < cutoff:
+        if _too_old(published, cutoff):
             continue
         source_name = _clean(_text(item, "source")) or "news"
         items.append({
@@ -416,7 +468,7 @@ def source_web(query, cutoff, limit, days):
 
 _ADAPTERS = {
     "hackernews": lambda q, c, l, d: source_hackernews(q, c, l),
-    "reddit": lambda q, c, l, d: source_reddit(q, c, l),
+    "reddit": lambda q, c, l, d: source_reddit(q, c, l, d),
     "arxiv": lambda q, c, l, d: source_arxiv(q, c, l),
     "github": lambda q, c, l, d: source_github(q, c, l),
     "web": lambda q, c, l, d: source_web(q, c, l, d),
@@ -440,22 +492,66 @@ def run_source(name, query, cutoff, limit, days):
         return name, [], f"{_SOURCE_LABELS.get(name, name)}: {type(exc).__name__}: {exc}"
 
 
-def gather(sources, query, cutoff, limit, days):
-    """Fan out across the requested sources concurrently. Concurrency is safe:
-    _fetch does not mutate global state (unlike a getaddrinfo monkeypatch), so
-    threads don't interfere."""
+def gather(sources, query, cutoff, limit, days, deadline=GATHER_DEADLINE):
+    """Fan out across the requested sources concurrently, bounded by an overall
+    deadline. Concurrency is safe: _fetch does not mutate global state, and each
+    thread writes a distinct key of `outcomes`. Threads are daemonic on purpose:
+    a source that misses the deadline is reported as a warning, and a stalled
+    thread can neither block this join nor keep the process alive at exit —
+    otherwise one slow-dripping endpoint would sink the whole brief, successful
+    sources included."""
+    outcomes = {}
+
+    def _run(name):
+        outcomes[name] = run_source(name, query, cutoff, limit, days)
+
+    threads = [threading.Thread(target=_run, args=(name,), daemon=True) for name in sources]
+    for thread in threads:
+        thread.start()
+    stop_at = time.monotonic() + deadline
+    for thread in threads:
+        thread.join(max(0.0, stop_at - time.monotonic()))
+
     results, warnings = {}, []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(sources)) as pool:
-        futures = {
-            pool.submit(run_source, name, query, cutoff, limit, days): name
-            for name in sources
-        }
-        for future in concurrent.futures.as_completed(futures):
-            name, items, warning = future.result()
+    for name in sources:
+        if name in outcomes:
+            _, items, warning = outcomes[name]
             results[name] = items
             if warning:
                 warnings.append(warning)
+        else:
+            results[name] = []
+            warnings.append(f"{_SOURCE_LABELS.get(name, name)}: no response within {deadline}s")
     return results, warnings
+
+
+def _dedupe_key(title):
+    """Normalize a title for duplicate detection: lowercase, alphanumerics only."""
+    return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+
+
+def dedupe(results, sources):
+    """Drop duplicates across (and within) sources: an item whose normalized
+    title or URL was already seen is folded away, keeping the first occurrence
+    (canonical source order; each source list is already rank-ordered). Catches
+    crossposts and syndicated headlines — a story retitled differently by two
+    outlets is out of reach for a keyless engine and left to the agent."""
+    seen_titles, seen_urls = set(), set()
+    deduped = {}
+    for name in sources:
+        kept = []
+        for item in results.get(name) or []:
+            title_key = _dedupe_key(item["title"])
+            url = (item["url"] or "").rstrip("/")
+            if (title_key and title_key in seen_titles) or (url and url in seen_urls):
+                continue
+            if title_key:
+                seen_titles.add(title_key)
+            if url:
+                seen_urls.add(url)
+            kept.append(item)
+        deduped[name] = kept
+    return deduped
 
 
 # --------------------------------------------------------------------------- #
@@ -512,10 +608,10 @@ def _item_line_md(idx, item):
     return line
 
 
-def render_markdown(query, days, since, generated, results, warnings):
-    counts = {name: len(results.get(name) or []) for name in ALL_SOURCES}
+def render_markdown(query, days, since, generated, results, warnings, sources):
+    counts = {name: len(results.get(name) or []) for name in sources}
     summary = " · ".join(
-        f"{_SOURCE_LABELS[name]} ({counts[name]})" for name in ALL_SOURCES
+        f"{_SOURCE_LABELS[name]} ({counts[name]})" for name in sources
     )
     lines = [
         f"# Last-{days}-days brief: {query}",
@@ -540,7 +636,7 @@ def render_markdown(query, days, since, generated, results, warnings):
         lines.append("")
         lines.append("Recurring terms: " + ", ".join(f"{w} ({n})" for w, n in terms))
 
-    for name in ALL_SOURCES:
+    for name in sources:
         items = results.get(name) or []
         if not items:
             continue
@@ -555,7 +651,7 @@ def render_markdown(query, days, since, generated, results, warnings):
         "- Engagement signals: Hacker News = points/comments, GitHub = stars. "
         "Reddit, arXiv, and Web are ranked by recency (no keyless engagement metric)."
     )
-    empty = [_SOURCE_LABELS[n] for n in ALL_SOURCES if not (results.get(n) or [])]
+    empty = [_SOURCE_LABELS[n] for n in sources if not (results.get(n) or [])]
     if empty:
         lines.append(f"- Returned nothing in this window: {', '.join(empty)}.")
     if warnings:
@@ -568,7 +664,7 @@ def render_markdown(query, days, since, generated, results, warnings):
     return "\n".join(lines)
 
 
-def render_html(query, days, since, generated, results, warnings):
+def render_html(query, days, since, generated, results, warnings, sources):
     """Render the same brief as a self-contained, styled HTML page. ALL external
     text (titles, snippets, source names, the topic) is HTML-escaped: the page is
     served from our S3 domain public-by-link, so an unescaped hostile title would
@@ -580,8 +676,8 @@ def render_html(query, days, since, generated, results, warnings):
         title = e(item["title"])
         return f'<a href="{e(url)}" target="_blank" rel="noopener noreferrer">{title}</a>' if url else title
 
-    counts = {name: len(results.get(name) or []) for name in ALL_SOURCES}
-    summary = " · ".join(f"{_SOURCE_LABELS[name]} ({counts[name]})" for name in ALL_SOURCES)
+    counts = {name: len(results.get(name) or []) for name in sources}
+    summary = " · ".join(f"{_SOURCE_LABELS[name]} ({counts[name]})" for name in sources)
 
     parts = [
         "<!doctype html>",
@@ -634,7 +730,7 @@ def render_html(query, days, since, generated, results, warnings):
         parts.append("<p><strong>Recurring terms:</strong> "
                      + ", ".join(f"{e(w)} ({n})" for w, n in terms) + "</p>")
 
-    for name in ALL_SOURCES:
+    for name in sources:
         items = results.get(name) or []
         if not items:
             continue
@@ -651,7 +747,7 @@ def render_html(query, days, since, generated, results, warnings):
         "Engagement signals: Hacker News = points/comments, GitHub = stars. "
         "Reddit, arXiv, and Web are ranked by recency.",
     ]
-    empty = [_SOURCE_LABELS[n] for n in ALL_SOURCES if not (results.get(n) or [])]
+    empty = [_SOURCE_LABELS[n] for n in sources if not (results.get(n) or [])]
     if empty:
         note_lines.append("Returned nothing in this window: " + ", ".join(empty) + ".")
     for warning in warnings:
@@ -707,8 +803,17 @@ def upload_html(html_text, user_email):
 # CLI
 # --------------------------------------------------------------------------- #
 
+class _JsonArgumentParser(argparse.ArgumentParser):
+    """argparse's own failures (non-integer --days, a bad --format choice, an
+    unknown flag) must honor the JSON stdout contract like every other error —
+    the consumer is an agent parsing stdout, not a human reading a usage dump."""
+
+    def error(self, message):
+        _fail(f"invalid arguments: {message}", "bad_args")
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(
+    parser = _JsonArgumentParser(
         description="Research what people said about a topic in the last ~30 days across keyless sources.")
     parser.add_argument("--topic", "--query", dest="topic", help="Topic to research (required)")
     parser.add_argument("--user", help="Caller email (from the [caller: ...] header); required for --format html|both")
@@ -769,46 +874,52 @@ def main(argv=None):
     except ConfigError as exc:
         _fail(exc.message, exc.code)
 
-    generated_dt = _now_utc()
-    cutoff = generated_dt - dt.timedelta(days=cfg["days"])
-    since = cutoff.strftime("%Y-%m-%d")
-    generated = generated_dt.strftime("%Y-%m-%d %H:%MZ")
+    try:
+        generated_dt = _now_utc()
+        cutoff = generated_dt - dt.timedelta(days=cfg["days"])
+        since = cutoff.strftime("%Y-%m-%d")
+        generated = generated_dt.strftime("%Y-%m-%d %H:%MZ")
 
-    results, warnings = gather(cfg["sources"], cfg["topic"], cutoff, cfg["limit"], cfg["days"])
-    total = sum(len(v) for v in results.values())
+        results, warnings = gather(cfg["sources"], cfg["topic"], cutoff, cfg["limit"], cfg["days"])
+        results = dedupe(results, cfg["sources"])
+        total = sum(len(v) for v in results.values())
 
-    brief_md = render_markdown(cfg["topic"], cfg["days"], since, generated, results, warnings)
+        brief_md = render_markdown(
+            cfg["topic"], cfg["days"], since, generated, results, warnings, cfg["sources"])
 
-    out = {
-        "status": "ok",
-        "topic": cfg["topic"],
-        "window_days": cfg["days"],
-        "since": since,
-        "generated_at": generated,
-        "format": cfg["fmt"],
-        "total_items": total,
-        "counts": {name: len(results.get(name) or []) for name in cfg["sources"]},
-        "warnings": warnings,
-    }
+        out = {
+            "status": "ok",
+            "topic": cfg["topic"],
+            "window_days": cfg["days"],
+            "since": since,
+            "generated_at": generated,
+            "format": cfg["fmt"],
+            "total_items": total,
+            "counts": {name: len(results.get(name) or []) for name in cfg["sources"]},
+            "warnings": warnings,
+        }
 
-    if cfg["fmt"] in ("md", "both"):
-        out["brief_markdown"] = brief_md
-    if cfg["fmt"] in ("html", "both"):
-        html_text = render_html(cfg["topic"], cfg["days"], since, generated, results, warnings)
-        try:
-            url, key = upload_html(html_text, cfg["user"])
-            out["url"] = url
-            out["s3Key"] = key
-            out["sharing"] = "public-by-link"
-        except UploadError as exc:
-            # html-only: nothing else to deliver, so fail loudly. both: the
-            # Markdown brief is already computed, so degrade to it with a warning
-            # rather than throwing away the work the user also asked for.
-            if cfg["fmt"] == "html":
-                _fail(exc.message, exc.code)
-            out["warnings"].append(f"HTML artifact upload failed ({exc.code}): {exc.message}")
+        if cfg["fmt"] in ("md", "both"):
+            out["brief_markdown"] = brief_md
+        if cfg["fmt"] in ("html", "both"):
+            html_text = render_html(
+                cfg["topic"], cfg["days"], since, generated, results, warnings, cfg["sources"])
+            try:
+                url, key = upload_html(html_text, cfg["user"])
+                out["url"] = url
+                out["s3Key"] = key
+                out["sharing"] = "public-by-link"
+            except UploadError as exc:
+                # html-only: nothing else to deliver, so fail loudly. both: the
+                # Markdown brief is already computed, so degrade to it with a warning
+                # rather than throwing away the work the user also asked for.
+                if cfg["fmt"] == "html":
+                    _fail(exc.message, exc.code)
+                out["warnings"].append(f"HTML artifact upload failed ({exc.code}): {exc.message}")
 
-    _emit(out)
+        _emit(out)
+    except Exception as exc:  # noqa: BLE001 — the JSON stdout contract must hold even for unexpected bugs
+        _fail(f"unexpected failure: {type(exc).__name__}: {exc}", "upstream_error")
 
 
 if __name__ == "__main__":

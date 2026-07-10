@@ -86,12 +86,17 @@ Pick the mode from what the user asked for:
 - **`both`** — when the user wants the answer now *and* a shareable link. The
   result carries `brief_markdown` **and** `url`.
 
-### Reply rule for `html` / `both`
+## Required Reply Format (`html` / `both`)
 
 When the result includes a `url`, your chat reply **must contain the bare `url`
-on a line by itself** — the user cannot see the tool result. Do not wrap it in
-`[label](url)` or `**bold**` (Google Chat corrupts long S3 URLs). One short line
-of context above it is fine.
+on a line by itself** — the user cannot see the tool result.
+
+- ✅ One short line of context, then the bare URL on its own line:
+  `Here's the shareable brief:`
+  `https://<bucket>.s3.us-east-1.amazonaws.com/public-images/a@psd401.net/<uuid>.html`
+- ❌ `[Open the brief](https://…)` or `**https://…**` — Google Chat corrupts
+  long S3 URLs wrapped in link or bold markup.
+- ❌ Replying "the brief has been uploaded" without including the URL.
 
 ## Result shape
 
@@ -113,7 +118,9 @@ of context above it is fine.
 }
 ```
 
-`brief_markdown` is present for `md`/`both`; `url`/`s3Key` for `html`/`both`.
+`brief_markdown` is present for `md`/`both`; `url`/`s3Key`/`sharing` for
+`html`/`both` — except that on `both`, a failed upload omits them and degrades
+to the Markdown brief plus a warning (see **Errors**).
 
 ## Notes & limits
 
@@ -125,18 +132,30 @@ of context above it is fine.
   recency. Don't over-read the ordering of the recency-ranked sources.
 - **Reddit relevance is loose.** Keyless Reddit search returns recent posts that
   loosely match; treat low-signal Reddit hits with skepticism when you synthesize.
-- **No secrets.** The engine reads **no** environment variables, `.env`, or
-  `~/.config` credentials. If a paid source is ever added, its key must come from
-  `psd-credentials get --shared --name <key>` — never the environment.
+- **No dedicated secrets.** The engine needs no API key. Its only environment
+  reads are non-secret deployment config (`WORKSPACE_BUCKET`, `AWS_REGION`) for
+  the S3 upload, and GitHub optionally borrows the container's `gh auth token`
+  (never printed) for a higher rate limit. If a paid source is ever added, its
+  key must come from `psd-credentials get --shared --name <key>` — never the
+  environment.
+- **De-duplication is mechanical.** Items with the same normalized title or URL
+  are folded to their first occurrence; the same story *retitled* by two outlets
+  can still appear twice — fold those in your synthesis.
+- **Web citations are Google News redirect links** (`news.google.com/rss/...`),
+  not the publisher's URL — they open the article, but don't cite them as the
+  publisher's own domain.
 - **Window & size caps.** `--days` ≤ 90, `--limit` ≤ 25 per source, topic ≤ 300
-  chars.
+  chars, and all sources share a combined 60s fetch budget (a source that blows
+  it is reported under `warnings`).
 
 ## Errors
 
 Errors are a single JSON object `{ "status": "error", "error": "<code>", "message": "..." }`:
 
 - **`bad_args`** — missing `--topic`, an unknown `--source`, an over-long topic,
-  or `--format html|both` without a valid `--user` email.
+  `--format html|both` without a valid `--user` email, or any malformed flag
+  (non-integer `--days`/`--limit`, unknown option — argparse failures honor the
+  JSON contract too).
 - **`misconfigured`** — `--format html` requested but `WORKSPACE_BUCKET` is unset
   or `boto3` is unavailable (S3 upload impossible).
 - **`upstream_error`** — `--format html` requested but the S3 upload failed.

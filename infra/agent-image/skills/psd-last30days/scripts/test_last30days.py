@@ -18,6 +18,7 @@ import io
 import json
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -57,9 +58,31 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg["sources"], list(last30days.ALL_SOURCES))
 
     def test_invalid_format_rejected_by_argparse(self):
-        # argparse `choices` exits(2) on an invalid value.
-        with self.assertRaises(SystemExit):
-            last30days.build_parser().parse_args(["--topic", "x", "--format", "pdf"])
+        # argparse-level failures exit via _fail, honoring the JSON contract.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit):
+                last30days.build_parser().parse_args(["--topic", "x", "--format", "pdf"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out["error"], "bad_args")
+
+    def test_non_integer_days_honors_json_error_contract(self):
+        # `--days "last week"` fails inside argparse's type=int, which must
+        # still emit the JSON error envelope, not a plain-text usage dump.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit):
+                last30days.build_parser().parse_args(["--topic", "x", "--days", "last week"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["error"], "bad_args")
+        self.assertIn("days", out["message"])
+
+    def test_overlong_user_email_rejected(self):
+        long_email = "a" * 250 + "@x.example"  # > 254 chars
+        self.assertFalse(last30days.valid_email(long_email))
+        with self.assertRaises(last30days.ConfigError):
+            _cfg(["--topic", "x", "--format", "html", "--user", long_email])
 
     def test_html_requires_user(self):
         with self.assertRaises(last30days.ConfigError) as ctx:
@@ -206,12 +229,27 @@ class RenderTests(unittest.TestCase):
 
     def test_markdown_is_cited_and_structured(self):
         md = last30days.render_markdown("gpt-5", 30, "2026-06-10", "2026-07-10 12:00Z",
-                                        self._results(), warnings=[])
+                                        self._results(), warnings=[],
+                                        sources=list(last30days.ALL_SOURCES))
         self.assertIn("# Last-30-days brief: gpt-5", md)
         self.assertIn("## Hacker News", md)
         self.assertIn("https://ok.example/p", md)          # citation present
         self.assertIn("What's surfacing", md)
         self.assertIn("Returned nothing in this window", md)  # reddit/arxiv/github empty
+
+    def test_renderers_never_mention_unqueried_sources(self):
+        # --sources hackernews: results carries ONLY that key. The brief must not
+        # claim Reddit/arXiv/GitHub/Web "returned nothing" — they were never queried.
+        results = {"hackernews": [_item("hackernews", "HN top", score=3, label="3 pts")]}
+        md = last30days.render_markdown("x", 30, "2026-06-10", "2026-07-10 12:00Z",
+                                        results, warnings=[], sources=["hackernews"])
+        self.assertNotIn("Returned nothing in this window", md)
+        self.assertNotIn("Reddit (0)", md)  # header counts only the queried source
+        self.assertIn("Hacker News (1)", md)
+        page = last30days.render_html("x", 30, "2026-06-10", "2026-07-10 12:00Z",
+                                      results, warnings=[], sources=["hackernews"])
+        self.assertNotIn("Returned nothing in this window", page)
+        self.assertNotIn("Reddit (0)", page)
 
     def test_html_escapes_hostile_source_content(self):
         evil = {
@@ -220,7 +258,8 @@ class RenderTests(unittest.TestCase):
             "reddit": [], "arxiv": [], "github": [], "web": [],
         }
         page = last30days.render_html("<img src=x onerror=alert(3)>", 30,
-                                      "2026-06-10", "2026-07-10 12:00Z", evil, warnings=[])
+                                      "2026-06-10", "2026-07-10 12:00Z", evil, warnings=[],
+                                      sources=list(last30days.ALL_SOURCES))
         # Topic and title are escaped, not live markup.
         self.assertNotIn("<script>alert(1)</script>", page)
         self.assertIn("&lt;script&gt;", page)
@@ -283,6 +322,98 @@ class MainOutputTests(unittest.TestCase):
         self.assertEqual(out["sharing"], "public-by-link")
         self.assertTrue(out["url"].endswith("u.html"))
         self.assertNotIn("brief_markdown", out)
+
+
+_REDDIT_ATOM = b"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Cool post about thing</title>
+    <link rel="self" href="https://www.reddit.com/api/self-link"/>
+    <link rel="alternate" href="https://www.reddit.com/r/foo/comments/1/cool_post/"/>
+    <updated>2026-07-09T10:00:00+00:00</updated>
+    <category term="foo" label="r/foo"/>
+  </entry>
+  <entry>
+    <title>Ancient post</title>
+    <link href="https://www.reddit.com/r/foo/comments/2/old/"/>
+    <updated>2020-01-01T00:00:00+00:00</updated>
+  </entry>
+</feed>
+"""
+
+
+class RedditAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.cutoff = dt.datetime(2026, 6, 15, tzinfo=dt.timezone.utc)
+
+    def test_picks_alternate_link_and_filters_old_entries(self):
+        with mock.patch.object(last30days, "_fetch", return_value=_REDDIT_ATOM) as fetched:
+            items = last30days.source_reddit("thing", self.cutoff, limit=10, days=90)
+        # 90 days needs the year window (Reddit's t= steps are week/month/year).
+        self.assertIn("t=year", fetched.call_args[0][0])
+        # Ancient entry dropped by the cutoff filter; rel="self" link skipped.
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["url"], "https://www.reddit.com/r/foo/comments/1/cool_post/")
+        self.assertEqual(items[0]["score_label"], "r/foo")
+
+    def test_window_param_tracks_days(self):
+        for days, expected in ((7, "t=week"), (30, "t=month"), (60, "t=year")):
+            with mock.patch.object(last30days, "_fetch", return_value=_REDDIT_ATOM) as fetched:
+                last30days.source_reddit("x", self.cutoff, limit=5, days=days)
+            self.assertIn(expected, fetched.call_args[0][0])
+
+
+class CleanTests(unittest.TestCase):
+    def test_entity_encoded_tags_are_stripped_not_revealed(self):
+        # Unescape-then-strip: '&lt;script&gt;' must not survive as a literal tag
+        # in the (unescaped) Markdown brief.
+        self.assertEqual(
+            last30days._clean("Cool &lt;script&gt;alert(1)&lt;/script&gt; product"),
+            "Cool alert(1) product")
+
+    def test_literal_tags_still_stripped(self):
+        self.assertEqual(last30days._clean("<b>Bold</b> move"), "Bold move")
+
+
+class DedupeTests(unittest.TestCase):
+    def test_folds_duplicates_by_normalized_title_and_url(self):
+        results = {
+            "hackernews": [_item("hackernews", "Big Model Released!", url="https://a.example/story")],
+            "web": [
+                _item("web", "big model released", url="https://news.example/other"),  # dup title
+                _item("web", "Fresh headline", url="https://a.example/story/"),        # dup url
+                _item("web", "Unique story", url="https://unique.example/x"),
+            ],
+        }
+        deduped = last30days.dedupe(results, ["hackernews", "web"])
+        self.assertEqual(len(deduped["hackernews"]), 1)  # first occurrence kept
+        self.assertEqual([i["title"] for i in deduped["web"]], ["Unique story"])
+
+
+class GatherTests(unittest.TestCase):
+    def test_deadline_converts_stalled_source_to_warning(self):
+        cutoff = dt.datetime(2026, 6, 15, tzinfo=dt.timezone.utc)
+
+        def slow_run_source(name, query, cutoff, limit, days):
+            if name == "reddit":
+                time.sleep(5)
+            return name, [], None
+
+        with mock.patch.object(last30days, "run_source", side_effect=slow_run_source):
+            results, warnings = last30days.gather(
+                ["hackernews", "reddit"], "x", cutoff, 5, 30, deadline=0.2)
+        # The fast source's result survives; the stalled one becomes a warning.
+        self.assertEqual(results["hackernews"], [])
+        self.assertEqual(results["reddit"], [])
+        self.assertTrue(any("no response within" in w for w in warnings))
+
+
+class UploadTests(unittest.TestCase):
+    def test_missing_bucket_raises_misconfigured(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(last30days.UploadError) as ctx:
+                last30days.upload_html("<html></html>", "a@psd401.net")
+        self.assertEqual(ctx.exception.code, "misconfigured")
 
 
 if __name__ == "__main__":
