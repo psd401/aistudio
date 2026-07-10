@@ -70,19 +70,24 @@ async function main() {
   switch (subcommand) {
     case 'capabilities': {
       const toolArgs = {};
-      if (args.section !== undefined && args.section !== true) {
+      // parseArgs sets a value-less flag (e.g. `--section` with nothing after it)
+      // to `true`; fail explicitly rather than silently ignoring the flag.
+      if (args.section !== undefined) {
+        if (args.section === true) fail('--section requires a value');
         if (!SECTIONS.includes(args.section)) {
           fail(`--section must be one of: ${SECTIONS.join(', ')}`);
         }
         toolArgs.section = args.section;
       }
-      if (args.surface !== undefined && args.surface !== true) {
+      if (args.surface !== undefined) {
+        if (args.surface === true) fail('--surface requires a value');
         if (!SURFACES.includes(args.surface)) {
           fail(`--surface must be one of: ${SURFACES.join(', ')}`);
         }
         toolArgs.surface = args.surface;
       }
-      if (args.query !== undefined && args.query !== true) {
+      if (args.query !== undefined) {
+        if (args.query === true) fail('--query requires a value');
         toolArgs.query = args.query;
       }
       await callMcp('tools/call', {

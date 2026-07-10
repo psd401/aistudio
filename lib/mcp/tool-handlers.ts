@@ -82,19 +82,22 @@ const CATALOG_SURFACES: readonly ToolSurface[] = [
 async function handleDescribeCapabilities(
   args: Record<string, unknown>,
 ): Promise<McpToolResult> {
+  // Defensive: the MCP dispatcher always passes a sanitized object, but guard
+  // against a null/undefined args from any future internal caller.
+  const safeArgs = args ?? {}
   const section =
-    typeof args.section === "string" &&
-    CATALOG_SECTIONS.includes(args.section as CapabilityCatalogSection)
-      ? (args.section as CapabilityCatalogSection)
+    typeof safeArgs.section === "string" &&
+    CATALOG_SECTIONS.includes(safeArgs.section as CapabilityCatalogSection)
+      ? (safeArgs.section as CapabilityCatalogSection)
       : undefined
   const surface =
-    typeof args.surface === "string" &&
-    CATALOG_SURFACES.includes(args.surface as ToolSurface)
-      ? (args.surface as ToolSurface)
+    typeof safeArgs.surface === "string" &&
+    CATALOG_SURFACES.includes(safeArgs.surface as ToolSurface)
+      ? (safeArgs.surface as ToolSurface)
       : undefined
   const query =
-    typeof args.query === "string" && args.query.trim().length > 0
-      ? args.query
+    typeof safeArgs.query === "string" && safeArgs.query.trim().length > 0
+      ? safeArgs.query
       : undefined
 
   const catalog = buildCapabilityCatalog({ section, surface, query })

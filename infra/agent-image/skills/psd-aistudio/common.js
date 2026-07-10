@@ -82,26 +82,42 @@ function requireSecretsManager() {
 async function resolveApiKey() {
   if (AISTUDIO_MCP_API_KEY) return AISTUDIO_MCP_API_KEY;
   if (AISTUDIO_MCP_API_KEY_SECRET_ID) {
-    const { SecretsManagerClient, GetSecretValueCommand } =
-      requireSecretsManager();
-    const client = new SecretsManagerClient({
-      region: process.env.AWS_REGION || 'us-east-1',
-    });
-    const resp = await client.send(
-      new GetSecretValueCommand({ SecretId: AISTUDIO_MCP_API_KEY_SECRET_ID })
-    );
-    const value = (resp.SecretString || '').trim();
+    let value;
+    try {
+      const { SecretsManagerClient, GetSecretValueCommand } =
+        requireSecretsManager();
+      const client = new SecretsManagerClient({
+        region: process.env.AWS_REGION || 'us-east-1',
+      });
+      const resp = await client.send(
+        new GetSecretValueCommand({ SecretId: AISTUDIO_MCP_API_KEY_SECRET_ID })
+      );
+      value = (resp.SecretString || '').trim();
+    } catch (err) {
+      // A retrieval failure (permission / decryption / network) is an infra
+      // error, not a malformed invocation — surface it clearly (exit 12) instead
+      // of letting it bubble to the generic exit-2 handler.
+      fail(
+        `Failed to retrieve API key from Secrets Manager ` +
+          `(${AISTUDIO_MCP_API_KEY_SECRET_ID}): ${err.message}`,
+        12
+      );
+    }
+    // Secret exists but is empty — the credential is effectively missing.
     if (!value) {
-      throw new Error(
-        `Secret ${AISTUDIO_MCP_API_KEY_SECRET_ID} has no SecretString value`
+      fail(
+        `Secret ${AISTUDIO_MCP_API_KEY_SECRET_ID} has no SecretString value`,
+        11
       );
     }
     return value;
   }
+  // No credential configured at all — access to AI Studio is not set up.
   fail(
     'No API key configured. Set AISTUDIO_MCP_API_KEY (a scoped sk- key holding ' +
       'platform:read) or AISTUDIO_MCP_API_KEY_SECRET_ID. The production agent ' +
-      'credential is pending the MCP action-tool work (see SKILL.md).'
+      'credential is pending the MCP action-tool work (see SKILL.md).',
+    11
   );
   return ''; // unreachable
 }
@@ -185,6 +201,18 @@ async function callMcp(method, params) {
       jsonrpc_error: data.error,
     });
     process.exit(12);
+  }
+
+  // A non-2xx status with a JSON body but NO JSON-RPC error field (e.g. an infra
+  // 502/503 proxy page, or a Next.js framework error `{"message": "..."}`) must
+  // NOT be treated as success — otherwise we'd silently write `null` and exit 0,
+  // hiding the real HTTP status (CLAUDE.md silent-failure pattern). Fail loudly.
+  if (!resp.ok) {
+    fail(
+      `AI Studio MCP returned HTTP ${resp.status}: ` +
+        `${JSON.stringify(data).slice(0, 512)}`,
+      12
+    );
   }
 
   process.stdout.write(JSON.stringify(data.result ?? null) + '\n');
