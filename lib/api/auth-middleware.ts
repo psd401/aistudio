@@ -35,6 +35,13 @@ export interface ApiAuthContext {
   scopes: string[];
   apiKeyId?: number;
   oauthClientId?: string;
+  /**
+   * The human a delegated agent acts for (Atrium §26.1). Set only when an OIDC
+   * token carries a `delegated_for` claim (RFC 8693-style actor delegation): the
+   * agent's `client_id` identifies the agent, `delegated_for` the human whose
+   * grants it inherits. Absent for ordinary user / autonomous tokens.
+   */
+  delegatedForUserId?: number;
 }
 
 export interface ApiErrorResponse {
@@ -158,6 +165,7 @@ export async function authenticateRequest(
         authType: "jwt",
         scopes: jwtResult.scopes,
         oauthClientId: jwtResult.clientId,
+        delegatedForUserId: jwtResult.delegatedForUserId,
       };
     } catch (error) {
       timer({ status: "error" });
@@ -342,7 +350,35 @@ interface JwtAuthResult {
   userId: number;
   cognitoSub: string;
   scopes: string[];
-  clientId: string;
+  /**
+   * The OIDC `client_id`/`azp`, or `undefined` when the token carries neither.
+   * NOT a sentinel string — `requesterFromApiAuth` does a truthy check on
+   * `oauthClientId`, so a literal `"unknown"` would be treated as a real client
+   * id and route the caller down the agent-resolution branch.
+   */
+  clientId?: string;
+  /** The human a delegated agent acts for, from a `delegated_for` claim. */
+  delegatedForUserId?: number;
+}
+
+/**
+ * Extract the Atrium delegated-agent marker (§26.1) from a verified token payload.
+ *
+ * The delegation trigger is EXCLUSIVELY a numeric `delegated_for` claim — the one
+ * the delegated minter (`POST /api/v1/agents/delegated-token`) always stamps
+ * directly. We deliberately do NOT fall back to the RFC-8693 `act.sub` actor claim:
+ * a broad `act.sub` fallback would silently promote ANY future token carrying a
+ * numeric `act.sub` (an audit actor, another subsystem's use of `act`) into Atrium
+ * delegation — with no `content:delegate` authorization anywhere on that path. The
+ * minted token keeps `act.sub` for audit only (a non-numeric agent client id).
+ *
+ * Returns the numeric user id, or `undefined` for an absent / non-integer value.
+ */
+export function parseDelegatedForClaim(
+  payload: Record<string, unknown>
+): number | undefined {
+  const raw = payload.delegated_for as string | number | undefined;
+  return raw != null && Number.isInteger(Number(raw)) ? Number(raw) : undefined;
 }
 
 /**
@@ -378,6 +414,9 @@ async function verifyJwtToken(
     const scopeStr = (payload.scope as string) ?? "";
     const scopes = scopeStr ? scopeStr.split(" ") : [];
 
+    // Atrium delegated-agent marker (§26.1) — see `parseDelegatedForClaim`.
+    const delegatedForUserId = parseDelegatedForClaim(payload);
+
     return {
       userId,
       cognitoSub,
@@ -387,8 +426,10 @@ async function verifyJwtToken(
         if (!cid) {
           log.warn("JWT missing client_id and azp claims")
         }
-        return cid ?? "unknown"
+        // undefined (not a sentinel) when absent — see JwtAuthResult.clientId.
+        return cid || undefined
       })(),
+      delegatedForUserId,
     };
   } catch (error) {
     log.warn("JWT verification error", {

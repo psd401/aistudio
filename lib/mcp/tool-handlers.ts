@@ -25,6 +25,7 @@ import { executeAssistantForJobCompletion } from "@/lib/api/assistant-execution-
 import { listAccessibleAssistants } from "@/lib/api/assistant-service"
 import { isAdminByUserId } from "@/lib/api/route-helpers"
 import { AGENT_TOOL_HANDLERS } from "@/lib/agents/agent-tools"
+import { CONTENT_TOOL_HANDLERS } from "./content-tool-handlers"
 
 // ============================================
 // Handler Map
@@ -41,6 +42,9 @@ export const TOOL_HANDLERS: Record<string, McpToolHandler> = {
   // callable from the agentic Assistant Architect runtime but not the external
   // MCP server.
   ...AGENT_TOOL_HANDLERS,
+  // Atrium content tools (Phase 5, Issue #1055): create/get/list/update/version/
+  // visibility/publish over the §11–§15 services.
+  ...CONTENT_TOOL_HANDLERS,
 }
 
 // ============================================

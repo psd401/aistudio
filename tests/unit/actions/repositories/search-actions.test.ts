@@ -9,17 +9,15 @@ import { describe, it, expect, jest, beforeAll, beforeEach } from '@jest/globals
 
 const mockGetServerSession = jest.fn(() => Promise.resolve({ sub: 'u' } as { sub: string } | null))
 const mockHasCapabilityAccess = jest.fn(() => Promise.resolve(true))
-const mockGetUserIdFromSession = jest.fn(() => Promise.resolve(1))
-const mockCanReadRepository = jest.fn(() => Promise.resolve(true))
+const mockAssertRepositoryReadAccess = jest.fn<(...a: unknown[]) => Promise<void>>(() => Promise.resolve())
 const mockVector = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promise.resolve([]))
 const mockKeyword = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promise.resolve([]))
 const mockHybrid = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promise.resolve([]))
 
 jest.mock('@/lib/auth/server-session', () => ({ getServerSession: mockGetServerSession }))
 jest.mock('@/utils/roles', () => ({ hasCapabilityAccess: mockHasCapabilityAccess }))
-jest.mock('@/actions/repositories/repository-permissions', () => ({
-  getUserIdFromSession: mockGetUserIdFromSession,
-  canReadRepository: mockCanReadRepository,
+jest.mock('@/lib/repositories/repository-access-guard', () => ({
+  assertRepositoryReadAccess: mockAssertRepositoryReadAccess,
 }))
 jest.mock('@/lib/repositories/search-service', () => ({
   vectorSearch: mockVector, keywordSearch: mockKeyword, hybridSearch: mockHybrid,
@@ -36,8 +34,7 @@ describe('searchRepository authorization (REV-COR-062 / REV-SEC-081)', () => {
     jest.clearAllMocks()
     mockGetServerSession.mockResolvedValue({ sub: 'u' })
     mockHasCapabilityAccess.mockResolvedValue(true)
-    mockGetUserIdFromSession.mockResolvedValue(1)
-    mockCanReadRepository.mockResolvedValue(true)
+    mockAssertRepositoryReadAccess.mockResolvedValue(undefined)
   })
 
   it('rejects a caller lacking the knowledge-repositories capability', async () => {
@@ -56,7 +53,7 @@ describe('searchRepository authorization (REV-COR-062 / REV-SEC-081)', () => {
   })
 
   it('rejects when the caller has no access to the repository', async () => {
-    mockCanReadRepository.mockResolvedValue(false)
+    mockAssertRepositoryReadAccess.mockRejectedValue(new Error('Record not found'))
     const res = await searchRepository({ query: 'x', repositoryId: 5 })
     expect(res.isSuccess).toBe(false)
     expect(mockHybrid).not.toHaveBeenCalled()

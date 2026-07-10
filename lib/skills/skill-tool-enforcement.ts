@@ -109,10 +109,54 @@ export function intersectSkillAllowedTools(
 export async function getApprovedSkillAllowedTools(
   skillId: string
 ): Promise<string[] | null> {
+  const session = await getApprovedSkillSession(skillId);
+  return session ? session.allowedTools : null;
+}
+
+/** What a skill-bound chat session needs from an approved skill. */
+export interface ApprovedSkillSession {
+  /** Skill display/slug name (for the injected prompt header + logging). */
+  name: string;
+  /** The skill's `allowed-tools` pin (possibly empty = no pin). */
+  allowedTools: string[];
+  /** S3 prefix of the promoted skill folder (SKILL.md lives under it). */
+  s3Key: string;
+}
+
+/**
+ * Loose UUID shape check for skill ids. Prevents a malformed id (from any
+ * caller that skipped schema validation) from reaching PostgreSQL, where it
+ * would raise `invalid input syntax for type uuid` instead of resolving to
+ * "unknown skill" (PR #1129 review). Exported for the skill tool executor.
+ */
+export function isSkillIdShaped(skillId: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    skillId
+  );
+}
+
+/**
+ * Fetch everything a skill-bound session needs from an APPROVED skill
+ * (scope=shared, scanStatus=clean) in one lookup: the `allowed-tools` pin plus
+ * the S3 key for loading the SKILL.md instructions. Returns `null` for an
+ * unknown/unapproved id — callers MUST treat that as "do not loosen, do not
+ * inject" (epic #922 completion audit: the chat route now also injects the
+ * skill's instructions, so the approval gate covers both).
+ */
+export async function getApprovedSkillSession(
+  skillId: string
+): Promise<ApprovedSkillSession | null> {
+  // Malformed id = unknown skill (defense-in-depth under the route's zod
+  // `.uuid()` validation; other callers may not validate).
+  if (!isSkillIdShaped(skillId)) return null;
   const rows = await executeQuery(
     (db) =>
       db
-        .select({ allowedTools: psdAgentSkills.allowedTools })
+        .select({
+          name: psdAgentSkills.name,
+          allowedTools: psdAgentSkills.allowedTools,
+          s3Key: psdAgentSkills.s3Key,
+        })
         .from(psdAgentSkills)
         .where(
           and(
@@ -126,5 +170,53 @@ export async function getApprovedSkillAllowedTools(
   );
   const row = rows[0];
   if (!row) return null;
-  return Array.isArray(row.allowedTools) ? row.allowedTools : [];
+  return {
+    name: row.name,
+    allowedTools: Array.isArray(row.allowedTools) ? row.allowedTools : [],
+    s3Key: row.s3Key,
+  };
+}
+
+/**
+ * Apply a skill's `allowed-tools` pin to MCP connector tool sets (#925 AC#6 —
+ * epic #922 completion audit). The built-in tool intersection alone left a hole:
+ * connector tools were merged into the model's tool set unconditionally, so a
+ * skill-bound session with connectors enabled could still call any external
+ * tool. An EMPTY pin restricts nothing (matching
+ * {@link intersectSkillAllowedTools}); a non-empty pin drops every connector
+ * tool UNLESS the pin explicitly namespaces it as `connector:{name}` or
+ * `connector:{serverId}:{name}`.
+ *
+ * Bare pin names deliberately do NOT match connector tools: pins are catalog
+ * identifiers/wire names, and the chat route merges connector tools with
+ * precedence on name collision — letting a bare pin admit a name-matching
+ * external tool would allow a connector to SHADOW the pinned built-in
+ * (PR #1129 review, Codex + Copilot).
+ *
+ * Returns new result objects with filtered `tools`; the originals (and their
+ * `close` handles) are not mutated, so connection cleanup is unaffected.
+ *
+ * Pure — no I/O.
+ */
+export function filterConnectorToolsByPin<
+  T extends { serverId?: string; tools: Record<string, unknown> },
+>(results: T[], allowedTools: string[]): T[] {
+  if (allowedTools.length === 0) return results;
+  // Only `connector:`-namespaced pins can admit a connector tool.
+  const connectorPins = new Set(
+    parseSkillAllowedTools(allowedTools)
+      .map((p) => p.name)
+      .filter((name) => name.startsWith("connector:"))
+  );
+  return results.map((result) => ({
+    ...result,
+    tools: Object.fromEntries(
+      Object.entries(result.tools).filter(
+        ([name]) =>
+          connectorPins.has(`connector:${name}`) ||
+          (result.serverId !== undefined &&
+            connectorPins.has(`connector:${result.serverId}:${name}`))
+      )
+    ),
+  }));
 }

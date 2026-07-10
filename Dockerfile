@@ -54,14 +54,23 @@ ENV RDS_SECRET_ARN=${RDS_SECRET_ARN}
 RUN --mount=type=cache,target=/app/.next/cache \
     node_modules/.bin/next build --webpack
 
-# Bundle voice WebSocket handler as a self-contained CJS artifact for voice-server.js.
-# The script fails the build if any non-builtin runtime externals leak into the bundle.
-# Writing into .next/standalone ensures the runner-stage COPY picks it up automatically.
-RUN node scripts/build-voice-ws-handler.mjs
-
-# Bundle the Atrium collaboration WebSocket handler the same way (#1051), so
-# voice-server.js can load ./collab-handler-bundle.cjs at runtime.
-RUN node scripts/build-collab-ws-handler.mjs
+# Bundle the voice AND Atrium-collab WebSocket handlers as self-contained CJS
+# artifacts for voice-server.js. Each script fails the build if a non-builtin
+# runtime external leaks in. Writing into .next/standalone ensures the runner-stage
+# COPY picks them up.
+#
+# BUILT IN ONE LAYER (2026-07-06): they were previously two separate RUN steps.
+# In the deployed image the voice bundle was present but the collab bundle was
+# MISSING ("Cannot find module ./collab-handler-bundle.cjs" → collab disabled →
+# workspace panel stuck "Connecting…" and agent doc edits fail) — the second
+# RUN layer's output was not surviving into the standalone COPY under BuildKit.
+# Producing both in a single layer (the one that demonstrably IS copied) and
+# asserting both files exist makes a missing bundle a LOUD build failure instead
+# of a silent runtime one.
+RUN node scripts/build-voice-ws-handler.mjs \
+ && node scripts/build-collab-ws-handler.mjs \
+ && test -f .next/standalone/ws-handler-bundle.cjs \
+ && test -f .next/standalone/collab-handler-bundle.cjs
 
 # ============================================================================
 # Stage 3: Production Runner
@@ -90,6 +99,19 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 # Copy static files to the .next/static location
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+# WebSocket handler bundles (voice #872, Atrium collab #1051) — copied EXPLICITLY
+# per-file, NOT relied on via the .next/standalone directory COPY above.
+# In shipped images the directory COPY brought ws-handler-bundle.cjs (voice, 4MB)
+# but repeatedly DROPPED the larger collab-handler-bundle.cjs (11MB) → at boot
+# voice-server.js `require('./collab-handler-bundle.cjs')` threw MODULE_NOT_FOUND
+# → collab WS disabled → workspace panel stuck "Connecting…" and agent doc edits
+# failed (PR #1137 one-RUN-layer attempt did NOT fix it; the file existed in the
+# builder per `test -f` yet was absent from the runner). An explicit single-file
+# COPY is deterministic: it lands the bundle at /app, and if a bundle is missing
+# from the builder it FAILS THE BUILD loudly instead of silently disabling collab.
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone/ws-handler-bundle.cjs ./ws-handler-bundle.cjs
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone/collab-handler-bundle.cjs ./collab-handler-bundle.cjs
 
 # Copy voice server wrapper for WebSocket support (issue #872)
 # voice-server.js wraps the Next.js standalone server.js to add WebSocket

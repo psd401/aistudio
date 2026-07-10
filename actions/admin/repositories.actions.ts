@@ -9,8 +9,10 @@ import {
   deleteRepository,
   getRepositoryItems,
   getRepositoryItemById,
-  deleteRepositoryItem
+  deleteRepositoryItem,
+  isSystemManagedRepository
 } from "@/lib/db/drizzle"
+import { assertNotSystemManagedRepository } from "@/lib/repositories/repository-access-guard"
 import {
   handleError,
   ErrorFactories,
@@ -68,7 +70,12 @@ export async function listAllRepositories(): Promise<ActionState<RepositoryWithO
     await requireAdminSession(log)
 
     log.debug("Fetching all repositories from database")
-    const repositoriesRaw = await getAllRepositoriesWithOwner()
+    // Exclude system-managed repositories (the Atrium retrieval index, #1056):
+    // their content is governed by per-object `canView`, so they must not be
+    // browsable / editable through the generic repository admin UI.
+    const repositoriesRaw = (await getAllRepositoriesWithOwner()).filter(
+      repo => !isSystemManagedRepository(repo)
+    )
 
     // Convert to expected type
     const repositories: RepositoryWithOwner[] = repositoriesRaw.map(repo => ({
@@ -137,6 +144,12 @@ export async function adminUpdateRepository(
       log.warn("No fields provided for update")
       return { isSuccess: false, message: "No fields to update" }
     }
+
+    // A system-managed repository (the Atrium retrieval index, #1056) is
+    // immutable through this generic admin path: editing it (e.g. flipping
+    // `isPublic` to true, or stripping the `systemManaged` flag) would reopen the
+    // shared-index bypass the system-managed guards close.
+    await assertNotSystemManagedRepository(input.id)
 
     log.info("Updating repository in database (admin)", {
       repositoryId: input.id
@@ -208,8 +221,12 @@ export async function adminDeleteRepository(
   
   try {
     log.info("Admin action started: Deleting repository", { repositoryId: id })
-    
+
     await requireAdminSession(log)
+
+    // Never delete a system-managed repo (the Atrium index, #1056) through the
+    // generic admin path — it would destroy the retrieval index out-of-band.
+    await assertNotSystemManagedRepository(id)
 
     // First, get all document items to delete from S3
     log.debug("Fetching document items for S3 deletion")
@@ -285,6 +302,11 @@ export async function adminGetRepositoryItems(
     
     await requireAdminSession(log)
 
+    // System-managed repositories (the Atrium retrieval index, #1056) are not
+    // browsable through the generic admin UI — their per-object visibility is
+    // enforced by `retrievalService`, not repository-level access.
+    await assertNotSystemManagedRepository(repositoryId)
+
     log.debug("Fetching repository items from database (admin)", { repositoryId })
     const itemsRaw = await getRepositoryItems(repositoryId)
 
@@ -345,6 +367,10 @@ export async function adminRemoveRepositoryItem(
       log.warn("Item not found for removal", { itemId })
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
+
+    // Never mutate a system-managed repo's items (the Atrium index, #1056) —
+    // deleting one out-of-band would desync the retrieval index.
+    await assertNotSystemManagedRepository(item.repositoryId)
 
     log.debug("Item found", {
       itemId,

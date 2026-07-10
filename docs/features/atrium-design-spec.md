@@ -117,7 +117,7 @@ Substrate      AI Studio: identity/RBAC · S3 · doc pipeline · vectors · MCP 
 | REST API v1 | `app/api/v1/*` (`sk-` keys, rate limiting, OpenAPI) | Hosts `/v1/content` endpoints |
 | Delegated agent auth | `lib/agent-workspace/consent-token.ts`, `app/agent-connect` | On-behalf-of-user agent authorization |
 | Navigation | `navigation_items` (`type` enum, `requiresRole`) | Extended to surface content as intranet pages |
-| Audit | `nexus_mcp_audit_logs`, OpenTelemetry (`instrumentation.ts`) | Logs every agent create/publish |
+| Audit | `content_audit_logs` (migration 090), OpenTelemetry (`instrumentation.ts`) | Logs every agent create/publish |
 | Safety | Bedrock Guardrails, PII tokenization (`lib/safety`) | Applied to agent-generated content paths |
 | Assistant Architect + scheduler | `lib/assistant-architect`, `schedules`, `@aws-sdk/client-scheduler` | Scheduled autonomous content production |
 
@@ -151,7 +151,7 @@ These describe how the layers wire at runtime; later sections give the code.
 4. Service inserts `content_objects` (owner *U*, `created_by_actor='agent'`), creates `content_versions` v1 (`author_actor='agent'`), registers a Proof doc via the doc-store adapter, snapshots markdown + rendered HTML to S3.
 5. Agent calls `publish_content(id, 'intranet')` → `publishService.publish` checks visibility/scope, writes `content_publications`, runs the intranet adapter, emits a `content.published` event.
 6. Event → retrieval indexer registers/refreshes chunks; the object is now a reader page and scoped context.
-7. All tool calls recorded in `nexus_mcp_audit_logs`.
+7. All content mutations recorded in `content_audit_logs` (§27).
 
 **Flow B — Human edits an agent-drafted document in nexus**
 1. User opens the object in the side-panel Proof editor next to chat.
@@ -543,7 +543,7 @@ ALTER TABLE navigation_items ADD COLUMN content_object_id uuid REFERENCES conten
 - **roles** — `grant_kind='role'` stores `roles.id` (as text) in `grant_value`; `agent_identities.role_id` gives autonomous agents a role.
 - **navigation_items** — new `content` enum value + `content_object_id`; collections link via `content_collections.nav_item_id`. The existing `requires_role` stays for non-content nav; content pages derive access from object visibility (§12).
 - **knowledge_repositories / repository_items / repository_item_chunks / repository_access** — retrieval index (§16) via `content_index_links`; mirror `repository_access` semantics through `content_visibility_grants`.
-- **nexus_mcp_audit_logs** — agent content tool calls append here (§27).
+- **content_audit_logs** — agent/REST content mutations append here (§27; migration 090 — deliberately NOT `nexus_mcp_audit_logs`, whose NOT NULL `server_id`/`user_id` fit neither a REST nor an autonomous-agent write).
 
 ## 10. Seed data
 
@@ -1365,6 +1365,13 @@ Register in `lib/mcp/custom-tools/registry.ts` (alongside the existing five tool
     "description": "Publish a content object to a destination. Public destinations require a human-held scope.",
     "inputSchema": { "type": "object", "required": ["id","destination"], "properties": {
       "id": { "type": "string" },
+      "destination": { "type": "string", "enum": ["intranet","public_web","schoology","google","okf"] } } }
+  },
+  {
+    "name": "unpublish_content",
+    "description": "Take a content object down from a destination. Unpublishing a public destination requires the same public authority as publishing it.",
+    "inputSchema": { "type": "object", "required": ["id","destination"], "properties": {
+      "id": { "type": "string" },
       "destination": { "type": "string", "enum": ["intranet","public_web","schoology","google"] } } }
   }
 ]
@@ -1395,6 +1402,19 @@ Because `ship-reporter` lacks `content:publish_public`, the update reaches all s
 - **Delegated (on behalf of a person):** the agent authenticates through the existing `agent-connect` / `consent-token` flow and receives a `Requester` of kind `agent-delegated` bound to user *U*. It **inherits exactly U's permissions**; created content is owned by U and shareable only as far as U can share. (My-agent-drafts-my-brief.)
 - **Autonomous (service identity):** a row in `agent_identities` with its own `role_id` and `scopes`, authenticated via **OAuth client-credentials** on the existing OIDC provider (`oauthClientId`). Produces a `Requester` of kind `agent-autonomous`.
 
+#### Delegated token exchange (`POST /api/v1/agents/delegated-token`, #1059)
+
+REST-side entry into the delegated mode is a **two-step token exchange**:
+
+1. The agent obtains its own client-credentials JWT from the OIDC provider (the autonomous identity above), then calls `POST /api/v1/agents/delegated-token` with `{ delegated_for: <user id>, scope?: "..." }`. Minting requires the agent-held `content:delegate` authority scope, an ACTIVE `agent_identities` row behind the caller's client id, and a token that is not itself delegated (no re-delegation).
+2. The returned `access_token` (a 300 s JWT signed by the same OIDC signer, verifiable through the existing JWKS) is used as the Bearer token on `/api/v1/content/*`, where it resolves to an `agent-delegated` requester bound to the named user (`isAdmin` forced false).
+
+**Claim design:** the token's `sub` is the §26.5 **system user**, not the human — a surface that ignores `delegated_for` (e.g. `/api/v1/chat`) resolves the token to the low-privilege system account (blast-radius containment). The human is named by a **numeric** `delegated_for` claim, which only the content resolver consumes; `act.sub` carries the agent's client id (RFC-8693-style audit) and must stay **non-numeric**, because the consumer treats a numeric `act.sub` as a `delegated_for` fallback.
+
+**Scope bounding:** minted scope = requested ∩ the agent's content scopes ∩ the user's role-derived content scopes — never `content:delegate` itself (a delegated credential can never re-mint), and `content:publish_public` only when the user is an administrator AND the agent holds it. An empty intersection is a 403; no token is minted.
+
+**Tradeoff (stateless, non-revocable):** the token is not persisted, so there is no revocation list — the short TTL (`DELEGATED_TOKEN_TTL_SECONDS` = 300) is the mitigation. Minting is audited via structured logs (agent, client id, user, scopes — never the token itself).
+
 ### 26.2 Scopes
 ```
 content:create            create objects + versions
@@ -1424,7 +1444,7 @@ Autonomous objects are owned by a designated **system user** (configurable) and 
 
 ## 27. Audit and events
 
-- **Audit:** every MCP/REST content mutation appends to `nexus_mcp_audit_logs` (already capturing MCP calls) with actor, tool, object id, and outcome — a complete external-creation/publish trail a district will want.
+- **Audit:** every MCP/REST content mutation appends to `content_audit_logs` (migration 090; a content-shaped table rather than `nexus_mcp_audit_logs`, whose NOT NULL `server_id`/`user_id` fit neither a REST nor an autonomous-agent write) with actor, action, surface, object id, destination, and outcome — a complete external-creation/publish trail a district will want.
 - **Events** (`lib/content/events.ts`): emit on an SNS topic / EventBridge bus.
   - `content.published` → re-index for retrieval; run connector pushes; notify a channel.
   - `content.version_created`, `content.unpublished`, `content.public_publish_requested` (drives the approval queue).
@@ -1450,7 +1470,7 @@ Artifact code (agent- or human-authored) is **untrusted** and executes only unde
 Run agent content-generation through the existing **Bedrock Guardrails** and **PII tokenization** (`lib/safety`) exactly as nexus does, before persisting a version. Apply on `create_*` and `create_version` when the author is an agent.
 
 ### 28.4 Provenance and audit as governance
-Two-grain provenance + `nexus_mcp_audit_logs` + the public-publish human gate give FERPA/COPPA/CIPA-relevant traceability: who authored content, who approved public exposure, and a queryable trail. Reader provenance footers make AI authorship visible to consumers.
+Two-grain provenance + `content_audit_logs` + the public-publish human gate give FERPA/COPPA/CIPA-relevant traceability: who authored content, who approved public exposure, and a queryable trail. Reader provenance footers make AI authorship visible to consumers.
 
 ### 28.5 Threat model (summary)
 
@@ -1485,7 +1505,7 @@ PROOF_DOC_STORE_MODE=            # "postgres" (default) | "s3"
 ```
 
 ### 30.2 CDK additions (`infra/`)
-- **S3:** an `atrium/` prefix on the existing content bucket; a separate public prefix/distribution (CloudFront) for `public_web`.
+- **S3:** an `atrium/` prefix on the existing content bucket. *(§33 #7 RESOLVED in Phase 7 (#1057): `public_web` is served by the anonymous Next reader route `/p/[slug]` on the existing ECS frontend, so NO separate public prefix/CloudFront distribution is provisioned in v1 — the public reader renders on demand from the same S3 source + sandbox the internal reader uses. A static-export CDN behind `ATRIUM_PUBLIC_BASE_URL` remains a future optimization.)*
 - **Sandbox origin:** a distinct subdomain/distribution serving the static artifact host page with the locked CSP (no app cookies in scope).
 - **Events:** an SNS topic (`atrium-content-events`) or EventBridge bus; subscriptions for the retrieval indexer (Lambda or in-app worker) and notifiers; a DLQ.
 - **IAM:** the app task role gets `s3:GetObject/PutObject` on the `atrium/*` prefix and `sns:Publish` on the topic. No new public bucket ACLs — serve public via CloudFront OAC.
@@ -1547,7 +1567,10 @@ MCP content tools (§24) + `/v1/content` (§23) + skill/scheduled-run wiring (§
 Index-on-publish via the repository pipeline (§16.1), permission-aware `search` (§16.2), whole-object injection, assistant retrieval scoping (§16.4).
 
 **Phase 7 — Publishing connectors**
-`public_web` (CloudFront/S3 public route + sandbox), then `schoology` and `google` adapters over `connector-service` and existing OAuth connectors, all behind the public-publish gate.
+`public_web` (the anonymous Next reader route `/p/[slug]` + the same artifact sandbox — §33 #7 resolved to the Next route, no net-new CloudFront/S3), then `schoology` and `google` adapters (v1 connector stubs, to be finished over `connector-service` + existing OAuth connectors), all behind the public-publish gate (`isPublicDestination`).
+
+**Phase 8 — OKF interoperability** *(post-spec addendum, §36)*
+`okf` export adapter (§36.2) + OKF import service (§36.3) + MCP/REST parity (§36.4). Boundary serialization only — no change to the content model. Sequence **last**: depends on Phase 6 (`getContextDocument` whole-object bodies) and Phase 7 (publish-adapter breadth). Export enforces `canView` per object and routes public/anonymous bundles through the §26.4 gate.
 
 ## 33. Open decisions to confirm during build
 
@@ -1557,7 +1580,7 @@ Index-on-publish via the repository pipeline (§16.1), permission-aware `search`
 4. **Retrieval index** — reuse `knowledge_repositories`/`repository_item_chunks` with a system repository per collection (recommended) vs a dedicated content index; confirm how `repository_access` vs `content_visibility_grants` are reconciled (this spec filters by `canView` at query time regardless).
 5. **Service identity mechanism** — OIDC client-credentials + `agent_identities` (recommended) vs Cognito app clients.
 6. **Artifact JSX rendering** — whether to support `jsx` artifacts (needs an in-sandbox transform/runtime) in v1 or start HTML/JS-only and add JSX later. Recommended: HTML/JS first.
-7. **Public hosting** — CloudFront + S3 static export vs an authenticated-but-anonymous Next public route for `public_web`.
+7. **Public hosting** — CloudFront + S3 static export vs an authenticated-but-anonymous Next public route for `public_web`. **RESOLVED (Phase 7, #1057): the authenticated-but-anonymous Next public route** (`app/(public)/p/[slug]/page.tsx`, in `PUBLIC_PATHS`). It reuses the existing render pipeline + artifact sandbox unchanged, needs no net-new CloudFront/S3 distribution, and enforces the same permission boundary as the rest of the content layer (strict `visibility_level='public'` + a live `public_web` publication). A static-export CDN remains a future optimization behind the same `ATRIUM_PUBLIC_BASE_URL` — only the `public_web` adapter body would change; the reader route and `external_ref` contract stay identical.
 8. **Naming** — §34.
 
 ## 34. Naming
@@ -1578,7 +1601,8 @@ lib/content/
   publish-service.ts  retrieval-service.ts  events.ts  errors.ts  types.ts
   storage/        s3-store.ts  proof-store.ts
   render/         markdown-render.ts
-  publish-adapters/  types.ts  intranet.ts  public-web.ts  schoology.ts  google.ts
+  publish-adapters/  types.ts  intranet.ts  public-web.ts  schoology.ts  google.ts  okf.ts   # §36 export
+  okf/            export.ts  import.ts  frontmatter.ts   # §36 OKF (de)serialization
 actions/db/atrium/                           # server actions wrapping the services
   create-content.ts  snapshot-document.ts  create-version.ts  publish.ts  set-visibility.ts
 app/api/v1/content/
@@ -1598,7 +1622,7 @@ infra/                                        # S3 prefix, sandbox origin, SNS t
 ```
 
 ### 35.2 Enum reference
-`content_kind`(document|artifact) · `content_status`(draft|published|archived) · `actor_kind`(human|agent) · `visibility_level`(private|group|internal|public) · `grant_kind`(role|building|department|grade|user) · `body_format`(markdown|html|jsx) · `publish_destination`(intranet|public_web|schoology|google) · `publication_status`(live|scheduled|unpublished|failed) · `agent_identity_kind`(service|skill) · `navigation_type` += content
+`content_kind`(document|artifact) · `content_status`(draft|published|archived) · `actor_kind`(human|agent) · `visibility_level`(private|group|internal|public) · `grant_kind`(role|building|department|grade|user) · `body_format`(markdown|html|jsx) · `publish_destination`(intranet|public_web|schoology|google|**okf** — §36) · `publication_status`(live|scheduled|unpublished|failed) · `agent_identity_kind`(service|skill) · `navigation_type` += content
 
 ### 35.3 Scope reference
 `content:create` · `content:update` · `content:publish_internal` · `content:publish_public` (human-held; withheld from autonomous agents)
@@ -1613,6 +1637,83 @@ infra/                                        # S3 prefix, sandbox origin, SNS t
 - **Delegated agent** — acts on behalf of a user, inheriting their permissions.
 - **Autonomous agent** — a service/skill identity with its own role and scopes; cannot publish publicly.
 - **Provenance** — recorded human/agent authorship; the green/violet rail (docs) or per-version author (artifacts).
+
+---
+
+## 36. OKF interoperability (Phase 8)
+
+> **Post-spec addendum.** Added after §§0–35 were written; tracked as Epic #1059 Phase 8 (issue #1103). Depends on Phase 6 (§16.3 whole-object bodies) and Phase 7 (publish-adapter breadth); ships last.
+
+[Open Knowledge Format (OKF)](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing) is a portable serialization for agent context: a directory of markdown files with YAML frontmatter, where each file is a *concept*, markdown links form the graph, and two reserved filenames carry structure — `index.md` (navigation) and `log.md` (change history). Its stance is **"format, not platform"** — no SDK, no runtime, no accounts — so any producer's knowledge is consumable by any agent without translation.
+
+Atrium already **stores everything OKF serializes.** OKF is therefore a *boundary serialization* — a read/write shape at the edge, not a change to the `lib/content/` model (§4 remains the source of truth). This phase adds **export** (a collection → an OKF bundle) and **import** (an OKF bundle → content objects), nothing more.
+
+### 36.1 Model mapping
+
+A content object maps to one OKF concept file. The `type` frontmatter field is required by OKF; every other field is optional and emitted only when present. Fields verified against the schema (§7–§9):
+
+| OKF frontmatter | Atrium source |
+|---|---|
+| `type` *(required)* | `content_objects.kind` (`document` \| `artifact`) |
+| `title` | `content_objects.title` |
+| `description` | `content_versions.summary` (head version) |
+| `resource` | `content_publications.external_ref` (a prior publication URL, if the object is already published elsewhere) |
+| `tags` | `content_objects.tags` (`text[]`) |
+| `timestamp` | `content_objects.updated_at` |
+| *body markdown* | head version body — documents via §16.3 `getContextDocument` (the `context.md` whole-object read); artifacts emit their code in a fenced block |
+
+Structure maps to the filesystem:
+- The `content_collections` subtree (self-referential tree, §8) → a directory tree.
+- One `index.md` per collection — an OKF navigation file linking its child concepts (mirrors the intranet collection view, §21).
+- `content_versions` history for an object → its `log.md` (version number, author actor, summary, timestamp) — the immutable version list is already the change log.
+
+Round-trip preserves object **metadata + body**, not editor-internal state: OKF's flat concept model cannot carry per-character document provenance or live artifact sandbox state. That loss is expected and documented, not a defect.
+
+### 36.2 Export — an `okf` publish destination
+
+Export is modeled as a new `publish_destination = 'okf'` adapter (`lib/content/publish-adapters/okf.ts`) implementing the §15.1 `PublishAdapter` interface (`destination` + `publish()` + `unpublish()`), so it inherits the §15.3 publish-service pipeline, the `content_publications` row, and — critically — the §26.4 public-publish gate. The adapter's `publish()` serializes the collection subtree (via `lib/content/okf/export.ts` + `frontmatter.ts`) to a bundle and returns its location as `external_ref` (an S3 key / URL, §36.5).
+
+**Permission boundary (the one security-critical surface).** A bundle is portable files that escape `canView` the moment they are written. Therefore export MUST:
+1. Filter **every** object in the subtree through `visibilityService.canView(req, obj)` (§12) — the same predicate that gates reads. An object the requester cannot view is omitted from the bundle entirely; a bundle requested by a student identity contains no staff-only concepts.
+2. Route any bundle whose scope is `public`/anonymous through the §26.4 gate: only a caller holding `content:publish_public` (human or delegated) may produce a public bundle; autonomous agents are structurally blocked and receive `approval_required`.
+
+Export writes a `content_audit_logs` row (§27) recording requester, collection, object count, and visibility tier.
+
+### 36.3 Import — a content service, not a destination
+
+Import (`lib/content/okf/import.ts`) parses a bundle (frontmatter + body + the `index.md` tree + `log.md`) and creates/updates content through `contentService`/`versionService`/`collectionService` — the same API every other surface uses (§22). It reconstructs the collection tree from the directory layout and `index.md`, then writes each concept as a content object + head version. Imported content is **agent-authored**: versions carry `actor_kind = agent` provenance (§11), never fabricated human authorship. Import writes a `content_audit_logs` row per run.
+
+Import is *not* a `publish_destination` — it is inbound, so it has no adapter; it is a plain service invoked by the MCP tool / REST endpoint.
+
+### 36.4 Surfaces (MCP + REST parity)
+
+Per §22 (parity), both directions are exposed at both surfaces, gated by content scopes (§26.2):
+- **MCP** (§24): `export_okf` (collection → bundle) and `import_okf` (bundle → collection).
+- **REST v1** (§23): `POST /v1/content/export/okf` and `POST /v1/content/import/okf`; update `docs/API/v1/openapi.yaml` + `context-graph.md`.
+
+Export requires a read scope + (for public bundles) `content:publish_public`; import requires `content:create`.
+
+### 36.5 Enum, migration, transport
+
+- Add `okf` to `publish_destination` (`lib/db/schema/enums.ts`) via a `010+` migration: `ALTER TYPE publish_destination ADD VALUE 'okf'`. The enum is master-owned (created in a `085+` Atrium migration, not an immutable 001–005 type owned by `postgres`), so `ADD VALUE` succeeds under the migration role. **Resolved:** migration **095** (`ALTER TYPE publish_destination ADD VALUE IF NOT EXISTS 'okf'` + the seeded `atrium-importer` agent identity, §36.3).
+- **Bundle transport (resolved):** a bundle is a **JSON manifest of files** — `{ okfVersion, generator, rootCollectionId, audience, objectCount, collectionCount, files: [{ path, content }] }` — where each `file` is an OKF-relative path + its markdown content. `export_okf` **returns this inline** (so an agent/consumer can round-trip it straight into `import_okf` with no unpacking) AND persists the same JSON to S3 (`atrium/okf/{collectionId}/{exportId}.json`), returning a presigned URL as the bundle `location`. Chosen over a `.zip`/tar to keep the format legible + dependency-free (the repo carries no archive/YAML lib) and to make the round-trip a pure in-memory operation; the model layer stays transport-agnostic, so a future archive form only changes `persistBundle`/the import parser.
+- **Export mutation boundary (resolved):** the COLLECTION exporter is **read-only over content** — it does NOT write `content_publications` rows or change object status/visibility (that would surprise a bulk export, and an `okf` publication row counting as `live` would keep an object "published" after a reader-unpublish). The `content_publications.external_ref` deliverable is honored by the **single-object `okf` PublishAdapter** path (`publishService.publish(obj, { destination: 'okf' })`), where "publish to okf" is an explicit act that writes the row + external_ref through the standard pipeline. Each `export_okf` / `import_okf` run writes one `content_audit_logs` row (§27).
+
+### 36.6 Acceptance (Phase 8)
+
+- [ ] `export_okf` produces a v0.1-valid bundle: one `.md`/object with `type` frontmatter, collection tree → directories, an `index.md` per collection, version history → `log.md`; frontmatter maps per §36.1.
+- [ ] Export enforces `canView`: a student-identity bundle excludes staff-only objects (integration test).
+- [ ] Public/anonymous export is blocked without `content:publish_public` (autonomous agent → `approval_required`).
+- [ ] Round-trip: export → `import_okf` into a fresh collection → object metadata + body preserved; imported objects carry `actor_kind = agent` provenance.
+- [ ] MCP + REST parity for export **and** import; a `content_audit_logs` row per run.
+- [ ] `bun run lint` + `bun run typecheck` pass.
+
+### 36.7 Non-goals (Phase 8)
+
+- Rewriting the content model to be OKF-native — OKF stays a boundary serialization.
+- Auto-generating bundles from non-Atrium sources (the BigQuery enrichment-agent equivalent).
+- Resolving OKF `resource` links to live external systems.
+- OKF over the Schoology/Google destinations — this is a standalone bundle format, not a connector target.
 
 ---
 

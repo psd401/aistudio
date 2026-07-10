@@ -40,6 +40,13 @@ export interface ExecutionCompleteEvent extends BaseSSEEvent {
   totalTokens: number;
   duration: number;
   success: true;
+  /**
+   * Estimated spend for an agentic run in whole cents, computed from token
+   * usage × the model's per-token rates (Issue #926 — epic #922 audit).
+   * `null` when the model has no complete pricing or usage was unreported;
+   * absent for prompt-chain executions.
+   */
+  estimatedCostCents?: number | null;
 }
 
 /** Emitted when execution fails */

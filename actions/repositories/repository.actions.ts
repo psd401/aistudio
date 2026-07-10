@@ -3,7 +3,7 @@
 import { getServerSession } from "@/lib/auth/server-session"
 import { type ActionState } from "@/types/actions-types"
 import { hasCapabilityAccess } from "@/utils/roles"
-import { getUserIdFromSession, canModifyRepository, canReadRepository } from "@/actions/repositories/repository-permissions"
+import { getUserIdFromSession, canModifyRepository } from "@/actions/repositories/repository-permissions"
 import {
   createRepository as drizzleCreateRepository,
   updateRepository as drizzleUpdateRepository,
@@ -17,6 +17,7 @@ import {
   revokeAccessById,
   getUserAccessibleRepositories
 } from "@/lib/db/drizzle"
+import { assertNotSystemManagedRepository, assertRepositoryReadAccess } from "@/lib/repositories/repository-access-guard"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq, count, inArray } from "drizzle-orm"
 import { repositoryAccess, repositoryItems } from "@/lib/db/schema"
@@ -234,6 +235,11 @@ export async function updateRepository(
       throw ErrorFactories.authzOwnerRequired("modify repository")
     }
 
+    // A system-managed repository (the Atrium retrieval index, #1056) is
+    // immutable through the generic API — masked as not-found so its `isPublic`
+    // / `metadata` (and thus the system-managed guard) cannot be flipped.
+    await assertNotSystemManagedRepository(input.id)
+
     // Check if any fields provided
     if (!hasRepositoryUpdates(input)) {
       log.warn("No fields provided for update")
@@ -326,6 +332,10 @@ export async function deleteRepository(
       })
       throw ErrorFactories.authzOwnerRequired("delete repository")
     }
+
+    // Never delete a system-managed repo (the Atrium index, #1056) through the
+    // generic API — it would destroy the retrieval index out-of-band.
+    await assertNotSystemManagedRepository(id)
 
     // First, get all document items to delete from S3
     log.debug("Fetching document items for deletion")
@@ -494,14 +504,11 @@ export async function getRepository(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
-    // Per-repository access check (REV-SEC-082 / REV-COR-061): the capability only
-    // grants "may use the feature", not "may read repository X". Return not-found
-    // (not forbidden) so repository existence stays non-enumerable.
-    const userId = await getUserIdFromSession(session.sub)
-    if (!(await canReadRepository(id, userId))) {
-      log.warn("Repository access denied - no read access", { userId: session.sub, repositoryId: id })
-      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
-    }
+    // Per-repository authorization: the caller must be able to access this
+    // repository (public / owner / grant). Closes the IDOR where any capability
+    // holder could read any repo's details by id, and excludes system-managed
+    // repos (the Atrium index, #1056) which the access model filters out.
+    await assertRepositoryReadAccess(id, session.sub)
 
     log.debug("Fetching repository from database", { repositoryId: id })
     const resultRaw = await getRepositoryById(id)

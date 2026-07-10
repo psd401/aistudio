@@ -12,6 +12,7 @@
 'use strict';
 
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
 
 const {
   SecretsManagerClient,
@@ -205,17 +206,149 @@ function splitCommand(cmd) {
   return tokens;
 }
 
+// ============================================================================
+// Payload files — safe transport for arbitrary text (#1138 follow-up)
+// ============================================================================
+//
+// splitCommand supports quoted segments but has NO escape syntax: a quote
+// character inside a same-quoted value terminates the token, so any content
+// with an apostrophe, mixed quotes, or newlines (i.e. real document text)
+// cannot ride inside --command at all. Observed live 2026-07-06: the agent
+// could not write Google Doc content ("no way to pass multi-word text via
+// this shim") and the task died. The fix: the model writes the content to a
+// file and references it with `--json-file <abs-path>` (JSON payloads) or
+// `--body-file <abs-path>` (plain-text bodies, e.g. +draft). The file's
+// content is delivered to gws as exactly ONE argv token — quoting rules
+// never apply to it.
+//
+// Ordering contract (see run.js): the resolved JSON is inlined into a
+// synthetic command string FIRST so Phase 1 gates (incl. the share-to-caller
+// payload validation) and marker injection see the real payload; execution
+// then swaps a whitespace-free placeholder token for the payload AFTER
+// splitCommand, so tokenization never touches the content.
+
+const PAYLOAD_PLACEHOLDERS = {
+  '--json-file': { flag: '--json', placeholder: '@@PSD_PAYLOAD_JSON@@', kind: 'json' },
+  '--body-file': { flag: '--body', placeholder: '@@PSD_PAYLOAD_BODY@@', kind: 'text' },
+  // chat +send message text. Added after the live 2026-07-07 run: the agent
+  // GUESSED `--text-file` while fumbling +send syntax against the clock —
+  // it's the natural generalization of the two flags above, so make it real.
+  '--text-file': { flag: '--text', placeholder: '@@PSD_PAYLOAD_TEXT@@', kind: 'text' },
+};
+
+/**
+ * Resolve `--json-file` / `--body-file` references in a --command string.
+ *
+ * Returns null when neither flag is present. Otherwise returns:
+ *   {
+ *     execCommand:      command with each file flag replaced by
+ *                       `--json @@PSD_PAYLOAD_JSON@@` / `--body @@…@@`,
+ *     syntheticCommand: command with each file flag replaced by the REAL
+ *                       content inline (gates + markers run against this),
+ *     payloads:         { [placeholderToken]: content }
+ *   }
+ *
+ * Fails (exit 1) on: relative path, unreadable file, invalid JSON in a
+ * --json-file, duplicate use of the same flag, or --json-file alongside an
+ * inline --json (ambiguous — exactly one payload source allowed).
+ */
+function resolvePayloadFiles(commandString) {
+  if (!commandString || typeof commandString !== 'string') return null;
+  let execCommand = commandString;
+  let syntheticCommand = commandString;
+  const payloads = {};
+
+  for (const [fileFlag, spec] of Object.entries(PAYLOAD_PLACEHOLDERS)) {
+    const re = new RegExp(`(^|\\s)${fileFlag}\\s+(\\S+)`, 'g');
+    const matches = [...commandString.matchAll(re)];
+    if (matches.length === 0) continue;
+    if (matches.length > 1) {
+      fail(`${fileFlag} may appear at most once per command`);
+    }
+    // Exactly one payload source per flag: reject the file form alongside its
+    // inline counterpart (--json + --json-file, --body + --body-file) —
+    // otherwise gws would receive two occurrences of the same flag and pick
+    // one silently. `--json\s` does not match `--json-file` (hyphen, not
+    // whitespace, follows), so the file flag never trips its own check.
+    const inlineRe = new RegExp(`(^|\\s)${spec.flag}\\s`);
+    if (inlineRe.test(commandString)) {
+      fail(`use either ${spec.flag} or ${fileFlag}, not both`);
+    }
+    let filePath = matches[0][2];
+    // Models habitually quote flag values (every SKILL.md example quotes
+    // --params). \S+ captures those quotes, so strip one matching
+    // surrounding pair before validating — otherwise a valid quoted path
+    // fails the absolute-path check with a misleading error.
+    if (
+      filePath.length >= 2 &&
+      ((filePath.startsWith("'") && filePath.endsWith("'")) ||
+        (filePath.startsWith('"') && filePath.endsWith('"')))
+    ) {
+      filePath = filePath.slice(1, -1);
+    }
+    if (!filePath.startsWith('/')) {
+      fail(`${fileFlag} requires an absolute path (got "${filePath}")`);
+    }
+    let content;
+    try {
+      content = fs.readFileSync(filePath, 'utf8');
+    } catch (err) {
+      fail(`${fileFlag}: cannot read ${filePath}: ${err.message}`);
+    }
+    if (spec.kind === 'json') {
+      try {
+        // Minify so the synthetic inline command is single-line — the
+        // marker injector's brace scanner and the gate regexes both operate
+        // on it, and a compact form keeps their behavior identical to the
+        // inline --json path.
+        content = JSON.stringify(JSON.parse(content));
+      } catch (err) {
+        fail(`${fileFlag}: ${filePath} is not valid JSON: ${err.message}`);
+      }
+    }
+    payloads[spec.placeholder] = content;
+    execCommand = execCommand.replace(
+      re,
+      (m, lead) => `${lead}${spec.flag} ${spec.placeholder}`
+    );
+    syntheticCommand = syntheticCommand.replace(
+      re,
+      (m, lead) => `${lead}${spec.flag} ${content}`
+    );
+  }
+
+  return Object.keys(payloads).length > 0
+    ? { execCommand, syntheticCommand, payloads }
+    : null;
+}
+
 /**
  * Exec gws with GOOGLE_WORKSPACE_CLI_TOKEN set. Streams stdout; returns exit
  * code. gws ignores GOOGLE_ACCESS_TOKEN — must be GOOGLE_WORKSPACE_CLI_TOKEN
  * per the gws README "Pre-obtained Access Token" section.
+ *
+ * `payloads` (optional) maps placeholder tokens to payload-file contents
+ * (see resolvePayloadFiles). Substitution happens AFTER splitCommand, so the
+ * content becomes exactly one argv token regardless of quotes/newlines.
  */
-function execGws(commandString, accessToken) {
-  const tokens = splitCommand(commandString);
+function execGws(commandString, accessToken, payloads) {
+  let tokens = splitCommand(commandString);
+  if (payloads && typeof payloads === 'object') {
+    tokens = tokens.map((t) =>
+      Object.prototype.hasOwnProperty.call(payloads, t) ? payloads[t] : t
+    );
+  }
   if (tokens.length === 0) {
     fail('--command is empty');
   }
-  const result = spawnSync('gws', tokens, {
+  // Call the real binary directly. In the agent container the model-facing
+  // `gws` on PATH is a refuse-by-default wrapper (bin/gws-wrapper.sh) that
+  // blocks direct data access; run.js is the only sanctioned caller, so it
+  // must reach the unwrapped binary at /usr/local/bin/gws.real. Local/dev
+  // images that ship no wrapper fall back to `gws` on PATH.
+  const REAL_GWS = '/usr/local/bin/gws.real';
+  const bin = fs.existsSync(REAL_GWS) ? REAL_GWS : 'gws';
+  const result = spawnSync(bin, tokens, {
     env: { ...process.env, GOOGLE_WORKSPACE_CLI_TOKEN: accessToken },
     stdio: ['ignore', 'inherit', 'inherit'],
   });
@@ -249,6 +382,27 @@ function execGws(commandString, accessToken) {
 // `pattern` matches against the SPACE-JOINED argv tokens, lowercased — so
 // `gws gmail users messages send` and `gws gmail.users.messages.send` both
 // trigger the same rule.
+// Operations forbidden ONLY on the user OAuth slot (scope === 'user_account').
+//
+// Added 2026-07-07 (Hagel, #1138): the agent recreated documents OWNED BY THE
+// USER's account to route around the sharing gate ("do not create documents
+// as my account, that's a huge hole security-wise"). File creation as the
+// user is impersonation — every artifact must be owned by the agent identity
+// (auditable, gate-enforced sharing) and shared explicitly via
+// isPermittedExplicitShare. Drafts/calendar/tasks on the user slot remain
+// allowed: they are marker-stamped, land in review surfaces (Drafts folder,
+// own calendar), and were explicitly designed as user-slot writes.
+const USER_SCOPE_FORBIDDEN = [
+  { pattern: /\bdrive[\s.]+files[\s.]+(create|copy)\b/i,
+    reason: 'creating files owned by the user (create as the agent and share explicitly instead)' },
+  { pattern: /\bdocs[\s.]+documents[\s.]+create\b/i,
+    reason: 'creating a Google Doc owned by the user (create as the agent and share explicitly instead)' },
+  { pattern: /\bsheets[\s.]+spreadsheets[\s.]+create\b/i,
+    reason: 'creating a Google Sheet owned by the user (create as the agent and share explicitly instead)' },
+  { pattern: /\bslides[\s.]+presentations[\s.]+create\b/i,
+    reason: 'creating a Google Slides deck owned by the user (create as the agent and share explicitly instead)' },
+];
+
 const PHASE1_FORBIDDEN = [
   // Send mail — any path that puts a message on the wire
   { pattern: /\bgmail[\s.]+users[\s.]+messages[\s.]+send\b/i,
@@ -293,28 +447,39 @@ const PHASE1_FORBIDDEN = [
     reason: 'modifying Drive sharing permissions (Phase 1: no permission changes)' },
 ];
 
+// District domain for the explicit-share exception. Env-overridable so
+// non-prod environments could narrow/redirect it; the default is the only
+// domain the platform serves.
+const AGENT_SHARE_DOMAIN = (process.env.AGENT_SHARE_DOMAIN || 'psd401.net').toLowerCase();
+
 /**
- * Narrow exception to the `drive.permissions.create` block: the agent is
- * permitted to share files it owns (scope === 'agent_account') back to the
- * caller who initiated the conversation, as `reader` or `commenter` only.
+ * Exception to the `drive.permissions.create` block: the agent may grant
+ * EXPLICIT, bounded permissions on files it owns (scope === 'agent_account').
  *
- * Rationale: when the agent creates artifacts on a user's behalf — investigation
- * reports, drafts, generated docs — it stores them in its own agent_account
- * Drive (because user_account scopes are intentionally narrow). Without this
- * exception, the user has no way to view the artifact, since the broad
- * `drive.permissions.create` block prevents even hand-back-to-owner sharing.
+ * Rationale: the agent stores artifacts it creates (reports, generated docs,
+ * meeting summaries) on its own agent_account Drive. Originally it could
+ * share them only back to the CALLER; product decision 2026-07-07 (Hagel,
+ * #1138 — team docs must land in shared Chat spaces) widened this to
+ * in-district sharing with explicit grants.
  *
  * Hard constraints (ALL must be true to allow):
- *   - context.scope is 'agent_account'  (sharing FROM the agent's own Drive)
- *   - context.ownerEmail matches the permission's emailAddress (caller only;
- *     no third-party shares, no domain shares, no anyone-with-link)
- *   - permission.type === 'user'        (no domain / group / anyone)
- *   - permission.role ∈ {reader, commenter}  (no writer/owner transfer)
+ *   - context.scope is 'agent_account'  (sharing FROM the agent's own Drive;
+ *     permission changes on user-owned files remain fully blocked)
+ *   - create only (update/delete remain blocked)
+ *   - EITHER type === 'user' with an @psd401.net emailAddress,
+ *     role ∈ {reader, commenter, writer} (writer added 2026-07-08, Hagel:
+ *     explicitly NAMED district individuals may edit agent-owned docs —
+ *     team collaboration on posted docs)
+ *   - OR     type === 'domain' with domain === psd401.net, role === 'reader'
+ *     (broad in-district visibility for docs posted to shared spaces;
+ *     domain-wide stays read-only — district-wide edit is vandalism surface)
+ *   - NEVER: type 'anyone' or 'group', external addresses/domains,
+ *     owner transfer.
  *
- * Returns true if the share request is the narrow caller-only handoff;
+ * Returns true if the share request fits the explicit in-district shape;
  * false otherwise. False means fall through to the existing block.
  */
-function isShareToCallerHandoff(commandString, context) {
+function isPermittedExplicitShare(commandString, context) {
   if (!context || context.scope !== 'agent_account' || !context.ownerEmail) {
     return false;
   }
@@ -323,36 +488,13 @@ function isShareToCallerHandoff(commandString, context) {
     return false;
   }
 
-  // Extract the --json payload without mutating it. We reuse the same brace-
-  // balanced parser idea as mutateJsonField but read-only.
-  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
-  if (jsonFlagIdx === -1) return false;
-  let i = jsonFlagIdx + '--json'.length;
-  while (i < commandString.length && /\s/.test(commandString[i])) i++;
-  if (commandString[i] === "'" || commandString[i] === '"') i++;
-  const jsonStart = i;
-  if (commandString[jsonStart] !== '{') return false;
-  let depth = 0;
-  let inString = false;
-  let stringChar = '';
-  let escape = false;
-  let jsonEnd = -1;
-  for (let j = jsonStart; j < commandString.length; j++) {
-    const ch = commandString[j];
-    if (escape) { escape = false; continue; }
-    if (ch === '\\') { escape = true; continue; }
-    if (inString) {
-      if (ch === stringChar) inString = false;
-      continue;
-    }
-    if (ch === '"' || ch === "'") { inString = true; stringChar = ch; continue; }
-    if (ch === '{') depth++;
-    else if (ch === '}') { depth--; if (depth === 0) { jsonEnd = j; break; } }
-  }
-  if (jsonEnd === -1) return false;
+  // Extract the --json payload without mutating it (shared helper — same
+  // brace-balanced scan marker injection uses).
+  const jsonStr = extractJsonArg(commandString);
+  if (!jsonStr) return false;
   let payload;
   try {
-    payload = JSON.parse(commandString.slice(jsonStart, jsonEnd + 1));
+    payload = JSON.parse(jsonStr);
   } catch {
     return false;
   }
@@ -368,12 +510,23 @@ function isShareToCallerHandoff(commandString, context) {
   const emailAddress = typeof perm.emailAddress === 'string'
     ? perm.emailAddress.toLowerCase()
     : '';
+  const domain = typeof perm.domain === 'string' ? perm.domain.toLowerCase() : '';
 
-  if (type !== 'user') return false;
-  if (role !== 'reader' && role !== 'commenter') return false;
-  if (emailAddress !== context.ownerEmail.toLowerCase()) return false;
-
-  return true;
+  if (type === 'user') {
+    // Explicit named recipient — must be in-district. Writer allowed for
+    // named individuals (2026-07-08); owner transfer never.
+    if (role !== 'reader' && role !== 'commenter' && role !== 'writer') {
+      return false;
+    }
+    return emailAddress.endsWith(`@${AGENT_SHARE_DOMAIN}`);
+  }
+  if (type === 'domain') {
+    // Whole-district visibility (docs linked in shared Chat spaces) —
+    // read-only, and ONLY our own domain.
+    return role === 'reader' && domain === AGENT_SHARE_DOMAIN;
+  }
+  // 'anyone', 'group', and everything else stay blocked.
+  return false;
 }
 
 /**
@@ -392,12 +545,25 @@ function enforcePhase1Gates(commandString, context) {
   if (!commandString || typeof commandString !== 'string') {
     return { allowed: true };
   }
+  // Scope-conditional gates: file creation as the USER is impersonation
+  // (2026-07-07, see USER_SCOPE_FORBIDDEN). Checked first — these have no
+  // exceptions. Fail-closed default: when scope is missing/unknown we still
+  // apply the user-slot rules (run.js always passes a resolved scope; only
+  // a buggy caller would omit it, and the agent slot is the privileged one).
+  if (!context || context.scope !== 'agent_account') {
+    for (const { pattern, reason } of USER_SCOPE_FORBIDDEN) {
+      if (pattern.test(commandString)) {
+        return { allowed: false, reason };
+      }
+    }
+  }
   for (const { pattern, reason } of PHASE1_FORBIDDEN) {
     if (pattern.test(commandString)) {
-      // Narrow exception: agent shares its own file with the caller, read-only.
+      // Exception: agent grants explicit, bounded in-district permissions
+      // on files it owns (see isPermittedExplicitShare).
       if (
         /\bdrive[\s.]+permissions[\s.]+create\b/i.test(commandString) &&
-        isShareToCallerHandoff(commandString, context)
+        isPermittedExplicitShare(commandString, context)
       ) {
         return { allowed: true };
       }
@@ -494,17 +660,17 @@ function injectMarkers(commandString) {
 }
 
 /**
- * Find the --json '{...}' argument in a gws command string and apply
- * `mutator` to the parsed object. Re-encode and splice back.
- *
- * Returns the original string if no --json arg or the JSON parse fails.
+ * Locate the --json '{...}' argument in a gws command string via a
+ * balanced-brace scan. Returns {jsonStart, jsonEnd, openQuote} (end
+ * inclusive) or null when there is no parseable --json object. Shared by
+ * mutateJsonField (marker injection) and extractJsonArg (payload-file flow).
  */
-function mutateJsonField(commandString, mutator) {
+function findJsonSpan(commandString) {
   // Match --json followed by a single-quoted or double-quoted JSON object.
   // The simple/robust approach: find --json, then balanced-brace scan from
   // the next non-quote character forward.
   const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
-  if (jsonFlagIdx === -1) return commandString;
+  if (jsonFlagIdx === -1) return null;
 
   // Find the start of the JSON object (`{`). Skip the `--json` token,
   // any whitespace, and any opening quote.
@@ -516,7 +682,7 @@ function mutateJsonField(commandString, mutator) {
     i++;
   }
   const jsonStart = i;
-  if (commandString[jsonStart] !== '{') return commandString;
+  if (commandString[jsonStart] !== '{') return null;
 
   // Brace-balance scan to find the matching close.
   let depth = 0;
@@ -543,7 +709,32 @@ function mutateJsonField(commandString, mutator) {
       if (depth === 0) { jsonEnd = j; break; }
     }
   }
-  if (jsonEnd === -1) return commandString;
+  if (jsonEnd === -1) return null;
+  return { jsonStart, jsonEnd, openQuote };
+}
+
+/**
+ * Return the raw --json object substring from a command string, or null.
+ * Used by the payload-file flow to pull a marker-mutated JSON payload back
+ * out of the synthetic inline command before execution.
+ */
+function extractJsonArg(commandString) {
+  if (!commandString || typeof commandString !== 'string') return null;
+  const span = findJsonSpan(commandString);
+  if (!span) return null;
+  return commandString.slice(span.jsonStart, span.jsonEnd + 1);
+}
+
+/**
+ * Find the --json '{...}' argument in a gws command string and apply
+ * `mutator` to the parsed object. Re-encode and splice back.
+ *
+ * Returns the original string if no --json arg or the JSON parse fails.
+ */
+function mutateJsonField(commandString, mutator) {
+  const span = findJsonSpan(commandString);
+  if (!span) return commandString;
+  const { jsonStart, jsonEnd, openQuote } = span;
 
   const jsonStr = commandString.slice(jsonStart, jsonEnd + 1);
   let obj;
@@ -591,5 +782,7 @@ module.exports = {
   execGws,
   enforcePhase1Gates,
   injectMarkers,
+  resolvePayloadFiles,
+  extractJsonArg,
   PHASE1_FORBIDDEN,
 };

@@ -48,6 +48,7 @@ export interface ModelFormData {
   inputCostPer1kTokens: string | null
   outputCostPer1kTokens: string | null
   cachedInputCostPer1kTokens: string | null
+  cacheWriteCostPer1kTokens: string | null
   // Performance (not displayed but preserved)
   averageLatencyMs: number | null
   maxConcurrency: number | null
@@ -73,6 +74,7 @@ const emptyFormData: ModelFormData = {
   inputCostPer1kTokens: null,
   outputCostPer1kTokens: null,
   cachedInputCostPer1kTokens: null,
+  cacheWriteCostPer1kTokens: null,
   averageLatencyMs: null,
   maxConcurrency: null,
   supportsBatching: false,
@@ -127,6 +129,7 @@ export function ModelDetailModal({
     inputCostPer1kTokens?: string
     outputCostPer1kTokens?: string
     cachedInputCostPer1kTokens?: string
+    cacheWriteCostPer1kTokens?: string
   }>({})
 
   // Initialize form data when model changes
@@ -173,6 +176,7 @@ export function ModelDetailModal({
         inputCostPer1kTokens: model.inputCostPer1kTokens || null,
         outputCostPer1kTokens: model.outputCostPer1kTokens || null,
         cachedInputCostPer1kTokens: model.cachedInputCostPer1kTokens || null,
+        cacheWriteCostPer1kTokens: model.cacheWriteCostPer1kTokens || null,
         averageLatencyMs: model.averageLatencyMs || null,
         maxConcurrency: model.maxConcurrency || null,
         supportsBatching: model.supportsBatching || false,
@@ -209,7 +213,7 @@ export function ModelDetailModal({
 
   // Cost field handler with validation
   const handleCostChange = useCallback(
-    (field: "inputCostPer1kTokens" | "outputCostPer1kTokens" | "cachedInputCostPer1kTokens") =>
+    (field: "inputCostPer1kTokens" | "outputCostPer1kTokens" | "cachedInputCostPer1kTokens" | "cacheWriteCostPer1kTokens") =>
       (e: React.ChangeEvent<HTMLInputElement>) => {
         const value = e.target.value
 
@@ -592,6 +596,26 @@ export function ModelDetailModal({
                       {costErrors.cachedInputCostPer1kTokens && (
                         <p id="cachedCost-error" className="text-sm text-destructive">
                           {costErrors.cachedInputCostPer1kTokens}
+                        </p>
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="cacheWriteCost">Cache Write Cost per 1K ($)</Label>
+                      <Input
+                        id="cacheWriteCost"
+                        type="number"
+                        step="0.000001"
+                        value={formData.cacheWriteCostPer1kTokens || ""}
+                        onChange={handleCostChange("cacheWriteCostPer1kTokens")}
+                        placeholder="0.000000"
+                        aria-invalid={!!costErrors.cacheWriteCostPer1kTokens}
+                        aria-describedby={
+                          costErrors.cacheWriteCostPer1kTokens ? "cacheWriteCost-error" : undefined
+                        }
+                      />
+                      {costErrors.cacheWriteCostPer1kTokens && (
+                        <p id="cacheWriteCost-error" className="text-sm text-destructive">
+                          {costErrors.cacheWriteCostPer1kTokens}
                         </p>
                       )}
                     </div>

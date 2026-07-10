@@ -10,8 +10,9 @@ import { describe, it, expect, jest, beforeAll, beforeEach } from '@jest/globals
 const mockGetServerSession = jest.fn(() => Promise.resolve({ sub: 'u' } as { sub: string } | null))
 const mockHasCapabilityAccess = jest.fn(() => Promise.resolve(true))
 const mockGetUserIdFromSession = jest.fn(() => Promise.resolve(1))
-const mockCanReadRepository = jest.fn(() => Promise.resolve(true))
 const mockCanModifyRepository = jest.fn(() => Promise.resolve(true))
+const mockAssertRepositoryReadAccess = jest.fn<(...a: unknown[]) => Promise<void>>(() => Promise.resolve())
+const mockAssertNotSystemManagedRepository = jest.fn<(...a: unknown[]) => Promise<void>>(() => Promise.resolve())
 const mockGetRepositoryById = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 const mockGetRepositoryAccessList = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promise.resolve([]))
 const mockExecuteQuery = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promise.resolve([]))
@@ -20,8 +21,11 @@ jest.mock('@/lib/auth/server-session', () => ({ getServerSession: mockGetServerS
 jest.mock('@/utils/roles', () => ({ hasCapabilityAccess: mockHasCapabilityAccess }))
 jest.mock('@/actions/repositories/repository-permissions', () => ({
   getUserIdFromSession: mockGetUserIdFromSession,
-  canReadRepository: mockCanReadRepository,
   canModifyRepository: mockCanModifyRepository,
+}))
+jest.mock('@/lib/repositories/repository-access-guard', () => ({
+  assertRepositoryReadAccess: mockAssertRepositoryReadAccess,
+  assertNotSystemManagedRepository: mockAssertNotSystemManagedRepository,
 }))
 jest.mock('@/lib/db/drizzle', () => ({
   getRepositoryById: mockGetRepositoryById,
@@ -50,13 +54,14 @@ describe('repository.actions authorization (REV-SEC-082 / REV-SEC-083 / REV-COR-
     mockGetServerSession.mockResolvedValue({ sub: 'u' })
     mockHasCapabilityAccess.mockResolvedValue(true)
     mockGetUserIdFromSession.mockResolvedValue(1)
-    mockCanReadRepository.mockResolvedValue(true)
     mockCanModifyRepository.mockResolvedValue(true)
+    mockAssertRepositoryReadAccess.mockResolvedValue(undefined)
+    mockAssertNotSystemManagedRepository.mockResolvedValue(undefined)
     mockExecuteQuery.mockResolvedValue([])
   })
 
   it('getRepository returns not-found when the caller lacks read access (REV-SEC-082)', async () => {
-    mockCanReadRepository.mockResolvedValue(false)
+    mockAssertRepositoryReadAccess.mockRejectedValue(new Error('Record not found'))
     const res = await mod.getRepository(999)
     expect(res.isSuccess).toBe(false)
     expect(mockGetRepositoryById).not.toHaveBeenCalled()

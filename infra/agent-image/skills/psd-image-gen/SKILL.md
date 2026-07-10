@@ -1,7 +1,7 @@
 ---
 name: psd-image-gen
 summary: Generate images with OpenAI gpt-image-2 — shared API key, district-funded.
-description: Generates an image from a text prompt via OpenAI's gpt-image-2 model, uploads the PNG to a public-by-link S3 prefix, and returns an unsigned HTTPS URL the agent can surface in chat. Uses a shared (district-funded) OpenAI API key from Secrets Manager — usage costs accrue centrally. Restricted by the `skill.image-gen` capability; users without the capability will be refused at invocation time (the skill remains visible in the catalog until OpenClaw supports per-session filtering). Output includes the URL, model, and resolved size; never the API key.
+description: Generate an image from a text prompt (OpenAI gpt-image-2) and return a shareable HTTPS URL. Use for image generation — "make/create/generate a picture or image", logos, illustrations, visuals.
 allowed-tools: Bash(node:*)
 ---
 
@@ -66,7 +66,7 @@ gpt-image-2 is priced per output token. The shared key bills the district. Prefe
 
 ## Permission Model
 
-This skill enforces the `skill.image-gen` capability at invocation time. The capability is granted via roles in the AI Studio `tools` / `role_tools` tables (currently named `tools`; renaming to `capabilities` under epic #922 / issue #923). Migration 075 seeds the capability and grants it to the `administrator` and `staff` roles.
+This skill enforces the `skill.image-gen` capability at invocation time. The capability is granted via roles in the AI Studio `capabilities` / `role_capabilities` tables (renamed from `tools` / `role_tools` by epic #922 / issue #923; the legacy tables were dropped in migration 084). Migration 075 seeds the capability and grants it to the `administrator` and `staff` roles.
 
 **Catalog visibility caveat.** OpenClaw loads skills statically at container startup, so the skill *appears* in `tools.catalog` for all users. Users without the capability who try to invoke it receive `forbidden_capability` and the call refuses before any OpenAI traffic is sent. Catalog-level filtering (so the skill is invisible to ungranted users) is a planned follow-up once OpenClaw exposes a per-session catalog hook.
 

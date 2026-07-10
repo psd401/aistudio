@@ -1,0 +1,163 @@
+/**
+ * Unit tests for the listVisible tag + query filters (Epic #1059 completion).
+ *
+ *  - Tag filter: must use the array-overlap form (`tags && ARRAY[$1]::text[]`)
+ *    so the `idx_content_tags` GIN index (migration 085) applies — the previous
+ *    `<tag> = ANY(tags)` form forced a sequential scan. The tag stays a bound
+ *    parameter (injection-safe) and is length-clamped.
+ *  - Query filter: case-insensitive title substring search, clamped to 200
+ *    chars, with LIKE metacharacters (`\`, `%`, `_`) escaped so user text can
+ *    never act as a wildcard pattern.
+ *
+ * drizzle-orm's `sql`/`ilike` are mocked as CAPTURING fakes so the exact
+ * template chunks / bound values the service builds can be asserted without a
+ * database.
+ */
+
+const executeQueryMock = jest.fn();
+jest.mock("@/lib/db/drizzle-client", () => ({
+  executeQuery: (...args: unknown[]) => executeQueryMock(...args),
+}));
+jest.mock("@/lib/db/schema", () => ({
+  contentObjects: {
+    id: "COL_id",
+    ownerUserId: "COL_owner",
+    visibilityLevel: "COL_visibility",
+    collectionId: "COL_collection",
+    kind: "COL_kind",
+    status: "COL_status",
+    tags: "COL_tags",
+    title: "COL_title",
+    updatedAt: "COL_updated_at",
+  },
+  contentVisibilityGrants: {},
+}));
+jest.mock("@/lib/db/drizzle-helpers", () => ({
+  pgTimestampAsText: (c: unknown) => c,
+  stripJsonQuotes: (v: unknown) => v,
+}));
+
+/** A captured sql`` invocation: raw template chunks + interpolated values. */
+interface CapturedSql {
+  op: "sql";
+  chunks: string[];
+  values: unknown[];
+}
+interface CapturedIlike {
+  op: "ilike";
+  column: unknown;
+  pattern: unknown;
+}
+
+jest.mock("drizzle-orm", () => ({
+  and: (...a: unknown[]) => a,
+  desc: (a: unknown) => a,
+  eq: (...a: unknown[]) => ({ op: "eq", a }),
+  ne: (...a: unknown[]) => ({ op: "ne", a }),
+  ilike: (column: unknown, pattern: unknown) => ({ op: "ilike", column, pattern }),
+  sql: Object.assign(
+    (chunks: TemplateStringsArray, ...values: unknown[]) => ({
+      op: "sql",
+      chunks: [...chunks],
+      values,
+    }),
+    { join: (..._a: unknown[]) => ({ op: "sql-join" }) }
+  ),
+}));
+
+import { visibilityService } from "@/lib/content/visibility-service";
+import type { Requester } from "@/lib/content/types";
+
+const staffUser: Requester = {
+  kind: "user",
+  userId: 100,
+  roles: ["staff"],
+  isAdmin: false,
+};
+
+/**
+ * Drive listVisible with a filter and capture the flattened `.where()` filter
+ * list (the array `and(...)` receives under the mocked drizzle-orm).
+ */
+async function captureFilters(
+  filter: Record<string, unknown>
+): Promise<unknown[]> {
+  let captured: unknown[] = [];
+  const builder: Record<string, unknown> = {};
+  for (const m of ["select", "from", "orderBy", "limit"]) {
+    builder[m] = jest.fn(() => builder);
+  }
+  builder.where = jest.fn((arg: unknown) => {
+    captured = arg as unknown[];
+    return builder;
+  });
+  builder.offset = jest.fn(() => Promise.resolve([]));
+  executeQueryMock.mockImplementationOnce((cb: (db: unknown) => unknown) =>
+    cb(builder)
+  );
+  await visibilityService.listVisible(
+    staffUser,
+    filter as Parameters<typeof visibilityService.listVisible>[1]
+  );
+  return captured;
+}
+
+const isSql = (f: unknown): f is CapturedSql =>
+  typeof f === "object" && f !== null && (f as { op?: string }).op === "sql";
+const isIlike = (f: unknown): f is CapturedIlike =>
+  typeof f === "object" && f !== null && (f as { op?: string }).op === "ilike";
+
+beforeEach(() => {
+  executeQueryMock.mockReset();
+});
+
+describe("listVisible tag filter (GIN-usable overlap form)", () => {
+  it("builds `tags && ARRAY[$tag]::text[]` with the tag as a bound value", async () => {
+    const filters = await captureFilters({ tag: "science" });
+    const tagFilter = filters
+      .filter(isSql)
+      .find((f) => f.chunks.some((c) => c.includes("&&")));
+    expect(tagFilter).toBeDefined();
+    // Overlap against a bound single-element array — the GIN-indexable form.
+    expect(tagFilter!.chunks.join("?")).toContain("&& ARRAY[");
+    expect(tagFilter!.chunks.join("?")).toContain("]::text[]");
+    // Column first, then the bound tag value (never string-concatenated).
+    expect(tagFilter!.values).toEqual(["COL_tags", "science"]);
+  });
+
+  it("clamps an oversized tag to 100 chars before binding", async () => {
+    const filters = await captureFilters({ tag: "x".repeat(500) });
+    const tagFilter = filters
+      .filter(isSql)
+      .find((f) => f.chunks.some((c) => c.includes("&&")));
+    expect(tagFilter!.values[1]).toBe("x".repeat(100));
+  });
+});
+
+describe("listVisible query filter (title ILIKE)", () => {
+  it("builds an ILIKE on title with a %-wrapped bound pattern", async () => {
+    const filters = await captureFilters({ query: "budget report" });
+    const q = filters.find(isIlike);
+    expect(q).toBeDefined();
+    expect(q!.column).toBe("COL_title");
+    expect(q!.pattern).toBe("%budget report%");
+  });
+
+  it("escapes LIKE metacharacters so user text cannot act as a wildcard", async () => {
+    const filters = await captureFilters({ query: String.raw`50%_off\deal` });
+    const q = filters.find(isIlike);
+    expect(q!.pattern).toBe(String.raw`%50\%\_off\\deal%`);
+  });
+
+  it("clamps the query to 200 chars before escaping", async () => {
+    const filters = await captureFilters({ query: "a".repeat(1000) });
+    const q = filters.find(isIlike);
+    // 200 payload chars + the two wrapping wildcards.
+    expect(q!.pattern).toBe(`%${"a".repeat(200)}%`);
+  });
+
+  it("adds no title filter when query is absent or empty", async () => {
+    expect((await captureFilters({})).find(isIlike)).toBeUndefined();
+    expect((await captureFilters({ query: "" })).find(isIlike)).toBeUndefined();
+  });
+});

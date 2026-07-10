@@ -10,8 +10,10 @@ import { describe, it, expect, jest, beforeAll, beforeEach } from '@jest/globals
 const mockGetServerSession = jest.fn(() => Promise.resolve({ sub: 'u' } as { sub: string } | null))
 const mockHasCapabilityAccess = jest.fn(() => Promise.resolve(true))
 const mockGetUserIdFromSession = jest.fn(() => Promise.resolve(1))
-const mockCanReadRepository = jest.fn(() => Promise.resolve(true))
 const mockCanModifyRepository = jest.fn(() => Promise.resolve(true))
+const mockAssertRepositoryReadAccess = jest.fn<(...a: unknown[]) => Promise<void>>(() => Promise.resolve())
+const mockAssertItemRepositoryReadAccess = jest.fn<(...a: unknown[]) => Promise<void>>(() => Promise.resolve())
+const mockAssertNotSystemManagedRepository = jest.fn<(...a: unknown[]) => Promise<void>>(() => Promise.resolve())
 const mockGetRepositoryItems = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promise.resolve([]))
 const mockGetRepositoryItemById = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 const mockCreateRepositoryItem = jest.fn<(...a: unknown[]) => Promise<unknown>>()
@@ -21,13 +23,16 @@ jest.mock('@/lib/auth/server-session', () => ({ getServerSession: mockGetServerS
 jest.mock('@/utils/roles', () => ({ hasCapabilityAccess: mockHasCapabilityAccess }))
 jest.mock('./repository-permissions', () => ({
   getUserIdFromSession: mockGetUserIdFromSession,
-  canReadRepository: mockCanReadRepository,
   canModifyRepository: mockCanModifyRepository,
 }), { virtual: true })
 jest.mock('@/actions/repositories/repository-permissions', () => ({
   getUserIdFromSession: mockGetUserIdFromSession,
-  canReadRepository: mockCanReadRepository,
   canModifyRepository: mockCanModifyRepository,
+}))
+jest.mock('@/lib/repositories/repository-access-guard', () => ({
+  assertRepositoryReadAccess: mockAssertRepositoryReadAccess,
+  assertItemRepositoryReadAccess: mockAssertItemRepositoryReadAccess,
+  assertNotSystemManagedRepository: mockAssertNotSystemManagedRepository,
 }))
 jest.mock('@/lib/repositories/content-disposition', () => ({ toContentDispositionValue: (s: string) => s }))
 jest.mock('@/lib/db/drizzle', () => ({
@@ -59,12 +64,14 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     mockGetServerSession.mockResolvedValue({ sub: 'u' })
     mockHasCapabilityAccess.mockResolvedValue(true)
     mockGetUserIdFromSession.mockResolvedValue(1)
-    mockCanReadRepository.mockResolvedValue(true)
     mockCanModifyRepository.mockResolvedValue(true)
+    mockAssertRepositoryReadAccess.mockResolvedValue(undefined)
+    mockAssertItemRepositoryReadAccess.mockResolvedValue(undefined)
+    mockAssertNotSystemManagedRepository.mockResolvedValue(undefined)
   })
 
   it('listRepositoryItems denies a caller without read access (REV-COR-061)', async () => {
-    mockCanReadRepository.mockResolvedValue(false)
+    mockAssertRepositoryReadAccess.mockRejectedValue(new Error('Record not found'))
     const res = await mod.listRepositoryItems(999)
     expect(res.isSuccess).toBe(false)
     expect(mockGetRepositoryItems).not.toHaveBeenCalled()

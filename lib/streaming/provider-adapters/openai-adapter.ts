@@ -3,7 +3,7 @@ import { streamText, type ModelMessage, type ToolSet } from 'ai';
 import { createLogger } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
-import { BaseProviderAdapter, type AccumulatedToolCall } from './base-adapter';
+import { BaseProviderAdapter, transformFinishUsage, type AccumulatedToolCall } from './base-adapter';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 import type { StreamingCallbacks, StreamConfig, ProviderCapabilities, StreamRequest } from '../types';
 
@@ -361,23 +361,11 @@ export class OpenAIAdapter extends BaseProviderAdapter {
           // Extract tool results from event.steps (shared method from base adapter)
           this.extractToolResultsFromSteps(event, accumulatedToolCalls, logger);
 
-          // Define proper type for usage
-          interface StreamUsage {
-            promptTokens?: number;
-            completionTokens?: number;
-            totalTokens?: number;
-            reasoningTokens?: number;
-          }
-
-          // Transform to our expected format
-          const usage = event.usage as StreamUsage;
+          // Transform to our expected format (v6 inputTokens/outputTokens with
+          // legacy-name fallbacks — see transformFinishUsage, epic #922 audit).
           const transformedData = {
             text: event.text || '',
-            usage: usage ? {
-              promptTokens: usage.promptTokens || 0,
-              completionTokens: usage.completionTokens || 0,
-              totalTokens: usage.totalTokens || 0
-            } : undefined,
+            usage: transformFinishUsage(event.usage),
             finishReason: event.finishReason || 'stop',
             toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
           };

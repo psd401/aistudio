@@ -183,6 +183,12 @@ Tool integration for Assistant Architect prompts.
 #### [features/tool-versioning.md](./features/tool-versioning.md)
 **Tool & skill versioning contract** — `v1`/`v2` versions, `identifier@version` addressing, deprecation lifecycle (90-day grace period, `replaced_by`, removal), MCP/REST visibility, and SKILL.md version pinning.
 
+#### [features/skill-publishing.md](./features/skill-publishing.md)
+**Skill publishing & export** — SKILL.md format, publish → scan → review pipeline, how skills are consumed (Nexus session binding vs `skill.{slug}` catalog tools), and the zip-export format + portability caveats for Claude Code / Desktop.
+
+#### [features/nexus-workspace-chat-editing.md](./features/nexus-workspace-chat-editing.md)
+**Nexus workspace chat editing (§1087)** — when a document/artifact is open beside the chat, the chat can read + edit it (live Yjs document edits via the agent bridge, artifact edits via `createVersion`); server-bound, canView/canEdit-gated, §28.3-screened.
+
 #### [features/assistant-architect-json-import-spec.md](./features/assistant-architect-json-import-spec.md)
 **Complete JSON import specification** for generating valid assistant import files. Includes schema reference, field types, variable substitution, execution patterns, and comprehensive examples.
 
@@ -212,6 +218,9 @@ K-12 content filtering with Amazon Bedrock Guardrails.
 
 #### [features/voice-api.md](./features/voice-api.md)
 Real-time voice conversations via WebSocket with Gemini Live API, transcript persistence, permissions, and content safety guardrails.
+
+#### [features/atrium-design-spec.md](./features/atrium-design-spec.md)
+**Atrium content workspace** (Epic #1059) — agent-native documents and sandboxed interactive artifacts: collaborative editing, visibility model and permission-aware retrieval, publishing connectors with the §26.4 public-publish approval gate, the anonymous `/p/[slug]` public reader, OKF export/import, and the MCP/REST content tool surfaces.
 
 ## 🚀 Quick Start
 

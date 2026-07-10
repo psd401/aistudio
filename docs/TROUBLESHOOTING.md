@@ -188,21 +188,21 @@ JOIN roles r ON ur.role_id = r.id
 WHERE u.email = 'user@example.com';
 ```
 
-2. Check role has tool permission:
+2. Check role has the capability:
 ```sql
-SELECT r.name AS role, t.identifier AS tool
+SELECT r.name AS role, c.identifier AS capability
 FROM roles r
-JOIN role_tools rt ON r.id = rt.role_id
-JOIN tools t ON rt.tool_id = t.id
+JOIN role_capabilities rc ON r.id = rc.role_id
+JOIN capabilities c ON rc.capability_id = c.id
 WHERE r.name = 'staff';
 ```
 
-3. Grant permission manually:
+3. Grant it via the admin UI at /admin/roles (Capabilities tab), or manually:
 ```sql
-INSERT INTO role_tools (role_id, tool_id)
-SELECT r.id, t.id
-FROM roles r, tools t
-WHERE r.name = 'staff' AND t.identifier = 'assistant-architect';
+INSERT INTO role_capabilities (role_id, capability_id)
+SELECT r.id, c.id
+FROM roles r, capabilities c
+WHERE r.name = 'staff' AND c.identifier = 'assistant-architect';
 ```
 
 ### Issue: Session expires immediately

@@ -1,0 +1,7 @@
+{
+  "name": "psd-plaud",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Per-user Plaud recordings via Plaud's MCP server (OpenClaw skill). No deps — reuses psd-workspace's AWS SDK.",
+  "main": "run.js"
+}

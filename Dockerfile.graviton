@@ -53,10 +53,21 @@ ENV RDS_SECRET_ARN=${RDS_SECRET_ARN}
 RUN --mount=type=cache,target=/app/.next/cache,id=nextjs-arm64 \
     node_modules/.bin/next build --webpack
 
-# Bundle voice WebSocket handler as a self-contained CJS artifact for voice-server.js.
-# The script fails the build if any non-builtin runtime externals leak into the bundle.
-# Writing into .next/standalone ensures the runner-stage COPY picks it up automatically.
-RUN node scripts/build-voice-ws-handler.mjs
+# Bundle the voice AND Atrium-collab WebSocket handlers as self-contained CJS
+# artifacts for voice-server.js. Each script fails the build if a non-builtin
+# runtime external leaks in. Writing into .next/standalone.
+#
+# THIS IS THE DEPLOYED DOCKERFILE: infra/lib/constructs/ecs-service.ts builds
+# `file: 'Dockerfile.graviton'` via fromAsset — NOT the root ./Dockerfile. This
+# file previously built ONLY the voice bundle, so collab-handler-bundle.cjs was
+# never created in the shipped image → voice-server.js `require('./collab-handler
+# -bundle.cjs')` threw MODULE_NOT_FOUND at boot → collab WS disabled → workspace
+# panel stuck "Connecting…" and agent doc edits failed. Build BOTH bundles here
+# and assert each exists.
+RUN node scripts/build-voice-ws-handler.mjs \
+ && node scripts/build-collab-ws-handler.mjs \
+ && test -f .next/standalone/ws-handler-bundle.cjs \
+ && test -f .next/standalone/collab-handler-bundle.cjs
 
 # ============================================================================
 # Stage 3: Production Runner
@@ -87,6 +98,12 @@ ENV MALLOC_ARENA_MAX=2
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+# WebSocket handler bundles (voice #872, Atrium collab #1051) — copied EXPLICITLY
+# per-file so a missing bundle FAILS THE BUILD instead of silently disabling the
+# WS server at runtime. voice-server.js require()s these from /app.
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone/ws-handler-bundle.cjs ./ws-handler-bundle.cjs
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone/collab-handler-bundle.cjs ./collab-handler-bundle.cjs
 
 # Copy voice server wrapper for WebSocket support (issue #872)
 # voice-server.js wraps the Next.js standalone server.js to add WebSocket

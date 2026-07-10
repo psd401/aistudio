@@ -30,6 +30,7 @@ kills the class of Converse format-translation bugs we used to own
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -51,6 +52,16 @@ logger = logging.getLogger("agentcore_wrapper")
 
 from harness_adapter import OpenClawAdapter
 import workspace_sync
+
+# The model the agent platform runs on today — used as the last-resort model-id
+# fallback for telemetry when neither the proxy, harness, nor caller supplied
+# one. Must match the id the proxy records + an ai_models pricing row
+# (migration 092); a mismatch silently yields $0 cost. Single source of truth so
+# the two fallbacks below don't drift (issue #1083, review round 2).
+# Switched GLM-5 -> Claude Sonnet 5 for #1089. Bedrock Mantle's Anthropic
+# Messages endpoint echoes the bare `claude-sonnet-5` on the response (verified),
+# so that is the id the proxy records — use it here too so the fallback matches.
+DEFAULT_AGENT_MODEL_ID = "claude-sonnet-5"
 
 adapter = OpenClawAdapter()
 
@@ -98,6 +109,50 @@ def start_mantle_proxy() -> None:
 
     logger.error("Mantle proxy did not become ready within 20s")
     sys.exit(1)
+
+def read_proxy_usage() -> dict:
+    """Read cumulative token usage from the Mantle proxy's /usage endpoint
+    (issue #1083). Returns a dict with input_tokens / output_tokens / model and
+    an `ok` flag — `ok=False` (with zeros) when the proxy is unreachable / not
+    answering, so the caller can tell "genuinely 0" from "read failed".
+
+    The wrapper calls this immediately before and after adapter.process() and
+    takes the delta — that sums a single turn's usage across all the Mantle
+    sub-calls a tool loop makes, since the proxy is per-container = per-session
+    and turns are serial. The `ok` flag matters for the BASELINE read: if the
+    baseline failed (ok=False) we cannot trust the delta (final − 0 would
+    over-count every prior turn), so the caller falls back to the harness
+    numbers. Never raises: telemetry must never break a chat turn.
+    """
+    import urllib.request
+    import urllib.error
+
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:18791/usage", timeout=2
+        ) as r:
+            if r.status != 200:
+                return {"input_tokens": 0, "output_tokens": 0,
+                        "cache_read_input_tokens": 0, "cache_write_input_tokens": 0,
+                        "model": None, "ok": False}
+            data = json.loads(r.read().decode("utf-8"))
+        return {
+            "input_tokens": int(data.get("input_tokens") or 0),
+            "output_tokens": int(data.get("output_tokens") or 0),
+            # Bedrock prompt-caching split (issue #1089). Older proxy images
+            # (pre-#1089) omit these keys — default to 0 so a mixed rollout
+            # never KeyErrors.
+            "cache_read_input_tokens": int(data.get("cache_read_input_tokens") or 0),
+            "cache_write_input_tokens": int(data.get("cache_write_input_tokens") or 0),
+            "model": data.get("model"),
+            "ok": True,
+        }
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+        logger.warning("read_proxy_usage failed: %s", str(exc)[:200])
+        return {"input_tokens": 0, "output_tokens": 0,
+                "cache_read_input_tokens": 0, "cache_write_input_tokens": 0,
+                "model": None, "ok": False}
+
 
 # Track which workspace prefix this microVM is currently serving so we can
 # (a) skip redundant S3 pulls and (b) push to the right prefix on shutdown.
@@ -255,37 +310,57 @@ def hydrate_bedrock_api_key() -> None:
         os.environ["AWS_BEARER_TOKEN_BEDROCK"] = value
         version = resp.get("VersionId", "?")
 
-        # Inline the literal token into openclaw.json. OpenClaw rewrites
-        # this file on gateway startup (see `Config overwrite` logs), but
-        # it preserves the `apiKey` string as written. Substituting the
-        # literal here means every OpenClaw code path that reads the
-        # provider config — main pipeline, embedded runner, plugins —
-        # sees an identical, already-resolved value.
+        # Inline the literal token into openclaw.json IF the config still
+        # uses the token-authenticated mantle provider. The native
+        # `amazon-bedrock` provider (#1138 native program) authenticates via
+        # the aws-sdk credential chain (execution role) and has no apiKey
+        # field — nothing to inline, and its absence is NOT an error. The
+        # env var above stays hydrated either way (memorySearch's native
+        # bedrock path consumes AWS_BEARER_TOKEN_BEDROCK).
+        # BOOT-ABORT REGRESSION (2026-07-08, r10): this step used to
+        # sys.exit(1) when amazon-bedrock-mantle was absent, which killed
+        # every microVM boot after the provider switch (AgentCore 424
+        # "error when starting"). Absent provider now logs and continues.
         config_path = "/home/node/.openclaw/openclaw.json"
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            providers = cfg.get("models", {}).get("providers", {})
-            mantle = providers.get("amazon-bedrock-mantle")
-            if not mantle:
-                logger.error(
-                    "openclaw.json has no amazon-bedrock-mantle provider — "
-                    "cannot inline token"
-                )
-                sys.exit(1)
-            mantle["apiKey"] = value
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=2)
+        inlined = _inline_bearer_token(config_path, value)
+        if inlined:
             logger.info(
                 "Bedrock API key hydrated + inlined (secret=%s version=%s "
                 "config=%s)",
                 secret_arn.split(":")[-1], version, config_path,
             )
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.error("failed to inline API key into %s: %s", config_path, exc)
-            sys.exit(1)
+        else:
+            logger.info(
+                "Bedrock API key hydrated to env only (no token-auth "
+                "provider in openclaw.json — native aws-sdk provider active)"
+            )
     except Exception as exc:  # noqa: BLE001
         logger.error("failed to hydrate Bedrock API key: %s", exc)
+        sys.exit(1)
+
+
+def _inline_bearer_token(config_path: str, value: str) -> bool:
+    """Inline the bearer token into the mantle provider's apiKey, if present.
+
+    Returns True when a token-auth provider existed and was updated, False
+    when the config has no `amazon-bedrock-mantle` provider (the native
+    aws-sdk-auth provider path — nothing to inline). Config read/write
+    errors are fatal: a half-written openclaw.json would break the gateway
+    in stranger ways than a clean abort.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        providers = cfg.get("models", {}).get("providers", {})
+        mantle = providers.get("amazon-bedrock-mantle")
+        if not mantle:
+            return False
+        mantle["apiKey"] = value
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        return True
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("failed to inline API key into %s: %s", config_path, exc)
         sys.exit(1)
 
 
@@ -310,6 +385,113 @@ def handle_shutdown(signum, frame):
 
 signal.signal(signal.SIGTERM, handle_shutdown)
 signal.signal(signal.SIGINT, handle_shutdown)
+
+
+def _sanitize_header_field(value, max_len: int) -> str:
+    """Strip prompt-header delimiters and clamp length.
+
+    Attachment fields originate from user-controlled Chat data; re-sanitize
+    here (the router also cleans them) so a crafted filename can neither break
+    OUT of the [attachments: ...] header (brackets/newlines) nor SPOOF metadata
+    within a `name="…"` field (double-quote / backslash) — e.g. a filename like
+    `a" source="drive-link` forging a trusted driveFileId.
+    """
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r'["\\\[\]\n\r]', "", value).strip()[:max_len]
+
+
+def _attachment_workspace_paths(attachments) -> list:
+    """Collect valid workspace-relative paths of router-fetched Chat uploads.
+
+    Router-generated (`attachments/<stamp>-<idx>-<name>`), but treated as
+    untrusted since the payload crosses a service boundary: only plain
+    relative paths under attachments/ with a safe character set pass.
+    workspace_sync.pull_files() re-validates against traversal independently.
+    """
+    if not isinstance(attachments, list):
+        return []
+    paths = []
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        path = att.get("workspacePath")
+        if (
+            isinstance(path, str)
+            and path.startswith("attachments/")
+            and ".." not in path
+            and re.fullmatch(r"[A-Za-z0-9._/-]+", path)
+        ):
+            paths.append(path)
+    return paths
+
+
+def _render_attachments_header(attachments) -> str:
+    """Render forwarded Chat attachments into a prompt header (issue #1138 F1).
+
+    Tells the agent what arrived and how to reach it:
+      - Chat uploads the router fetched carry `path="…"` — the file already
+        exists in the workspace (pulled per-turn via workspace_sync.pull_files)
+        and the agent reads it directly with its file tools.
+      - Chat uploads WITHOUT a path failed to download — the agent should say
+        so and ask the user to re-attach, never pretend the file is absent.
+      - Drive files/chips are metadata-only by design (the Drive barrier):
+        readable via the psd-workspace skill, subject to sharing with the
+        agent account.
+    """
+    if not isinstance(attachments, list) or not attachments:
+        return ""
+    lines = []
+    fetched = 0
+    failed_uploads = 0
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        name = _sanitize_header_field(att.get("name"), 256) or "unnamed"
+        mime = _sanitize_header_field(att.get("mimeType"), 100) or "unknown type"
+        if att.get("source") == "drive-link":
+            drive_id = _sanitize_header_field(att.get("driveFileId"), 256)
+            loc = f' driveFileId="{drive_id}"' if drive_id else ""
+            lines.append(
+                f'- name="{name}" type="{mime}" source="drive-link"{loc}'
+            )
+        else:
+            path = _sanitize_header_field(att.get("workspacePath"), 512)
+            if path and path.startswith("attachments/"):
+                fetched += 1
+                lines.append(
+                    f'- name="{name}" type="{mime}" source="chat-upload" '
+                    f'path="/home/node/.openclaw/{path}"'
+                )
+            else:
+                failed_uploads += 1
+                lines.append(
+                    f'- name="{name}" type="{mime}" source="chat-upload" '
+                    f"(download failed — file NOT available)"
+                )
+    if not lines:
+        return ""
+    body = "\n".join(lines)
+    guidance = []
+    if fetched:
+        guidance.append(
+            "Files with a path= are already downloaded into your workspace — "
+            "read them directly with your file tools at that path."
+        )
+    if failed_uploads:
+        guidance.append(
+            "Files marked download failed could not be retrieved — tell the "
+            "user and ask them to re-attach."
+        )
+    guidance.append(
+        "To read a Google Drive file or chip, use the psd-workspace skill "
+        "(the file may need to be shared with your agent account first)."
+    )
+    return (
+        f"[attachments: the user attached {len(lines)} file(s) to this "
+        f"message]\n{body}\n"
+        f"[{' '.join(guidance)}]"
+    )
 
 
 def main():
@@ -373,6 +555,9 @@ def main():
             invoked_by_email          — cross-user: email of the person consulting this agent
             invoked_by_display_name   — cross-user: display name of the invoker
             thread_context            — cross-user: ephemeral thread context from the Chat space
+            attachments               — Chat files/Drive chips (issue #1138 F1):
+                                        [{name, mimeType, source, driveFileId?,
+                                          attachmentResourceName?}]
         """
         global _current_workspace_prefix
 
@@ -382,15 +567,27 @@ def main():
         display_name = payload.get("user_display_name", "")
         workspace_prefix = payload.get("workspace_prefix", "")
         model_override = payload.get("model")
+        # Optional turn-deadline override (async-job runner, #1138). Only the
+        # job runner sends this; interactive router turns omit it and get the
+        # 840s default. Non-int garbage degrades to None (default behavior).
+        raw_deadline = payload.get("deadline_s")
+        try:
+            deadline_s = int(raw_deadline) if raw_deadline is not None else None
+        except (TypeError, ValueError):
+            deadline_s = None
         # Cross-user invocation fields
         invoked_by_email = payload.get("invoked_by_email", "")
         invoked_by_display_name = payload.get("invoked_by_display_name", "")
         thread_context = payload.get("thread_context", "")
+        # Chat attachments / Drive chips the router forwarded (issue #1138 F1).
+        attachments_header = _render_attachments_header(payload.get("attachments"))
 
         logger.info(
-            "Invocation received: session=%s user=%s prefix=%s msg_length=%d cross_user=%s",
+            "Invocation received: session=%s user=%s prefix=%s msg_length=%d "
+            "cross_user=%s attachments=%d",
             session_id, user_email, workspace_prefix or "-", len(user_message),
             invoked_by_email or "no",
+            len(payload.get("attachments") or []),
         )
 
         if not user_message.strip():
@@ -420,6 +617,27 @@ def main():
             except Exception as exc:  # noqa: BLE001
                 logger.warning("workspace mount failed: %s", exc)
 
+        # Per-turn attachment delivery (issue #1138 F1): the router uploaded
+        # Chat attachment bytes to S3 AFTER this microVM's one-time workspace
+        # pull, so fetch exactly those keys now — the header below points the
+        # agent at /home/node/.openclaw/<workspacePath> and the file must
+        # exist there before the turn starts. Failures are non-fatal: the
+        # agent still gets the metadata and reports the file as unavailable.
+        attachment_paths = _attachment_workspace_paths(payload.get("attachments"))
+        if attachment_paths and workspace_prefix:
+            try:
+                pulled = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    workspace_sync.pull_files,
+                    workspace_prefix,
+                    attachment_paths,
+                )
+                logger.info(
+                    "attachments pulled: %d/%d", pulled, len(attachment_paths)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("attachment pull failed: %s", exc)
+
         # Inject per-turn context: the caller's identity AND the current
         # Pacific local time. The LLM has no real clock — without this header
         # it falls back to whatever timestamps it sees in system metadata
@@ -432,6 +650,11 @@ def main():
             f"[now: {pacific_now.strftime('%A, %B %d, %Y %-I:%M %p')} "
             f"Pacific ({pacific_now.strftime('%Y-%m-%dT%H:%M:%S%z')})]"
         )
+
+        # Attachment header goes between the identity/time headers and the
+        # user's message so the agent sees what arrived before reading the
+        # request (issue #1138 F1). Empty when there are no attachments.
+        attach_section = f"\n{attachments_header}" if attachments_header else ""
 
         # Cross-user invocation: when someone other than the agent owner
         # is consulting this agent, inject a [cross-user-invocation] header so
@@ -460,17 +683,17 @@ def main():
             framed = (
                 f"[agent-owner: {display_name or user_email} <{user_email}>]\n"
                 f"{now_header}\n"
-                f"{cross_user_header}{thread_section}\n\n"
+                f"{cross_user_header}{thread_section}{attach_section}\n\n"
                 f"{user_message}"
             )
         elif display_name or user_email != "unknown":
             framed = (
                 f"[caller: {display_name or user_email} <{user_email}>]\n"
-                f"{now_header}\n\n"
+                f"{now_header}{attach_section}\n\n"
                 f"{user_message}"
             )
         else:
-            framed = f"{now_header}\n\n{user_message}"
+            framed = f"{now_header}{attach_section}\n\n{user_message}"
 
         # Flush the SSE headers immediately. Without an early yield the SDK
         # waits for the first chunk before sending headers, defeating the
@@ -479,8 +702,22 @@ def main():
         yield {"type": "start", "session_id": session_id}
 
         loop = asyncio.get_running_loop()
+        # Snapshot the proxy's cumulative usage BEFORE the turn so we can take a
+        # delta afterward (issue #1083). The proxy is the ground-truth capture
+        # point for GLM-5 token usage — OpenClaw's WS events don't surface it
+        # reliably. Read in the executor so the (blocking) HTTP call doesn't
+        # stall the event loop.
+        #
+        # ORDERING IS DELIBERATE — do NOT parallelize this baseline read with
+        # process_task to shave latency (a tempting "optimization"). adapter.
+        # process() drives Mantle calls that increment the proxy's cumulative
+        # counter; if the baseline snapshot races those calls it captures part
+        # of THIS turn's tokens, and `final − baseline` then under-counts. The
+        # baseline must be fully read before process_task is scheduled.
+        usage_baseline = await loop.run_in_executor(None, read_proxy_usage)
         process_task = loop.run_in_executor(
-            None, adapter.process, framed, session_id, model_override
+            None, adapter.process, framed, session_id, model_override,
+            deadline_s,
         )
 
         # Heartbeat every 30s while adapter.process runs in the executor.
@@ -494,6 +731,45 @@ def main():
                 elapsed = int(time.time() - invocation_start)
                 yield {"type": "heartbeat", "elapsed_s": elapsed}
 
+        # Take the post-turn usage delta from the Mantle proxy (issue #1083).
+        # This is the authoritative token source: the proxy reads every
+        # OpenAI-compatible response's `usage` object, whereas the harness
+        # adapter's WS-event extraction frequently yields 0. The proxy also
+        # carries the real model id (e.g. "zai.glm-5") so we never record the
+        # literal "default".
+        #
+        # The delta is only trustworthy when BOTH reads succeeded — if the
+        # BASELINE read failed (ok=False), `final − 0` would over-count every
+        # prior turn in this microVM, so we discard the proxy delta and fall
+        # back to the harness numbers. The model id is still usable from a
+        # successful final read regardless.
+        usage_final = await loop.run_in_executor(None, read_proxy_usage)
+        usage_trustworthy = usage_baseline.get("ok") and usage_final.get("ok")
+        if usage_trustworthy:
+            proxy_in = max(0, usage_final["input_tokens"] - usage_baseline["input_tokens"])
+            proxy_out = max(0, usage_final["output_tokens"] - usage_baseline["output_tokens"])
+            # Bedrock prompt-caching split (issue #1089) — same before/after
+            # delta as input/output. Zero on GLM-5 (no caching) and any turn
+            # with no cache activity.
+            proxy_cache_read = max(0, usage_final["cache_read_input_tokens"]
+                                   - usage_baseline["cache_read_input_tokens"])
+            proxy_cache_write = max(0, usage_final["cache_write_input_tokens"]
+                                    - usage_baseline["cache_write_input_tokens"])
+        else:
+            proxy_in = 0
+            proxy_out = 0
+            proxy_cache_read = 0
+            proxy_cache_write = 0
+            # Emit a distinct signal so a telemetry GAP (proxy read failed) is
+            # distinguishable in logs from a turn that genuinely used 0 tokens.
+            # Without this, a lost read looks identical to real-zero usage.
+            logger.warning(
+                "proxy usage read degraded — falling back to harness tokens "
+                "(baseline_ok=%s final_ok=%s session=%s)",
+                usage_baseline.get("ok"), usage_final.get("ok"), session_id,
+            )
+        proxy_model = usage_final.get("model") if usage_final.get("ok") else None
+
         # Adapter contract: TurnResult preferred; legacy str still
         # accepted so older adapters keep working during a phased rollout.
         if isinstance(result, str):
@@ -501,25 +777,48 @@ def main():
             metadata: dict = {
                 "session_id": session_id,
                 "user_id": user_email,
-                "model": model_override or "default",
+                "model": proxy_model or model_override or DEFAULT_AGENT_MODEL_ID,
+                "input_tokens": proxy_in,
+                "output_tokens": proxy_out,
+                # Cache tokens come only from the proxy delta (the harness has
+                # no cache numbers), so they're 0 when the delta is untrusted.
+                "cache_read_input_tokens": proxy_cache_read,
+                "cache_write_input_tokens": proxy_cache_write,
             }
         else:
             reply_text = result.text or ""
+            # Proxy delta wins; harness value is the fallback only when the
+            # proxy read was itself untrustworthy (not merely when it measured
+            # a real 0 — `or` would discard a trustworthy 0 and substitute the
+            # harness's possibly-wrong count, contradicting this comment).
+            input_tokens = proxy_in if usage_trustworthy else result.tokens_in
+            output_tokens = proxy_out if usage_trustworthy else result.tokens_out
             metadata = {
                 "session_id": session_id,
                 "user_id": user_email,
-                # Real values when the harness surfaces them; fall through
-                # to the override or "default" so the router's coalesce
-                # logic still has something sane.
-                "model": result.model or model_override or "default",
-                "input_tokens": result.tokens_in,
-                "output_tokens": result.tokens_out,
+                # Real model id, in priority order: proxy-observed > harness-
+                # observed > caller override > the known default model. We
+                # never emit the literal "default" anymore (issue #1083).
+                "model": proxy_model or result.model or model_override or DEFAULT_AGENT_MODEL_ID,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                # Bedrock prompt-caching split (issue #1089). Proxy-only; 0 when
+                # the proxy delta was untrusted or the model doesn't cache.
+                "cache_read_input_tokens": proxy_cache_read if usage_trustworthy else 0,
+                "cache_write_input_tokens": proxy_cache_write if usage_trustworthy else 0,
                 "latency_ms": result.latency_ms,
                 # Deep-telemetry payload: per-turn messages + tool calls.
                 # The router reads these and inserts into
                 # agent_message_content + agent_tool_invocations.
                 "messages": result.messages,
                 "tool_calls": result.tool_calls,
+                # Error-turn signal (harness_adapter TurnResult.failed). The
+                # router reads metadata.failed so a 0-token error turn (e.g. an
+                # OpenClaw session-init conflict) is flagged, not logged as a
+                # clean "Message processed" success. The harness already wrote
+                # the agent_failures row for these.
+                "failed": result.failed,
+                "error_class": result.error_class,
             }
 
         logger.info(

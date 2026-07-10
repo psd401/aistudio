@@ -16,6 +16,18 @@
  *   return createApiResponse({ message: "Hello" }, requestId);
  * });
  * ```
+ *
+ * Dynamic routes get their real Next.js route params as a 4th handler argument —
+ * `params` is a plain, already-resolved `Record<string, string>` (the wrapper
+ * awaits Next's `params` Promise). Prefer this over parsing the URL with
+ * `extractStringParam`, which finds a path segment by NAME and can misparse when a
+ * slug value equals a path literal (e.g. a content slug of `"publish"`):
+ * ```typescript
+ * export const DELETE = withApiAuth(async (req, auth, requestId, params) => {
+ *   const id = params.id;               // the real [id] segment, collision-free
+ *   const destination = params.destination;
+ * });
+ * ```
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -24,19 +36,42 @@ import { authenticateRequest, createErrorResponse } from "./auth-middleware";
 import type { ApiAuthContext } from "./auth-middleware";
 import { checkRateLimit, createRateLimitResponse, addRateLimitHeaders, recordUsage } from "./rate-limiter";
 
+/**
+ * Resolved dynamic route params, e.g. `{ id: "abc", destination: "intranet" }`.
+ * Values are typed `string | undefined` (not `string`) so a handler reading a key
+ * that does not correspond to a real `[param]` segment — or any key on a
+ * non-dynamic route, which receives `{}` — is forced to null-check rather than
+ * getting a false `string`. The Atrium content routes all guard with `if (!id)`.
+ */
+export type RouteParams = Record<string, string | undefined>;
+
 type ApiRouteHandler = (
   request: NextRequest,
   auth: ApiAuthContext,
-  requestId: string
+  requestId: string,
+  params: RouteParams
 ) => Promise<NextResponse>;
+
+/**
+ * The route context Next.js passes as the SECOND argument to a route handler.
+ * `params` is a Promise in the App Router (Next 15+); the wrapper awaits it before
+ * handing a plain object to the handler. Optional so a non-dynamic route (no
+ * `[param]` segment) still type-checks — its handler receives `{}`.
+ */
+interface RouteContext {
+  params?: Promise<RouteParams>;
+}
 
 /**
  * Wrap an API route handler with authentication, rate limiting, and usage logging.
  */
 export function withApiAuth(
   handler: ApiRouteHandler
-): (request: NextRequest) => Promise<NextResponse> {
-  return async (request: NextRequest): Promise<NextResponse> => {
+): (request: NextRequest, context?: RouteContext) => Promise<NextResponse> {
+  return async (
+    request: NextRequest,
+    context?: RouteContext
+  ): Promise<NextResponse> => {
     const requestId = generateRequestId();
     const timer = startTimer("apiRequest");
     const log = createLogger({ requestId, action: "withApiAuth" });
@@ -62,12 +97,18 @@ export function withApiAuth(
       return response;
     }
 
-    // Step 3: Execute handler
+    // Step 3: Execute handler. Both the try (success) and catch (500) branches
+    // assign `response` + `statusCode`, so no initializer is needed — and a `= 200`
+    // default would be dead (never read before reassignment: no-useless-assignment).
     let response: NextResponse;
-    let statusCode = 200;
+    let statusCode: number;
 
     try {
-      response = await handler(request, auth, requestId);
+      // Resolve Next's dynamic route params (a Promise in the App Router) once and
+      // hand the handler a plain object. A non-dynamic route has no `params`, so
+      // default to `{}` — the handler simply ignores the argument.
+      const params = context?.params ? await context.params : {};
+      response = await handler(request, auth, requestId, params);
       statusCode = response.status;
     } catch (error) {
       log.error("Unhandled error in API handler", {

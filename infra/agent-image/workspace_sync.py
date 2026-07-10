@@ -93,6 +93,11 @@ _SKIP_RELATIVE_PREFIXES = (
     "skills/psd-failure-report/",
     "skills/psd-freshservice/",
     "skills/psd-github/",
+    "skills/psd-html-artifact/",
+    # psd-html-output was REMOVED from the image (superseded by psd-html-artifact),
+    # but its skip entry is intentionally retained: stale objects may linger in
+    # some users' pre-separation S3 prefixes, and skipping the pull keeps the
+    # deleted skill from being resurrected under ~/.openclaw/skills/ on sync.
     "skills/psd-html-output/",
     "skills/psd-image-gen/",
     "skills/psd-redrover/",
@@ -221,6 +226,52 @@ def pull_workspace(prefix: str) -> int:
         prefix, count, skipped, elapsed,
     )
     return count
+
+
+def pull_files(prefix: str, relative_paths: list) -> int:
+    """Download specific workspace-relative files from s3://bucket/prefix/.
+
+    Per-turn attachment delivery (issue #1138 F1): the router uploads Chat
+    attachment bytes to s3://bucket/<prefix>/attachments/... at message time,
+    which is AFTER this microVM's one-time pull_workspace() ran — a warm
+    microVM would never see them. This fetches just the named keys so the
+    files exist at /home/node/.openclaw/<relative_path> before the turn.
+
+    Refuses paths that escape the workspace dir (traversal) or that map to
+    gateway-owned config (_should_skip_relative) — the relative paths arrive
+    from the router payload, so treat them as untrusted input. Failures on
+    individual files are logged and skipped; returns the count downloaded.
+    """
+    bucket = _bucket()
+    if not bucket or not prefix or not relative_paths:
+        return 0
+
+    s3 = _s3()
+    workspace_root = WORKSPACE_DIR.resolve()
+    pulled = 0
+    for rel in relative_paths:
+        if not isinstance(rel, str) or not rel:
+            continue
+        rel = rel.lstrip("/")
+        dest = (WORKSPACE_DIR / rel).resolve()
+        if not dest.is_relative_to(workspace_root):
+            logger.warning("pull_files: refusing path outside workspace: %s", rel)
+            continue
+        if _should_skip_relative(rel):
+            logger.warning("pull_files: refusing gateway-owned path: %s", rel)
+            continue
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket, f"{prefix.rstrip('/')}/{rel}", str(dest))
+            pulled += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pull_files: failed %s: %s", rel, str(exc)[:200])
+
+    logger.info(
+        "pull_files: prefix=%s requested=%d pulled=%d",
+        prefix, len(relative_paths), pulled,
+    )
+    return pulled
 
 
 def push_workspace(prefix: str) -> int:

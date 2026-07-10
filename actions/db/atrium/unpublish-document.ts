@@ -3,13 +3,16 @@
 /**
  * Atrium unpublish-document server action
  *
- * Issue #1054 (Epic #1059, Atrium Phase 4). Thin wrapper over
- * `publishService.unpublish` — removes a document's live intranet publication and
- * hides its auto-created nav item. View + edit permission is enforced in the
- * service (existence-masked: a non-viewable object 404s, never 403s); the surface
- * adds the feature-capability gate, mirroring `publishDocumentAction`.
+ * Issue #1054 (Epic #1059, Atrium Phase 4; destinations widened for Epic #1059
+ * completion). Thin wrapper over `publishService.unpublish` — removes an
+ * object's live publication at a destination (for `intranet`, also hides its
+ * auto-created nav item). View + edit permission is enforced in the service
+ * (existence-masked: a non-viewable object 404s, never 403s); the surface adds
+ * the feature-capability gate, mirroring `publishDocumentAction`. Taking a
+ * §26.4 public destination offline without authority surfaces as the same
+ * pending-approval outcome as publishing it.
  *
- * See docs/features/atrium-design-spec.md §15.3 / §21.
+ * See docs/features/atrium-design-spec.md §15.3 / §21 / §26.4.
  */
 
 import {
@@ -19,6 +22,8 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { publishService } from "@/lib/content/publish-service";
+import { ApprovalRequiredError } from "@/lib/content/errors";
+import { assertEditorDestination } from "@/lib/content/validators";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
@@ -26,7 +31,10 @@ import { getUserRequester } from "./requester";
 
 export async function unpublishDocumentAction(
   objectId: string,
-  input: { destination: "intranet" }
+  input: {
+    /** Widened `string`, narrowed at runtime via `assertEditorDestination`. */
+    destination: string;
+  }
 ): Promise<ActionState<{ unpublished: boolean }>> {
   const requestId = generateRequestId();
   const timer = startTimer("unpublishDocumentAction");
@@ -60,10 +68,15 @@ export async function unpublishDocumentAction(
       destination: input.destination,
     });
 
+    // Narrow the widened `string` destination at runtime BEFORE it reaches the
+    // service's adapter registry (rejects `okf` and any unexpected value) via
+    // the shared editor-destination guard in `lib/content/validators.ts`.
+    const destination = assertEditorDestination(input.destination, "unpublish");
+
     const result = await publishService.unpublish(
       requester,
       objectId,
-      input.destination
+      destination
     );
 
     timer({ status: "success" });
@@ -74,6 +87,20 @@ export async function unpublishDocumentAction(
     return createSuccess(result, "Document unpublished");
   } catch (error) {
     timer({ status: "error" });
+    // §26.4 gate: taking a public destination offline without authority is a
+    // pending-approval outcome (approval-queue event emitted in the service), not a
+    // failure — surface it distinctly so the editor can show an amber "submitted
+    // for review" caption, mirroring publishDocumentAction. The editor's
+    // destination picker exposes `public_web`, so a non-admin caller can land here.
+    if (error instanceof ApprovalRequiredError) {
+      log.info("Unpublish requires approval", { requestId });
+      return {
+        isSuccess: false,
+        approvalRequired: true,
+        message:
+          "Unpublishing from this destination requires administrator approval — your request has been submitted for review.",
+      };
+    }
     return handleError(error, "Failed to unpublish document", {
       context: "unpublishDocumentAction",
       requestId,

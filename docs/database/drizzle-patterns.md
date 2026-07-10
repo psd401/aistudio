@@ -319,13 +319,13 @@ const fullUserData = await executeQuery(
         id: users.id,
         email: users.email,
         roleName: roles.name,
-        toolName: tools.name,
+        capabilityName: capabilities.name,
       })
       .from(users)
       .innerJoin(userRoles, eq(users.id, userRoles.userId))
       .innerJoin(roles, eq(userRoles.roleId, roles.id))
-      .innerJoin(roleTools, eq(roles.id, roleTools.roleId))
-      .innerJoin(tools, eq(roleTools.toolId, tools.id)),
+      .innerJoin(roleCapabilities, eq(roles.id, roleCapabilities.roleId))
+      .innerJoin(capabilities, eq(roleCapabilities.capabilityId, capabilities.id)),
   "getFullUserData"
 );
 ```

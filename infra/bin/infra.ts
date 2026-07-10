@@ -15,6 +15,7 @@ import { SecretsManagerStack } from '../lib/secrets-manager-stack';
 import { GuardrailsStack } from '../lib/guardrails-stack';
 import { AgentPlatformStack } from '../lib/agent-platform-stack';
 import { AtriumSandboxStack } from '../lib/atrium-sandbox-stack';
+import { AtriumEventsStack } from '../lib/atrium-events-stack';
 import { SecretValue } from 'aws-cdk-lib';
 import { PermissionBoundaryConstruct } from '../lib/constructs/security';
 import { AccessAnalyzerStack } from '../lib/stacks/access-analyzer-stack';
@@ -180,6 +181,16 @@ const devAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandbo
 cdk.Tags.of(devAtriumSandboxStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAtriumSandboxStack).add(key, value));
 
+// Atrium content events (#1055): SNS topic the app publishes content lifecycle
+// events to (injected as ATRIUM_EVENTS_TOPIC_ARN). Dedicated stack for clean
+// separation; downstream subscribers (Phase 6 retrieval indexer, notifiers) attach here.
+const devAtriumEventsStack = new AtriumEventsStack(app, 'AIStudio-AtriumEventsStack-Dev', {
+  environment: 'dev',
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(devAtriumEventsStack).add('Environment', 'Dev');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAtriumEventsStack).add(key, value));
+
 // K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
 const guardrailNotificationEmail = app.node.tryGetContext('guardrailNotificationEmail') || alertEmail;
 const devGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-Dev', {
@@ -334,6 +345,14 @@ const prodAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandb
 cdk.Tags.of(prodAtriumSandboxStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAtriumSandboxStack).add(key, value));
 
+// Atrium content events (#1055) — prod SNS topic.
+const prodAtriumEventsStack = new AtriumEventsStack(app, 'AIStudio-AtriumEventsStack-Prod', {
+  environment: 'prod',
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(prodAtriumEventsStack).add('Environment', 'Prod');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAtriumEventsStack).add(key, value));
+
 // K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
 const prodGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-Prod', {
   environment: 'prod',
@@ -445,6 +464,7 @@ if (baseDomain) {
     documentsBucketName: devStorageStack.documentsBucketName,
     agentWorkspaceBucketName: devAgentPlatformStack.workspaceBucket.bucketName, // #925
     atriumSandboxOrigin: devAtriumSandboxStack.sandboxOrigin, // #1052
+    atriumEventsTopicArn: devAtriumEventsStack.topicArn, // #1055
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -455,6 +475,7 @@ if (baseDomain) {
   devFrontendStack.addDependency(devGuardrailsStack); // Need guardrails config exports
   devFrontendStack.addDependency(devAgentPlatformStack); // Need agent workspace bucket name (#925)
   devFrontendStack.addDependency(devAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
+  devFrontendStack.addDependency(devAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devFrontendStack).add(key, value));
 
@@ -468,6 +489,7 @@ if (baseDomain) {
     documentsBucketName: prodStorageStack.documentsBucketName,
     agentWorkspaceBucketName: prodAgentPlatformStack.workspaceBucket.bucketName, // #925
     atriumSandboxOrigin: prodAtriumSandboxStack.sandboxOrigin, // #1052
+    atriumEventsTopicArn: prodAtriumEventsStack.topicArn, // #1055
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -478,6 +500,7 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodGuardrailsStack); // Need guardrails config exports
   prodFrontendStack.addDependency(prodAgentPlatformStack); // Need agent workspace bucket name (#925)
   prodFrontendStack.addDependency(prodAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
+  prodFrontendStack.addDependency(prodAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodFrontendStack).add(key, value));
 

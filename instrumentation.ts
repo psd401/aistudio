@@ -149,7 +149,15 @@ async function syncToolCatalog(): Promise<void> {
       inserted: result.inserted.length,
       updated: result.updated.length,
       deactivated: result.deactivated.length,
+      schemaViolations: result.schemaViolations.length,
     });
+    if (result.schemaViolations.length > 0) {
+      // Surfaced at boot too (sync already error-logged each one): a published
+      // tool version's schema was edited without a version bump (#927).
+      log.error("Tool catalog immutability violations detected at startup", {
+        tools: result.schemaViolations,
+      });
+    }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     // Don't fail startup on sync errors.

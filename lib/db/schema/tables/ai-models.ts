@@ -45,6 +45,13 @@ export const aiModels = pgTable("ai_models", {
     precision: 10,
     scale: 6,
   }),
+  // Cache-WRITE rate (migration 092, issue #1089). The cache-read rate is
+  // cachedInputCostPer1kTokens above; this is the price to WRITE the cache
+  // (2x input at 1h TTL). Nullable — only caching-capable models set it.
+  cacheWriteCostPer1kTokens: numeric("cache_write_cost_per_1k_tokens", {
+    precision: 10,
+    scale: 6,
+  }),
   pricingUpdatedAt: timestamp("pricing_updated_at"),
   averageLatencyMs: integer("average_latency_ms"),
   maxConcurrency: integer("max_concurrency").default(10),
