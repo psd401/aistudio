@@ -1,0 +1,7 @@
+{
+  "name": "psd-canva",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Per-user Canva account access via Canva's Connect REST API (OpenClaw skill). No deps — reuses psd-workspace's AWS SDK.",
+  "main": "run.js"
+}
