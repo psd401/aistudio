@@ -212,6 +212,39 @@ For long-running operations (Assistant Architect, etc.):
 
 Job status flow: pending → processing → streaming → completed
 
+## Image Generation
+
+The platform supports image generation via OpenAI (DALL-E) and Google Gemini with SSRF protection.
+
+### Image Generation Service
+
+```typescript
+// lib/ai/image-generation-service.ts
+generateAndUploadImage(config): Promise<{ url: string, key: string }>
+```
+
+Features:
+- OpenAI: Uses `generateImage` API with DALL-E models
+- Google Gemini: Uses `generateText` with multimodal file output
+- S3 storage for generated images with presigned URLs
+
+### Reference Image SSRF Protection
+
+When using reference images from URLs, the service validates URLs to prevent Server-Side Request Forgery:
+
+```typescript
+// lib/ai/image-generation-service.ts
+assertSafeFetchUrl(url)  // Validates URL before fetching
+```
+
+Protections:
+- Blocks internal IP addresses (127.0.0.1, 10.x, 172.16-31.x, 192.168.x, link-local, loopback)
+- Enforces timeout and byte limits (10s, 10MB max)
+- Limits redirect depth (max 5 hops)
+- Uses bounded stream reading to prevent memory exhaustion
+
+**Source**: `/lib/ai/image-generation-service.ts`
+
 ## Dual-Stream Model Compare
 
 ```typescript
@@ -232,6 +265,8 @@ mergeStreamsWithIdentifiers(stream1, stream2)
 | Unified Streaming | `/lib/streaming/unified-streaming-service.ts` |
 | SSE Types | `/lib/streaming/sse-event-types.ts` |
 | Stream Request | `/lib/streaming/types.ts` |
+| Image Generation | `/lib/ai/image-generation-service.ts` |
+| Document Generation | `/lib/ai/document-generation-service.ts` |
 | Model Compare | `/lib/compare/dual-stream-merger.ts` |
 | History Adapter | `/lib/nexus/history-adapter.ts` |
 | Polling Adapter | `/lib/nexus/nexus-polling-adapter.ts` |

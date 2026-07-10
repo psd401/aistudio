@@ -19,18 +19,38 @@ AI Studio uses AWS Cognito with Google OAuth federation, managed through NextAut
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| NextAuth Config | `/auth.ts` | Cognito provider setup, JWT/session callbacks |
+| NextAuth Config | `/auth.ts` | Cognito provider setup, JWT/session callbacks, NaN guard for maxAge |
 | Token Refresh | `/lib/auth/token-refresh-client.ts` | Edge-compatible token refresh |
 | Server Session | `/lib/auth/server-session.ts` | Server-side session retrieval |
+| Polling Session Cache | `/lib/auth/polling-session-cache.ts` | High-performance cache for polling ops (5-min TTL) |
+| Optimized Polling Auth | `/lib/auth/optimized-polling-auth.ts` | Reduces auth overhead from ~500ms to ~5ms |
+| Edge Logger | `/lib/auth/edge-logger.ts` | Edge-compatible auth logging (warn/error emit in production) |
 | Middleware | `/middleware.ts` | Route protection, security headers, CSP |
 
 ### Session Details
 
-- **Session Max Age**: Configurable via `SESSION_MAX_AGE` (default: 24 hours)
+- **Session Max Age**: Configurable via `SESSION_MAX_AGE` (default: 24 hours); validated to prevent NaN
 - **Tokens Stored**: `accessToken`, `idToken`, `refreshToken` in encrypted JWT cookie
 - **Token Refresh**: Proactive refresh at 25% remaining lifetime
 - **CSRF Protection**: PKCE + state + nonce checks enabled
 - **Agent Token Sync**: Cognito refresh token mirrored to AWS Secrets Manager for AgentCore
+- **Polling Optimization**: High-frequency polling endpoints use cached sessions (5-min TTL) to reduce database load
+
+### Polling Session Cache
+
+Long-running operations (chat polling, status checks) use an optimized authentication path:
+
+```
+authenticatePollingRequest()
+  → getServerSession() → JWT validation
+  → Check pollingSessionCache (keyed by sub)
+  → Cache hit → Return cached userId/roles
+  → Cache miss → DB lookup → Cache result
+```
+
+**Performance**: Reduces auth overhead from ~500ms to ~5ms per request.
+
+**Cache Invalidation**: Call `invalidateUserSessions(sub)` on logout or role changes.
 
 ### JIT User Provisioning
 
@@ -213,8 +233,10 @@ User Input → PII Detection → Token Replacement → AI Provider
 | Category | Files |
 |----------|-------|
 | Auth Core | `/auth.ts`, `/lib/auth/server-session.ts` |
+| Polling Cache | `/lib/auth/polling-session-cache.ts`, `/lib/auth/optimized-polling-auth.ts` |
+| Edge Runtime | `/lib/auth/edge-logger.ts`, `/lib/auth/token-refresh-client.ts` |
 | RBAC | `/lib/capabilities/manifest.ts`, `/lib/db/drizzle/capabilities.ts` |
 | API Keys | `/lib/api-keys/key-service.ts`, `/lib/api-keys/scopes.ts` |
-| OAuth | `/lib/oauth/oidc-provider-config.ts`, `/lib/oauth/delegated-token.ts` |
+| OAuth | `/lib/oauth/oidc-provider-config.ts`, `/lib/oauth/delegated-token.ts`, `/lib/oauth/drizzle-adapter.ts` |
 | Safety | `/lib/safety/content-safety-service.ts`, `/lib/safety/pii-tokenization-service.ts` |
 | Docs | `/docs/features/k12-content-safety.md` |
