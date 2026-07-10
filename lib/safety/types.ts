@@ -302,7 +302,7 @@ export const CONFIDENCE_GATED_PII_TYPES: ReadonlySet<ComprehendPIIType> = new Se
  *
  * See: GitHub issue #972 — PII tokenizer false-positives on hardware part numbers.
  */
-const envScore = parseFloat(process.env.PII_MIN_CONFIDENCE_SCORE ?? '');
+const envScore = Number.parseFloat(process.env.PII_MIN_CONFIDENCE_SCORE ?? '');
 export const PII_MIN_CONFIDENCE_SCORE: number =
   !Number.isNaN(envScore) && envScore >= 0 && envScore <= 1 ? envScore : 0.90;
 
