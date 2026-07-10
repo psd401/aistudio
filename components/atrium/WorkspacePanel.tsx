@@ -118,7 +118,11 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
         )}
         {state.status === "ready" &&
           (state.data.kind === "document" ? (
-            <DocumentEditor idOrSlug={state.data.id} userId={state.data.userId} />
+            <DocumentEditor
+              idOrSlug={state.data.id}
+              userId={state.data.userId}
+              layout="panel"
+            />
           ) : (
             <ArtifactCanvas
               idOrSlug={state.data.id}

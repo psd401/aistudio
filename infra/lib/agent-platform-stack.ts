@@ -2,6 +2,8 @@ import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
+import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
+import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -35,7 +37,7 @@ import {
   VPCProvider,
   IEnvironmentConfig,
 } from './constructs';
-import { ServiceRoleFactory } from './constructs/security';
+import { ServiceRoleFactory, usGuardrailProfileArns } from './constructs/security';
 import { AGENT_LAMBDA_RUNTIME } from './constructs/compute/lambda-construct';
 
 export interface AgentPlatformStackProps extends cdk.StackProps {
@@ -490,7 +492,13 @@ export class AgentPlatformStack extends cdk.Stack {
               'bedrock:ConverseStream',
             ],
             resources: [
-              `arn:aws:bedrock:${this.region}::foundation-model/*`,
+              // Cross-region inference profiles (us.*) authorize against the
+              // DESTINATION region's foundation-model ARN — grant all three
+              // regions the us.* profiles span (same lesson as the guardrail
+              // profile, #1138).
+              `arn:aws:bedrock:us-east-1::foundation-model/*`,
+              `arn:aws:bedrock:us-east-2::foundation-model/*`,
+              `arn:aws:bedrock:us-west-2::foundation-model/*`,
               `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
             ],
           }),
@@ -771,7 +779,12 @@ export class AgentPlatformStack extends cdk.Stack {
         'bedrock:ConverseStream',
       ],
       resources: [
-        `arn:aws:bedrock:${this.region}::foundation-model/*`,
+        // Cross-region us.* profiles authorize against the DESTINATION
+        // region's foundation-model ARN (verified live for the guardrail
+        // profile, #1138) — grant all three regions the profiles span.
+        `arn:aws:bedrock:us-east-1::foundation-model/*`,
+        `arn:aws:bedrock:us-east-2::foundation-model/*`,
+        `arn:aws:bedrock:us-west-2::foundation-model/*`,
         `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
         // Cross-region inference profiles use region-less format (us, eu, ap)
         // See: https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html
@@ -890,11 +903,13 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
       // The guardrail uses cross-region inference (guardrails-stack.ts
       // crossRegionConfig), so ApplyGuardrail authorizes against BOTH the
-      // guardrail ARN AND the system-defined guardrail-profile ARN. Granting
-      // only the guardrail ARN yields AccessDenied on every call.
+      // guardrail ARN AND the system-defined guardrail-profile ARN in the
+      // DESTINATION region Bedrock routes to — a FIXED US fan-out set, not
+      // this.region. Granting one region yields AccessDenied whenever routing
+      // leaves it (issue #1138 F5). Profile id stays pinned.
       resources: [
         props.guardrailArn,
-        `arn:aws:bedrock:${this.region}:${this.account}:guardrail-profile/us.guardrail.v1:0`,
+        ...usGuardrailProfileArns(this.account),
       ],
     }));
 
@@ -1104,11 +1119,13 @@ export class AgentPlatformStack extends cdk.Stack {
             actions: ['bedrock:ApplyGuardrail', 'bedrock:GetGuardrail'],
             // Cross-region inference (guardrails-stack.ts crossRegionConfig)
             // makes ApplyGuardrail authorize against BOTH the guardrail ARN
-            // and the system-defined guardrail-profile ARN. Omitting the
-            // profile ARN caused AccessDenied on 100% of router turns.
+            // and the system-defined guardrail-profile ARN in the DESTINATION
+            // region Bedrock routes to. Scoping to this.region caused
+            // AccessDenied on 100% of router turns routed to us-east-2
+            // (issue #1138 F5); grant the whole fixed US fan-out set.
             resources: [
               props.guardrailArn,
-              `arn:aws:bedrock:${this.region}:${this.account}:guardrail-profile/us.guardrail.v1:0`,
+              ...usGuardrailProfileArns(this.account),
             ],
           })],
         }),
@@ -1140,6 +1157,24 @@ export class AgentPlatformStack extends cdk.Stack {
     this.routerLambdaRole.addManagedPolicy(
       iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
     );
+
+    // Attachment delivery (#1138 F1): the router writes Chat-upload bytes to
+    // s3://<workspace-bucket>/<workspacePrefix>/attachments/. This CANNOT rely
+    // on the ServiceRoleFactory s3Buckets grant above — that grant conditions
+    // object actions on `aws:ResourceTag/Environment|ManagedBy`, and S3 object
+    // operations provide NO resource tags at authorization time (the bucket's
+    // tags do not satisfy the key, despite the factory comment claiming they
+    // do), so every s3:PutObject through it is denied. Observed live:
+    // AccessDenied on .../attachments/...pdf, 2026-07-07 (#1138 follow-up).
+    // Grant the write narrowly (attachments keys only) without the inert
+    // condition. AbortMultipartUpload lets lib-storage clean up a failed
+    // multipart upload instead of leaving orphaned parts.
+    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'WorkspaceAttachmentWrite',
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:PutObject', 's3:AbortMultipartUpload'],
+      resources: [`${this.workspaceBucket.bucketArn}/*/attachments/*`],
+    }));
 
     // Grant Secrets Manager read access directly (not through ServiceRoleFactory).
     // CDK cross-stack refs and new Secret() produce tokens that don't start with
@@ -2118,6 +2153,10 @@ export class AgentPlatformStack extends cdk.Stack {
         ENVIRONMENT: environment,
         USERS_TABLE: this.usersTable.tableName,
         SIGNALS_TABLE: this.signalsTable.tableName,
+        // Chat-uploaded attachment bytes are delivered to the agent via
+        // s3://<workspace-bucket>/<workspacePrefix>/attachments/ (#1138 F1).
+        // The role already has PutObject via ServiceRoleFactory s3Buckets.
+        WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
         MESSAGE_DEDUP_TABLE: this.messageDedupTable.tableName,
         SESSION_LOCKS_TABLE: this.sessionLocksTable.tableName,
         INTERAGENT_TABLE: interAgentTable.tableName,
@@ -2157,6 +2196,128 @@ export class AgentPlatformStack extends cdk.Stack {
 
     cdk.Tags.of(this.routerLambda).add('Environment', environment);
     cdk.Tags.of(this.routerLambda).add('ManagedBy', 'cdk');
+
+    // -------------------------------------------------------------------------
+    // Async job-runner (issue #1138 — "the 14-minute wall")
+    //
+    // A multi-step agent turn that hits the router's 14-minute deadline is
+    // promoted ONCE to an on-demand Fargate task (promoteToJob in the router).
+    // The task runs the SAME compiled agent-router package with a different
+    // entrypoint (dist/job-main.js), resumes the same AgentCore session with a
+    // 2-hour deadline (AgentCore invocations may run up to 8h — only the
+    // Lambda caller was capped at 15 min), and posts the final answer to the
+    // originating Chat space. No always-on compute: the cluster is free and
+    // tasks exist only while a job runs.
+    // -------------------------------------------------------------------------
+    const jobCluster = new ecs.Cluster(this, 'JobRunnerCluster', {
+      clusterName: `psd-agent-jobs-${environment}`,
+      vpc,
+      containerInsightsV2: ecs.ContainerInsights.DISABLED,
+    });
+
+    const jobLogGroup = new logs.LogGroup(this, 'JobRunnerLogGroup', {
+      logGroupName: `/ecs/psd-agent-job-runner-${environment}`,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const jobTaskDef = new ecs.FargateTaskDefinition(this, 'JobRunnerTaskDef', {
+      family: `psd-agent-job-runner-${environment}`,
+      // I/O-bound: the task mostly holds an SSE stream open while the
+      // AgentCore microVM does the work. 512/1024 is generous headroom.
+      cpu: 512,
+      memoryLimitMiB: 1024,
+      runtimePlatform: {
+        cpuArchitecture: ecs.CpuArchitecture.ARM64,
+        operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+      },
+    });
+
+    jobTaskDef.addContainer('job-runner', {
+      containerName: 'job-runner',
+      image: ecs.ContainerImage.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-router'),
+        { file: 'Dockerfile', platform: ecrAssets.Platform.LINUX_ARM64 },
+      ),
+      logging: ecs.LogDrivers.awsLogs({
+        logGroup: jobLogGroup,
+        streamPrefix: 'job',
+      }),
+      environment: {
+        ENVIRONMENT: environment,
+        // Region for the SDK clients the shared router module constructs.
+        AWS_REGION: this.region,
+        AWS_ACCOUNT_ID: this.account,
+        NODE_ENV: 'production',
+        SESSION_LOCKS_TABLE: this.sessionLocksTable.tableName,
+        GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
+        DATABASE_HOST: props.databaseHost,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: props.databaseName || 'aistudio',
+        // The undici dispatcher must outlive the 2h job deadline: 2h05m.
+        AGENTCORE_TIMEOUT_MS_OVERRIDE: String((2 * 60 + 5) * 60 * 1000),
+        // JOB_PAYLOAD is injected per-run via RunTask containerOverrides.
+      },
+    });
+
+    // Task role — mirrors ONLY what job-main.ts touches: AgentCore invoke,
+    // the two secrets, the session-locks table, and (via awslogs) the log
+    // group on the execution role.
+    jobTaskDef.addToTaskRolePolicy(new iam.PolicyStatement({
+      sid: 'AgentCoreInvoke',
+      effect: iam.Effect.ALLOW,
+      actions: ['bedrock-agentcore:InvokeAgentRuntime', 'bedrock-agentcore:InvokeAgentRuntimeForUser'],
+      resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
+    }));
+    this.googleCredentialsSecret.grantRead(jobTaskDef.taskRole);
+    dbSecret.grantRead(jobTaskDef.taskRole);
+    this.sessionLocksTable.grantReadWriteData(jobTaskDef.taskRole);
+
+    const jobRunnerSg = new ec2.SecurityGroup(this, 'JobRunnerSg', {
+      vpc,
+      // EC2 GroupDescription is ASCII-only — a unicode dash here failed the
+      // whole 2026-07-07 deploy (CREATE_FAILED: "Character sets beyond ASCII
+      // are not supported"). Keep this string plain ASCII.
+      description:
+        'psd-agent job-runner Fargate tasks - egress only (Aurora ingress is VPC-CIDR-wide)',
+      allowAllOutbound: true,
+    });
+
+    // Router promotes turns by launching the task. RunTask needs the task-def
+    // ARN and PassRole on both roles the task assumes.
+    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'JobRunnerLaunch',
+      effect: iam.Effect.ALLOW,
+      actions: ['ecs:RunTask'],
+      resources: [jobTaskDef.taskDefinitionArn],
+    }));
+    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'JobRunnerPassRole',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:PassRole'],
+      resources: [
+        jobTaskDef.taskRole.roleArn,
+        jobTaskDef.obtainExecutionRole().roleArn,
+      ],
+      conditions: {
+        StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' },
+      },
+    }));
+
+    this.routerLambda.addEnvironment('JOB_CLUSTER_ARN', jobCluster.clusterArn);
+    this.routerLambda.addEnvironment('JOB_TASK_DEF_ARN', jobTaskDef.taskDefinitionArn);
+    this.routerLambda.addEnvironment(
+      'JOB_SUBNETS',
+      vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS })
+        .subnetIds.join(','),
+    );
+    this.routerLambda.addEnvironment('JOB_SECURITY_GROUP', jobRunnerSg.securityGroupId);
+    this.routerLambda.addEnvironment('JOB_CONTAINER_NAME', 'job-runner');
+
+    cdk.Tags.of(jobCluster).add('Environment', environment);
+    cdk.Tags.of(jobCluster).add('ManagedBy', 'cdk');
+    cdk.Tags.of(jobLogGroup).add('Environment', environment);
+    cdk.Tags.of(jobLogGroup).add('ManagedBy', 'cdk');
 
     // Wire SQS → Lambda trigger
     // NOTE on duplicate processing: With batchSize=1 and 18-min visibility timeout

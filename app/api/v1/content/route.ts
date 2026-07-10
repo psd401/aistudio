@@ -18,7 +18,6 @@ import {
 } from "@/lib/api";
 import { z } from "zod";
 import {
-  ApprovalRequiredError,
   contentService,
   hasPublishPublicScope,
   recordContentAudit,
@@ -27,7 +26,6 @@ import {
 import {
   contentErrorToResponse,
   resolveRestRequester,
-  respondApprovalRequired,
   restVisibilitySchema,
 } from "@/lib/content/rest";
 import {
@@ -151,21 +149,21 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       outcome: "ok",
       requestId,
     });
-    log.info("Created content via REST", { objectId: created.id, kind: input.kind });
+    // §26.4 create-as-private (issue #1118 item 2): an unauthorized public create
+    // is NOT rejected — `contentService.create` returns the object created PRIVATE
+    // and queues a durable `visibility_widen` request. The response reflects
+    // `visibilityLevel: "private"`; a caller wanting public awaits admin approval.
+    log.info("Created content via REST", {
+      objectId: created.id,
+      kind: input.kind,
+      visibilityLevel: created.visibilityLevel,
+    });
     return createApiResponse(
       { data: { ...created, url: contentDeepLink(created.slug) }, meta: { requestId } },
       requestId,
       201
     );
   } catch (err) {
-    if (err instanceof ApprovalRequiredError) {
-      log.info("Public create requires approval", { title: input.title });
-      return respondApprovalRequired(err, {
-        req,
-        action: "create",
-        requestId,
-      });
-    }
     void recordContentAudit({
       req,
       action: "create",

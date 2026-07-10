@@ -21,6 +21,7 @@
 // --- mocks (hoisted above imports by jest) ---
 
 const mockUnpublish = jest.fn();
+const mockCreate = jest.fn();
 const mockList = jest.fn();
 const mockRecordAudit = jest.fn();
 const mockRequesterFromApiAuth = jest.fn();
@@ -42,6 +43,7 @@ jest.mock("@/lib/content", () => {
     __MockContentError: MockContentError,
     isContentError: (err: unknown) => err instanceof MockContentError,
     contentService: {
+      create: (...a: unknown[]) => mockCreate(...a),
       list: (...a: unknown[]) => mockList(...a),
     },
     hasPublishPublicScope: (...a: unknown[]) => mockHasPublishPublicScope(...a),
@@ -229,6 +231,32 @@ describe("unpublish_content handler", () => {
 
     expect(result.isError).toBe(true);
     expect(mockUnpublish).not.toHaveBeenCalled();
+  });
+});
+
+describe("create_document handler", () => {
+  const handler = CONTENT_TOOL_HANDLERS.create_document;
+
+  it("includes visibilityLevel in the response so a create-as-private downgrade is visible to the caller", async () => {
+    mockResolveCollectionId.mockResolvedValue(undefined);
+    mockCreate.mockResolvedValue({
+      id: "obj-1",
+      slug: "my-doc",
+      visibilityLevel: "private",
+    });
+
+    const result = await handler(
+      { title: "My Doc", visibility: { level: "public" } },
+      context()
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(payloadOf(result)).toEqual({
+      id: "obj-1",
+      slug: "my-doc",
+      url: "/c/my-doc",
+      visibilityLevel: "private",
+    });
   });
 });
 

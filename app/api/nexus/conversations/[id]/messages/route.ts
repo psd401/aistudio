@@ -28,6 +28,20 @@ interface NexusMessageResponse {
 const MAX_CONTENT_LENGTH = 50000
 
 /**
+ * REV-SEC-143: a stored image `s3Key` ultimately originates from client-supplied
+ * message parts, so only presign a key that provably belongs to the conversation
+ * being read. Attachment objects live under `conversations/<id>/...` and
+ * server-generated images under `v2/generated-images/<id>/...`; any other key
+ * (e.g. another user's upload at `<userId>/<ts>-file.pdf`) must never be signed.
+ */
+function isKeyForConversation(s3Key: string, conversationId: string): boolean {
+  return (
+    s3Key.startsWith(`conversations/${conversationId}/`) ||
+    s3Key.startsWith(`v2/generated-images/${conversationId}/`)
+  )
+}
+
+/**
  * Truncate content to prevent memory issues
  */
 function truncateContent(content: string): string {
@@ -41,7 +55,7 @@ function truncateContent(content: string): string {
  * Convert a part to content format, handling images as markdown and passing through tool parts.
  * For image parts with s3Key, generates a fresh presigned URL to replace expired ones.
  */
-async function convertPartToTextContent(part: MessagePart): Promise<ContentPart | null> {
+async function convertPartToTextContent(part: MessagePart, conversationId: string): Promise<ContentPart | null> {
   const partType = part.type as string
 
   if (partType === 'text') {
@@ -54,7 +68,9 @@ async function convertPartToTextContent(part: MessagePart): Promise<ContentPart 
   if (partType === 'image') {
     // Refresh presigned URL from s3Key if available (fixes expired URL issue)
     const s3Key = part.s3Key
-    if (s3Key) {
+    // REV-SEC-143: only presign a key that belongs to THIS conversation — a
+    // client-planted s3Key pointing at another user's object must never be signed.
+    if (s3Key && isKeyForConversation(s3Key, conversationId)) {
       try {
         const freshUrl = await getDocumentSignedUrl({ key: s3Key, expiresIn: 3600 })
         return { type: 'text', text: `![Generated Image](${freshUrl})` }
@@ -66,8 +82,11 @@ async function convertPartToTextContent(part: MessagePart): Promise<ContentPart 
           error: error instanceof Error ? error.message : String(error)
         })
       }
+    } else if (s3Key) {
+      const log = createLogger({ context: 'convertPartToTextContent' })
+      log.warn('Refusing to presign s3Key outside the conversation prefix', { conversationId })
     }
-    // Fallback to stored imageUrl if no s3Key or URL generation failed
+    // Fallback to stored imageUrl if no (valid) s3Key or URL generation failed
     const imageUrl = part.imageUrl
     return imageUrl ? { type: 'text', text: `![Generated Image](${imageUrl})` } : null
   }
@@ -98,8 +117,8 @@ async function convertPartToTextContent(part: MessagePart): Promise<ContentPart 
  * Truncate parts content and ensure at least one part.
  * Async to support presigned URL refresh for image parts.
  */
-async function truncatePartsContent(parts: MessagePart[]): Promise<ContentPart[]> {
-  const results = await Promise.all(parts.map(part => convertPartToTextContent(part)))
+async function truncatePartsContent(parts: MessagePart[], conversationId: string): Promise<ContentPart[]> {
+  const results = await Promise.all(parts.map(part => convertPartToTextContent(part, conversationId)))
   const converted = results.filter((part): part is ContentPart => part !== null)
   return converted.length > 0 ? converted : [{ type: 'text', text: '' }]
 }
@@ -160,12 +179,12 @@ async function convertMessageToAiSdk(msg: {
   parts?: MessagePart[] | null
   createdAt?: Date | null
   metadata?: Record<string, unknown> | null
-}): Promise<NexusMessageResponse> {
+}, conversationId: string): Promise<NexusMessageResponse> {
   const truncatedContent = msg.content ? truncateContent(msg.content) : null
   let truncatedParts: ContentPart[] | null = null
 
   if (msg.parts && Array.isArray(msg.parts)) {
-    truncatedParts = await truncatePartsContent(msg.parts)
+    truncatedParts = await truncatePartsContent(msg.parts, conversationId)
   }
 
   const baseMessage = {
@@ -252,8 +271,12 @@ export async function GET(
     })
     const totalCount = await getMessageCount(conversationId)
 
-    // Convert to AI SDK format (async for presigned URL refresh)
-    const aiSdkMessages = await Promise.all(messages.map(convertMessageToAiSdk))
+    // Convert to AI SDK format (async for presigned URL refresh). Pass the
+    // ownership-verified conversationId so only this conversation's own image keys
+    // are presigned (REV-SEC-143).
+    const aiSdkMessages = await Promise.all(
+      messages.map(msg => convertMessageToAiSdk(msg, conversationId!))
+    )
 
     timer({ status: 'success' })
     log.info('Messages retrieved', { conversationId, userId, messageCount: messages.length })

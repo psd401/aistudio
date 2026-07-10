@@ -273,14 +273,22 @@ export async function revokeOAuthClient(
 
     log.info("Revoking OAuth client", { clientId })
 
-    await executeQuery(
+    const revoked = await executeQuery(
       (db) =>
         db
           .update(oauthClients)
           .set({ isActive: false, updatedAt: new Date() })
-          .where(eq(oauthClients.clientId, clientId)),
+          .where(eq(oauthClients.clientId, clientId))
+          .returning({ id: oauthClients.id }),
       "revokeOAuthClient"
     )
+
+    if (revoked.length === 0) {
+      // No row matched — a typo, stale UI, an already-deleted client, or a race.
+      // Surface a failure instead of a false "revoked" success so an admin never
+      // believes an OAuth client is disabled while it is still active (REV-COR-055).
+      throw ErrorFactories.dbRecordNotFound("oauth_clients", clientId)
+    }
 
     timer({ status: "success" })
     log.info("OAuth client revoked", { clientId })
