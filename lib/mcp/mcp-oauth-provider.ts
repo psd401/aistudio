@@ -86,7 +86,15 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
     const rows = await executeQuery(
       (db) =>
         db
-          .select()
+          .select({
+            // Explicit projection (REV-DB-167): only the columns tokens() consumes, mirroring
+            // clientInformation()'s single-column select — not SELECT * (which also fetches
+            // id/userId/serverId the caller already holds, plus created_at/updated_at).
+            encryptedAccessToken: nexusMcpUserTokens.encryptedAccessToken,
+            encryptedRefreshToken: nexusMcpUserTokens.encryptedRefreshToken,
+            tokenExpiresAt: nexusMcpUserTokens.tokenExpiresAt,
+            scope: nexusMcpUserTokens.scope,
+          })
           .from(nexusMcpUserTokens)
           .where(
             and(
