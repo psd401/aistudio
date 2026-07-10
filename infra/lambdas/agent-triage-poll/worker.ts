@@ -23,16 +23,28 @@ import { enqueue, type QueueMessage } from "./queue";
 
 export const handler: SQSHandler = async (event) => {
   const batchItemFailures: { itemIdentifier: string }[] = [];
+  // FIFO ordering: once a message in a group fails, every LATER message in
+  // the same group (userEmail) must also be reported as a failure and NOT
+  // processed — otherwise SQS would deliver them out of order relative to
+  // the retried one. Records arrive in per-group order within the batch.
+  const failedGroups = new Set<string>();
 
   for (const record of event.Records) {
+    const group = record.attributes?.MessageGroupId ?? record.messageId;
+    if (failedGroups.has(group)) {
+      batchItemFailures.push({ itemIdentifier: record.messageId });
+      continue;
+    }
     try {
       const msg = JSON.parse(record.body) as QueueMessage;
       await handleMessage(msg);
     } catch (err) {
       log("ERROR", "worker_message_failed", {
         messageId: record.messageId,
+        group,
         err: err instanceof Error ? err.message : String(err),
       });
+      failedGroups.add(group);
       batchItemFailures.push({ itemIdentifier: record.messageId });
     }
   }
