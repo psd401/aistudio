@@ -82,15 +82,20 @@ export class BedrockGuardrailsService {
     };
   }
 
+  /** First non-empty of the provided override and the env fallback. */
+  private static firstSet(override: string | undefined, env: string | undefined, fallback = ''): string {
+    return override || env || fallback;
+  }
+
   /**
    * Build configuration from provided config and environment variables
    */
   private static buildConfig(region: string, config?: Partial<GuardrailsConfig>): GuardrailsConfig {
     return {
       region,
-      guardrailId: config?.guardrailId || process.env.BEDROCK_GUARDRAIL_ID || '',
-      guardrailVersion: config?.guardrailVersion || process.env.BEDROCK_GUARDRAIL_VERSION || 'DRAFT',
-      violationTopicArn: config?.violationTopicArn || process.env.GUARDRAIL_VIOLATION_TOPIC_ARN,
+      guardrailId: BedrockGuardrailsService.firstSet(config?.guardrailId, process.env.BEDROCK_GUARDRAIL_ID),
+      guardrailVersion: BedrockGuardrailsService.firstSet(config?.guardrailVersion, process.env.BEDROCK_GUARDRAIL_VERSION, 'DRAFT'),
+      violationTopicArn: BedrockGuardrailsService.firstSet(config?.violationTopicArn, process.env.GUARDRAIL_VIOLATION_TOPIC_ARN) || undefined,
       enableViolationNotifications: config?.enableViolationNotifications ?? true,
       enablePiiTokenization: config?.enablePiiTokenization ?? true,
       tokenTtlSeconds: config?.tokenTtlSeconds ?? 3600,
@@ -111,18 +116,26 @@ export class BedrockGuardrailsService {
     }
 
     // Issue #727: Validate GUARDRAIL_HASH_SECRET is set for privacy protection.
-    // In production the default literal is a real privacy hole: it lets anyone who
-    // reads the open-source repo pre-compute the HMAC of a known session/user id and
-    // correlate guardrail-violation logs across requests for a K-12 student. Treat a
-    // missing secret as a STARTUP ERROR in production; keep it a warning in dev/test
-    // so local runs and unit tests work without the env var.
+    // The old default literal was a real privacy hole: anyone who reads the
+    // open-source repo could pre-compute the HMAC of a known session/user id and
+    // correlate guardrail-violation logs across requests for a K-12 student.
+    //
+    // This USED to throw in production — which took down EVERY chat request when
+    // the env var was missing (the guardrails service is constructed lazily on
+    // the first chat request, so the "startup error" surfaced as a per-request
+    // 500 across the whole product; broke deployed dev, 2026-07-06). A missing
+    // secret must never cost availability: instead, hashValue() REFUSES to hash
+    // and emits a fixed 'redacted' placeholder — zero correlation is possible,
+    // which is strictly more private than default-secret hashing — and we log
+    // loudly (error in production, warn elsewhere) so ops wires the secret.
     if (!process.env.GUARDRAIL_HASH_SECRET && !config?.hashSecret) {
       if (process.env.NODE_ENV === 'production') {
-        throw new Error(
-          'GUARDRAIL_HASH_SECRET must be set in production: the default secret lets violation logs be correlated by session/user id, breaking student privacy.'
+        this.log.error(
+          'GUARDRAIL_HASH_SECRET is not set: guardrail violation logs will record a redacted placeholder instead of a per-session hash (violations cannot be correlated per user until the secret is configured). Set the GUARDRAIL_HASH_SECRET env var / ECS secret.'
         );
+      } else {
+        this.log.warn('GUARDRAIL_HASH_SECRET not configured - violation logs will use a redacted placeholder for session ID hashing');
       }
-      this.log.warn('GUARDRAIL_HASH_SECRET not configured - using default secret for session ID hashing (weakens privacy protection)');
     }
 
     // Issue #929: Warn when content snippet logging is active — snippets contain the
@@ -722,9 +735,17 @@ export class BedrockGuardrailsService {
    *
    * Uses a secret key to prevent rainbow table attacks on predictable values
    * like session IDs. The secret should be set via GUARDRAIL_HASH_SECRET env var.
+   *
+   * With NO secret configured this returns a fixed 'redacted' placeholder
+   * instead of falling back to a publicly-known default key: a repo-visible
+   * default lets anyone pre-compute HMACs of known ids and correlate a K-12
+   * student's violation logs, whereas a constant placeholder carries zero
+   * information. Availability is never traded for the secret (see
+   * logConfigurationWarnings).
    */
   private hashValue(value: string): string {
-    const secret = process.env.GUARDRAIL_HASH_SECRET || this.config.hashSecret || 'aistudio-guardrail-default-secret';
+    const secret = process.env.GUARDRAIL_HASH_SECRET || this.config.hashSecret;
+    if (!secret) return 'redacted';
     return createHmac('sha256', secret).update(value).digest('hex').substring(0, 16);
   }
 

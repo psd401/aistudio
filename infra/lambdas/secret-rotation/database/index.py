@@ -54,7 +54,7 @@ def sanitize_for_logging(text: str) -> str:
         return text
 
     # Remove ARNs
-    text = re.sub(r'arn:aws:[^:]+:[^:]+:\d+:[^\s]+', '[ARN_REDACTED]', text)
+    text = re.sub(r'arn:aws(?:-[a-z]+)*:[^:]*:[^:]*:\d*:[^\s]+', '[ARN_REDACTED]', text)
     # Remove IP addresses
     text = re.sub(r'\d+\.\d+\.\d+\.\d+', '[IP_REDACTED]', text)
     # Remove email addresses
@@ -77,6 +77,33 @@ def sanitize_error(error: Exception) -> str:
     return sanitize_for_logging(error_str)
 
 
+def validate_rotation_request(arn: str, token: str) -> bool:
+    """
+    AWS-standard rotation preamble guard (REV-INFRA-109).
+
+    Verifies the secret has rotation enabled, the ClientRequestToken is actually
+    staged for this secret, and it is AWSPENDING (not already AWSCURRENT). Without
+    these checks the handler would act on out-of-order/stale invocations or on a
+    version Secrets Manager does not expect.
+
+    Returns:
+        True if the caller should short-circuit (token already AWSCURRENT).
+    """
+    metadata = secretsmanager.describe_secret(SecretId=arn)
+    if not metadata.get('RotationEnabled', False):
+        raise ValueError("Secret is not enabled for rotation")
+
+    versions = metadata['VersionIdsToStages']
+    if token not in versions:
+        raise ValueError("Rotation token has no stage for this secret")
+    if "AWSCURRENT" in versions[token]:
+        logger.info("Rotation token is already AWSCURRENT; nothing to do")
+        return True
+    if "AWSPENDING" not in versions[token]:
+        raise ValueError("Rotation token is not staged as AWSPENDING")
+    return False
+
+
 def handler(event: Dict[str, Any], context: Any) -> None:
     """
     Main rotation handler invoked by Secrets Manager
@@ -96,6 +123,10 @@ def handler(event: Dict[str, Any], context: Any) -> None:
     step = event['Step']
 
     try:
+        # AWS-standard preamble guard before acting on the step (REV-INFRA-109).
+        if validate_rotation_request(arn, token):
+            return
+
         # Dispatch to appropriate step handler
         if step == "createSecret":
             create_secret(arn, token)
@@ -118,7 +149,7 @@ def create_secret(arn: str, token: str) -> None:
 
     Generates a new random password and stores it as AWSPENDING.
     """
-    logger.info(f"Creating new secret version for {arn}")
+    logger.info(f"Creating new secret version for {sanitize_for_logging(arn)}")
 
     # Check if AWSPENDING version already exists
     try:
@@ -143,7 +174,7 @@ def create_secret(arn: str, token: str) -> None:
     # Generate new password
     password_response = secretsmanager.get_random_password(
         PasswordLength=32,
-        ExcludeCharacters='/@"\'\\'',
+        ExcludeCharacters='/@"\'\\',
         ExcludePunctuation=False,
         RequireEachIncludedType=True
     )
@@ -168,7 +199,7 @@ def set_secret(arn: str, token: str) -> None:
 
     Updates the database user's password to match the AWSPENDING secret.
     """
-    logger.info(f"Setting secret in database for {arn}")
+    logger.info(f"Setting secret in database for {sanitize_for_logging(arn)}")
 
     # Get pending secret
     pending_secret = secretsmanager.get_secret_value(
@@ -220,7 +251,7 @@ def test_secret(arn: str, token: str) -> None:
 
     Attempts to connect to the database using the AWSPENDING credentials.
     """
-    logger.info(f"Testing secret for {arn}")
+    logger.info(f"Testing secret for {sanitize_for_logging(arn)}")
 
     # Get pending secret
     pending_secret = secretsmanager.get_secret_value(
@@ -255,7 +286,7 @@ def finish_secret(arn: str, token: str) -> None:
 
     Moves the AWSCURRENT label to the AWSPENDING version.
     """
-    logger.info(f"Finishing rotation for {arn}")
+    logger.info(f"Finishing rotation for {sanitize_for_logging(arn)}")
 
     # Get metadata about the secret
     metadata = secretsmanager.describe_secret(SecretId=arn)
@@ -271,13 +302,23 @@ def finish_secret(arn: str, token: str) -> None:
             current_version = version
             break
 
-    # Move AWSCURRENT stage to new version
-    secretsmanager.update_secret_version_stage(
-        SecretId=arn,
-        VersionStage="AWSCURRENT",
-        MoveToVersionId=token,
-        RemoveFromVersionId=current_version
-    )
+    # Move AWSCURRENT stage to new version. Never pass RemoveFromVersionId=None —
+    # if no AWSCURRENT version was found, omit it rather than sending an invalid
+    # argument to the API (REV-INFRA-109).
+    if current_version is not None:
+        secretsmanager.update_secret_version_stage(
+            SecretId=arn,
+            VersionStage="AWSCURRENT",
+            MoveToVersionId=token,
+            RemoveFromVersionId=current_version
+        )
+    else:
+        logger.warning("No AWSCURRENT version found to remove; setting AWSCURRENT without removal")
+        secretsmanager.update_secret_version_stage(
+            SecretId=arn,
+            VersionStage="AWSCURRENT",
+            MoveToVersionId=token
+        )
 
     logger.info("Successfully completed rotation")
 
@@ -297,11 +338,19 @@ def get_database_connection(secret_dict: Dict[str, Any]) -> Any:
     Returns:
         Database connection object
     """
+    # Require TLS on the rotation connection (REV-COR-435-OVF1 / REV-INFRA-108).
+    # libpq's default sslmode is 'prefer', which silently falls back to an
+    # UNENCRYPTED connection — over which set_secret transmits the freshly rotated
+    # ALTER USER password. Aurora/RDS accept TLS; 'require' guarantees encryption.
+    # Overridable via the secret's own `sslmode` for non-TLS targets, but the
+    # default enforces encryption.
+    sslmode = secret_dict.get('sslmode', 'require')
     return psycopg2.connect(
         host=secret_dict['host'],
         port=secret_dict.get('port', 5432),
         user=secret_dict['username'],
         password=secret_dict['password'],
         database=secret_dict.get('database', 'postgres'),
+        sslmode=sslmode,
         connect_timeout=5
     )

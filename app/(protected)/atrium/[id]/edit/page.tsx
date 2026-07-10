@@ -14,6 +14,10 @@
  * server's read-only token) — this page only gates visibility and passes a
  * `canEdit` hint to the artifact canvas so the Code-tab Save button is hidden for
  * read-only viewers.
+ *
+ * Header controls (Epic #1059 completion): ContentSettings (rename / tags /
+ * section / archive-restore, editors only) and — for documents — the VersionMenu
+ * (history + restore); artifacts restore inline in the canvas toolbar.
  */
 
 import { forbidden, notFound } from "next/navigation";
@@ -24,6 +28,8 @@ import { canEdit } from "@/lib/content/helpers";
 import { DocumentEditor } from "@/components/atrium/DocumentEditor";
 import { ArtifactCanvas } from "@/components/atrium/ArtifactCanvas";
 import { VisibilityChip } from "@/components/atrium/VisibilityChip";
+import { ContentSettings } from "@/components/atrium/ContentSettings";
+import { VersionMenu } from "@/components/atrium/VersionMenu";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 
 export const dynamic = "force-dynamic";
@@ -62,6 +68,38 @@ export default async function AtriumEditPage({
   // to show/hide the Save control; the create-version action re-checks server-side.
   const userCanEdit = canEdit(req, obj.ownerUserId);
 
+  // Header controls (Epic #1059 completion): the ContentSettings dialog (rename /
+  // tags / section / archive-restore) for editors, and — for documents — the
+  // VersionMenu (history + restore; the artifact canvas has its own inline
+  // version select + restore). Server actions re-check permission regardless;
+  // the settings dialog is simply not rendered for read-only viewers.
+  const headerControls = (
+    <div className="flex shrink-0 items-center gap-2">
+      {/* Nexus workspace (spec §17): open this object BESIDE the chat so the
+          adjacent conversation becomes the re-prompt/tweak path. */}
+      <a
+        href={`/nexus?workspace=${obj.id}`}
+        className="rounded border px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
+      >
+        Open beside chat
+      </a>
+      {obj.kind === "document" && (
+        <VersionMenu key={`versions-${obj.id}`} idOrSlug={obj.id} canEdit={userCanEdit} />
+      )}
+      {userCanEdit && (
+        <ContentSettings
+          key={`settings-${obj.id}`}
+          objectId={obj.id}
+          title={obj.title}
+          tags={obj.tags}
+          collectionId={obj.collectionId}
+          status={obj.status}
+        />
+      )}
+      <VisibilityChip key={obj.id} idOrSlug={obj.id} />
+    </div>
+  );
+
   if (obj.kind === "artifact") {
     return (
       <main className="mx-auto max-w-4xl px-4 py-6">
@@ -72,7 +110,7 @@ export default async function AtriumEditPage({
               Interactive artifact · preview runs in an isolated sandbox
             </p>
           </div>
-          <VisibilityChip key={obj.id} idOrSlug={obj.id} />
+          {headerControls}
         </header>
         <ArtifactCanvas key={obj.id} idOrSlug={obj.id} canEdit={userCanEdit} sandboxSrc={getArtifactSandboxRenderUrl()} />
       </main>
@@ -88,7 +126,7 @@ export default async function AtriumEditPage({
             Live document · agent edits show purple, your edits show green
           </p>
         </div>
-        <VisibilityChip key={obj.id} idOrSlug={obj.id} />
+        {headerControls}
       </header>
       <DocumentEditor key={obj.id} idOrSlug={obj.id} userId={req.userId} />
     </main>

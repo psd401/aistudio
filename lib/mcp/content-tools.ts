@@ -1,8 +1,10 @@
 /**
  * Atrium content MCP tool definitions (Issue #1055, Phase 5 §24)
  *
- * The eight atomic content primitives exposed to MCP clients, registered into
- * `MCP_TOOLS` / `TOOL_SCOPE_MAP` alongside the existing first-party tools. They
+ * The atomic content primitives exposed to MCP clients, registered into
+ * `MCP_TOOLS` alongside the existing first-party tools (scope enforcement lives
+ * in the unified tool catalog — `lib/tools/catalog/manifest.ts` — which a unit
+ * test keeps in sync with `CONTENT_TOOL_SCOPE_MAP` below). They
  * are deliberately atomic — there is NO `generate_and_publish`; an agent calls
  * `create_*` then `publish_content` as separate, individually-scoped steps.
  *
@@ -31,6 +33,10 @@ export const CONTENT_TOOL_SCOPE_MAP: Record<string, ApiScope> = {
   // enforced in publishService, which raises approval_required without the
   // human-held content:publish_public.
   publish_content: "content:publish_internal",
+  // Unpublish shares publish's authority model: internal scope is the baseline,
+  // and taking down a PUBLIC destination is gated inside publishService.unpublish
+  // (§26.4 — the same authority needed to put it up).
+  unpublish_content: "content:publish_internal",
   // OKF interoperability (Phase 8, §36.4). Export is a read/serialization
   // (content:read); a `public` audience additionally needs content:publish_public
   // (the §26.4 gate is enforced in okfExportService). Import creates content.
@@ -87,7 +93,7 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "list_content",
     description:
-      "List content the caller may view. Filterable by kind, collection, tag, and status.",
+      "List content the caller may view. Filterable by kind, collection, tag, status, and title text.",
     inputSchema: {
       type: "object",
       properties: {
@@ -98,6 +104,10 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
           type: "string",
           enum: ["draft", "published", "archived"],
           description: "Filter by status",
+        },
+        query: {
+          type: "string",
+          description: "Case-insensitive title search (max 200 characters)",
         },
       },
     },
@@ -170,6 +180,23 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
           type: "string",
           enum: ["intranet", "public_web", "schoology", "google", "okf"],
           description: "Publish destination",
+        },
+      },
+      required: ["id", "destination"],
+    },
+  },
+  {
+    name: "unpublish_content",
+    description:
+      "Unpublish (take down) a content object from a destination. Idempotent: unpublishing an object that is not live there returns unpublished: false rather than erroring. Taking down a public-facing destination requires the human-held content:publish_public; without it the call returns a structured approval_required signal — the same §26.4 authority needed to publish it. Mirrors DELETE /api/v1/content/{id}/publish/{destination} (no okf: an okf publication is a serialized S3 bundle with no live surface to take down).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Object id" },
+        destination: {
+          type: "string",
+          enum: ["intranet", "public_web", "schoology", "google"],
+          description: "Destination to unpublish from",
         },
       },
       required: ["id", "destination"],

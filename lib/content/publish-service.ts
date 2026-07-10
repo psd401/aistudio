@@ -42,9 +42,10 @@ import {
   raisePublishApprovalRequired,
 } from "./helpers";
 import { visibilityService } from "./visibility-service";
+import { versionService } from "./version-service";
 import { retrievalService } from "./retrieval-service";
 import { contentEvents } from "./events";
-import { NotFoundError, ValidationError, ApprovalRequiredError } from "./errors";
+import { NotFoundError, ValidationError } from "./errors";
 import {
   isPublicDestination,
   type PublishAdapter,
@@ -73,6 +74,14 @@ export interface PublishInput {
     level: VisibilityLevel;
     grants?: VisibilityGrant[];
   };
+  /**
+   * Publish a SPECIFIC version rather than the object's current head. Used by
+   * the §26.4 approval replay (issue #1118): a request pins the raise-time head
+   * so approving it publishes the REVIEWED version even if the author has since
+   * edited a newer head. The version must belong to the object (validated below,
+   * ValidationError otherwise). Omit to publish the current head (the default).
+   */
+  versionId?: string;
 }
 
 /**
@@ -130,6 +139,36 @@ async function loadPublishable(
 }
 
 /**
+ * Resolve which version a publish will make live: the caller's pinned
+ * `input.versionId` (an approval replay of the raise-time head — issue #1118), or
+ * the object's current working head. A pinned version MUST belong to the object
+ * (an approval row could name a version of a different object only via corruption)
+ * — `versionService.getById` scopes by object and returns null otherwise, which
+ * we map to a ValidationError. A null head (no version) is "nothing to publish".
+ * Runs OUTSIDE the transaction (a plain read), before the §26.4 gate.
+ */
+async function resolvePublishVersionId(
+  objectId: string,
+  obj: PublishableObject,
+  input: PublishInput
+): Promise<string> {
+  if (input.versionId != null) {
+    const version = await versionService.getById(objectId, input.versionId);
+    if (!version) {
+      throw new ValidationError("Version not found for this object", {
+        objectId,
+        versionId: input.versionId,
+      });
+    }
+    return input.versionId;
+  }
+  if (obj.currentVersionId == null) {
+    throw new ValidationError("Nothing to publish", { objectId });
+  }
+  return obj.currentVersionId;
+}
+
+/**
  * Post-commit publish side effects, both best-effort: a successful publish has
  * already committed, so neither a retrieval-index failure nor an event-bus
  * hiccup may roll it back. Extracted from `publish` so the method stays within
@@ -150,7 +189,11 @@ async function runPublishSideEffects(args: {
 }): Promise<void> {
   const { req, objectId, slug, publishedVersionId, destination, log } = args;
   try {
-    await retrievalService.indexObject(objectId);
+    // Index the version we just made LIVE, not the object's head — a §26.4
+    // approval replay can publish an OLDER pinned version while the author has a
+    // newer head (issue #1118); indexing the head would leak the unreviewed head
+    // text to assistant retrieval while readers serve the reviewed version.
+    await retrievalService.indexObject(objectId, publishedVersionId);
   } catch (indexError) {
     log.warn("Failed to index published content for retrieval", {
       objectId,
@@ -276,6 +319,39 @@ async function runPublishAdapter(args: {
 // `visibilityService.setLevel`) so the message + emitted event shape stay
 // identical across every §26.4 gate site.
 
+/**
+ * §26.4 — taking a public-facing destination (public_web/schoology/google) offline
+ * requires the same authority as putting it up. Without this, `content:publish_internal`
+ * alone could tear down already-live public content it could never have published,
+ * which is backwards from a review-safety standpoint. Routes through the shared raise
+ * (issue #1118 item 2) so a blocked unpublish PERSISTS a durable
+ * `content_publish_requests` row (kind `unpublish`, replayed cleanly via `unpublish`
+ * on approve) and appears in /admin/atrium — previously this was a raw throw that
+ * queued nothing. The caller only invokes this once a live publication is confirmed,
+ * so an already-offline destination is never gated or queued. `never`-typed when it
+ * raises; a no-op when the destination is internal or the caller is authorized. Safe
+ * pre-tx (no lock held), so no deadlock concern.
+ */
+function assertMayUnpublishPublicOrRaise(
+  req: Requester,
+  obj: PublishableObject,
+  objectId: string,
+  destination: PublishDestination,
+  opts: { hasPublishPublicCapability?: boolean }
+): void {
+  if (
+    isPublicDestination(destination) &&
+    !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
+  ) {
+    raisePublishApprovalRequired(
+      req,
+      "Unpublishing from a public destination requires approval",
+      { objectId, slug: obj.slug, destination },
+      { destination, objectId, requestKind: "unpublish" }
+    );
+  }
+}
+
 export const publishService = {
   /**
    * Publish (or republish) an object's working head to a destination. Idempotent
@@ -324,54 +400,64 @@ export const publishService = {
       opts.hasPublishPublicCapability ?? false
     );
 
-    // §26.4 gate — PART 1 (destination), evaluated pre-transaction because it does
-    // NOT depend on the object's current visibility (a public-facing destination —
-    // public_web/schoology/google, `isPublicDestination` — is ALWAYS a public
-    // exposure) and so is race-free here. It runs BEFORE the adapter-not-implemented
-    // check below so an unauthorized caller (including every autonomous agent) gets
-    // the approval signal, not a "not yet available" error. PART 2 — widening
-    // visibility to `public` — DOES depend on the current level, so it is evaluated
-    // inside the transaction against the FOR-UPDATE-locked row (see below), closing
-    // the TOCTOU hole where a concurrent narrow (public → internal) between a
-    // pre-read and the locked write would skip the gate on a real widen-back.
-    if (isPublicDestination(input.destination) && !mayPublishPublic) {
-      raisePublishApprovalRequired(
-        req,
-        "Publishing to a public destination requires approval",
-        { objectId, slug: obj.slug, destination: input.destination },
-        { destination: input.destination, objectId }
-      );
-    }
-
-    // Nothing is live without a working head: the publication's
-    // `published_version_id` is NOT NULL, so a null head cannot be published.
-    if (obj.currentVersionId == null) {
-      throw new ValidationError("Nothing to publish", { objectId });
-    }
-    const publishedVersionId = obj.currentVersionId;
-
-    // The actor recording the publish. Guests/autonomous agents have no user id;
-    // `published_by` is nullable, so a null here is persisted as "system".
-    const publishedBy = authorUserIdOf(req);
-
     const adapter = adapters[input.destination];
 
-    // A destination whose adapter is not yet implemented (public_web/schoology/
-    // google — later phases) must fail BEFORE the transaction. Otherwise the
-    // status/visibility widening below commits, then the post-commit adapter call
-    // throws, and the object is left flagged `public` (canView treats
-    // visibilityLevel === "public" as world-readable regardless of publication
-    // status) with no live publication — a "failed" publish that silently exposed
-    // the content. Blocking here writes nothing. This runs AFTER the §26.4 gate so
-    // an unauthorized caller still gets the approval signal, not this error. (When
-    // a real external adapter lands, its runtime failures will instead need
-    // compensating revert of the committed status/visibility.)
+    // Resolve the version to publish (the current head, or the specific version an
+    // approval replay pinned — issue #1118). This CHEAP business validation runs
+    // BEFORE the §26.4 gate (issue #1118 item 6): a request that can never
+    // succeed — nothing to publish (null head), or a pinned version that does not
+    // belong to the object — must fail with a plain ValidationError instead of
+    // being persisted to the approval queue as a doomed row that just re-hits the
+    // same error on approve. It leaks nothing the caller (already past
+    // `assertCanEdit`) doesn't know. The §26.4 authorization ORDER is unchanged
+    // (canView → assertCanEdit → gate); only this validation moved ahead of it.
+    const publishedVersionId = await resolvePublishVersionId(objectId, obj, input);
+
+    // A destination whose adapter is not yet implemented (schoology/google — later
+    // phases) must fail BEFORE any write, and — issue #1118 item 6 — BEFORE the
+    // §26.4 gate so an unauthorized schoology/google publish (doomed: the adapter
+    // throws on approve too) is not queued. The revealed fact ("destination not
+    // yet wired") is static and non-sensitive. Otherwise the status/visibility
+    // widening below would commit, the post-commit adapter call would throw, and
+    // the object would be left flagged `public` with no live publication — a
+    // "failed" publish that silently exposed content.
     if (adapter.implemented === false) {
       throw new ValidationError(
         `Publishing to '${input.destination}' is not yet available`,
         { destination: input.destination }
       );
     }
+
+    // §26.4 gate — PART 1 (destination), evaluated pre-transaction because it does
+    // NOT depend on the object's current visibility (a public-facing destination —
+    // public_web/schoology/google, `isPublicDestination` — is ALWAYS a public
+    // exposure) and so is race-free here. PART 2 — widening visibility to `public`
+    // — DOES depend on the current level, so it is evaluated inside the transaction
+    // against the FOR-UPDATE-locked row (see below), closing the TOCTOU hole where
+    // a concurrent narrow (public → internal) between a pre-read and the locked
+    // write would skip the gate on a real widen-back.
+    if (isPublicDestination(input.destination) && !mayPublishPublic) {
+      raisePublishApprovalRequired(
+        req,
+        "Publishing to a public destination requires approval",
+        { objectId, slug: obj.slug, destination: input.destination },
+        {
+          destination: input.destination,
+          objectId,
+          // Pin the raise-time head so approve publishes the REVIEWED version
+          // even after later edits (#1118 item 1).
+          versionId: publishedVersionId,
+          // Record the caller's bundled widen so approve applies it too, and the
+          // approve message is accurate (#1118 item 5) — the pre-tx gate is the
+          // one site that would otherwise drop the widen intent.
+          wantsPublicWiden: input.visibility?.level === "public",
+        }
+      );
+    }
+
+    // The actor recording the publish. Guests/autonomous agents have no user id;
+    // `published_by` is nullable, so a null here is persisted as "system".
+    const publishedBy = authorUserIdOf(req);
 
     const publicationId = await executeTransaction(
       async (tx: DbTransaction) => {
@@ -412,7 +498,14 @@ export const publishService = {
             req,
             "Publishing to a public destination requires approval",
             { objectId, slug: obj.slug, destination: input.destination },
-            { destination: input.destination, objectId }
+            {
+              destination: input.destination,
+              objectId,
+              // Pin the raise-time head for the replay (#1118 item 1); the widen
+              // is recorded automatically (this branch fires only for a non-public
+              // destination bundling a public widen).
+              versionId: publishedVersionId,
+            }
           );
         }
 
@@ -518,6 +611,11 @@ export const publishService = {
    * no-op-safe call when there is no live publication (returns `unpublished:
    * false`) rather than throwing — unpublishing an already-unpublished object is
    * idempotent from the caller's view.
+   *
+   * Once NO destination remains live, the retrieval index entry is pruned
+   * post-commit (best-effort) so unpublished content stops surfacing as
+   * assistant context (§16); while any other destination is still live the
+   * index is kept.
    */
   async unpublish(
     req: Requester,
@@ -542,26 +640,46 @@ export const publishService = {
     }
     assertCanEdit(req, obj.ownerUserId);
 
-    // §26.4 — taking a public-facing destination (public_web/schoology/google)
-    // offline requires the same authority as putting it up in the first place.
-    // Without this, `content:publish_internal` alone could tear down already-live
-    // public content it could never have published, which is backwards from a
-    // review-safety standpoint.
-    if (
-      isPublicDestination(destination) &&
-      !canPublishPublic(req, opts.hasPublishPublicCapability ?? false)
-    ) {
-      throw new ApprovalRequiredError(
-        "Unpublishing from a public destination requires approval",
-        { destination, objectId }
-      );
+    // Idempotent no-op check BEFORE the §26.4 gate (issue #1118 review, P2): if
+    // nothing is LIVE at this destination there is nothing to take offline and no
+    // public exposure to gate — return the documented `{ unpublished: false }`
+    // rather than throwing ApprovalRequiredError and queuing an approval whose
+    // replay would only re-run the same no-op. This read leaks nothing (the caller
+    // already passed assertCanEdit) and mirrors item 6's "don't queue doomed
+    // requests" discipline. Read outside the tx (no lock); the transaction below
+    // re-checks the live row under FOR UPDATE, so a concurrent publish landing
+    // between this read and the tx is still handled correctly there.
+    const liveNow = await executeQuery(
+      (db) =>
+        db
+          .select({ id: contentPublications.id })
+          .from(contentPublications)
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.destination, destination),
+              eq(contentPublications.status, "live")
+            )
+          )
+          .limit(1),
+      "publish.unpublish.liveCheck"
+    );
+    if (!liveNow[0]) {
+      return { unpublished: false };
     }
+
+    // §26.4 gate (only reached when a live publication actually exists — see the
+    // no-op check above, so an already-offline destination is never gated/queued).
+    assertMayUnpublishPublicOrRaise(req, obj, objectId, destination, opts);
 
     const adapter = adapters[destination];
 
     // Mark the publication unpublished and revert the object to draft atomically.
     // Lock the row FOR UPDATE so a concurrent publish/unpublish serializes here.
-    const externalRef = await executeTransaction(
+    // Resolves to undefined when nothing was live (idempotent no-op), else the
+    // removed publication's externalRef plus whether ANY other destination is
+    // still live (drives the retrieval-index pruning below).
+    const outcome = await executeTransaction(
       async (tx: DbTransaction) => {
         const locked = await tx
           .select({ id: contentObjects.id })
@@ -622,20 +740,46 @@ export const publishService = {
             .where(eq(contentObjects.id, objectId));
         }
 
-        return pub[0].externalRef;
+        return {
+          externalRef: pub[0].externalRef,
+          anyLiveRemaining: Boolean(stillLive[0]),
+        };
       },
       "publish.unpublish"
     );
 
-    if (externalRef === undefined) {
+    if (outcome === undefined) {
       // No live publication existed — idempotent no-op.
       return { unpublished: false };
+    }
+    const { externalRef, anyLiveRemaining } = outcome;
+
+    // Retrieval-index pruning (§16) FIRST — before the adapter teardown. Once NO
+    // destination is live anywhere, the object must stop surfacing as assistant
+    // context: remove its backing repository_item/chunks/link and clear
+    // indexed_at. This runs BEFORE the teardown deliberately: the teardown can
+    // throw (and re-throws below), and a retry would idempotently no-op at the
+    // `status = 'live'` filter and never reach a prune placed after it — leaving
+    // the index un-pruned indefinitely. Best-effort itself: the unpublish tx has
+    // already committed, so a prune failure is logged, never thrown.
+    if (!anyLiveRemaining) {
+      try {
+        await retrievalService.removeFromIndex(objectId);
+      } catch (pruneError) {
+        log.warn("Failed to prune retrieval index after unpublish", {
+          objectId,
+          destination,
+          error:
+            pruneError instanceof Error ? pruneError.message : String(pruneError),
+        });
+      }
     }
 
     // Destination teardown AFTER the transaction commits (external/secondary IO
     // outside the tx). For the intranet adapter this hides the nav item; a
     // failure is logged and surfaced (the publication is already marked
-    // unpublished, so the live surface is gone regardless).
+    // unpublished + the index already pruned, so the live surface is gone
+    // regardless).
     if (adapter.unpublish) {
       try {
         await adapter.unpublish({ objectId, externalRef });
@@ -666,6 +810,93 @@ export const publishService = {
     });
 
     return { unpublished: true };
+  },
+
+  /**
+   * Take an object OFFLINE at every destination — the takedown cascade for a
+   * status transition OUT of `published` (`draft` or `archived`) via
+   * `contentService.update` (#1059).
+   *
+   * This is a removal, so unlike `unpublish` it is NOT §26.4-gated: pulling public
+   * content DOWN is always the safe direction, and the caller has already run
+   * `assertCanEdit`. It flips every live `content_publications` row for the object
+   * to `unpublished` in one FOR-UPDATE-locked transaction, then runs each
+   * destination adapter's teardown (e.g. the intranet nav-item hide) post-commit.
+   *
+   * Without this, setting a published object to `draft` or `archived` left it
+   * reachable at its permanent public/intranet reader URL — both readers gate ONLY
+   * on a live publication, never on `content_objects.status` — a content-exposure
+   * footgun that contradicts what "draft"/"archived" imply. The caller writes the
+   * new status; this method never touches status. Idempotent: no live publication
+   * (already unpublished, or never published) → no-op.
+   */
+  async retractAllPublications(objectId: string): Promise<void> {
+    const log = createLogger({ action: "publish.retractAllPublications" });
+
+    const torn = await executeTransaction(
+      async (tx: DbTransaction) => {
+        const locked = await tx
+          .select({ id: contentObjects.id })
+          .from(contentObjects)
+          .where(eq(contentObjects.id, objectId))
+          .for("update")
+          .limit(1);
+        if (!locked[0]) {
+          throw new NotFoundError("Content not found", { objectId });
+        }
+        const live = await tx
+          .select({
+            destination: contentPublications.destination,
+            externalRef: contentPublications.externalRef,
+          })
+          .from(contentPublications)
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.status, "live")
+            )
+          );
+        if (live.length === 0) return [];
+        await tx
+          .update(contentPublications)
+          .set({ status: "unpublished", updatedAt: new Date() })
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.status, "live")
+            )
+          );
+        return live;
+      },
+      "publish.retractAllPublications"
+    );
+
+    // Adapter teardown AFTER the commit (secondary IO). Best-effort PER
+    // destination: the publication is already flipped `unpublished`, so the live
+    // reader surface is gone regardless of a nav-hide failure — log and continue
+    // so one failing destination cannot leave the others' teardown unrun.
+    for (const pub of torn) {
+      const adapter = adapters[pub.destination as PublishDestination];
+      if (!adapter?.unpublish) continue;
+      try {
+        await adapter.unpublish({ objectId, externalRef: pub.externalRef });
+      } catch (adapterError) {
+        log.warn("Archive teardown failed for a destination", {
+          objectId,
+          destination: pub.destination,
+          error:
+            adapterError instanceof Error
+              ? adapterError.message
+              : String(adapterError),
+        });
+      }
+    }
+    if (torn.length > 0) {
+      log.info("Retracted all live publications for archive", {
+        objectId,
+        destinations: torn.map((p) => p.destination),
+      });
+    }
   },
 
   /**

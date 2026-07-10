@@ -191,6 +191,19 @@ export async function getOidcProvider(
       Grant: 86400,
     },
 
+    // Refresh-token rotation (REV-DB-164): node-oidc-provider's built-in default for
+    // `rotateRefreshToken` is NOT `false` — it's a function that rotates refresh tokens
+    // issued to public (`token_endpoint_auth_method: "none"`) clients and tokens nearing
+    // expiry. Since this app supports public/PKCE-only clients, that default would rotate
+    // their refresh tokens, and this adapter's `consume('RefreshToken')` now stamps
+    // `rotated_at` on every consume — so an un-pinned default would mark a public client's
+    // original refresh token as rotated/consumed on first use, breaking any client that
+    // expects to reuse the same refresh token for the full 24h TTL. Pin it to `false`
+    // explicitly so refresh tokens stay single-use-per-TTL, not rotated. The adapter is
+    // correct-by-construction either way: flipping this to a rotating policy later is safe
+    // without further adapter changes, and replay of a rotated token would be detected.
+    rotateRefreshToken: false,
+
     // ==========================================
     // Claims
     // ==========================================

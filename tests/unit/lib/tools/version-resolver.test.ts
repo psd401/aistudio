@@ -52,6 +52,13 @@ describe("parseToolRef", () => {
     expect(parseToolRef("documents.create@latest")).toBeNull()
   })
 
+  it("rejects v0, zero-padded, and dotted versions (strict vN grammar, epic #922 audit)", () => {
+    // versionRank is /^v[1-9]\d*$/: versions start at v1, no leading zeros.
+    expect(parseToolRef("x@v0")).toBeNull()
+    expect(parseToolRef("x@v01")).toBeNull()
+    expect(parseToolRef("x@v1.2")).toBeNull()
+  })
+
   it("rejects a trailing/empty @ part", () => {
     expect(parseToolRef("documents.create@")).toBeNull()
     expect(parseToolRef("@v1")).toBeNull()

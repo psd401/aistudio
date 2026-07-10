@@ -65,8 +65,10 @@ import {
   requesterFromApiAuth,
   buildDelegatedRequester,
   buildAutonomousRequesterForIdentity,
+  requesterForUserId,
 } from "@/lib/content/requester-from-auth";
 import { principalOf } from "@/lib/content/helpers";
+import { buildDelegatedTokenClaims } from "@/lib/oauth/delegated-token";
 
 // The autonomous-vs-human discriminator keys off ATRIUM_SYSTEM_USER_ID: a
 // client-credentials (machine) token's sub === this id; a human's is their own.
@@ -273,5 +275,79 @@ describe("buildDelegatedRequester grant-inheritance invariant", () => {
     // principalOf forces isAdmin:false for delegated — the agent CANNOT exceed
     // the human's grants by inheriting admin power.
     expect(principalOf(req).isAdmin).toBe(false);
+  });
+});
+
+describe("requesterForUserId (API-key execution path, #1059 completion)", () => {
+  it("builds a plain user requester with admin derived from roles", async () => {
+    roleRows = [{ name: "administrator" }];
+    const req = await requesterForUserId(42);
+    expect(req).not.toBeNull();
+    if (!req || req.kind !== "user") throw new Error("wrong kind");
+    expect(req.userId).toBe(42);
+    expect(req.roles).toEqual(["administrator"]);
+    expect(req.building).toBe("High School");
+    expect(req.isAdmin).toBe(true);
+  });
+
+  it("returns null (never throws) when the user row is missing", async () => {
+    userRows = [];
+    await expect(requesterForUserId(999)).resolves.toBeNull();
+  });
+
+  it("returns null (never throws) when the lookup itself fails", async () => {
+    const { executeQuery } = jest.requireMock("@/lib/db/drizzle-client") as {
+      executeQuery: jest.Mock;
+    };
+    executeQuery.mockRejectedValueOnce(new Error("db down"));
+    await expect(requesterForUserId(42)).resolves.toBeNull();
+  });
+});
+
+describe("delegated token mint→consume round-trip (§26.1, #1059)", () => {
+  it("a token minted for an ADMIN resolves to agent-delegated and is NEVER admin", async () => {
+    // The acting-for user is an administrator.
+    roleRows = [{ name: "administrator" }];
+    // Mint claims exactly as the route does.
+    const claims = buildDelegatedTokenClaims({
+      systemUserId: "3", // the pinned system user (sub)
+      delegatedForUserId: 42,
+      agentClientId: "agent-client-1",
+      scopes: ["content:create", "content:read"],
+      issuer: "https://issuer.example",
+      nowSeconds: 1_000_000,
+      jti: "jti-1",
+    });
+    // Extract exactly what auth-middleware derives from a verified JWT.
+    const delegatedForUserId = Number.isInteger(Number(claims.delegated_for))
+      ? Number(claims.delegated_for)
+      : undefined;
+    const req = await requesterFromApiAuth({
+      userId: Number(claims.sub), // 3 = system user
+      scopes: (claims.scope as string).split(" "),
+      oauthClientId: claims.client_id as string,
+      delegatedForUserId,
+    });
+    expect(req.kind).toBe("agent-delegated");
+    if (req.kind !== "agent-delegated") throw new Error("wrong kind");
+    expect(req.actingForUserId).toBe(42);
+    expect(req.scopes).toEqual(["content:create", "content:read"]);
+    // THE security invariant: acting for an admin does NOT make the agent admin.
+    expect(principalOf(req).isAdmin).toBe(false);
+  });
+
+  it("act.sub (agent client id) is non-numeric, so it never leaks in as delegated_for", () => {
+    const claims = buildDelegatedTokenClaims({
+      systemUserId: "3",
+      delegatedForUserId: 42,
+      agentClientId: "agent-client-1",
+      scopes: ["content:read"],
+      issuer: "https://issuer.example",
+      nowSeconds: 1_000_000,
+      jti: "jti-2",
+    });
+    // auth-middleware's fallback: delegated_for ?? act.sub, coerced to int.
+    const actSub = (claims.act as { sub: string }).sub;
+    expect(Number.isInteger(Number(actSub))).toBe(false);
   });
 });

@@ -117,7 +117,7 @@ Substrate      AI Studio: identity/RBAC · S3 · doc pipeline · vectors · MCP 
 | REST API v1 | `app/api/v1/*` (`sk-` keys, rate limiting, OpenAPI) | Hosts `/v1/content` endpoints |
 | Delegated agent auth | `lib/agent-workspace/consent-token.ts`, `app/agent-connect` | On-behalf-of-user agent authorization |
 | Navigation | `navigation_items` (`type` enum, `requiresRole`) | Extended to surface content as intranet pages |
-| Audit | `nexus_mcp_audit_logs`, OpenTelemetry (`instrumentation.ts`) | Logs every agent create/publish |
+| Audit | `content_audit_logs` (migration 090), OpenTelemetry (`instrumentation.ts`) | Logs every agent create/publish |
 | Safety | Bedrock Guardrails, PII tokenization (`lib/safety`) | Applied to agent-generated content paths |
 | Assistant Architect + scheduler | `lib/assistant-architect`, `schedules`, `@aws-sdk/client-scheduler` | Scheduled autonomous content production |
 
@@ -151,7 +151,7 @@ These describe how the layers wire at runtime; later sections give the code.
 4. Service inserts `content_objects` (owner *U*, `created_by_actor='agent'`), creates `content_versions` v1 (`author_actor='agent'`), registers a Proof doc via the doc-store adapter, snapshots markdown + rendered HTML to S3.
 5. Agent calls `publish_content(id, 'intranet')` → `publishService.publish` checks visibility/scope, writes `content_publications`, runs the intranet adapter, emits a `content.published` event.
 6. Event → retrieval indexer registers/refreshes chunks; the object is now a reader page and scoped context.
-7. All tool calls recorded in `nexus_mcp_audit_logs`.
+7. All content mutations recorded in `content_audit_logs` (§27).
 
 **Flow B — Human edits an agent-drafted document in nexus**
 1. User opens the object in the side-panel Proof editor next to chat.
@@ -543,7 +543,7 @@ ALTER TABLE navigation_items ADD COLUMN content_object_id uuid REFERENCES conten
 - **roles** — `grant_kind='role'` stores `roles.id` (as text) in `grant_value`; `agent_identities.role_id` gives autonomous agents a role.
 - **navigation_items** — new `content` enum value + `content_object_id`; collections link via `content_collections.nav_item_id`. The existing `requires_role` stays for non-content nav; content pages derive access from object visibility (§12).
 - **knowledge_repositories / repository_items / repository_item_chunks / repository_access** — retrieval index (§16) via `content_index_links`; mirror `repository_access` semantics through `content_visibility_grants`.
-- **nexus_mcp_audit_logs** — agent content tool calls append here (§27).
+- **content_audit_logs** — agent/REST content mutations append here (§27; migration 090 — deliberately NOT `nexus_mcp_audit_logs`, whose NOT NULL `server_id`/`user_id` fit neither a REST nor an autonomous-agent write).
 
 ## 10. Seed data
 
@@ -1365,6 +1365,13 @@ Register in `lib/mcp/custom-tools/registry.ts` (alongside the existing five tool
     "description": "Publish a content object to a destination. Public destinations require a human-held scope.",
     "inputSchema": { "type": "object", "required": ["id","destination"], "properties": {
       "id": { "type": "string" },
+      "destination": { "type": "string", "enum": ["intranet","public_web","schoology","google","okf"] } } }
+  },
+  {
+    "name": "unpublish_content",
+    "description": "Take a content object down from a destination. Unpublishing a public destination requires the same public authority as publishing it.",
+    "inputSchema": { "type": "object", "required": ["id","destination"], "properties": {
+      "id": { "type": "string" },
       "destination": { "type": "string", "enum": ["intranet","public_web","schoology","google"] } } }
   }
 ]
@@ -1395,6 +1402,19 @@ Because `ship-reporter` lacks `content:publish_public`, the update reaches all s
 - **Delegated (on behalf of a person):** the agent authenticates through the existing `agent-connect` / `consent-token` flow and receives a `Requester` of kind `agent-delegated` bound to user *U*. It **inherits exactly U's permissions**; created content is owned by U and shareable only as far as U can share. (My-agent-drafts-my-brief.)
 - **Autonomous (service identity):** a row in `agent_identities` with its own `role_id` and `scopes`, authenticated via **OAuth client-credentials** on the existing OIDC provider (`oauthClientId`). Produces a `Requester` of kind `agent-autonomous`.
 
+#### Delegated token exchange (`POST /api/v1/agents/delegated-token`, #1059)
+
+REST-side entry into the delegated mode is a **two-step token exchange**:
+
+1. The agent obtains its own client-credentials JWT from the OIDC provider (the autonomous identity above), then calls `POST /api/v1/agents/delegated-token` with `{ delegated_for: <user id>, scope?: "..." }`. Minting requires the agent-held `content:delegate` authority scope, an ACTIVE `agent_identities` row behind the caller's client id, and a token that is not itself delegated (no re-delegation).
+2. The returned `access_token` (a 300 s JWT signed by the same OIDC signer, verifiable through the existing JWKS) is used as the Bearer token on `/api/v1/content/*`, where it resolves to an `agent-delegated` requester bound to the named user (`isAdmin` forced false).
+
+**Claim design:** the token's `sub` is the §26.5 **system user**, not the human — a surface that ignores `delegated_for` (e.g. `/api/v1/chat`) resolves the token to the low-privilege system account (blast-radius containment). The human is named by a **numeric** `delegated_for` claim, which only the content resolver consumes; `act.sub` carries the agent's client id (RFC-8693-style audit) and must stay **non-numeric**, because the consumer treats a numeric `act.sub` as a `delegated_for` fallback.
+
+**Scope bounding:** minted scope = requested ∩ the agent's content scopes ∩ the user's role-derived content scopes — never `content:delegate` itself (a delegated credential can never re-mint), and `content:publish_public` only when the user is an administrator AND the agent holds it. An empty intersection is a 403; no token is minted.
+
+**Tradeoff (stateless, non-revocable):** the token is not persisted, so there is no revocation list — the short TTL (`DELEGATED_TOKEN_TTL_SECONDS` = 300) is the mitigation. Minting is audited via structured logs (agent, client id, user, scopes — never the token itself).
+
 ### 26.2 Scopes
 ```
 content:create            create objects + versions
@@ -1424,7 +1444,7 @@ Autonomous objects are owned by a designated **system user** (configurable) and 
 
 ## 27. Audit and events
 
-- **Audit:** every MCP/REST content mutation appends to `nexus_mcp_audit_logs` (already capturing MCP calls) with actor, tool, object id, and outcome — a complete external-creation/publish trail a district will want.
+- **Audit:** every MCP/REST content mutation appends to `content_audit_logs` (migration 090; a content-shaped table rather than `nexus_mcp_audit_logs`, whose NOT NULL `server_id`/`user_id` fit neither a REST nor an autonomous-agent write) with actor, action, surface, object id, destination, and outcome — a complete external-creation/publish trail a district will want.
 - **Events** (`lib/content/events.ts`): emit on an SNS topic / EventBridge bus.
   - `content.published` → re-index for retrieval; run connector pushes; notify a channel.
   - `content.version_created`, `content.unpublished`, `content.public_publish_requested` (drives the approval queue).
@@ -1450,7 +1470,7 @@ Artifact code (agent- or human-authored) is **untrusted** and executes only unde
 Run agent content-generation through the existing **Bedrock Guardrails** and **PII tokenization** (`lib/safety`) exactly as nexus does, before persisting a version. Apply on `create_*` and `create_version` when the author is an agent.
 
 ### 28.4 Provenance and audit as governance
-Two-grain provenance + `nexus_mcp_audit_logs` + the public-publish human gate give FERPA/COPPA/CIPA-relevant traceability: who authored content, who approved public exposure, and a queryable trail. Reader provenance footers make AI authorship visible to consumers.
+Two-grain provenance + `content_audit_logs` + the public-publish human gate give FERPA/COPPA/CIPA-relevant traceability: who authored content, who approved public exposure, and a queryable trail. Reader provenance footers make AI authorship visible to consumers.
 
 ### 28.5 Threat model (summary)
 

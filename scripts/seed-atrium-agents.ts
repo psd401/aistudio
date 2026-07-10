@@ -36,6 +36,23 @@ const SEED_AGENTS: SeedAgent[] = [
   { name: "ship-reporter", kind: "service", scopes: ["content:create", "content:publish_internal"] },
   { name: "screentime-bot", kind: "service", scopes: ["content:create", "content:publish_internal"] },
   { name: "tutorial-publisher", kind: "skill", scopes: ["content:create", "content:update"] },
+  // Delegation broker (§26.1, #1059): the one seeded identity holding
+  // `content:delegate`, so it may mint short-lived delegated tokens acting on
+  // behalf of a user (POST /api/v1/agents/delegated-token). It carries content
+  // DATA scopes too — a delegated token is bounded by requested ∩ this agent's
+  // content scopes ∩ the user's role-derived scopes, so a broker with only the
+  // authority scope could mint nothing usable. Still no content:publish_public.
+  {
+    name: "delegation-broker",
+    kind: "service",
+    scopes: [
+      "content:read",
+      "content:create",
+      "content:update",
+      "content:publish_internal",
+      "content:delegate",
+    ],
+  },
 ];
 
 async function staffRoleId(): Promise<number | null> {

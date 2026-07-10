@@ -76,7 +76,7 @@ export const userRolesRelations = relations(userRoles, ({ one }) => ({
 
 export const rolesRelations = relations(roles, ({ many }) => ({
   userRoles: many(userRoles),
-  roleTools: many(roleTools),
+  roleCapabilities: many(roleCapabilities),
   // ... other relations
 }));
 ```
@@ -109,17 +109,17 @@ user?.userRoles.forEach((ur) => {
   ur.role.name; // Fully typed property access
 });
 
-// Get all users with roles and tools (3-level deep)
-const usersWithRolesAndTools = await executeQuery(
+// Get all users with roles and capabilities (3-level deep)
+const usersWithRolesAndCapabilities = await executeQuery(
   (db) => db.query.users.findMany({
     with: {
       userRoles: {
         with: {
           role: {
             with: {
-              roleTools: {
+              roleCapabilities: {
                 with: {
-                  tool: true,
+                  capability: true,
                 },
               },
             },
@@ -128,7 +128,7 @@ const usersWithRolesAndTools = await executeQuery(
       },
     },
   }),
-  "getUsersWithRolesAndTools"
+  "getUsersWithRolesAndCapabilities"
 );
 
 // Selective field loading (reduce payload size)
@@ -608,9 +608,9 @@ const deepQuery = await executeQuery(
         with: {
           role: {
             with: {
-              roleTools: {
+              roleCapabilities: {
                 with: {
-                  tool: true,
+                  capability: true,
                 },
               },
             },
@@ -636,16 +636,16 @@ const users = await executeQuery(
   "getUsers"
 );
 
-// Then query tools separately if needed
+// Then query capabilities separately if needed
 const roleIds = users.flatMap(u => u.userRoles.map(ur => ur.roleId));
-const roleTools = await executeQuery(
-  (db) => db.query.roleTools.findMany({
-    where: inArray(schema.roleTools.roleId, roleIds),
+const roleCapabilities = await executeQuery(
+  (db) => db.query.roleCapabilities.findMany({
+    where: inArray(schema.roleCapabilities.roleId, roleIds),
     with: {
-      tool: true,
+      capability: true,
     },
   }),
-  "getRoleTools"
+  "getRoleCapabilities"
 );
 ```
 
@@ -667,10 +667,10 @@ const rolesResult = await executeSQL(
   [userId]
 );
 
-const toolsResult = await executeSQL(
-  `SELECT t.* FROM tools t
-   JOIN role_tools rt ON t.id = rt.tool_id
-   JOIN user_roles ur ON rt.role_id = ur.role_id
+const capabilitiesResult = await executeSQL(
+  `SELECT c.* FROM capabilities c
+   JOIN role_capabilities rc ON c.id = rc.capability_id
+   JOIN user_roles ur ON rc.role_id = ur.role_id
    WHERE ur.user_id = $1`,
   [userId]
 );
@@ -688,9 +688,9 @@ const user = await executeQuery(
         with: {
           role: {
             with: {
-              roleTools: {
+              roleCapabilities: {
                 with: {
-                  tool: true,
+                  capability: true,
                 },
               },
             },

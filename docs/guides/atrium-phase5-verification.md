@@ -66,12 +66,16 @@ topic ARN set — one SNS publish per successful publish.
 
 ## 2. MCP tools
 
-Point an MCP client (Claude Code, etc.) at `/api/mcp` with the same key. The eight
+Point an MCP client (Claude Code, etc.) at `/api/mcp` with the same key. The
 content tools (`create_document`, `create_artifact`, `get_content`,
 `list_content`, `update_content`, `create_version`, `set_visibility`,
-`publish_content`) appear in `tools/list` for a caller holding `content:*`.
+`publish_content`, `unpublish_content`, plus the Phase 8 `export_okf` /
+`import_okf`) appear in `tools/list` for a caller holding `content:*`.
 `publish_content` to `public_web` without `content:publish_public` returns a
-structured `{ status: "approval_required" }` result (not an error).
+structured `{ status: "approval_required" }` result (not an error);
+`unpublish_content` mirrors the REST `DELETE /content/{id}/publish/{destination}`
+semantics, including the public-destination authority check. `list_content`
+accepts an optional `query` (title contains, ≤200 chars).
 
 ## 3. Autonomous identity (OAuth client-credentials)
 

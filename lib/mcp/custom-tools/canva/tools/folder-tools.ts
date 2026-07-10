@@ -31,7 +31,7 @@ export function createFolderTools(client: CanvaApiClient): Record<string, unknow
         const params: Record<string, string> = {}
         if (args.continuation) params.continuation = args.continuation
         if (args.sort_by) params.sort_by = args.sort_by
-        return client.get(`/v1/folders/${args.folder_id}/items`, params)
+        return client.get(`/v1/folders/${encodeURIComponent(args.folder_id)}/items`, params)
       },
     }),
 

@@ -32,6 +32,11 @@ let publishableRows: Array<{
   collectionId: string | null;
 }> = [];
 
+// executeQuery also serves the unpublish pre-gate live-publication check (issue
+// #1118 P2). Default: a live publication exists, so the unpublish gate/tx run;
+// set to [] to model an already-offline destination (the pre-gate no-op).
+let liveCheckRows: Array<{ id: string }> = [{ id: "pub-live" }];
+
 let setLevelInTxCalls = 0;
 let lastSetLevelVisibility: unknown = null;
 let lastSetLevelExtraSet: unknown = null;
@@ -42,7 +47,7 @@ jest.mock("@/lib/db/drizzle-client", () => ({
   // post-commit `.set({ externalRef })` UPDATE (persist-external-ref) payload can
   // be asserted, then resolves to `publishableRows` exactly as before —
   // loadPublishable is unaffected; only side-effect capture is added.
-  executeQuery: jest.fn(async (cb?: (db: unknown) => unknown) => {
+  executeQuery: jest.fn(async (cb?: (db: unknown) => unknown, label?: string) => {
     if (typeof cb === "function") {
       try {
         cb(setRecorder);
@@ -51,6 +56,9 @@ jest.mock("@/lib/db/drizzle-client", () => ({
         // future callback shape can't break the (unchanged) return value.
       }
     }
+    // The unpublish pre-gate live-publication check (issue #1118 P2) reads its own
+    // configurable result; every other executeQuery (loadPublishable, …) is unchanged.
+    if (label === "publish.unpublish.liveCheck") return liveCheckRows;
     return publishableRows;
   }),
   executeTransaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
@@ -85,11 +93,23 @@ jest.mock("drizzle-orm", () => ({
 }));
 
 // publish-service now calls retrievalService.indexObject after a successful
-// publish (Phase 6, §16.1). Stub it so this suite doesn't drag in the embedding
-// / vector-search stack (ai-helpers → provider-factory → settings-manager);
-// the index wiring itself is covered by atrium-retrieval-permission-aware.test.ts.
+// publish (Phase 6, §16.1) and retrievalService.removeFromIndex after an
+// unpublish that leaves NO destination live (index pruning). Stub both so this
+// suite doesn't drag in the embedding / vector-search stack (ai-helpers →
+// provider-factory → settings-manager); the index/prune internals are covered by
+// atrium-retrieval-permission-aware.test.ts / atrium-retrieval-index-pruning.test.ts.
+const removeFromIndexMock = jest.fn(async (_objectId: string) => undefined);
+const indexObjectMock = jest.fn(
+  async (_objectId: string, _versionId?: string) => undefined
+);
 jest.mock("@/lib/content/retrieval-service", () => ({
-  retrievalService: { indexObject: jest.fn(async () => undefined) },
+  retrievalService: {
+    // Deref the outer mocks lazily (jest.mock factories are hoisted above the
+    // const declarations — a direct reference is a TDZ error).
+    indexObject: (objectId: string, versionId?: string) =>
+      indexObjectMock(objectId, versionId),
+    removeFromIndex: (objectId: string) => removeFromIndexMock(objectId),
+  },
 }));
 
 jest.mock("@/lib/content/visibility-service", () => ({
@@ -118,6 +138,10 @@ jest.mock("@/lib/content/visibility-service", () => ({
 // ran AFTER the transaction.
 let adapterPublishCalls = 0;
 let adapterUnpublishCalls = 0;
+// When true, the intranet adapter teardown throws — used to prove the retrieval
+// index is pruned BEFORE the teardown (#4), so a teardown failure can't strand
+// the index un-pruned.
+let adapterUnpublishThrows = false;
 jest.mock("@/lib/content/publish-adapters/intranet", () => ({
   intranetAdapter: {
     destination: "intranet",
@@ -127,6 +151,7 @@ jest.mock("@/lib/content/publish-adapters/intranet", () => ({
     }),
     unpublish: jest.fn(async () => {
       adapterUnpublishCalls += 1;
+      if (adapterUnpublishThrows) throw new Error("nav hide boom");
     }),
   },
 }));
@@ -180,6 +205,23 @@ jest.mock("@/lib/content/publish-adapters/okf", () => ({
   okfAdapter: {
     destination: "okf",
     publish: jest.fn(async () => ({ externalRef: null })),
+  },
+}));
+
+// publish-service imports versionService (to validate a PINNED version on the
+// approval-replay path — issue #1118). The REAL module pulls mappers →
+// drizzle-helpers, which needs `sql` (not in this suite's minimal drizzle-orm
+// mock), so stub it. `getById` returns a version by default so a `versionId`
+// publish validates; individual tests override it (e.g. null → not-found).
+const getVersionByIdMock = jest.fn(
+  async (): Promise<{ id: string; versionNumber: number } | null> => ({
+    id: "v-pinned",
+    versionNumber: 3,
+  })
+);
+jest.mock("@/lib/content/version-service", () => ({
+  versionService: {
+    getById: (...args: unknown[]) => getVersionByIdMock(...(args as [])),
   },
 }));
 
@@ -271,11 +313,13 @@ beforeEach(() => {
     },
   ];
   canViewResult = true;
+  liveCheckRows = [{ id: "pub-live" }];
   setLevelInTxCalls = 0;
   lastSetLevelVisibility = null;
   lastSetLevelExtraSet = null;
   adapterPublishCalls = 0;
   adapterUnpublishCalls = 0;
+  adapterUnpublishThrows = false;
   publicWebPublishCalls = 0;
   lastPublicWebSlug = null;
   lastSetPayload = null;
@@ -381,14 +425,19 @@ describe("publishService.publish", () => {
     expect(publicWebPublishCalls).toBe(0);
   });
 
-  it("gates schoology/google behind the §26.4 public gate for an unauthorized caller (Phase 7)", async () => {
-    // Phase 7 (#1057): schoology & google are PUBLIC (family-facing) destinations
-    // now, so a non-admin owner without publish_public is routed through the
-    // approval gate — BEFORE the not-implemented check — exactly like public_web.
+  it("fails a schoology/google publish with ValidationError BEFORE the gate for an unauthorized caller (issue #1118 item 6 — doomed requests are not queued)", async () => {
+    // schoology & google are not-yet-implemented connector STUBS. Issue #1118 item
+    // 6 reorders the cheap adapter-not-implemented check AHEAD of the §26.4 gate:
+    // a publish to a stub can NEVER succeed (approving it just re-hits the stub
+    // error), so it must fail with a plain ValidationError and NOT be persisted as
+    // a doomed approval-queue row. The revealed fact ("destination not yet wired")
+    // is static/non-sensitive. (public_web IS implemented, so an unauthorized
+    // public_web publish still reaches the gate — see the ApprovalRequiredError
+    // test above.) No write, no queued request, no adapter.
     for (const destination of ["schoology", "google"] as const) {
       await expect(
         publishService.publish(owner, "o1", { destination })
-      ).rejects.toThrow(ApprovalRequiredError);
+      ).rejects.toThrow(ValidationError);
     }
     expect(setLevelInTxCalls).toBe(0);
     expect(adapterPublishCalls).toBe(0);
@@ -461,6 +510,36 @@ describe("publishService.publish", () => {
     expect(setLevelInTxCalls).toBe(0);
   });
 
+  it("publishes a PINNED version (input.versionId), not the head — approval replay (issue #1118 item 1)", async () => {
+    // An approval replay pins the raise-time version so the admin publishes the
+    // REVIEWED content even though the current head is v1. getById validates the
+    // pinned version belongs to the object.
+    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    const result = await publishService.publish(admin, "o1", {
+      destination: "intranet",
+      versionId: "v-reviewed",
+    });
+    expect(result).toEqual({
+      publicationId: "pub1",
+      publishedVersionId: "v-reviewed",
+    });
+    expect(getVersionByIdMock).toHaveBeenCalled();
+    // Retrieval must index the PUBLISHED (pinned) version, not the head — else it
+    // would surface the unreviewed head text to assistant search (issue #1118 P1).
+    expect(indexObjectMock).toHaveBeenCalledWith("o1", "v-reviewed");
+  });
+
+  it("throws ValidationError when the pinned versionId does not belong to the object", async () => {
+    // getById scopes by object and returns null for a version of another object.
+    getVersionByIdMock.mockResolvedValueOnce(null);
+    await expect(
+      publishService.publish(admin, "o1", {
+        destination: "intranet",
+        versionId: "not-mine",
+      })
+    ).rejects.toThrow(ValidationError);
+  });
+
   it("widens visibility via setLevelInTx only when visibility is provided", async () => {
     // tx queue: FOR UPDATE lock row, then the publication upsert RETURNING id.
     txResults = [[{ id: "o1" }], [{ id: "pub2" }]];
@@ -523,10 +602,28 @@ describe("publishService.unpublish", () => {
   });
 
   it("is a no-op (unpublished:false) and does NOT run the adapter when there is no live publication", async () => {
-    // tx queue: FOR UPDATE lock row, then the live-publication lookup returns [].
-    txResults = [[{ id: "o1" }], []];
+    // No live publication anywhere → the pre-gate check short-circuits (issue
+    // #1118 P2) and returns the no-op WITHOUT opening the transaction.
+    liveCheckRows = [];
     const result = await publishService.unpublish(owner, "o1", "intranet");
     expect(result).toEqual({ unpublished: false });
+    expect(adapterUnpublishCalls).toBe(0);
+  });
+
+  it("an already-offline public_web unpublish by an unauthorized caller is a no-op — NOT gated or queued (issue #1118 P2)", async () => {
+    // Nothing live at public_web → there is no exposure to gate. The §26.4 gate
+    // must NOT fire and must NOT queue a doomed approval whose replay would only
+    // re-run this same no-op. `owner` is a non-admin without publish_public.
+    liveCheckRows = [];
+    const result = await publishService.unpublish(owner, "o1", "public_web");
+    expect(result).toEqual({ unpublished: false });
+    // Let any fire-and-forget settle, then assert NO approval request was written.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      executeQueryMock.mock.calls.some(
+        (call: unknown[]) => call[1] === "content.publishApprovalRequest"
+      )
+    ).toBe(false);
     expect(adapterUnpublishCalls).toBe(0);
   });
 
@@ -538,13 +635,36 @@ describe("publishService.unpublish", () => {
     expect(adapterUnpublishCalls).toBe(1);
   });
 
+  it("prunes the retrieval index BEFORE the adapter teardown (#4 — teardown failure can't strand the index)", async () => {
+    // No other destination live → the object goes fully offline, so the index
+    // must be pruned. The teardown then throws; the prune must already have run
+    // (a retry would idempotently no-op at the `status='live'` filter and never
+    // reach a prune placed after the teardown).
+    adapterUnpublishThrows = true;
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    await expect(
+      publishService.unpublish(owner, "o1", "intranet")
+    ).rejects.toThrow(/nav hide boom/);
+    expect(removeFromIndexMock).toHaveBeenCalledWith("o1");
+    expect(adapterUnpublishCalls).toBe(1);
+  });
+
   // §26.4 — taking a public destination offline requires the same authority as
   // putting it up: content:publish_internal alone must not be enough to tear
   // down already-live public_web content.
-  it("throws ApprovalRequiredError unpublishing public_web without publish_public, and never touches the tx", async () => {
+  it("throws ApprovalRequiredError unpublishing public_web without publish_public, PERSISTS a durable request (issue #1118 item 2), and never touches the tx", async () => {
     await expect(
       publishService.unpublish(owner, "o1", "public_web")
     ).rejects.toThrow(ApprovalRequiredError);
+    // Let the fire-and-forget persist settle, then assert the unpublish request was
+    // written to the durable queue — previously this gate raw-threw and queued
+    // NOTHING, so a blocked unpublish never appeared in /admin/atrium.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      executeQueryMock.mock.calls.some(
+        (call: unknown[]) => call[1] === "content.publishApprovalRequest"
+      )
+    ).toBe(true);
     expect(adapterUnpublishCalls).toBe(0);
   });
 
@@ -591,6 +711,34 @@ describe("publishService.unpublish", () => {
     // downgraded to draft (intranet remains live).
     expect(statuses).toContain("unpublished");
     expect(statuses).not.toContain("draft");
+    // The retrieval index is KEPT while any destination is still live — the
+    // content is still published somewhere and must remain retrievable.
+    expect(removeFromIndexMock).not.toHaveBeenCalled();
+  });
+
+  it("prunes the retrieval index only when the last live destination is removed", async () => {
+    // tx queue: FOR UPDATE lock, the live row being torn down, then the
+    // "any other destination still live?" check returns [] (none remain).
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
+    const result = await publishService.unpublish(admin, "o1", "public_web");
+    expect(result).toEqual({ unpublished: true });
+    expect(removeFromIndexMock).toHaveBeenCalledTimes(1);
+    expect(removeFromIndexMock).toHaveBeenCalledWith("o1");
+  });
+
+  it("does NOT prune the index on the idempotent no-op path (nothing was live)", async () => {
+    txResults = [[{ id: "o1" }], []];
+    const result = await publishService.unpublish(owner, "o1", "intranet");
+    expect(result).toEqual({ unpublished: false });
+    expect(removeFromIndexMock).not.toHaveBeenCalled();
+  });
+
+  it("a prune failure is best-effort: the unpublish still succeeds", async () => {
+    removeFromIndexMock.mockRejectedValueOnce(new Error("index prune boom"));
+    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
+    const result = await publishService.unpublish(admin, "o1", "public_web");
+    // The unpublish already committed; a failed index prune is logged, not thrown.
+    expect(result).toEqual({ unpublished: true });
   });
 
   it("reverts the object to draft when the unpublished destination was the last live one", async () => {

@@ -14,8 +14,9 @@
  *     (role-driven visibility, scopes from the token, owns via the system user).
  *   - otherwise (sk- key / session / human OIDC token) -> `user`.
  *
- * Scope enforcement happens at the surface (`requireScope` / MCP `TOOL_SCOPE_MAP`)
- * BEFORE the service is called; this resolver only establishes WHO is calling.
+ * Scope enforcement happens at the surface (`requireScope` / the unified tool
+ * catalog's per-entry `requiredScopes` on MCP dispatch, #924) BEFORE the service
+ * is called; this resolver only establishes WHO is calling.
  */
 
 import { and, eq } from "drizzle-orm";
@@ -214,6 +215,43 @@ export function buildDelegatedRequester(input: {
     scopes: input.scopes,
     agentLabel: input.agentLabel,
   };
+}
+
+/**
+ * Build a plain `user` Requester from a known integer `users.id` — the
+ * identity-known path the API-key Assistant Architect execution service uses
+ * (its auth wrapper already resolved the key's owner to a user id before
+ * execution starts). Returns `null` instead of throwing when the user row is
+ * missing or the lookup fails: the retrieval callers treat a null requester as
+ * "no Atrium context" (fail closed to nothing), and a context-enrichment lookup
+ * must never fail the execution itself.
+ */
+export async function requesterForUserId(
+  userId: number
+): Promise<Requester | null> {
+  const log = createLogger({ action: "atrium.requesterForUserId" });
+  try {
+    const ctx = await loadUserContext(userId);
+    if (!ctx) {
+      log.warn("No user row resolving Atrium requester by id", { userId });
+      return null;
+    }
+    return {
+      kind: "user",
+      userId,
+      roles: ctx.roles,
+      building: ctx.building,
+      department: ctx.department,
+      gradeLevels: ctx.gradeLevels,
+      isAdmin: ctx.roles.includes(ADMIN_ROLE),
+    };
+  } catch (error) {
+    log.warn("Failed resolving Atrium requester by id", {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 /**

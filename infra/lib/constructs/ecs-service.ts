@@ -13,6 +13,7 @@ import * as cloudwatch_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as autoscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 import { RedisCache } from './cache/redis-cache';
+import { usGuardrailProfileArns } from './security';
 
 export interface EcsServiceConstructProps {
   vpc: ec2.IVpc;
@@ -130,6 +131,12 @@ export interface EcsServiceConstructProps {
    * kept separate from AUTH_SECRET so a session-key leak can't forge collab tokens.
    */
   collabJwtSecretArn: string;
+  /**
+   * Guardrail violation-log hash secret ARN from Secrets Manager (#727).
+   * HMAC key for pseudonymizing session/user ids in guardrail-violation logs;
+   * without it the app logs a fixed 'redacted' placeholder (uncorrelatable).
+   */
+  guardrailHashSecretArn: string;
   /**
    * K-12 Content Safety: Bedrock Guardrail ARN (from GuardrailsStack)
    * If provided, enables precise IAM scoping instead of wildcard
@@ -289,6 +296,7 @@ export class EcsServiceConstruct extends Construct {
         props.authSecretArn,
         props.internalApiSecretArn,
         props.collabJwtSecretArn,
+        props.guardrailHashSecretArn,
       ],
     }));
 
@@ -325,6 +333,7 @@ export class EcsServiceConstruct extends Construct {
                 props.authSecretArn, // Include auth secret
                 props.internalApiSecretArn, // Include internal API secret
                 props.collabJwtSecretArn, // Include Atrium collab token signing secret (#1051)
+                props.guardrailHashSecretArn, // Include guardrail hash secret (#727)
               ],
             }),
             // Agent Workspace OAuth secrets — read+update for refresh tokens (#912).
@@ -511,8 +520,16 @@ export class EcsServiceConstruct extends Construct {
                 'arn:aws:bedrock:*:*:provisioned-model/*',
               ],
             }),
-            // K-12 Content Safety: Bedrock Guardrails API access
-            // Uses specific ARN from GuardrailsStack when provided, falls back to wildcard
+            // K-12 Content Safety: Bedrock Guardrails API access.
+            // CROSS-REGION-INFERENCE GOTCHA (2026-07-06 prod outage): ApplyGuardrail
+            // on a guardrail that uses a cross-region inference PROFILE authorizes
+            // against BOTH the guardrail ARN AND the guardrail-PROFILE ARN
+            // (e.g. .../guardrail-profile/us.guardrail.v1:0). Granting only the
+            // guardrail ARN yields 100% AccessDenied on the profile — which made
+            // ContentSafetyService fail and, worse, made Atrium §28.3 agent-write
+            // screening fail CLOSED (every workspace/agent content edit rejected).
+            // Grant the profile ARNs alongside the guardrail. (See PR #1093 for the
+            // agent-router equivalent.)
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [
@@ -520,8 +537,20 @@ export class EcsServiceConstruct extends Construct {
                 'bedrock:GetGuardrail',
               ],
               resources: props.guardrailArn
-                ? [props.guardrailArn]
-                : [`arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`],
+                ? [
+                    props.guardrailArn,
+                    // The system-defined cross-region inference profile the
+                    // guardrail resolves to at apply time. Pinned to the exact
+                    // profile id (NOT a wildcard) but granted in every region
+                    // the profile fans out to — ApplyGuardrail authorizes
+                    // against the DESTINATION region, so a single-region grant
+                    // fails whenever routing leaves it (issue #1138 F5).
+                    ...usGuardrailProfileArns(cdk.Stack.of(this).account),
+                  ]
+                : [
+                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`,
+                    ...usGuardrailProfileArns(cdk.Stack.of(this).account),
+                  ],
             }),
             // K-12 Content Safety: Amazon Comprehend for PII detection
             new iam.PolicyStatement({
@@ -764,6 +793,14 @@ export class EcsServiceConstruct extends Construct {
         COLLAB_JWT_SECRET: ecs.Secret.fromSecretsManager(
           secretsmanager.Secret.fromSecretCompleteArn(this, 'CollabJwtSecret', props.collabJwtSecretArn),
           'COLLAB_JWT_SECRET'
+        ),
+        // Guardrail violation-log hash secret (#727 / 2026-07-06 chat outage):
+        // enables real per-session HMAC pseudonymization in violation logs.
+        // The app degrades to a 'redacted' placeholder if this is ever missing —
+        // it must never take chat down again.
+        GUARDRAIL_HASH_SECRET: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretCompleteArn(this, 'GuardrailHashSecret', props.guardrailHashSecretArn),
+          'GUARDRAIL_HASH_SECRET'
         ),
         // Issue #603: Database credentials for postgres.js driver
         // The RDS secret contains a JSON object with: username, password, host, port, dbname

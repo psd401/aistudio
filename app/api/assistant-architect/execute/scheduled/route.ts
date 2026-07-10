@@ -5,9 +5,15 @@ import { ErrorFactories } from '@/lib/error-utils';
 import { getUserById, getAssistantArchitectById, getChainPrompts, getAIModelById } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { eq, desc, sql } from 'drizzle-orm';
-import { promptResults, scheduledExecutions } from '@/lib/db/schema';
+import { promptResults, scheduledExecutions, executionResults } from '@/lib/db/schema';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
-import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
+import {
+  retrieveKnowledgeForPrompt,
+  formatKnowledgeContext,
+  retrieveAtriumKnowledgeForPrompt,
+  formatAtriumKnowledgeContext,
+  resolveScheduledAtriumRetrievalRequester,
+} from '@/lib/assistant-architect/knowledge-retrieval';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import { buildAutonomousRequesterForIdentity } from '@/lib/content';
 import type { Requester } from '@/lib/content/types';
@@ -23,6 +29,9 @@ export const maxDuration = 900;
 const MAX_INPUT_SIZE_BYTES = 100000; // 100KB max input size
 const MAX_PROMPT_CHAIN_LENGTH = 20; // Max 20 prompts per execution
 const MAX_RESPONSE_SIZE_BYTES = 10485760; // 10MB max response size
+// Default per-prompt timeout when a prompt has no timeoutSeconds configured, so
+// finishPromise can never hang the request until maxDuration (REV-COR-210-OVF1).
+const DEFAULT_PROMPT_TIMEOUT_SECONDS = 300;
 const MAX_ACCUMULATED_CONTEXT_MESSAGES = Number.parseInt(
   process.env.MAX_CONTEXT_MESSAGES || '10',
   10
@@ -71,6 +80,8 @@ interface PromptExecutionContext {
   userCognitoSub: string;
   assistantOwnerSub?: string;
   userId: number;
+  /** The executing assistant's id, for the Atrium retrieval-scope gate (§16.4). */
+  assistantId: number;
   /**
    * The autonomous agent Requester the run executes as (§25 service identity),
    * when the schedule specified an `agent_identity_id`. Null = the run authors any
@@ -79,6 +90,15 @@ interface PromptExecutionContext {
    * the user's full human authority.
    */
   agentRequester: Requester | null;
+  /**
+   * The requester used ONLY for Atrium content RETRIEVAL (§16): the agent service
+   * identity when set, otherwise the schedule OWNER's own `user` requester. Distinct
+   * from `agentRequester` (the write/execution identity, left untouched): retrieval
+   * is read-only and bounded per-hit by `canView`, so reading as the owner exposes
+   * only content they may already see — this is NOT borrowing the owner's write
+   * authority. Null (both unresolved) skips retrieval (fail closed).
+   */
+  atriumRetrievalRequester: Requester | null;
 }
 
 /**
@@ -110,7 +130,15 @@ function validateInternalRequest(req: NextRequest): { scheduleId: string; execut
       algorithms: ['HS256'],
       issuer: 'schedule-executor',
       audience: 'assistant-architect-api'
-    }) as { scheduleId: string; executionId: string };
+    }) as { scheduleId: string; executionId: string; exp?: number };
+
+    // Replay hardening (REV-SEC-101): reject tokens with no expiry — jwt.verify
+    // only enforces `exp` when it is present, so a no-exp token would be
+    // replayable indefinitely.
+    if (!decoded.exp) {
+      log.warn('Internal token rejected - missing exp claim');
+      return null;
+    }
 
     log.info('Internal request validated successfully', {
       scheduleId: decoded.scheduleId,
@@ -289,6 +317,19 @@ export async function POST(req: NextRequest) {
     if ('errorResponse' in agentResolution) return agentResolution.errorResponse;
     const agentRequester = agentResolution.requester;
 
+    // Atrium retrieval requester (Phase 6, §16): retrieval is READ-ONLY and bounded
+    // per-hit by `canView`, so when a schedule specifies no agent identity we fall
+    // back to the schedule OWNER's own `user` requester FOR RETRIEVAL ONLY — it can
+    // surface only content the owner may already see. This is NOT borrowing the
+    // owner's authority for a WRITE (which the design forbids); the write/execution
+    // identity stays exactly `agentRequester`. Without this fallback scheduled Atrium
+    // retrieval was dead code: nothing populates `scheduled_executions.agent_identity_id`,
+    // so `agentRequester` is always null and retrieval never fired. Both null -> skip.
+    const atriumRetrievalRequester = await resolveScheduledAtriumRetrievalRequester(
+      agentRequester,
+      userId
+    );
+
     log.info('Scheduled execution request parsed', sanitizeForLogging({
       scheduleId,
       toolId,
@@ -298,6 +339,74 @@ export async function POST(req: NextRequest) {
       hasInputs: Object.keys(inputs).length > 0,
       inputKeys: Object.keys(inputs)
     }));
+
+    // 2b. Bind the untrusted body to the authenticated schedule (REV-SEC-101 /
+    // REV-COR-200). The JWT only proves the caller is the schedule-executor Lambda;
+    // userId/toolId/scheduleId arrive in the body. Derive identity server-side from
+    // the schedule so a captured/replayed token cannot run an arbitrary tool as an
+    // arbitrary user, cannot target another schedule's execution_results row, and
+    // cannot be replayed after the result is written.
+    const jsonError = (error: string, status: number, reason: string) => {
+      timer({ status: 'error', reason });
+      return new Response(JSON.stringify({ error, requestId }), {
+        status,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    // (a) body.scheduleId must equal the JWT's scheduleId.
+    if (String(jwtPayload.scheduleId) !== String(scheduleId)) {
+      log.warn('Rejected - body scheduleId does not match JWT', {
+        jwtScheduleId: jwtPayload.scheduleId, bodyScheduleId: scheduleId
+      });
+      return jsonError('Forbidden', 403, 'schedule_mismatch');
+    }
+    const scheduleIdNum = Number(scheduleId);
+
+    // (b) The execution_results row (from the JWT) must belong to this schedule and
+    // be unconsumed — binds the write target and gives single-use replay protection.
+    const [execResultRow] = await executeQuery(
+      (db) => db
+        .select({ scheduledExecutionId: executionResults.scheduledExecutionId, status: executionResults.status })
+        .from(executionResults)
+        .where(eq(executionResults.id, executionResultId))
+        .limit(1),
+      'loadExecutionResultForAuth'
+    );
+    if (!execResultRow || execResultRow.scheduledExecutionId !== scheduleIdNum) {
+      log.warn('Rejected - execution result does not belong to the authenticated schedule', {
+        executionResultId, scheduleId
+      });
+      return jsonError('Forbidden', 403, 'execution_result_mismatch');
+    }
+    if (execResultRow.status && !['pending', 'running'].includes(execResultRow.status)) {
+      log.warn('Rejected - execution result already consumed (replay?)', {
+        executionResultId, status: execResultRow.status
+      });
+      return jsonError('Already processed', 409, 'execution_result_consumed');
+    }
+
+    // (c) Derive the authoritative userId/toolId from the schedule and reject a body
+    // that disagrees — never trust body-supplied identity.
+    const [scheduleRow] = await executeQuery(
+      (db) => db
+        .select({ userId: scheduledExecutions.userId, assistantArchitectId: scheduledExecutions.assistantArchitectId })
+        .from(scheduledExecutions)
+        .where(eq(scheduledExecutions.id, scheduleIdNum))
+        .limit(1),
+      'loadScheduleForAuth'
+    );
+    if (!scheduleRow) {
+      log.warn('Rejected - schedule not found', { scheduleId });
+      return jsonError('Not found', 404, 'schedule_not_found');
+    }
+    if (scheduleRow.userId !== userId || scheduleRow.assistantArchitectId !== toolId) {
+      log.warn('Rejected - body userId/toolId do not match the schedule', {
+        bodyUserId: userId, bodyToolId: toolId,
+        scheduleUserId: scheduleRow.userId, scheduleToolId: scheduleRow.assistantArchitectId
+      });
+      return jsonError('Forbidden', 403, 'identity_mismatch');
+    }
 
     // 3. Get user's cognito_sub for context
     const user = await getUserById(userId);
@@ -411,17 +520,36 @@ export async function POST(req: NextRequest) {
     log.info('Tool execution created for scheduled run', { executionId, toolId, scheduleId });
 
     // 7. Execute prompt chain server-side (no SSE)
+    // Owner's cognito_sub (not the numeric users.id) so owner-based repository
+    // access resolves for non-owner scheduled runs (REV-COR-511). getUserById
+    // throws if the owner row is gone — treat that as no owner sub rather than
+    // failing the scheduled run (REV-COR-511 follow-up).
+    let assistantOwnerSub: string | undefined;
+    if (architect.userId) {
+      try {
+        assistantOwnerSub = (await getUserById(architect.userId))?.cognitoSub ?? undefined;
+      } catch (error) {
+        log.warn('Failed to resolve assistant owner sub', {
+          userId: architect.userId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const context: PromptExecutionContext = {
       previousOutputs: new Map(),
       accumulatedMessages: [],
       executionId,
       userCognitoSub,
-      assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
+      assistantOwnerSub,
       userId,
+      assistantId: toolId,
       // The resolved service-identity Requester (null when the schedule runs as the
       // owning user). Threaded so the content-authoring tool wiring reads its write
       // authority from the identity's scopes.
-      agentRequester
+      agentRequester,
+      // Read-only Atrium retrieval identity: the service identity when set, else the
+      // owning user (canView-bounded). Distinct from the write identity above.
+      atriumRetrievalRequester
     };
 
     try {
@@ -624,6 +752,76 @@ function describeWriteIdentity(context: PromptExecutionContext): string {
 }
 
 /**
+ * Step 1: inject repository knowledge + Atrium content context for one prompt.
+ * Mirrors the interactive route's `injectRepositoryKnowledge`. Returns the
+ * combined context string ('' when nothing was retrieved). Extracted from
+ * `executePromptChainServerSide` (complexity budget); logic unchanged.
+ *
+ * Atrium (Phase 6, Issue #1056): off unless the assistant has a
+ * `retrieval_scope`. A scheduled run retrieves as `atriumRetrievalRequester` —
+ * the resolved service identity (§25) when set, otherwise the schedule OWNER's
+ * own `user` requester (read-only + `canView`-bounded, so it exposes only content
+ * the owner may already see; NOT the owner's write authority). A null requester
+ * (neither resolvable) skips Atrium retrieval entirely (fail closed).
+ */
+async function injectKnowledgeContext(
+  prompt: ChainPrompt,
+  context: PromptExecutionContext,
+  requestId: string,
+  log: ReturnType<typeof createLogger>
+): Promise<string> {
+  let repositoryContext = '';
+  if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+    log.debug('Retrieving repository knowledge', {
+      promptId: prompt.id,
+      repositoryIds: prompt.repositoryIds
+    });
+
+    const knowledgeChunks = await retrieveKnowledgeForPrompt(
+      prompt.content,
+      prompt.repositoryIds,
+      context.userCognitoSub,
+      context.assistantOwnerSub,
+      {
+        maxChunks: 10,
+        maxTokens: 4000,
+        similarityThreshold: 0.7,
+        searchType: 'hybrid',
+        vectorWeight: 0.8
+      },
+      requestId
+    );
+
+    if (knowledgeChunks.length > 0) {
+      repositoryContext = '\n\n' + formatKnowledgeContext(knowledgeChunks);
+      log.debug('Repository context retrieved', {
+        promptId: prompt.id,
+        chunkCount: knowledgeChunks.length
+      });
+    }
+  }
+
+  // Atrium content-as-context (Phase 6): same caps as the repository block,
+  // distinct `atrium:<slug>` source labels (see the function JSDoc for gating).
+  const atriumHits = await retrieveAtriumKnowledgeForPrompt(
+    context.atriumRetrievalRequester,
+    context.assistantId,
+    prompt.content,
+    { maxChunks: 10, maxTokens: 4000 },
+    requestId
+  );
+  if (atriumHits.length > 0) {
+    repositoryContext += '\n\n' + formatAtriumKnowledgeContext(atriumHits);
+    log.debug('Atrium content context retrieved', {
+      promptId: prompt.id,
+      hitCount: atriumHits.length
+    });
+  }
+
+  return repositoryContext;
+}
+
+/**
  * Execute prompt chain server-side without SSE
  * Collects complete response in memory
  */
@@ -664,37 +862,13 @@ async function executePromptChainServerSide(
         });
       }
 
-      // 1. Inject repository context if configured
-      let repositoryContext = '';
-      if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
-        log.debug('Retrieving repository knowledge', {
-          promptId: prompt.id,
-          repositoryIds: prompt.repositoryIds
-        });
-
-        const knowledgeChunks = await retrieveKnowledgeForPrompt(
-          prompt.content,
-          prompt.repositoryIds,
-          context.userCognitoSub,
-          context.assistantOwnerSub,
-          {
-            maxChunks: 10,
-            maxTokens: 4000,
-            similarityThreshold: 0.7,
-            searchType: 'hybrid',
-            vectorWeight: 0.8
-          },
-          requestId
-        );
-
-        if (knowledgeChunks.length > 0) {
-          repositoryContext = '\n\n' + formatKnowledgeContext(knowledgeChunks);
-          log.debug('Repository context retrieved', {
-            promptId: prompt.id,
-            chunkCount: knowledgeChunks.length
-          });
-        }
-      }
+      // 1. Inject repository + Atrium knowledge context if configured
+      const repositoryContext = await injectKnowledgeContext(
+        prompt,
+        context,
+        requestId,
+        log
+      );
 
       // 2. Apply variable substitution with prompt execution order validation
       const inputMapping = (prompt.inputMapping || {}) as Record<string, string>;
@@ -778,22 +952,27 @@ async function executePromptChainServerSide(
         finishPromiseReject = reject;
       });
 
-      // Set up per-prompt timeout if configured
-      let promptTimeoutId: NodeJS.Timeout | null = null;
-      if (prompt.timeoutSeconds) {
-        promptTimeoutId = setTimeout(() => {
-          if (!promiseResolved) {
-            log.warn('Prompt execution timeout', {
-              promptId: prompt.id,
-              timeoutSeconds: prompt.timeoutSeconds
-            });
-            finishPromiseReject(
-              new Error(`Prompt ${prompt.id} exceeded timeout of ${prompt.timeoutSeconds} seconds`)
-            );
-            promiseResolved = true;
-          }
-        }, prompt.timeoutSeconds * 1000);
-      }
+      // Always install a per-prompt timeout (REV-COR-210-OVF1). finishPromise settles
+      // ONLY from onFinish; if the stream ends/aborts without firing onFinish and no
+      // timeout is configured, the Promise.all join below would hang until maxDuration
+      // (900s), leaving tool_executions stuck 'running'. Default to a bounded ceiling.
+      const effectiveTimeoutSeconds =
+        prompt.timeoutSeconds && prompt.timeoutSeconds > 0
+          ? prompt.timeoutSeconds
+          : DEFAULT_PROMPT_TIMEOUT_SECONDS;
+      const promptTimeoutId: NodeJS.Timeout = setTimeout(() => {
+        if (!promiseResolved) {
+          log.warn('Prompt execution timeout', {
+            promptId: prompt.id,
+            timeoutSeconds: effectiveTimeoutSeconds,
+            configured: !!prompt.timeoutSeconds
+          });
+          finishPromiseReject(
+            new Error(`Prompt ${prompt.id} exceeded timeout of ${effectiveTimeoutSeconds} seconds`)
+          );
+          promiseResolved = true;
+        }
+      }, effectiveTimeoutSeconds * 1000);
 
       const streamRequest: StreamRequest = {
         messages,
@@ -852,23 +1031,20 @@ async function executePromptChainServerSide(
               const completedAt = new Date();
               const startedAt = new Date(completedAt.getTime() - executionTimeMs);
 
-              // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
-              // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
-              // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+              // JSONB + enum written via bound parameters (postgres.js binds these
+              // correctly). The old sql.raw() + manual single-quote escaping was a
+              // retired RDS Data API workaround and injection-adjacent for user-
+              // influenced processedContent — REV-COR-210 / REV-DB-023.
               const promptInputData = {
                 originalContent: prompt.content,
                 processedContent,
                 repositoryContext: repositoryContext ? 'included' : 'none'
               };
               const inputDataJson = JSON.stringify(promptInputData);
-              // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
-              const escapedInputJson = inputDataJson.replace(/'/g, "''");
-              // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
-              // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
               await executeQuery(
                 (db) => db.execute(sql`
                   INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
-                  VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text || ''}, ${sql.raw(`'${resultStatus}'::execution_status`)}, ${startedAt.toISOString()}::timestamp, ${completedAt.toISOString()}::timestamp, ${executionTimeMs})
+                  VALUES (${context.executionId}, ${prompt.id}, ${inputDataJson}::jsonb, ${text || ''}, ${resultStatus}::execution_status, ${startedAt.toISOString()}::timestamp, ${completedAt.toISOString()}::timestamp, ${executionTimeMs})
                 `),
                 'savePromptResult'
               );
@@ -924,14 +1100,24 @@ async function executePromptChainServerSide(
         }
       };
 
-      // 7. Execute prompt with streaming (server-side collection)
-      const streamResponse = await unifiedStreamingService.stream(streamRequest);
+      // 7. Execute prompt with streaming (server-side collection). The stream call
+      // itself is inside this try so a rejection here (e.g. provider/model error
+      // before any onFinish callback fires) also clears the per-prompt timeout —
+      // otherwise it would fire later and reject an already-settled finishPromise
+      // with no handler attached.
+      try {
+        const streamResponse = await unifiedStreamingService.stream(streamRequest);
 
-      // Wait for both stream completion AND result storage to prevent race condition
-      await Promise.all([
-        streamResponse.result.usage,
-        finishPromise
-      ]);
+        // Wait for both stream completion AND result storage to prevent race condition
+        await Promise.all([
+          streamResponse.result.usage,
+          finishPromise
+        ]);
+      } finally {
+        // Always clear the per-prompt timeout, even if the join rejects for a reason
+        // other than the timeout firing (REV-COR-210-OVF1).
+        clearTimeout(promptTimeoutId);
+      }
 
       log.info('Prompt execution completed', {
         promptId: prompt.id,
@@ -950,22 +1136,16 @@ async function executePromptChainServerSide(
         executionId: context.executionId
       });
 
-      // Save failed prompt result
-      // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
-      // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
-      // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+      // Save failed prompt result — JSONB + enum bound as parameters, not sql.raw
+      // (REV-COR-210 / REV-DB-023).
       const now = new Date();
       const failedInputData = { prompt: prompt.content };
       const failedInputJson = JSON.stringify(failedInputData);
-      // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
-      const escapedFailedJson = failedInputJson.replace(/'/g, "''");
       const errorMsg = promptError instanceof Error ? promptError.message : String(promptError);
-      // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
-      // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
       await executeQuery(
         (db) => db.execute(sql`
           INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at)
-          VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedFailedJson}'::jsonb`)}, '', ${sql.raw("'failed'::execution_status")}, ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
+          VALUES (${context.executionId}, ${prompt.id}, ${failedInputJson}::jsonb, '', ${'failed'}::execution_status, ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
         `),
         'saveFailedPromptResult'
       );

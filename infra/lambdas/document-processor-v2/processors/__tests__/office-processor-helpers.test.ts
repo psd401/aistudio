@@ -59,7 +59,9 @@ describe('OfficeProcessor.sanitizeSheetName', () => {
   });
 
   it('replaces # characters with a space', () => {
-    expect(sanitizeSheetName('## Q1 2026')).toBe('   Q1 2026');
+    // Leading replacement spaces are then removed by the final trim.
+    expect(sanitizeSheetName('## Q1 2026')).toBe('Q1 2026');
+    expect(sanitizeSheetName('Q1 # 2026')).toBe('Q1   2026');
   });
 
   it('replaces backticks with a space', () => {

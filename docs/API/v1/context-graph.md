@@ -672,17 +672,24 @@ session-cookie path for these endpoints. Every response carries `X-Request-Id` a
 | `content:update` | Update metadata, create versions, set visibility |
 | `content:publish_internal` | Publish to / unpublish from a destination |
 | `content:publish_public` | Publish to a public-facing destination without approval |
+| `content:delegate` | Mint short-lived delegated tokens (`POST /api/v1/agents/delegated-token`) — agent-held authority, never present in a minted token |
 
 Staff API keys may hold up to `content:publish_internal`; `content:publish_public`
-is administrator-held. A caller without it that requests a `public`-facing outcome is
-not rejected — it returns `202` with `data.status = "approval_required"` and enters
-the review queue (the §26.4 gate). This applies everywhere a request could reach
-`visibilityLevel: "public"` or take a `public_web` publication offline, not just the
-publish endpoint: `POST /content` (create at `visibility.level: "public"`),
+is administrator-held. A caller without it that requests a `public`-facing outcome on
+an EXISTING object is not rejected — it returns `202` with `data.status =
+"approval_required"` and enters the review queue (the §26.4 gate):
 `PATCH /content/{id}/visibility` (widen to `public`), `POST /content/{id}/publish`
 (publish to `public_web`), and `DELETE /content/{id}/publish/{destination}`
 (unpublish from `public_web` — taking public content down needs the same authority
-as putting it up).
+as putting it up). Each of these persists a durable `content_publish_requests` row
+that an admin approves at /admin/atrium; approving a `publish` replays the PINNED
+raise-time version (issue #1118), not a newer edited head.
+
+`POST /content` (create at `visibility.level: "public"`) is the ONE exception: rather
+than block, it uses **create-as-private** (issue #1118) — the object is created
+`private` (returned `201`) and a `visibility_widen` request is queued for it. Inspect
+`data.visibilityLevel` in the `201` body to see whether the requested `public` was
+applied or downgraded.
 
 **Content error codes** (in addition to the shared `INVALID_TOKEN`,
 `INSUFFICIENT_SCOPE`, `RATE_LIMIT_EXCEEDED`, and `INTERNAL_ERROR`):
@@ -716,12 +723,13 @@ List content objects the caller may view (permission-filtered server-side). Requ
 | `collection` | string (slug or UUID) | Scope to one collection |
 | `tag` | string | Filter by a single tag (exact match) |
 | `status` | `draft` \| `published` \| `archived` | Filter by lifecycle status |
+| `query` | string (1–200 chars) | Case-insensitive title substring search |
 
 **Example request:**
 
 ```bash
 curl -H "Authorization: Bearer sk-your-key" \
-  "https://your-domain/api/v1/content?kind=document&status=published&tag=policy"
+  "https://your-domain/api/v1/content?kind=document&status=published&tag=policy&query=acceptable%20use"
 ```
 
 **Response `200`** — `meta.count` is the number of items returned.
@@ -823,9 +831,14 @@ internal reader `url` (`/c/{slug}`).
 **Response `400`** — Validation error, or `CONTENT_VALIDATION` (e.g. unknown collection slug).
 **Response `403`** — API key lacks `content:create`.
 **Response `409`** — `CONTENT_CONFLICT` (slug collision).
-**Response `202`** — approval required: `visibility.level: "public"` was requested (explicitly,
-or inherited from a collection whose default is `public`) without `content:publish_public`.
-Nothing is created; body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
+
+**Create-as-private (issue #1118):** requesting `visibility.level: "public"` (explicitly,
+or inherited from a collection whose default is `public`) without `content:publish_public`
+is NOT rejected and does NOT return `202`. The object is created at
+`visibilityLevel: "private"` (returned in the `201` body) and a durable
+`visibility_widen` request is queued for it — an admin approves it at /admin/atrium to
+make it public. Inspect `data.visibilityLevel` to see whether `public` was applied or
+downgraded to `private`.
 
 ---
 
@@ -1034,8 +1047,9 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 Unpublish the object from a destination. **Idempotent:** unpublishing an object that
 is not live at the destination returns `unpublished: false` rather than erroring.
-`{destination}` is one of `intranet`, `public_web`, `schoology`, `google`, `okf`. Requires
-`content:publish_internal`.
+`{destination}` is one of `intranet`, `public_web`, `schoology`, `google` (no `okf`:
+an okf publication is a serialized S3 bundle with no live surface to take down).
+Mirrors the MCP `unpublish_content` tool. Requires `content:publish_internal`.
 
 **Public-publish gate (§26.4):** taking any public-facing destination
 (`public_web`, `schoology`, `google`) offline requires the same
@@ -1175,6 +1189,71 @@ path/`sourceRef` dedup; slugs auto-suffix). For idempotency, import into a fresh
 
 **Response `400`** — `CONTENT_VALIDATION` (empty bundle / no concept files).
 **Response `403`** — API key lacks `content:create`, or the `atrium-content` capability (session).
+
+---
+
+### Delegated agent tokens (§26.1, Epic #1059)
+
+#### `POST /api/v1/agents/delegated-token`
+
+Exchange an autonomous agent's OAuth client-credentials JWT for a **short-lived
+(300 s) delegated token** that acts on behalf of a named human user. Requires the
+agent-held `content:delegate` scope, and the caller must be an **OIDC agent
+bearer** (a JWT whose client id maps to an active `agent_identities` row) — a
+session or `sk-` API key cannot mint even if it holds the scope, and a delegated
+token cannot re-mint. The returned `access_token` is used as the Bearer token on
+`/api/v1/content/*`, where it resolves to an `agent-delegated` requester bound to
+the named user (`isAdmin` forced false).
+
+**Request body:**
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `delegated_for` | integer | yes | Positive user id of the human to act for |
+| `scope` | string | no | Space-delimited narrowing (≤ 500 chars). Omit for the full grantable intersection |
+
+**Scope bounding:** minted scope = requested ∩ the agent's content scopes ∩ the
+user's role-derived content scopes. It never includes `content:delegate`, and
+includes `content:publish_public` only when the user is an administrator AND the
+agent holds it. An empty intersection returns `403 INSUFFICIENT_SCOPE` — no token.
+
+**Token claims:** `sub` is the low-privilege **system user** (§26.5), not the
+human — a surface that does not honor `delegated_for` resolves the token to the
+system account, not the full human. The human is named by the **numeric**
+`delegated_for` claim; `act.sub` carries the agent's (non-numeric) client id for
+audit.
+
+**Stateless / non-revocable:** the token is signed by the platform OIDC signer
+and is not persisted — it cannot be revoked before expiry. The 300-second TTL is
+the mitigation; treat the minted token as single-task-scoped.
+
+**Example request:**
+
+```bash
+curl -X POST -H "Authorization: Bearer <agent-oidc-jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{ "delegated_for": 42, "scope": "content:read content:create" }' \
+  "https://your-domain/api/v1/agents/delegated-token"
+```
+
+**Response `200`**
+
+```json
+{
+  "data": {
+    "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "token_type": "Bearer",
+    "expires_in": 300,
+    "scope": "content:create content:read",
+    "delegated_for": 42
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `400`** — `VALIDATION_ERROR` (missing/non-positive `delegated_for`, `scope` over 500 chars).
+**Response `403`** — `INSUFFICIENT_SCOPE` (caller lacks `content:delegate`, or the scope intersection is empty — including for an **unknown** `delegated_for` user, which has no grantable scopes) or `FORBIDDEN` (session/`sk-` caller, no active agent identity, or a delegated token attempting to re-mint). An unknown user is deliberately indistinguishable from a role-less one (same `INSUFFICIENT_SCOPE`) so a delegation-capable agent cannot enumerate valid user ids.
+**Response `500`** — `CONFIGURATION_ERROR` (`ATRIUM_SYSTEM_USER_ID` not configured).
 
 ---
 

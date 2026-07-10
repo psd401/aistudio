@@ -32,6 +32,15 @@ import { revalidatePath } from "next/cache"
 import { uploadDocument, deleteDocument } from "@/lib/aws/s3-client"
 import { queueFileForProcessing, processUrl } from "@/lib/services/file-processing-service"
 import { canModifyRepository, getUserIdFromSession } from "./repository-permissions"
+import { toContentDispositionValue } from "@/lib/repositories/content-disposition"
+
+// Runtime-validated processing-status union (REV-COR-068): actions are network
+// endpoints, so the TS parameter type is not enforced on the wire.
+const VALID_PROCESSING_STATUSES = ["pending", "processing", "completed", "failed"] as const
+type ProcessingStatus = (typeof VALID_PROCESSING_STATUSES)[number]
+function isProcessingStatus(s: string): s is ProcessingStatus {
+  return (VALID_PROCESSING_STATUSES as readonly string[]).includes(s)
+}
 
 export interface RepositoryItem {
   id: number
@@ -118,6 +127,19 @@ function mapToRepositoryItem(itemRaw: RawRepositoryItem): RepositoryItem {
     createdAt: itemRaw.createdAt ?? new Date(),
     updatedAt: itemRaw.updatedAt ?? new Date()
   }
+}
+
+// Validate addDocumentWithPresignedUrl input; returns a user-facing error message or null when valid
+function validatePresignedUrlInput(input: AddDocumentWithPresignedUrlInput): string | null {
+  if (!input.name || input.name.trim().length === 0) {
+    return "Name is required"
+  }
+
+  if (!input.s3Key || input.s3Key.trim().length === 0) {
+    return "S3 key is required"
+  }
+
+  return null
 }
 
 // Validate addDocumentItem input; returns a user-facing error message or null when valid
@@ -216,6 +238,11 @@ export async function addDocumentItem(
     // Get the user ID from the cognito_sub
     log.debug("Getting user ID from session")
     const userId = await getUserIdFromSession(session.sub)
+
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API — a foreign item would pollute the retrieval
+    // index. Runs BEFORE the ownership check (404-mask precedes 403).
+    await assertNotSystemManagedRepository(input.repository_id)
 
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
@@ -348,16 +375,17 @@ export async function addDocumentWithPresignedUrl(
     }
     
     // Validate inputs
-    if (!input.name || input.name.trim().length === 0) {
-      return { isSuccess: false, message: "Name is required" }
-    }
-    
-    if (!input.s3Key || input.s3Key.trim().length === 0) {
-      return { isSuccess: false, message: "S3 key is required" }
+    const validationError = validatePresignedUrlInput(input)
+    if (validationError) {
+      return { isSuccess: false, message: validationError }
     }
 
     // Get the user ID from the cognito_sub
     const userId = await getUserIdFromSession(session.sub)
+
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
 
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
@@ -368,6 +396,19 @@ export async function addDocumentWithPresignedUrl(
         repositoryId: input.repository_id
       })
       throw ErrorFactories.authzOwnerRequired("add items to repository")
+    }
+
+    // S3-key namespace check (REV-SEC-062): the client echoes back a key, but the
+    // legitimate upload flow (generateUploadUrl) only ever mints keys under
+    // repositories/${repositoryId}/. Reject any other key so a user cannot register
+    // an arbitrary documents-bucket object onto their repo and presign-download it.
+    const expectedKeyPrefix = `repositories/${input.repository_id}/`
+    if (!input.s3Key.startsWith(expectedKeyPrefix)) {
+      log.warn("Presigned upload denied - s3Key outside repository namespace", {
+        userId,
+        repositoryId: input.repository_id
+      })
+      return { isSuccess: false, message: "Invalid S3 key for this repository" }
     }
 
     // Create repository item with S3 key reference via Drizzle
@@ -500,6 +541,10 @@ export async function addUrlItem(
     // Get the user ID from the cognito_sub
     const userId = await getUserIdFromSession(session.sub)
 
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
+
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
     const canModify = await canModifyRepository(input.repository_id, userId)
@@ -617,6 +662,10 @@ export async function addTextItem(
     // Get the user ID from the cognito_sub
     log.debug("Getting user ID from session")
     const userId = await getUserIdFromSession(session.sub)
+
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
 
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
@@ -859,7 +908,7 @@ export async function listRepositoryItems(
     // Per-repository authorization: the caller must be able to access this
     // repository (public / owner / grant). Also excludes system-managed repos
     // (the Atrium index, #1056). Closes the IDOR where any capability holder
-    // could list a private repo they don't own.
+    // could list a private repo they don't own (REV-COR-061).
     await assertRepositoryReadAccess(repositoryId, session.sub)
 
     // Fetch repository items via Drizzle
@@ -934,7 +983,8 @@ export async function searchRepositoryItems(
     }
 
     // Per-repository authorization (public / owner / grant); also excludes
-    // system-managed repos (#1056). Closes the IDOR on item search.
+    // system-managed repos (#1056). Closes the IDOR on item search — this
+    // returns chunk CONTENT (REV-COR-061).
     await assertRepositoryReadAccess(repositoryId, session.sub)
 
     // Search in item names via Drizzle
@@ -1059,9 +1109,10 @@ export async function getItemChunks(
 
     // A chunk read is a DIRECT read of raw indexed text. Require access to the
     // item's repository (public / owner / grant) — closes the IDOR where any
-    // capability holder could read another repo's chunks by item id. Also
-    // excludes system-managed repos (the Atrium index, #1056), whose per-object
-    // visibility is enforced by retrievalService/canView, not repo-level access.
+    // capability holder could read another repo's chunks by item id (REV-COR-061).
+    // Also excludes system-managed repos (the Atrium index, #1056), whose
+    // per-object visibility is enforced by retrievalService/canView, not
+    // repo-level access.
     await assertItemRepositoryReadAccess(itemId, session.sub)
 
     // Fetch chunks via Drizzle
@@ -1132,6 +1183,39 @@ export async function updateItemProcessingStatus(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // Validate the status string (REV-COR-068): actions are network endpoints, so
+    // the TS union is not enforced at runtime — reject anything outside the four
+    // states before any write instead of casting an arbitrary string in.
+    if (!isProcessingStatus(status)) {
+      log.warn("Invalid processing status", { itemId, status })
+      return { isSuccess: false, message: "Invalid processing status" }
+    }
+
+    // A status write keyed by itemId is a cross-repo write path: without a
+    // per-item guard any capability holder could flip processing status on an
+    // arbitrary item (IDOR), including rows of the system-managed Atrium index
+    // (#1056). Mirror removeRepositoryItem: resolve the item (404 on miss),
+    // reject system-managed repos (404-mask), then require ownership (403).
+    log.debug("Fetching item for status update", { itemId })
+    const itemRaw = await getRepositoryItemById(itemId)
+    if (!itemRaw) {
+      log.warn("Item not found for status update", { itemId })
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+    }
+    await assertNotSystemManagedRepository(itemRaw.repositoryId)
+
+    const userId = await getUserIdFromSession(session.sub)
+    log.debug("Checking repository ownership", { repositoryId: itemRaw.repositoryId, userId })
+    const canModify = await canModifyRepository(itemRaw.repositoryId, userId)
+    if (!canModify) {
+      log.warn("Status update denied - not owner", {
+        userId,
+        repositoryId: itemRaw.repositoryId,
+        itemId
+      })
+      throw ErrorFactories.authzOwnerRequired("update items in repository")
+    }
+
     // Update processing status via Drizzle
     log.info("Updating processing status in database", {
       itemId,
@@ -1139,7 +1223,7 @@ export async function updateItemProcessingStatus(
       hasError: !!error
     })
 
-    await updateRepositoryItemStatus(itemId, status as "pending" | "processing" | "completed" | "failed", error ?? null)
+    await updateRepositoryItemStatus(itemId, status, error ?? null)
 
     log.info("Processing status updated successfully", { itemId, status })
 
@@ -1209,30 +1293,43 @@ export async function getDocumentDownloadUrl(
       return { isSuccess: false, message: "Item is not a document" }
     }
 
+    // Defense in depth (REV-SEC-062): never presign a stored source outside this
+    // item's own repository namespace — blocks a client-planted key (via
+    // addDocumentWithPresignedUrl) from being signed against the shared bucket.
+    const expectedPrefix = `repositories/${item.repositoryId}/`
+    if (!item.source.startsWith(expectedPrefix)) {
+      log.warn("Download URL denied - source outside repository namespace", {
+        itemId,
+        repositoryId: item.repositoryId
+      })
+      return { isSuccess: false, message: "Item is not available for download" }
+    }
+
     // Generate a presigned URL for download
     const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner')
     const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3')
-    
+
     const s3Client = new S3Client({})
     const bucketName = process.env.DOCUMENTS_BUCKET_NAME
-    
+
     if (!bucketName) {
       return { isSuccess: false, message: "Storage not configured" }
     }
 
-    // Extract file extension from the original S3 key or metadata
-    const filename = resolveDownloadFilename(item)
+    // Sanitize/encode the display filename before it lands in the reflected
+    // Content-Disposition header (REV-COR-071).
+    const contentDisposition = toContentDispositionValue(resolveDownloadFilename(item))
 
     const command = new GetObjectCommand({
       Bucket: bucketName,
       Key: item.source,
-      ResponseContentDisposition: `attachment; filename="${filename}"`
+      ResponseContentDisposition: contentDisposition
     })
 
     log.info("Generating presigned download URL", {
       itemId,
       s3Key: item.source,
-      fileName: filename
+      contentDisposition
     })
     
     const downloadUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 }) // 1 hour

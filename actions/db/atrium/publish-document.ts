@@ -3,12 +3,15 @@
 /**
  * Atrium publish-document server action
  *
- * Issue #1051 (Epic #1059, Atrium Phase 1). Thin wrapper over
- * `publishService.publish` — publishes a document's working head to the intranet
- * reader (`/c/[slug]`) for the logged-in human surface. View + edit permission is
- * enforced in the service; the surface adds the feature-capability gate.
+ * Issue #1051 (Epic #1059, Atrium Phase 1; destinations widened for Epic #1059
+ * completion). Thin wrapper over `publishService.publish` — publishes an
+ * object's working head to a destination for the logged-in human surface:
+ * `intranet` (`/c/[slug]`), `public_web` (`/p/[slug]`, §26.4-gated), or the
+ * `schoology`/`google` connector stubs (their adapters throw
+ * `implemented:false` until wired). View + edit permission is enforced in the
+ * service; the surface adds the feature-capability gate.
  *
- * See docs/features/atrium-design-spec.md §15 (publishing).
+ * See docs/features/atrium-design-spec.md §15 (publishing) / §26.4.
  */
 
 import {
@@ -20,16 +23,36 @@ import {
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { publishService } from "@/lib/content/publish-service";
 import { ApprovalRequiredError } from "@/lib/content/errors";
-import { assertGrantKind, assertLevel } from "@/lib/content/validators";
+import {
+  assertEditorDestination,
+  assertGrantKind,
+  assertLevel,
+} from "@/lib/content/validators";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
 
+/**
+ * The editor destination union (excludes `okf` — API/MCP-only by design),
+ * re-exported from its canonical home in `lib/content/validators.ts` (which
+ * derives it from the adapter registry's `PUBLISH_DESTINATIONS`) so existing
+ * consumers (`unpublish-document.ts`, the `EditorToolbar` picker) keep their
+ * import path. Type-only, so it is erased and legal in a "use server" module.
+ */
+export type { EditorPublishDestination } from "@/lib/content/validators";
+
 export async function publishDocumentAction(
   objectId: string,
   input: {
-    destination: "intranet";
+    /**
+     * Widened to `string` (the action/REST-style input contract) and narrowed at
+     * runtime via `assertEditorDestination`. `intranet` publishes to the internal
+     * reader; `public_web`/`schoology`/`google` are §26.4 public destinations —
+     * a caller without public-publish authority gets the pending-approval
+     * outcome, not a failure (see the ApprovalRequiredError branch below).
+     */
+    destination: string;
     /**
      * Optional visibility-widening applied in the publish transaction. `level`
      * arrives as a plain `string` (the action/REST/MCP input contract) and is
@@ -76,12 +99,16 @@ export async function publishDocumentAction(
       }),
     });
 
+    // Narrow the widened `string` destination at runtime BEFORE it reaches the
+    // service's adapter registry (rejects `okf` and any unexpected value).
+    const destination = assertEditorDestination(input.destination, "publish");
+
     // `input.visibility` carries a widened `level` and `grant.kind` (plain
     // `string`). `assertLevel` / `assertGrantKind` narrow each via a RUNTIME
     // check (throwing ValidationError on an unexpected value) before they reach
     // the service — the DB enum is the last line of defense, not the first.
     const result = await publishService.publish(requester, objectId, {
-      destination: input.destination,
+      destination,
       visibility: input.visibility
         ? {
             level: assertLevel(input.visibility.level),
@@ -108,8 +135,8 @@ export async function publishDocumentAction(
     timer({ status: "error" });
     // §26.4 gate: a public-destination publish without approval is a
     // pending-approval outcome (approval-queue event emitted), not a failure.
-    // Surface it distinctly (defensive — the shipped editor only publishes to
-    // intranet today, but the action accepts public destinations).
+    // Surface it distinctly — the editor's destination picker exposes
+    // `public_web`, so a non-admin caller routinely lands here.
     if (error instanceof ApprovalRequiredError) {
       log.info("Publish requires approval", { requestId });
       return {

@@ -75,6 +75,32 @@ def _format_for_chat(text: str) -> str:
         return text
 
 
+def _frame_failed_partial(partial: str) -> str:
+    """Wrap a failed/degraded turn so it is never presented as a clean answer.
+
+    When a turn dies mid-task the model has usually emitted some scratchpad
+    narration ("Now let's read the file...") before it stopped. Posting that
+    verbatim reads to the user as a finished reply, hiding the failure and any
+    side effects that already ran (issue #1138 F4). Prefix an explicit error
+    frame; keep the partial so the user still sees what completed. When there
+    is no partial, return a standalone error.
+
+    `partial` must already be chat-formatted (the frame text is plain).
+    """
+    partial = (partial or "").strip()
+    if partial:
+        return (
+            "⚠️ I couldn't finish that — I hit a problem partway "
+            "through and some steps may have already run. Here's how far I "
+            "got:\n\n" + partial
+        )
+    return (
+        "⚠️ I couldn't complete that — I hit a problem partway "
+        "through. Some steps may have already run, so please check before "
+        "retrying."
+    )
+
+
 class HarnessAdapter(abc.ABC):
     """Abstract base class for agent harness adapters."""
 
@@ -84,10 +110,12 @@ class HarnessAdapter(abc.ABC):
         message: str,
         session_id: str,
         model_override: Optional[str] = None,
+        deadline_s: Optional[int] = None,
     ) -> Union[str, TurnResult]:
         """Send a message to the harness and return either a plain string
         (legacy contract) or a TurnResult (preferred). Wrapper accepts
-        both."""
+        both. `deadline_s` (async-job path, #1138) overrides the turn
+        deadline; None keeps the interactive default."""
 
     @abc.abstractmethod
     def configure(self, config: dict) -> None:
@@ -218,6 +246,8 @@ class OpenClawAdapter(HarnessAdapter):
         message: str,
         session_id: str,
         model_override: Optional[str] = None,
+        deadline_s: Optional[int] = None,
+        _is_nudge: bool = False,
     ) -> TurnResult:
         """Send a message to OpenClaw via WebSocket and return a TurnResult.
 
@@ -471,15 +501,7 @@ class OpenClawAdapter(HarnessAdapter):
                 # 14 min — 30s under the cron Lambda's 14:30 AbortSignal so
                 # the harness gets a chance to return whatever it has
                 # accumulated before the client kills the connection.
-                default_deadline_s = 840
-                try:
-                    deadline_s = int(os.environ.get(
-                        "OPENCLAW_CHAT_DEADLINE_S",
-                        str(default_deadline_s),
-                    ))
-                except ValueError:
-                    deadline_s = default_deadline_s
-                deadline_s = max(60, min(840, deadline_s))
+                deadline_s = self._resolve_deadline_s(deadline_s)
                 deadline = time.time() + deadline_s
                 got_final = False
                 event_counts: dict = {}
@@ -493,6 +515,11 @@ class OpenClawAdapter(HarnessAdapter):
                 # final `event:chat` state=final arrives with an empty message
                 # and is now just a completion signal).
                 agent_assistant_accum: str = ""
+                # True when tool activity arrived after accumulated assistant
+                # text — the next assistant delta starts a NEW narration
+                # segment and gets a blank-line separator (issue #1138 F4;
+                # the run-on "…in Plaud.Good, done…" came from this path).
+                assistant_boundary_pending: bool = False
                 # Allow recv() to sit idle for up to 60s between events
                 # without raising — long tool calls (web_fetch, model
                 # inference on a big prompt) produce gaps with no stream
@@ -589,14 +616,38 @@ class OpenClawAdapter(HarnessAdapter):
                             )
                             cumulative = self._extract_text(data.get("message"))
                             if isinstance(increment, str) and increment:
-                                agent_assistant_accum = (
-                                    increment
-                                    if replace
-                                    else agent_assistant_accum + increment
+                                agent_assistant_accum = self._accumulate_assistant(
+                                    agent_assistant_accum,
+                                    increment,
+                                    replace,
+                                    assistant_boundary_pending,
                                 )
+                                assistant_boundary_pending = False
                             elif isinstance(cumulative, str) and cumulative:
                                 agent_assistant_accum = cumulative
+                                assistant_boundary_pending = False
+                        elif stream in ("item", "command_output"):
+                            # Newer OpenClaw builds report tool activity as
+                            # `item`/`command_output` streams. Tool activity
+                            # after accumulated text means the next assistant
+                            # delta starts a NEW narration segment — mark the
+                            # boundary so segments don't run together
+                            # ("...in Plaud.Good, done..."), issue #1138 F4.
+                            if agent_assistant_accum:
+                                assistant_boundary_pending = True
+                            # Native-tool mode (#1138 r12+) reports tool
+                            # execution ONLY here — record it so telemetry's
+                            # tool_calls and the empty-turn nudge below see
+                            # native-mode activity (the legacy tool_call/
+                            # tool_result streams stay handled underneath).
+                            if stream == "item" and isinstance(data, dict)                                     and data.get("kind") == "tool":
+                                self._record_item_tool_event(
+                                    data, tool_starts, tool_calls
+                                )
                         elif stream == "tool_call" and isinstance(data, dict):
+                            # Same boundary rule for protocol-v3 tool events.
+                            if agent_assistant_accum:
+                                assistant_boundary_pending = True
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -609,6 +660,8 @@ class OpenClawAdapter(HarnessAdapter):
                                 "started_at": time.time(),
                             }
                         elif stream == "tool_result" and isinstance(data, dict):
+                            if agent_assistant_accum:
+                                assistant_boundary_pending = True
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -693,10 +746,13 @@ class OpenClawAdapter(HarnessAdapter):
                                     "last_state": last_state,
                                 },
                             )
-                            err_text = (
+                            # Never post the accumulated scratchpad narration
+                            # as if it were the answer — frame it as a failed
+                            # partial (issue #1138 F4).
+                            err_text = _frame_failed_partial(
                                 _format_for_chat(response_text)
                                 if response_text
-                                else "I encountered an error processing your message."
+                                else ""
                             )
                             return TurnResult(
                                 text=err_text,
@@ -847,8 +903,11 @@ class OpenClawAdapter(HarnessAdapter):
                         "first_events": first_event_types,
                     },
                 )
+                # A partial that never reached a final event is still a
+                # failed turn — frame it so it doesn't read as a finished
+                # answer (issue #1138 F4).
                 return _result(
-                    _format_for_chat(response_text.strip()),
+                    _frame_failed_partial(_format_for_chat(response_text.strip())),
                     failed=True,
                     error_class="ChatDeadlineExpiredPartial",
                 )
@@ -891,6 +950,36 @@ class OpenClawAdapter(HarnessAdapter):
 
         if response_text.strip():
             return _result(_format_for_chat(response_text.strip()))
+        if not _is_nudge and tool_calls:
+            # The turn DID work (tool calls ran) but produced no reply —
+            # nudge once for the user-facing summary instead of sending the
+            # canned fallback (#1138, observed live on r12). Recursive call
+            # is bounded by _is_nudge; a short deadline is plenty at direct-
+            # Mantle serving speeds.
+            logger.warning(
+                "empty final after %d tool calls — sending one nudge",
+                len(tool_calls),
+            )
+            nudged = self.process(
+                self.EMPTY_TURN_NUDGE,
+                session_id,
+                model_override,
+                deadline_s=180,
+                _is_nudge=True,
+            )
+            if nudged.text.strip():
+                merged_tools = tool_calls + nudged.tool_calls
+                return TurnResult(
+                    text=nudged.text,
+                    model=nudged.model or observed_model,
+                    tokens_in=tokens_in + nudged.tokens_in,
+                    tokens_out=tokens_out + nudged.tokens_out,
+                    latency_ms=int((time.time() - chat_send_at) * 1000),
+                    messages=messages_log + nudged.messages,
+                    tool_calls=merged_tools,
+                    failed=nudged.failed,
+                    error_class=nudged.error_class,
+                )
         record_failure(
             source="harness",
             severity="empty_response",
@@ -913,6 +1002,103 @@ class OpenClawAdapter(HarnessAdapter):
         )
 
     @staticmethod
+    def _record_item_tool_event(data, tool_starts, tool_calls) -> None:
+        """Track a native-mode tool item (stream="item", kind="tool").
+
+        phase="start" registers the call; a later phase ("end"/"error"/
+        anything terminal with a status) completes it into tool_calls. The
+        item stream is the ONLY place beta.2 reports tool execution when
+        toolSearch/code-mode is off, so without this the Conversations tab
+        showed zero tool calls and the empty-turn nudge couldn't tell a
+        silent WORKING turn from a truly idle one.
+        """
+        item_id = data.get("itemId") or data.get("toolCallId") or ""
+        phase = data.get("phase")
+        if phase == "start":
+            tool_starts[item_id] = {
+                "name": data.get("name") or data.get("title") or "unknown",
+                "args": data.get("meta"),
+                "started_at": time.time(),
+            }
+            return
+        start = tool_starts.pop(item_id, None)
+        now = time.time()
+        started_at = start["started_at"] if start else now
+        tool_calls.append({
+            "name": (start or {}).get("name") or data.get("name") or "unknown",
+            "args": (start or {}).get("args"),
+            "result": data.get("output") or data.get("result"),
+            "status": "error" if (data.get("status") in ("error", "failed")) else "success",
+            "error_text": (
+                str(data.get("error"))[:2000] if data.get("error") else None
+            ),
+            "duration_ms": int(max(0, (now - started_at) * 1000)),
+            "started_at": datetime.fromtimestamp(started_at, tz=timezone.utc).isoformat(),
+            "finished_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        })
+
+    # Sent as a one-shot follow-up when a turn completes tool work but ends
+    # with no user-visible text (observed live on r12: the model executed
+    # every grant, then a provider timeout ate the closing message and the
+    # user got the canned empty-response fallback). One nudge only — if the
+    # model stays silent twice, the canned fallback stands.
+    EMPTY_TURN_NUDGE = (
+        "[system-nudge] Your previous turn finished tool work but sent the "
+        "user NO reply — they saw nothing. Send the user-facing summary of "
+        "what you just did (and its outcome) now, as plain text. Do not "
+        "re-run any tools unless something genuinely failed."
+    )
+
+    @staticmethod
+    def _resolve_deadline_s(override) -> int:
+        """Resolve the turn deadline in seconds.
+
+        `override` is the payload-supplied deadline from the async-job runner
+        (#1138): the promoted job leg holds the SSE stream for up to 2 hours,
+        so the override clamps to [60, 7200] (ceiling approved 2026-07-07).
+        Interactive turns send no override and keep the env-var/default path
+        clamped to [60, 840] — bounded by the router Lambda's 15-min ceiling.
+        Garbage values degrade to the 840s default, never raise.
+        """
+        default_deadline_s = 840
+        if override is not None:
+            try:
+                return max(60, min(7200, int(override)))
+            except (TypeError, ValueError):
+                return default_deadline_s
+        try:
+            value = int(os.environ.get(
+                "OPENCLAW_CHAT_DEADLINE_S",
+                str(default_deadline_s),
+            ))
+        except ValueError:
+            value = default_deadline_s
+        return max(60, min(840, value))
+
+    @staticmethod
+    def _accumulate_assistant(
+        accum: str,
+        increment: str,
+        replace: bool,
+        boundary_pending: bool,
+    ) -> str:
+        """Append a streamed assistant increment to the turn accumulator.
+
+        `replace` resets the buffer (protocol v4 replace-mode delta).
+        `boundary_pending` means tool activity separated this increment from
+        the previously accumulated text — i.e. the model started a NEW
+        narration segment — so join with a blank line instead of butting the
+        segments together (issue #1138 F4: "…in Plaud.Good, done…").
+        Increments within one segment must never get separators; the caller
+        only sets `boundary_pending` on tool events.
+        """
+        if replace:
+            return increment
+        if boundary_pending and accum and increment:
+            return accum + "\n\n" + increment
+        return accum + increment
+
+    @staticmethod
     def _extract_text(content) -> str:
         """Recursively extract text from OpenClaw content blocks."""
         if isinstance(content, str):
@@ -928,7 +1114,15 @@ class OpenClawAdapter(HarnessAdapter):
                     parts.append(block.get("text", ""))
                 elif isinstance(block, str):
                     parts.append(block)
-            return "".join(parts)
+            # Join DISTINCT text blocks with a blank line. The model emits a
+            # short narration text block before each tool call, so a single
+            # assistant message often carries several text blocks interleaved
+            # with tool_use blocks. Concatenating them with no separator
+            # produced runs like "...in Plaud.Good, done. Let's read the
+            # file.Now getting..." (issue #1138 F4). Blank-line join keeps each
+            # block readable; empties are dropped so we never emit a leading or
+            # trailing separator.
+            return "\n\n".join(p for p in parts if p and p.strip())
         return str(content) if content else ""
 
     def health(self) -> bool:

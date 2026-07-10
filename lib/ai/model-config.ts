@@ -43,6 +43,10 @@ export async function getModelConfig(modelId: string | number) {
     id: model.id,
     name: model.name,
     provider: model.provider,
-    model_id: model.modelId
+    model_id: model.modelId,
+    // Include capabilities so callers (e.g. Nexus chat) can derive image/deep-research
+    // routing from this single fetched row instead of re-reading the same ai_models
+    // row via getAIModelById (REV-PERF-002).
+    capabilities: model.capabilities
   };
 }

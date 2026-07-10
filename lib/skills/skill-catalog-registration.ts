@@ -49,13 +49,18 @@ export interface SkillCatalogToolInput {
 /**
  * Build the `tool_catalog` row for an approved skill. Pure — no DB access.
  *
- * - `surfaces`: skills are invocable from chat (`ai_sdk`), the MCP server
- *   (`mcp`), and internal agent loops (`internal`).
+ * - `surfaces`: skills are invocable from the MCP server (`mcp`) and internal
+ *   agent loops (`internal`), where `dispatch()` resolves the `skill:` handlerRef
+ *   (`skill-tool-executor.ts`). Chat (`ai_sdk`) is deliberately NOT listed: the
+ *   chat surface consumes a skill by SESSION BINDING (`skillId` pins the tool
+ *   list and injects the SKILL.md instructions into the system prompt), not as a
+ *   callable tool — the provider adapters have no executor for skill names, so
+ *   advertising `ai_sdk` would be a dead listing.
  * - `requiredScopes`: empty — a published skill is open to any authenticated
  *   caller. Per-skill capability gating is handled separately by the skill's
  *   `requiredCapability` (check_capability.js at invocation), not by catalog scope.
- * - `handlerRef`: `skill:{id}` — the dispatcher resolves this to load + run the
- *   skill folder from S3.
+ * - `handlerRef`: `skill:{id}` — the dispatcher resolves this to load the
+ *   skill's SKILL.md from S3 as the tool result.
  */
 export function buildSkillCatalogToolValues(
   input: SkillCatalogToolInput
@@ -66,7 +71,7 @@ export function buildSkillCatalogToolValues(
     name: buildSkillCatalogToolName(input.slug),
     description: input.summary,
     inputSchema: { type: "object", properties: {} },
-    surfaces: ["ai_sdk", "mcp", "internal"],
+    surfaces: ["mcp", "internal"],
     requiredScopes: [],
     agentCallable: true,
     source: "skill",

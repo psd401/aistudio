@@ -1,28 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 
-// Limit request body size to 25MB for uploads
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: "25mb"
-    }
-  }
-}
+// NOTE: `export const config = { api: { bodyParser } }` was removed
+// (REV-COR-213 / REV-SEC-126). That is a Pages-Router API config; App Router route
+// handlers ignore it, so it enforced no size cap. The limit is now applied via an
+// early Content-Length guard plus the authoritative post-parse `file.size` check.
 import { z } from 'zod';
-import { uploadDocument } from '@/lib/aws/s3-client';
-import { saveDocument, batchInsertDocumentChunks } from '@/lib/db/queries/documents';
+import { uploadDocument, deleteDocument } from '@/lib/aws/s3-client';
+import { saveDocument, batchInsertDocumentChunks, deleteDocumentById } from '@/lib/db/queries/documents';
 import { extractTextFromDocument, chunkText, getFileTypeFromFileName } from '@/lib/document-processing';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 // import * as fs from 'fs'; // No longer needed if text processing is out
 // import * as path from 'path'; // No longer needed if text processing is out
 
-import { 
+import {
   ALLOWED_FILE_EXTENSIONS,
   ALLOWED_MIME_TYPES,
   getMaxFileSize
 } from '@/lib/file-validation';
+
+// Multipart framing (boundary + part headers + filename) makes the request body
+// slightly larger than the file itself, so the early Content-Length guard allows
+// this much overhead above the max file size; `file.size` stays authoritative.
+const UPLOAD_BODY_OVERHEAD_BYTES = 100 * 1024;
 
 // Enhanced file validation schema
 // Using z.any() since File/Blob classes are not available during SSR/build
@@ -97,7 +98,26 @@ export async function POST(request: NextRequest) {
   const userId = currentUser.data.user.id;
   log.debug(`Current user ID: ${userId}, type: ${typeof userId}`);
 
-  // Add more checks before the main try block if needed
+  // Best-effort compensating cleanup (REV-COR-214). The upload proceeds in stages
+  // (S3 object -> text extraction -> documents row -> chunks); a failure in a later
+  // stage must not orphan the S3 object or a half-written documents row. These run
+  // outside any DB transaction (S3 deletes are side effects) and never throw.
+  const cleanupOrphanedS3 = async (key: string) => {
+    try {
+      await deleteDocument(key);
+      log.info('[Upload API] Removed orphaned S3 object after failed upload', { key });
+    } catch (cleanupError) {
+      log.error('[Upload API] Failed to remove orphaned S3 object', cleanupError);
+    }
+  };
+  const cleanupOrphanedDocument = async (id: number) => {
+    try {
+      await deleteDocumentById({ id });
+      log.info('[Upload API] Removed orphaned document row after failed chunk insert', { id });
+    } catch (cleanupError) {
+      log.error('[Upload API] Failed to remove orphaned document row', cleanupError);
+    }
+  };
 
   try {
     log.info('[Upload API] Inside main try block');
@@ -120,6 +140,25 @@ export async function POST(request: NextRequest) {
     */
     
     
+    // Enforce the upload size limit BEFORE buffering the whole body into memory
+    // (REV-COR-213 / REV-SEC-126). Reject on Content-Length here; the authoritative
+    // per-file `file.size > maxFileSize` check below still runs post-parse. The
+    // Content-Length header can be spoofed/absent, so this is a coarse pre-buffer
+    // guard, not the source of truth.
+    const maxFileSize = await getMaxFileSize();
+    const contentLength = Number(request.headers.get('content-length') || 0);
+    if (Number.isFinite(contentLength) && contentLength > maxFileSize + UPLOAD_BODY_OVERHEAD_BYTES) {
+      log.warn('Upload rejected by Content-Length guard', { contentLength, maxFileSize });
+      timer({ status: "error", reason: "file_too_large" });
+      return new NextResponse(
+        JSON.stringify({
+          success: false,
+          error: `File size must be less than ${maxFileSize / (1024 * 1024)}MB`
+        }),
+        { status: 413, headers }
+      );
+    }
+
     // Parse the form data
     let formData;
     try {
@@ -181,8 +220,7 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    // 3. Check file size
-    const maxFileSize = await getMaxFileSize();
+    // 3. Check file size (authoritative — maxFileSize resolved before the guard above)
     if (file.size > maxFileSize) {
       log.warn('File too large:', file.size, 'Max:', maxFileSize);
       timer({ status: "error", reason: "file_too_large" });
@@ -252,11 +290,13 @@ export async function POST(request: NextRequest) {
     } catch (uploadError) {
       log.error('[Upload API] Step failed: Uploading to S3', uploadError);
       timer({ status: "error", reason: "s3_upload_error" });
+      // REV-COR-208: never echo raw exception detail (S3/SDK internals) to the
+      // client — log it server-side and correlate via X-Request-Id.
       return new NextResponse(
-        JSON.stringify({ 
+        JSON.stringify({
           success: false,
-          error: `Failed to upload file to storage: ${uploadError instanceof Error ? uploadError.message : String(uploadError)}` 
-        }), 
+          error: 'Failed to upload file to storage'
+        }),
         { status: 500, headers }
       );
     }
@@ -279,11 +319,14 @@ export async function POST(request: NextRequest) {
       log.error('[Upload API] Step failed: Text Extraction', extractError);
       log.error('Error extracting text from document:', extractError);
       timer({ status: "error", reason: "text_extraction_error" });
+      // REV-COR-214: the S3 object was already uploaded — remove it so it is not orphaned.
+      await cleanupOrphanedS3(s3Key);
+      // REV-COR-208: never echo raw exception detail to the client.
       return new NextResponse(
-        JSON.stringify({ 
+        JSON.stringify({
           success: false,
-          error: `Failed to extract text from document: ${extractError instanceof Error ? extractError.message : String(extractError)}` 
-        }), 
+          error: 'Failed to extract text from document'
+        }),
         { status: 500, headers }
       );
     }
@@ -292,11 +335,13 @@ export async function POST(request: NextRequest) {
     if (text === null || text === undefined) {
       log.error('[Upload API] Text extraction resulted in null or undefined text.');
       timer({ status: "error", reason: "no_text_extracted" });
+      // REV-COR-214: no usable text — remove the already-uploaded S3 object.
+      await cleanupOrphanedS3(s3Key);
       return new NextResponse(
-        JSON.stringify({ 
-          success: false, 
-          error: 'Failed to extract valid text content from the document.' 
-        }), 
+        JSON.stringify({
+          success: false,
+          error: 'Failed to extract valid text content from the document.'
+        }),
         { status: 500, headers }
       );
     }
@@ -319,11 +364,15 @@ export async function POST(request: NextRequest) {
       log.error('[Upload API] Step failed: Saving Document Metadata', saveError);
       log.error('Error saving document to database:', saveError);
       timer({ status: "error", reason: "db_save_error" });
+      // REV-COR-214: the documents row failed to persist, so only the S3 object
+      // needs removing to avoid an orphan.
+      await cleanupOrphanedS3(s3Key);
+      // REV-COR-208: never echo raw exception detail to the client.
       return new NextResponse(
-        JSON.stringify({ 
+        JSON.stringify({
           success: false,
-          error: `Failed to save document to database: ${saveError instanceof Error ? saveError.message : String(saveError)}` 
-        }), 
+          error: 'Failed to save document to database'
+        }),
         { status: 500, headers }
       );
     }
@@ -354,13 +403,18 @@ export async function POST(request: NextRequest) {
       log.error('[Upload API] Step failed: Chunking/Saving Chunks', chunkError);
       log.error('Error processing or saving chunks:', chunkError);
       timer({ status: "error", reason: "chunk_processing_error" });
-      // Attempt to clean up the document record if chunk saving fails?
-      // await deleteDocumentById({ id: document.id }); // Optional cleanup
+      // REV-COR-214: both the documents row and the S3 object are now orphaned
+      // (the row exists but has no/partial chunks, so it would appear in the user's
+      // list yet return nothing on retrieval). Roll both back — document row first,
+      // then the S3 object.
+      await cleanupOrphanedDocument(document.id);
+      await cleanupOrphanedS3(s3Key);
+      // REV-COR-208: never echo raw exception detail to the client.
       return new NextResponse(
-        JSON.stringify({ 
+        JSON.stringify({
           success: false,
-          error: `Failed to process or save document chunks: ${chunkError instanceof Error ? chunkError.message : String(chunkError)}` 
-        }), 
+          error: 'Failed to process or save document chunks'
+        }),
         { status: 500, headers }
       );
     }
@@ -393,10 +447,11 @@ export async function POST(request: NextRequest) {
     timer({ status: "error" });
     log.error('[Upload API] General Error in POST handler (Restore Step 1):', error);
     log.error('Detailed Error:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
+    // REV-COR-208: never echo raw exception detail to the client.
     return new NextResponse(
-      JSON.stringify({ 
-        success: false, 
-        error: error instanceof Error ? error.message : 'Failed during restore step 1' 
+      JSON.stringify({
+        success: false,
+        error: 'Failed to upload document'
       }),
       { status: 500, headers }
     );

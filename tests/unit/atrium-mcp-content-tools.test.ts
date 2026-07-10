@@ -2,10 +2,12 @@
  * Registry-parity tests for the Atrium content MCP tools (Issue #1055, §24).
  *
  * Guards the wiring invariants that a typo would otherwise leak to runtime: every
- * content tool is listed, scoped, and has a handler; the set is exactly the ten
- * atomic primitives (no generate_and_publish); publish maps to publish_internal
- * (the gate, not the scope, blocks public). The set includes the Phase 8 OKF
- * interoperability tools (export_okf / import_okf, #1103).
+ * content tool is listed, scoped, and has a handler; the set is exactly the eleven
+ * atomic primitives (no generate_and_publish); publish AND unpublish map to
+ * publish_internal (the §26.4 gate, not the scope, blocks public in both
+ * directions). The set includes the Phase 8 OKF interoperability tools
+ * (export_okf / import_okf, #1103) and unpublish_content (REST-DELETE parity,
+ * Epic #1059 completion).
  */
 
 // The handlers module imports the content barrel, which transitively pulls the
@@ -21,6 +23,7 @@ jest.mock("@/lib/content/render/html-sanitize", () => ({
 
 import { CONTENT_MCP_TOOLS, CONTENT_TOOL_SCOPE_MAP } from "@/lib/mcp/content-tools";
 import { CONTENT_TOOL_HANDLERS } from "@/lib/mcp/content-tool-handlers";
+import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest";
 
 const EXPECTED = [
   "create_document",
@@ -31,12 +34,13 @@ const EXPECTED = [
   "create_version",
   "set_visibility",
   "publish_content",
+  "unpublish_content",
   "export_okf",
   "import_okf",
 ] as const;
 
 describe("Atrium MCP content tools registry", () => {
-  it("exposes exactly the ten atomic primitives (no generate_and_publish)", () => {
+  it("exposes exactly the eleven atomic primitives (no generate_and_publish)", () => {
     const names = CONTENT_MCP_TOOLS.map((t) => t.name).sort();
     expect(names).toEqual([...EXPECTED].sort());
     expect(names).not.toContain("generate_and_publish");
@@ -49,6 +53,14 @@ describe("Atrium MCP content tools registry", () => {
     }
   });
 
+  it("keeps the unified catalog's requiredScopes in sync with CONTENT_TOOL_SCOPE_MAP (drift guard — the catalog is the live enforcement point, epic #922 audit)", () => {
+    for (const name of EXPECTED) {
+      const entry = TOOL_MANIFEST.find((t) => t.name === name);
+      expect(entry).toBeDefined();
+      expect(entry!.requiredScopes).toEqual([CONTENT_TOOL_SCOPE_MAP[name]]);
+    }
+  });
+
   it("scopes reads to content:read, mutations to create/update, publish to publish_internal", () => {
     expect(CONTENT_TOOL_SCOPE_MAP.get_content).toBe("content:read");
     expect(CONTENT_TOOL_SCOPE_MAP.list_content).toBe("content:read");
@@ -58,8 +70,11 @@ describe("Atrium MCP content tools registry", () => {
     expect(CONTENT_TOOL_SCOPE_MAP.create_version).toBe("content:update");
     expect(CONTENT_TOOL_SCOPE_MAP.set_visibility).toBe("content:update");
     // Public publishing is gated in publishService (§26.4), NOT by a separate
-    // tool scope — the tool requires only the internal-publish scope.
+    // tool scope — the tool requires only the internal-publish scope. Unpublish
+    // shares the model: taking down a public destination is gated inside
+    // publishService.unpublish, not by a distinct scope.
     expect(CONTENT_TOOL_SCOPE_MAP.publish_content).toBe("content:publish_internal");
+    expect(CONTENT_TOOL_SCOPE_MAP.unpublish_content).toBe("content:publish_internal");
     // OKF export is a read/serialization (the §26.4 public-bundle gate is enforced
     // in okfExportService, not by a distinct tool scope); import creates content.
     expect(CONTENT_TOOL_SCOPE_MAP.export_okf).toBe("content:read");
@@ -71,5 +86,26 @@ describe("Atrium MCP content tools registry", () => {
       expect(tool.inputSchema.type).toBe("object");
       expect(tool.description.length).toBeGreaterThan(0);
     }
+  });
+
+  it("unpublish_content mirrors the REST DELETE destination set (no okf)", () => {
+    const tool = CONTENT_MCP_TOOLS.find((t) => t.name === "unpublish_content");
+    expect(tool).toBeDefined();
+    // An okf publication is a serialized S3 bundle with no live surface to take
+    // down — the REST DELETE route rejects it, so the tool enum must not offer it.
+    expect(tool?.inputSchema.properties.destination?.enum).toEqual([
+      "intranet",
+      "public_web",
+      "schoology",
+      "google",
+    ]);
+    expect(tool?.inputSchema.required).toEqual(["id", "destination"]);
+  });
+
+  it("list_content exposes the optional title-search `query` property", () => {
+    const tool = CONTENT_MCP_TOOLS.find((t) => t.name === "list_content");
+    expect(tool?.inputSchema.properties.query?.type).toBe("string");
+    // Optional: `query` must not be in required.
+    expect(tool?.inputSchema.required ?? []).not.toContain("query");
   });
 });
