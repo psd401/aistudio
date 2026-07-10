@@ -20,7 +20,7 @@ import { users, userRoles, roles } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { promptUsageEvents } from "@/lib/db/schema/tables/prompt-usage-events"
 import { getDateThreshold } from "@/lib/date-utils"
-import { deleteAllWorkspaceSecrets } from "@/lib/agent-workspace/secrets-manager"
+import { deleteAllWorkspaceSecrets, deleteCanvaSecret } from "@/lib/agent-workspace/secrets-manager"
 
 // Constants
 const ACTIVE_USER_THRESHOLD_DAYS = 30 // Users who signed in within this many days are considered "active"
@@ -685,6 +685,17 @@ export async function deleteUser(userId: number): Promise<ActionState<void>> {
         })
       } catch (err) {
         log.warn("Workspace secret cleanup failed (orphan secret may remain)", {
+          userId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+      // Canva refresh token lives in its own per-user slot (…/user/{email}/canva).
+      // Purge it independently so a removed account leaves no orphan OAuth token.
+      try {
+        const canvaRemoved = await deleteCanvaSecret(userToDeleteEmail.email)
+        log.info("Canva secret cleanup after user deletion", { userId, canvaRemoved })
+      } catch (err) {
+        log.warn("Canva secret cleanup failed (orphan secret may remain)", {
           userId,
           error: err instanceof Error ? err.message : String(err),
         })
