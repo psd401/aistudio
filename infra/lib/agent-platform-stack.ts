@@ -1317,6 +1317,15 @@ export class AgentPlatformStack extends cdk.Stack {
       PSD_DATA_MCP_URL:
         (this.node.tryGetContext('psdDataMcpUrl') as string | undefined)
         ?? 'https://l3jpggwgsojgql275k6axcboue0syeuq.lambda-url.us-west-2.on.aws/mcp',
+      // AI Studio's own MCP endpoint (Issue #1100) — the psd-aistudio skill POSTs
+      // JSON-RPC here to read the live capability catalog (describe_capabilities).
+      // Derived from APP_BASE_URL so it always tracks the deployed web app;
+      // overridable via `-c aistudioMcpUrl=…` for a split/edge deployment.
+      AISTUDIO_MCP_URL:
+        (this.node.tryGetContext('aistudioMcpUrl') as string | undefined)
+        ?? (props.appBaseUrl
+          ? `${props.appBaseUrl.replace(/\/+$/, '')}/api/mcp`
+          : ''),
       AUTH_COGNITO_USER_POOL_ID: cdk.Fn.importValue(
         `${environment}-CognitoUserPoolId`,
       ),

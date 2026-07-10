@@ -26,12 +26,18 @@ import { listAccessibleAssistants } from "@/lib/api/assistant-service"
 import { isAdminByUserId } from "@/lib/api/route-helpers"
 import { AGENT_TOOL_HANDLERS } from "@/lib/agents/agent-tools"
 import { CONTENT_TOOL_HANDLERS } from "./content-tool-handlers"
+import {
+  buildCapabilityCatalog,
+  type CapabilityCatalogSection,
+} from "@/lib/capabilities/capability-catalog"
+import type { ToolSurface } from "@/lib/tools/catalog/types"
 
 // ============================================
 // Handler Map
 // ============================================
 
 export const TOOL_HANDLERS: Record<string, McpToolHandler> = {
+  describe_capabilities: handleDescribeCapabilities,
   search_decisions: handleSearchDecisions,
   capture_decision: handleCaptureDecision,
   execute_assistant: handleExecuteAssistant,
@@ -45,6 +51,60 @@ export const TOOL_HANDLERS: Record<string, McpToolHandler> = {
   // Atrium content tools (Phase 5, Issue #1055): create/get/list/update/version/
   // visibility/publish over the §11–§15 services.
   ...CONTENT_TOOL_HANDLERS,
+}
+
+// ============================================
+// describe_capabilities (Issue #1100)
+// ============================================
+
+const CATALOG_SECTIONS: readonly CapabilityCatalogSection[] = [
+  "actions",
+  "features",
+  "scopes",
+  "all",
+]
+const CATALOG_SURFACES: readonly ToolSurface[] = [
+  "mcp",
+  "ai_sdk",
+  "rest",
+  "internal",
+]
+
+/**
+ * Live projection of AI Studio's own registries (Issue #1100). Reads the
+ * capability builder ON EVERY CALL so the result always reflects the deployed
+ * code — the freshness guarantee. Pure/read-only: no auth beyond the
+ * `platform:read` scope the catalog already enforced before dispatch. Unknown
+ * `section`/`surface` values are ignored (fall back to the builder defaults)
+ * rather than erroring, so a slightly-off client argument still returns a useful
+ * catalog.
+ */
+async function handleDescribeCapabilities(
+  args: Record<string, unknown>,
+): Promise<McpToolResult> {
+  // Defensive: the MCP dispatcher always passes a sanitized object, but guard
+  // against a null/undefined args from any future internal caller.
+  const safeArgs = args ?? {}
+  const section =
+    typeof safeArgs.section === "string" &&
+    CATALOG_SECTIONS.includes(safeArgs.section as CapabilityCatalogSection)
+      ? (safeArgs.section as CapabilityCatalogSection)
+      : undefined
+  const surface =
+    typeof safeArgs.surface === "string" &&
+    CATALOG_SURFACES.includes(safeArgs.surface as ToolSurface)
+      ? (safeArgs.surface as ToolSurface)
+      : undefined
+  const query =
+    typeof safeArgs.query === "string" && safeArgs.query.trim().length > 0
+      ? safeArgs.query
+      : undefined
+
+  const catalog = buildCapabilityCatalog({ section, surface, query })
+
+  return {
+    content: [{ type: "text", text: JSON.stringify(catalog) }],
+  }
 }
 
 // ============================================

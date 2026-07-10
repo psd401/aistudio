@@ -81,6 +81,16 @@ interface McpCatalogMapping {
 }
 
 const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
+  // Platform capability catalog meta-tool (Issue #1100). Read-only projection of
+  // AI Studio's own registries. Gated by the low, broadly-granted `platform:read`
+  // scope so any authenticated caller (student/staff/administrator, and the
+  // scoped agent) can discover current capabilities. Non-destructive. Exposed on
+  // the `internal` surface too so an in-process agent loop can also read it.
+  describe_capabilities: {
+    identifier: "platform.describe_capabilities",
+    requiredScope: "platform:read",
+    internalScopes: ["platform:read"],
+  },
   search_decisions: {
     identifier: "decisions.search",
     requiredScope: "mcp:search_decisions",

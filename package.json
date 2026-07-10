@@ -51,6 +51,8 @@
     "migration:list": "tsx scripts/drizzle-helpers/list-migrations.ts",
     "openapi:generate": "bun scripts/openapi/generate-from-catalog.ts",
     "openapi:check": "bun scripts/openapi/generate-from-catalog.ts --check",
+    "capabilities:generate": "bun scripts/capabilities/generate-catalog.ts",
+    "capabilities:check": "bun scripts/capabilities/generate-catalog.ts --check",
     "db:up": "docker compose -f docker-compose.dev.yml up -d postgres",
     "db:down": "docker compose -f docker-compose.dev.yml down",
     "db:reset": "docker compose -f docker-compose.dev.yml down -v && docker compose -f docker-compose.dev.yml up -d postgres",

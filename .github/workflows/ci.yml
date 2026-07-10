@@ -38,6 +38,9 @@ jobs:
     - name: Check generated tool-catalog OpenAPI is in sync
       run: bun run openapi:check
 
+    - name: Check generated capability catalog is in sync
+      run: bun run capabilities:check
+
     - name: Run tests
       run: bun run test:ci
       env:
