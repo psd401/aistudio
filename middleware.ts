@@ -34,6 +34,13 @@ const PUBLIC_PATHS = [
   // this single entry covers both /agent-connect-canva and …/callback while NOT
   // matching the separate /agent-connect exact route.
   "/agent-connect-canva",
+  // Sibling consent flows with the identical token-authenticated pattern.
+  // These entries were missing when Plaud (#1097) and the Cognito data-consent
+  // page shipped: `/agent-connect` only prefix-matches `/agent-connect/...`,
+  // so a session-less first visit to these suffixed routes bounced through
+  // sign-in before ever reaching the consent page (found during #1176 review).
+  "/agent-connect-plaud",
+  "/agent-connect-data",
   // Atrium public reader (#1057): /p/[slug] is the anonymous public_web reader
   // route (spec §20). It is world-readable by design — the page itself gates
   // strictly on visibility_level='public' + a live public_web publication and

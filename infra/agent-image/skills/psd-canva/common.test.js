@@ -22,7 +22,7 @@ process.env.ENVIRONMENT = 'dev';
 
 const { test, expect, beforeEach, afterEach, mock } = require('bun:test');
 
-const { secretsStore } = require('./test-support');
+const { secretsStore, smFailures } = require('./test-support');
 const common = require('./common');
 
 const EMAIL = 'teacher@psd401.net';
@@ -43,6 +43,7 @@ beforeEach(() => {
   for (const key of Object.keys(secretsStore)) delete secretsStore[key];
   secretsStore[CANVA_OAUTH_SECRET_ID] = { client_id: 'cid-123', client_secret: 'csecret-xyz' };
   secretsStore[INTERNAL_API_KEY_SECRET_ID] = 'internal-api-key';
+  smFailures.put = null;
   originalFetch = globalThis.fetch;
 });
 
@@ -113,6 +114,24 @@ test('authorizeUser writes the rotated refresh token back to Secrets Manager', a
   expect(accessToken).toBe('access-tok');
   // The stored refresh token must have been replaced with the rotated one.
   expect(secretsStore[CANVA_TOKEN_SECRET_ID].refresh_token).toBe('rotated-rt');
+});
+
+test('authorizeUser survives a failed rotated-token write-back (non-fatal)', async () => {
+  secretsStore[CANVA_TOKEN_SECRET_ID] = { refresh_token: 'stored-rt', obtained_at: '2026-01-01T00:00:00Z' };
+  smFailures.put = new Error('SM throttled');
+  globalThis.fetch = mock(async (url) => {
+    if (String(url).includes('/rest/v1/oauth/token')) {
+      return jsonResponse({ access_token: 'access-tok', refresh_token: 'rotated-rt', expires_in: 14400 });
+    }
+    throw new Error(`Unexpected fetch to ${url}`);
+  });
+
+  // The write-back failure must not discard the access token already in hand;
+  // the old refresh token is dead at Canva either way, so the next call
+  // surfaces needs-auth cleanly.
+  const accessToken = await common.authorizeUser(EMAIL);
+  expect(accessToken).toBe('access-tok');
+  expect(secretsStore[CANVA_TOKEN_SECRET_ID].refresh_token).toBe('stored-rt');
 });
 
 test('canvaFetch retries a 429 then succeeds', async () => {

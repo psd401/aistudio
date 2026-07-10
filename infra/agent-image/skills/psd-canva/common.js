@@ -151,11 +151,18 @@ async function getCanvaClientCreds() {
  */
 async function updateStoredRefreshToken(email, record, newRefreshToken) {
   if (!newRefreshToken || newRefreshToken === record.refresh_token) return;
-  const next = { ...record, refresh_token: newRefreshToken, obtained_at: new Date().toISOString() };
-  await smClient.send(new PutSecretValueCommand({
-    SecretId: canvaTokenSecretId(email),
-    SecretString: JSON.stringify(next),
-  }));
+  try {
+    const next = { ...record, refresh_token: newRefreshToken, obtained_at: new Date().toISOString() };
+    await smClient.send(new PutSecretValueCommand({
+      SecretId: canvaTokenSecretId(email),
+      SecretString: JSON.stringify(next),
+    }));
+  } catch (err) {
+    // Non-fatal: the access token in hand is still valid for this call, and
+    // the old refresh token is already dead at Canva either way — the next
+    // call surfaces a clean needs-auth instead of this turn's result dying.
+    process.stderr.write(`psd-canva: refresh-token rotation write failed (continuing): ${err.message}\n`);
+  }
 }
 
 /**

@@ -25,6 +25,10 @@ class FakePutSecretValueCommand {
 
 const secretsStore = {};
 
+// Set `smFailures.put` to an Error to make the next PutSecretValueCommand
+// throw it (auto-clears after one throw).
+const smFailures = { put: null };
+
 class FakeSecretsManagerClient {
   async send(command) {
     if (command instanceof FakeGetSecretValueCommand) {
@@ -37,6 +41,11 @@ class FakeSecretsManagerClient {
       return { SecretString: typeof value === 'string' ? value : JSON.stringify(value) };
     }
     if (command instanceof FakePutSecretValueCommand) {
+      if (smFailures.put) {
+        const err = smFailures.put;
+        smFailures.put = null;
+        throw err;
+      }
       secretsStore[command.input.SecretId] = JSON.parse(command.input.SecretString);
       return {};
     }
@@ -50,4 +59,4 @@ mock.module('@aws-sdk/client-secrets-manager', () => ({
   PutSecretValueCommand: FakePutSecretValueCommand,
 }));
 
-module.exports = { secretsStore };
+module.exports = { secretsStore, smFailures };

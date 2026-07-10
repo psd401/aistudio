@@ -69,10 +69,10 @@ async function getCanvaClientCreds(
     if (
       typeof clientId === "string" &&
       clientId &&
-      clientId !== "PLACEHOLDER" &&
+      !clientId.startsWith("PLACEHOLDER") &&
       typeof clientSecret === "string" &&
       clientSecret &&
-      clientSecret !== "PLACEHOLDER"
+      !clientSecret.startsWith("PLACEHOLDER")
     ) {
       return { client_id: clientId, client_secret: clientSecret }
     }
