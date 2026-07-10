@@ -1,15 +1,30 @@
 module.exports = {
-  testEnvironment: 'node',
-  // document-processor-v2 ships its own __tests__ dirs (chunkText, html-sanitizer,
-  // lambda-logger, office-processor, handler) that were previously invisible to any
-  // Jest run — `roots` scopes test *discovery* itself, not just filtering, so listing
-  // only `test` here made every lambda test file dead weight with zero CI signal.
-  // Scoped to this lambda (not all of infra/lambdas) to avoid pulling in sibling
-  // lambda test suites (agent-triage-poll, agent-router) that this change hasn't
-  // verified against this config.
-  roots: ['<rootDir>/test', '<rootDir>/lambdas/document-processor-v2'],
-  testMatch: ['**/*.test.ts'],
-  transform: {
-    '^.+\\.tsx?$': 'ts-jest'
-  }
+  projects: [
+    {
+      displayName: 'infra',
+      testEnvironment: 'node',
+      roots: ['<rootDir>/test'],
+      testMatch: ['**/*.test.ts'],
+      transform: {
+        '^.+\\.tsx?$': 'ts-jest'
+      }
+    },
+    {
+      displayName: 'lambdas',
+      testEnvironment: 'node',
+      roots: ['<rootDir>/lambdas'],
+      testMatch: ['**/__tests__/**/*.test.ts'],
+      // agent-skill-builder's suite imports `bun:test` and runs under
+      // `bun test`, not jest.
+      testPathIgnorePatterns: ['<rootDir>/lambdas/agent-skill-builder/'],
+      transform: {
+        '^.+\\.tsx?$': [
+          'ts-jest',
+          {
+            tsconfig: '<rootDir>/lambdas/tsconfig.test.json'
+          }
+        ]
+      }
+    }
+  ]
 };
