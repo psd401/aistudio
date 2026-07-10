@@ -1,0 +1,7 @@
+{
+  "name": "psd-aistudio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenClaw skill: live AI Studio capability catalog via the describe_capabilities MCP meta-tool on /api/mcp. Read-only, authenticated with a scoped platform:read sk- key. @aws-sdk/client-secrets-manager (only for the secret-id auth path) is resolved at runtime via psd-workspace's node_modules — no image dependency of its own.",
+  "main": "run.js"
+}
