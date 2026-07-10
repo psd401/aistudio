@@ -12,7 +12,9 @@ or simply:
     python3 -m unittest test_last30days   (from this directory)
 """
 
+import contextlib
 import datetime as dt
+import io
 import json
 import os
 import sys
@@ -22,6 +24,16 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
 
 import last30days  # noqa: E402
+
+
+def _run_main(argv):
+    """Run main(argv) with gather() stubbed (no network) and capture stdout JSON."""
+    empty = {name: [] for name in last30days.ALL_SOURCES}
+    buf = io.StringIO()
+    with mock.patch.object(last30days, "gather", return_value=(empty, [])):
+        with contextlib.redirect_stdout(buf):
+            last30days.main(argv)
+    return json.loads(buf.getvalue())
 
 
 def _cfg(argv):
@@ -234,6 +246,43 @@ class RenderTests(unittest.TestCase):
         self.assertIn("benchmark", terms)   # appears 3x across titles
         self.assertNotIn("model", terms)    # topic word excluded
         self.assertNotIn("the", terms)      # stopword excluded
+
+
+class MainOutputTests(unittest.TestCase):
+    def test_md_mode_emits_brief_and_no_url(self):
+        out = _run_main(["--topic", "kubernetes"])
+        self.assertEqual(out["status"], "ok")
+        self.assertIn("brief_markdown", out)
+        self.assertNotIn("url", out)
+        self.assertEqual(out["total_items"], 0)
+
+    def test_both_degrades_to_md_when_upload_fails(self):
+        err = last30days.UploadError("misconfigured", "no bucket")
+        with mock.patch.object(last30days, "upload_html", side_effect=err):
+            out = _run_main(["--topic", "x", "--format", "both", "--user", "a@psd401.net"])
+        # The already-computed Markdown is still delivered; the failure is a warning.
+        self.assertEqual(out["status"], "ok")
+        self.assertIn("brief_markdown", out)
+        self.assertNotIn("url", out)
+        self.assertTrue(any("HTML artifact upload failed" in w for w in out["warnings"]))
+
+    def test_html_only_fails_hard_when_upload_fails(self):
+        err = last30days.UploadError("misconfigured", "no bucket")
+        empty = {name: [] for name in last30days.ALL_SOURCES}
+        with mock.patch.object(last30days, "gather", return_value=(empty, [])):
+            with mock.patch.object(last30days, "upload_html", side_effect=err):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        last30days.main(["--topic", "x", "--format", "html", "--user", "a@psd401.net"])
+
+    def test_html_mode_emits_url_from_successful_upload(self):
+        with mock.patch.object(last30days, "upload_html",
+                               return_value=("https://b.s3.us-east-1.amazonaws.com/public-images/a@psd401.net/u.html",
+                                             "public-images/a@psd401.net/u.html")):
+            out = _run_main(["--topic", "x", "--format", "html", "--user", "a@psd401.net"])
+        self.assertEqual(out["sharing"], "public-by-link")
+        self.assertTrue(out["url"].endswith("u.html"))
+        self.assertNotIn("brief_markdown", out)
 
 
 if __name__ == "__main__":

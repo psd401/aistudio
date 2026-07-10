@@ -665,15 +665,27 @@ def render_html(query, days, since, generated, results, warnings):
     return "\n".join(parts)
 
 
+class UploadError(Exception):
+    """Raised when the HTML artifact cannot be uploaded; carries an error code so
+    the caller can decide whether to fail (html-only) or degrade (both -> md)."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 def upload_html(html_text, user_email):
+    """Upload the rendered HTML to S3 public-by-link and return (url, key).
+    Raises UploadError so the caller controls fail-vs-degrade per format."""
     bucket = os.environ.get("WORKSPACE_BUCKET")
     if not bucket:
-        _fail("WORKSPACE_BUCKET env var not set — cannot upload HTML artifact", "misconfigured")
+        raise UploadError("misconfigured", "WORKSPACE_BUCKET env var not set — cannot upload HTML artifact")
     region = os.environ.get("AWS_REGION", "us-east-1")
     try:
         import boto3  # baked into the container venv
     except ImportError:
-        _fail("boto3 not available in the runtime — cannot upload HTML artifact", "misconfigured")
+        raise UploadError("misconfigured", "boto3 not available in the runtime — cannot upload HTML artifact")
     key = f"public-images/{user_email}/{uuid.uuid4()}.html"
     try:
         s3 = boto3.client("s3", region_name=region)
@@ -685,7 +697,7 @@ def upload_html(html_text, user_email):
             Metadata={"generated_by": "psd-last30days"},
         )
     except Exception as exc:  # noqa: BLE001 — botocore ClientError, network failure, etc.
-        _fail(f"failed to upload HTML artifact to S3: {exc}", "upstream_error")
+        raise UploadError("upstream_error", f"failed to upload HTML artifact to S3: {exc}")
     encoded_key = "/".join(urllib.parse.quote(seg) for seg in key.split("/"))
     url = f"https://{bucket}.s3.{region}.amazonaws.com/{encoded_key}"
     return url, key
@@ -783,10 +795,18 @@ def main(argv=None):
         out["brief_markdown"] = brief_md
     if cfg["fmt"] in ("html", "both"):
         html_text = render_html(cfg["topic"], cfg["days"], since, generated, results, warnings)
-        url, key = upload_html(html_text, cfg["user"])
-        out["url"] = url
-        out["s3Key"] = key
-        out["sharing"] = "public-by-link"
+        try:
+            url, key = upload_html(html_text, cfg["user"])
+            out["url"] = url
+            out["s3Key"] = key
+            out["sharing"] = "public-by-link"
+        except UploadError as exc:
+            # html-only: nothing else to deliver, so fail loudly. both: the
+            # Markdown brief is already computed, so degrade to it with a warning
+            # rather than throwing away the work the user also asked for.
+            if cfg["fmt"] == "html":
+                _fail(exc.message, exc.code)
+            out["warnings"].append(f"HTML artifact upload failed ({exc.code}): {exc.message}")
 
     _emit(out)
 

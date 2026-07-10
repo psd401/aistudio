@@ -137,9 +137,14 @@ Errors are a single JSON object `{ "status": "error", "error": "<code>", "messag
 
 - **`bad_args`** — missing `--topic`, an unknown `--source`, an over-long topic,
   or `--format html|both` without a valid `--user` email.
-- **`misconfigured`** — `--format html|both` requested but `WORKSPACE_BUCKET` is
-  unset or `boto3` is unavailable (S3 upload impossible).
-- **`upstream_error`** — the S3 upload of the HTML artifact failed.
+- **`misconfigured`** — `--format html` requested but `WORKSPACE_BUCKET` is unset
+  or `boto3` is unavailable (S3 upload impossible).
+- **`upstream_error`** — `--format html` requested but the S3 upload failed.
 
-Individual source failures are **not** fatal — they surface under `warnings` in a
-successful (`status: "ok"`) result, not as an error.
+Two kinds of failure are **not** fatal — they surface under `warnings` in a
+successful (`status: "ok"`) result, not as an error:
+- Any individual source failing or being rate-limited (the brief is built from
+  the sources that answered).
+- For **`--format both`**, an HTML-upload failure degrades to delivering just the
+  Markdown brief plus a `HTML artifact upload failed (...)` warning — only
+  `--format html` (with nothing else to return) fails hard.
