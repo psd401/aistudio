@@ -38,8 +38,31 @@ and observable behavior do not change. Bug fixes that do **not** change observab
 behavior are allowed within a version; anything that changes the contract requires
 a **new version** (a bump).
 
+This is **enforced at sync time** (epic #922 completion audit): if a manifest
+entry changes the input/output schema of an `(identifier, version)` that already
+exists in `tool_catalog`, the boot-time sync REFUSES the update for that entry,
+logs a structured error (`Tool version immutability violation`), and reports the
+key in the sync result's `schemaViolations`. The runtime keeps serving the
+published schema; the only way forward is a version bump.
+
 > Rule of thumb: if a consumer that worked against `v1` could break, it is a new
 > version, not an edit.
+
+### Version grammar
+
+Versions are `v1`, `v2`, ... — starting at `v1`, no leading zeros. `v0`, `v01`,
+and `v1.2` are rejected as malformed everywhere (`versionRank`, `parseToolRef`,
+the REST `versions/{n}` param), so a malformed pin can never half-match one
+validation layer and pass another.
+
+### Version-pinned dispatch
+
+`ToolCatalog.dispatch()` accepts `name@vN` addressing: a pinned call dispatches
+exactly that version (needed because `tools/list include:"all"` returns multiple
+versions sharing one wire name), and a pin to a removed/never-existed version
+fails with `unknown` rather than silently falling back to latest. Admin-disabled
+versions are masked from the REST metadata routes the same way `dispatch()`
+masks them: found-but-disabled reads as not-found.
 
 ### Adding a new version
 

@@ -85,8 +85,44 @@ export class SchedulerStack extends cdk.Stack {
     // PowerTuning Result (2025-10-24): 2048MB → 512MB (75% reduction)
     this.scheduleExecutorFunction = new lambda.Function(this, 'ScheduleExecutor', {
       runtime: lambda.Runtime.NODEJS_20_X,
-      handler: 'dist/index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambdas/schedule-executor')),
+      handler: 'index.handler',
+      // Bundle at synth time so the compiled entrypoint + production deps are always in
+      // the asset. The handler previously pointed at dist/index.handler, but nothing
+      // built dist/ (not committed, gitignored, absent from build-lambdas.sh), so a
+      // deploy without a manual `npm run build` died at init with ImportModuleError
+      // (REV-COR-421 / REV-INFRA-103). Mirrors embedding-generator's bundling.
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambdas/schedule-executor'), {
+        assetHashType: cdk.AssetHashType.SOURCE,
+        bundling: {
+          image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+          local: {
+            tryBundle(outputDir: string): boolean {
+              const { execSync } = require('child_process');
+              const inputDir = path.join(__dirname, '../lambdas/schedule-executor');
+              try {
+                execSync('npm install && npm run build', { cwd: inputDir, stdio: 'inherit' });
+                execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                execSync('npm install --omit=dev', { cwd: outputDir, stdio: 'inherit' });
+                return true;
+              } catch (e) {
+                process.stderr.write(`Local bundling failed, falling back to Docker: ${e}\n`);
+                return false;
+              }
+            },
+          },
+          command: [
+            'bash', '-c',
+            [
+              'npm install',
+              'npm run build',
+              'cp -r dist/* /asset-output/',
+              'cp package.json /asset-output/',
+              'cd /asset-output && npm install --omit=dev',
+            ].join(' && '),
+          ],
+        },
+      }),
       functionName: `aistudio-${props.environment}-schedule-executor`,
       timeout: cdk.Duration.minutes(15), // Full Lambda timeout for long-running Assistant Architect executions
       memorySize: 512, // Optimized via PowerTuning from 2GB

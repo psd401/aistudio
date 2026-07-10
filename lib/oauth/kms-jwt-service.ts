@@ -138,6 +138,16 @@ export class KmsJwtService {
     return jwk
   }
 
+  /**
+   * KMS private keys are non-exportable, so node-oidc-provider cannot sign with
+   * this key. Returns null; a production deployment that needs OIDC-issued JWT
+   * access tokens must supply an exportable signing key (see oidc-provider-config
+   * and the Phase 5 verification runbook).
+   */
+  async getSigningJwk(): Promise<Record<string, unknown> | null> {
+    return null
+  }
+
   getKid(): string {
     return this.kid
   }

@@ -21,6 +21,8 @@ export interface FrontendStackEcsProps extends cdk.StackProps {
   customSubdomain?: string;
   documentsBucketName?: string; // Optional for backward compatibility
   agentWorkspaceBucketName?: string; // Optional for backward compatibility (#925)
+  atriumSandboxOrigin?: string; // Optional; falls back to SSM (#1052)
+  atriumEventsTopicArn?: string; // Optional; SNS topic for content events (#1055)
   /**
    * If true, will look up existing VPC from database stack.
    * If false, will create a new VPC for ECS (not recommended - prefer VPC sharing)
@@ -71,6 +73,23 @@ export class FrontendStackEcs extends cdk.Stack {
     const agentWorkspaceBucketName = props.agentWorkspaceBucketName ||
       ssm.StringParameter.valueForStringParameter(
         this, `/aistudio/${environment}/agent-workspace-bucket-name`
+      );
+
+    // Atrium artifact sandbox origin (#1052) — prefer the cross-stack prop from
+    // AtriumSandboxStack; fall back to the SSM param it publishes, mirroring
+    // documentsBucketName above. Injected into the task as ATRIUM_SANDBOX_ORIGIN
+    // so the app never needs a hand-set or build-time origin value.
+    const atriumSandboxOrigin = props.atriumSandboxOrigin ||
+      ssm.StringParameter.valueForStringParameter(
+        this, `/aistudio/${environment}/atrium-sandbox-origin`
+      );
+
+    // Atrium content events SNS topic ARN (#1055) — prefer the cross-stack prop
+    // from AtriumEventsStack; fall back to the SSM param it publishes. Injected
+    // as ATRIUM_EVENTS_TOPIC_ARN; the app's events publisher no-ops if unset.
+    const atriumEventsTopicArn = props.atriumEventsTopicArn ||
+      ssm.StringParameter.valueForStringParameter(
+        this, `/aistudio/${environment}/atrium-events-topic-arn`
       );
 
     // ============================================================================
@@ -129,6 +148,29 @@ export class FrontendStackEcs extends cdk.Stack {
     });
 
     // ============================================================================
+    // Guardrail Violation-Log Hash Secret (Issue #727 / chat outage 2026-07-06)
+    // ============================================================================
+    // HMAC key for pseudonymizing session/user ids in guardrail-violation logs
+    // (lib/safety/bedrock-guardrails-service.ts hashValue). Without a configured
+    // secret the app REFUSES to hash and logs a fixed 'redacted' placeholder —
+    // private but uncorrelatable, so per-student violation triage needs this set.
+    // A missing secret briefly took down every Nexus chat request when the app
+    // treated it as a production startup error; the secret is now provisioned
+    // here so real per-session hashing works, and the app degrades gracefully if
+    // it ever goes missing again. Injected as GUARDRAIL_HASH_SECRET below.
+    const guardrailHashSecret = new secretsmanager.Secret(this, 'GuardrailHashSecret', {
+      secretName: `aistudio-${environment}-guardrail-hash-secret`,
+      description: 'HMAC key for pseudonymizing ids in guardrail violation logs',
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({}),
+        generateStringKey: 'GUARDRAIL_HASH_SECRET',
+        excludePunctuation: true,
+        passwordLength: 32,
+      },
+      removalPolicy: environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ============================================================================
     // MCP Token Encryption Key (AES-256-GCM DEK)
     // ============================================================================
     // Random 64-character alphanumeric password used as HKDF input key material.
@@ -160,6 +202,8 @@ export class FrontendStackEcs extends cdk.Stack {
       environment,
       documentsBucketName,
       agentWorkspaceBucketName,
+      atriumSandboxOrigin,
+      atriumEventsTopicArn,
       enableContainerInsights: true,
       enableFargateSpot: true, // Enable Fargate Spot for cost optimization
       spotRatio: environment === 'prod' ? 50 : 100, // 50% Spot in prod, 100% in dev
@@ -181,6 +225,8 @@ export class FrontendStackEcs extends cdk.Stack {
       internalApiSecretArn: internalApiSecret.secretArn,
       // Atrium collab token signing secret (#1051, created above)
       collabJwtSecretArn: collabJwtSecret.secretArn,
+      // Guardrail violation-log hash secret (#727, created above)
+      guardrailHashSecretArn: guardrailHashSecret.secretArn,
       // K-12 Content Safety: Guardrails resources from GuardrailsStack
       // These enable precise IAM scoping and DynamoDB access for PII tokenization
       guardrailArn: cdk.Fn.importValue(`${environment}-GuardrailArn`),

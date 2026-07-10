@@ -3,6 +3,9 @@
 import { hasCapabilityAccess } from "@/utils/roles"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
+// Pure cron logic lives in a non-"use server" module so it can be unit-tested
+// and so custom POSIX cron is converted to AWS EventBridge form (REV-COR-046/047).
+import { convertToCronExpression, validateCustomCronExpression } from "@/lib/schedules/cron"
 import { getServerSession } from "@/lib/auth/server-session"
 import { ActionState } from "@/types"
 // Note: cron-parser had import issues, using robust regex validation instead
@@ -262,75 +265,6 @@ function validateInputData(inputData: Record<string, unknown>): { isValid: boole
 }
 
 /**
- * Validates the individual fields of a custom cron expression.
- * Returns any validation errors found (empty array when valid).
- */
-function validateCustomCronExpression(cron: string): string[] {
-  const errors: string[] = []
-
-  // Comprehensive cron validation with strict input sanitization
-  const trimmedCron = cron.trim()
-
-  // First, ensure the cron string only contains allowed characters
-  // eslint-disable-next-line no-useless-escape
-  if (!/^[\d\s*,/\-]+$/.test(trimmedCron)) {
-    errors.push('Cron expression contains invalid characters')
-    return errors
-  }
-
-  const cronFields = trimmedCron.split(/\s+/)
-
-  // Validate exact field count first
-  if (cronFields.length !== 5) {
-    errors.push('cron expression must have exactly 5 fields (minute hour day month day-of-week)')
-    return errors
-  }
-
-  // Validate each field individually to prevent bypass attempts.
-  //
-  // Note: each field is split on commas and every part is regex-checked, so
-  // comma lists (e.g. "1,15,30") are accepted — AWS EventBridge supports them.
-  // This validation is intentionally permissive about combining list parts with
-  // step values (e.g. "*/2,*/3"): such corner cases pass here but EventBridge is
-  // the final authority and will reject anything it does not accept at
-  // create/update time. We do not attempt to fully replicate EventBridge's cron
-  // grammar; we only block obviously malformed input and ReDoS vectors.
-  const [minute, hour, day, month, dayOfWeek] = cronFields
-
-  // Validate minute field (0-59) - supports comma-separated lists, ReDoS-safe
-  const minuteRegex = /^\*$|^[0-5]?\d$|^[0-5]?\d-[0-5]?\d$|^[0-5]?\d\/\d+$|^\*\/\d+$/
-  if (minute.split(',').some(p => !minuteRegex.test(p))) {
-    errors.push('Invalid minute field in cron expression')
-  }
-
-  // Validate hour field (0-23) - supports comma-separated lists, ReDoS-safe
-  const hourRegex = /^\*$|^(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])-(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])\/\d+$|^\*\/\d+$/
-  if (hour.split(',').some(p => !hourRegex.test(p))) {
-    errors.push('Invalid hour field in cron expression')
-  }
-
-  // Validate day field (1-31) - supports comma-separated lists, ReDoS-safe
-  const dayRegex = /^\*$|^(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])-(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])\/\d+$|^\*\/\d+$/
-  if (day.split(',').some(p => !dayRegex.test(p))) {
-    errors.push('Invalid day field in cron expression')
-  }
-
-  // Validate month field (1-12) - supports comma-separated lists, ReDoS-safe
-  const monthRegex = /^\*$|^(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])-(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])\/\d+$|^\*\/\d+$/
-  if (month.split(',').some(p => !monthRegex.test(p))) {
-    errors.push('Invalid month field in cron expression')
-  }
-
-  // Validate day-of-week field (0-6) - supports comma-separated lists, ReDoS-safe
-  const dayOfWeekRegex = /^\*$|^[0-6]$|^[0-6]-[0-6]$|^[0-6]\/\d+$|^\*\/\d+$/
-  if (dayOfWeek.split(',').some(p => !dayOfWeekRegex.test(p))) {
-    errors.push('Invalid day-of-week field in cron expression')
-  }
-
-  return errors
-}
-
-/**
  * Validates frequency-specific schedule configuration fields.
  * Returns any validation errors found (empty array when valid).
  */
@@ -388,40 +322,9 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
   return { isValid: errors.length === 0, errors }
 }
 
-/**
- * Converts schedule configuration to cron expression for EventBridge
- */
-function convertToCronExpression(scheduleConfig: ScheduleConfig): string {
-  const { frequency, time, daysOfWeek, dayOfMonth, cron } = scheduleConfig
-
-  if (frequency === 'custom' && cron) {
-    return cron
-  }
-
-  const [hours, minutes] = time.split(':').map(Number)
-
-  switch (frequency) {
-    case 'daily':
-      return `${minutes} ${hours} * * ? *`
-
-    case 'weekly': {
-      if (!daysOfWeek || daysOfWeek.length === 0) {
-        throw ErrorFactories.validationFailed([{ field: 'daysOfWeek', message: 'Days of week required for weekly schedules' }])
-      }
-      // Convert from 0=Sunday to 1=Sunday for cron
-      const cronDays = daysOfWeek.map(day => day === 0 ? 7 : day).join(',')
-      return `${minutes} ${hours} ? * ${cronDays} *`
-    }
-
-    case 'monthly': {
-      const day = dayOfMonth || 1
-      return `${minutes} ${hours} ${day} * ? *`
-    }
-
-    default:
-      throw ErrorFactories.validationFailed([{ field: 'frequency', message: `Unsupported frequency: ${frequency}`, value: frequency }])
-  }
-}
+// convertToCronExpression + validateCustomCronExpression are imported from
+// @/lib/schedules/cron (see import at top) — extracted so the pure logic is
+// unit-testable and so custom POSIX cron is converted to AWS EventBridge form.
 
 /**
  * Options for creating an EventBridge schedule

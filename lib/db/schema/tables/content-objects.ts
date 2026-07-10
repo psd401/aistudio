@@ -59,6 +59,9 @@ export type SourceRef =
   | { type: "upload"; uploadId: string; filename: string }
   | { type: "object"; objectId: string }
   | { type: "chat"; conversationId: string }
+  // OKF import provenance (Phase 8, §36.3): the object was created from an
+  // imported Open Knowledge Format bundle. `generator` records the producer id.
+  | { type: "okf"; generator: string }
   | { type: "none" };
 
 export const contentObjects = pgTable(

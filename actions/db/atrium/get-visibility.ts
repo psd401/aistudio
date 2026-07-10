@@ -1,0 +1,110 @@
+"use server"
+
+/**
+ * Atrium get-visibility server action
+ *
+ * Issue #1053 (Epic #1059, Atrium Phase 3). Loads an object's current visibility
+ * level + group grants so the visibility editor (VisibilityChip) can populate
+ * its level picker and grant builder. Read-gated by `canView` (mask existence →
+ * NotFound) — a caller who cannot view the object cannot enumerate its grants.
+ *
+ * See docs/features/atrium-design-spec.md §12.
+ */
+
+import {
+  createLogger,
+  generateRequestId,
+  sanitizeForLogging,
+  startTimer,
+} from "@/lib/logger";
+import { createSuccess, handleError } from "@/lib/error-utils";
+import { contentService } from "@/lib/content/content-service";
+import { visibilityService } from "@/lib/content/visibility-service";
+import { canEdit } from "@/lib/content/helpers";
+import { hasCapabilityAccess } from "@/utils/roles";
+import { NotFoundError } from "@/lib/content/errors";
+import type { VisibilityGrant, VisibilityLevel } from "@/lib/content/types";
+import type { ActionState } from "@/types";
+import { getServerSession } from "@/lib/auth/server-session";
+import { getOptionalRequester } from "./requester";
+
+export interface VisibilityState {
+  visibilityLevel: VisibilityLevel;
+  grants: VisibilityGrant[];
+  /** Whether the current requester may change the visibility (owner/admin). */
+  canEdit: boolean;
+}
+
+export async function getVisibilityAction(
+  idOrSlug: string
+): Promise<ActionState<VisibilityState>> {
+  const requestId = generateRequestId();
+  const timer = startTimer("getVisibilityAction");
+  const log = createLogger({ requestId, action: "getVisibilityAction" });
+
+  try {
+    log.info("Action started: get visibility", {
+      idOrSlug: sanitizeForLogging(idOrSlug),
+    });
+
+    // Resolve the session ONCE and thread it to both the requester build and the
+    // capability check below, so a token refresh mid-action can't make the two
+    // observe different sessions (matching set-visibility / list-grant-options).
+    const session = await getServerSession();
+    const requester = await getOptionalRequester(requestId, session);
+    const obj = await contentService.loadByIdOrSlug(idOrSlug);
+    if (!obj) throw new NotFoundError("Content not found", { idOrSlug });
+
+    // Mask existence: a non-viewable object 404s rather than revealing its grants.
+    const viewable = await visibilityService.canView(requester, {
+      id: obj.id,
+      ownerUserId: obj.ownerUserId,
+      visibilityLevel: obj.visibilityLevel,
+    });
+    if (!viewable) throw new NotFoundError("Content not found", { idOrSlug });
+
+    // The edit gate must match `setVisibilityAction`'s gate exactly, or the chip
+    // shows a live Save button to an owner who lacks the `atrium-content`
+    // capability and every save then fails with an opaque authz error. The write
+    // action requires BOTH owner/admin (assertCanEdit) AND the capability, so AND
+    // them here too. Only run the (cheap) capability check when the owner/admin
+    // check already passed — a non-owner is read-only regardless.
+    const editable =
+      canEdit(requester, obj.ownerUserId) &&
+      !!session?.sub &&
+      (await hasCapabilityAccess("atrium-content", session.sub));
+
+    // Return the grant list ONLY to an editor (owner/admin). The grant set names
+    // every principal explicitly granted access — including the numeric users.id of
+    // each `user` grant — which the owner never intended to expose to grantees. A
+    // non-editor who can view the object (e.g. via a single `user` grant) must not
+    // be able to enumerate everyone else's grants. They only need the level to
+    // render the read-only badge; the editor's grant builder is the sole consumer
+    // of this list (it is hidden for non-editors). Group grants are only meaningful
+    // for a `group` object; load them (cheap, indexed) so the editor can show the
+    // prior selection if the level was toggled away from group and back.
+    const grants = editable ? await visibilityService.grantsFor(obj.id) : [];
+
+    timer({ status: "success" });
+    log.info("Visibility loaded", {
+      objectId: obj.id,
+      visibilityLevel: obj.visibilityLevel,
+      grantCount: grants.length,
+    });
+    return createSuccess(
+      {
+        visibilityLevel: obj.visibilityLevel,
+        grants,
+        canEdit: editable,
+      },
+      "Visibility loaded"
+    );
+  } catch (error) {
+    timer({ status: "error" });
+    return handleError(error, "Failed to load visibility", {
+      context: "getVisibilityAction",
+      requestId,
+      operation: "getVisibilityAction",
+    });
+  }
+}

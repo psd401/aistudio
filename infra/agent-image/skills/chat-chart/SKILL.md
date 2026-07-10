@@ -1,7 +1,7 @@
 ---
 name: chat-chart
 summary: REQUIRED for any user request containing "chart", "graph", "plot", or "visualize" — renders inline bar/line/pie/scatter in Google Chat.
-description: Renders a chart from a small data payload and emits a PSD_AGENT_RICH_V1 envelope containing a cardsV2 entry with the chart as an inline image. The Router Lambda lifts the envelope into the Chat message so the user sees the chart in their DM. Two engines — QuickChart.io (fast, external) for clearly-public data, and local matplotlib (private, slower) for anything sensitive. Default engine picks `local` if `--sensitive` is set OR if the data trips an inline PII regex; otherwise `quickchart`.
+description: Render an inline bar/line/pie/scatter chart in Google Chat from a small data payload. REQUIRED whenever the user asks to "chart", "graph", "plot", or "visualize" data.
 allowed-tools: Bash(node:*)
 ---
 

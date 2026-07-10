@@ -22,6 +22,7 @@ import {
 } from "@/lib/api"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { serializeToolEntry, type SerializedToolVersion } from "@/lib/tools/catalog/rest-serializer"
+import { pickLatestNonDeprecated, isDeprecated } from "@/lib/tools/catalog/version-resolver"
 import { createLogger } from "@/lib/logger"
 
 export const GET = withApiAuth(async (request, auth, requestId) => {
@@ -44,7 +45,13 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
   const includeAll = searchParams.get("include") === "all"
 
   try {
-    const versions = await toolCatalogInstance.listVersions(identifier)
+    // Admin-disabled versions are masked from this API entirely (same policy as
+    // dispatch(): found-but-disabled reads as not-found, so a disabled tool's
+    // existence cannot be probed). listVersions() includes inactive rows for the
+    // admin UI, so filter here. (Epic #922 completion audit.)
+    const versions = (await toolCatalogInstance.listVersions(identifier)).filter(
+      (v) => v.isActive
+    )
     if (versions.length === 0) {
       return createErrorResponse(
         requestId,
@@ -63,13 +70,12 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
       )
     }
 
-    // Default: resolve the latest non-deprecated version via the catalog resolver.
-    // No caller context here (a metadata read is not a tool invocation), so the
-    // deprecation telemetry event is intentionally not emitted.
-    const resolution = await toolCatalogInstance.resolve(identifier)
-    if (!resolution.ok) {
-      // listVersions found rows, so this can only be an all-deprecated fallback
-      // edge; resolve() still returns the latest deprecated entry in that case.
+    // Default: latest non-deprecated ACTIVE version (same per-identifier policy
+    // resolve() applies, over the active set). No caller context here (a
+    // metadata read is not a tool invocation), so the deprecation telemetry
+    // event is intentionally not emitted.
+    const latest = pickLatestNonDeprecated(versions)
+    if (!latest) {
       return createErrorResponse(
         requestId,
         404,
@@ -80,11 +86,11 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
 
     log.info("Resolved latest tool version", {
       identifier,
-      version: resolution.entry.version,
-      deprecated: resolution.deprecated,
+      version: latest.version,
+      deprecated: isDeprecated(latest),
     })
     return createApiResponse(
-      { data: serializeToolEntry(resolution.entry), meta: { requestId } },
+      { data: serializeToolEntry(latest), meta: { requestId } },
       requestId
     )
   } catch (error) {

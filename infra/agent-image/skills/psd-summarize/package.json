@@ -1,0 +1,7 @@
+{
+  "name": "psd-summarize",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Records-safe summarization (OpenClaw skill). No deps — uses fetch + Bedrock Mantle directly.",
+  "main": "run.js"
+}

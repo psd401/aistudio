@@ -17,9 +17,10 @@ import {
   revokeAccessById,
   getUserAccessibleRepositories
 } from "@/lib/db/drizzle"
+import { assertNotSystemManagedRepository, assertRepositoryReadAccess } from "@/lib/repositories/repository-access-guard"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { eq } from "drizzle-orm"
-import { repositoryAccess } from "@/lib/db/schema"
+import { eq, count, inArray } from "drizzle-orm"
+import { repositoryAccess, repositoryItems } from "@/lib/db/schema"
 import {
   handleError,
   ErrorFactories,
@@ -234,10 +235,21 @@ export async function updateRepository(
       throw ErrorFactories.authzOwnerRequired("modify repository")
     }
 
+    // A system-managed repository (the Atrium retrieval index, #1056) is
+    // immutable through the generic API — masked as not-found so its `isPublic`
+    // / `metadata` (and thus the system-managed guard) cannot be flipped.
+    await assertNotSystemManagedRepository(input.id)
+
     // Check if any fields provided
     if (!hasRepositoryUpdates(input)) {
       log.warn("No fields provided for update")
-      return createSuccess(null as unknown as Repository, "No changes to apply")
+      // Return the actual current row, not a null cast — the ActionState<Repository>
+      // contract promises a Repository on success (REV-COR-064).
+      const current = await getRepositoryById(input.id)
+      if (!current) {
+        throw ErrorFactories.dbRecordNotFound("knowledge_repositories", input.id)
+      }
+      return createSuccess(mapToRepository(current), "No changes to apply")
     }
 
     log.info("Updating repository in database", {
@@ -320,6 +332,10 @@ export async function deleteRepository(
       })
       throw ErrorFactories.authzOwnerRequired("delete repository")
     }
+
+    // Never delete a system-managed repo (the Atrium index, #1056) through the
+    // generic API — it would destroy the retrieval index out-of-band.
+    await assertNotSystemManagedRepository(id)
 
     // First, get all document items to delete from S3
     log.debug("Fetching document items for deletion")
@@ -407,23 +423,20 @@ export async function listRepositories(): Promise<ActionState<Repository[]>> {
     const userId = await getUserIdFromSession(session.sub)
     const repositoriesRaw = await getRepositoriesByOwnerId(userId)
 
-    // Get item counts for each repository
-    const repositories: Repository[] = await Promise.all(
-      repositoriesRaw.map(async (repo) => {
-        const items = await getRepositoryItems(repo.id)
-        return {
-          id: repo.id,
-          name: repo.name,
-          description: repo.description,
-          ownerId: repo.ownerId,
-          isPublic: repo.isPublic ?? false,
-          metadata: repo.metadata ?? {},
-          createdAt: repo.createdAt ?? new Date(),
-          updatedAt: repo.updatedAt ?? new Date(),
-          itemCount: items.length
-        }
-      })
-    )
+    // Item counts via ONE grouped COUNT(*) instead of an N+1 full-row SELECT *
+    // per repository (which pulled entire text-item bodies) — REV-COR-069.
+    const counts = await getRepositoryItemCounts(repositoriesRaw.map((r) => r.id))
+    const repositories: Repository[] = repositoriesRaw.map((repo) => ({
+      id: repo.id,
+      name: repo.name,
+      description: repo.description,
+      ownerId: repo.ownerId,
+      isPublic: repo.isPublic ?? false,
+      metadata: repo.metadata ?? {},
+      createdAt: repo.createdAt ?? new Date(),
+      updatedAt: repo.updatedAt ?? new Date(),
+      itemCount: counts.get(repo.id) ?? 0
+    }))
 
     log.info("Repositories fetched successfully", {
       repositoryCount: repositories.length
@@ -442,6 +455,27 @@ export async function listRepositories(): Promise<ActionState<Repository[]>> {
       operation: "listRepositories"
     })
   }
+}
+
+/**
+ * Item counts for a set of repositories via ONE grouped COUNT(*) query, instead
+ * of a full-row SELECT * per repository (which loaded entire text-item bodies
+ * just to call items.length). Missing ids default to 0. (REV-COR-069)
+ */
+async function getRepositoryItemCounts(repositoryIds: number[]): Promise<Map<number, number>> {
+  if (repositoryIds.length === 0) return new Map()
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({ repositoryId: repositoryItems.repositoryId, count: count() })
+        .from(repositoryItems)
+        .where(inArray(repositoryItems.repositoryId, repositoryIds))
+        .groupBy(repositoryItems.repositoryId),
+    "getRepositoryItemCounts"
+  )
+  const counts = new Map<number, number>()
+  for (const row of rows) counts.set(row.repositoryId, Number(row.count))
+  return counts
 }
 
 export async function getRepository(
@@ -470,6 +504,12 @@ export async function getRepository(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // Per-repository authorization: the caller must be able to access this
+    // repository (public / owner / grant). Closes the IDOR where any capability
+    // holder could read any repo's details by id, and excludes system-managed
+    // repos (the Atrium index, #1056) which the access model filters out.
+    await assertRepositoryReadAccess(id, session.sub)
+
     log.debug("Fetching repository from database", { repositoryId: id })
     const resultRaw = await getRepositoryById(id)
 
@@ -478,8 +518,8 @@ export async function getRepository(
       throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
     }
 
-    // Get item count
-    const items = await getRepositoryItems(id)
+    // Item count via a single COUNT(*) instead of loading all item rows (REV-COR-069).
+    const counts = await getRepositoryItemCounts([id])
 
     const result: Repository = {
       id: resultRaw.id,
@@ -490,7 +530,7 @@ export async function getRepository(
       metadata: resultRaw.metadata ?? {},
       createdAt: resultRaw.createdAt ?? new Date(),
       updatedAt: resultRaw.updatedAt ?? new Date(),
-      itemCount: items.length
+      itemCount: counts.get(id) ?? 0
     }
 
     log.info("Repository fetched successfully", {
@@ -538,6 +578,14 @@ export async function getRepositoryAccess(
         repositoryId
       })
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
+    }
+
+    // The ACL is management metadata — restrict to owner/admin, matching
+    // grantRepositoryAccess / revokeRepositoryAccess (REV-SEC-083).
+    const currentUserId = await getUserIdFromSession(session.sub)
+    if (!(await canModifyRepository(repositoryId, currentUserId))) {
+      log.warn("Repository access list denied - not owner/admin", { userId: session.sub, repositoryId })
+      throw ErrorFactories.authzOwnerRequired("view repository access")
     }
 
     log.debug("Fetching repository access list from database", { repositoryId })

@@ -58,6 +58,8 @@ export function AgentModelBreakdown({ data, loading = false }: AgentModelBreakdo
               <TableHead>Model</TableHead>
               <TableHead className="text-right">Messages</TableHead>
               <TableHead className="text-right">Total Tokens</TableHead>
+              <TableHead className="text-right">Cache Read</TableHead>
+              <TableHead className="text-right">Cache Write</TableHead>
               <TableHead className="text-right">Avg Latency</TableHead>
             </TableRow>
           </TableHeader>
@@ -72,6 +74,16 @@ export function AgentModelBreakdown({ data, loading = false }: AgentModelBreakdo
                 </TableCell>
                 <TableCell className="text-right">
                   {item.totalTokens.toLocaleString()}
+                </TableCell>
+                <TableCell className="text-right">
+                  {item.cacheReadTokens > 0
+                    ? item.cacheReadTokens.toLocaleString()
+                    : "—"}
+                </TableCell>
+                <TableCell className="text-right">
+                  {item.cacheWriteTokens > 0
+                    ? item.cacheWriteTokens.toLocaleString()
+                    : "—"}
                 </TableCell>
                 <TableCell className="text-right">
                   {item.avgLatencyMs > 1000

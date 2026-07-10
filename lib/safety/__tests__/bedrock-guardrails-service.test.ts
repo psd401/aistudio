@@ -605,15 +605,26 @@ describe('BedrockGuardrailsService - detection fingerprint (Issue #929)', () => 
     );
 
   it('should attach contentHash to topic detection log lines', async () => {
-    const service = createTestService();
-    await service.evaluateInput('any content that triggers a detection');
+    // A configured hash secret is required for real HMAC fingerprints: without
+    // one, hashValue() deliberately refuses to hash and emits the constant
+    // 'redacted' placeholder (PR #1131 — a missing secret must degrade
+    // privacy-safe instead of throwing/500ing chat). This test covers the
+    // WITH-secret hashing path; the without-secret placeholder is covered by
+    // tests/unit/lib/safety/bedrock-guardrails-hash.test.ts.
+    process.env.GUARDRAIL_HASH_SECRET = 'fingerprint-test-secret';
+    try {
+      const service = createTestService();
+      await service.evaluateInput('any content that triggers a detection');
 
-    const detectionCall = findDetectionCall();
-    expect(detectionCall).toBeDefined();
-    const meta = detectionCall![1] as { contentHash?: unknown; contentSnippet?: unknown };
-    expect(typeof meta.contentHash).toBe('string');
-    expect(meta.contentHash as string).toMatch(/^[a-f0-9]{16}$/);
-    expect(meta.contentSnippet).toBeUndefined();
+      const detectionCall = findDetectionCall();
+      expect(detectionCall).toBeDefined();
+      const meta = detectionCall![1] as { contentHash?: unknown; contentSnippet?: unknown };
+      expect(typeof meta.contentHash).toBe('string');
+      expect(meta.contentHash as string).toMatch(/^[a-f0-9]{16}$/);
+      expect(meta.contentSnippet).toBeUndefined();
+    } finally {
+      delete process.env.GUARDRAIL_HASH_SECRET;
+    }
   });
 
   it('should include contentSnippet only when GUARDRAIL_LOG_SNIPPET=true', async () => {

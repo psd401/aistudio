@@ -20,7 +20,7 @@
  * stable conversation id.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import { Collaboration } from "@tiptap/extension-collaboration";
 import { Markdown } from "tiptap-markdown";
@@ -28,10 +28,14 @@ import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import { getSchemaExtensions } from "@/lib/content/collab/editor-extensions";
 import { makeAuthorTag } from "@/lib/content/collab/provenance";
-import { snapshotDocumentAction } from "@/actions/db/atrium/snapshot-document";
-import { publishDocumentAction } from "@/actions/db/atrium/publish-document";
+import { cn } from "@/lib/utils";
+import { EditorToolbar } from "./EditorToolbar";
+import { useEditorActions } from "./use-editor-actions";
 import { AuthoredTracker } from "./authored-tracker";
 import { ProvenanceRail } from "./provenance-rail";
+import { SuggestionMode, useSuggestionState } from "./suggestion-mode";
+import { CommentSidebar } from "./CommentSidebar";
+import { acceptAllSuggestions } from "@/lib/content/collab/suggestions";
 import "@/styles/atrium-content.css";
 
 interface CollabSession {
@@ -48,9 +52,21 @@ export interface DocumentEditorProps {
   idOrSlug: string;
   /** The current user's id, stamped on their edits (green rail). */
   userId: number;
+  /**
+   * Layout context (Epic #1059 §17). `"page"` (default) is the full-width
+   * `/atrium/[id]/edit` page: the 288px comment rail sits BESIDE the editor.
+   * `"panel"` is the narrow Nexus workspace sibling (~380–720px), where a fixed
+   * 288px side rail would collapse the editor to an unreadable sliver — so the
+   * rail stacks BELOW the editor at full width instead.
+   */
+  layout?: "page" | "panel";
 }
 
-export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
+export function DocumentEditor({
+  idOrSlug,
+  userId,
+  layout = "page",
+}: DocumentEditorProps) {
   // Lazily create the Y.Doc once (a null ref initializer reads clearer than the
   // `undefined as unknown as Y.Doc` cast). The lazy init below runs on the first
   // render before any consumer, so `ydoc` is always a live doc by use.
@@ -61,7 +77,6 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
   const providerRef = useRef<WebsocketProvider | null>(null);
   const [status, setStatus] = useState<Status>("connecting");
   const [canEdit, setCanEdit] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
   // The resolved object UUID from the collab session (`docName`). The component is
   // mounted with `idOrSlug`, which MAY be a slug; the snapshot/publish actions must
   // target the stable UUID so a slug change between load and save can't retarget a
@@ -80,6 +95,13 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
         Markdown,
         Collaboration.configure({ document: ydoc }),
         AuthoredTracker.configure({ by: makeAuthorTag("human", userId) }),
+        // §18.1 track-changes: a client-only plugin layer (no schema change) that
+        // turns edits into pending suggestions while its toggle is on. Coexists
+        // with AuthoredTracker/ProvenanceRail as a separate visual layer.
+        SuggestionMode.configure({
+          by: makeAuthorTag("human", userId),
+          defaultOn: false,
+        }),
         ProvenanceRail,
       ],
     },
@@ -180,62 +202,71 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
     editor?.setEditable(canEdit);
   }, [editor, canEdit]);
 
-  const handleSnapshot = useCallback(async () => {
-    if (!editor) return;
-    // Target the resolved UUID, not the (possibly slug) mount prop. Until the
-    // session resolves, fall back to idOrSlug — but the buttons only render once
-    // canEdit is true, which is set together with docName, so the ref is populated.
-    const target = docNameRef.current ?? idOrSlug;
-    const body = editor.storage.markdown.getMarkdown();
-    const result = await snapshotDocumentAction(target, { body });
-    setMessage(result.isSuccess ? "Snapshot saved" : result.message ?? "Snapshot failed");
-  }, [editor, idOrSlug]);
+  // Snapshot / publish / unpublish, with shared busy + success/error feedback.
+  const {
+    message,
+    actionError,
+    pendingApproval,
+    busy,
+    handleSnapshot,
+    handlePublish,
+    handleUnpublish,
+  } = useEditorActions({ editor, idOrSlug, docNameRef });
 
-  const handlePublish = useCallback(async () => {
-    const target = docNameRef.current ?? idOrSlug;
-    const result = await publishDocumentAction(target, { destination: "intranet" });
-    setMessage(result.isSuccess ? "Published to intranet" : result.message ?? "Publish failed");
-  }, [idOrSlug]);
+  // Live track-changes toggle state + pending-suggestion count for the toolbar.
+  const { suggesting, count: suggestionCount } = useSuggestionState(editor);
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-3 text-xs text-gray-500">
-        <span aria-live="polite">
-          {status === "connecting" && "Connecting…"}
-          {status === "ready" && (canEdit ? "Connected" : "Read-only")}
-          {status === "error" && "Connection error"}
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--atrium-human)" }} />
-          You
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--atrium-agent)" }} />
-          Agent
-        </span>
-        {canEdit && (
-          <span className="ml-auto flex gap-2">
-            <button
-              type="button"
-              onClick={handleSnapshot}
-              className="rounded border px-2 py-1 hover:bg-gray-50"
-            >
-              Snapshot
-            </button>
-            <button
-              type="button"
-              onClick={handlePublish}
-              className="rounded border px-2 py-1 hover:bg-gray-50"
-            >
-              Publish
-            </button>
-          </span>
-        )}
+    <div className={cn("flex flex-col gap-2", layout === "panel" && "p-3")}>
+      <EditorToolbar
+        status={status}
+        canEdit={canEdit}
+        busy={busy}
+        suggesting={suggesting}
+        suggestionCount={suggestionCount}
+        onSnapshot={handleSnapshot}
+        onPublish={handlePublish}
+        onUnpublish={handleUnpublish}
+        onToggleSuggesting={() => editor?.commands.toggleSuggesting()}
+        onAcceptAll={() => {
+          if (editor) acceptAllSuggestions(editor);
+        }}
+      />
+      <div className={cn("flex gap-4", layout === "panel" && "flex-col")}>
+        <div className="atrium-editor min-w-0 flex-1">
+          <EditorContent editor={editor} className="atrium-content" />
+        </div>
+        {/* Comment threads: a 288px right rail on the full PAGE (hidden on small
+            viewports); stacked full-width BELOW the editor in the narrow §17
+            workspace panel so the editor keeps the whole panel width. */}
+        <div
+          className={cn(
+            "shrink-0",
+            layout === "panel" ? "w-full border-t pt-3" : "hidden w-72 md:block"
+          )}
+        >
+          <CommentSidebar idOrSlug={idOrSlug} editor={editor} canEdit={canEdit} />
+        </div>
       </div>
-      <div className="atrium-editor">
-        <EditorContent editor={editor} className="atrium-content" />
-      </div>
-      {message && <p className="text-xs text-gray-500">{message}</p>}
+      {message && (
+        <p
+          // A pending-approval outcome is announced as a status (not an error) and
+          // styled amber — distinct from the red error and the neutral success
+          // captions, mirroring VisibilityChip's §26.4 pending notice.
+          aria-live="polite"
+          role={pendingApproval ? "status" : undefined}
+          className={cn(
+            "text-xs",
+            actionError
+              ? "text-destructive"
+              : pendingApproval
+                ? "text-amber-600"
+                : "text-muted-foreground"
+          )}
+        >
+          {message}
+        </p>
+      )}
     </div>
   );
 }

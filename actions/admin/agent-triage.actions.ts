@@ -18,6 +18,8 @@ import {
   GetCommand,
   ScanCommand,
   UpdateCommand,
+  type GetCommandOutput,
+  type ScanCommandOutput,
 } from "@aws-sdk/lib-dynamodb"
 
 import { requireRole } from "@/lib/auth/role-helpers"
@@ -119,7 +121,10 @@ export async function getTriageSummaryList(): Promise<
     let pagesScanned = 0
     const MAX_PAGES = 5 // ~5 × 1MB = up to ~5000 rows
     do {
-      const resp = await ddb().send(
+      // The @smithy/types skew between @aws-sdk/lib-dynamodb and
+      // @aws-sdk/client-dynamodb also defeats send()'s overload narrowing,
+      // so the response must be cast back to the command's output type.
+      const resp = (await ddb().send(
         // @ts-expect-error — nested @smithy/types version mismatch between
         // @aws-sdk/lib-dynamodb and @aws-sdk/client-dynamodb. Same pattern as
         // GetCommand/UpdateCommand/DeleteCommand below.
@@ -136,7 +141,7 @@ export async function getTriageSummaryList(): Promise<
           ProjectionExpression: "userEmail, enabled, enabledAt, disabledAt, lastPollAt, digestEnabled, #rules, escalation, recentDecisions, learnedPatterns",
           ExpressionAttributeNames: { "#rules": "rules" },
         }),
-      )
+      )) as ScanCommandOutput
       for (const item of (resp.Items ?? []) as Array<{
         userEmail: string
         enabled?: boolean
@@ -221,13 +226,14 @@ export async function getTriageState(
     await requireRole("administrator")
     log.info("Fetching triage state", sanitizeForLogging({ userEmail }))
 
-    const resp = await ddb().send(
+    // Cast back to the command's output type — same skew note as the Scan above.
+    const resp = (await ddb().send(
       // @ts-expect-error — nested @smithy/types version mismatch (see above).
       new GetCommand({
         TableName: TRIAGE_TABLE,
         Key: { userEmail: userEmail.toLowerCase() },
       }),
-    )
+    )) as GetCommandOutput
     if (!resp.Item) return createSuccess(null, "No triage row found")
 
     const row = resp.Item as {

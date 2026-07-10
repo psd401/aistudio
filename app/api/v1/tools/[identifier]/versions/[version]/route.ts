@@ -79,6 +79,18 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
       )
     }
 
+    // An admin-disabled version must not leak through the metadata API (same
+    // masking `dispatch()` applies: found-but-disabled reads as not-found).
+    // (Epic #922 completion audit.)
+    if (!resolution.entry.isActive) {
+      return createErrorResponse(
+        requestId,
+        404,
+        "NOT_FOUND",
+        `Tool '${identifier}' has no version '${version}'. It may have been removed; check the latest version at /api/v1/tools/${encodeURIComponent(identifier)}.`
+      )
+    }
+
     log.info("Fetched specific tool version", {
       identifier,
       version,

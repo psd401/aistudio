@@ -79,7 +79,11 @@ export class AccessAnalyzerStack extends cdk.Stack {
   ): accessanalyzer.CfnAnalyzer.ArchiveRuleProperty[] {
     return [
       {
-        ruleName: "ArchiveExpectedPublicS3Access",
+        // Archives S3 findings for buckets that are NOT public (isPublic=false),
+        // i.e. externally-shared-but-locked-down buckets — used to cut noise from
+        // correctly-restricted buckets. The name now matches the filter; it must NOT
+        // blanket-archive isPublic=true (real public-exposure) findings (REV-COR-488).
+        ruleName: "ArchiveNonPublicS3Access",
         filter: [
           {
             property: "resourceType",

@@ -2,7 +2,7 @@ import { authenticatePollingRequest, validateJobOwnership } from '@/lib/auth/opt
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { jobManagementService } from '@/lib/streaming/job-management-service';
 import type { UniversalPollingStatus } from '@/lib/streaming/job-management-service';
-import { createMessageWithStats } from '@/lib/db/drizzle';
+import { upsertMessageWithStats } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { nexusMessages } from '@/lib/db/schema';
 import { eq, and, gte } from 'drizzle-orm';
@@ -161,16 +161,19 @@ export async function GET(
             finishReason: responseData?.finishReason
           });
 
-          // Save assistant response and update conversation stats in one operation
-          await createMessageWithStats({
-            conversationId: job.nexusConversationId,
+          // Save the fallback assistant response idempotently (REV-COR-226). The
+          // prior plain INSERT after a SELECT was a TOCTOU race: two concurrent
+          // completed-status polls could both observe zero rows and both insert,
+          // duplicating the assistant message. Upserting on a deterministic,
+          // job-derived id makes concurrent writers converge on a single row.
+          await upsertMessageWithStats(`job-${jobId}`, job.nexusConversationId, {
             role: 'assistant',
             content: assistantText,
             parts: [{ type: 'text', text: assistantText }],
             modelId: job.modelId,
             tokenUsage: responseData?.usage || {},
             finishReason: (responseData?.finishReason as string) || 'stop',
-            metadata: { savedVia: 'api-fallback' },
+            metadata: { savedVia: 'api-fallback', jobId },
           });
 
           log.info('Assistant message saved via API fallback successfully', {

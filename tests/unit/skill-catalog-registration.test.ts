@@ -42,8 +42,8 @@ describe("buildSkillCatalogToolValues", () => {
     expect(values.version).toBe(SKILL_CATALOG_VERSION)
   })
 
-  it("exposes the skill across chat, MCP, and internal agent surfaces", () => {
-    expect(values.surfaces).toEqual(["ai_sdk", "mcp", "internal"])
+  it("exposes the skill on MCP and internal agent surfaces only (chat consumes skills via session binding, not as a callable tool)", () => {
+    expect(values.surfaces).toEqual(["mcp", "internal"])
   })
 
   it("is open to any authenticated caller (no required scopes) and agent-callable", () => {

@@ -1,7 +1,7 @@
 ---
 name: psd-email-triage
 summary: Smart email triage — opt-in, per-user rules, Gmail labels, daily digest, Chat escalations. Configure entirely from chat.
-description: When the user asks to start triaging their email (or to adjust rules / escalation / digest / labels for an already-enabled triage setup), call this skill. The skill writes to a per-user DynamoDB row that a background Lambda reads every 5 minutes; the Lambda classifies new mail using rules + Bedrock Nova Micro, applies Gmail labels, and posts escalation cards to chat when something important arrives. Phase 1 of the email triage feature.
+description: Set up or adjust smart email triage — per-user rules, Gmail labels, daily digest, and Chat escalations. Use when the user wants to start or change triaging their inbox.
 allowed-tools: Bash(node:*)
 ---
 

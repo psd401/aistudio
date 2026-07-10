@@ -288,7 +288,18 @@ function parseDate(dateArg) {
     };
   }
 
-  const d = new Date(dateArg);
+  // Force local-midnight parsing. `new Date('2026-01-15')` parses a date-only
+  // ISO string as UTC midnight, which in the container's America/Los_Angeles TZ
+  // (UTC-7/8) reads back as the *previous* calendar day through formatDate's
+  // local getters — a silent off-by-one on both the query window and the label.
+  // Appending T00:00:00 parses as local midnight, preserving the requested day
+  // (mirrors the psd-freshservice fix). See REV-COR-331.
+  // Only do this for an unambiguous YYYY-MM-DD value — appending T00:00:00 to
+  // any other format (MM/DD/YYYY, "Month DD, YYYY", ...) produces an invalid
+  // date string in Node's parser (gemini-code-assist review).
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(dateArg)
+    ? new Date(`${dateArg}T00:00:00`)
+    : new Date(dateArg);
   if (isNaN(d.getTime())) {
     fail(`Could not parse date: ${dateArg}`, 'bad_args');
   }

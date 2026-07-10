@@ -62,7 +62,10 @@ import {
 import { ErrorFactories } from "@/lib/error-utils";
 import { CAPABILITY_MANIFEST } from "@/lib/capabilities/manifest";
 // Single source of truth for the runtime mode union (#926) — see re-export below.
-import type { AssistantArchitectMode } from "@/lib/db/schema/tables/assistant-architects";
+import type {
+  AssistantArchitectMode,
+  AssistantRetrievalScope,
+} from "@/lib/db/schema/tables/assistant-architects";
 
 /**
  * Identifiers owned by the code manifest. An Assistant Architect whose slugified
@@ -117,6 +120,8 @@ export interface AssistantArchitectData {
   agentTimeoutSeconds?: number;
   agentCostCapCents?: number | null;
   agentMaxRequestsPerHour?: number | null;
+  // Retrieval scoping (Atrium Phase 6, Issue #1056)
+  retrievalScope?: AssistantRetrievalScope | null;
 }
 
 export interface AssistantArchitectUpdateData {
@@ -134,6 +139,8 @@ export interface AssistantArchitectUpdateData {
   agentTimeoutSeconds?: number;
   agentCostCapCents?: number | null;
   agentMaxRequestsPerHour?: number | null;
+  // Retrieval scoping (Atrium Phase 6, Issue #1056)
+  retrievalScope?: AssistantRetrievalScope | null;
 }
 
 export interface AssistantArchitectWithCreator {
@@ -155,6 +162,8 @@ export interface AssistantArchitectWithCreator {
   agentTimeoutSeconds: number;
   agentCostCapCents: number | null;
   agentMaxRequestsPerHour: number | null;
+  // Retrieval scoping (Atrium Phase 6, Issue #1056)
+  retrievalScope: AssistantRetrievalScope | null;
   creator: {
     id: number;
     firstName: string | null;
@@ -195,6 +204,7 @@ export async function getAssistantArchitects(): Promise<
           agentTimeoutSeconds: assistantArchitects.agentTimeoutSeconds,
           agentCostCapCents: assistantArchitects.agentCostCapCents,
           agentMaxRequestsPerHour: assistantArchitects.agentMaxRequestsPerHour,
+          retrievalScope: assistantArchitects.retrievalScope,
           creatorId: users.id,
           creatorFirstName: users.firstName,
           creatorLastName: users.lastName,
@@ -226,6 +236,7 @@ export async function getAssistantArchitects(): Promise<
     agentTimeoutSeconds: row.agentTimeoutSeconds,
     agentCostCapCents: row.agentCostCapCents,
     agentMaxRequestsPerHour: row.agentMaxRequestsPerHour,
+    retrievalScope: row.retrievalScope,
     creator:
       row.creatorId && row.creatorEmail
         ? {
@@ -283,6 +294,7 @@ export async function getAssistantArchitectWithCreator(
           agentTimeoutSeconds: assistantArchitects.agentTimeoutSeconds,
           agentCostCapCents: assistantArchitects.agentCostCapCents,
           agentMaxRequestsPerHour: assistantArchitects.agentMaxRequestsPerHour,
+          retrievalScope: assistantArchitects.retrievalScope,
           creatorId: users.id,
           creatorFirstName: users.firstName,
           creatorLastName: users.lastName,
@@ -317,6 +329,7 @@ export async function getAssistantArchitectWithCreator(
     agentTimeoutSeconds: row.agentTimeoutSeconds,
     agentCostCapCents: row.agentCostCapCents,
     agentMaxRequestsPerHour: row.agentMaxRequestsPerHour,
+    retrievalScope: row.retrievalScope,
     creator:
       row.creatorId && row.creatorEmail
         ? {
@@ -409,6 +422,9 @@ export async function createAssistantArchitect(data: AssistantArchitectData) {
             : {}),
           ...(data.agentMaxRequestsPerHour !== undefined
             ? { agentMaxRequestsPerHour: data.agentMaxRequestsPerHour }
+            : {}),
+          ...(data.retrievalScope !== undefined
+            ? { retrievalScope: data.retrievalScope }
             : {}),
         })
         .returning(),

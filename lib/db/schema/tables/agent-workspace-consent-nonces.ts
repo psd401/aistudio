@@ -32,9 +32,13 @@ export const psdAgentWorkspaceConsentNonces = pgTable("psd_agent_workspace_conse
   //                      are exactly what we need; the consume step writes
   //                      to a different secret path.
   tokenKind: varchar("token_kind", { length: 16 })
-    .$type<"agent_account" | "user_account" | "cognito_data">()
+    .$type<"agent_account" | "user_account" | "cognito_data" | "plaud">()
     .notNull()
     .default("agent_account"),
+  // PKCE (S256) code_verifier for the 'plaud' kind — generated at mint time,
+  // read back at the callback to exchange the auth code. Never placed in a URL
+  // (only the S256 challenge is). Null for the non-PKCE kinds.
+  codeVerifier: varchar("code_verifier", { length: 128 }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   consumedAt: timestamp("consumed_at", { withTimezone: true }),
 }, (table) => [

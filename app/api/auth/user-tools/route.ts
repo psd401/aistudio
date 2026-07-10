@@ -38,11 +38,14 @@ export async function GET() {
     )
   } catch (error) {
     timer({ status: "error" });
+    // REV-COR-208: log the full error server-side but return a fixed generic
+    // message — never echo raw exception detail to the client. Correlate via the
+    // X-Request-Id header.
     log.error("Error fetching user tools:", error)
     return NextResponse.json(
-      { 
-        isSuccess: false, 
-        message: error instanceof Error ? error.message : "Failed to fetch user tools"
+      {
+        isSuccess: false,
+        message: "Failed to fetch user tools"
       },
       { status: 500, headers: { "X-Request-Id": requestId } }
     )

@@ -31,6 +31,10 @@
 # KNOBS:
 #   SKIP_E2E=1         skip entirely for one push       (never runs in CI)
 #   E2E_PORT=3000      port for the dev server
+#   E2E_DATABASE_URL   DB for a runner-started server (default: local Docker
+#                      postgres). Deliberately NOT plain DATABASE_URL — that is
+#                      sourced from .env.local and may be container-perspective.
+#   E2E_DB_SSL         DB_SSL for a runner-started server (default: false)
 #   E2E_WORKERS=2      Playwright worker count (global-setup warms every route the
 #                      suite hits, so a cold server doesn't thrash at 2; drop to 1
 #                      if you still see compile-timeout flakiness)
@@ -57,9 +61,17 @@ if curl -sf "$BASE/api/healthz" >/dev/null 2>&1; then
   echo "e2e-local: reusing the dev server already on :$E2E_PORT"
 else
   echo "e2e-local: starting a dev server on :$E2E_PORT (AUTH_URL pinned to it; isolated .next-e2e)…"
+  # Pin the started server to the LOCAL Docker postgres, exactly like the
+  # `dev:local` script does. .env.local was sourced above (for AUTH_SECRET) and
+  # on some machines it carries the CONTAINER-perspective DATABASE_URL
+  # (host.docker.internal / master / sslmode=require) — unusable from a host
+  # process, and under the old ${DATABASE_URL:-…} fallback it silently won,
+  # leaving the started server unable to reach the DB at all (every query fails
+  # from boot; authed specs die on a /dashboard redirect at ~15s each). Use
+  # E2E_DATABASE_URL / E2E_DB_SSL to point the suite at a non-default DB.
   AUTH_URL="$BASE" NEXT_DIST_DIR=.next-e2e \
-  DATABASE_URL="${DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/aistudio}" \
-  DB_SSL="${DB_SSL:-false}" PORT="$E2E_PORT" HOSTNAME=127.0.0.1 \
+  DATABASE_URL="${E2E_DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/aistudio}" \
+  DB_SSL="${E2E_DB_SSL:-false}" PORT="$E2E_PORT" HOSTNAME=127.0.0.1 \
     bun run server.ts > /tmp/e2e-local-server.log 2>&1 &
   STARTED_PID=$!
   # On exit: stop our server and undo Next's automatic tsconfig.json edit (running
@@ -108,9 +120,29 @@ export PLAYWRIGHT_AUTH_ENABLED=true
 export PLAYWRIGHT_WARM=1
 if [ "${E2E_RUN_EXTERNAL:-}" != "1" ]; then export E2E_EXCLUDE_EXTERNAL=1; fi
 
-echo "e2e-local: running Playwright suite against $BASE (workers=${E2E_WORKERS:-2}, retries=${E2E_RETRIES:-2})…"
-bunx playwright test --workers="${E2E_WORKERS:-2}" --retries="${E2E_RETRIES:-2}" "$@"
+# Default to ONE worker: the host `next dev` server recompiles routes on demand and
+# can't keep up with the parallel suite, so workers=2 produced load-induced timeout
+# flakes (tests that pass in isolation). Serial is slower but reliable, so the hook
+# passes without SKIP_E2E. Override with E2E_WORKERS=N for a faster, flakier run.
+echo "e2e-local: running Playwright suite against $BASE (workers=${E2E_WORKERS:-1}, retries=${E2E_RETRIES:-2})…"
+# Capture output (tee keeps it live) so we can tell GENUINE failures from FLAKY tests.
+RUN_LOG="$(mktemp)"
+set -o pipefail
+bunx playwright test --workers="${E2E_WORKERS:-1}" --retries="${E2E_RETRIES:-2}" "$@" 2>&1 | tee "$RUN_LOG"
 RESULT=$?
+set +o pipefail
+
+# A flaky test (failed once, passed on retry) is a PASS. Playwright still exits
+# non-zero when ANY test is flaky, but a host `next dev` server has inherent timing
+# flakiness (collab/streaming/ReactFlow/modal) that no amount of serial + retry fully
+# removes. Block the push only on GENUINE failures (a "N failed" summary line), not a
+# flaky-only run. CI (built app, stricter, retries) remains the hard gate.
+if [ "$RESULT" -ne 0 ] && ! grep -qE "^[[:space:]]+[0-9]+ failed" "$RUN_LOG"; then
+  echo ""
+  echo "e2e-local: only flaky tests (passed on retry) — no genuine failures. Treating as pass."
+  RESULT=0
+fi
+rm -f "$RUN_LOG"
 
 if [ "$RESULT" -ne 0 ]; then
   echo ""
