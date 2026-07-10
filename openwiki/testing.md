@@ -91,7 +91,7 @@ bun run test:streaming:contract  # Contract tests
 |-------|------|----------|
 | Admin Users | `admin-users.spec.ts` | User management UI |
 | Admin Capabilities | `admin-capabilities.spec.ts` | RBAC configuration |
-| Admin Agents | `admin-agents.spec.ts` | Agent management |
+| Admin Agents | `admin-agents.spec.ts` | Agent telemetry dashboard, iteration metrics (#1161) |
 | Atrium Documents | `atrium-document.guard.spec.ts` | Document editing |
 | Atrium Artifacts | `atrium-artifact.guard.spec.ts` | Artifact creation |
 | Atrium Publishing | `atrium-visibility-editor.spec.ts` | Publishing workflow |

@@ -84,7 +84,7 @@ AgentPlatformStack (depends on FrontendStack)
 | Content | `content_objects`, `content_versions`, `content_publications` |
 | Nexus | `nexus_conversations`, `nexus_messages`, `nexus_mcp_connections` |
 | Knowledge | `knowledge_repositories`, `repository_items`, `repository_item_chunks` |
-| Agent | `agent_sessions`, `agent_messages`, `agent_tool_invocations` |
+| Agent | `agent_sessions`, `agent_messages` (+ iteration telemetry), `agent_tool_invocations` |
 
 **Schema Source**: `/lib/db/schema/tables/`
 
@@ -97,6 +97,55 @@ AgentPlatformStack (depends on FrontendStack)
 - **S3 Workspace Buckets**: Agent file storage
 - **DynamoDB Tables**: 6 tables for agent state management
 - **Router Lambda**: Google Chat integration
+- **Job Runner**: Async Fargate tasks for long-running turns (bypasses Lambda 15-min limit)
+
+### Build-time Eval Gates
+
+Before pushing an agent image, `build-and-push.sh` runs automated gates that would have caught previous production failures (dead-boot r10, missing provider r11, SOUL.md truncation #1138):
+
+| Gate | Check | Source |
+|------|-------|--------|
+| Instruction-budget | Bootstrap files fit within `openclaw.json` `bootstrapMaxChars` / `bootstrapTotalMaxChars` limits | `/infra/agent-image/check_bootstrap_budget.py` |
+| Config consistency | `contextWindow` values are positive ints; `apiKey` env-vars are hydrated in wrapper | `/infra/agent-image/check_config_consistency.py` |
+| Boot probe | Container emits `BOOT_OK` marker within timeout | Runtime check in `build-and-push.sh` |
+| Canary turn | Agent responds to a test prompt | Runtime check in `build-and-push.sh` |
+
+Two separate bypass flags for emergencies:
+- `SKIP_STATIC_GATE=1` — Skip instruction-budget + config-consistency (rarely needed)
+- `SKIP_PROBE_GATE=1` — Skip boot probe + canary turn (if probe itself is broken)
+
+### Iteration Telemetry (Issue #1161)
+
+Agent turns are measured via `agent_messages` columns added in migration 100:
+
+| Column | Purpose |
+|--------|---------|
+| `model_call_count` | Upstream model round-trips per turn |
+| `duration_ms` | Wall-clock time from invocation to final yield |
+| `nudged` | Whether empty-turn nudge fired |
+
+Dashboard aggregates (via `/actions/admin/agent-telemetry.actions.ts`):
+- `avgModelCallsPerTurn` / `p95ModelCallsPerTurn` — surface expensive turns
+- `emptyTurnRate` — fraction of turns ending empty (unrecovered)
+- `nudgeFireRate` — fraction where nudge fired (recovered + unrecovered)
+
+Trace export for session analysis:
+```bash
+bunx tsx scripts/agent-trace-export.ts <session-id>
+bunx tsx scripts/agent-trace-export.ts <session-id> --json  # machine-readable
+```
+
+### Job Runner (Issue #1138)
+
+Long-running agent turns hit Lambda's 15-minute deadline. The router promotes these to async Fargate tasks:
+
+1. Router detects turn approaching deadline (promoteToJob in `index.ts`)
+2. Launches ECS Fargate task with `JOB_PAYLOAD` env var
+3. Job runner (`job-main.ts`) invokes AgentCore with up to 2-hour limit
+4. SSE heartbeats keep stream alive; session lock renewed every 10 minutes
+5. Final answer posted to originating Google Chat space
+
+**Source**: `/infra/lambdas/agent-router/job-main.ts`
 
 ### DynamoDB Tables
 
@@ -232,5 +281,10 @@ bunx cdk destroy AIStudio-FrontendStack-Dev    # Tear down
 | Migrations | `/infra/database/migrations.json` |
 | Agent Docker | `/infra/agent-image/Dockerfile` |
 | Harness Adapter | `/infra/agent-image/harness_adapter.py` |
+| Agent Wrapper | `/infra/agent-image/agentcore_wrapper.py` |
+| Bootstrap Budget Gate | `/infra/agent-image/check_bootstrap_budget.py` |
+| Config Consistency Gate | `/infra/agent-image/check_config_consistency.py` |
+| Trace Export | `/scripts/agent-trace-export.ts` |
+| Job Runner | `/infra/lambdas/agent-router/job-main.ts` |
 | Deploy Commands | `/infra/DEPLOYMENT_COMMANDS.md` |
 | Safety Checklist | `/infra/DEPLOYMENT_SAFETY_CHECKLIST.md` |
