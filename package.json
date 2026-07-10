@@ -89,7 +89,7 @@
     "@aws-sdk/client-sqs": "^3.982.0",
     "@aws-sdk/client-ssm": "^3.982.0",
     "@aws-sdk/credential-providers": "^3.982.0",
-    "@aws-sdk/lib-dynamodb": "~3.1068.0",
+    "@aws-sdk/lib-dynamodb": "~3.1076.0",
     "@aws-sdk/s3-request-presigner": "^3.982.0",
     "@aws-sdk/util-dynamodb": "^3.982.0",
     "@codemirror/commands": "^6.10.4",
