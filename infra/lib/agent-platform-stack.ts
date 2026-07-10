@@ -2585,6 +2585,186 @@ export class AgentPlatformStack extends cdk.Stack {
     }
 
     // =====================================================================
+    // 9b-2. Degradation alarms + iteration metrics (issue #1161)
+    // =====================================================================
+    // The #1138 incident's defining failure was that "nothing measured the
+    // thing that broke": guardrail screening ran dead for days and SOUL.md was
+    // truncated every boot, both invisible because the ERROR/WARN lines just
+    // scrolled past for weeks. This block turns each of those silent-degradation
+    // classes into a paged metric, extending the AGENT_FAILURE_RECORD filter
+    // pattern above.
+    //
+    // Router / cron / job log groups are importable at synth, so their signals
+    // are log MetricFilters keyed off stable marker tokens (GUARDRAIL_DENIAL,
+    // AGENT_ERROR_TURN, BACKGROUND_PROMOTION, JOB_RUNNER_FAILED_TURN) plus the
+    // PascalCase EmptyAgentResponse errorClass. Container-origin signals
+    // (BootTruncationWarn, BuildMarkerBoot/BootOk, AgentNudgeFired) can't use a
+    // MetricFilter — the AgentCore log group name has a runtime-generated
+    // suffix — so the wrapper/harness emit them directly via put_metric_data
+    // (see agent_failures.emit_agent_metric); here we only alarm on them.
+    const alarmPeriod = cdk.Duration.minutes(5);
+    const iterationAlarms: cloudwatch.Alarm[] = [];
+
+    const routerLog = this.routerLambda.logGroup;
+    const sumMetric = (metricName: string) =>
+      new cloudwatch.Metric({
+        namespace: failureMetricNamespace,
+        metricName,
+        period: alarmPeriod,
+        statistic: 'Sum',
+      });
+
+    // -- Router-log metric filters (marker-keyed) --
+    new logs.MetricFilter(this, 'GuardrailDenialMetric', {
+      logGroup: routerLog,
+      metricNamespace: failureMetricNamespace,
+      metricName: 'GuardrailDenials',
+      filterPattern: logs.FilterPattern.literal('GUARDRAIL_DENIAL'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    new logs.MetricFilter(this, 'ErrorTurnMetric', {
+      logGroup: routerLog,
+      metricNamespace: failureMetricNamespace,
+      metricName: 'ErrorTurns',
+      filterPattern: logs.FilterPattern.literal('AGENT_ERROR_TURN'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    new logs.MetricFilter(this, 'EmptyAgentResponseMetric', {
+      logGroup: routerLog,
+      metricNamespace: failureMetricNamespace,
+      metricName: 'EmptyAgentResponses',
+      filterPattern: logs.FilterPattern.literal('EmptyAgentResponse'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    // Background-promotion counter — a metric WITHOUT an alarm (the platform
+    // compensating for model behavior; its trend feeds Loop-2 tuning, #1161).
+    new logs.MetricFilter(this, 'BackgroundPromotionMetric', {
+      logGroup: routerLog,
+      metricNamespace: failureMetricNamespace,
+      metricName: 'BackgroundPromotions',
+      filterPattern: logs.FilterPattern.literal('BACKGROUND_PROMOTION'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    // -- Job-runner (ECS) task-failure filter --
+    new logs.MetricFilter(this, 'JobRunnerFailureMetric', {
+      logGroup: jobLogGroup,
+      metricNamespace: failureMetricNamespace,
+      metricName: 'JobRunnerFailures',
+      filterPattern: logs.FilterPattern.literal('JOB_RUNNER_FAILED_TURN'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    // -- Alarms (6). Thresholds mirror the existing operational style
+    //    (DLQ >= 1, errors >= 5, failures >= 10). --
+    iterationAlarms.push(
+      new cloudwatch.Alarm(this, 'GuardrailDenialRateAlarm', {
+        alarmName: `psd-agent-guardrail-denials-${environment}`,
+        alarmDescription:
+          'Guardrail would-have-blocked rate elevated (>= 10 in 5 min). ' +
+          'Screening runs detect-only; a spike means either abuse or a broken policy.',
+        metric: sumMetric('GuardrailDenials'),
+        threshold: 10,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+    );
+    iterationAlarms.push(
+      new cloudwatch.Alarm(this, 'ErrorTurnRateAlarm', {
+        alarmName: `psd-agent-error-turns-${environment}`,
+        alarmDescription:
+          'Agent error-turn rate elevated (>= 10 in 5 min). Triage: ' +
+          'https://aistudio.psd401.net/admin/agents (Failures tab).',
+        metric: sumMetric('ErrorTurns'),
+        threshold: 10,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+    );
+    iterationAlarms.push(
+      new cloudwatch.Alarm(this, 'EmptyAgentResponseAlarm', {
+        alarmName: `psd-agent-empty-responses-${environment}`,
+        alarmDescription:
+          'EmptyAgentResponse rate elevated (>= 5 in 5 min) — users are getting ' +
+          'the canned no-response fallback. Often a provider timeout or a prompt regression.',
+        metric: sumMetric('EmptyAgentResponses'),
+        threshold: 5,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+    );
+    iterationAlarms.push(
+      new cloudwatch.Alarm(this, 'JobRunnerFailureAlarm', {
+        alarmName: `psd-agent-job-runner-failures-${environment}`,
+        alarmDescription:
+          'Background job-runner failed-turn rate elevated (>= 5 in 5 min).',
+        metric: sumMetric('JobRunnerFailures'),
+        threshold: 5,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+    );
+    // Boot-truncation: any live image whose bootstrap files exceed the
+    // openclaw.json budget (the SOUL.md-truncation-for-weeks signature). The
+    // wrapper emits BootTruncationWarn at boot; any occurrence pages.
+    iterationAlarms.push(
+      new cloudwatch.Alarm(this, 'BootTruncationAlarm', {
+        alarmName: `psd-agent-boot-truncation-${environment}`,
+        alarmDescription:
+          'A live agent image truncated its bootstrap instructions at boot ' +
+          '(over openclaw.json budget). The build gate should have caught this — ' +
+          'investigate how it shipped.',
+        metric: sumMetric('BootTruncationWarn'),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+    );
+    // Dead-boot detector (the r10 signature): a microVM logged BUILD_MARKER but
+    // never reached BOOT_OK. BuildMarkerBoot counts starts, BootOk counts
+    // serving-ready boots; a positive difference over the window means a boot
+    // died before serving. NOTE: a microVM that boots in the last seconds of a
+    // period can transiently show +1 (BUILD_MARKER this period, BootOk the
+    // next); it self-clears, and this is a rare "investigate" page, not
+    // auto-remediation, so evaluationPeriods stays 1.
+    iterationAlarms.push(
+      new cloudwatch.Alarm(this, 'DeadBootAlarm', {
+        alarmName: `psd-agent-dead-boot-${environment}`,
+        alarmDescription:
+          'Agent microVM booted (BUILD_MARKER) but never reached BOOT_OK ' +
+          '(gateway/provider/model resolution failed) — the r10 dead-boot signature.',
+        metric: new cloudwatch.MathExpression({
+          expression: 'builds - boots',
+          usingMetrics: {
+            builds: sumMetric('BuildMarkerBoot'),
+            boots: sumMetric('BootOk'),
+          },
+          period: alarmPeriod,
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+    );
+
+    if (alarmTopic) {
+      const iterationSnsAction = new cloudwatchActions.SnsAction(alarmTopic);
+      for (const a of iterationAlarms) {
+        a.addAlarmAction(iterationSnsAction);
+      }
+    }
+
+    // =====================================================================
     // 9c. Agent Health Daily Lambda (issue #890)
     // =====================================================================
     // Scans S3 workspaces once per day and writes per-user health snapshots
@@ -3347,6 +3527,13 @@ export class AgentPlatformStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'RouterLambdaArn', {
       value: this.routerLambda.functionArn,
       description: 'Router Lambda function ARN',
+    });
+
+    // Bedrock API key secret ARN — consumed by build-and-push.sh (#1161) to run
+    // the build-time boot probe + canary turn with canary credentials.
+    new cdk.CfnOutput(this, 'BedrockApiKeySecretArn', {
+      value: this.bedrockApiKeySecret.secretArn,
+      description: 'Bedrock API key secret ARN (build-time canary probe credential)',
     });
 
     new cdk.CfnOutput(this, 'RouterQueueUrl', {

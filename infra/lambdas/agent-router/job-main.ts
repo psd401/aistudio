@@ -169,6 +169,8 @@ async function main(): Promise<number> {
         );
       }
       log.warn('Background job finished with a failed turn', {
+        // Stable marker for the JobRunnerFailure metric filter (#1161).
+        marker: 'JOB_RUNNER_FAILED_TURN',
         errorClass: agentResult.errorClass ?? 'unknown',
         latencyMs,
       });

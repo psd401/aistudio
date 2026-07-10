@@ -1096,6 +1096,8 @@ async function applyGuardrails(
     if (result.action === 'GUARDRAIL_INTERVENED') {
       const outputs = result.outputs?.map((o) => o.text).join(' ') || '';
       log.warn('Guardrail would have blocked — passing through per policy', {
+        // Stable marker for the GuardrailDenialRate metric filter (#1161).
+        marker: 'GUARDRAIL_DENIAL',
         action: result.action,
         outputPreview: outputs.substring(0, 200),
       });
@@ -1782,6 +1784,10 @@ async function promoteToJob(
     );
 
     log.info('Turn promoted to background job', {
+      // Stable marker for the BackgroundPromotion metric filter (#1161). This
+      // is a "platform compensating for model behavior" counter — its trend is
+      // an input to Loop-2 instruction tuning, so it's a metric without an alarm.
+      marker: 'BACKGROUND_PROMOTION',
       sessionId: input.sessionId,
       taskArn: result.tasks?.[0]?.taskArn ?? 'unknown',
     });
@@ -2136,6 +2142,10 @@ async function flagFailedTurn(
 ): Promise<boolean> {
   if (!agentResult.failed) return false;
   log.warn('Agent returned an error turn', {
+    // Stable marker for the ErrorTurnRate metric filter (#1161). The errorClass
+    // field carries EmptyAgentResponse for empty-final turns, which the
+    // dedicated EmptyAgentResponse filter matches on the same line.
+    marker: 'AGENT_ERROR_TURN',
     errorClass: agentResult.errorClass ?? 'unknown',
     errorSource: agentResult.errorSource ?? 'unknown',
     latencyMs: ctx.latencyMs,
