@@ -125,13 +125,16 @@ function ipv4IsBlocked(ip: string): boolean {
   if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
     return true; // malformed → block
   }
-  const [a, b] = parts;
+  const [a, b, c] = parts;
   if (a === 0) return true;                           // 0.0.0.0/8 "this network"
   if (a === 10) return true;                          // 10.0.0.0/8 private
   if (a === 127) return true;                         // 127.0.0.0/8 loopback
   if (a === 169 && b === 254) return true;            // 169.254.0.0/16 link-local + cloud metadata
   if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12 private
   if (a === 192 && b === 168) return true;            // 192.168.0.0/16 private
+  if (a === 192 && b === 0 && c === 0) return true;   // 192.0.0.0/24 IETF protocol assignments
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
+  if (a === 203 && b === 0 && c === 113) return true; // 203.0.113.0/24 documentation (TEST-NET-3)
   if (a === 100 && b >= 64 && b <= 127) return true;  // 100.64.0.0/10 CGNAT
   return false;
 }
@@ -153,6 +156,9 @@ function ipv6IsBlocked(ip: string): boolean {
     const asIpv4 = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
     return ipv4IsBlocked(asIpv4);
   }
+  // Deprecated IPv4-compatible form (no "ffff:" marker), e.g. "::127.0.0.1".
+  const deprecated = lower.match(/^::(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (deprecated) return ipv4IsBlocked(deprecated[1]);
 
   if (/^fe[89ab]/.test(lower)) return true;           // fe80::/10 link-local
   if (/^f[cd]/.test(lower)) return true;              // fc00::/7 unique-local

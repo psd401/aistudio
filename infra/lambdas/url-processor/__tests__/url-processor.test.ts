@@ -8,11 +8,9 @@
  * - REV-COR-435  : async/direct invocations propagate errors; API Gateway path returns HTTP shapes.
  * - REV-INFRA-135: chunkText records a distinct, increasing lineStart per chunk.
  *
- * Run (from repo root):
- *   cd infra && bunx jest --rootDir "$(pwd)" --roots "$(pwd)/lambdas/url-processor" \
- *     --testMatch "**\/__tests__/**\/*.test.ts" \
- *     --transform '{"^.+\\.tsx?$":["ts-jest",{"tsconfig":"<scratchpad>/urlproc-tsconfig.test.json"}]}' \
- *     --testEnvironment node
+ * Run (from repo root): cd infra && bun run test
+ * Picked up by the "lambdas" project in infra/jest.config.js, which transforms
+ * lambdas/**\/__tests__/**\/*.test.ts via infra/lambdas/tsconfig.test.json.
  *
  * Runtime deps (@aws-sdk/*, cheerio, marked) are virtual-mocked so the test needs no
  * bundled node_modules and never loads the ESM-only layer packages. The module importing
@@ -110,6 +108,11 @@ describe('isBlockedAddress — SSRF address ranges (REV-COR-434)', () => {
     '::ffff:10.0.0.1', // IPv4-mapped (dotted-decimal)
     '::ffff:7f00:1', // IPv4-mapped 127.0.0.1, hex-normalized (Gemini finding, PR #1130)
     '::ffff:a9fe:a9fe', // IPv4-mapped 169.254.169.254 (cloud metadata), hex-normalized
+    '::127.0.0.1', // deprecated IPv4-compatible form (no "ffff:" marker)
+    '192.0.0.8', // 192.0.0.0/24 IETF protocol assignments
+    '198.18.0.1', // 198.18.0.0/15 benchmarking
+    '198.19.255.254', // 198.18.0.0/15 benchmarking (upper half)
+    '203.0.113.5', // 203.0.113.0/24 documentation (TEST-NET-3)
     'not-an-ip',
   ])('blocks %s', (ip) => {
     expect(isBlockedAddress(ip)).toBe(true);
