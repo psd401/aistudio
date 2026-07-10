@@ -26,8 +26,35 @@ import {
 
 import type { Label, TriageRules } from "./rules";
 import type { EmailFeatures } from "./rules";
+import type { CorrectionRecord, LearnedPattern } from "./types";
 
 const MODEL_ID = process.env.TRIAGE_LLM_MODEL_ID ?? "us.amazon.nova-micro-v1:0";
+
+/**
+ * Global confidence floor — anything below this becomes `later` regardless
+ * of the model's label. Unchanged from Phase 1.
+ */
+export const GLOBAL_CONFIDENCE_FLOOR = 0.6;
+
+/**
+ * Higher bar for LLM-sourced `important` (#1172): "important" isn't always
+ * important, so an LLM `important` needs at least this confidence or it is
+ * demoted to `later`. Rule-sourced importants (VIP, thread-reply) are
+ * unaffected — they never pass through here.
+ */
+export const IMPORTANT_CONFIDENCE_FLOOR = 0.75;
+
+/** Max characters of body excerpt we feed Nova Micro (#1172). */
+export const BODY_EXCERPT_MAX = 1500;
+
+export interface ClassifyOptions {
+  /** Full-body excerpt (preferred over snippet when available). */
+  bodyExcerpt?: string;
+  /** Weighted sender hints from the nightly learning job. */
+  learnedPatterns?: LearnedPattern[];
+  /** Recent user corrections, summarised into the prompt. */
+  recentCorrections?: CorrectionRecord[];
+}
 
 let cachedClient: BedrockRuntimeClient | null = null;
 
@@ -55,9 +82,15 @@ export async function classifyWithLLM(
   features: EmailFeatures,
   rules: TriageRules,
   userInternalDomain: string,
+  opts: ClassifyOptions = {},
 ): Promise<LLMDecision> {
-  const systemPrompt = buildSystemPrompt(rules, userInternalDomain);
-  const userPrompt = buildUserPrompt(features);
+  const systemPrompt = buildSystemPrompt(
+    rules,
+    userInternalDomain,
+    opts.learnedPatterns ?? [],
+    opts.recentCorrections ?? [],
+  );
+  const userPrompt = buildUserPrompt(features, opts.bodyExcerpt);
 
   try {
     const resp = await client().send(
@@ -111,6 +144,8 @@ export async function classifyWithLLM(
 function buildSystemPrompt(
   rules: TriageRules,
   userInternalDomain: string,
+  learnedPatterns: LearnedPattern[],
+  recentCorrections: CorrectionRecord[],
 ): string {
   const vip = rules.vipSenders.length
     ? rules.vipSenders.join(", ")
@@ -132,7 +167,7 @@ function buildSystemPrompt(
           })
           .join("\n");
 
-  return [
+  const lines = [
     `You classify incoming emails for a Peninsula School District (PSD) employee into one of three Gmail labels:`,
     `  - important: needs attention soon. Real work, real people, real decisions.`,
     `  - later:     can wait. Notifications, FYI, low-priority discussion.`,
@@ -143,8 +178,12 @@ function buildSystemPrompt(
     ``,
     `Confidence calibration:`,
     `  0.9+  obvious case (signature human conversation, clear newsletter)`,
+    `  0.75+ confident it is genuinely important (needed before "important" sticks)`,
     `  0.6+  reasonable signal but not certain`,
     `  <0.6  genuine ambiguity — Lambda will default to "later" anyway`,
+    ``,
+    `Be conservative with "important": it should mean the user must look soon. When`,
+    `unsure between important and later, prefer later or lower your confidence.`,
     ``,
     `Heuristics (in priority order):`,
     `  1. Spam pretends to be urgent. External senders shouting "URGENT" without a thread or prior contact → almost always later.`,
@@ -158,22 +197,124 @@ function buildSystemPrompt(
     `  Muted senders: ${muted}`,
     `  Keyword rules:`,
     `${keywords}`,
-  ].join("\n");
+  ];
+
+  const learned = formatLearnedPatterns(learnedPatterns);
+  if (learned) {
+    lines.push(
+      ``,
+      `Learned sender signals (soft hints from this user's past corrections; higher`,
+      `weight = stronger. Use as evidence, not a hard rule):`,
+      learned,
+    );
+  }
+
+  const corrections = formatRecentCorrections(recentCorrections);
+  if (corrections) {
+    lines.push(
+      ``,
+      `Recent corrections the user made to your past calls (learn the direction):`,
+      corrections,
+    );
+  }
+
+  return lines.join("\n");
 }
 
-function buildUserPrompt(features: EmailFeatures): string {
-  // Keep this small — Nova Micro is cheap per token but we still want
-  // throughput at scale. Truncate to ~1500 chars max.
-  const snippet =
-    features.snippetLower.length > 400
-      ? features.snippetLower.slice(0, 400) + "…"
-      : features.snippetLower;
+/**
+ * Render weighted learned patterns as prompt hints. Highest-weight first,
+ * capped at 8 lines so a chatty history can't blow the prompt budget.
+ */
+function formatLearnedPatterns(patterns: LearnedPattern[]): string {
+  if (!patterns || patterns.length === 0) return "";
+  return patterns
+    .slice()
+    .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+    .slice(0, 8)
+    .map((p) => {
+      const lean =
+        p.kind === "vip"
+          ? "lean important (user keeps rescuing these)"
+          : "lean later/news (user keeps archiving these)";
+      return `  - ${p.pattern} → ${lean} [w=${(p.weight ?? 0).toFixed(1)}]`;
+    })
+    .join("\n");
+}
+
+/** Summarise the most recent corrections (newest first, capped at 5). */
+function formatRecentCorrections(corrections: CorrectionRecord[]): string {
+  if (!corrections || corrections.length === 0) return "";
+  return corrections
+    .slice(-5)
+    .reverse()
+    .map((c) => {
+      const who = c.fromEmail ? ` from ${c.fromEmail}` : "";
+      if (c.toLabel === "archived") {
+        return `  - archived an "important"${who} (you over-escalated)`;
+      }
+      if (c.toLabel === "inbox") {
+        return `  - rescued a "${c.fromLabel}"${who} back to inbox (you under-escalated)`;
+      }
+      return `  - re-labelled "${c.fromLabel}" → "${c.toLabel}"${who}`;
+    })
+    .join("\n");
+}
+
+function buildUserPrompt(features: EmailFeatures, bodyExcerpt?: string): string {
+  // Prefer the fuller body excerpt (#1172) — the 200-char snippet often
+  // cut off the signal ("please approve by Friday"). Fall back to the
+  // snippet when no body could be fetched. Cap at BODY_EXCERPT_MAX so a
+  // long thread can't blow Nova Micro's token budget.
+  const raw = bodyExcerpt && bodyExcerpt.trim() ? bodyExcerpt : features.snippetLower;
+  const body =
+    raw.length > BODY_EXCERPT_MAX ? raw.slice(0, BODY_EXCERPT_MAX) + "…" : raw;
   return [
     `From: ${features.fromEmail} (${features.isInternal ? "internal" : "external"})`,
     `Subject: ${features.subject}`,
-    `Snippet: ${snippet}`,
+    `Body: ${body}`,
     `Has-prior-reply-from-user: ${features.hasUserReply}`,
   ].join("\n");
+}
+
+/**
+ * Apply the confidence floors to a raw LLM decision (#1172). Pure +
+ * exported so the "important needs ≥ 0.75" rule is unit-testable without
+ * a Bedrock mock.
+ *
+ *   - confidence < GLOBAL_CONFIDENCE_FLOOR (0.6) → later (any label)
+ *   - label === important && confidence < IMPORTANT_CONFIDENCE_FLOOR (0.75)
+ *       → later (the "important isn't always important" bar)
+ *
+ * Rule-sourced decisions never pass through here; they're always trusted.
+ */
+export function finalizeLLMLabel(llm: LLMDecision): {
+  label: Label;
+  confidence: number;
+  reason: string;
+  downgraded: boolean;
+} {
+  if (llm.confidence < GLOBAL_CONFIDENCE_FLOOR) {
+    return {
+      label: "later",
+      confidence: llm.confidence,
+      reason: `low-confidence (${llm.reason})`,
+      downgraded: true,
+    };
+  }
+  if (llm.label === "important" && llm.confidence < IMPORTANT_CONFIDENCE_FLOOR) {
+    return {
+      label: "later",
+      confidence: llm.confidence,
+      reason: `important-below-${IMPORTANT_CONFIDENCE_FLOOR} (${llm.reason})`,
+      downgraded: true,
+    };
+  }
+  return {
+    label: llm.label,
+    confidence: llm.confidence,
+    reason: llm.reason,
+    downgraded: false,
+  };
 }
 
 /**

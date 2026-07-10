@@ -36,12 +36,20 @@ User in Chat ───────────► PSD AI Agent (existing OpenCla
    (EventBridge Scheduler)
 ```
 
-Three deployable artefacts:
+Deployable artefacts:
 - DynamoDB table `psd-agent-triage-<env>` (added in `infra/lib/agent-platform-stack.ts`).
-- Two Lambdas (`agent-triage-poll`, `agent-triage-digest`) under `infra/lambdas/`.
+- Lambdas under `infra/lambdas/agent-triage-poll/` (shared code, multiple
+  handlers) + `agent-triage-digest`.
 - One skill (`psd-email-triage`) bundled into the agent image.
 
 Plus one Next.js admin page (`/admin/agents/[userEmail]/triage`).
+
+> **Phase 2 (#1172) changed the poll execution path.** The single
+> `psd-agent-triage-poll` Lambda's in-process serial user loop was replaced
+> by a **dispatcher → SQS FIFO → worker** fanout (see the Phase 2 section
+> below). The 5-minute EventBridge rule now targets the **dispatcher**, which
+> enqueues one message per enabled user; the **worker** does the per-user
+> work. `agent-triage-digest` is unchanged.
 
 ---
 
@@ -247,13 +255,89 @@ Each task gesture invokes AgentCore once (~$0.01–0.05 per invocation depending
 
 ---
 
+## Phase 2 (#1172) — fanout, sweep, learning, escalation modes
+
+Phase 2 ships #996 items 2/3/4/6 plus a per-user escalation policy. All new
+state is additive DDB attributes (no migration).
+
+### Multi-tenant fanout (item 6)
+
+```
+EventBridge rate(5m)  ── {job:"poll"} ─►  DISPATCHER ─► SQS FIFO ─► WORKER
+EventBridge daily 09:00 ─ {job:"learn"} ─►  (lists users,   (group =   (poll / sweep
+                                            enqueues 1/user) userEmail)  slice / learn)
+                                                                │
+                                                        maxReceiveCount 3
+                                                                ▼
+                                                          work DLQ + alarm
+```
+
+- **Dispatcher** (`dispatcher.handler`): scans `enabled=true`, enqueues one
+  `poll` message per user; on the poll job it also kicks a `sweep` message
+  for users whose sweep is `pending` or a `running` sweep gone stale
+  (>15 min). On the learn job it enqueues one `learn` per user.
+- **Worker** (`worker.handler`): SQS event source, `reportBatchItemFailures`.
+  Dispatches by message type. **FIFO `MessageGroupId = userEmail`** gives
+  per-user single-flight — the cursor-safety invariant the old
+  `reservedConcurrency=1` provided — while users run in parallel (worker
+  `reservedConcurrency=25`). Poison users land in the DLQ after 3 receives.
+- Dedup ids: poll = 5-min bucket, learn = date, sweep continuation = page
+  cursor (so consecutive slices are never collapsed).
+
+### Initial-inbox sweep (item 2)
+
+- On **enable** (and via the `sweep` skill subcommand) the row gets a `sweep`
+  map (`status=pending`). The dispatcher kicks it; the worker runs one **page
+  per slice** (≤50 msgs) over `in:inbox newer_than:30d`, cap **1000**, through
+  the normal rules→LLM pipeline with **escalation suppressed** (no ping-storm).
+- **Resumable**: `sweep.pageToken` + `processed`/`labeled` persist each slice;
+  the worker re-enqueues a continuation until the cursor is exhausted or the
+  cap is hit. A slice interrupted by a Lambda timeout is redelivered and
+  reprocesses its page idempotently (already-labeled messages are skipped).
+
+### Correction-driven learning (items 3 + 4)
+
+- Nightly `learn` job (`learning.ts` pure algorithm) mines
+  `recentCorrections` (+ `recentDecisions` for sender attribution) into
+  **age-decayed weighted `learnedPatterns`** (30-day half-life). Patterns are
+  injected into the classifier prompt as **soft hints** — applied
+  automatically, never hard-labelling.
+- Strong, repeated signals (≥2 corrections, weight ≥1.5) become **pending
+  rule suggestions** (`mute`/`vip`). Suggestions are **suggest-only**: a Chat
+  card surfaces them and they become real `rules` only when the user runs
+  `suggestions apply <id>`. `dismiss` records the id so it is never re-raised.
+
+### "Important" quality + per-user escalation (new scope)
+
+- Classifier now sees a **~1500-char body excerpt** (snippet fallback), the
+  learned patterns, and a recent-correction summary. **LLM `important`
+  requires confidence ≥ 0.75** (`finalizeLLMLabel`), else it drops to `later`
+  (the global 0.6 floor is unchanged).
+- New top-level `escalationMode` (`all`|`high-confidence`|`rules-only`|`none`)
+  + `escalationConfidenceThreshold` (default 0.85), enforced in
+  `shouldEscalate`. **Default `all` preserves pre-#1172 behaviour** — nobody's
+  escalations change until they opt in via
+  `escalation mode …` / `escalation threshold …`.
+
+### Phase 2 files
+
+`infra/lambdas/agent-triage-poll/` — `dispatcher.ts`, `worker.ts`, `queue.ts`,
+`sweep.ts`, `learn.ts`, `learning.ts` (+ `rules.ts`, `llm.ts`, `storage.ts`,
+`gmail.ts`, `chat.ts`, `index.ts` extended); `infra/lib/agent-platform-stack.ts`
+(queue/DLQ/worker/dispatcher/rules/alarm); `infra/agent-image/skills/psd-email-triage/`
+(`run.js`, `SKILL.md`); `app/(protected)/admin/agents/[userEmail]/triage/` +
+`actions/admin/agent-triage.actions.ts`.
+
+---
+
 ## Phase 1 known limitations
 
-Listed here, all tracked in #996:
-- No Gmail push subscription — escalations are bounded by the 5-minute polling cadence.
-- No retroactive classification — only mail received after enable gets sorted.
-- `learnedPatterns` array is populated by Phase 2; Phase 1 only records `recentCorrections`.
-- Single-Lambda scan over all opted-in users — caps at 1000 per invocation. Fan-out comes with Phase 2.
+Most are resolved in Phase 2 (#1172); the rest remain tracked in #996:
+- ~~No retroactive classification~~ → **resolved**: initial-inbox sweep (item 2).
+- ~~`learnedPatterns` unpopulated~~ → **resolved**: nightly learning (items 3+4).
+- ~~Single-Lambda scan caps at 1000 users~~ → **resolved**: dispatcher/worker fanout (item 6).
+- No Gmail push subscription — escalations are still bounded by the 5-minute polling cadence (item 1, deferred).
+- No cross-system correlation (item 5), skill-sharing (item 7), or at-scale cost spot-check (item 8) — deferred.
 
 ---
 

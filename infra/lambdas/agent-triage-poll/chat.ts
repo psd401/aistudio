@@ -15,7 +15,7 @@ import {
 } from "@aws-sdk/client-secrets-manager";
 import * as chatPkg from "@googleapis/chat";
 
-import type { GmailMessageMeta } from "./types";
+import type { GmailMessageMeta, Suggestion } from "./types";
 import type { Label } from "./rules";
 
 const GOOGLE_CREDENTIALS_SECRET_ARN =
@@ -193,6 +193,68 @@ export async function postEscalation(params: EscalationParams): Promise<void> {
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
   return s.slice(0, n - 1) + "…";
+}
+
+export interface SuggestionCardParams {
+  dmSpaceName: string;
+  suggestions: Suggestion[];
+}
+
+/**
+ * Post a card summarising NEW pending rule suggestions from the nightly
+ * learning job (#1172). Hard rules are suggest-only: the card tells the
+ * user how to approve ("apply the rule") — approval itself flows through
+ * the skill's `suggestions apply <id>` subcommand, which the agent runs
+ * on the user's say-so. We deliberately don't embed interactive buttons
+ * (they'd need a Chat webhook round-trip); the agent is the action layer.
+ */
+export async function postSuggestionCard(
+  params: SuggestionCardParams,
+): Promise<void> {
+  if (params.suggestions.length === 0) return;
+  const client = await getChatClient();
+
+  const widgets = params.suggestions.slice(0, 10).map((s) => ({
+    decoratedText: {
+      topLabel: s.kind === "mute" ? "Mute suggestion" : "VIP suggestion",
+      text: truncate(s.reason, 300),
+      bottomLabel: `id: ${s.id}`,
+    },
+  }));
+
+  const card = {
+    cardId: `triage-suggestions-${Date.now()}`,
+    card: {
+      header: {
+        title: "💡 Triage learned something",
+        subtitle: `${params.suggestions.length} suggested rule change(s) from your recent corrections`,
+      },
+      sections: [
+        { widgets },
+        {
+          widgets: [
+            {
+              textParagraph: {
+                text:
+                  "Tell me to <b>apply</b> or <b>dismiss</b> any of these (e.g. " +
+                  '"apply the first one" or "ignore that") and I\'ll update your ' +
+                  "triage rules. Nothing changes until you approve.",
+              },
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  const requestBody: Record<string, unknown> = {
+    text: `💡 Triage has ${params.suggestions.length} suggested rule change(s) from your recent corrections.`,
+    cardsV2: [card],
+  };
+  await client.spaces.messages.create({
+    parent: params.dmSpaceName,
+    requestBody,
+  });
 }
 
 export interface TaskOutcomeParams {

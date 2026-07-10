@@ -1696,19 +1696,52 @@ export class AgentPlatformStack extends cdk.Stack {
     }));
 
     // =====================================================================
-    // 7d. Email Triage Classifier Lambda — psd-agent-triage-poll
+    // 7d. Email Triage fanout — dispatcher + worker + FIFO work queue (#1172)
     // =====================================================================
-    // Polls Gmail history for opted-in users every 5 minutes. For each
-    // new message: deterministic rules → maybe Nova Micro fallback →
-    // apply Gmail label → maybe Chat escalation. For each user-driven
-    // label change: record as training signal.
+    // Replaces the old single psd-agent-triage-poll Lambda's in-process
+    // serial user loop (#996 item 6). Flow:
+    //   EventBridge (5-min "poll" / daily "learn") → DISPATCHER Lambda lists
+    //   enabled users → one SQS FIFO message per user → WORKER Lambda does the
+    //   per-user work (live triage / initial-inbox sweep slice / nightly
+    //   learning). FIFO MessageGroupId = userEmail gives per-user
+    //   single-flight (the cursor-safety invariant the old
+    //   reservedConcurrency=1 provided) while users run in parallel. A DLQ
+    //   captures poison users so one bad row can't wedge the queue.
     // See docs/operations/email-triage.md.
-    //
-    // 5-minute polling is the load-bearing primitive for Phase 1. Phase 2
-    // (#996) adds Gmail push subscriptions for sub-minute escalation
-    // latency; polling stays as the fallback there.
-    const triagePollRole = ServiceRoleFactory.createLambdaRole(this, 'TriagePollLambdaRole', {
-      functionName: 'psd-agent-triage-poll',
+
+    // ---- FIFO work queue + DLQ -------------------------------------------
+    const triageWorkDlq = new sqs.Queue(this, 'TriageWorkDLQ', {
+      queueName: `psd-agent-triage-work-dlq-${environment}.fifo`,
+      fifo: true,
+      contentBasedDeduplication: false,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+    cdk.Tags.of(triageWorkDlq).add('Environment', environment);
+    cdk.Tags.of(triageWorkDlq).add('ManagedBy', 'cdk');
+
+    const triageWorkQueue = new sqs.Queue(this, 'TriageWorkQueue', {
+      queueName: `psd-agent-triage-work-${environment}.fifo`,
+      fifo: true,
+      // Explicit dedup ids are supplied per message (poll = 5-min bucket,
+      // learn = date, sweep = page cursor), so content-based dedup is off.
+      contentBasedDeduplication: false,
+      // High-throughput FIFO: parallelism scales with distinct groups
+      // (users), not a single global rate.
+      fifoThroughputLimit: sqs.FifoThroughputLimit.PER_MESSAGE_GROUP_ID,
+      deduplicationScope: sqs.DeduplicationScope.MESSAGE_GROUP,
+      // Visibility >= 6x worker timeout (240s) → 24 min minimum; 30 min here.
+      visibilityTimeout: cdk.Duration.minutes(30),
+      retentionPeriod: cdk.Duration.days(4),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      deadLetterQueue: { queue: triageWorkDlq, maxReceiveCount: 3 },
+    });
+    cdk.Tags.of(triageWorkQueue).add('Environment', environment);
+    cdk.Tags.of(triageWorkQueue).add('ManagedBy', 'cdk');
+
+    // ---- Worker role (per-user work: Gmail/Bedrock/AgentCore/Chat) -------
+    const triageWorkerRole = ServiceRoleFactory.createLambdaRole(this, 'TriageWorkerLambdaRole', {
+      functionName: 'psd-agent-triage-worker',
       environment,
       region: this.region,
       account: this.account,
@@ -1795,81 +1828,84 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
     });
 
-    const triagePollLogGroup = new logs.LogGroup(this, 'TriagePollLogGroup', {
-      logGroupName: `/aws/lambda/psd-agent-triage-poll-${environment}`,
+    const triageWorkerLogGroup = new logs.LogGroup(this, 'TriageWorkerLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-triage-worker-${environment}`,
       retention: config.monitoring.logRetention,
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
     });
-    cdk.Tags.of(triagePollLogGroup).add('Environment', environment);
-    cdk.Tags.of(triagePollLogGroup).add('ManagedBy', 'cdk');
+    cdk.Tags.of(triageWorkerLogGroup).add('Environment', environment);
+    cdk.Tags.of(triageWorkerLogGroup).add('ManagedBy', 'cdk');
 
-    triagePollRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'TriagePollLogsCorrectArn',
+    triageWorkerRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'TriageWorkerLogsCorrectArn',
       effect: iam.Effect.ALLOW,
       actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
       resources: [
-        `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/psd-agent-triage-poll-${environment}:*`,
+        `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/psd-agent-triage-worker-${environment}:*`,
       ],
     }));
 
     // Read MEMORY.md from each user's S3 workspace prefix.
-    triagePollRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'TriagePollReadWorkspaceMemory',
+    triageWorkerRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'TriageWorkerReadWorkspaceMemory',
       effect: iam.Effect.ALLOW,
       actions: ['s3:GetObject'],
       resources: [`${this.workspaceBucket.bucketArn}/*/MEMORY.md`],
     }));
 
-    const triagePollLambda = new lambda.Function(this, 'TriagePollLambda', {
-      functionName: `psd-agent-triage-poll-${environment}`,
-      runtime: AGENT_LAMBDA_RUNTIME,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(
-        path.join(__dirname, '..', 'lambdas', 'agent-triage-poll'),
-        {
-          assetHashType: cdk.AssetHashType.SOURCE,
-          bundling: {
-            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
-            local: {
-              tryBundle(outputDir: string): boolean {
-                try {
-                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-triage-poll');
-                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
-                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
-                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
-                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
-                  return true;
-                } catch (e) {
-                  // eslint-disable-next-line no-console
-                  console.error('Local bundling failed, falling back to Docker:', e);
-                  return false;
-                }
-              },
+    // Shared code asset — the whole agent-triage-poll dir compiles all
+    // *.ts to dist; worker + dispatcher select different handlers off the
+    // same bundle, so CDK builds/uploads it once.
+    const triageLambdaCode = lambda.Code.fromAsset(
+      path.join(__dirname, '..', 'lambdas', 'agent-triage-poll'),
+      {
+        assetHashType: cdk.AssetHashType.SOURCE,
+        bundling: {
+          image: AGENT_LAMBDA_RUNTIME.bundlingImage,
+          local: {
+            tryBundle(outputDir: string): boolean {
+              try {
+                const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-triage-poll');
+                execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                return true;
+              } catch (e) {
+                // eslint-disable-next-line no-console
+                console.error('Local bundling failed, falling back to Docker:', e);
+                return false;
+              }
             },
-            command: [
-              'bash', '-c',
-              [
-                'npm install',
-                'npm run build',
-                'cp -r dist/* /asset-output/',
-                'cp package.json /asset-output/',
-                'cd /asset-output && npm install --production',
-              ].join(' && '),
-            ],
           },
+          command: [
+            'bash', '-c',
+            [
+              'npm install',
+              'npm run build',
+              'cp -r dist/* /asset-output/',
+              'cp package.json /asset-output/',
+              'cd /asset-output && npm install --production',
+            ].join(' && '),
+          ],
         },
-      ),
+      },
+    );
+
+    const triageWorkerLambda = new lambda.Function(this, 'TriageWorkerLambda', {
+      functionName: `psd-agent-triage-worker-${environment}`,
+      runtime: AGENT_LAMBDA_RUNTIME,
+      handler: 'worker.handler',
+      code: triageLambdaCode,
       memorySize: 1024,
-      // 4.5 minutes — 30s safety margin below the 5-minute EventBridge
-      // schedule interval. With reservedConcurrentExecutions=1, an
-      // invocation that hits the full timeout would silently drop the
-      // next scheduled firing (no retry, no DLQ). The 30s gap ensures
-      // the next invocation can start cleanly.
-      timeout: cdk.Duration.seconds(270),
-      role: triagePollRole,
-      logGroup: triagePollLogGroup,
+      // One SQS message = one user's poll / sweep slice / learning run.
+      // 4 min covers a slow sweep page (~50 messages × LLM) with headroom
+      // under the queue's 30-min visibility timeout (>= 6× this).
+      timeout: cdk.Duration.minutes(4),
+      role: triageWorkerRole,
+      logGroup: triageWorkerLogGroup,
       environment: {
         ENVIRONMENT: environment,
         TRIAGE_TABLE: this.triageTable.tableName,
@@ -1879,42 +1915,138 @@ export class AgentPlatformStack extends cdk.Stack {
         // user's task-creation instructions and embed them in the
         // AgentCore prompt verbatim.
         WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
-        TRIAGE_USER_BATCH: '10',
+        // Sweep continuations re-enqueue onto this queue (worker → worker).
+        TRIAGE_WORK_QUEUE_URL: triageWorkQueue.queueUrl,
         // Override knob — set to 'us.anthropic.claude-3-5-haiku-...' to
         // fall back from Nova Micro without redeploy.
         TRIAGE_LLM_MODEL_ID: 'us.amazon.nova-micro-v1:0',
         // AGENTCORE_RUNTIME_ID intentionally NOT set — resolved from SSM
-        // at runtime (same pattern as router/cron Lambdas). The runtime
-        // resource is created conditionally on `--context agentImageTag`
-        // so we can't reliably build the env var at deploy time.
-        // The Lambda's agentcore.ts module does the SSM lookup on cold
-        // start, caches the result, and uses it for @psd/Task gestures.
+        // at runtime (same pattern as router/cron Lambdas).
         AWS_ACCOUNT: this.account,
       },
       architecture: lambda.Architecture.ARM_64,
-      // Hard concurrency cap of 1 — the Lambda processes a per-user
-      // history cursor in DDB without read-modify-write locking, so two
-      // concurrent invocations would re-process the same labelsAdded
-      // events and duplicate downstream side-effects (#duplicate-task
-      // bug observed 2026-05-22). With a 5-minute schedule and ~2-minute
-      // typical invocations this is safe; if an invocation runs long
-      // EventBridge skips the next firing rather than queuing.
-      reservedConcurrentExecutions: 1,
+      // Bounded concurrency across users. Per-user single-flight is
+      // enforced by the FIFO MessageGroupId (userEmail), so a per-user
+      // cursor is never processed by two invocations at once — this cap
+      // just limits total parallelism (and downstream Bedrock/Gmail load).
+      reservedConcurrentExecutions: 25,
     });
-    cdk.Tags.of(triagePollLambda).add('Environment', environment);
-    cdk.Tags.of(triagePollLambda).add('ManagedBy', 'cdk');
+    cdk.Tags.of(triageWorkerLambda).add('Environment', environment);
+    cdk.Tags.of(triageWorkerLambda).add('ManagedBy', 'cdk');
 
-    // EventBridge Rule fires the poller every 5 minutes. Rule (not
-    // Scheduler) is the right primitive for a global fixed cadence —
-    // simpler IAM + no per-invocation payload.
+    // Worker consumes the FIFO queue (SqsEventSource grants consume) and
+    // re-enqueues sweep continuations (needs send).
+    triageWorkerLambda.addEventSource(
+      new lambdaEventSources.SqsEventSource(triageWorkQueue, {
+        // FIFO: no maxBatchingWindow (unsupported). Small batch keeps a
+        // poison message's blast radius tiny; partial-batch failures let a
+        // good record in the same group succeed.
+        batchSize: 5,
+        reportBatchItemFailures: true,
+      }),
+    );
+    triageWorkQueue.grantSendMessages(triageWorkerLambda);
+
+    // ---- Dispatcher (fan-out) -------------------------------------------
+    // Lists enabled users and enqueues one message per user. Minimal perms:
+    // scan the triage table (via ServiceRoleFactory) + send to the queue.
+    const triageDispatcherRole = ServiceRoleFactory.createLambdaRole(this, 'TriageDispatcherLambdaRole', {
+      functionName: 'psd-agent-triage-dispatcher',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      dynamodbTables: [this.triageTable.tableName],
+    });
+
+    const triageDispatcherLogGroup = new logs.LogGroup(this, 'TriageDispatcherLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-triage-dispatcher-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(triageDispatcherLogGroup).add('Environment', environment);
+    cdk.Tags.of(triageDispatcherLogGroup).add('ManagedBy', 'cdk');
+
+    triageDispatcherRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'TriageDispatcherLogsCorrectArn',
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [
+        `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/psd-agent-triage-dispatcher-${environment}:*`,
+      ],
+    }));
+
+    const triageDispatcherLambda = new lambda.Function(this, 'TriageDispatcherLambda', {
+      functionName: `psd-agent-triage-dispatcher-${environment}`,
+      runtime: AGENT_LAMBDA_RUNTIME,
+      handler: 'dispatcher.handler',
+      code: triageLambdaCode,
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(2),
+      role: triageDispatcherRole,
+      logGroup: triageDispatcherLogGroup,
+      environment: {
+        ENVIRONMENT: environment,
+        TRIAGE_TABLE: this.triageTable.tableName,
+        TRIAGE_WORK_QUEUE_URL: triageWorkQueue.queueUrl,
+      },
+      architecture: lambda.Architecture.ARM_64,
+    });
+    cdk.Tags.of(triageDispatcherLambda).add('Environment', environment);
+    cdk.Tags.of(triageDispatcherLambda).add('ManagedBy', 'cdk');
+    triageWorkQueue.grantSendMessages(triageDispatcherLambda);
+
+    // EventBridge Rule fires the dispatcher every 5 minutes for the live
+    // poll (+ sweep kicks). Rule (not Scheduler) is the right primitive for
+    // a global fixed cadence — simpler IAM + a constant payload.
     const triagePollRule = new events.Rule(this, 'TriagePollRule', {
       ruleName: `psd-agent-triage-poll-${environment}`,
       schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
-      description: 'Every-5-minute trigger for the email triage classifier',
+      description: 'Every-5-minute triage dispatch (poll + sweep kicks)',
     });
-    triagePollRule.addTarget(new eventsTargets.LambdaFunction(triagePollLambda));
+    triagePollRule.addTarget(
+      new eventsTargets.LambdaFunction(triageDispatcherLambda, {
+        event: events.RuleTargetInput.fromObject({ job: 'poll' }),
+      }),
+    );
     cdk.Tags.of(triagePollRule).add('Environment', environment);
     cdk.Tags.of(triagePollRule).add('ManagedBy', 'cdk');
+
+    // Daily rule fires the dispatcher for the nightly correction-driven
+    // learning job. 09:00 UTC ≈ 01:00-02:00 America/Los_Angeles.
+    const triageLearnRule = new events.Rule(this, 'TriageLearnRule', {
+      ruleName: `psd-agent-triage-learn-${environment}`,
+      schedule: events.Schedule.cron({ minute: '0', hour: '9' }),
+      description: 'Nightly correction-driven learning dispatch',
+    });
+    triageLearnRule.addTarget(
+      new eventsTargets.LambdaFunction(triageDispatcherLambda, {
+        event: events.RuleTargetInput.fromObject({ job: 'learn' }),
+      }),
+    );
+    cdk.Tags.of(triageLearnRule).add('Environment', environment);
+    cdk.Tags.of(triageLearnRule).add('ManagedBy', 'cdk');
+
+    // DLQ alarm — a user landing in the DLQ (3 failed receives) needs
+    // investigation; their triage is stalled until resolved.
+    const triageWorkDlqAlarm = new cloudwatch.Alarm(this, 'TriageWorkDlqAlarm', {
+      alarmName: `psd-agent-triage-work-dlq-${environment}`,
+      alarmDescription:
+        'Email triage work DLQ received messages — a user\'s poll/sweep/learn failed repeatedly',
+      metric: triageWorkDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    if (this.agentAlarmTopic) {
+      triageWorkDlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.agentAlarmTopic));
+    }
 
     // =====================================================================
     // 7e. Triage Digest Lambda — psd-agent-triage-digest

@@ -126,6 +126,38 @@ export async function listHistory(
 }
 
 /**
+ * List message ids in the user's inbox matching a Gmail search query.
+ * Used by the initial-inbox sweep (#1172) which backfills existing mail
+ * — `q=in:inbox newer_than:30d` by default. Returns one page at a time
+ * (Gmail caps a page at ~100 ids) so the caller can time-budget slices
+ * and resume with `nextPageToken`.
+ */
+export async function listInboxMessages(
+  accessToken: string,
+  opts: { query?: string; pageToken?: string; maxResults?: number } = {},
+): Promise<{ messages: { id: string; threadId: string }[]; nextPageToken?: string }> {
+  const params = new URLSearchParams({
+    q: opts.query ?? "in:inbox newer_than:30d",
+    maxResults: String(opts.maxResults ?? 100),
+  });
+  if (opts.pageToken) params.set("pageToken", opts.pageToken);
+  const resp = await gmailFetch(accessToken, `/messages?${params.toString()}`);
+  if (!resp.ok) {
+    throw new Error(
+      `Gmail messages.list failed: ${resp.status} ${await resp.text()}`,
+    );
+  }
+  const data = (await resp.json()) as {
+    messages?: { id: string; threadId: string }[];
+    nextPageToken?: string;
+  };
+  return {
+    messages: data.messages ?? [],
+    nextPageToken: data.nextPageToken,
+  };
+}
+
+/**
  * Fetch the metadata of a single message — sender, subject, snippet,
  * labelIds. We deliberately use `format=metadata` to avoid downloading
  * full bodies (and exposing them to Bedrock prompt input).

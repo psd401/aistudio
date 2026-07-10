@@ -6,9 +6,14 @@
  * in sync when adding new attributes.
  */
 
-import type { Label, TriageRules, EscalationConfig } from "./rules";
+import type {
+  Label,
+  TriageRules,
+  EscalationConfig,
+  EscalationMode,
+} from "./rules";
 
-export type { Label, TriageRules, EscalationConfig };
+export type { Label, TriageRules, EscalationConfig, EscalationMode };
 
 /**
  * Label keys present in the DDB row. The three classifier-assignable
@@ -39,6 +44,27 @@ export interface TriageRow {
   recentDecisions: DecisionRecord[];
   recentCorrections: CorrectionRecord[];
   learnedPatterns?: LearnedPattern[];
+  /**
+   * Per-user escalation policy (#1172). Absent ⇒ `all` (legacy behaviour —
+   * nobody's escalations change until they opt in).
+   */
+  escalationMode?: EscalationMode;
+  /** LLM-confidence bar for `high-confidence` mode. Absent ⇒ 0.85. */
+  escalationConfidenceThreshold?: number;
+  /**
+   * Pending rule suggestions surfaced by the nightly learning job
+   * (#1172). Applied only when the user approves via the skill's
+   * `suggestions apply <id>` subcommand.
+   */
+  pendingSuggestions?: Suggestion[];
+  /** Suggestion ids the user dismissed — never re-raised. */
+  dismissedSuggestions?: string[];
+  /** Suggestion ids the user has applied — audit trail, not re-raised. */
+  appliedSuggestions?: string[];
+  /** ISO timestamp of the last nightly learning run. */
+  learnedAt?: string;
+  /** Initial-inbox-sweep state (#1172). Absent ⇒ no sweep requested. */
+  sweep?: SweepState;
   /** Internal-domain hint, set on enable from the user's email. */
   internalDomain?: string;
   /** Chat DM space resource name, set on enable when known. */
@@ -94,12 +120,69 @@ export interface CorrectionRecord {
    */
   toLabel: Label | "inbox" | "archived";
   ts: string;
+  /**
+   * Sender of the corrected message, snapshotted from the prior decision
+   * so the nightly learning job (#1172) can attribute the correction to a
+   * sender/domain without re-fetching from Gmail. Absent on pre-#1172
+   * corrections (learning tolerates their omission).
+   */
+  fromEmail?: string;
+  /** Sender domain, derived from `fromEmail`. */
+  fromDomain?: string;
 }
 
 export interface LearnedPattern {
+  /** Sender email or domain the pattern keys on. */
   pattern: string;
+  /** Accumulated, age-decayed strength of the signal. */
   weight: number;
+  /** How the pattern was derived (e.g. `correction`). */
   source: string;
+  /** What the pattern argues for — demote/mute vs. promote/VIP. */
+  kind?: "mute" | "vip";
+  /** Number of corrections that fed this pattern. */
+  count?: number;
+}
+
+/**
+ * A pending, user-approvable rule suggestion produced by the nightly
+ * learning job (#1172). Hard rules are suggest-only: a suggestion is
+ * applied to `rules` only when the user runs `suggestions apply <id>`.
+ */
+export interface Suggestion {
+  /** Stable id (e.g. `mute:noreply@x.com`) — dedupes + dismiss tracking. */
+  id: string;
+  kind: "mute" | "vip";
+  /** Sender email (vip) or wildcard pattern (mute) the rule would add. */
+  target: string;
+  /** Human-readable rationale for the Chat card + admin page. */
+  reason: string;
+  /** Number of corrections behind this suggestion. */
+  count: number;
+  /** Age-decayed weight at suggestion time. */
+  weight: number;
+  createdAt: string;
+}
+
+/**
+ * Initial-inbox-sweep progress (#1172). Time-budgeted slices persist this
+ * so a sweep interrupted by a Lambda timeout resumes on the next tick.
+ */
+export interface SweepState {
+  status: "pending" | "running" | "complete" | "error";
+  /** Gmail messages.list pageToken for the next slice; null ⇒ start/done. */
+  pageToken?: string | null;
+  /** Messages examined so far (counts toward the cap). */
+  processed: number;
+  /** Messages we actually applied a label to. */
+  labeled: number;
+  /** Newest-30-days window in days (30) and hard message cap (1000). */
+  windowDays: number;
+  cap: number;
+  startedAt?: string;
+  updatedAt?: string;
+  /** Populated when status === "error". */
+  error?: string;
 }
 
 export interface GmailMessageMeta {

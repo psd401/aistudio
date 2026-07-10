@@ -20,6 +20,9 @@ import {
 import type {
   CorrectionRecord,
   DecisionRecord,
+  LearnedPattern,
+  Suggestion,
+  SweepState,
   TriageRow,
 } from "./types";
 
@@ -395,6 +398,88 @@ export async function recordTaskCreated(
       );
     }
   }
+}
+
+/**
+ * Persist one initial-inbox-sweep slice (#1172): append the decisions
+ * recorded during this slice (trimmed to the rolling window) and update
+ * the `sweep` state map (status, pageToken, counts). Kept separate from
+ * recordPollResult so a sweep never touches the live Gmail-history cursor
+ * (`lastHistoryId`) — the two run independently.
+ */
+export async function recordSweepSlice(
+  userEmail: string,
+  newDecisions: DecisionRecord[],
+  sweep: SweepState,
+): Promise<void> {
+  const RECENT_MAX = 20;
+  if (newDecisions.length > 0) {
+    await ddb().send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: { userEmail },
+        UpdateExpression:
+          "SET recentDecisions = list_append(if_not_exists(recentDecisions, :empty), :d), sweep = :s",
+        ExpressionAttributeValues: {
+          ":empty": [],
+          ":d": newDecisions,
+          ":s": sweep,
+        },
+      }),
+    );
+    // Trim the rolling decisions window — same two-step pattern as
+    // recordPollResult (DynamoDB has no atomic append-then-truncate).
+    const row = await getTriageRow(userEmail);
+    if (row) {
+      const trimmed = (row.recentDecisions ?? []).slice(-RECENT_MAX);
+      if (trimmed.length < (row.recentDecisions ?? []).length) {
+        await ddb().send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: { userEmail },
+            UpdateExpression: "SET recentDecisions = :d",
+            ExpressionAttributeValues: { ":d": trimmed },
+          }),
+        );
+      }
+    }
+  } else {
+    await ddb().send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: { userEmail },
+        UpdateExpression: "SET sweep = :s",
+        ExpressionAttributeValues: { ":s": sweep },
+      }),
+    );
+  }
+}
+
+/**
+ * Persist the output of the nightly learning job (#1172): the soft
+ * `learnedPatterns` (LLM hints) and the merged `pendingSuggestions`
+ * (user-approvable rule changes). `learnedAt` timestamps the run so the
+ * admin page + skill can show freshness.
+ */
+export async function saveLearning(
+  userEmail: string,
+  learnedPatterns: LearnedPattern[],
+  pendingSuggestions: Suggestion[],
+  learnedAt: string,
+): Promise<void> {
+  await ddb().send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: { userEmail },
+      UpdateExpression:
+        "SET learnedPatterns = :lp, pendingSuggestions = :ps, learnedAt = :at",
+      ExpressionAttributeValues: {
+        ":lp": learnedPatterns,
+        ":ps": pendingSuggestions,
+        ":at": learnedAt,
+      },
+    }),
+  );
 }
 
 /**
