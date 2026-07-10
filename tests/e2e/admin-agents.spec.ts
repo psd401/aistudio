@@ -217,4 +217,57 @@ test.describe('Agent Dashboard — Admin', () => {
       fullPage: true,
     })
   })
+
+  // admin-agents-iteration-telemetry (issue #1161): the always-visible stats
+  // area renders an "Iteration telemetry (per turn)" card row surfacing the
+  // Loop-2 measurement metrics — avg/p95 model-calls-per-turn, empty-turn rate,
+  // and nudge-fire rate. These render regardless of whether there is turn data
+  // in the window (they show 0 / 0.0% on an empty range).
+  test('iteration telemetry cards render (model calls, empty-turn, nudge rate)', async ({
+    page,
+  }, testInfo) => {
+    // The stats cards live above the tabs and load with the page.
+    const sectionHeading = page
+      .getByText('Iteration telemetry (per turn)', { exact: true })
+      .first()
+    await expect(sectionHeading).toBeVisible({ timeout: 15000 })
+
+    // All four iteration metric cards must be present by label.
+    for (const label of [
+      'Avg Model Calls / Turn',
+      'p95 Model Calls / Turn',
+      'Empty-Turn Rate',
+      'Nudge-Fire Rate',
+    ]) {
+      await expect(
+        page.getByText(label, { exact: true }).first()
+      ).toBeVisible({ timeout: 10000 })
+    }
+
+    // The Adoption tab's per-user table adds the per-user iteration columns.
+    await page.waitForSelector('[role="tab"][aria-selected="true"]', {
+      timeout: 10000,
+    })
+    await page.locator('[role="tab"]').filter({ hasText: 'Adoption' }).click()
+    // Either the new columns render (data present) or the empty state shows.
+    const callsCol = page
+      .locator('th')
+      .filter({ hasText: /Avg Calls\/Turn/i })
+      .first()
+    const nudgeCol = page
+      .locator('th')
+      .filter({ hasText: /Nudge Rate/i })
+      .first()
+    const emptyState = page.locator('text=/No user data available/i').first()
+    await expect(callsCol.or(emptyState)).toBeVisible({ timeout: 10000 })
+    if (await callsCol.isVisible().catch(() => false)) {
+      await expect(nudgeCol).toBeVisible()
+    }
+
+    await mkdir('.verification', { recursive: true })
+    await page.screenshot({
+      path: `.verification/admin-agents-iteration-telemetry-${testInfo.project.name}.png`,
+      fullPage: true,
+    })
+  })
 })

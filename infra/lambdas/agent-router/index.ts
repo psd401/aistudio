@@ -1096,6 +1096,8 @@ async function applyGuardrails(
     if (result.action === 'GUARDRAIL_INTERVENED') {
       const outputs = result.outputs?.map((o) => o.text).join(' ') || '';
       log.warn('Guardrail would have blocked — passing through per policy', {
+        // Stable marker for the GuardrailDenialRate metric filter (#1161).
+        marker: 'GUARDRAIL_DENIAL',
         action: result.action,
         outputPreview: outputs.substring(0, 200),
       });
@@ -1237,6 +1239,16 @@ async function invokeAgentCore(
   model: string | null;
   /** Wall-clock ms reported by the harness from chat.send to final. */
   latencyMs: number;
+  /**
+   * Iteration telemetry (issue #1161).
+   * modelCallCount — upstream Mantle model round-trips this turn (proxy delta).
+   * durationMs — full turn wall-clock from the wrapper (invocation_start ->
+   *   final yield); distinct from latencyMs (harness chat.send -> final).
+   * nudged — the harness fired its one empty-turn nudge this turn.
+   */
+  modelCallCount: number;
+  durationMs: number;
+  nudged: boolean;
   /** Per-turn message log (role + content_text). Empty when harness doesn't surface it. */
   messages: Array<{ role: string; content: string }>;
   /** Per-turn tool calls. Empty when harness doesn't surface them. */
@@ -1306,6 +1318,9 @@ async function invokeAgentCore(
       cacheWriteInputTokens: 0,
       model: null,
       latencyMs: 0,
+      modelCallCount: 0,
+      durationMs: 0,
+      nudged: false,
       messages: [],
       toolCalls: [],
       failed: true,
@@ -1400,6 +1415,9 @@ async function invokeAgentCore(
           cacheWriteInputTokens: 0,
           model: null,
           latencyMs: 0,
+          modelCallCount: 0,
+          durationMs: 0,
+          nudged: false,
           messages: [],
           toolCalls: [],
           failed: true,
@@ -1416,6 +1434,9 @@ async function invokeAgentCore(
         cacheWriteInputTokens: 0,
         model: null,
         latencyMs: 0,
+        modelCallCount: 0,
+        durationMs: 0,
+        nudged: false,
         messages: [],
         toolCalls: [],
         failed: true,
@@ -1490,6 +1511,12 @@ async function invokeAgentCore(
       // is somehow missing the field.
       model: (metadata.model as string) || 'unknown',
       latencyMs: (metadata.latency_ms as number) || 0,
+      // Iteration telemetry (issue #1161). The wrapper sends model_call_count
+      // (proxy round-trip delta), duration_ms (turn wall-clock), and nudged
+      // (empty-turn nudge fired). Older wrapper images omit these — default 0/false.
+      modelCallCount: (metadata.model_call_count as number) || 0,
+      durationMs: (metadata.duration_ms as number) || 0,
+      nudged: metadata.nudged === true,
       messages,
       toolCalls,
       // Harness-reported error turn (e.g. OpenClaw session-init conflict). The
@@ -1513,6 +1540,9 @@ async function invokeAgentCore(
       cacheWriteInputTokens: 0,
       model: null,
       latencyMs: 0,
+      modelCallCount: 0,
+      durationMs: 0,
+      nudged: false,
       messages: [],
       toolCalls: [],
       failed: true,
@@ -1754,6 +1784,10 @@ async function promoteToJob(
     );
 
     log.info('Turn promoted to background job', {
+      // Stable marker for the BackgroundPromotion metric filter (#1161). This
+      // is a "platform compensating for model behavior" counter — its trend is
+      // an input to Loop-2 instruction tuning, so it's a metric without an alarm.
+      marker: 'BACKGROUND_PROMOTION',
       sessionId: input.sessionId,
       taskArn: result.tasks?.[0]?.taskArn ?? 'unknown',
     });
@@ -1867,6 +1901,10 @@ async function logTelemetry(
     cacheReadInputTokens?: number;
     cacheWriteInputTokens?: number;
     latencyMs: number;
+    /** Iteration telemetry (issue #1161). Optional; default 0/false for callers that don't set them. */
+    modelCallCount?: number;
+    durationMs?: number;
+    nudged?: boolean;
     guardrailBlocked: boolean;
     spaceName: string;
     /** Cross-user invocation: email of the person who invoked the agent */
@@ -1905,6 +1943,11 @@ async function logTelemetry(
     // default to 0 — GLM-5 rows and older callers record no cache activity.
     const cacheReadTokens = params.cacheReadInputTokens ?? 0;
     const cacheWriteTokens = params.cacheWriteInputTokens ?? 0;
+    // Iteration telemetry (issue #1161). Optional on the params so older/other
+    // callers default cleanly — 0 model calls, 0ms duration, no nudge.
+    const modelCallCount = params.modelCallCount ?? 0;
+    const durationMs = params.durationMs ?? 0;
+    const nudged = params.nudged ?? false;
     // Session total is true VOLUME processed, so it must include the cached
     // prefix (#1089/#1092): input_tokens is now the DE-CACHED billable input,
     // so add cache read/write back or agent_sessions.total_tokens under-reports
@@ -1919,11 +1962,13 @@ async function logTelemetry(
       sql<{ id: number }[]>`INSERT INTO agent_messages
           (user_id, session_id, model, input_tokens, output_tokens,
            cache_read_input_tokens, cache_write_input_tokens,
-           latency_ms, guardrail_blocked, space_name, invoked_by, agent_owner_id, topic, created_at)
+           latency_ms, model_call_count, duration_ms, nudged,
+           guardrail_blocked, space_name, invoked_by, agent_owner_id, topic, created_at)
           VALUES (${params.userId}, ${params.sessionId}, ${params.model},
                   ${params.inputTokens}, ${params.outputTokens},
                   ${cacheReadTokens}, ${cacheWriteTokens},
-                  ${params.latencyMs}, ${params.guardrailBlocked},
+                  ${params.latencyMs}, ${modelCallCount}, ${durationMs}, ${nudged},
+                  ${params.guardrailBlocked},
                   ${params.spaceName}, ${invokedBy}, ${agentOwnerId}, ${topic}, NOW())
           RETURNING id`,
       sql`INSERT INTO agent_sessions
@@ -2097,6 +2142,10 @@ async function flagFailedTurn(
 ): Promise<boolean> {
   if (!agentResult.failed) return false;
   log.warn('Agent returned an error turn', {
+    // Stable marker for the ErrorTurnRate metric filter (#1161). The errorClass
+    // field carries EmptyAgentResponse for empty-final turns, which the
+    // dedicated EmptyAgentResponse filter matches on the same line.
+    marker: 'AGENT_ERROR_TURN',
     errorClass: agentResult.errorClass ?? 'unknown',
     errorSource: agentResult.errorSource ?? 'unknown',
     latencyMs: ctx.latencyMs,
@@ -2982,6 +3031,9 @@ async function processRecord(
           cacheReadInputTokens: agentResult.cacheReadInputTokens,
           cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
           latencyMs,
+          modelCallCount: agentResult.modelCallCount,
+          durationMs: agentResult.durationMs,
+          nudged: agentResult.nudged,
           guardrailBlocked: false, // Always false here — blocked messages return early above
           spaceName,
           invokedBy: senderEmail,
@@ -3124,6 +3176,9 @@ async function processRecord(
           cacheReadInputTokens: agentResult.cacheReadInputTokens,
           cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
           latencyMs: promotedLatencyMs,
+          modelCallCount: agentResult.modelCallCount,
+          durationMs: agentResult.durationMs,
+          nudged: agentResult.nudged,
           guardrailBlocked: guardrailResult.wouldHaveBlocked,
           spaceName,
           topic,
@@ -3178,6 +3233,9 @@ async function processRecord(
       cacheReadInputTokens: agentResult.cacheReadInputTokens,
       cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
       latencyMs,
+      modelCallCount: agentResult.modelCallCount,
+      durationMs: agentResult.durationMs,
+      nudged: agentResult.nudged,
       // Preserve the guardrail signal for telemetry — the message was not
       // blocked, but we record whether it would have been under the old
       // fail-closed policy for later analysis / tuning.

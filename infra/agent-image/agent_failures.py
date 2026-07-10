@@ -61,31 +61,51 @@ def _get_cloudwatch_client():
         return None
 
 
-def _emit_failure_metric(source: str) -> None:
+def emit_agent_metric(
+    metric_name: str,
+    value: float = 1,
+    dimensions: Optional[Mapping[str, str]] = None,
+) -> None:
     """
-    Best-effort: emit a CloudWatch custom metric for the failure so the
-    AgentFailureRateAlarm in agent-platform-stack picks it up. Bypasses the
-    log-group-based MetricFilter approach because AgentCore log group names
-    contain a runtime-generated suffix (`psd_agent_<env>-<id>-DEFAULT`) that
-    isn't predictable at CDK synth time.
+    Best-effort: emit a CloudWatch custom metric from inside the AgentCore
+    container into the `PSD/AgentPlatform/{ENVIRONMENT}` namespace.
+
+    The container's log group name contains a runtime-generated suffix
+    (`psd_agent_<env>-<id>-DEFAULT`) that isn't predictable at CDK synth time,
+    so a log-group MetricFilter cannot attach to it. Container-origin signals
+    (boot markers, nudge fires, boot-truncation WARNs) therefore emit their
+    metrics directly via put_metric_data and alarm on the resulting metric —
+    the same escape hatch AgentFailuresHarness uses.
+
+    Never raises: telemetry must never break a chat turn or a boot.
     """
     client = _get_cloudwatch_client()
     if client is None:
         return
     try:
+        datum: Dict[str, Any] = {
+            "MetricName": metric_name,
+            "Value": value,
+            "Unit": "Count",
+        }
+        if dimensions:
+            datum["Dimensions"] = [
+                {"Name": k, "Value": v} for k, v in dimensions.items()
+            ]
         client.put_metric_data(
             Namespace=f"PSD/AgentPlatform/{_ENVIRONMENT}",
-            MetricData=[
-                {
-                    "MetricName": "AgentFailuresHarness",
-                    "Value": 1,
-                    "Unit": "Count",
-                    "Dimensions": [{"Name": "Source", "Value": source}],
-                }
-            ],
+            MetricData=[datum],
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("put_metric_data failed: %s", exc)
+
+
+def _emit_failure_metric(source: str) -> None:
+    """
+    Emit the AgentFailuresHarness metric so the AgentFailureRateAlarm in
+    agent-platform-stack picks it up. Thin wrapper over emit_agent_metric.
+    """
+    emit_agent_metric("AgentFailuresHarness", dimensions={"Source": source})
 
 
 def _truncate(s: Optional[str], max_len: int) -> Optional[str]:

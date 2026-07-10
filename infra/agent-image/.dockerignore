@@ -27,6 +27,9 @@ node_modules/
 .idea/
 *.swp
 
+# Build-time eval-gate probe artifacts (issue #1161) — trend data, not image content
+.build-probes/
+
 # Local-only test scratch
 test_*.py
 *.test.ts

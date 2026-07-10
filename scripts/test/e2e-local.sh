@@ -15,11 +15,15 @@
 #   only decrypts on a DEV server (NODE_ENV != production); a production build switches
 #   to secure-cookie semantics and rejects it. AND every auth redirect uses AUTH_URL —
 #   if AUTH_URL's port doesn't match the serving port, redirects 307 to a dead origin
-#   (ERR_CONNECTION_REFUSED). So this runner uses a DEV server on port 3000 with
-#   AUTH_URL pinned to http://localhost:3000 (origin == port). If a healthy server is
-#   already on :3000 (your `bun run dev:local`), it is reused; otherwise the runner
-#   starts its own — in an isolated build dir (.next-e2e via NEXT_DIST_DIR) so it never
-#   locks or pollutes your normal `.next` — and tears it down afterward.
+#   (ERR_CONNECTION_REFUSED). So this runner uses a DEV server on port 3100 with
+#   AUTH_URL pinned to http://localhost:3100 (origin == port). Port 3100 — NOT 3000 —
+#   because on machines that keep the Dockerized app on :3000, the healthz reuse
+#   check below would latch onto that container, which answers healthz fine but
+#   rejects the minted cookie (every authed spec dies on a /dashboard redirect).
+#   If a healthy server is already on :3100 (e.g. a prior harness run), it is
+#   reused; otherwise the runner starts its own — in an isolated build dir
+#   (.next-e2e via NEXT_DIST_DIR) so it never locks or pollutes your normal
+#   `.next` — and tears it down afterward.
 #
 #   Next dev lazily compiles each route on first hit and can fall over under parallel
 #   load, so the runner warms the heavy routes first and caps workers (E2E_WORKERS=2).
@@ -30,7 +34,7 @@
 #
 # KNOBS:
 #   SKIP_E2E=1         skip entirely for one push       (never runs in CI)
-#   E2E_PORT=3000      port for the dev server
+#   E2E_PORT=3100      port for the dev server (avoid 3000: the Docker app owns it)
 #   E2E_DATABASE_URL   DB for a runner-started server (default: local Docker
 #                      postgres). Deliberately NOT plain DATABASE_URL — that is
 #                      sourced from .env.local and may be container-perspective.
@@ -46,7 +50,7 @@ if [ "${SKIP_E2E:-}" = "1" ]; then echo "e2e-local: SKIP_E2E=1 — skipping"; ex
 
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT" || exit 1
 
-E2E_PORT="${E2E_PORT:-3000}"
+E2E_PORT="${E2E_PORT:-3100}"
 BASE="http://localhost:${E2E_PORT}"
 
 # --- Local secrets (AUTH_SECRET + AUTH_COGNITO_* from .env.local) -----------------
@@ -55,7 +59,7 @@ if [ -z "${AUTH_SECRET:-}" ]; then
   echo "❌ e2e-local: AUTH_SECRET not set (expected in .env.local). Aborting."; exit 1
 fi
 
-# --- Reuse a running :3000 dev server, or start our own ----------------------------
+# --- Reuse a running dev server on :$E2E_PORT, or start our own --------------------
 STARTED_PID=""
 if curl -sf "$BASE/api/healthz" >/dev/null 2>&1; then
   echo "e2e-local: reusing the dev server already on :$E2E_PORT"

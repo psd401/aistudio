@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
-from agent_failures import record_failure
+from agent_failures import emit_agent_metric, record_failure
 from chat_format import markdown_to_chat
 
 logger = logging.getLogger("harness_adapter")
@@ -54,6 +54,13 @@ class TurnResult:
     # turn is no longer logged as a clean "Message processed" success.
     failed: bool = False
     error_class: Optional[str] = None
+    # Iteration telemetry (issue #1161): True when the empty-turn nudge fired
+    # at least once this turn (the turn did tool work but produced no user-
+    # visible text, so the harness sent one follow-up asking for the summary).
+    # The wrapper forwards this as metadata.nudged -> agent_messages.nudged so
+    # the dashboard can trend nudge-fire rate. A recovered-after-nudge turn
+    # writes no agent_failures row, so this flag is its only persisted signal.
+    nudged: bool = False
 
 
 def _format_for_chat(text: str) -> str:
@@ -853,6 +860,7 @@ class OpenClawAdapter(HarnessAdapter):
             *,
             failed: bool = False,
             error_class: Optional[str] = None,
+            nudged: bool = False,
         ) -> TurnResult:
             assistant = text or ""
             log = list(messages_log)
@@ -868,6 +876,7 @@ class OpenClawAdapter(HarnessAdapter):
                 tool_calls=tool_calls,
                 failed=failed,
                 error_class=error_class,
+                nudged=nudged,
             )
 
         if not got_final:
@@ -960,6 +969,11 @@ class OpenClawAdapter(HarnessAdapter):
                 "empty final after %d tool calls — sending one nudge",
                 len(tool_calls),
             )
+            # Iteration telemetry (issue #1161): a nudge fired this turn.
+            # Emit a CloudWatch metric (best-effort) so nudge-fire rate is
+            # trendable in the AgentCore container log group, which has a
+            # runtime-generated suffix a MetricFilter can't attach to.
+            emit_agent_metric("AgentNudgeFired")
             nudged = self.process(
                 self.EMPTY_TURN_NUDGE,
                 session_id,
@@ -979,6 +993,10 @@ class OpenClawAdapter(HarnessAdapter):
                     tool_calls=merged_tools,
                     failed=nudged.failed,
                     error_class=nudged.error_class,
+                    # The nudge fired and recovered a reply — record it so the
+                    # dashboard counts this turn in the nudge-fire rate even
+                    # though it wrote no agent_failures row.
+                    nudged=True,
                 )
         record_failure(
             source="harness",
@@ -995,10 +1013,14 @@ class OpenClawAdapter(HarnessAdapter):
                 "first_events": first_event_types,
             },
         )
+        # nudged reflects whether the one nudge fired this turn: it did iff this
+        # is not itself a nudge leg AND there were tool calls to summarize (the
+        # exact condition guarding the self.process() nudge call above).
         return _result(
             "I processed your message but had no response.",
             failed=True,
             error_class="EmptyAgentResponse",
+            nudged=(not _is_nudge and bool(tool_calls)),
         )
 
     @staticmethod

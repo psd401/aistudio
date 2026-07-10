@@ -52,6 +52,13 @@ logger = logging.getLogger("agentcore_wrapper")
 
 from harness_adapter import OpenClawAdapter
 import workspace_sync
+from agent_failures import emit_agent_metric
+from check_bootstrap_budget import check_runtime_bootstrap
+
+# Runtime path OpenClaw reads its config + auto-loaded bootstrap files from.
+# Same path hydrate_bedrock_api_key() inlines the bearer token into.
+OPENCLAW_CONFIG_PATH = "/home/node/.openclaw/openclaw.json"
+OPENCLAW_WORKSPACE_DIR = "/home/node/.openclaw"
 
 # The model the agent platform runs on today — used as the last-resort model-id
 # fallback for telemetry when neither the proxy, harness, nor caller supplied
@@ -119,6 +126,22 @@ def start_mantle_proxy() -> None:
     logger.error("Mantle proxy did not become ready within 20s")
     sys.exit(1)
 
+def resolve_model_call_count(proxy_model_calls: int, tool_call_count: int) -> int:
+    """Per-turn model-call count (issue #1161), robust to the serving path.
+
+    The mantle_proxy `usage_events` delta is authoritative WHEN OpenClaw routes
+    through the proxy — but #1159 ("direct-Mantle provider") pointed the baseUrl
+    at the real Bedrock Mantle endpoint, so on the current image the proxy sees
+    no model traffic and its delta is 0. Fall back to a harness-derived count
+    from the real event stream: one model call per tool round plus the final
+    response (tool_call_count + 1). Prefer the proxy value only when it's > 0, so
+    this stays correct if the proxy is ever restored to the serving path.
+    """
+    if proxy_model_calls > 0:
+        return proxy_model_calls
+    return tool_call_count + 1
+
+
 def read_proxy_usage() -> dict:
     """Read cumulative token usage from the Mantle proxy's /usage endpoint
     (issue #1083). Returns a dict with input_tokens / output_tokens / model and
@@ -143,7 +166,7 @@ def read_proxy_usage() -> dict:
             if r.status != 200:
                 return {"input_tokens": 0, "output_tokens": 0,
                         "cache_read_input_tokens": 0, "cache_write_input_tokens": 0,
-                        "model": None, "ok": False}
+                        "usage_events": 0, "model": None, "ok": False}
             data = json.loads(r.read().decode("utf-8"))
         return {
             "input_tokens": int(data.get("input_tokens") or 0),
@@ -153,6 +176,11 @@ def read_proxy_usage() -> dict:
             # never KeyErrors.
             "cache_read_input_tokens": int(data.get("cache_read_input_tokens") or 0),
             "cache_write_input_tokens": int(data.get("cache_write_input_tokens") or 0),
+            # Per-turn model-call count (issue #1161). The proxy increments
+            # usage_events once per adopted upstream response, so a before/after
+            # delta = the number of Mantle round-trips this turn made. Older
+            # proxy images omit the key — default to 0.
+            "usage_events": int(data.get("usage_events") or 0),
             "model": data.get("model"),
             "ok": True,
         }
@@ -160,7 +188,7 @@ def read_proxy_usage() -> dict:
         logger.warning("read_proxy_usage failed: %s", str(exc)[:200])
         return {"input_tokens": 0, "output_tokens": 0,
                 "cache_read_input_tokens": 0, "cache_write_input_tokens": 0,
-                "model": None, "ok": False}
+                "usage_events": 0, "model": None, "ok": False}
 
 
 # Track which workspace prefix this microVM is currently serving so we can
@@ -503,10 +531,105 @@ def _render_attachments_header(attachments) -> str:
     )
 
 
+def _resolve_boot_model() -> tuple[bool, str, str]:
+    """Verify the primary model resolves against the runtime openclaw.json.
+
+    Reads agents.defaults.model.primary ("<provider>/<model-id>"), confirms the
+    provider is registered under models.providers and the model id is one of its
+    declared models, and that the provider's apiKey has been hydrated (no
+    leftover "env:" placeholder) unless it's a native aws-sdk provider with no
+    apiKey. Returns (ok, provider, model_id). Never raises — a resolution
+    failure just means BOOT_OK is withheld and the dead-boot alarm fires.
+    """
+    try:
+        with open(OPENCLAW_CONFIG_PATH, "r", encoding="utf-8") as fh:
+            config = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.error("BOOT: cannot read %s: %s", OPENCLAW_CONFIG_PATH, exc)
+        return False, "unknown", "unknown"
+
+    primary = (
+        ((config.get("agents") or {}).get("defaults") or {}).get("model") or {}
+    ).get("primary")
+    if not isinstance(primary, str) or "/" not in primary:
+        logger.error("BOOT: agents.defaults.model.primary missing/malformed: %r", primary)
+        return False, "unknown", "unknown"
+
+    provider_name, model_id = primary.split("/", 1)
+    providers = (config.get("models") or {}).get("providers") or {}
+    provider = providers.get(provider_name)
+    if not isinstance(provider, dict):
+        logger.error("BOOT: provider %r not registered in openclaw.json", provider_name)
+        return False, provider_name, model_id
+
+    model_ids = {m.get("id") for m in (provider.get("models") or []) if isinstance(m, dict)}
+    if model_id not in model_ids:
+        logger.error(
+            "BOOT: model %r not declared under provider %r (declared=%s)",
+            model_id, provider_name, sorted(i for i in model_ids if i),
+        )
+        return False, provider_name, model_id
+
+    # Provider must have a usable credential: either the apiKey was hydrated
+    # (no leftover "env:" placeholder) or it's a native provider with no apiKey
+    # (aws-sdk credential chain). A dangling "env:" means hydration didn't run.
+    api_key = provider.get("apiKey")
+    if isinstance(api_key, str) and api_key.startswith("env:"):
+        logger.error(
+            "BOOT: provider %r apiKey still an unhydrated placeholder (%r)",
+            provider_name, api_key,
+        )
+        return False, provider_name, model_id
+
+    return True, provider_name, model_id
+
+
+def verify_boot_and_emit_ok() -> bool:
+    """Run the post-gateway boot verification and emit BOOT_OK on success.
+
+    Called AFTER the gateway is confirmed ready. Verifies provider + model
+    resolution, runs the runtime instruction-budget check (WARN + metric on
+    over-budget bootstrap files — the r-weeks SOUL.md-truncation signature), and
+    emits exactly one structured BOOT_OK line + a BootOk metric so the
+    BUILD_MARKER-vs-BOOT_OK dead-boot alarm can confirm the microVM reached a
+    serving state. Returns True when BOOT_OK was emitted.
+    """
+    # Runtime instruction-budget check — the build gate should have caught an
+    # over-budget image, but a live truncation is a silent-degradation class we
+    # alarm on directly (the AgentCore log group can't host a MetricFilter).
+    violations = check_runtime_bootstrap(OPENCLAW_CONFIG_PATH, OPENCLAW_WORKSPACE_DIR)
+    if violations:
+        emit_agent_metric("BootTruncationWarn")
+        for v in violations:
+            logger.warning("BOOT_TRUNCATION: %s", v)
+
+    ok, provider, model_id = _resolve_boot_model()
+    if not ok:
+        logger.error(
+            "BOOT: model/provider resolution FAILED — withholding BOOT_OK "
+            "(dead-boot alarm will fire). provider=%s model=%s",
+            provider, model_id,
+        )
+        return False
+
+    # Structured, single-line, greppable. The dead-boot MetricFilter/alarm keys
+    # off the BootOk metric; this line is the human-readable confirmation.
+    logger.info(
+        "BOOT_OK provider=%s model=%s gateway_port=%s build=%s",
+        provider, model_id, 3100, os.environ.get("BUILD_MARKER", "unset"),
+    )
+    emit_agent_metric("BootOk")
+    return True
+
+
 def main():
     """Start the AgentCore wrapper."""
-    # Log the build marker FIRST so it appears even if startup fails.
+    # Log the build marker FIRST so it appears even if startup fails. Emit a
+    # matching BuildMarkerBoot metric so the BUILD_MARKER-vs-BOOT_OK divergence
+    # alarm has a "a microVM booted" counter to compare BootOk against (the r10
+    # dead-boot signature: booted but never reached a serving state).
     logger.info("BUILD_MARKER=%s", os.environ.get("BUILD_MARKER", "unset"))
+    emit_agent_metric("BuildMarkerBoot")
 
     try:
         from bedrock_agentcore.runtime import BedrockAgentCoreApp
@@ -768,11 +891,17 @@ def main():
                                    - usage_baseline["cache_read_input_tokens"])
             proxy_cache_write = max(0, usage_final["cache_write_input_tokens"]
                                     - usage_baseline["cache_write_input_tokens"])
+            # Per-turn model-call count (issue #1161) — same before/after delta
+            # as tokens. The proxy counts one usage_event per adopted upstream
+            # response, so the delta is this turn's Mantle round-trip count.
+            proxy_model_calls = max(0, usage_final["usage_events"]
+                                    - usage_baseline["usage_events"])
         else:
             proxy_in = 0
             proxy_out = 0
             proxy_cache_read = 0
             proxy_cache_write = 0
+            proxy_model_calls = 0
             # Emit a distinct signal so a telemetry GAP (proxy read failed) is
             # distinguishable in logs from a turn that genuinely used 0 tokens.
             # Without this, a lost read looks identical to real-zero usage.
@@ -797,6 +926,13 @@ def main():
                 # no cache numbers), so they're 0 when the delta is untrusted.
                 "cache_read_input_tokens": proxy_cache_read,
                 "cache_write_input_tokens": proxy_cache_write,
+                # Iteration telemetry (issue #1161). The legacy-str adapter
+                # exposes no tool-call list, so model_call_count can only use the
+                # proxy delta (0 on the direct-Mantle path — see the TurnResult
+                # branch); duration_ms is the full turn wall-clock; no nudge signal.
+                "model_call_count": proxy_model_calls,
+                "duration_ms": int((time.time() - invocation_start) * 1000),
+                "nudged": False,
             }
         else:
             reply_text = result.text or ""
@@ -819,6 +955,28 @@ def main():
                 # the proxy delta was untrusted or the model doesn't cache.
                 "cache_read_input_tokens": proxy_cache_read if usage_trustworthy else 0,
                 "cache_write_input_tokens": proxy_cache_write if usage_trustworthy else 0,
+                # Iteration telemetry (issue #1161).
+                # model_call_count: the proxy's usage_events delta is authoritative
+                #   WHEN the proxy is in the serving path — but #1159 ("direct-
+                #   Mantle provider") pointed OpenClaw's baseUrl at the real
+                #   Bedrock Mantle endpoint, not the 127.0.0.1:18791 proxy, so on
+                #   the current image the proxy sees no model traffic and
+                #   usage_events stays 0. Fall back to a harness-derived count
+                #   from the real event stream: one model call per tool round plus
+                #   the final response (len(tool_calls) + 1). Prefer the proxy
+                #   value only when it's > 0 so this stays correct if the proxy is
+                #   ever restored to the serving path. (The nudge-recovered turn's
+                #   tool_calls already include the nudge leg's tools, so the +1
+                #   still under- rather than over-counts on that path.)
+                # duration_ms: full turn wall-clock in the wrapper — distinct
+                #   from result.latency_ms (harness chat.send -> final); this
+                #   also counts the proxy reads and the empty-turn nudge retry.
+                # nudged: the harness fired its one empty-turn nudge this turn.
+                "model_call_count": resolve_model_call_count(
+                    proxy_model_calls, len(result.tool_calls)
+                ),
+                "duration_ms": int((time.time() - invocation_start) * 1000),
+                "nudged": result.nudged,
                 "latency_ms": result.latency_ms,
                 # Deep-telemetry payload: per-turn messages + tool calls.
                 # The router reads these and inserts into
@@ -836,7 +994,8 @@ def main():
 
         logger.info(
             "Invocation complete: session=%s response_length=%d elapsed_s=%d "
-            "model=%s tokens_in=%s tokens_out=%s tool_calls=%d",
+            "model=%s tokens_in=%s tokens_out=%s tool_calls=%d "
+            "model_calls=%s duration_ms=%s nudged=%s",
             session_id,
             len(reply_text),
             int(time.time() - invocation_start),
@@ -844,6 +1003,9 @@ def main():
             metadata.get("input_tokens"),
             metadata.get("output_tokens"),
             len(metadata.get("tool_calls") or []),
+            metadata.get("model_call_count"),
+            metadata.get("duration_ms"),
+            metadata.get("nudged"),
         )
 
         yield {
@@ -856,6 +1018,16 @@ def main():
         os.environ.get("ENVIRONMENT", "unknown"),
         os.environ.get("WORKSPACE_BUCKET", "unknown"),
     )
+
+    # Gateway is ready (adapter.configure blocked until /health 200), the
+    # provider key is hydrated, and the proxy is healthy — verify model/provider
+    # resolution and emit BOOT_OK. Best-effort: a verification failure withholds
+    # BOOT_OK (surfaced by the dead-boot alarm) but must not stop the server
+    # from trying to serve.
+    try:
+        verify_boot_and_emit_ok()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("BOOT: verify_boot_and_emit_ok raised (continuing): %s", exc)
 
     app.run()
 

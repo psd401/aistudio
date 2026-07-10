@@ -137,6 +137,9 @@ async function main(): Promise<number> {
         cacheReadInputTokens: agentResult.cacheReadInputTokens,
         cacheWriteInputTokens: agentResult.cacheWriteInputTokens,
         latencyMs,
+        modelCallCount: agentResult.modelCallCount,
+        durationMs: agentResult.durationMs,
+        nudged: agentResult.nudged,
         // Guardrails ran on the original message in the first leg.
         guardrailBlocked: false,
         spaceName: job.spaceName,
@@ -166,6 +169,8 @@ async function main(): Promise<number> {
         );
       }
       log.warn('Background job finished with a failed turn', {
+        // Stable marker for the JobRunnerFailure metric filter (#1161).
+        marker: 'JOB_RUNNER_FAILED_TURN',
         errorClass: agentResult.errorClass ?? 'unknown',
         latencyMs,
       });
