@@ -106,8 +106,21 @@ Features:
 - JWT access tokens signed via KMS
 - JWKS endpoint at `/api/oauth/jwks`
 - Introspection & revocation
+- Consent decisions stored in DB with atomic consume-once semantics
 
-**Source**: `/lib/oauth/oidc-provider-config.ts`
+#### Consent Decision Security
+
+OAuth consent decisions use a **server-only module pattern** to prevent unauthorized consumption:
+
+- Consent stored in `oauth_consent_decisions` table with 5-minute TTL
+- Consumption is atomic: `DELETE ... RETURNING` prevents race conditions
+- The `consumeConsentDecision` function is in a `server-only` module, making client imports fail at build time
+
+**Why server-only?**: Previously, consent consumption was in a `"use server"` module, making it a public unauthenticated endpoint that could consume any user's pending consent by UID. The fix moves it to `/lib/oauth/consent-decisions.ts` with `import "server-only"`.
+
+**Sources**: 
+- `/lib/oauth/consent-decisions.ts` - Consent consumption (server-only)
+- `/actions/oauth/consent.actions.ts` - Consent approval/denial actions
 
 ### Delegated Tokens (Agent-on-Behalf-of-User)
 
