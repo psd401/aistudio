@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
-import { getAIModelById } from '@/lib/db/drizzle';
 import { hasCapability } from '@/lib/ai/capability-utils';
 import { processMessagesWithAttachments } from '@/lib/services/attachment-storage-service';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
@@ -20,11 +19,9 @@ import {
   extractImagePrompt,
   validateImagePrompt,
   getOrCreateImageConversation,
-  saveImageUserMessage,
   extractReferenceImages,
   getPreviousGeneratedImages,
-  saveImageAssistantMessage,
-  updateImageConversationStats,
+  persistImageExchange,
   createImageStreamResponse,
   handleImageGenerationError,
 } from './image-generation-handler';
@@ -371,13 +368,11 @@ async function handleImageGeneration(params: {
 
   const { conversationId, title: conversationTitle } = convResult;
 
-  // Save user message
-  await saveImageUserMessage({ conversationId, imagePrompt, dbModelId });
-
   try {
-    // Extract reference images from message
+    // Extract reference images from message. Pass conversationId so client-supplied
+    // s3Keys can be validated against this conversation's own prefix (REV-SEC-144).
     const lastMessage = messages[messages.length - 1];
-    let referenceImages = await extractReferenceImages(lastMessage);
+    let referenceImages = await extractReferenceImages(lastMessage, conversationId);
 
     // If no reference images and existing conversation, check previous messages
     if (existingConversationId && referenceImages.length === 0) {
@@ -409,9 +404,10 @@ async function handleImageGeneration(params: {
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined
     });
 
-    // Save assistant message and update stats
-    await saveImageAssistantMessage({ conversationId, imageResult, dbModelId });
-    await updateImageConversationStats(conversationId);
+    // Persist the user prompt + assistant image + stats atomically (REV-DB-047 /
+    // REV-COR-220). Kept after generation (a side effect) so a generation failure
+    // leaves no partial rows and no desynced message_count.
+    await persistImageExchange({ conversationId, imagePrompt, imageResult, dbModelId });
 
     timer({ status: 'success', conversationId });
 
@@ -781,9 +777,11 @@ async function getValidatedModelConfig(
   }
 
   const dbModelId = modelConfig.id;
-  const modelWithCapabilities = await getAIModelById(dbModelId);
-  const isImageGenerationModel = hasCapability(modelWithCapabilities?.capabilities, 'imageGeneration');
-  const isDeepResearchModel = hasCapability(modelWithCapabilities?.capabilities, 'deepResearch');
+  // REV-PERF-002: derive capability flags from the row getModelConfig already
+  // fetched — the previous getAIModelById(dbModelId) here was a second SELECT of the
+  // identical ai_models row on every chat/image/deep-research request.
+  const isImageGenerationModel = hasCapability(modelConfig.capabilities, 'imageGeneration');
+  const isDeepResearchModel = hasCapability(modelConfig.capabilities, 'deepResearch');
 
   return { modelConfig, dbModelId, isImageGenerationModel, isDeepResearchModel };
 }
