@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
-import { getAIModelById } from '@/lib/db/drizzle';
 import { hasCapability } from '@/lib/ai/capability-utils';
 import { processMessagesWithAttachments } from '@/lib/services/attachment-storage-service';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
@@ -20,11 +19,9 @@ import {
   extractImagePrompt,
   validateImagePrompt,
   getOrCreateImageConversation,
-  saveImageUserMessage,
   extractReferenceImages,
   getPreviousGeneratedImages,
-  saveImageAssistantMessage,
-  updateImageConversationStats,
+  persistImageExchange,
   createImageStreamResponse,
   handleImageGenerationError,
 } from './image-generation-handler';
@@ -52,6 +49,7 @@ import {
   type ApprovedSkillSession,
 } from '@/lib/skills/skill-tool-enforcement';
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
+import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -135,6 +133,31 @@ function createOnFinishCallback(params: {
 }
 
 /**
+ * Pre-merge the adapter (universal) tools with per-user MCP connector tools and
+ * the open-workspace content tools (§1087). Returns undefined when neither
+ * connectors nor workspace tools are active (the streaming service then builds
+ * adapter tools itself from `enabledTools`). Connector + workspace tools take
+ * precedence over adapter tools on a name collision.
+ */
+async function buildMergedChatTools(params: {
+  enabledTools: string[];
+  connectorToolResults: McpConnectorToolsResult[];
+  workspaceTools?: ToolSet;
+}): Promise<ToolSet | undefined> {
+  const { enabledTools, connectorToolResults, workspaceTools } = params;
+  const hasWorkspaceTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
+  if (connectorToolResults.length === 0 && !hasWorkspaceTools) return undefined;
+  const merged: ToolSet = { ...(await createUniversalTools(enabledTools)) };
+  for (const result of connectorToolResults) {
+    Object.assign(merged, result.tools);
+  }
+  if (hasWorkspaceTools) {
+    Object.assign(merged, workspaceTools);
+  }
+  return merged;
+}
+
+/**
  * Execute streaming and return response
  */
 async function executeStreaming(params: {
@@ -153,6 +176,10 @@ async function executeStreaming(params: {
   skillInstructions?: string;
   /** Bound skill's name (labels the injected instruction block). */
   skillName?: string;
+  /** Server-built AI SDK tools for the open workspace object (Atrium §1087). */
+  workspaceTools?: ToolSet;
+  /** System-prompt line describing the open workspace object + how to edit it. */
+  workspacePromptFragment?: string;
   reasoningEffort: 'minimal' | 'low' | 'medium' | 'high';
   responseMode: 'standard' | 'flex' | 'priority';
   requestId: string;
@@ -165,24 +192,22 @@ async function executeStreaming(params: {
     messages, modelConfig, userId, sessionId, conversationId,
     conversationIdValue, conversationTitle, enabledTools, enabledConnectors,
     connectorToolResults, failedConnectorIds, skillInstructions, skillName,
+    workspaceTools, workspacePromptFragment,
     reasoningEffort, responseMode,
     requestId, dbModelId, log, timer, precomputedInputTokenMappings
   } = params;
 
-  const systemPrompt = buildNexusSystemPrompt(skillInstructions, skillName);
+  const systemPrompt = buildNexusSystemPrompt(skillInstructions, skillName, workspacePromptFragment);
 
-  // When MCP connectors are enabled, pre-merge adapter tools + connector tools
-  // and pass as request.tools so the streaming service uses them directly
-  // (skipping adapter.createTools to avoid redundant work).
-  // Connector tools take precedence on name collision.
-  let mergedTools: ToolSet | undefined;
-  if (connectorToolResults.length > 0) {
-    const adapterTools = await createUniversalTools(enabledTools);
-    mergedTools = { ...adapterTools };
-    for (const result of connectorToolResults) {
-      Object.assign(mergedTools, result.tools);
-    }
-  }
+  const hasWorkspaceTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
+  const multiStepToolsActive = connectorToolResults.length > 0 || hasWorkspaceTools;
+
+  // Pre-merge adapter + connector + workspace tools (undefined when none active).
+  const mergedTools = await buildMergedChatTools({
+    enabledTools,
+    connectorToolResults,
+    workspaceTools: hasWorkspaceTools ? workspaceTools : undefined,
+  });
 
   const streamRequest: StreamRequest = {
     messages,
@@ -193,13 +218,19 @@ async function executeStreaming(params: {
     conversationId,
     source: 'nexus',
     systemPrompt,
-    enabledTools: mergedTools ? undefined : enabledTools,
+    // Always pass the scoped enabledTools: when `tools` is also set (connector /
+    // workspace merge), the streaming service now merges the model's
+    // provider-native tools UNDER the pre-merged set so web search / code
+    // interpreter aren't dropped just because a connector or workspace is active
+    // (PR #1136 review). Without `tools`, this is the sole tool source as before.
+    enabledTools,
     enabledConnectors,
     tools: mergedTools,
-    // maxSteps enables multi-step tool use (agent loop). Only needed when MCP connector
-    // tools are active — without connectors, the model uses single-step tool calls only.
-    // 10 steps is a reasonable upper bound for MCP tool chains (fetch→process→respond).
-    maxSteps: connectorToolResults.length > 0 ? 10 : undefined,
+    // maxSteps enables multi-step tool use (agent loop). Needed when MCP connector
+    // tools OR workspace content tools (§1087: read→edit→confirm) are active —
+    // without them the model uses single-step tool calls only. 10 steps is a
+    // reasonable upper bound for a read→edit→respond chain.
+    maxSteps: multiStepToolsActive ? 10 : undefined,
     options: { reasoningEffort, responseMode },
     precomputedInputTokenMappings,
     callbacks: {
@@ -284,6 +315,10 @@ const ChatRequestSchema = z.object({
   // When the session is bound to a published skill ("use in chat"), the skill's
   // `allowed-tools` pin is enforced server-side over the client tool list (#925 AC#6).
   skillId: z.string().uuid().optional(),
+  // When a workspace document/artifact is open beside the chat (`?workspace=<id|slug>`),
+  // the server binds read/edit tools for THAT object (Atrium §1087). Loose validation
+  // only — the tool builder canView/canEdit-gates server-side; cap length like other params.
+  workspaceId: z.string().min(1).max(200).optional(),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
   responseMode: z.enum(['standard', 'priority', 'flex']).optional()
 });
@@ -333,13 +368,11 @@ async function handleImageGeneration(params: {
 
   const { conversationId, title: conversationTitle } = convResult;
 
-  // Save user message
-  await saveImageUserMessage({ conversationId, imagePrompt, dbModelId });
-
   try {
-    // Extract reference images from message
+    // Extract reference images from message. Pass conversationId so client-supplied
+    // s3Keys can be validated against this conversation's own prefix (REV-SEC-144).
     const lastMessage = messages[messages.length - 1];
-    let referenceImages = await extractReferenceImages(lastMessage);
+    let referenceImages = await extractReferenceImages(lastMessage, conversationId);
 
     // If no reference images and existing conversation, check previous messages
     if (existingConversationId && referenceImages.length === 0) {
@@ -371,9 +404,10 @@ async function handleImageGeneration(params: {
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined
     });
 
-    // Save assistant message and update stats
-    await saveImageAssistantMessage({ conversationId, imageResult, dbModelId });
-    await updateImageConversationStats(conversationId);
+    // Persist the user prompt + assistant image + stats atomically (REV-DB-047 /
+    // REV-COR-220). Kept after generation (a side effect) so a generation failure
+    // leaves no partial rows and no desynced message_count.
+    await persistImageExchange({ conversationId, imagePrompt, imageResult, dbModelId });
 
     timer({ status: 'success', conversationId });
 
@@ -743,9 +777,11 @@ async function getValidatedModelConfig(
   }
 
   const dbModelId = modelConfig.id;
-  const modelWithCapabilities = await getAIModelById(dbModelId);
-  const isImageGenerationModel = hasCapability(modelWithCapabilities?.capabilities, 'imageGeneration');
-  const isDeepResearchModel = hasCapability(modelWithCapabilities?.capabilities, 'deepResearch');
+  // REV-PERF-002: derive capability flags from the row getModelConfig already
+  // fetched — the previous getAIModelById(dbModelId) here was a second SELECT of the
+  // identical ai_models row on every chat/image/deep-research request.
+  const isImageGenerationModel = hasCapability(modelConfig.capabilities, 'imageGeneration');
+  const isDeepResearchModel = hasCapability(modelConfig.capabilities, 'deepResearch');
 
   return { modelConfig, dbModelId, isImageGenerationModel, isDeepResearchModel };
 }
@@ -1034,10 +1070,19 @@ IMPORTANT: If text contains privacy tokens like [PII:xxxx-xxxx-xxxx-xxxx], prese
  */
 function buildNexusSystemPrompt(
   skillInstructions: string | undefined,
-  skillName: string | undefined
+  skillName: string | undefined,
+  workspacePromptFragment?: string
 ): string {
-  if (!skillInstructions) return NEXUS_BASE_SYSTEM_PROMPT;
-  return `${NEXUS_BASE_SYSTEM_PROMPT}\n\n---\n\nThe user has loaded the skill "${skillName ?? 'skill'}" into this session. Follow its instructions below for this conversation.\n\n${skillInstructions}`;
+  let prompt = NEXUS_BASE_SYSTEM_PROMPT;
+  if (skillInstructions) {
+    prompt += `\n\n---\n\nThe user has loaded the skill "${skillName ?? 'skill'}" into this session. Follow its instructions below for this conversation.\n\n${skillInstructions}`;
+  }
+  // Atrium §1087: when a workspace document/artifact is open beside the chat,
+  // tell the model it can act on that object via the workspace tools.
+  if (workspacePromptFragment) {
+    prompt += `\n\n---\n\n${workspacePromptFragment}`;
+  }
+  return prompt;
 }
 
 /**
@@ -1085,6 +1130,13 @@ async function applySkillSessionBinding(args: {
   effectiveConnectorToolResults: McpConnectorToolsResult[];
   skillInstructions: string | undefined;
   skillName: string | undefined;
+  /**
+   * The bound skill's `allowed-tools` pin (empty = no pin / no skill). Callers
+   * apply it to ANY additional tool set they add after this binding — e.g. the
+   * workspace content tools (§1087) — so a restrictive skill can't be widened by
+   * opening a workspace (PR #1136 review, codex P2).
+   */
+  skillAllowedTools: string[];
 }> {
   const { connectorToolResults, skillId, log } = args;
   const boundSkill = await loadBoundSkill(skillId, log);
@@ -1094,6 +1146,7 @@ async function applySkillSessionBinding(args: {
       effectiveConnectorToolResults: connectorToolResults,
       skillInstructions: undefined,
       skillName: undefined,
+      skillAllowedTools: [],
     };
   }
   const scopedEnabledTools = intersectSkillAllowedTools(
@@ -1119,6 +1172,62 @@ async function applySkillSessionBinding(args: {
     effectiveConnectorToolResults,
     skillInstructions: boundSkill.instructions ?? undefined,
     skillName: boundSkill.name,
+    skillAllowedTools: boundSkill.allowedTools,
+  };
+}
+
+/**
+ * Apply a bound skill's `allowed-tools` pin to the workspace content tools
+ * (§1087 — PR #1136 review): with a non-empty pin, keep only workspace tools the
+ * skill explicitly allows (by tool name); an empty pin (no skill / unpinned)
+ * leaves them untouched. Prevents a restrictive skill from being silently widened
+ * with document/artifact-edit tools just because a workspace is open.
+ */
+function filterWorkspaceToolsBySkillPin(
+  tools: ToolSet | undefined,
+  skillAllowedTools: string[]
+): ToolSet | undefined {
+  if (!tools || skillAllowedTools.length === 0) return tools;
+  const allowedNames = intersectSkillAllowedTools(Object.keys(tools), skillAllowedTools);
+  const allowed = new Set(allowedNames);
+  return Object.fromEntries(
+    Object.entries(tools).filter(([name]) => allowed.has(name))
+  ) as ToolSet;
+}
+
+/**
+ * Bind the open-workspace content tools for the chat request (Atrium §1087), or
+ * null when no workspace is open. Extracted so POST stays under the complexity
+ * budget; `buildWorkspaceChatTools` already canView/canEdit-gates and returns
+ * null on a bad/unviewable id.
+ */
+async function bindWorkspaceTools(
+  workspaceId: string | undefined,
+  userId: number,
+  requestId: string
+): Promise<Awaited<ReturnType<typeof buildWorkspaceChatTools>>> {
+  if (!workspaceId) return null;
+  return buildWorkspaceChatTools({ workspaceIdOrSlug: workspaceId, userId, requestId });
+}
+
+/**
+ * Bind the §1087 workspace tools AND apply the bound skill's allowed-tools pin to
+ * them, returning the (possibly empty) tool set + the matching prompt fragment.
+ * Extracted so POST stays under the complexity budget (PR #1136 review).
+ */
+async function bindWorkspaceToolsForChat(args: {
+  workspaceId: string | undefined;
+  userId: number;
+  requestId: string;
+  skillAllowedTools: string[];
+}): Promise<{ workspaceTools: ToolSet | undefined; workspacePromptFragment: string | undefined }> {
+  const workspace = await bindWorkspaceTools(args.workspaceId, args.userId, args.requestId);
+  const workspaceTools = filterWorkspaceToolsBySkillPin(workspace?.tools, args.skillAllowedTools);
+  // Drop the prompt fragment when the pin filtered every workspace tool away.
+  const hasTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
+  return {
+    workspaceTools,
+    workspacePromptFragment: hasTools ? workspace?.systemPromptFragment : undefined,
   };
 }
 
@@ -1141,7 +1250,7 @@ export async function POST(req: Request) {
     const validation = validateRequest(body, requestId, log);
     if (!validation.valid) return validation.error;
 
-    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [], enabledConnectors = [], skillId } = validation.data;
+    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [], enabledConnectors = [], skillId, workspaceId } = validation.data;
     const conversationIdValue = existingConversationId || undefined;
 
     // 2. Validate conversation ID format
@@ -1217,7 +1326,16 @@ export async function POST(req: Request) {
       skillId,
       log,
     });
-    const { scopedEnabledTools, effectiveConnectorToolResults, skillInstructions, skillName } = skillBinding;
+    const { scopedEnabledTools, effectiveConnectorToolResults, skillInstructions, skillName, skillAllowedTools } = skillBinding;
+
+    // 8c. Bind workspace content tools when a document/artifact is open beside the
+    // chat (Atrium §1087). Server-built + canView/canEdit-gated; a bad/unviewable
+    // `?workspace=` yields no tools (never breaks chat). A bound skill's
+    // allowed-tools pin still applies (a restrictive skill can't be widened by
+    // opening a workspace — PR #1136 review).
+    const { workspaceTools, workspacePromptFragment } = await bindWorkspaceToolsForChat({
+      workspaceId, userId, requestId, skillAllowedTools,
+    });
 
     // 9. Execute streaming and return response
     // Once executeStreaming returns successfully, the streaming Response is in flight.
@@ -1239,6 +1357,8 @@ export async function POST(req: Request) {
       failedConnectorIds,
       skillInstructions,
       skillName,
+      workspaceTools,
+      workspacePromptFragment,
       reasoningEffort: validation.data.reasoningEffort || 'medium',
       responseMode: validation.data.responseMode || 'standard',
       requestId,

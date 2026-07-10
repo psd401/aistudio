@@ -703,57 +703,48 @@ async function getOrCreateTools(
   request: StreamRequest,
   adapter: Awaited<ReturnType<typeof getProviderAdapter>>
 ): Promise<StreamConfig['tools']> {
-  // When pre-resolved tools are provided (e.g., adapter + MCP connector tools
-  // already merged by the caller), use them directly and skip adapter.createTools()
-  // to avoid redundant work and unintended side effects.
+  // Build the adapter's tool set (universal + model-supported provider-native
+  // tools) from `enabledTools`, honoring the model's capability filter.
+  const buildAdapterTools = async (): Promise<StreamConfig['tools']> => {
+    const requestedTools = request.enabledTools || [];
+    if (requestedTools.length === 0) {
+      return adapter.createTools([]);
+    }
+    const supportedTools = adapter.getSupportedTools(request.modelId);
+    // If the adapter reports no supported tools, pass nothing to avoid
+    // "tool use in streaming mode" errors (e.g., Bedrock Claude models).
+    // createTools([]) still returns universal tools (show_chart) unconditionally.
+    if (supportedTools.length === 0) {
+      log.info('Model does not support provider-native tools, filtering all tool requests', {
+        modelId: request.modelId,
+        requestedCount: requestedTools.length,
+      });
+      return adapter.createTools([]);
+    }
+    const filteredTools = requestedTools.filter(tool => supportedTools.includes(tool));
+    if (filteredTools.length < requestedTools.length) {
+      log.info('Filtered unsupported tools for model', {
+        modelId: request.modelId,
+        requestedCount: requestedTools.length,
+        filteredCount: filteredTools.length,
+        droppedTools: requestedTools.filter(tool => !supportedTools.includes(tool)),
+      });
+    }
+    return adapter.createTools(filteredTools);
+  };
+
+  // When pre-resolved tools are provided (adapter + MCP connector + workspace
+  // tools merged by the caller), MERGE the adapter's provider-native tools UNDER
+  // them (pre-resolved tools win on a name collision) rather than replacing.
+  // Returning `request.tools` alone dropped provider-native tools (OpenAI web
+  // search / code interpreter) whenever a connector or workspace was active,
+  // even though the same `enabledTools` work without them (PR #1136 review).
   if (request.tools) {
-    return request.tools;
+    const adapterTools = await buildAdapterTools();
+    return { ...adapterTools, ...request.tools };
   }
 
-  const requestedTools = request.enabledTools || [];
-  if (requestedTools.length === 0) {
-    return adapter.createTools([]);
-  }
-
-  // Filter requested tools against model's supported capabilities
-  const supportedTools = adapter.getSupportedTools(request.modelId);
-
-  // If the adapter reports no supported tools, pass nothing to avoid
-  // "tool use in streaming mode" errors (e.g., Bedrock Claude models)
-  if (supportedTools.length === 0) {
-    log.info('Model does not support provider-native tools, filtering all tool requests', {
-      modelId: request.modelId,
-      requestedCount: requestedTools.length,
-    });
-    log.debug('Tool filtering detail (no provider-native tools)', {
-      modelId: request.modelId,
-      requestedTools,
-    });
-    // createTools([]) always returns universal tools (show_chart, etc.) regardless of
-    // the empty input — BaseProviderAdapter.createTools() calls createUniversalTools()
-    // unconditionally, and all concrete adapters call super or replicate this behaviour.
-    return adapter.createTools([]);
-  }
-
-  // Only pass through tools the model actually supports
-  const filteredTools = requestedTools.filter(tool => supportedTools.includes(tool));
-  if (filteredTools.length < requestedTools.length) {
-    const droppedTools = requestedTools.filter(tool => !supportedTools.includes(tool));
-    log.info('Filtered unsupported tools for model', {
-      modelId: request.modelId,
-      requestedCount: requestedTools.length,
-      filteredCount: filteredTools.length,
-      droppedTools,
-    });
-    log.debug('Tool filtering detail', {
-      modelId: request.modelId,
-      requestedTools,
-      supportedTools,
-      filteredTools,
-    });
-  }
-
-  return adapter.createTools(filteredTools);
+  return buildAdapterTools();
 }
 
 /**

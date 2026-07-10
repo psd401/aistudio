@@ -18,7 +18,6 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle/utils"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { oauthConsentDecisions } from "@/lib/db/schema"
-import { eq, and, gt } from "drizzle-orm"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import type { ActionState } from "@/types/actions-types"
 
@@ -26,57 +25,15 @@ import type { ActionState } from "@/types/actions-types"
 // Types
 // ============================================
 
-interface ConsentDecision {
-  approved: boolean
-  userId: number
-  scopes: string[]
-  createdAt: number
-}
-
 interface ConsentResult {
   redirectTo: string
 }
 
-// ============================================
-// Consent Decision Persistence (Database)
-// ============================================
-
-/**
- * Retrieve and consume a consent decision from the database.
- * Returns undefined if not found or expired. Deletes after reading (consume-once).
- */
-export async function getConsentDecision(uid: string): Promise<ConsentDecision | undefined> {
-  const [decision] = await executeQuery(
-    (db) =>
-      db
-        .select()
-        .from(oauthConsentDecisions)
-        .where(
-          and(
-            eq(oauthConsentDecisions.uid, uid),
-            gt(oauthConsentDecisions.expiresAt, new Date())
-          )
-        )
-        .limit(1),
-    "getConsentDecision"
-  )
-
-  if (!decision) return undefined
-
-  // Consume once — delete after reading
-  await executeQuery(
-    (db) =>
-      db.delete(oauthConsentDecisions).where(eq(oauthConsentDecisions.uid, uid)),
-    "deleteConsentDecision"
-  )
-
-  return {
-    approved: decision.approved,
-    userId: decision.userId,
-    scopes: decision.scopes as string[],
-    createdAt: decision.createdAt.getTime(),
-  }
-}
+// NOTE: getConsentDecision moved to lib/oauth/consent-decisions.ts as
+// consumeConsentDecision (REV-COR-050). As an exported "use server" function it
+// was a public, unauthenticated endpoint that could destructively consume any
+// user's pending consent decision by uid. Its legitimate consumer is the OAuth
+// interaction route handler (a server-only module), not the action surface.
 
 // ============================================
 // Core Consent Processing

@@ -165,11 +165,14 @@ describe("versionService.snapshot screening wiring", () => {
     expect(checkInputSafetyMock).toHaveBeenCalledWith("# bad", "obj-1");
   });
 
-  it("fails closed when screening is degraded", async () => {
+  it("fails OPEN (proceeds to the transaction) when screening is degraded", async () => {
+    // A degraded evaluation must not block a write — it reaches the transaction
+    // like a passing screen (here surfaced via the TX sentinel).
     checkResult = { allowed: true, degraded: true };
     await expect(
       versionService.snapshot(autonomousAgent, doc, { body: "# any" })
-    ).rejects.toThrow(/Safety screening unavailable/);
+    ).rejects.toThrow(TX_SENTINEL);
+    expect(checkInputSafetyMock).toHaveBeenCalledWith("# any", "obj-1");
   });
 
   it("proceeds to the transaction when an agent body passes screening", async () => {

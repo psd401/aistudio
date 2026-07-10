@@ -675,15 +675,21 @@ session-cookie path for these endpoints. Every response carries `X-Request-Id` a
 | `content:delegate` | Mint short-lived delegated tokens (`POST /api/v1/agents/delegated-token`) — agent-held authority, never present in a minted token |
 
 Staff API keys may hold up to `content:publish_internal`; `content:publish_public`
-is administrator-held. A caller without it that requests a `public`-facing outcome is
-not rejected — it returns `202` with `data.status = "approval_required"` and enters
-the review queue (the §26.4 gate). This applies everywhere a request could reach
-`visibilityLevel: "public"` or take a `public_web` publication offline, not just the
-publish endpoint: `POST /content` (create at `visibility.level: "public"`),
+is administrator-held. A caller without it that requests a `public`-facing outcome on
+an EXISTING object is not rejected — it returns `202` with `data.status =
+"approval_required"` and enters the review queue (the §26.4 gate):
 `PATCH /content/{id}/visibility` (widen to `public`), `POST /content/{id}/publish`
 (publish to `public_web`), and `DELETE /content/{id}/publish/{destination}`
 (unpublish from `public_web` — taking public content down needs the same authority
-as putting it up).
+as putting it up). Each of these persists a durable `content_publish_requests` row
+that an admin approves at /admin/atrium; approving a `publish` replays the PINNED
+raise-time version (issue #1118), not a newer edited head.
+
+`POST /content` (create at `visibility.level: "public"`) is the ONE exception: rather
+than block, it uses **create-as-private** (issue #1118) — the object is created
+`private` (returned `201`) and a `visibility_widen` request is queued for it. Inspect
+`data.visibilityLevel` in the `201` body to see whether the requested `public` was
+applied or downgraded.
 
 **Content error codes** (in addition to the shared `INVALID_TOKEN`,
 `INSUFFICIENT_SCOPE`, `RATE_LIMIT_EXCEEDED`, and `INTERNAL_ERROR`):
@@ -825,9 +831,14 @@ internal reader `url` (`/c/{slug}`).
 **Response `400`** — Validation error, or `CONTENT_VALIDATION` (e.g. unknown collection slug).
 **Response `403`** — API key lacks `content:create`.
 **Response `409`** — `CONTENT_CONFLICT` (slug collision).
-**Response `202`** — approval required: `visibility.level: "public"` was requested (explicitly,
-or inherited from a collection whose default is `public`) without `content:publish_public`.
-Nothing is created; body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
+
+**Create-as-private (issue #1118):** requesting `visibility.level: "public"` (explicitly,
+or inherited from a collection whose default is `public`) without `content:publish_public`
+is NOT rejected and does NOT return `202`. The object is created at
+`visibilityLevel: "private"` (returned in the `201` body) and a durable
+`visibility_widen` request is queued for it — an admin approves it at /admin/atrium to
+make it public. Inspect `data.visibilityLevel` to see whether `public` was applied or
+downgraded to `private`.
 
 ---
 

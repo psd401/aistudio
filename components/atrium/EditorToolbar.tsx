@@ -76,7 +76,10 @@ export function EditorToolbar({
     useState<EditorPublishDestination>("intranet");
 
   return (
-    <div className="flex items-center gap-3 text-xs text-gray-500">
+    // flex-wrap so the status legend + action buttons wrap onto a second line in
+    // the narrow Nexus workspace panel (Epic #1059 §17) instead of clipping off
+    // the right edge. The full-width page has room and never wraps.
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-gray-500">
       <span aria-live="polite">
         {status === "connecting" && "Connecting…"}
         {status === "ready" && (canEdit ? "Connected" : "Read-only")}
@@ -103,7 +106,11 @@ export function EditorToolbar({
         </span>
       )}
       {canEdit && (
-        <span className="ml-auto flex items-center gap-2">
+        // flex-wrap here too (PR #1131 review): the action group's min-content
+        // width (~500px across six controls) exceeds the workspace panel's
+        // 380px minimum, so without wrapping INSIDE the group the outer wrap
+        // still clips Publish/Unpublish off the panel edge.
+        <span className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
           {/* Track-changes toggle: while ON, edits become proposed suggestions. */}
           <Button
             type="button"

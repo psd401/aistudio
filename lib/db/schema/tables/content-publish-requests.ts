@@ -35,30 +35,52 @@ import { agentIdentities } from "./agent-identities";
 /**
  * What the blocked caller was trying to do:
  * - `publish` — `publishService.publish` to a public destination, or with a
- *   bundled visibility widen to public. Replayed via `publishService.publish`.
+ *   bundled visibility widen to public. Replayed via `publishService.publish`,
+ *   PINNED to the raise-time version (`context.versionId`) so the admin approves
+ *   the reviewed content, not whatever the author has since edited into the head.
  * - `visibility_widen` — `visibilityService.setLevel` widening to `public`.
- *   Replayed via `visibilityService.setLevel`.
+ *   Replayed via `visibilityService.setLevel`. Also the request an unauthorized
+ *   public CREATE lands on: the object is created PRIVATE and this row queues the
+ *   widen to public (issue #1118 — create is not blocked outright).
+ * - `unpublish` — `publishService.unpublish` from a public destination without
+ *   the §26.4 authority. Replayed cleanly via `publishService.unpublish` (a
+ *   removal is idempotent; if already offline the replay is a no-op).
  * - `export` — a public-audience OKF bundle. NOT replayed on approve: the bundle
  *   is produced and handed to the original caller at call time (a bundle built by
  *   the approving admin would go nowhere, and would snapshot approval-time
  *   content, not request-time). Approval only records the decision; the exporter
  *   re-runs the export.
  */
-export type ContentPublishRequestKind = "publish" | "visibility_widen" | "export";
+export type ContentPublishRequestKind =
+  | "publish"
+  | "visibility_widen"
+  | "unpublish"
+  | "export";
 
 export type ContentPublishRequestStatus = "pending" | "approved" | "denied";
 
 /**
  * Exactly what is needed to REPLAY the blocked action on approve (plus display
  * fields), shaped per kind:
- * - `publish`: `{ destination, slug?, visibility? }` — `visibility` is present
- *   (always `{ level: "public" }`) only when the in-tx widen branch fired.
+ * - `publish`: `{ destination, slug?, versionId?, visibility? }` — `versionId`
+ *   pins the raise-time head so approve publishes the REVIEWED version, not a
+ *   later edit (issue #1118); `visibility` (`{ level: "public" }`) is present when
+ *   the caller bundled a widen to public (the in-tx widen branch, or a public
+ *   destination whose caller also asked to widen).
  * - `visibility_widen`: `{ level: "public" }`.
+ * - `unpublish`: `{ destination }` — the public destination to take offline.
  * - `export`: `{ collectionId, audience: "public" }` (display only, no replay).
  */
 export interface ContentPublishRequestContext {
   destination?: string;
   slug?: string;
+  /**
+   * The content version to publish on replay — pinned at raise time so an admin
+   * approves the reviewed content even if the author kept editing (issue #1118).
+   * Absent on rows written before this change; replay then falls back to the
+   * object's current head (the pre-#1118 behaviour).
+   */
+  versionId?: string;
   visibility?: { level: "public" };
   level?: "public";
   collectionId?: string;

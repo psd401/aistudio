@@ -16,6 +16,7 @@ import json
 import logging
 import boto3
 import os
+import re
 from typing import Dict, Any
 import secrets
 import string
@@ -30,6 +31,41 @@ secretsmanager = boto3.client(
 )
 
 
+def sanitize_for_logging(text: str) -> str:
+    """Redact ARNs / IPs / emails from log messages (REV-INFRA-115)."""
+    if not text:
+        return text
+    text = re.sub(r'arn:aws(?:-[a-z]+)*:[^:]*:[^:]*:\d*:[^\s]+', '[ARN_REDACTED]', text)
+    text = re.sub(r'\d+\.\d+\.\d+\.\d+', '[IP_REDACTED]', text)
+    text = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[EMAIL_REDACTED]', text)
+    return text
+
+
+def sanitize_error(error: Exception) -> str:
+    """Sanitize an exception message for logging (REV-INFRA-115)."""
+    return sanitize_for_logging(str(error))
+
+
+def validate_rotation_request(arn: str, token: str) -> bool:
+    """
+    AWS-standard rotation preamble guard (REV-INFRA-109). Verifies rotation is
+    enabled, the token is staged for this secret, and it is AWSPENDING (not already
+    AWSCURRENT). Returns True if the caller should short-circuit (already current).
+    """
+    metadata = secretsmanager.describe_secret(SecretId=arn)
+    if not metadata.get('RotationEnabled', False):
+        raise ValueError("Secret is not enabled for rotation")
+    versions = metadata['VersionIdsToStages']
+    if token not in versions:
+        raise ValueError("Rotation token has no stage for this secret")
+    if "AWSCURRENT" in versions[token]:
+        logger.info("Rotation token is already AWSCURRENT; nothing to do")
+        return True
+    if "AWSPENDING" not in versions[token]:
+        raise ValueError("Rotation token is not staged as AWSPENDING")
+    return False
+
+
 def handler(event: Dict[str, Any], context: Any) -> None:
     """
     Main rotation handler for API keys
@@ -38,22 +74,31 @@ def handler(event: Dict[str, Any], context: Any) -> None:
         event: Event data from Secrets Manager
         context: Lambda context object
     """
-    logger.info(f"API Key rotation event: {json.dumps(event)}")
+    # Log only the step, never the full event/ARN/ClientRequestToken (REV-INFRA-115).
+    logger.info(f"Rotation event received for step: {event.get('Step')}")
 
     arn = event['SecretId']
     token = event['ClientRequestToken']
     step = event['Step']
 
-    if step == "createSecret":
-        create_secret(arn, token)
-    elif step == "setSecret":
-        set_secret(arn, token)
-    elif step == "testSecret":
-        test_secret(arn, token)
-    elif step == "finishSecret":
-        finish_secret(arn, token)
-    else:
-        raise ValueError(f"Invalid step: {step}")
+    try:
+        # AWS-standard preamble guard before acting on the step (REV-INFRA-109).
+        if validate_rotation_request(arn, token):
+            return
+
+        if step == "createSecret":
+            create_secret(arn, token)
+        elif step == "setSecret":
+            set_secret(arn, token)
+        elif step == "testSecret":
+            test_secret(arn, token)
+        elif step == "finishSecret":
+            finish_secret(arn, token)
+        else:
+            raise ValueError(f"Invalid step: {step}")
+    except Exception as e:
+        logger.error(f"Rotation failed: {sanitize_error(e)}")
+        raise
 
 
 def create_secret(arn: str, token: str) -> None:
@@ -62,7 +107,7 @@ def create_secret(arn: str, token: str) -> None:
 
     Creates a cryptographically secure random API key.
     """
-    logger.info(f"Creating new API key for {arn}")
+    logger.info(f"Creating new API key for {sanitize_for_logging(arn)}")
 
     # Check if AWSPENDING version already exists
     try:
@@ -118,7 +163,7 @@ def set_secret(arn: str, token: str) -> None:
     service to update. Override this function if you need to update
     an external service.
     """
-    logger.info(f"Set secret for {arn} - no-op for simple API keys")
+    logger.info(f"Set secret for {sanitize_for_logging(arn)} - no-op for simple API keys")
     # No action needed for simple API keys
     pass
 
@@ -129,7 +174,7 @@ def test_secret(arn: str, token: str) -> None:
 
     Validates that the new API key meets format requirements.
     """
-    logger.info(f"Testing API key for {arn}")
+    logger.info(f"Testing API key for {sanitize_for_logging(arn)}")
 
     # Get pending secret
     pending_secret = secretsmanager.get_secret_value(
@@ -156,7 +201,7 @@ def finish_secret(arn: str, token: str) -> None:
     """
     Finish the rotation by moving AWSCURRENT label
     """
-    logger.info(f"Finishing rotation for {arn}")
+    logger.info(f"Finishing rotation for {sanitize_for_logging(arn)}")
 
     # Get metadata about the secret
     metadata = secretsmanager.describe_secret(SecretId=arn)
@@ -171,13 +216,22 @@ def finish_secret(arn: str, token: str) -> None:
             current_version = version
             break
 
-    # Move AWSCURRENT stage to new version
-    secretsmanager.update_secret_version_stage(
-        SecretId=arn,
-        VersionStage="AWSCURRENT",
-        MoveToVersionId=token,
-        RemoveFromVersionId=current_version
-    )
+    # Move AWSCURRENT stage to new version. Never pass RemoveFromVersionId=None
+    # (REV-INFRA-109).
+    if current_version is not None:
+        secretsmanager.update_secret_version_stage(
+            SecretId=arn,
+            VersionStage="AWSCURRENT",
+            MoveToVersionId=token,
+            RemoveFromVersionId=current_version
+        )
+    else:
+        logger.warning("No AWSCURRENT version found to remove; setting AWSCURRENT without removal")
+        secretsmanager.update_secret_version_stage(
+            SecretId=arn,
+            VersionStage="AWSCURRENT",
+            MoveToVersionId=token
+        )
 
     logger.info("Successfully completed rotation")
 

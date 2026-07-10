@@ -8,38 +8,11 @@ import { parse as csvParse } from 'csv-parse/sync';
 import { marked } from 'marked';
 import { createLambdaLogger } from '../utils/lambda-logger';
 import { sanitizeTextWithMetrics } from '../../../../lib/utils/text-sanitizer';
-
-/**
- * Securely removes HTML tags to prevent injection attacks
- * This function handles malformed HTML and prevents bypassing attempts
- */
-function sanitizeHTML(html: string): string {
-  // First, iteratively remove HTML tags until none remain
-  // This prevents bypassing through nested or malformed tags
-  let sanitized = html;
-  let previousLength = 0;
-  
-  while (sanitized.length !== previousLength && /<[^>]*>/g.test(sanitized)) {
-    previousLength = sanitized.length;
-    sanitized = sanitized.replace(/<[^>]*>/g, ' ');
-  }
-  
-  // AFTER tags are removed, safely decode HTML entities (prevents security bypass)
-  sanitized = sanitized
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#x27;/g, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, '&');
-  
-  // Clean up extra whitespace created by tag removal
-  sanitized = sanitized
-    .replace(/\s+/g, ' ')
-    .trim();
-    
-  return sanitized;
-}
+// REV-COR-409 / REV-INFRA-094: use the shared decode-first sanitizer. TextProcessor's
+// own copy stripped tags BEFORE decoding entities, so entity-encoded markup
+// (&lt;script&gt;) round-tripped into live <script>. Both processors now share one
+// correct implementation.
+import { sanitizeHtml } from '../utils/html-sanitizer';
 
 export class TextProcessor implements DocumentProcessor {
   constructor(private config: ProcessorConfig) {}
@@ -202,7 +175,7 @@ export class TextProcessor implements DocumentProcessor {
     try {
       // Convert markdown to plain text for text field
       const html = await marked.parse(content);
-      const plainText = sanitizeHTML(html).trim();
+      const plainText = sanitizeHtml(html).trim();
       
       return {
         text: plainText,
@@ -444,19 +417,21 @@ export class TextProcessor implements DocumentProcessor {
     while (startIndex < text.length) {
       let endIndex = Math.min(startIndex + chunkSize, text.length);
       
-      // Try to break at sentence or line boundary
+      // Try to break at a sentence or line boundary — but only when the break still
+      // leaves a chunk larger than the overlap. Otherwise `endIndex - overlap` would
+      // move the next window BACKWARD and the loop would never terminate (REV-COR-406).
       if (endIndex < text.length) {
         const lastSentenceEnd = text.lastIndexOf('.', endIndex);
         const lastLineEnd = text.lastIndexOf('\n', endIndex);
         const breakPoint = Math.max(lastSentenceEnd, lastLineEnd);
-        
-        if (breakPoint > startIndex) {
+
+        if (breakPoint > startIndex && (breakPoint + 1 - startIndex) > overlap) {
           endIndex = breakPoint + 1;
         }
       }
-      
+
       const chunkContent = text.substring(startIndex, endIndex).trim();
-      
+
       if (chunkContent.length > 0) {
         chunks.push({
           chunkIndex,
@@ -470,9 +445,17 @@ export class TextProcessor implements DocumentProcessor {
         });
         chunkIndex++;
       }
-      
-      startIndex = endIndex - overlap;
-      if (startIndex >= endIndex) break;
+
+      // Once a chunk reaches the end of the text, everything is covered — stop
+      // (REV-COR-406). Without this the loop would keep emitting tiny overlapping
+      // tail windows because `endIndex - overlap` sits behind `startIndex` near the end.
+      if (endIndex >= text.length) break;
+
+      // Advance with guaranteed forward progress (REV-COR-406): never regress and
+      // always move at least one character past the previous start.
+      const nextStart = Math.max(startIndex + 1, endIndex - overlap);
+      if (nextStart <= startIndex) break; // defensive; should be unreachable
+      startIndex = nextStart;
     }
     
     const logger = createLambdaLogger({ operation: 'TextProcessor.chunkText' });

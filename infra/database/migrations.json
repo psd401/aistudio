@@ -92,6 +92,7 @@
     "095-atrium-okf.sql",
     "096-atrium-publish-approvals.sql",
     "097-atrium-nav-entry.sql",
-    "098-atrium-comments.sql"
+    "098-atrium-comments.sql",
+    "099-atrium-publish-approvals-unpublish-kind.sql"
   ]
 }

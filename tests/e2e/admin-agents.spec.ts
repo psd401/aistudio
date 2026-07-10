@@ -175,8 +175,11 @@ test.describe('Agent Dashboard — Admin', () => {
     await page.locator('[role="tab"]').filter({ hasText: 'Cost' }).click()
 
     // Source-of-truth panel heading always renders on the Cost tab.
+    // NOTE: must be a regex LITERAL, not a 'text=/…/' string selector — inside a
+    // string literal JS collapses \( to (, turning the parens into a regex group
+    // that can never match the rendered "(tokens × pricing)" heading.
     const panelHeading = page
-      .locator('text=/Model cost \(tokens × pricing\)/i')
+      .getByRole('heading', { name: /Model cost \(tokens × pricing\)/i })
       .first()
     await expect(panelHeading).toBeVisible({ timeout: 15000 })
 

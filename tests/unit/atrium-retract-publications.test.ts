@@ -59,6 +59,14 @@ jest.mock("drizzle-orm", () => ({
   eq: (...a: unknown[]) => a,
 }));
 
+// publish-service imports versionService (to validate a pinned version on the
+// approval-replay path — issue #1118). The REAL module pulls mappers →
+// drizzle-helpers, which calls `sql` (absent from this suite's minimal drizzle-orm
+// mock). retractAllPublications never uses it, so stub it out.
+jest.mock("@/lib/content/version-service", () => ({
+  versionService: { getById: jest.fn() },
+}));
+
 const intranetUnpublish = jest.fn(async (_a: unknown) => undefined);
 const publicWebUnpublish = jest.fn(async (_a: unknown) => undefined);
 jest.mock("@/lib/content/publish-adapters/intranet", () => ({
