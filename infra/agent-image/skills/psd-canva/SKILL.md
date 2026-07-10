@@ -23,7 +23,7 @@ Manager — never a shared Canva account.
 |---|---|---|
 | `whoami` | The connected Canva account's profile | — |
 | `list-designs` | List/search the user's designs | `--query` `--ownership any\|owned\|shared` `--sort-by` `--continuation` |
-| `create-design` | Create a new design | `--title`, and either `--design-type doc\|whiteboard\|presentation` **or** `--width N --height N` |
+| `create-design` | Create a new design | `--title`, and at least one of `--design-type doc\|whiteboard\|presentation`, `--width N --height N`, or `--asset-id <id>` (start from an uploaded asset) |
 | `export` | Export a design to a file (async) | `--design-id <id>` `--format pdf\|png` `--pages 1,2,3` |
 | `upload-asset` | Upload a local image/asset (async) | `--file <local-path>` `--name` |
 

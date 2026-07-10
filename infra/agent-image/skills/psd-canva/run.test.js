@@ -2,7 +2,7 @@
  * Regression tests for run.js's CLI subcommand → Canva REST wiring.
  *
  * Confirms each subcommand hits the correct method + path + body:
- *   whoami        → GET  /v1/users/me/profile
+ *   whoami        → GET  /v1/users/me (+ /v1/users/me/profile enrichment)
  *   list-designs  → GET  /v1/designs  (query/ownership/sort_by/continuation)
  *   create-design → POST /v1/designs  (preset vs custom design_type)
  *   export        → startAndPollJob /v1/exports  (format object)
@@ -25,11 +25,14 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-require('./test-support');
+const { secretsStore } = require('./test-support');
 const common = require('./common');
 
 let fetchCalls;
 let jobCalls;
+// When set, the canvaFetch stub throws it once (then auto-clears) — used to
+// drive withAuth's 401/rate-limited/canva-error mapping branches.
+let fetchError;
 
 const originalAuthorizeUser = common.authorizeUser;
 const originalCanvaFetch = common.canvaFetch;
@@ -37,6 +40,11 @@ const originalStartAndPollJob = common.startAndPollJob;
 
 common.authorizeUser = async () => 'access-tok';
 common.canvaFetch = async (token, method, reqPath, opts) => {
+  if (fetchError) {
+    const err = fetchError;
+    fetchError = null;
+    throw err;
+  }
   fetchCalls.push({ token, method, path: reqPath, opts: opts || {} });
   if (reqPath === '/v1/asset-uploads') {
     return { job: { id: 'up-1', status: 'success', asset: { id: 'asset-1' } } };
@@ -59,6 +67,7 @@ const EMAIL = 'teacher@psd401.net';
 beforeEach(() => {
   fetchCalls = [];
   jobCalls = [];
+  fetchError = null;
 });
 
 async function runCli(argv) {
@@ -73,11 +82,73 @@ async function runCli(argv) {
   }
 }
 
-test('whoami → GET /v1/users/me/profile', async () => {
+// Run the CLI expecting a structured exit: captures the emitted JSON and the
+// exit code (process.exit is stubbed to throw a sentinel, like common.test.js).
+async function runCliExpectExit(argv) {
+  process.argv = ['node', 'run.js', ...argv];
+  const chunks = [];
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk) => { chunks.push(chunk); return true; };
+  const originalExit = process.exit.bind(process);
+  let exitCode;
+  process.exit = (code) => { exitCode = code; throw new Error('__test_exit__'); };
+  try {
+    await expect(main()).rejects.toThrow('__test_exit__');
+  } finally {
+    process.stdout.write = originalWrite;
+    process.exit = originalExit;
+  }
+  return { exitCode, emitted: JSON.parse(chunks.join('')) };
+}
+
+test('whoami → GET /v1/users/me, enriched with /v1/users/me/profile', async () => {
   await runCli(['--user', EMAIL, 'whoami']);
-  expect(fetchCalls).toHaveLength(1);
+  expect(fetchCalls).toHaveLength(2);
   expect(fetchCalls[0].method).toBe('GET');
-  expect(fetchCalls[0].path).toBe('/v1/users/me/profile');
+  expect(fetchCalls[0].path).toBe('/v1/users/me');
+  expect(fetchCalls[1].path).toBe('/v1/users/me/profile');
+});
+
+test('withAuth maps a mid-call 401 to needs-auth (exit 10)', async () => {
+  fetchError = Object.assign(new Error('Canva API 401'), { code: 'unauthorized', status: 401 });
+  // emitNeedsAuthAndExit reads the internal API key from (mocked) Secrets
+  // Manager and mints a consent link over real fetch — stub both.
+  secretsStore['psd-agent/dev/internal-api-key'] = 'internal-api-key';
+  const originalGlobalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/api/agent/consent-link')) {
+      return new Response(
+        JSON.stringify({ url: 'https://app.test/agent-connect-canva?token=abc' }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    throw new Error(`Unexpected fetch to ${url}`);
+  };
+  try {
+    const { exitCode, emitted } = await runCliExpectExit(['--user', EMAIL, 'whoami']);
+    expect(exitCode).toBe(10);
+    expect(emitted.status).toBe('needs-auth');
+    expect(emitted.kind).toBe('canva');
+  } finally {
+    globalThis.fetch = originalGlobalFetch;
+  }
+});
+
+test('withAuth maps an exhausted rate limit to rate-limited (exit 14)', async () => {
+  fetchError = Object.assign(new Error('Canva API 429 after retries'), { code: 'rate_limited', status: 429 });
+  const { exitCode, emitted } = await runCliExpectExit(['--user', EMAIL, 'whoami']);
+  expect(exitCode).toBe(14);
+  expect(emitted.status).toBe('rate-limited');
+  expect(emitted.tool).toBe('whoami');
+});
+
+test('withAuth maps any other Canva failure to canva-error (exit 12)', async () => {
+  fetchError = Object.assign(new Error('Canva API error: HTTP 500'), { code: 'http_500', status: 500 });
+  const { exitCode, emitted } = await runCliExpectExit(['--user', EMAIL, 'whoami']);
+  expect(exitCode).toBe(12);
+  expect(emitted.status).toBe('canva-error');
+  expect(emitted.code).toBe('http_500');
+  expect(emitted.http_status).toBe(500);
 });
 
 test('list-designs forwards query/ownership/sort-by as GET params', async () => {
@@ -98,6 +169,7 @@ test('create-design with a preset builds design_type {type:preset,name}', async 
   expect(fetchCalls[0].method).toBe('POST');
   expect(fetchCalls[0].path).toBe('/v1/designs');
   expect(fetchCalls[0].opts.body).toEqual({
+    type: 'type_and_asset',
     title: 'My Doc',
     design_type: { type: 'preset', name: 'doc' },
   });
@@ -107,7 +179,17 @@ test('create-design with width/height builds a custom design_type', async () => 
   await runCli(['--user', EMAIL, 'create-design', '--width', '800', '--height', '600']);
   expect(fetchCalls).toHaveLength(1);
   expect(fetchCalls[0].opts.body).toEqual({
+    type: 'type_and_asset',
     design_type: { type: 'custom', width: 800, height: 600 },
+  });
+});
+
+test('create-design accepts --asset-id alone (no design_type)', async () => {
+  await runCli(['--user', EMAIL, 'create-design', '--asset-id', 'Msd59349ff']);
+  expect(fetchCalls).toHaveLength(1);
+  expect(fetchCalls[0].opts.body).toEqual({
+    type: 'type_and_asset',
+    asset_id: 'Msd59349ff',
   });
 });
 
@@ -122,12 +204,11 @@ test('export starts+polls the /v1/exports job with a format object', async () =>
   });
 });
 
-test('export --pages parses a CSV page list', async () => {
+test('export --pages parses a CSV page list into format.pages', async () => {
   await runCli(['--user', EMAIL, 'export', '--design-id', 'DAF123', '--format', 'png', '--pages', '1,3, 5']);
   expect(jobCalls[0].body).toEqual({
     design_id: 'DAF123',
-    format: { type: 'png' },
-    pages: [1, 3, 5],
+    format: { type: 'png', pages: [1, 3, 5] },
   });
 });
 

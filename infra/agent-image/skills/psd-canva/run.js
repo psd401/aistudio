@@ -71,8 +71,18 @@ async function main() {
 
   switch (sub) {
     case 'whoami': {
-      const result = await withAuth(userEmail, 'whoami', (token) =>
-        canvaFetch(token, 'GET', '/v1/users/me/profile'));
+      const result = await withAuth(userEmail, 'whoami', async (token) => {
+        // /v1/users/me needs no scope; /v1/users/me/profile (display_name)
+        // needs profile:read — enrich when available, never fail whoami on
+        // the profile call alone (scope may have been narrowed on refresh).
+        const me = await canvaFetch(token, 'GET', '/v1/users/me');
+        try {
+          const profile = await canvaFetch(token, 'GET', '/v1/users/me/profile');
+          return { ...me, ...profile };
+        } catch {
+          return me;
+        }
+      });
       ok(result);
       break;
     }
@@ -90,8 +100,11 @@ async function main() {
     }
 
     case 'create-design': {
-      const body = {};
+      // POST /v1/designs requires the top-level "type" discriminator alongside
+      // design_type/asset_id; at least one of the two must be set.
+      const body = { type: 'type_and_asset' };
       if (args.title && args.title !== true) body.title = args.title;
+      if (args.asset_id && args.asset_id !== true) body.asset_id = String(args.asset_id);
       const preset = args.design_type;
       const width = args.width && args.width !== true ? Number(args.width) : null;
       const height = args.height && args.height !== true ? Number(args.height) : null;
@@ -99,8 +112,8 @@ async function main() {
         body.design_type = { type: 'preset', name: preset };
       } else if (width && height && !Number.isNaN(width) && !Number.isNaN(height)) {
         body.design_type = { type: 'custom', width, height };
-      } else {
-        fail('create-design requires either --design-type <doc|whiteboard|presentation> or --width N --height N');
+      } else if (!body.asset_id) {
+        fail('create-design requires --design-type <doc|whiteboard|presentation>, --width N --height N, or --asset-id <id>');
       }
       const result = await withAuth(userEmail, 'create-design', (token) =>
         canvaFetch(token, 'POST', '/v1/designs', { body }));
@@ -115,7 +128,11 @@ async function main() {
       const body = { design_id: args.design_id, format: { type: format } };
       if (args.pages && args.pages !== true) {
         const pages = String(args.pages).split(',').map((p) => Number(p.trim())).filter((n) => Number.isInteger(n) && n > 0);
-        if (pages.length) body.pages = pages;
+        // A supplied-but-unusable page list must fail loudly — silently
+        // dropping it would export ALL pages against the caller's intent.
+        if (!pages.length) fail('export --pages must be a comma-separated list of positive page numbers (e.g. 1,2,3)');
+        // "pages" lives INSIDE the format object, not at the body top level.
+        body.format.pages = pages;
       }
       const job = await withAuth(userEmail, 'export', (token) =>
         startAndPollJob(token, '/v1/exports', '/v1/exports', body));
