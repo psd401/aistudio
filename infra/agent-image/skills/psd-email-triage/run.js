@@ -69,6 +69,28 @@ function requirePositional(args, n, subcmd) {
   return args._positional;
 }
 
+// Escalation modes recognised by the classifier Lambda (rules.ts). Keep in
+// sync with EscalationMode there.
+const ESCALATION_MODES = ['all', 'high-confidence', 'rules-only', 'none'];
+
+// Initial-inbox sweep defaults — mirror sweep.ts (last 30 days, cap 1000).
+const SWEEP_WINDOW_DAYS = 30;
+const SWEEP_CAP = 1000;
+
+function newSweepState(now) {
+  const t = now || new Date().toISOString();
+  return {
+    status: 'pending',
+    pageToken: null,
+    processed: 0,
+    labeled: 0,
+    windowDays: SWEEP_WINDOW_DAYS,
+    cap: SWEEP_CAP,
+    startedAt: t,
+    updatedAt: t,
+  };
+}
+
 // ---------------------------------------------------------------------
 // Subcommands
 // ---------------------------------------------------------------------
@@ -131,6 +153,17 @@ async function cmd_enable(args) {
     recentDecisions: (existing && existing.recentDecisions) || [],
     recentCorrections: (existing && existing.recentCorrections) || [],
     learnedPatterns: (existing && existing.learnedPatterns) || [],
+    // Per-user escalation policy (#1172). Default 'all' preserves the
+    // pre-#1172 "everything important pings me" behaviour until the user
+    // opts into a quieter mode.
+    escalationMode: (existing && existing.escalationMode) || 'all',
+    escalationConfidenceThreshold:
+      (existing && existing.escalationConfidenceThreshold) || 0.85,
+    // Kick an initial-inbox sweep on first enable (#1172). The dispatcher
+    // picks up pending sweeps on its next 5-minute tick and the worker
+    // backfills existing INBOX mail (last 30 days, cap 1000) with
+    // escalation suppressed.
+    sweep: newSweepState(now),
     internalDomain,
     // NOTE: do NOT include `userEmail` here. It's the DynamoDB partition
     // key — UpdateCommand passes it via Key{userEmail} and DDB refuses
@@ -163,7 +196,9 @@ async function cmd_enable(args) {
     subcommand: 'enable',
     summary:
       `Watching ${user}. Gmail labels: ${Object.values(labels).join(', ')}. ` +
-      `Default rules seeded. Cursor anchored at historyId ${startHistoryId}.` +
+      `Default rules seeded. Cursor anchored at historyId ${startHistoryId}. ` +
+      `Kicking off an inbox sweep of the last ${SWEEP_WINDOW_DAYS} days (up to ` +
+      `${SWEEP_CAP} messages, no Chat pings) on the next tick.` +
       (digestNote ? ' ' + digestNote : ''),
     data: { labels, labelIdsByKey, startHistoryId, digestArn },
   });
@@ -225,15 +260,21 @@ async function cmd_status(args) {
     });
     return;
   }
+  const sweep = row.sweep || null;
+  const sweepSummary = sweep
+    ? `sweep ${sweep.status} (${sweep.processed || 0}/${sweep.cap || SWEEP_CAP})`
+    : 'no sweep';
   emit({
     ok: true,
     subcommand: 'status',
     summary:
       `${row.enabled ? 'Active' : 'Paused'} · ` +
+      `escalation ${row.escalationMode || 'all'} · ` +
       `${(row.rules.vipSenders || []).length} VIPs · ` +
       `${(row.rules.muteSenders || []).length} muted · ` +
       `${(row.rules.keywordRules || []).length} keyword rules · ` +
-      `${(row.recentDecisions || []).length} recent decisions · ` +
+      `${(row.pendingSuggestions || []).length} pending suggestion(s) · ` +
+      `${sweepSummary} · ` +
       `digest ${row.digestEnabled ? `${row.digestTime} ${row.digestTz || ''}` : 'off'}.`,
     data: {
       enabled: row.enabled,
@@ -241,6 +282,11 @@ async function cmd_status(args) {
       disabledAt: row.disabledAt,
       labels: row.labels,
       lastPollAt: row.lastPollAt,
+      escalationMode: row.escalationMode || 'all',
+      escalationConfidenceThreshold: row.escalationConfidenceThreshold ?? 0.85,
+      sweep,
+      learnedAt: row.learnedAt,
+      pendingSuggestions: (row.pendingSuggestions || []).slice(0, 10),
       counts: {
         vipSenders: (row.rules.vipSenders || []).length,
         muteSenders: (row.rules.muteSenders || []).length,
@@ -249,6 +295,8 @@ async function cmd_status(args) {
         escalationKeywords: (row.escalation.keywords || []).length,
         recentDecisions: (row.recentDecisions || []).length,
         recentCorrections: (row.recentCorrections || []).length,
+        learnedPatterns: (row.learnedPatterns || []).length,
+        pendingSuggestions: (row.pendingSuggestions || []).length,
       },
       digest: {
         enabled: row.digestEnabled,
@@ -361,8 +409,12 @@ async function cmd_escalation(args) {
     emit({
       ok: true,
       subcommand: 'escalation list',
-      summary: 'Current escalation rules',
-      data: { escalation: row.escalation },
+      summary: `Mode: ${row.escalationMode || 'all'} · threshold ${row.escalationConfidenceThreshold ?? 0.85}`,
+      data: {
+        escalation: row.escalation,
+        escalationMode: row.escalationMode || 'all',
+        escalationConfidenceThreshold: row.escalationConfidenceThreshold ?? 0.85,
+      },
     });
     return;
   }
@@ -408,6 +460,46 @@ async function cmd_escalation(args) {
     const row = await requireEnabledRow(user, 'escalation labels');
     await lib.updateRow(user, { escalation: { ...row.escalation, labelTriggers: triggers } });
     emit({ ok: true, subcommand: 'escalation labels', summary: `Label triggers set to: ${triggers.join(', ')}` });
+    return;
+  }
+  // Per-user escalation policy (#1172).
+  if (verb === 'mode') {
+    const user = requireUser(args, 'escalation mode');
+    const [, mode] = requirePositional(args, 2, 'escalation mode');
+    if (!ESCALATION_MODES.includes(mode)) {
+      bail('bad-mode', `mode must be one of: ${ESCALATION_MODES.join(', ')} (got "${mode}")`, 'escalation mode');
+    }
+    await requireEnabledRow(user, 'escalation mode');
+    await lib.updateRow(user, { escalationMode: mode });
+    const desc = {
+      'all': 'every Important classification pings you (default).',
+      'high-confidence': "only rule matches and confident LLM calls ping you.",
+      'rules-only': 'only your VIP/escalation-rule matches ping you; plain LLM Important never does.',
+      'none': 'nothing pings you — the daily digest is the only surface.',
+    }[mode];
+    emit({
+      ok: true,
+      subcommand: 'escalation mode',
+      summary: `Escalation mode set to "${mode}" — ${desc}`,
+      data: { escalationMode: mode },
+    });
+    return;
+  }
+  if (verb === 'threshold') {
+    const user = requireUser(args, 'escalation threshold');
+    const [, raw] = requirePositional(args, 2, 'escalation threshold');
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+      bail('bad-threshold', `threshold must be a number between 0 and 1 (got "${raw}")`, 'escalation threshold');
+    }
+    await requireEnabledRow(user, 'escalation threshold');
+    await lib.updateRow(user, { escalationConfidenceThreshold: value });
+    emit({
+      ok: true,
+      subcommand: 'escalation threshold',
+      summary: `high-confidence escalation threshold set to ${value} (only used in "high-confidence" mode).`,
+      data: { escalationConfidenceThreshold: value },
+    });
     return;
   }
   bail('bad-verb', `Unknown escalation subcommand: ${verb}`, 'escalation');
@@ -464,6 +556,10 @@ async function cmd_training(args) {
       toLabel: newLabel,
       ts: new Date().toISOString(),
       source: 'user-correction',
+      // Snapshot the sender so the nightly learning job (#1172) can
+      // attribute this correction without re-fetching from Gmail.
+      fromEmail: prior ? prior.fromEmail : undefined,
+      fromDomain: prior && prior.fromEmail ? prior.fromEmail.split('@')[1] : undefined,
     };
     const corrections = [...(row.recentCorrections || []), correction].slice(-50);
     await lib.updateRow(user, { recentCorrections: corrections });
@@ -659,6 +755,124 @@ async function cmd_tasks(args) {
 }
 
 // ---------------------------------------------------------------------
+// sweep — initial-inbox backfill (#1172)
+// ---------------------------------------------------------------------
+
+async function cmd_sweep(args) {
+  const user = requireUser(args, 'sweep');
+  const row = await requireEnabledRow(user, 'sweep');
+  const current = row.sweep;
+  if (current && (current.status === 'pending' || current.status === 'running')) {
+    emit({
+      ok: true,
+      subcommand: 'sweep',
+      summary:
+        `A sweep is already ${current.status} for ${user} ` +
+        `(${current.processed || 0} processed, ${current.labeled || 0} labeled). ` +
+        `It continues on the next tick.`,
+      data: { sweep: current },
+    });
+    return;
+  }
+  const sweep = newSweepState();
+  await lib.updateRow(user, { sweep });
+  emit({
+    ok: true,
+    subcommand: 'sweep',
+    summary:
+      `Queued an inbox sweep for ${user} — backfilling the last ${SWEEP_WINDOW_DAYS} days ` +
+      `of INBOX (up to ${SWEEP_CAP} messages) through the normal rules→LLM pipeline. ` +
+      `No Chat pings during the sweep. It starts on the next 5-minute tick.`,
+    data: { sweep },
+  });
+}
+
+// ---------------------------------------------------------------------
+// suggestions — approve/dismiss learned rule suggestions (#1172)
+// ---------------------------------------------------------------------
+
+async function cmd_suggestions(args) {
+  const verb = args._positional[0] || 'list';
+  const user = requireUser(args, `suggestions ${verb}`);
+  const row = await requireEnabledRow(user, `suggestions ${verb}`);
+  const pending = row.pendingSuggestions || [];
+
+  if (verb === 'list') {
+    emit({
+      ok: true,
+      subcommand: 'suggestions list',
+      summary: pending.length
+        ? `${pending.length} pending suggestion(s) from your recent corrections`
+        : 'No pending suggestions.',
+      data: { suggestions: pending },
+    });
+    return;
+  }
+
+  if (verb === 'apply') {
+    const [, id] = requirePositional(args, 2, 'suggestions apply');
+    const s = pending.find((x) => x.id === id);
+    if (!s) bail('not-found', `No pending suggestion with id "${id}"`, 'suggestions apply');
+    const rules = { ...row.rules };
+    if (s.kind === 'vip') {
+      rules.vipSenders = Array.from(
+        new Set([...(rules.vipSenders || []), String(s.target).toLowerCase()]),
+      );
+    } else if (s.kind === 'mute') {
+      rules.muteSenders = Array.from(
+        new Set([...(rules.muteSenders || []), String(s.target).toLowerCase()]),
+      );
+    } else {
+      bail('bad-kind', `Suggestion "${id}" has unknown kind "${s.kind}"`, 'suggestions apply');
+    }
+    const remaining = pending.filter((x) => x.id !== id);
+    const applied = Array.from(new Set([...(row.appliedSuggestions || []), id]));
+    await lib.updateRow(user, {
+      rules,
+      pendingSuggestions: remaining,
+      appliedSuggestions: applied,
+    });
+    emit({
+      ok: true,
+      subcommand: 'suggestions apply',
+      summary:
+        s.kind === 'vip'
+          ? `Applied: ${s.target} is now a VIP (always Important).`
+          : `Applied: muting ${s.target} — future mail from them auto-archives to Later.`,
+      data: { applied: s, rules },
+    });
+    return;
+  }
+
+  if (verb === 'dismiss') {
+    const [, id] = requirePositional(args, 2, 'suggestions dismiss');
+    const exists =
+      pending.some((x) => x.id === id) ||
+      (row.dismissedSuggestions || []).includes(id);
+    if (!exists) bail('not-found', `No suggestion with id "${id}" to dismiss`, 'suggestions dismiss');
+    const remaining = pending.filter((x) => x.id !== id);
+    const dismissed = Array.from(new Set([...(row.dismissedSuggestions || []), id]));
+    await lib.updateRow(user, {
+      pendingSuggestions: remaining,
+      dismissedSuggestions: dismissed,
+    });
+    emit({
+      ok: true,
+      subcommand: 'suggestions dismiss',
+      summary: `Dismissed suggestion "${id}" — it won't be raised again.`,
+      data: { dismissedId: id },
+    });
+    return;
+  }
+
+  bail(
+    'bad-verb',
+    `Unknown suggestions subcommand: ${verb} (try 'list', 'apply <id>', 'dismiss <id>')`,
+    'suggestions',
+  );
+}
+
+// ---------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------
 
@@ -673,6 +887,8 @@ const COMMANDS = {
   labels: cmd_labels,
   digest: cmd_digest,
   tasks: cmd_tasks,
+  sweep: cmd_sweep,
+  suggestions: cmd_suggestions,
 };
 
 async function main() {

@@ -18,6 +18,9 @@ Smart email triage controlled entirely through chat. The user says things like "
 - User asks "show recent triage", "what did you classify?" → `training recent`
 - User says "I keep getting Important on noisy senders" → `training correct` + `rules mute`
 - User wants a daily summary → `digest enable` / `digest time HH:MM`
+- User says "only ping me when you're sure" / "stop pinging me for everything" / "quiet down the notifications" → `escalation mode <high-confidence|rules-only|none>` (+ `escalation threshold`)
+- User says "triage my existing inbox" / "sweep my backlog" / "catch up on my old mail" → `sweep`
+- User says "show me your suggestions" / "apply that" / "yes do the first one" / "ignore that suggestion" → `suggestions list|apply <id>|dismiss <id>`
 
 Don't call this skill for:
 - Generic Gmail operations (use `psd-workspace` / `gws-*`)
@@ -35,10 +38,11 @@ node /opt/psd-skills/psd-email-triage/run.js <subcommand> --user <email> [args]
 
 | Subcommand | Effect |
 |------------|--------|
-| `enable` | Create Gmail labels (default `@psd/Important`, `@psd/Later`, `@psd/News`), seed default rules, anchor Gmail history cursor, optionally schedule daily digest. Idempotent — running `enable` on an already-enabled triage is a no-op that returns current status. |
+| `enable` | Create Gmail labels (default `@psd/Important`, `@psd/Later`, `@psd/News`), seed default rules, anchor Gmail history cursor, optionally schedule daily digest, and **kick an initial-inbox sweep** (last 30 days, ≤1000 messages, no Chat pings). Idempotent — running `enable` on an already-enabled triage is a no-op that returns current status. |
 | `disable` | Pause classification. Keeps rules + labels intact for re-enable. |
 | `disable --forget` | Hard reset: clears rules, learned patterns, decision history; deletes Gmail labels; removes digest schedule. |
-| `status` | Returns enabled state, label set, rule counts, last poll, recent decision counts. |
+| `status` | Returns enabled state, escalation mode/threshold, label set, rule counts, sweep progress, pending-suggestion count, last poll, recent decision counts. |
+| `sweep` | (Re)run the initial-inbox backfill for an already-enabled user — classifies the last 30 days of INBOX (≤1000 messages) through the normal pipeline with **no Chat escalations**. Resumable + escalation-silent. No-op if a sweep is already pending/running. |
 
 ### Rules
 
@@ -54,11 +58,13 @@ node /opt/psd-skills/psd-email-triage/run.js <subcommand> --user <email> [args]
 
 | Subcommand | Effect |
 |------------|--------|
-| `escalation list` | Show current escalation senders + keywords + label triggers. |
+| `escalation list` | Show current escalation mode, threshold, senders + keywords + label triggers. |
 | `escalation add-sender <email>` | Always Chat-ping when this sender's mail classifies as Important. |
 | `escalation add-keyword <kw>` | Always Chat-ping when an Important message's subject/snippet contains this keyword. |
 | `escalation remove <type> <value>` | Remove an escalation rule. `type` is `sender` or `keyword`. |
 | `escalation labels <label1,label2>` | Override which labels trigger Chat. Default: `important` only. |
+| `escalation mode <all\|high-confidence\|rules-only\|none>` | **Per-user policy for which Important classifications ping Chat.** `all` (default) = every Important pings. `high-confidence` = only rule matches + LLM decisions ≥ threshold. `rules-only` = only your VIP/escalation-rule matches; plain LLM Important never pings. `none` = label only, digest is the sole surface. Explicit escalation sender/keyword rules always ping (except `none`). |
+| `escalation threshold <0-1>` | LLM-confidence bar for `high-confidence` mode. Default `0.85`. |
 
 ### Training feedback
 
@@ -66,6 +72,20 @@ node /opt/psd-skills/psd-email-triage/run.js <subcommand> --user <email> [args]
 |------------|--------|
 | `training recent [--limit N]` | Last N classifications (default 20) with sender, subject, label, source (rule vs llm), confidence, reason. |
 | `training correct <messageId> <newLabel>` | Re-label one message in Gmail and record a training signal. |
+
+### Learned suggestions
+
+A nightly job mines the user's corrections into weighted hints (fed to the
+classifier automatically) and **suggested rule changes** ("you archived 3
+Important emails from X → mute X"). Hard rules are **suggest-only** — a
+suggestion becomes a real rule only when the user approves it here. New
+suggestions also arrive as a Chat card.
+
+| Subcommand | Effect |
+|------------|--------|
+| `suggestions list` | Show pending rule suggestions (each has an `id`, `kind` = `mute`/`vip`, `target`, and `reason`). |
+| `suggestions apply <id>` | Approve a suggestion — writes the real rule (`vip` → VIP sender, `mute` → mute pattern) and clears it from pending. |
+| `suggestions dismiss <id>` | Reject a suggestion — cleared from pending and **never raised again**. |
 
 ### Simulation
 
