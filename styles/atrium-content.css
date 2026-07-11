@@ -27,37 +27,57 @@
 
 /* ----------------------------------------------------------------------------
  * Rendered document typography (.atrium-content wraps reader/public_web output)
+ *
+ * Meridian scale (Epic #1059 slice E): body 15.5px/1.75 in Schibsted Grotesk
+ * (`--font-meridian`, resolved inside the `.atrium-meridian` scope both readers +
+ * the editor sheet now carry) with the Meridian ink `#2B302E`. Every color routes
+ * through a `--mer-*` token with a literal Meridian hex fallback so this shared
+ * sink also renders correctly on any surface that imports it WITHOUT the scope
+ * (e.g. the Nexus workspace artifact panel via ArtifactCanvas).
  * -------------------------------------------------------------------------- */
 .atrium-content {
-  line-height: 1.65;
-  color: #1f2937;
-  font-size: 1rem;
+  font-family: var(--font-meridian), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  line-height: 1.75;
+  color: #2b302e;
+  font-size: 15.5px;
+  letter-spacing: -0.01em;
   word-break: break-word;
 }
 .atrium-content h1,
 .atrium-content h2,
 .atrium-content h3 {
-  font-weight: 600;
+  font-weight: 700;
   line-height: 1.25;
+  letter-spacing: -0.02em;
+  color: var(--mer-ink, #191d1c);
   margin: 1.6em 0 0.6em;
+  /* Anchor targets (rehype-slug ids) must clear the sticky reader top nav so a
+   * TOC jump lands the heading below the bar rather than under it. */
+  scroll-margin-top: 84px;
 }
-.atrium-content h1 { font-size: 1.875rem; }
-.atrium-content h2 { font-size: 1.5rem; }
-.atrium-content h3 { font-size: 1.25rem; }
-.atrium-content p { margin: 0.75em 0; }
+.atrium-content h1 { font-size: 1.7rem; }
+.atrium-content h2 { font-size: 1.3rem; }
+.atrium-content h3 { font-size: 1.075rem; font-weight: 600; }
+.atrium-content p { margin: 0.85em 0; }
 .atrium-content ul,
-.atrium-content ol { margin: 0.75em 0; padding-left: 1.5rem; }
-.atrium-content li { margin: 0.25em 0; }
+.atrium-content ol { margin: 0.85em 0; padding-left: 1.5rem; }
+.atrium-content li { margin: 0.3em 0; }
 .atrium-content a {
-  color: #2563eb;
+  color: var(--mer-brand, #10322e);
   text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: var(--mer-brand-mid, #2c7a6b);
   text-underline-offset: 2px;
+}
+.atrium-content a:hover {
+  text-decoration-color: var(--mer-brand, #10322e);
 }
 .atrium-content blockquote {
   margin: 1em 0;
   padding: 0.25em 1rem;
-  border-left: 3px solid #d1d5db;
-  color: #4b5563;
+  border-left: 3px solid var(--mer-border, #e4e7e3);
+  color: var(--mer-ink-secondary, #454d49);
 }
 .atrium-content pre {
   background: #0f172a;
@@ -71,7 +91,7 @@
   font-size: 0.9em;
 }
 .atrium-content :not(pre) > code {
-  background: #f1f5f9;
+  background: var(--mer-brand-tint, #e9f2ef);
   padding: 0.1em 0.35em;
   border-radius: 0.3rem;
 }
@@ -82,30 +102,44 @@
 }
 .atrium-content th,
 .atrium-content td {
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--mer-border, #e4e7e3);
   padding: 0.5rem 0.75rem;
   text-align: left;
 }
-.atrium-content th { background: #f9fafb; font-weight: 600; }
-.atrium-content img { max-width: 100%; height: auto; }
+.atrium-content th {
+  background: var(--mer-canvas, #f6f7f5);
+  font-weight: 600;
+}
+.atrium-content img { max-width: 100%; height: auto; border-radius: 12px; }
 
 /* ----------------------------------------------------------------------------
  * Curated directives (:::callout / :::warn)
+ *
+ * Meridian callout (Epic #1059 slice E): the agent-callout gradient tint from the
+ * handoff (`linear-gradient(135deg,#EAF1EE,#F0EDFA)`) with a hairline border and
+ * 12px radius — the calm teal→violet wash the reader mockup uses. `warn` keeps a
+ * distinct amber-tinted treatment so a caution reads differently from a note.
  * -------------------------------------------------------------------------- */
 .atrium-callout {
-  margin: 1em 0;
-  padding: 0.85rem 1rem;
-  border-left: 4px solid #2563eb;
-  border-radius: 0.4rem;
-  background: #eff6ff;
+  display: flex;
+  gap: 12px;
+  margin: 1.15em 0;
+  padding: 15px 18px;
+  border: 1px solid var(--mer-border-agent, #ded8f2);
+  border-radius: 12px;
+  background: var(--mer-grad-agent-callout, linear-gradient(135deg, #eaf1ee, #f0edfa));
+  color: var(--mer-ink, #191d1c);
+  font-size: 13.5px;
+  line-height: 1.6;
 }
 .atrium-callout-warn {
-  border-left-color: #d97706;
-  background: #fffbeb;
+  border-color: #ecd8a6;
+  background: linear-gradient(135deg, #fdf6e6, #fbeccb);
 }
 .atrium-callout-title {
   font-weight: 600;
   margin-bottom: 0.25rem;
+  color: var(--mer-ink, #191d1c);
 }
 
 /* ----------------------------------------------------------------------------
@@ -190,9 +224,9 @@
 .atrium-provenance-footer {
   margin-top: 2.5rem;
   padding-top: 1rem;
-  border-top: 1px solid #e5e7eb;
-  font-size: 0.85rem;
-  color: #6b7280;
+  border-top: 1px solid var(--mer-border, #e4e7e3);
+  font-size: 0.8rem;
+  color: var(--mer-ink-muted, #8b948f);
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem 1rem;
