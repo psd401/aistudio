@@ -192,6 +192,9 @@ Tool integration for Assistant Architect prompts.
 #### [features/nexus-workspace-chat-editing.md](./features/nexus-workspace-chat-editing.md)
 **Nexus workspace chat editing (§1087)** — when a document/artifact is open beside the chat, the chat can read + edit it (live Yjs document edits via the agent bridge, artifact edits via `createVersion`); server-bound, canView/canEdit-gated, §28.3-screened.
 
+#### [features/atrium-agent-access.md](./features/atrium-agent-access.md)
+**Connecting agents to Atrium content** — how a local MCP client (Claude Code etc.) or the PSD AI Agents (OpenClaw) read/write Atrium documents: API-key setup, the MCP content tools + scope table, the version-based vs live-document distinction, delegated tokens, and the loopback binding hazard for the live bridge.
+
 #### [features/assistant-architect-json-import-spec.md](./features/assistant-architect-json-import-spec.md)
 **Complete JSON import specification** for generating valid assistant import files. Includes schema reference, field types, variable substitution, execution patterns, and comprehensive examples.
 

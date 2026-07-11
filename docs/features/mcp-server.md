@@ -31,6 +31,8 @@ Three auth paths supported:
 | `list_assistants` | `mcp:list_assistants` | List accessible assistants |
 | `get_decision_graph` | `mcp:get_decision_graph` | Get node details + connections |
 
+**Atrium content tools** (`create_document`, `create_artifact`, `get_content`, `list_content`, `update_content`, `create_version`, `set_visibility`, `publish_content`, `unpublish_content`, `export_okf`, `import_okf`) are registered alongside these, scoped via `content:*` — see [atrium-agent-access.md](./atrium-agent-access.md) for the per-tool scope table, semantics (version-based, private+draft, §28.3-screened), and agent integration guide.
+
 ## Protocol Methods
 
 | Method | Purpose |
