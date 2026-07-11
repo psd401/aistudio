@@ -1,0 +1,361 @@
+/*
+ * Atrium — Meridian design layer (Epic #1059 redesign)
+ *
+ * A calm, modern workspace skin for Atrium: soft light surfaces, a deep-teal
+ * brand, and a violet accent RESERVED EXCLUSIVELY for AI-agent presence.
+ *
+ * SCOPE: every token and component class lives under `.atrium-meridian`, which
+ * the Atrium `layout.tsx` puts on the shell root only. The global app palette
+ * (`app/globals.css` @theme) and non-Atrium routes (/dashboard, /nexus, …) are
+ * therefore untouched — verify there is no token leakage.
+ *
+ * LIGHT MODE ONLY (approved plan decision 1.4): no dark variants. Atrium dark
+ * mode is already partially broken today and is intentionally out of scope.
+ *
+ * Token values are authoritative from the Meridian design handoff (README.md).
+ * RULE: violet = agent, always and only. Humans get green / terracotta / blue.
+ */
+
+.atrium-meridian {
+  /* ---- Surfaces ---- */
+  --mer-canvas: #f6f7f5; /* app background */
+  --mer-canvas-sunken: #edefec; /* editor desk behind the sheet */
+  --mer-surface: #ffffff; /* cards, sheets, top bars */
+  --mer-border: #e4e7e3; /* all hairline borders */
+  --mer-border-agent: #ded8f2; /* border on agent-authored cards */
+
+  /* ---- Ink ---- */
+  --mer-ink: #191d1c; /* primary text */
+  --mer-ink-secondary: #454d49; /* secondary text, secondary buttons */
+  --mer-ink-muted: #8b948f; /* metadata, placeholders, labels */
+
+  /* ---- Brand (deep teal) ---- */
+  --mer-brand: #10322e; /* primary buttons, active nav, headers */
+  --mer-brand-tint: #e9f2ef; /* active-state fills, badges, icon chips */
+  --mer-brand-mid: #2c7a6b; /* chart fills, positive indicators */
+
+  /* ---- Agent (violet — agent presence ONLY) ---- */
+  --mer-agent: #6d4fc2; /* avatars, badges, underlines */
+  --mer-agent-tint: #f0edfa; /* agent badge fills */
+  --mer-agent-light: #8d74dc; /* chart gradient top for agent series */
+  --mer-agent-soft: rgba(109, 79, 194, 0.06); /* agent-edit wash */
+
+  /* ---- Humans ---- */
+  --mer-human-you: #3e7c4f; /* current user's avatar/edit color (green) */
+  --mer-human-other-1: #b4552d; /* terracotta */
+  --mer-human-other-2: #4a7ce8; /* blue */
+
+  /* ---- Icon rail ---- */
+  --mer-rail-bg: #10322e;
+  --mer-rail-active: rgba(233, 242, 239, 0.16);
+  --mer-rail-ink: rgba(233, 242, 239, 0.62);
+  --mer-rail-ink-active: #f6f7f5;
+
+  /* ---- Radii ---- */
+  --mer-r-card: 15px;
+  --mer-r-button: 9px;
+  --mer-r-chip: 7px;
+  --mer-r-pill: 99px;
+
+  /* ---- Shadows ---- */
+  --mer-shadow-card: 0 1px 3px rgba(16, 50, 46, 0.05);
+  --mer-shadow-sheet: 0 2px 16px rgba(16, 50, 46, 0.08);
+  --mer-shadow-toolbar: 0 8px 24px rgba(25, 29, 28, 0.3);
+
+  /* ---- Gradients (used sparingly) ---- */
+  --mer-grad-brand: linear-gradient(135deg, #10322e, #164a42, #1d5a4b);
+  --mer-grad-cover: linear-gradient(115deg, #10322e 0%, #1d5a4b 45%, #6d4fc2 130%);
+  --mer-grad-agent-callout: linear-gradient(135deg, #eaf1ee, #f0edfa);
+
+  font-family: var(--font-meridian), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  color: var(--mer-ink);
+  background: var(--mer-canvas);
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ============================================================================
+ * SHELL — 64px icon rail + 236px workspace nav column + fluid main area
+ * ========================================================================== */
+.mer-shell {
+  display: flex;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--mer-canvas);
+}
+
+/* ---- Icon rail (far-left, dark teal) ---- */
+.mer-rail {
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  height: 100dvh;
+  width: 64px;
+  flex-shrink: 0;
+  background: var(--mer-rail-bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 0;
+  z-index: 20;
+}
+.mer-rail-logo {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--mer-rail-active);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--mer-rail-ink-active);
+  font-weight: 700;
+  font-size: 15px;
+  margin-bottom: 8px;
+  text-decoration: none;
+}
+.mer-rail-tile {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--mer-rail-ink);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 160ms ease-out, color 160ms ease-out;
+}
+.mer-rail-tile:hover {
+  background: var(--mer-rail-active);
+  color: var(--mer-rail-ink-active);
+}
+.mer-rail-tile[data-active="true"] {
+  background: var(--mer-rail-active);
+  color: var(--mer-rail-ink-active);
+}
+.mer-rail-spacer {
+  margin-top: auto;
+}
+.mer-rail-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--mer-human-you);
+  text-decoration: none;
+}
+
+/* ---- Workspace nav column (white) ---- */
+.mer-navcol {
+  width: 236px;
+  flex-shrink: 0;
+  background: var(--mer-surface);
+  border-right: 1px solid var(--mer-border);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 12px;
+  gap: 6px;
+  overflow-y: auto;
+  height: 100vh;
+  height: 100dvh;
+  position: sticky;
+  top: 0;
+}
+.mer-navcol-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mer-ink-muted);
+  padding: 4px 8px;
+}
+.mer-navcol-divider {
+  height: 1px;
+  background: var(--mer-border);
+  margin: 14px 4px 6px;
+}
+
+/* ---- Agent activity feed ---- */
+.mer-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mer-activity-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--mer-ink-secondary);
+  text-decoration: none;
+}
+.mer-activity-item:hover {
+  background: var(--mer-brand-tint);
+}
+.mer-activity-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--mer-agent);
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+.mer-activity-dot[data-live="true"] {
+  box-shadow: 0 0 0 0 rgba(109, 79, 194, 0.5);
+  animation: mer-pulse 2s infinite;
+}
+@keyframes mer-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(109, 79, 194, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(109, 79, 194, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(109, 79, 194, 0);
+  }
+}
+.mer-activity-title {
+  font-weight: 600;
+  color: var(--mer-ink);
+}
+.mer-activity-empty {
+  padding: 8px;
+  font-size: 12px;
+  color: var(--mer-ink-muted);
+}
+
+/* ---- Main content region ---- */
+.mer-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+/* ============================================================================
+ * SHARED PRIMITIVES — buttons, pills, badges, cards (reused across slices B–F)
+ * ========================================================================== */
+.mer-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--mer-r-button);
+  font-size: 13.5px;
+  font-weight: 600;
+  border: 1px solid var(--mer-border);
+  background: var(--mer-surface);
+  color: var(--mer-ink-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 150ms ease-out, border-color 150ms ease-out,
+    color 150ms ease-out;
+}
+.mer-btn:hover {
+  background: var(--mer-brand-tint);
+}
+.mer-btn-primary {
+  background: var(--mer-brand);
+  color: #fff;
+  border-color: var(--mer-brand);
+}
+.mer-btn-primary:hover {
+  background: #0b2622;
+}
+.mer-btn-agent {
+  background: var(--mer-agent);
+  color: #fff;
+  border-color: var(--mer-agent);
+}
+.mer-btn-agent:hover {
+  background: #5b3fa8;
+}
+
+/* Badges / status pills */
+.mer-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: var(--mer-r-pill);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1.6;
+}
+.mer-badge-published {
+  background: var(--mer-brand-tint);
+  color: var(--mer-brand);
+}
+.mer-badge-draft {
+  background: #f1f2f0;
+  color: var(--mer-ink-secondary);
+}
+.mer-badge-agent {
+  background: var(--mer-agent-tint);
+  color: var(--mer-agent);
+}
+.mer-badge-live {
+  background: var(--mer-ink);
+  color: #fff;
+}
+
+/* Cards */
+.mer-card {
+  background: var(--mer-surface);
+  border: 1px solid var(--mer-border);
+  border-radius: var(--mer-r-card);
+  box-shadow: var(--mer-shadow-card);
+}
+.mer-card-agent {
+  border-color: var(--mer-border-agent);
+}
+
+/* Icon chip (34px brand-tint square that fronts a doc card) */
+.mer-icon-chip {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--mer-brand-tint);
+  color: var(--mer-brand);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* ============================================================================
+ * SCOPED SHADCN OVERRIDES — the shared CollectionTree renders global-theme
+ * utility classes (bg-accent / hover:bg-muted). Inside the Meridian scope only,
+ * remap its active + hover states to Meridian tokens so the shell reads as one
+ * system without editing the shared component (it is also used by the reader).
+ * Restricted to the nav column so nothing else is affected.
+ * ========================================================================== */
+.atrium-meridian .mer-navcol nav[aria-label="Content sections"] {
+  color: var(--mer-ink-secondary);
+}
+.atrium-meridian .mer-navcol .bg-accent {
+  background: var(--mer-brand-tint) !important;
+  color: var(--mer-brand) !important;
+}
+.atrium-meridian .mer-navcol .text-accent-foreground {
+  color: var(--mer-brand) !important;
+}
+.atrium-meridian .mer-navcol [class*="hover:bg-muted"]:hover {
+  background: var(--mer-brand-tint) !important;
+}

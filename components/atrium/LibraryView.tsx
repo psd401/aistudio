@@ -31,7 +31,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { CollectionTree } from "@/components/atrium/CollectionTree";
 import { listContentAction } from "@/actions/db/atrium/list-content";
 import { createContentAction } from "@/actions/db/atrium/create-content";
 import type { ContentObjectDTO, ContentKind } from "@/lib/content";
@@ -116,18 +115,21 @@ export function LibraryView(): React.JSX.Element {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Deep-link support: the reader's collection sidebar links to
-  // `/atrium?collection=<id>`. Seed the section filter from the URL on the FIRST
-  // render via `useSearchParams` (it returns the param on both the SSR pass — the
-  // page is force-dynamic — and on client hydration, so server and client agree
-  // and there is no hydration mismatch). Seeding at init makes the very first
-  // `fetchPage` ALREADY filtered instead of firing an unfiltered page-1 request
-  // that the reqSeq guard then has to discard (the content flash + wasted round
-  // trip on every reader→library deep link). Mount-once semantics are preserved:
-  // as with the prior effect, a later `?collection=` change is not re-read.
+  // Section selection is URL-driven (`?collection=<id>`): the Meridian shell's
+  // workspace nav column (a separate React subtree in `atrium/layout.tsx`) owns
+  // the section tree and pushes the selection into the URL, and the reader's
+  // collection sidebar deep-links here the same way. Reading it reactively (not
+  // mount-once) is what lets the shell tree drive this grid — a `?collection=`
+  // change re-seeds `collectionId`, which re-keys `fetchPage` and reloads page
+  // one. `useSearchParams` returns the param on the SSR pass (force-dynamic) and
+  // on hydration, so server and client agree with no hydration mismatch.
+  const collectionParam = searchParams.get("collection");
   const [collectionId, setCollectionId] = useState<string | null>(
-    () => searchParams.get("collection") || null
+    collectionParam
   );
+  useEffect(() => {
+    setCollectionId(collectionParam);
+  }, [collectionParam]);
   const [kind, setKind] = useState<KindFilter>("all");
   const [tag, setTag] = useState("");
   // Debounced copy of `tag`: the tag filter is a SERVER round-trip (unlike the
@@ -248,15 +250,8 @@ export function LibraryView(): React.JSX.Element {
   );
 
   return (
-    <div className="flex w-full gap-6">
-      <aside className="hidden w-60 shrink-0 border-r pr-4 md:block">
-        <CollectionTree
-          selectedCollectionId={collectionId}
-          onSelect={setCollectionId}
-        />
-      </aside>
-
-      <section className="min-w-0 flex-1">
+    <div className="w-full px-5 py-6 md:px-8 md:py-8">
+      <section className="mx-auto min-w-0 max-w-6xl">
         <header className="mb-4 flex flex-wrap items-center gap-3">
           <h1 className="mr-auto text-2xl font-semibold">Content library</h1>
           <Button size="sm" onClick={() => setCreateKind("document")}>
