@@ -31,6 +31,7 @@ import {
   stampAuthor,
   yDocToProseMirrorJSON,
 } from "./markdown-bridge";
+import { proseMirrorJSONToMarkdown } from "./prosemirror-markdown";
 import { COLLAB_FIELD, makeAuthorTag } from "./provenance";
 import { ATRIUM_COMMENT_MARK } from "./comment-mark";
 import {
@@ -308,6 +309,135 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
       content: [...(current.content ?? []), ...(agentJson.content ?? [])],
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Read path (Nexus workspace chat, §1087)
+//
+// The workspace-chat READ tool needs the document's CURRENT live text — the
+// frozen `atrium_doc_state.markdown` projection is only ever set on seed and is
+// never re-derived from later edits, so it goes stale the moment anyone types.
+// `readAgentDocMarkdown` opens the SAME loopback y-sync client the write path
+// uses, but READ-ONLY (`w:false`), hydrates a throwaway Y.Doc from the live
+// server state, and serializes it back to markdown. It shares the SSRF-guarded
+// URL resolution + protocol constants + token minting with the write path; it is
+// a SEPARATE function (not a refactor of runLoopbackEdit) so the battle-tested
+// write settle/close-race guards stay byte-identical.
+// ---------------------------------------------------------------------------
+
+/**
+ * Open a short-lived READ-ONLY y-sync client to the collab server, wait for the
+ * server's SyncStep2 to hydrate a throwaway Y.Doc, then run `read(ydoc)` against
+ * the hydrated doc and resolve with its result. The socket is closed in `finally`.
+ *
+ * Read-only means the token carries `w:false`: the collab server still replies to
+ * our SyncStep1 with a SyncStep2 (reads are permitted) but ignores any inbound
+ * mutation, so this can never alter the live document. Rejects on the SYNC_TIMEOUT
+ * window, a socket error, a close before hydration, OR a throw from `read` (so a
+ * bad serialization settles the promise rather than hanging it).
+ *
+ * Exported for the read-path smoke (a throwing `read` must reject, not hang).
+ */
+export async function withHydratedDoc<T>(
+  objectId: string,
+  read: (ydoc: Y.Doc) => T
+): Promise<T> {
+  // Read-only, short-TTL token (same 30s agent grant, `w:false`). The `sub` is a
+  // non-user agent principal; the collab server authorizes on `oid` + `w`.
+  const token = await signAgentCollabToken({ sub: "agent:read", oid: objectId, w: false });
+  const base = resolveCollabBaseUrl();
+  const url = `${base}${COLLAB_WS_PATH}/${objectId}?token=${encodeURIComponent(token)}`;
+  const ydoc = new Y.Doc();
+  const ws = new WebSocket(url);
+  ws.binaryType = "arraybuffer";
+
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        reject(new Error("collab sync timeout"));
+      }, SYNC_TIMEOUT_MS);
+      // Single resolution path so the timeout, error, and close handlers cannot
+      // double-settle the promise.
+      const finish = (fn: () => void): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        fn();
+      };
+
+      ws.addEventListener("open", () => {
+        // Ask the server for its current state; its SyncStep2 reply hydrates us.
+        const enc = encoding.createEncoder();
+        encoding.writeVarUint(enc, MESSAGE_SYNC);
+        syncProtocol.writeSyncStep1(enc, ydoc);
+        ws.send(encoding.toUint8Array(enc));
+      });
+
+      ws.addEventListener("message", (ev: MessageEvent) => {
+        try {
+          const u8 = new Uint8Array(ev.data as ArrayBuffer);
+          const decoder = decoding.createDecoder(u8);
+          if (decoding.readVarUint(decoder) !== MESSAGE_SYNC) return;
+          const enc = encoding.createEncoder();
+          encoding.writeVarUint(enc, MESSAGE_SYNC);
+          const syncType = syncProtocol.readSyncMessage(decoder, enc, ydoc, ws);
+          // A SyncStep1 from the server needs our SyncStep2 reply (harmless: the
+          // read-only server ignores it). A SyncStep2 has no reply.
+          if (encoding.length(enc) > 1 && ws.readyState === WebSocket.OPEN) {
+            ws.send(encoding.toUint8Array(enc));
+          }
+          // The server's SyncStep2 has applied its state to our doc — read it.
+          // Run `read(ydoc)` BEFORE `finish` flips `done`: if it throws, `done` is
+          // still false so the reject below settles the promise. Calling read
+          // INSIDE finish() would flip `done` first, making the subsequent
+          // reject a no-op and hanging the promise forever (socket leak, no
+          // fallback) — the exact bug the fallback contract must avoid.
+          if (syncType === SYNC_STEP_2) {
+            let value: T;
+            try {
+              value = read(ydoc);
+            } catch (e) {
+              finish(() => reject(e instanceof Error ? e : new Error(String(e))));
+              return;
+            }
+            finish(() => resolve(value));
+          }
+        } catch (e) {
+          finish(() => reject(e instanceof Error ? e : new Error(String(e))));
+        }
+      });
+
+      ws.addEventListener("error", () => finish(() => reject(new Error("collab websocket error"))));
+      // A server-side 4401 (rejected/expired token) fires 'close', not 'error';
+      // reject promptly rather than hanging for the full SYNC_TIMEOUT.
+      ws.addEventListener("close", () => finish(() => reject(new Error("collab websocket closed"))));
+    });
+  } finally {
+    try { ws.close(); } catch { /* already closed */ }
+  }
+}
+
+/**
+ * Read the CURRENT live markdown of a collaborative Atrium document, straight
+ * from the Yjs doc the editors are connected to (not the stale seed projection).
+ * Returns the serialized markdown ("" for a genuinely empty/new document), or
+ * `null` when the live document could not be read (collab listener unreachable,
+ * sync timeout, or any error) so callers can fall back to a persisted snapshot.
+ */
+export async function readAgentDocMarkdown(objectId: string): Promise<string | null> {
+  try {
+    const json = await withHydratedDoc(objectId, (ydoc) => yDocToProseMirrorJSON(ydoc));
+    return proseMirrorJSONToMarkdown(json);
+  } catch (err) {
+    log.warn("readAgentDocMarkdown failed", {
+      objectId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

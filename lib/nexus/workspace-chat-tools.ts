@@ -30,7 +30,7 @@ import { tool, jsonSchema, type Tool, type ToolSet } from "ai";
 import { contentService } from "@/lib/content/content-service";
 import { canEdit } from "@/lib/content/helpers";
 import { requesterForUserId } from "@/lib/content/requester-from-auth";
-import { applyAgentEdit } from "@/lib/content/collab/apply-agent-edit";
+import { applyAgentEdit, readAgentDocMarkdown } from "@/lib/content/collab/apply-agent-edit";
 import { loadDocState } from "@/lib/content/collab/doc-state-store";
 import { screenAgentContent } from "@/lib/content/agent-screening";
 import { createLogger } from "@/lib/logger";
@@ -39,6 +39,30 @@ import { createLogger } from "@/lib/logger";
 const NEXUS_CHAT_AGENT_LABEL = "nexus-chat";
 /** Bound on the markdown/code a single chat edit may write (mirrors the bridge). */
 const MAX_EDIT_BYTES = 512 * 1024;
+
+/**
+ * The exact messages `runLoopbackEdit` rejects with when the live collab listener
+ * is unreachable / the sync round-trip times out or the socket closes (see
+ * apply-agent-edit.ts). Matched EXACTLY (not by substring) so a genuine apply
+ * failure — surfaced as the wrapper `collab sync apply failed: <inner>` — is never
+ * misclassified as transient just because `<inner>` happens to contain the word
+ * "timeout" (PR #1186 review).
+ */
+const COLLAB_TRANSPORT_ERRORS = new Set([
+  "collab websocket error",
+  "collab websocket closed",
+  "collab sync timeout",
+]);
+
+/**
+ * True when an agent-bridge failure is a transient TRANSPORT problem (unreachable
+ * listener / timed-out sync / closed socket) rather than a genuine content-apply
+ * failure. Used to give the model an accurate, retryable message instead of a
+ * generic "could not apply".
+ */
+function isCollabTransportError(message: string): boolean {
+  return COLLAB_TRANSPORT_ERRORS.has(message);
+}
 
 export interface WorkspaceChatTools {
   /** AI SDK tools to merge into the model's tool set. */
@@ -62,10 +86,15 @@ interface ReadResult {
 }
 
 /**
- * Resolve the CURRENT body of the open object for reading (PR #1136 review):
- * - documents keep their live text in the Yjs doc, projected to
- *   `atrium_doc_state.markdown` — NOT in `version.bodyInline` (null for a live
- *   collab doc). Read the projection, falling back to the version snapshot.
+ * Resolve the CURRENT body of the open object for reading (§1087):
+ * - documents keep their live text in the Yjs CRDT, which is the ONLY
+ *   authoritative source of what is on screen. The `atrium_doc_state.markdown`
+ *   projection is set on seed and NEVER re-derived from later edits, so it goes
+ *   stale the moment anyone types (and is empty for a title-only/new doc). Read
+ *   the LIVE Yjs doc first; only if the live listener is unreachable fall back to
+ *   the (possibly stale) projection, then the version snapshot. An empty live
+ *   document is a real state (`body: ""`, NOT unavailable) so the model writes an
+ *   intro rather than narrating a permission error.
  * - artifacts store small source inline (`bodyInline`); a large artifact's source
  *   lives at `bodyLocation` with `bodyInline` null — report `bodyUnavailable`
  *   rather than telling the model the item is empty (which would let a rewrite
@@ -75,13 +104,17 @@ async function resolveReadBody(
   obj: Awaited<ReturnType<typeof contentService.get>>
 ): Promise<{ body: string | null; bodyUnavailable: boolean }> {
   if (obj.kind === "document") {
-    // A live collaborative document keeps its text in the Yjs doc, projected to
-    // `atrium_doc_state.markdown`. That projection — not `version.bodyInline`
-    // (null for a live doc) — is the readable source. It may lag the very latest
-    // unsaved edits, but returning it beats claiming the doc is empty. When it is
-    // genuinely unavailable (empty projection, no snapshot), signal
-    // `bodyUnavailable` so the model appends/edits conservatively rather than
-    // rewriting from nothing (PR #1136 review).
+    // 1. Live read from the Yjs doc — the current on-screen text. `""` is a
+    //    genuinely empty (new / title-only) document, NOT unavailable: reporting
+    //    body "" lets the model write an intro. `null` means the live read failed
+    //    (collab listener unreachable / timeout) — fall through to the snapshots.
+    const live = await readAgentDocMarkdown(obj.id);
+    if (live !== null) return { body: live, bodyUnavailable: false };
+
+    // 2. Live read unavailable. Fall back to the persisted markdown projection
+    //    (may lag the latest edits), then the version snapshot. Only when neither
+    //    exists is the body genuinely unavailable — signal it so the model edits
+    //    conservatively rather than rewriting from nothing.
     const state = await loadDocState(obj.id);
     const md =
       state?.markdown && state.markdown.trim().length > 0
@@ -192,11 +225,16 @@ function buildDocumentEditTool(
         });
         return { ok: true, mode };
       } catch (err) {
-        log.error("edit_workspace_document apply failed", {
-          objectId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return { error: "The edit could not be applied to the live document." };
+        const message = err instanceof Error ? err.message : String(err);
+        log.error("edit_workspace_document apply failed", { objectId, error: message });
+        // Distinguish an unreachable live-collab listener (transient, retryable)
+        // from a genuine apply failure. Neither is a permission problem — the
+        // edit tool is only bound for an editable document — so do not imply one.
+        return {
+          error: isCollabTransportError(message)
+            ? "The live document service is temporarily unreachable, so the edit was not applied. Please try again in a moment."
+            : "The edit could not be applied to the live document.",
+        };
       }
     },
   });
@@ -268,9 +306,13 @@ function buildArtifactUpdateTool(
           objectId,
           error: err instanceof Error ? err.message : String(err),
         });
+        // The content was already §28.3-screened above and edit access was
+        // confirmed before this tool was bound, so this catch is a save failure
+        // (a concurrent-version conflict or storage error) — NOT a screening
+        // block or a permission problem. Do not claim either (PR #1136 review).
         return {
           error:
-            "The artifact could not be updated (it may be blocked by the safety screen or you may not have edit access).",
+            "The new artifact version could not be saved right now (another change may have been saved at the same time). Please try again.",
         };
       }
     },
