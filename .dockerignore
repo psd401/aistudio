@@ -13,6 +13,12 @@ yarn-error.log*
 .next-e2e
 out
 
+# Claude Code session worktrees — a full second copy of the repo (own
+# node_modules/.next-e2e) that can be actively churning while another session
+# works there. Never part of the image; also excluded in the CDK asset list
+# (infra/lib/constructs/ecs-service.ts) which governs deploy fingerprinting.
+.claude
+
 # Testing
 coverage
 .jest
