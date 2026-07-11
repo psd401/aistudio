@@ -81,7 +81,9 @@ software-library trend check, `--sources reddit,web` for general public sentimen
 - **hackernews** — Algolia's HN Search API (`hn.algolia.com`), keyless JSON.
 - **arxiv** — arXiv's Atom query API, sorted by submission date.
 - **github** — direct unauthenticated GitHub REST search (`api.github.com/search/repositories`), filtered by `pushed:>`. **Not** the `gh` CLI: `gh` requires a per-user `github_pat` credential (see `psd-github/SKILL.md`) that most callers won't have provisioned, so it isn't actually keyless. The public search API works unauthenticated at 10 requests/minute, ample for one research run.
-- **web** — Google News' documented keyless RSS search endpoint (`news.google.com/rss/search`), not HTML scraping.
+- **web** — Google News' documented keyless RSS search endpoint (`news.google.com/rss/search`), not HTML scraping. Items with no parseable publish date are dropped (treated as out-of-window), same as every other adapter.
+
+`reddit` and `arxiv` hard-cap at 25 results per call regardless of `--limit-per-source`; `github` caps at 30 — upstream API limits, not configurable.
 
 ## Notes & limits
 

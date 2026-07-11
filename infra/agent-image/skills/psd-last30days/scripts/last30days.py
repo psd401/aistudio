@@ -5,28 +5,50 @@ optionally a self-contained HTML artifact uploaded to S3.
 """
 
 import argparse
-import html as html_lib
+import html
 import json
 import re
 import sys
+import traceback
 import uuid
+from typing import NoReturn
 from urllib.parse import quote
 
 from sources import SOURCES, SourceError
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_MAX_EMAIL_LEN = 254  # RFC 5321 — also bounds the regex match against a ReDoS-shaped input
+_SAFE_URL_SCHEMES = ("http://", "https://")
 
 
-def _fail(message, code, status_code=1):
+def _fail(message: str, code: str) -> NoReturn:
     print(json.dumps({"status": "error", "error": code, "message": message}))
-    sys.exit(status_code)
+    sys.exit(1)
 
 
-def _valid_email(email):
-    return bool(email) and "/" not in email and bool(_EMAIL_RE.match(email))
+class _JsonErrorArgumentParser(argparse.ArgumentParser):
+    """argparse's own usage errors (missing/invalid flags) would otherwise print
+    plain text to stderr and skip the {"status":"error",...} contract every
+    other failure in this script follows — normalize them to match."""
+
+    def error(self, message: str) -> NoReturn:
+        _fail(message, "bad_args")
 
 
-def build_markdown(topic, days, grouped, sources_failed):
+def _valid_email(email: str) -> bool:
+    return (
+        bool(email)
+        and len(email) <= _MAX_EMAIL_LEN
+        and "/" not in email
+        and bool(_EMAIL_RE.match(email))
+    )
+
+
+def _safe_href(url: str) -> str:
+    return url if url.lower().startswith(_SAFE_URL_SCHEMES) else "#"
+
+
+def build_markdown(topic: str, days: int, grouped: dict, sources_failed: list) -> str:
     lines = [f"# Last {days} Days: {topic}", ""]
     if not grouped:
         lines.append("_No results found in the selected window and sources._")
@@ -45,15 +67,16 @@ def build_markdown(topic, days, grouped, sources_failed):
     return "\n".join(lines).strip() + "\n"
 
 
-def build_html(topic, days, grouped, sources_failed):
+def build_html(topic: str, days: int, grouped: dict, sources_failed: list) -> str:
     def esc(s):
-        return html_lib.escape(s or "", quote=True)
+        return html.escape(s or "", quote=True)
 
     def render_item(it):
+        href = esc(_safe_href(it["url"]))
         date = esc(it["published"][:10] if it["published"] else "undated")
         snippet_html = f'<p>{esc(it["snippet"])}</p>' if it["snippet"] else ""
         return (
-            f'<li><a href="{esc(it["url"])}" rel="noopener noreferrer">{esc(it["title"])}</a>'
+            f'<li><a href="{href}" rel="noopener noreferrer">{esc(it["title"])}</a>'
             f'<span class="meta">{date}</span>{snippet_html}</li>'
         )
 
@@ -102,14 +125,12 @@ def build_html(topic, days, grouped, sources_failed):
 """
 
 
-def upload_html(html_body, user_email):
+def upload_html(html_body: str, user_email: str) -> str:
     import os
 
     import boto3
 
-    bucket = os.environ.get("WORKSPACE_BUCKET")
-    if not bucket:
-        _fail("WORKSPACE_BUCKET env var not set — cannot upload HTML artifact", "misconfigured")
+    bucket = os.environ["WORKSPACE_BUCKET"]  # presence already checked by caller
     region = os.environ.get("AWS_REGION", "us-east-1")
     key = f"public-images/{user_email}/{uuid.uuid4()}.html"
     s3 = boto3.client("s3", region_name=region)
@@ -124,8 +145,10 @@ def upload_html(html_body, user_email):
     return f"https://{bucket}.s3.{region}.amazonaws.com/{encoded_key}"
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Research what was said about a topic in the last N days.")
+def main() -> None:
+    import os
+
+    parser = _JsonErrorArgumentParser(description="Research what was said about a topic in the last N days.")
     parser.add_argument("--topic", required=True)
     parser.add_argument("--user", required=True)
     parser.add_argument("--days", type=int, default=30)
@@ -146,9 +169,15 @@ def main():
         _fail("`--limit-per-source` must be between 1 and 50", "bad_args")
 
     requested = [s.strip() for s in args.sources.split(",") if s.strip()]
+    if not requested:
+        _fail("`--sources` must include at least one source", "bad_args")
     unknown = [s for s in requested if s not in SOURCES]
     if unknown:
         _fail(f"Unknown source(s): {', '.join(unknown)}. Valid: {', '.join(SOURCES)}", "bad_args")
+
+    # Fail fast on misconfiguration before spending time on any network fetch.
+    if args.format in ("html", "both") and not os.environ.get("WORKSPACE_BUCKET"):
+        _fail("WORKSPACE_BUCKET env var not set — cannot upload HTML artifact", "misconfigured")
 
     grouped = {}
     sources_failed = []
@@ -158,14 +187,15 @@ def main():
         except SourceError as exc:
             sources_failed.append({"source": name, "error": str(exc)})
             continue
-        except Exception as exc:  # noqa: BLE001 — an external API's malformed response must not crash the whole run
-            sources_failed.append({"source": name, "error": f"parse_error: {exc}"})
+        except Exception as exc:  # noqa: BLE001 — an adapter bug must not crash the whole run either
+            print(f"psd-last30days: unexpected error in source '{name}':\n{traceback.format_exc()}", file=sys.stderr)
+            sources_failed.append({"source": name, "error": f"internal_error: {exc}"})
             continue
         if items:
             grouped[name] = items
 
     item_count = sum(len(v) for v in grouped.values())
-    if item_count == 0 and requested and len(sources_failed) == len(requested):
+    if item_count == 0 and len(sources_failed) == len(requested):
         _fail(
             f"All {len(requested)} source(s) failed: "
             + "; ".join(f"{f['source']}: {f['error']}" for f in sources_failed),
@@ -185,8 +215,11 @@ def main():
     }
 
     if args.format in ("html", "both"):
-        html_body = build_html(args.topic, args.days, grouped, sources_failed)
-        result["html_url"] = upload_html(html_body, args.user)
+        try:
+            html_body = build_html(args.topic, args.days, grouped, sources_failed)
+            result["html_url"] = upload_html(html_body, args.user)
+        except Exception as exc:  # noqa: BLE001 — keep the script's "always emit JSON" contract
+            _fail(f"HTML artifact upload failed: {exc}", "upstream_error")
 
     print(json.dumps(result))
 
