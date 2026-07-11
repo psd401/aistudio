@@ -75,6 +75,22 @@ bun run test:streaming:contract  # Contract tests
 
 **MCP**:
 - `atrium-mcp-content-tools.test.ts` - MCP tool definitions
+- `describe-capabilities-tool.test.ts` - Capability catalog meta-tool (#1100)
+
+**Capabilities**:
+- `/tests/unit/lib/capabilities/capability-catalog.test.ts` - Catalog projection logic (#1100)
+
+**Email Triage (Agent Lambda)**:
+- `/infra/lambdas/agent-triage-poll/dispatcher.test.ts` - Dispatcher queue logic (#1172)
+- `/infra/lambdas/agent-triage-poll/learning.test.ts` - Correction-driven learning (#1172)
+- `/infra/lambdas/agent-triage-poll/queue.test.ts` - SQS message handling (#1172)
+- `/infra/lambdas/agent-triage-poll/sweep.test.ts` - Inbox backfill state machine (#1172)
+- `/infra/lambdas/agent-triage-poll/worker.test.ts` - Per-user worker logic (#1172)
+
+**Agent Skills**:
+- `/infra/agent-image/skills/psd-canva/common.test.js` - Canva skill helpers (#1176)
+- `/infra/agent-image/skills/psd-canva/run.test.js` - Canva skill runner (#1176)
+- `/infra/agent-image/skills/psd-last30days/scripts/test_last30days.py` - Last30days skill (#1180)
 
 ## E2E Tests
 
@@ -92,12 +108,15 @@ bun run test:streaming:contract  # Contract tests
 | Admin Users | `admin-users.spec.ts` | User management UI |
 | Admin Capabilities | `admin-capabilities.spec.ts` | RBAC configuration |
 | Admin Agents | `admin-agents.spec.ts` | Agent telemetry dashboard, iteration metrics (#1161) |
+| Admin Agents Triage | `admin-agents-triage-settings.functional.spec.ts` | Triage settings UI (#1172) |
 | Atrium Documents | `atrium-document.guard.spec.ts` | Document editing |
 | Atrium Artifacts | `atrium-artifact.guard.spec.ts` | Artifact creation |
 | Atrium Publishing | `atrium-visibility-editor.spec.ts` | Publishing workflow |
 | Nexus Chat | `nexus-tools.spec.ts` | Chat functionality |
 | Nexus Workspace | `nexus-workspace-panel.spec.ts` | Workspace integration |
 | Assistant Architect | `assistant-architect-streaming.spec.ts` | Tool execution |
+| MCP Describe Capabilities | `mcp-describe-capabilities.spec.ts` | Capability catalog meta-tool (#1100) |
+| Canva Consent Page | `canva-consent-page.spec.ts` | Canva OAuth flow UI (#1176) |
 | Model Compare | `model-compare-polling.spec.ts` | Dual-stream |
 
 ### E2E Test Patterns

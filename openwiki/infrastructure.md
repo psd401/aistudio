@@ -95,7 +95,7 @@ AgentPlatformStack (depends on FrontendStack)
 - **ECR Repository**: Docker image storage for agent container
 - **AgentCore Runtime**: AWS managed agent execution
 - **S3 Workspace Buckets**: Agent file storage
-- **DynamoDB Tables**: 6 tables for agent state management
+- **DynamoDB Tables**: 7 tables for agent state management (including triage)
 - **Router Lambda**: Google Chat integration
 - **Job Runner**: Async Fargate tasks for long-running turns (bypasses Lambda 15-min limit)
 
@@ -157,8 +157,62 @@ Long-running agent turns hit Lambda's 15-minute deadline. The router promotes th
 | `AgentFailures` | Failure tracking |
 | `AgentHealthSnapshots` | Health monitoring |
 | `AgentSkills` | Skill registry |
+| `psd-agent-triage-<env>` | Per-user email triage state (#1172) |
 
 **Source**: `/infra/lib/agent-platform-stack.ts`
+
+### Agent Skills
+
+The agent container bundles 25+ skills under `/infra/agent-image/skills/`. Each skill has a `SKILL.md` frontmatter contract that specifies:
+
+- `name`: kebab-case identifier
+- `summary`: one-line catalog entry (for `psd-skills-meta`)
+- `description`: what it does + when to use (model-facing, ~30–50 tokens)
+- `allowed-tools`: tool scope (e.g. `Bash(node:*)`)
+
+Skills use progressive disclosure: only `name` + `description` load into the system prompt (always-on), while the full `SKILL.md` body loads on-demand when triggered.
+
+**Skill Authoring Guide**: `/docs/guides/agent-skill-authoring.md`
+
+Key skills:
+
+| Skill | Purpose | Source |
+|-------|---------|--------|
+| `psd-canva` | Per-user Canva OAuth, design creation, PDF/PNG export via Connect REST API (#1176) | `/infra/agent-image/skills/psd-canva/` |
+| `psd-last30days` | Keyless social/community research (HN, Reddit, arXiv, GitHub, Google News) with cited briefs (#1180) | `/infra/agent-image/skills/psd-last30days/` |
+| `psd-aistudio` | Live capability catalog from AI Studio's registries via `describe_capabilities` MCP meta-tool (#1173) | `/infra/agent-image/skills/psd-aistudio/` |
+| `psd-email-triage` | Configure smart email triage from chat (rules, escalation, digest) | `/infra/agent-image/skills/psd-email-triage/` |
+
+### MCP describe_capabilities Meta-Tool (#1100)
+
+The `describe_capabilities` MCP tool provides a live projection of AI Studio's invocable actions and web-app features:
+
+- **Actions**: MCP-exposed tools with `agentInvocable: true` flag
+- **Features**: Role-gated UI features to steer users toward
+- **Scopes**: API-scope reference for explaining access requirements
+
+The catalog is rebuilt on every call from source-of-truth registries (`TOOL_MANIFEST`, `CAPABILITY_MANIFEST`, `API_SCOPES`), ensuring it never falls behind deployed code.
+
+**Sources**: `/lib/capabilities/capability-catalog.ts`, `/lib/mcp/tool-handlers.ts`
+
+### Email Triage Architecture (Phase 2)
+
+Email triage uses a **dispatcher → SQS FIFO → worker** fanout architecture (#1172):
+
+```
+EventBridge (5-min)  ──►  Dispatcher  ──►  SQS FIFO queue  ──►  Worker
+             │                          │                      │
+             │    one message per user  │                      │
+             │    + sweep kicks         │                      │
+             └──────────────────────────┘                      ▼
+                                                Gmail history → rules → LLM → labels
+```
+
+The dispatcher enqueues one message per enabled user; the worker does per-user Gmail/Bedrock work. This prevents one slow user from blocking others.
+
+**Sweep**: Initial inbox backfill (last 30 days, ≤1000 messages) runs through the same pipeline with escalation suppressed. State persisted in DDB `sweep` map for resumption.
+
+**Sources**: `/infra/lambdas/agent-triage-poll/dispatcher.ts`, `/infra/lambdas/agent-triage-poll/sweep.ts`, `/docs/operations/email-triage.md`
 
 ### Harness Adapter
 
@@ -286,5 +340,10 @@ bunx cdk destroy AIStudio-FrontendStack-Dev    # Tear down
 | Config Consistency Gate | `/infra/agent-image/check_config_consistency.py` |
 | Trace Export | `/scripts/agent-trace-export.ts` |
 | Job Runner | `/infra/lambdas/agent-router/job-main.ts` |
+| Agent Skills | `/infra/agent-image/skills/` |
+| Capability Catalog | `/lib/capabilities/capability-catalog.ts` |
+| Email Triage Dispatcher | `/infra/lambdas/agent-triage-poll/dispatcher.ts` |
+| Email Triage Worker | `/infra/lambdas/agent-triage-poll/worker.ts` |
+| Skill Authoring Guide | `/docs/guides/agent-skill-authoring.md` |
 | Deploy Commands | `/infra/DEPLOYMENT_COMMANDS.md` |
 | Safety Checklist | `/infra/DEPLOYMENT_SAFETY_CHECKLIST.md` |
