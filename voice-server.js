@@ -23,6 +23,7 @@
 
 /* eslint-disable no-undef, @typescript-eslint/no-require-imports, unicorn/prefer-node-protocol -- CJS script outside Next.js runtime */
 const http = require('http')
+const net = require('net')
 const { WebSocketServer } = require('ws')
 const { parse } = require('url')
 
@@ -135,6 +136,38 @@ function isOriginAllowed(request) {
 }
 
 /**
+ * Boot-time loopback self-check.
+ *
+ * The Atrium agent bridge (lib/content/collab/apply-agent-edit.ts) connects to
+ * this same process at ws://127.0.0.1:$PORT — it only works if the server is
+ * bound to an interface that includes loopback (0.0.0.0). ECS/Docker inject
+ * HOSTNAME=<task hostname> at runtime, which silently overrides the Dockerfile's
+ * ENV HOSTNAME=0.0.0.0 and makes Next.js standalone bind eth0 only; every agent
+ * read/write then fails with "collab websocket error" while browser traffic (via
+ * the ALB) keeps working. entrypoint.sh now forces HOSTNAME=0.0.0.0; this check
+ * makes any regression a single unambiguous CloudWatch ERROR line at boot.
+ */
+function runLoopbackSelfCheck(server) {
+  const addr = server.address()
+  if (!addr || typeof addr !== 'object') return
+  console.log(`[voice-server] HTTP server bound to ${addr.address}:${addr.port}`) // eslint-disable-line no-console
+  const probe = net.connect({ host: '127.0.0.1', port: addr.port })
+  const timer = setTimeout(() => {
+    probe.destroy()
+    console.error(`[voice-server] ERROR: loopback self-check TIMED OUT — 127.0.0.1:${addr.port} unreachable; the Atrium agent bridge (workspace chat read/edit) will fail. Bound address is ${addr.address}; HOSTNAME env was likely overridden — see entrypoint.sh.`) // eslint-disable-line no-console
+  }, 3000)
+  probe.on('connect', () => {
+    clearTimeout(timer)
+    probe.end()
+    console.log(`[voice-server] loopback self-check OK (127.0.0.1:${addr.port} reachable — agent bridge can connect)`) // eslint-disable-line no-console
+  })
+  probe.on('error', (err) => {
+    clearTimeout(timer)
+    console.error(`[voice-server] ERROR: loopback self-check FAILED (${err.message}) — 127.0.0.1:${addr.port} refused; the Atrium agent bridge (workspace chat read/edit) will fail. Bound address is ${addr.address}; HOSTNAME env was likely overridden — see entrypoint.sh.`) // eslint-disable-line no-console
+  })
+}
+
+/**
  * Intercept http.createServer to attach WebSocket upgrade handling.
  * Next.js standalone server.js calls http.createServer internally.
  */
@@ -144,6 +177,9 @@ http.createServer = function (...args) {
   const server = originalCreateServer(...args)
 
   if (!wss) {
+    // Self-check once the (first) server starts listening — this is the server
+    // Next.js standalone binds, the same one the agent bridge dials over loopback.
+    server.on('listening', () => runLoopbackSelfCheck(server))
     // maxPayload must match WS_MAX_PAYLOAD in lib/voice/constants.ts (64KB)
     wss = new WebSocketServer({ noServer: true, maxPayload: 65536 })
     // Separate WS server for Atrium collab (larger payload for Yjs sync frames).
