@@ -22,6 +22,11 @@ import { fontMeridian } from "@/lib/atrium/meridian-fonts";
 import type { DocumentHeading } from "@/lib/content/render/headings";
 import { AtriumReaderNav } from "./AtriumReaderNav";
 import { ReaderToc } from "./ReaderToc";
+// The readers live OUTSIDE the `/atrium` layout that scopes Meridian elsewhere, so
+// the reader frame must pull the token layer + `.mer-reader-*` chrome itself (the
+// pages already import the shared `atrium-content.css` body sink). Scoped under
+// `.atrium-meridian` — no leakage to the rest of the reader routes.
+import "@/styles/atrium-meridian.css";
 
 export interface ReaderFrameProps {
   /** The document/artifact title (rendered as the sheet heading). */
