@@ -172,6 +172,24 @@ function ThreadCard({
   // opened by the agent — the first comment's author kind (README §"Comments").
   const isAgentThread = thread.comments[0]?.authorKind === "agent";
 
+  // DEFERRED — the agent "⟳ Working…" chip (README §"2b", Meridian slice F). The
+  // mockup shows an agent reply ("On it — building the shuttle map… I'll embed it
+  // when it's ready") carrying a "⟳ Working…" chip that clears when the artifact
+  // LANDS in the doc. Rendering that honestly needs a per-thread agent-task
+  // lifecycle: SET when the agent acknowledges a request, CLEARED when its async
+  // result is applied to the document body. The clear signal is the agent-bridge
+  // live-edit loopback (`applyAgentEdit` → the doc gains the embed) which — exactly
+  // like the slice-D backlink re-sync deferred at
+  // `lib/content/version-service.ts:100-115` — depends on the server-side
+  // ProseMirror-JSON→markdown serializer / `readAgentDocMarkdown` added in PR #1186,
+  // NOT present in this branch's parent chain. The comment schema (migration 098)
+  // carries only thread-level `resolved`, no working/pending state. Adding a
+  // `working` flag now would either never clear (a chip stuck on "Working…"
+  // forever) or fake it from the global `agentWriting` presence signal (which is
+  // not thread-scoped and would mislabel every agent comment) — both hacks. So the
+  // chip is deferred to the follow-up that lands on top of #1186; the agent card's
+  // violet treatment ships now, the working-state chip does not.
+
   return (
     <li
       className={cn(
