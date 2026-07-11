@@ -2,7 +2,7 @@
 name: psd-pdf-to-markdown
 summary: Convert a PDF (from a URL, workspace S3 key, or container path) into clean Markdown with tables preserved — no image files, no model download.
 description: Convert a PDF to clean Markdown with tables preserved and images dropped. Use when the user wants to turn a PDF into Markdown or extract a PDF's text/tables for further processing. Input is a public URL, a workspace S3 key, or a container file path.
-allowed-tools: Bash(python3:*)
+allowed-tools: Bash(python3:*), Bash(/opt/agentcore-venv/bin/python3:*)
 ---
 
 # psd-pdf-to-markdown
@@ -32,9 +32,9 @@ header regardless of source.
 ## Usage
 
 ```bash
-python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py --url "https://example.com/report.pdf"
-python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py --user <email> --s3-key "public-images/<email>/report.pdf"
-python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py --path "/home/node/workspace/report.pdf"
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py --url "https://example.com/report.pdf"
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py --user <email> --s3-key "public-images/<email>/report.pdf"
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py --path "/home/node/workspace/report.pdf"
 ```
 
 Options:

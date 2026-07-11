@@ -2,7 +2,7 @@
 name: psd-last30days
 summary: Research what people said about a topic in the last ~30 days across keyless social/community sources (Hacker News, Reddit, arXiv, GitHub, Google News) and return a grounded, cited brief — in chat, as an S3 HTML artifact, or both.
 description: Research recent chatter on a topic — "what did people actually say about X in the last ~30 days?" Fans out across free, keyless sources (Hacker News, Reddit, arXiv, GitHub, Google News), ranks by engagement/recency, de-duplicates, and returns a source-cited brief you synthesize. Default output is a Markdown brief in chat; on request it also (or instead) produces a self-contained HTML page uploaded to S3 and shareable by link. Use for trend/pulse/"what's new" research on a person, product, company, or topic.
-allowed-tools: Bash(python3:*)
+allowed-tools: Bash(python3:*), Bash(/opt/agentcore-venv/bin/python3:*)
 ---
 
 # psd-last30days
@@ -40,7 +40,7 @@ path to the caller). For the default Markdown mode it is optional but harmless.
 ## Usage
 
 ```bash
-python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --topic "<topic>"
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --topic "<topic>"
 ```
 
 Options:
@@ -56,16 +56,16 @@ Options:
 
 ```bash
 # Default: Markdown brief in chat
-python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --topic "llama 4" --days 14
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --topic "llama 4" --days 14
 
 # Only two sources, tighter list
-python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --topic "chromebooks in schools" --sources web,hackernews
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --topic "chromebooks in schools" --sources web,hackernews
 
 # HTML artifact uploaded to S3 (public-by-link)
-python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --user name@psd401.net --topic "gpt-5" --format html
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --user name@psd401.net --topic "gpt-5" --format html
 
 # Both: brief in chat AND an S3 HTML link
-python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --user name@psd401.net --topic "gpt-5" --format both
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --user name@psd401.net --topic "gpt-5" --format both
 ```
 
 ## Output modes — how to choose
