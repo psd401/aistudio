@@ -183,13 +183,23 @@ function serializeBlock(node: PMNode): string {
   }
 }
 
-/** Serialize a list of block nodes, dropping empties and joining with a blank line. */
+/**
+ * Serialize a list of block nodes, dropping empties and joining with exactly one
+ * blank line. Trailing newlines are stripped PER BLOCK (e.g. a paragraph that ends
+ * in a hardBreak) so the join never produces a run of 3+ newlines — done here at
+ * the seam rather than with a document-wide `\n{3,}` collapse, which would corrupt
+ * legitimate blank lines INSIDE a code block or other preformatted content.
+ */
 function serializeBlocks(nodes: PMNode[] | undefined): string {
   if (!nodes) return "";
-  return nodes
-    .map(serializeBlock)
-    .filter((s) => s !== "")
-    .join("\n\n");
+  const parts: string[] = [];
+  for (const node of nodes) {
+    // Strip only trailing newlines: a code block ends with its closing fence, so
+    // its internal blank lines (before the fence) are untouched.
+    const s = serializeBlock(node).replace(/\n+$/, "");
+    if (s !== "") parts.push(s);
+  }
+  return parts.join("\n\n");
 }
 
 /**
@@ -204,8 +214,10 @@ export function proseMirrorJSONToMarkdown(doc: PMNode | null | undefined): strin
       doc.type === undefined || doc.type === "doc"
         ? serializeBlocks(doc.content)
         : serializeBlock(doc);
-    // Collapse runaway blank lines and trim surrounding whitespace for a clean projection.
-    return out.replace(/\n{3,}/g, "\n\n").trim();
+    // Trim surrounding whitespace only. Blank-line runs between blocks are already
+    // prevented at the join (serializeBlocks); a document-wide `\n{3,}` collapse
+    // would corrupt legitimate blank lines inside a code block.
+    return out.trim();
   } catch {
     return "";
   }

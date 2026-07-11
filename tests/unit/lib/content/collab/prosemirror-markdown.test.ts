@@ -104,6 +104,18 @@ describe("proseMirrorJSONToMarkdown — nodes", () => {
     expect(proseMirrorJSONToMarkdown(doc(cb))).toBe("````\na ``` b\n````");
   });
 
+  it("PRESERVES multiple blank lines inside a code block (no document-wide newline collapse)", () => {
+    // Regression: a global `\n{3,}` collapse would corrupt preformatted content.
+    const cb: PMNode = { type: "codeBlock", attrs: { language: "py" }, content: [text("a\n\n\nb")] };
+    expect(proseMirrorJSONToMarkdown(doc(cb))).toBe("```py\na\n\n\nb\n```");
+  });
+
+  it("does not emit a 3+ newline run when a paragraph ends in a hardBreak", () => {
+    // The trailing hardBreak is dropped at the block seam so the blank-line join stays clean.
+    const out = proseMirrorJSONToMarkdown(doc(para(text("a"), { type: "hardBreak" }), para(text("b"))));
+    expect(out).toBe("a\n\nb");
+  });
+
   it("serializes a horizontal rule", () => {
     expect(proseMirrorJSONToMarkdown(doc(para(text("a")), { type: "horizontalRule" }, para(text("b"))))).toBe(
       "a\n\n---\n\nb"
