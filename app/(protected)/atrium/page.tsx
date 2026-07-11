@@ -21,6 +21,7 @@ import { redirect } from "next/navigation";
 import { getServerSession } from "@/lib/auth/server-session";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { LibraryView } from "@/components/atrium/LibraryView";
+import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 
 export const dynamic = "force-dynamic";
 
@@ -37,5 +38,10 @@ export default async function AtriumLibraryPage(): Promise<React.JSX.Element> {
     redirect("/dashboard");
   }
 
-  return <LibraryView />;
+  // Resolve the cross-origin sandbox render URL server-side (from the runtime env,
+  // never a build-time NEXT_PUBLIC value) so the library's artifact cards can mount
+  // live scaled thumbnails. `null` when unconfigured → cards keep the gradient.
+  const sandboxSrc = getArtifactSandboxRenderUrl();
+
+  return <LibraryView sandboxSrc={sandboxSrc} />;
 }

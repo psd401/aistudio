@@ -580,6 +580,30 @@
   color: rgba(255, 255, 255, 0.85);
 }
 
+/* Live artifact thumbnail (slice F): the ArtifactSandbox iframe rendered at a
+ * larger logical size and scaled down to fill the 120px preview band, clipped by
+ * the band's overflow:hidden. pointer-events:none keeps the card a single link
+ * target. The scale wrapper is 360% wide × scaled 0.2778 ≈ card width. */
+.mer-artifact-thumb-scale {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 360%;
+  transform: scale(0.2778);
+  transform-origin: top left;
+  pointer-events: none;
+}
+.mer-artifact-thumb-frame {
+  height: 432px;
+  border: 0;
+  background: #fff;
+}
+/* Doc-card emoji icon (slice F) sized to fill the 34px icon chip. */
+.mer-icon-emoji {
+  font-size: 18px;
+  line-height: 1;
+}
+
 /* Dashed "Create with the agent" card */
 .mer-create-card {
   display: flex;
@@ -874,6 +898,189 @@
   font-weight: 600;
 }
 
+/* ---- Cover band + emoji doc icon (Meridian slice F, README §"2b") ------------
+ * Shared by the editor sheet and both reader sheets. The band is a CSS GRADIENT
+ * (no raster) selected by a preset key (`lib/atrium/cover.ts` → `.mer-cover--<key>`)
+ * with two soft radial glows; the 56px emoji tile overlaps its bottom by −28px. The
+ * band bleeds to the sheet edges via negative margins matching each sheet's padding
+ * and clips its own rounded top corners (so the sheet needs no overflow:hidden that
+ * would clip the floating toolbar). */
+.mer-cover {
+  position: relative;
+  height: 170px;
+  overflow: hidden;
+  border-radius: 14px 14px 0 0;
+  background: var(--mer-grad-cover);
+}
+.mer-cover::before,
+.mer-cover::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.mer-cover::before {
+  left: 34px;
+  bottom: -26px;
+  width: 180px;
+  height: 180px;
+  background: radial-gradient(circle, rgba(233, 242, 239, 0.16), transparent 66%);
+}
+.mer-cover::after {
+  right: 60px;
+  top: -40px;
+  width: 150px;
+  height: 150px;
+  background: radial-gradient(circle, rgba(157, 123, 244, 0.3), transparent 66%);
+}
+/* Preset gradients (keys in lib/atrium/cover.ts). `default` is the handoff cover. */
+.mer-cover--default { background: var(--mer-grad-cover); }
+.mer-cover--sunrise { background: linear-gradient(115deg, #b4552d 0%, #c07a1e 48%, #6d4fc2 130%); }
+.mer-cover--forest { background: linear-gradient(115deg, #10322e 0%, #2c7a6b 55%, #3e7c4f 120%); }
+.mer-cover--violet { background: linear-gradient(115deg, #3b2a6b 0%, #6d4fc2 55%, #8d74dc 120%); }
+.mer-cover--dusk { background: linear-gradient(115deg, #191d1c 0%, #454d49 45%, #6d4fc2 130%); }
+
+/* "Change cover · 🖼" glass pill (editor only). */
+.mer-cover-change {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  padding: 4px 11px;
+  border-radius: var(--mer-r-pill);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+}
+.mer-cover-change:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+/* 56px emoji tile overlapping the cover bottom edge. */
+.mer-cover-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(16, 50, 46, 0.14);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  line-height: 1;
+  margin: -28px 0 0;
+  position: relative;
+  z-index: 2;
+}
+
+/* Editor sheet: bleed the cover to the sheet edges (cancel the 48px/60px padding). */
+.mer-sheet .mer-cover {
+  margin: -48px -60px 0;
+}
+@media (max-width: 720px) {
+  .mer-sheet .mer-cover {
+    margin: -32px -26px 0;
+  }
+}
+
+/* Cover-gradient picker popover (Change-cover pill → swatches + emoji field). */
+.mer-cover-picker {
+  position: absolute;
+  right: 14px;
+  top: 46px;
+  z-index: 5;
+  width: 232px;
+  background: var(--mer-surface);
+  border: 1px solid var(--mer-border);
+  border-radius: 12px;
+  box-shadow: var(--mer-shadow-toolbar);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mer-cover-picker-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mer-ink-muted);
+}
+.mer-cover-swatches {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mer-cover-swatch {
+  width: 40px;
+  height: 26px;
+  border-radius: 7px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.mer-cover-swatch[data-selected="true"] {
+  border-color: var(--mer-ink);
+}
+.mer-cover-emoji-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mer-cover-emoji-input {
+  width: 100%;
+  height: 32px;
+  border: 1px solid var(--mer-border);
+  border-radius: 8px;
+  padding: 0 10px;
+  font-size: 15px;
+  background: var(--mer-surface);
+  color: var(--mer-ink);
+}
+.mer-cover-picker-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mer-cover-picker-remove {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--mer-ink-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.mer-cover-picker-remove:hover {
+  color: var(--mer-ink-secondary);
+}
+
+/* "Add cover" affordance shown above the title when a doc has no cover yet. */
+.mer-cover-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mer-ink-muted);
+  background: var(--mer-canvas);
+  border: 1px solid var(--mer-border);
+  border-radius: var(--mer-r-button);
+  cursor: pointer;
+}
+.mer-cover-add:hover {
+  color: var(--mer-ink-secondary);
+  background: var(--mer-brand-tint);
+}
+
 /* Sheet body typography — scoped to the Meridian editor only (readers keep the
  * base .atrium-content type until slice E wraps them in .atrium-meridian). */
 .atrium-meridian .mer-sheet .atrium-content {
@@ -1114,6 +1321,67 @@
   font-size: 12.5px;
   color: rgba(246, 247, 245, 0.6);
   white-space: nowrap;
+}
+
+/* Media picker popover (image / grid / video by URL) — dark like the toolbar. */
+.mer-bubble-media-pop {
+  min-width: 236px;
+  padding: 8px;
+  gap: 8px;
+}
+.mer-bubble-media-tabs {
+  display: inline-flex;
+  gap: 2px;
+  background: rgba(246, 247, 245, 0.1);
+  border-radius: 7px;
+  padding: 2px;
+}
+.mer-bubble-media-tab {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(246, 247, 245, 0.7);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.mer-bubble-media-tab[data-active="true"] {
+  color: var(--mer-ink);
+  background: var(--mer-canvas);
+}
+.mer-bubble-media-input {
+  width: 100%;
+  font-size: 12.5px;
+  color: var(--mer-ink);
+  background: var(--mer-canvas);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 7px 9px;
+  resize: vertical;
+  font-family: inherit;
+}
+.mer-bubble-media-input:focus {
+  outline: none;
+  border-color: var(--mer-agent-light);
+}
+.mer-bubble-media-error {
+  font-size: 11.5px;
+  color: #f3a68f;
+}
+.mer-bubble-media-insert {
+  padding: 7px 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--mer-agent);
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.mer-bubble-media-insert:hover {
+  background: var(--mer-agent-light);
 }
 .mer-bubble-colors {
   position: absolute;
@@ -1681,6 +1949,25 @@
   .mer-reader-sheet {
     padding: 30px 24px 36px;
   }
+}
+/* Reader cover band (slice F): a slightly shorter 150px band + 52px tile, bled to
+ * the reader sheet's 16px corners. No "Change cover" pill — the reader is read-only. */
+.mer-reader-sheet .mer-cover {
+  margin: -44px -56px 0;
+  height: 150px;
+  border-radius: 16px 16px 0 0;
+}
+@media (max-width: 720px) {
+  .mer-reader-sheet .mer-cover {
+    margin: -30px -24px 0;
+  }
+}
+.mer-reader-sheet .mer-cover-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 13px;
+  font-size: 24px;
+  margin-top: -26px;
 }
 .mer-reader-head {
   display: flex;

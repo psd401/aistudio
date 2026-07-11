@@ -9,19 +9,19 @@
  * distinct Meridian cards in a responsive 3-column grid; a dashed
  * "Create with the agent" card is the last cell. Each card links to the editor.
  *
- * Artifact cards show a branded gradient PREVIEW (not a live sandbox thumbnail):
- * there is no thumbnail pipeline, the cross-origin sandbox origin is not
- * available on every deploy, and fetching each artifact's code per card would be
- * an N-request storm. The gradient + "LIVE ARTIFACT" pill conveys the
- * agent-maintained, always-current nature without that cost; a real cached
- * snapshot is a later enhancement.
+ * Artifact cards show a LIVE, scaled sandbox thumbnail of the actual artifact
+ * (slice F: `ArtifactThumbnail`), lazy-loaded via IntersectionObserver and capped
+ * to a few concurrent frames; the branded gradient is the pre-load/fallback state
+ * (and the whole preview when the sandbox origin is unconfigured). Doc cards show
+ * the doc's emoji icon (slice F) when set, else the kind's default icon.
  */
 
 import Link from "next/link";
-import { FileText, Boxes, Loader2, Sparkles, ArrowUpRight } from "lucide-react";
+import { FileText, Loader2, Sparkles, ArrowUpRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { timeAgo } from "@/lib/atrium/relative-time";
 import type { ContentObjectDTO } from "@/lib/content";
+import { ArtifactThumbnail } from "./ArtifactThumbnail";
 
 /** Meridian status pill class for a content object's lifecycle status. */
 function statusBadge(status: ContentObjectDTO["status"]): {
@@ -54,8 +54,14 @@ function DocCard({ it }: { it: ContentObjectDTO }): React.JSX.Element {
       className={cn("mer-lib-card", isAgent && "mer-card-agent")}
     >
       <div className="mer-lib-card-head">
-        <span className="mer-icon-chip">
-          <FileText className="h-4 w-4" aria-hidden="true" />
+        <span className="mer-icon-chip" data-emoji={it.icon ? "true" : undefined}>
+          {it.icon ? (
+            <span className="mer-icon-emoji" aria-hidden="true">
+              {it.icon}
+            </span>
+          ) : (
+            <FileText className="h-4 w-4" aria-hidden="true" />
+          )}
         </span>
         <span className={cn("mer-badge", status.cls)}>{status.label}</span>
       </div>
@@ -76,17 +82,20 @@ function DocCard({ it }: { it: ContentObjectDTO }): React.JSX.Element {
   );
 }
 
-function ArtifactCard({ it }: { it: ContentObjectDTO }): React.JSX.Element {
+function ArtifactCard({
+  it,
+  sandboxSrc,
+}: {
+  it: ContentObjectDTO;
+  sandboxSrc: string | null;
+}): React.JSX.Element {
   const isAgent = it.createdByActor === "agent";
   return (
     <Link
       href={`/atrium/${it.id}/edit`}
       className={cn("mer-lib-card mer-lib-card-artifact", isAgent && "mer-card-agent")}
     >
-      <div className="mer-artifact-preview" aria-hidden="true">
-        <span className="mer-badge mer-badge-live">● Live artifact</span>
-        <Boxes className="mer-artifact-preview-icon h-8 w-8" />
-      </div>
+      <ArtifactThumbnail artifactId={it.id} sandboxSrc={sandboxSrc} />
       <p className="mer-lib-card-title">{it.title}</p>
       <div className="mer-lib-card-foot">
         <span className="mer-lib-card-meta">
@@ -119,6 +128,12 @@ interface LibraryListProps {
   error: string | null;
   /** Opens the creation flow (the dashed "Create with the agent" card). */
   onCreate: () => void;
+  /**
+   * The cross-origin sandbox render URL (resolved server-side), threaded to each
+   * artifact card's live thumbnail. `null` when the sandbox origin is unconfigured
+   * → cards keep the gradient placeholder.
+   */
+  sandboxSrc: string | null;
 }
 
 export function LibraryList({
@@ -126,6 +141,7 @@ export function LibraryList({
   loading,
   error,
   onCreate,
+  sandboxSrc,
 }: LibraryListProps): React.JSX.Element {
   if (loading) {
     return (
@@ -146,7 +162,7 @@ export function LibraryList({
     <div className="mer-card-grid">
       {items.map((it) =>
         it.kind === "artifact" ? (
-          <ArtifactCard key={it.id} it={it} />
+          <ArtifactCard key={it.id} it={it} sandboxSrc={sandboxSrc} />
         ) : (
           <DocCard key={it.id} it={it} />
         )
