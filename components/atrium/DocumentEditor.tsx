@@ -48,6 +48,14 @@ import { useCollabSession, type CollabStatus } from "./use-collab-session";
 import { renderColorFor, initialsFromName, type PresenceUser } from "@/lib/atrium/presence";
 import { acceptAllSuggestions } from "@/lib/content/collab/suggestions";
 import "@/styles/atrium-content.css";
+// The Meridian editor classes (.mer-*) live here. Imported at the COMPONENT level
+// (not only via the Atrium layout) so the editor is styled wherever it mounts —
+// including the Nexus workspace panel (/nexus), which is outside the Atrium
+// layout. The `.mer-*` tokens are scoped to `.atrium-meridian`, so the panel-mode
+// root below carries that scope class to resolve them (the full-page mount already
+// sits inside the Atrium layout's scope). The floating BubbleMenu appends to the
+// editor's parent element, which is inside this scope in both modes.
+import "@/styles/atrium-meridian.css";
 
 type Status = CollabStatus;
 
@@ -413,9 +421,11 @@ export function DocumentEditor({
   );
 
   // --- Narrow Nexus workspace panel: compact stacked form ----------------------
+  // The panel mounts under /nexus (outside the Atrium layout), so it carries the
+  // `.atrium-meridian` scope class itself to resolve the `.mer-*` tokens.
   if (layout === "panel") {
     return (
-      <div className="flex flex-col gap-2 p-3">
+      <div className="atrium-meridian flex flex-col gap-2 p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <PresenceStack
             roster={roster}

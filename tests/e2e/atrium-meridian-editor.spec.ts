@@ -56,6 +56,13 @@ test.describe("Atrium Meridian editor (authenticated)", () => {
       await expect(page.locator(".mer-editor-topbar")).toBeVisible();
       await expect(page.locator(".mer-breadcrumb-title")).toBeVisible();
 
+      // Evidence: the topbar (breadcrumb/title/controls) + the sheet header at the
+      // top of the page before any typing scrolls it away.
+      await page.screenshot({
+        path: `${SHOT_DIR}/01-editor-topbar.png`,
+        fullPage: false,
+      });
+
       // Collab connected as the owner: the editor flips editable.
       const pm = page.locator(".ProseMirror");
       await expect(pm).toHaveAttribute("contenteditable", "true", {
@@ -67,14 +74,19 @@ test.describe("Atrium Meridian editor (authenticated)", () => {
         timeout: 60000,
       });
 
-      // Type a line and select it so the floating toolbar can act on it.
+      // Type a fresh line (Enter isolates it), then select EXACTLY the marker by
+      // walking back char-by-char. The shared collab doc accumulates content across
+      // every run into large paragraphs, so Shift+Home would grab a huge multi-line
+      // range; a fixed-length backward selection is deterministic regardless of the
+      // doc's size or wrapping, so bold/underline act on the marker alone.
       const marker = `Meridian ${Date.now()}`;
       await pm.click();
       await page.keyboard.press("End");
+      await page.keyboard.press("Enter");
       await page.keyboard.type(marker);
-      await page.keyboard.down("Shift");
-      await page.keyboard.press("Home");
-      await page.keyboard.up("Shift");
+      for (let i = 0; i < marker.length; i++) {
+        await page.keyboard.press("Shift+ArrowLeft");
+      }
 
       // The floating dark formatting toolbar appears over the selection.
       const bubble = page.locator('[data-testid="editor-bubble-menu"]');
@@ -84,12 +96,23 @@ test.describe("Atrium Meridian editor (authenticated)", () => {
         fullPage: false,
       });
 
-      // Bold + Underline apply to the selection (StarterKit marks the toolbar drives).
-      await bubble.locator('button[aria-label="Bold"]').click();
-      await expect(pm.locator("strong")).toContainText(marker, { timeout: 15000 });
-      // Re-select (the click kept focus/selection) and underline it.
-      await bubble.locator('button[aria-label="Underline"]').click();
-      await expect(pm.locator("u")).toHaveCount(1, { timeout: 15000 });
+      // Bold + Underline apply to the SELECTION: after each click the toolbar's
+      // toggle reflects the active mark on the selected marker (aria-pressed), which
+      // is the collab-schema mark landing — robust in the noisy shared doc where a
+      // DOM tag match would be brittle. The mark also renders (<strong>/<u>).
+      const boldBtn = bubble.locator('button[aria-label="Bold"]');
+      await boldBtn.click();
+      await expect(boldBtn).toHaveAttribute("aria-pressed", "true", {
+        timeout: 15000,
+      });
+      await expect(pm.locator("strong")).not.toHaveCount(0, { timeout: 15000 });
+
+      const underlineBtn = bubble.locator('button[aria-label="Underline"]');
+      await underlineBtn.click();
+      await expect(underlineBtn).toHaveAttribute("aria-pressed", "true", {
+        timeout: 15000,
+      });
+      await expect(pm.locator("u")).not.toHaveCount(0, { timeout: 15000 });
 
       await page.screenshot({
         path: `${SHOT_DIR}/02-editor-sheet.png`,

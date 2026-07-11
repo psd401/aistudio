@@ -172,7 +172,20 @@ export function EditorBubbleMenu({
       shouldShow={({ editor: e, from, to }) => e.isEditable && to > from}
       options={{ placement: "top", offset: 8 }}
     >
-      <div className="mer-bubble" data-testid="editor-bubble-menu">
+      <div
+        className="mer-bubble"
+        role="toolbar"
+        aria-label="Text formatting"
+        data-testid="editor-bubble-menu"
+        // Keep the editor's text selection alive when a formatting control is
+        // clicked: a native button would otherwise steal focus on mousedown and
+        // collapse the selection BEFORE the click runs, so `toggleBold()` would
+        // apply to an empty cursor (stored mark) instead of the selected span.
+        // preventDefault on mousedown blocks the focus/selection change while the
+        // click (onClick) still fires. The buttons inside are individually
+        // keyboard-focusable, so the toolbar role carries the interaction.
+        onMouseDown={(e) => e.preventDefault()}
+      >
         <button
           type="button"
           className="mer-bubble-btn mer-bubble-text"

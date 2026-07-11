@@ -30,7 +30,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import type { WebsocketProvider } from "y-websocket";
-import { yCursorPlugin, yCursorPluginKey } from "y-prosemirror";
+// IMPORTANT: import the cursor plugin from @tiptap/y-tiptap, NOT y-prosemirror.
+// TipTap v3's Collaboration extension binds via @tiptap/y-tiptap, which defines
+// its OWN `ySyncPluginKey` instance; y-prosemirror's yCursorPlugin reads a
+// DIFFERENT key and finds no sync state -> `Cannot read properties of undefined
+// (reading 'doc')` at registration. Using y-tiptap's cursor plugin shares the
+// editor's sync plugin key, so it resolves the binding (and no-ops until synced).
+import { yCursorPlugin, yCursorPluginKey } from "@tiptap/y-tiptap";
 import { AUTHORED_MARK, authorKindOf } from "@/lib/content/collab/provenance";
 import {
   type PresenceUser,

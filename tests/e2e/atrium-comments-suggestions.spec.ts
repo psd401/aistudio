@@ -36,7 +36,11 @@ test.describe("Atrium comments + track-changes (authenticated)", () => {
 
       const pm = page.locator(".ProseMirror");
       await expect(pm).toHaveAttribute("contenteditable", "true", { timeout: 60000 });
-      await expect(page.getByText("Connected")).toBeVisible({ timeout: 60000 });
+      // Ready signal moved from the "Connected" toolbar label to the Meridian sheet
+      // byline (slice-C redesign): "…editing · saved" once the Y.Doc has synced.
+      await expect(page.getByTestId("editor-byline")).toContainText("saved", {
+        timeout: 60000,
+      });
 
       // Seed a known line to operate on.
       const marker = `CT ${Date.now()}`;
