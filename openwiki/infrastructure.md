@@ -47,9 +47,11 @@ AgentPlatformStack (depends on FrontendStack)
 - **Base Image**: ARM64 Graviton-optimized
 - **Runtime**: AgentCore Runtime + Python harness
 - **Tools**: Native Bedrock provider, MCP tools
+- **Plugins**: Vendored `@openclaw/amazon-bedrock-provider` for memory embedding
+- **Compaction**: Mid-turn precheck enabled to prevent context overflow in long tool loops
 - **Security**: Supply-chain security gates
 
-**Source**: `/infra/agent-image/Dockerfile`
+**Source**: `/infra/agent-image/Dockerfile`, `/infra/agent-image/openclaw.json`
 
 ## Database Infrastructure
 
@@ -114,6 +116,20 @@ Two separate bypass flags for emergencies:
 - `SKIP_STATIC_GATE=1` — Skip instruction-budget + config-consistency (rarely needed)
 - `SKIP_PROBE_GATE=1` — Skip boot probe + canary turn (if probe itself is broken)
 
+### Runtime Configuration
+
+Key OpenClaw runtime settings in `openclaw.json`:
+
+| Setting | Purpose |
+|---------|---------|
+| `agents.defaults.compaction.midTurnPrecheck.enabled` | Prevents context overflow during long tool loops by triggering compaction mid-turn instead of hard-failing (#1184) |
+| `plugins.load.paths` | Loads vendored plugins from `/opt/openclaw-plugins/` |
+| `plugins.entries.amazon-bedrock` | Enables Bedrock memory embedding provider (required for `memorySearch.provider: bedrock`) |
+
+**Memory embedding**: The `amazon-bedrock` plugin registers the "bedrock" adapter for memory search. It must be vendored under `/opt/openclaw-plugins` (not `~/.openclaw`, which is runtime-persistent storage that shadows build-time writes).
+
+**Source**: `/infra/agent-image/openclaw.json`
+
 ### Iteration Telemetry (Issue #1161)
 
 Agent turns are measured via `agent_messages` columns added in migration 100:
@@ -168,9 +184,11 @@ The agent container bundles 25+ skills under `/infra/agent-image/skills/`. Each 
 - `name`: kebab-case identifier
 - `summary`: one-line catalog entry (for `psd-skills-meta`)
 - `description`: what it does + when to use (model-facing, ~30–50 tokens)
-- `allowed-tools`: tool scope (e.g. `Bash(node:*)`)
+- `allowed-tools`: tool scope (e.g. `Bash(/opt/agentcore-venv/bin/python3:*)`)
 
 Skills use progressive disclosure: only `name` + `description` load into the system prompt (always-on), while the full `SKILL.md` body loads on-demand when triggered.
+
+**Python invocations**: Skills must use the absolute path `/opt/agentcore-venv/bin/python3` instead of bare `python3` to ensure the venv with boto3 is used regardless of child-process PATH inheritance (#1184).
 
 **Skill Authoring Guide**: `/docs/guides/agent-skill-authoring.md`
 
