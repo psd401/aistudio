@@ -52,6 +52,7 @@ import remarkMath from "remark-math";
 import remarkDirective from "remark-directive";
 import remarkRehype from "remark-rehype";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import rehypeSlug from "rehype-slug";
 import rehypeKatex from "rehype-katex";
 import rehypeStringify from "rehype-stringify";
 import { visit } from "unist-util-visit";
@@ -148,6 +149,15 @@ const buildProcessor = () =>
     .use(remarkAtriumDirectives)
     .use(remarkRehype)
     .use(rehypeSanitize, sanitizeSchema)
+    // rehype-slug runs AFTER the sanitize gate on purpose: it adds a stable `id`
+    // to every heading so the reader's "ON THIS PAGE" TOC (Epic #1059 slice E) can
+    // anchor to it and in-page `#slug` links resolve. The id is derived by
+    // github-slugger from the heading text (lower-cased, `[a-z0-9-]` only), so it
+    // is fully generated — never author-controlled raw — and opens no injection
+    // surface even though it is applied after sanitize. `lib/content/render/
+    // headings.ts` slugs the SAME heading text with the SAME github-slugger, so the
+    // TOC ids and these DOM ids always agree.
+    .use(rehypeSlug)
     // rehype-katex defaults to catching parse errors (rendering them inline in
     // errorColor) rather than throwing, and `trust: false` (no \href/\url). No
     // options needed; sanitize already ran, so KaTeX's inline styles survive.

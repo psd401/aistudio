@@ -22,8 +22,18 @@ function check(name: string, fn: () => void): void {
 
 check("renders headings and bold", () => {
   const html = renderMarkdownToHtml("# Hello\n\n**bold**");
-  assert.match(html, /<h1>Hello<\/h1>/);
+  // rehype-slug adds a stable, github-slugger id to every heading (the reader TOC
+  // anchors to it). The id is generated from the heading text — never raw author
+  // input — so it opens no injection surface despite running after sanitize.
+  assert.match(html, /<h1 id="hello">Hello<\/h1>/);
   assert.match(html, /<strong>bold<\/strong>/);
+});
+
+check("heading ids are github-slugged + de-duplicated", () => {
+  const html = renderMarkdownToHtml("## Parade & closures\n\n## Parade & closures");
+  // Non-word chars collapse to hyphens; a duplicate heading gets a `-1` suffix.
+  assert.match(html, /<h2 id="parade--closures">/);
+  assert.match(html, /<h2 id="parade--closures-1">/);
 });
 
 check("strips <script> authored in markdown", () => {
