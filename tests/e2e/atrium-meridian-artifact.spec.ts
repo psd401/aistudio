@@ -129,7 +129,10 @@ test.describe("Atrium Meridian artifact viewer + embed (authenticated)", () => {
 
       // The embedded-artifact block renders in the editor (the NodeView resolved
       // the artifact — available → the Meridian bordered block with its title).
-      const nodeview = page.locator('[data-testid="artifact-embed-nodeview"]');
+      // Scope to `.first()`: the collab doc persists server-side, so re-runs (and
+      // Playwright retries) accumulate embed nodes in the SAME shared document — a
+      // bare locator would hit a strict-mode "resolved to N elements" violation.
+      const nodeview = page.locator('[data-testid="artifact-embed-nodeview"]').first();
       await expect(nodeview).toBeVisible({ timeout: 30000 });
       const block = page.locator('[data-testid="artifact-embed"]').first();
       await expect(block).toBeVisible({ timeout: 30000 });
