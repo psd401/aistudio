@@ -398,6 +398,12 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
 # psd-freshservice has zero npm dependencies (native fetch + child_process only).
 # psd-brand-guidelines has zero npm dependencies (config + static assets only).
 # psd-github has zero npm dependencies (wraps /usr/local/bin/gh).
+# psd-last30days (#1174) is pure Python (stdlib urllib + xml.etree only) with an
+# optional boto3 S3 upload — boto3 is already in /opt/agentcore-venv, so it needs
+# NO new pip dependency and NO npm install. It is installed solely by the
+# `COPY skills /opt/psd-skills` above (same pattern as the Python psd-pdf-to-markdown
+# and psd-tts skills), adding NO Docker layer — keeping the image well under the
+# Firecracker overlay-mount layer ceiling that constrains this stage.
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
 # Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.
