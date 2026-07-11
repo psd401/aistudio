@@ -678,6 +678,16 @@ export class EcsServiceConstruct extends Construct {
             'tests/',         // Exclude test files
             '*.md',           // Exclude documentation
             '.env*',          // Exclude environment files (use secrets instead)
+            // Claude Code session worktrees — a full second copy of the repo
+            // (own node_modules / .next-e2e) that can be ACTIVELY CHURNING while
+            // another session works there; asset fingerprinting races the file
+            // deletions (lstat ENOENT aborts `cdk deploy`) and bloats the context.
+            '.claude/',
+            // Local E2E runner build dir (NEXT_DIST_DIR=.next-e2e) — volatile
+            // turbopack cache during suite runs, multi-GB when idle. Already in
+            // .dockerignore; must ALSO be here because this exclude list governs
+            // the CDK fingerprint walk.
+            '.next-e2e/',
           ],
         });
 
