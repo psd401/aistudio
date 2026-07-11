@@ -151,6 +151,18 @@ describe("buildWorkspaceChatTools", () => {
     expect(out.error).toBe("The edit could not be applied to the live document.");
   });
 
+  it("edit_workspace_document does NOT misclassify a wrapped apply failure containing 'timeout' as transient", async () => {
+    // Exact-match guard (PR #1186 review): the transient classifier must match only
+    // the exact transport messages, not any message that happens to contain "timeout".
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    applyAgentEditMock.mockRejectedValue(new Error("collab sync apply failed: inner request timeout"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.edit_workspace_document, { markdown: "hi" })) as { error: string };
+    expect(out.error).toBe("The edit could not be applied to the live document.");
+    expect(out.error).not.toMatch(/temporarily unreachable/i);
+  });
+
   it("update_workspace_artifact failure does NOT claim a screening block or missing edit access", async () => {
     getMock.mockResolvedValue(ART);
     canEditMock.mockReturnValue(true);

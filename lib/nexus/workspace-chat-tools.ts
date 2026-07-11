@@ -41,16 +41,27 @@ const NEXUS_CHAT_AGENT_LABEL = "nexus-chat";
 const MAX_EDIT_BYTES = 512 * 1024;
 
 /**
- * True when an agent-bridge failure is a transient TRANSPORT problem (the live
- * collab listener is unreachable / the sync round-trip timed out or the socket
- * closed) rather than a genuine content-apply failure. `applyAgentEdit` rejects
- * with exactly these messages from `runLoopbackEdit` (see apply-agent-edit.ts):
- * "collab websocket error", "collab websocket closed", "collab sync timeout" — all
- * matched by this pattern. Used to give the model an accurate, retryable message
- * instead of a generic "could not apply".
+ * The exact messages `runLoopbackEdit` rejects with when the live collab listener
+ * is unreachable / the sync round-trip times out or the socket closes (see
+ * apply-agent-edit.ts). Matched EXACTLY (not by substring) so a genuine apply
+ * failure — surfaced as the wrapper `collab sync apply failed: <inner>` — is never
+ * misclassified as transient just because `<inner>` happens to contain the word
+ * "timeout" (PR #1186 review).
+ */
+const COLLAB_TRANSPORT_ERRORS = new Set([
+  "collab websocket error",
+  "collab websocket closed",
+  "collab sync timeout",
+]);
+
+/**
+ * True when an agent-bridge failure is a transient TRANSPORT problem (unreachable
+ * listener / timed-out sync / closed socket) rather than a genuine content-apply
+ * failure. Used to give the model an accurate, retryable message instead of a
+ * generic "could not apply".
  */
 function isCollabTransportError(message: string): boolean {
-  return /websocket|timeout/i.test(message);
+  return COLLAB_TRANSPORT_ERRORS.has(message);
 }
 
 export interface WorkspaceChatTools {
