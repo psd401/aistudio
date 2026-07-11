@@ -73,7 +73,6 @@ test.describe("Atrium Meridian shell (authenticated)", () => {
         workspace.getByText("Loading sections…")
       ).toHaveCount(0);
       await expect(page.locator('a[href^="/atrium/"]').first()).toBeVisible();
-      await page.waitForTimeout(400);
 
       await page.screenshot({
         path: `${SHOT_DIR}/01-shell-library.png`,

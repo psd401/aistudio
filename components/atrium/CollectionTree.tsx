@@ -54,6 +54,12 @@ function TreeRow({
   return (
     <li>
       <div
+        // `data-selected` is a stable styling hook: the Meridian shell restyles
+        // the selected row via `.mer-navcol [data-selected="true"]` (see
+        // styles/atrium-meridian.css) rather than depending on the Tailwind
+        // utility class strings below, which have no compile-time link to that CSS
+        // and are shared with the reader sidebar. It is inert everywhere else.
+        data-selected={isSelected ? "true" : undefined}
         className={cn(
           "flex items-center gap-1 rounded-md px-2 py-1.5 text-sm",
           isSelected
@@ -166,6 +172,7 @@ export function CollectionTree({
           <button
             type="button"
             onClick={() => onSelect(null)}
+            data-selected={selectedCollectionId === null ? "true" : undefined}
             className={cn(
               "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left",
               selectedCollectionId === null

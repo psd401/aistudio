@@ -20,7 +20,7 @@
  * surfaced in this glanceable sidebar — an acceptable, always-safe bound.
  */
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, or } from "drizzle-orm";
 import {
   createLogger,
   generateRequestId,
@@ -113,7 +113,16 @@ export async function listAgentActivityAction(
           .from(contentAuditLogs)
           .where(
             and(
-              eq(contentAuditLogs.actorKind, "agent"),
+              // Any AI-agent action, whether autonomous or delegated. A delegated
+              // agent (REST/MCP token acting for a user) records provenance as the
+              // human it acts for — `actorKind = 'human'` — but still carries an
+              // `agent_label`; only pure-human actions have a null label. Filtering
+              // on `actorKind = 'agent'` alone would drop the entire common
+              // delegated-agent path from the feed.
+              or(
+                eq(contentAuditLogs.actorKind, "agent"),
+                isNotNull(contentAuditLogs.agentLabel)
+              ),
               eq(contentAuditLogs.outcome, "ok"),
               inArray(contentAuditLogs.action, [...ACTIVITY_ACTIONS]),
               inArray(contentAuditLogs.objectId, visibleIds)

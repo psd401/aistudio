@@ -21,7 +21,7 @@ export function WorkspaceNav(): React.JSX.Element {
 
   const onSelectCollection = useCallback(
     (id: string | null) => {
-      const params = new URLSearchParams(Array.from(searchParams.entries()));
+      const params = new URLSearchParams(searchParams);
       if (id) params.set("collection", id);
       else params.delete("collection");
       const qs = params.toString();
