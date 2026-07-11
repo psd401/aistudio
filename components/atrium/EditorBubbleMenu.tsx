@@ -196,7 +196,11 @@ function ArtifactEmbedPicker({
       .focus()
       .insertContentAt(at, {
         type: ARTIFACT_EMBED_NODE_NAME,
-        attrs: { artifactId: opt.id, title: opt.title },
+        // Only the id is stored in the shared Y.Doc. NEVER stamp the title here:
+        // the doc syncs to every canView(document) peer, but the artifact is gated
+        // on canView(artifact), so a title in the CRDT would leak it. The title is
+        // re-resolved per viewer through the visibility gate (see artifact-embed-node.ts).
+        attrs: { artifactId: opt.id },
       })
       .run();
     onPick();

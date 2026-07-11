@@ -74,6 +74,20 @@ check("server schema exposes the Meridian embedded-artifact node", () => {
   );
 });
 
+check("embedded-artifact node has NO title attr (title-leak regression guard)", () => {
+  // SECURITY: the node must carry ONLY `artifactId` in the shared Y.Doc. A cached
+  // `title` would sync to every canView(document) peer and leak the artifact's title
+  // to someone who cannot canView(artifact). The title is always re-resolved through
+  // the visibility gate instead. Assert the schema attr set to lock this in.
+  const schema = getCollabSchema();
+  const attrs = Object.keys(schema.nodes[EXPECTED_EMBED_NODE].spec.attrs ?? {}).sort();
+  assert.deepEqual(
+    attrs,
+    ["artifactId"],
+    `embed node must expose only artifactId (found: ${attrs.join(", ")})`
+  );
+});
+
 check("client schema (getSchema(getSchemaExtensions)) == server schema mark set", () => {
   const client = getSchema(getSchemaExtensions());
   const server = getCollabSchema();
@@ -155,7 +169,7 @@ check("an embedded-artifact node survives a Yjs round-trip with its id intact", 
     type: "doc",
     content: [
       { type: "paragraph", content: [{ type: "text", text: "before" }] },
-      { type: "atriumArtifactEmbed", attrs: { artifactId, title: "Metrics" } },
+      { type: "atriumArtifactEmbed", attrs: { artifactId } },
       { type: "paragraph", content: [{ type: "text", text: "after" }] },
     ],
   };

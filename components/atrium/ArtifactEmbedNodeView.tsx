@@ -32,8 +32,6 @@ function maskedEmbed(artifactId: string): ResolvedEmbed {
 export function ArtifactEmbedNodeView(props: ReactNodeViewProps): React.JSX.Element {
   const artifactId =
     typeof props.node.attrs.artifactId === "string" ? props.node.attrs.artifactId : "";
-  const cachedTitle =
-    typeof props.node.attrs.title === "string" ? props.node.attrs.title : null;
 
   const [resolved, setResolved] = useState<ResolvedEmbed | null>(null);
   const [loading, setLoading] = useState(true);
@@ -74,6 +72,10 @@ export function ArtifactEmbedNodeView(props: ReactNodeViewProps): React.JSX.Elem
       data-testid="artifact-embed-nodeview"
     >
       {loading || !resolved ? (
+        // Pre-resolve label is a fixed generic string ONLY — never any Y.Doc-derived
+        // text (the node holds no title; see the title-leak note in
+        // artifact-embed-node.ts). The real title arrives from the visibility-gated
+        // resolve below, so a viewer who cannot see the artifact never learns its name.
         <div
           className="atrium-embed atrium-embed-loading"
           data-testid="artifact-embed-loading"
@@ -81,12 +83,12 @@ export function ArtifactEmbedNodeView(props: ReactNodeViewProps): React.JSX.Elem
           <span className="atrium-embed-mark" aria-hidden="true">
             ✦
           </span>{" "}
-          {cachedTitle ?? "Loading embedded artifact…"}
+          Loading embedded artifact…
         </div>
       ) : (
         <ArtifactEmbedBlock
           available={resolved.available}
-          title={resolved.title ?? cachedTitle}
+          title={resolved.title}
           code={resolved.code}
           sandboxSrc={resolved.sandboxSrc}
           href={resolved.href}

@@ -69,23 +69,24 @@ export const AtriumArtifactEmbed = Node.create<
 
   addAttributes() {
     return {
-      /** The embedded artifact's content-object id (a UUID). */
+      /**
+       * The embedded artifact's content-object id (a UUID) — the ONLY attribute
+       * this node holds in the shared Y.Doc.
+       *
+       * SECURITY (title-leak fix): the node deliberately carries NO cached `title`.
+       * The Y.Doc syncs to every `canView(document)` collaborator, but an embedded
+       * artifact is gated on its OWN `canView(artifact)` — so a title stored here
+       * would leak the artifact's title to a document collaborator who may not see
+       * the artifact. The authoritative title is therefore ALWAYS re-resolved from
+       * the DB through the visibility-gated `resolveArtifactEmbedAction` /
+       * `resolveEmbedForReader`; the editor labels the pre-resolve block with a
+       * generic string, never any Y.Doc-derived text.
+       */
       artifactId: {
         default: null,
         parseHTML: (el) => el.getAttribute("data-artifact-id"),
         renderHTML: (attrs) =>
           attrs.artifactId ? { "data-artifact-id": attrs.artifactId } : {},
-      },
-      /**
-       * A cached display title. Convenience only — the authoritative title is
-       * re-resolved from the DB at render time (editor NodeView + reader), so it
-       * is intentionally NOT persisted to markdown (the directive carries only the
-       * id). Held in the Y.Doc so the editor can label the block before its fetch.
-       */
-      title: {
-        default: null,
-        parseHTML: (el) => el.getAttribute("data-title"),
-        renderHTML: (attrs) => (attrs.title ? { "data-title": attrs.title } : {}),
       },
     };
   },
