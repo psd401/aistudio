@@ -40,6 +40,11 @@
       "heartbeat": {
         "every": "0m"
       },
+      "compaction": {
+        "midTurnPrecheck": {
+          "enabled": true
+        }
+      },
       "memorySearch": {
         "provider": "bedrock",
         "model": "amazon.titan-embed-text-v2:0"
@@ -63,9 +68,20 @@
     "enabled": false
   },
   "plugins": {
+    "load": {
+      "paths": ["/opt/openclaw-plugins/amazon-bedrock"]
+    },
     "entries": {
       "active-memory": {
         "enabled": false
+      },
+      "amazon-bedrock": {
+        "enabled": true,
+        "config": {
+          "discovery": {
+            "enabled": false
+          }
+        }
       }
     }
   },

@@ -374,6 +374,19 @@ COPY skills /opt/psd-skills
 # "Failed to mount overlay: No such file or directory" (agent outage 2026-07-02,
 # caused by adding the gws-wrapper COPY at 53). Absolute `cd` paths so the chain
 # is independent of prior CWD. Keep new skills in this RUN, not new RUNs.
+#
+# The tail of this RUN also vendors the @openclaw/amazon-bedrock-provider
+# plugin: it registers the "bedrock" memory-embedding adapter that
+# openclaw.json's memorySearch.provider names. The published OpenClaw base
+# image ships with NO bundled extensions (they're an opt-in OPENCLAW_EXTENSIONS
+# build arg of the upstream Dockerfile), so memory sync failed every cycle with
+# "Unknown memory embedding provider: bedrock" (2026-07-10). It must live under
+# /opt (image-owned): ~/.openclaw is runtime-persistent storage that shadows
+# anything written there at build time. Loaded via openclaw.json
+# plugins.load.paths. Version-pinned to the same OpenClaw release this image
+# pins (2026.6.11); npm verifies the registry integrity hash on pack. The
+# tarball is self-contained (bundleDependencies: @aws-sdk clients ship inside
+# it, with an npm-shrinkwrap.json), so no npm install runs after extraction.
 RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund && \
@@ -381,7 +394,13 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-html-artifact && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund && \
-    cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund
+    cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund && \
+    mkdir -p /opt/openclaw-plugins && cd /opt/openclaw-plugins && \
+    npm pack @openclaw/amazon-bedrock-provider@2026.6.11 && \
+    tar -xzf openclaw-amazon-bedrock-provider-2026.6.11.tgz && \
+    mv package amazon-bedrock && \
+    rm openclaw-amazon-bedrock-provider-2026.6.11.tgz && \
+    test -f /opt/openclaw-plugins/amazon-bedrock/openclaw.plugin.json
 # chat-card has zero npm deps. chat-chart's npm install is paired with the
 # matplotlib install above — both stay disabled until we figure out the
 # AgentCore overlay-mount failure. With both off the image boots cleanly
