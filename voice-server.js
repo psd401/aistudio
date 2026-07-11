@@ -152,18 +152,24 @@ function runLoopbackSelfCheck(server) {
   if (!addr || typeof addr !== 'object') return
   console.log(`[voice-server] HTTP server bound to ${addr.address}:${addr.port}`) // eslint-disable-line no-console
   const probe = net.connect({ host: '127.0.0.1', port: addr.port })
-  const timer = setTimeout(() => {
+  // Single-outcome guard: destroy() from the timeout handler can itself emit
+  // 'error' (and vice versa), which would double-log the verdict.
+  let finished = false
+  const finish = (fn) => {
+    if (finished) return
+    finished = true
+    clearTimeout(timer)
     probe.destroy()
-    console.error(`[voice-server] ERROR: loopback self-check TIMED OUT — 127.0.0.1:${addr.port} unreachable; the Atrium agent bridge (workspace chat read/edit) will fail. Bound address is ${addr.address}; HOSTNAME env was likely overridden — see entrypoint.sh.`) // eslint-disable-line no-console
+    fn()
+  }
+  const timer = setTimeout(() => {
+    finish(() => console.error(`[voice-server] ERROR: loopback self-check TIMED OUT — 127.0.0.1:${addr.port} unreachable; the Atrium agent bridge (workspace chat read/edit) will fail. Bound address is ${addr.address}; HOSTNAME env was likely overridden — see entrypoint.sh.`)) // eslint-disable-line no-console
   }, 3000)
   probe.on('connect', () => {
-    clearTimeout(timer)
-    probe.end()
-    console.log(`[voice-server] loopback self-check OK (127.0.0.1:${addr.port} reachable — agent bridge can connect)`) // eslint-disable-line no-console
+    finish(() => console.log(`[voice-server] loopback self-check OK (127.0.0.1:${addr.port} reachable — agent bridge can connect)`)) // eslint-disable-line no-console
   })
   probe.on('error', (err) => {
-    clearTimeout(timer)
-    console.error(`[voice-server] ERROR: loopback self-check FAILED (${err.message}) — 127.0.0.1:${addr.port} refused; the Atrium agent bridge (workspace chat read/edit) will fail. Bound address is ${addr.address}; HOSTNAME env was likely overridden — see entrypoint.sh.`) // eslint-disable-line no-console
+    finish(() => console.error(`[voice-server] ERROR: loopback self-check FAILED (${err.message}) — 127.0.0.1:${addr.port} refused; the Atrium agent bridge (workspace chat read/edit) will fail. Bound address is ${addr.address}; HOSTNAME env was likely overridden — see entrypoint.sh.`)) // eslint-disable-line no-console
   })
 }
 
