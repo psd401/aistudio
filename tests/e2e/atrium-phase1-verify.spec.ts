@@ -114,7 +114,9 @@ test.describe("Atrium Phase 1 — authenticated surfaces", () => {
       await expect(page.locator('.atrium-rail-block[data-author="agent"]').first()).toBeVisible({
         timeout: 60000,
       });
-      await expect(page.getByText("Connected")).toBeVisible({ timeout: 60000 });
+      // Collab ready signal: the Meridian sheet byline reports the synced ("saved")
+      // state (the old "Connected" toolbar label was removed in the slice-C redesign).
+      await expect(page.getByTestId("editor-byline")).toContainText("saved", { timeout: 60000 });
       await page.screenshot({ path: `${SHOT}/02-editor-agent-purple.png`, fullPage: true });
     } finally {
       await context.close();
