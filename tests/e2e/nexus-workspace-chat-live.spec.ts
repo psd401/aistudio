@@ -49,6 +49,10 @@ async function sendChat(page: import("@playwright/test").Page, text: string): Pr
 }
 
 test.describe("Nexus workspace chat — live Atrium read/edit (§1087, authenticated)", () => {
+  // A real model call + a tool round-trip + a live Yjs edit can take well over
+  // the default 60s per-test budget on a cold dev server; give each flow headroom.
+  test.describe.configure({ timeout: 180_000 });
+
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
     "Requires the authed host dev server (collab WS) + a chat model + seeded docs — see docs/guides/e2e-authenticated-testing.md"
