@@ -2,7 +2,7 @@
 name: psd-last30days
 summary: Research what people said about a topic in the last ~30 days across keyless social/community sources (Hacker News, Reddit, arXiv, GitHub, Google News) and return a grounded, cited brief — in chat, as an S3 HTML artifact, or both.
 description: Research recent chatter on a topic — "what did people actually say about X in the last ~30 days?" Fans out across free, keyless sources (Hacker News, Reddit, arXiv, GitHub, Google News), ranks by engagement/recency, de-duplicates, and returns a source-cited brief you synthesize. Default output is a Markdown brief in chat; on request it also (or instead) produces a self-contained HTML page uploaded to S3 and shareable by link. Use for trend/pulse/"what's new" research on a person, product, company, or topic.
-allowed-tools: Bash(python3:*), Bash(/opt/agentcore-venv/bin/python3:*)
+allowed-tools: Bash(/opt/agentcore-venv/bin/python3:*)
 ---
 
 # psd-last30days

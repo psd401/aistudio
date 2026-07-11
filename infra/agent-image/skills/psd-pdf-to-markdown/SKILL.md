@@ -2,7 +2,7 @@
 name: psd-pdf-to-markdown
 summary: Convert a PDF (from a URL, workspace S3 key, or container path) into clean Markdown with tables preserved — no image files, no model download.
 description: Convert a PDF to clean Markdown with tables preserved and images dropped. Use when the user wants to turn a PDF into Markdown or extract a PDF's text/tables for further processing. Input is a public URL, a workspace S3 key, or a container file path.
-allowed-tools: Bash(python3:*), Bash(/opt/agentcore-venv/bin/python3:*)
+allowed-tools: Bash(/opt/agentcore-venv/bin/python3:*)
 ---
 
 # psd-pdf-to-markdown

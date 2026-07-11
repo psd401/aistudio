@@ -2,7 +2,7 @@
 name: psd-tts
 summary: Turn text into a shareable MP3 with Amazon Polly (generative voices) and return a public HTTPS link — narration, briefings, audio summaries.
 description: Convert text to natural-sounding speech (MP3) with Amazon Polly and return a shareable HTTPS URL. Use when asked to read something aloud, narrate a document, or make an audio version or podcast of text.
-allowed-tools: Bash(python3:*), Bash(/opt/agentcore-venv/bin/python3:*)
+allowed-tools: Bash(/opt/agentcore-venv/bin/python3:*)
 ---
 
 # psd-tts
