@@ -4,7 +4,9 @@ Smart email triage for the PSD AI Agent. Phase 1 — agent-native opt-in,
 per-user rules, Gmail labels, Bedrock Nova Micro fallback classifier,
 Chat escalations, daily digest, admin sub-page.
 
-Phase 2 tracker: <https://github.com/psd401/aistudio/issues/996>
+Phase 2 shipped in #1172 (PR #1177). **End users:** see the
+[Email Triage User Guide](../features/email-triage-user-guide.md) — this page
+covers runtime architecture and operations.
 
 ---
 
@@ -257,7 +259,8 @@ Each task gesture invokes AgentCore once (~$0.01–0.05 per invocation depending
 
 ## Phase 2 (#1172) — fanout, sweep, learning, escalation modes
 
-Phase 2 ships #996 items 2/3/4/6 plus a per-user escalation policy. All new
+Phase 2 ships items 2/3/4/6 of the (since-retired) #996 tracker plus a
+per-user escalation policy. All new
 state is additive DDB attributes (no migration).
 
 ### Multi-tenant fanout (item 6)
@@ -332,7 +335,8 @@ EventBridge daily 09:00 ─ {job:"learn"} ─►  (lists users,   (group =   (po
 
 ## Phase 1 known limitations
 
-Most are resolved in Phase 2 (#1172); the rest remain tracked in #996:
+Most are resolved in Phase 2 (#1172). The rest are deferred with no open
+tracker (#996 was deleted 2026-07-10) — re-file individually if wanted:
 - ~~No retroactive classification~~ → **resolved**: initial-inbox sweep (item 2).
 - ~~`learnedPatterns` unpopulated~~ → **resolved**: nightly learning (items 3+4).
 - ~~Single-Lambda scan caps at 1000 users~~ → **resolved**: dispatcher/worker fanout (item 6).

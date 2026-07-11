@@ -186,6 +186,9 @@ Tool integration for Assistant Architect prompts.
 #### [features/skill-publishing.md](./features/skill-publishing.md)
 **Skill publishing & export** — SKILL.md format, publish → scan → review pipeline, how skills are consumed (Nexus session binding vs `skill.{slug}` catalog tools), and the zip-export format + portability caveats for Claude Code / Desktop.
 
+#### [features/email-triage-user-guide.md](./features/email-triage-user-guide.md)
+**Email triage user guide** — enabling triage, the three-label folder model, escalation modes (what pings vs what gets labeled), rule tuning, the correction → nightly-learning → suggestion loop, digest, and `@psd/Task` email-to-task. End-user companion to [operations/email-triage.md](./operations/email-triage.md).
+
 #### [features/nexus-workspace-chat-editing.md](./features/nexus-workspace-chat-editing.md)
 **Nexus workspace chat editing (§1087)** — when a document/artifact is open beside the chat, the chat can read + edit it (live Yjs document edits via the agent bridge, artifact edits via `createVersion`); server-bound, canView/canEdit-gated, §28.3-screened.
 
