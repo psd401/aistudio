@@ -25,6 +25,7 @@ const createVersionMock = jest.fn();
 const canEditMock = jest.fn();
 const requesterMock = jest.fn();
 const applyAgentEditMock = jest.fn();
+const readAgentDocMarkdownMock = jest.fn();
 const screenMock = jest.fn();
 const loadDocStateMock = jest.fn();
 
@@ -42,6 +43,7 @@ jest.mock("@/lib/content/requester-from-auth", () => ({
 }));
 jest.mock("@/lib/content/collab/apply-agent-edit", () => ({
   applyAgentEdit: (...a: unknown[]) => applyAgentEditMock(...a),
+  readAgentDocMarkdown: (...a: unknown[]) => readAgentDocMarkdownMock(...a),
 }));
 jest.mock("@/lib/content/collab/doc-state-store", () => ({
   loadDocState: (...a: unknown[]) => loadDocStateMock(...a),
@@ -68,7 +70,9 @@ beforeEach(() => {
   requesterMock.mockResolvedValue(REQ);
   screenMock.mockResolvedValue({ allowed: true });
   applyAgentEditMock.mockResolvedValue(undefined);
-  loadDocStateMock.mockResolvedValue({ markdown: "# Live doc", revision: 5 });
+  // Default: the live Yjs read succeeds (the authoritative on-screen text).
+  readAgentDocMarkdownMock.mockResolvedValue("# Live doc");
+  loadDocStateMock.mockResolvedValue({ markdown: "# Projection", revision: 5 });
 });
 
 describe("buildWorkspaceChatTools", () => {
@@ -128,6 +132,35 @@ describe("buildWorkspaceChatTools", () => {
     expect(out).toEqual({ error: "nope" });
   });
 
+  it("edit_workspace_document surfaces an unreachable collab listener as a retryable error (not a permission error)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    applyAgentEditMock.mockRejectedValue(new Error("collab websocket closed"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.edit_workspace_document, { markdown: "hi" })) as { error: string };
+    expect(out.error).toMatch(/temporarily unreachable/i);
+    expect(out.error).not.toMatch(/access|permission/i);
+  });
+
+  it("edit_workspace_document reports a generic apply failure for a non-transport error", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    applyAgentEditMock.mockRejectedValue(new Error("collab sync apply failed: boom"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.edit_workspace_document, { markdown: "hi" })) as { error: string };
+    expect(out.error).toBe("The edit could not be applied to the live document.");
+  });
+
+  it("update_workspace_artifact failure does NOT claim a screening block or missing edit access", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    createVersionMock.mockRejectedValue(new Error("A content object with this slug already exists"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.update_workspace_artifact, { code: "<div/>" })) as { error: string };
+    expect(out.error).not.toMatch(/safety screen|edit access|permission/i);
+    expect(out.error).toMatch(/could not be saved/i);
+  });
+
   it("update_workspace_artifact SCREENS the code (§28.3) then creates a version", async () => {
     getMock.mockResolvedValue(ART);
     canEditMock.mockReturnValue(true);
@@ -155,19 +188,60 @@ describe("buildWorkspaceChatTools", () => {
     expect(out).toEqual({ error: "nope" });
   });
 
-  it("read_workspace_content reads the doc-state markdown projection for a document (not bodyInline)", async () => {
+  it("read_workspace_content reads the LIVE Yjs doc for a document (not the stale projection)", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(true);
-    loadDocStateMock.mockResolvedValue({ markdown: "# Live doc", revision: 5 });
+    readAgentDocMarkdownMock.mockResolvedValue("# Live edits\n\nfresh text");
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
-    expect(loadDocStateMock).toHaveBeenCalledWith("doc-1");
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Live doc" });
+    expect(readAgentDocMarkdownMock).toHaveBeenCalledWith("doc-1");
+    // The live read short-circuits — the stale projection is NOT consulted.
+    expect(loadDocStateMock).not.toHaveBeenCalled();
+    expect(out).toEqual({
+      title: "My Doc",
+      kind: "document",
+      bodyFormat: "markdown",
+      body: "# Live edits\n\nfresh text",
+    });
   });
 
-  it("read_workspace_content flags bodyUnavailable for a document with an empty projection", async () => {
+  it("read_workspace_content reports an EMPTY live document as body:'' (not unavailable, not a refusal)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    // A new / title-only document: the live doc hydrates to empty text.
+    readAgentDocMarkdownMock.mockResolvedValue("");
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.read_workspace_content, {});
+    expect(loadDocStateMock).not.toHaveBeenCalled();
+    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "" });
+  });
+
+  it("read_workspace_content falls back to the projection when the live read is unavailable (null)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    readAgentDocMarkdownMock.mockResolvedValue(null); // collab listener unreachable
+    loadDocStateMock.mockResolvedValue({ markdown: "# Projection", revision: 5 });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.read_workspace_content, {});
+    expect(readAgentDocMarkdownMock).toHaveBeenCalledWith("doc-1");
+    expect(loadDocStateMock).toHaveBeenCalledWith("doc-1");
+    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Projection" });
+  });
+
+  it("read_workspace_content falls back to version.bodyInline when live read AND projection are empty", async () => {
+    getMock.mockResolvedValue({ ...DOC, version: { bodyFormat: "markdown", bodyInline: "# Snapshot", versionNumber: 3 } });
+    canEditMock.mockReturnValue(true);
+    readAgentDocMarkdownMock.mockResolvedValue(null);
+    loadDocStateMock.mockResolvedValue({ markdown: "", revision: 5 });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.read_workspace_content, {});
+    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Snapshot" });
+  });
+
+  it("read_workspace_content flags bodyUnavailable only when live read, projection AND snapshot are all empty", async () => {
     getMock.mockResolvedValue({ ...DOC, version: { bodyFormat: "markdown", bodyInline: null, versionNumber: 3 } });
     canEditMock.mockReturnValue(true);
+    readAgentDocMarkdownMock.mockResolvedValue(null);
     loadDocStateMock.mockResolvedValue({ markdown: "", revision: 5 });
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
