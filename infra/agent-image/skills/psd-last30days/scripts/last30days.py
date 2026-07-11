@@ -59,7 +59,8 @@ def build_markdown(topic: str, days: int, grouped: dict, sources_failed: list) -
         for it in items:
             date = it["published"][:10] if it["published"] else "undated"
             snippet = f" — {it['snippet']}" if it["snippet"] else ""
-            lines.append(f"- [{it['title']}]({it['url']}) ({date}){snippet}")
+            safe_title = it["title"].replace("[", "\\[").replace("]", "\\]")
+            lines.append(f"- [{safe_title}]({it['url']}) ({date}){snippet}")
         lines.append("")
     if sources_failed:
         failed_str = ", ".join(f"{f['source']} ({f['error']})" for f in sources_failed)

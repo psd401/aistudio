@@ -110,9 +110,25 @@ def _atom_link(entry):
     return links[0].get("href", "") if links else ""
 
 
+def _reddit_time_filter(days):
+    """Map a --days window to Reddit's coarse `t` buckets (day/week/month/year/all).
+
+    Reddit has no arbitrary day-range filter, so the bucket must be at least as
+    wide as `days` — the caller's own `_cutoff` re-filters precisely afterward.
+    """
+    if days <= 1:
+        return "day"
+    if days <= 7:
+        return "week"
+    if days <= 30:
+        return "month"
+    return "year"
+
+
 def fetch_reddit(topic, days, limit):
     q = quote(topic)
-    url = f"https://www.reddit.com/search.rss?q={q}&sort=new&t=month&limit={min(limit, 25)}"
+    t = _reddit_time_filter(days)
+    url = f"https://www.reddit.com/search.rss?q={q}&sort=new&t={t}&limit={min(limit, 25)}"
     root = _parse_xml(_get(url))
     cutoff = _cutoff(days)
     items = []

@@ -67,6 +67,18 @@ def test_build_markdown_empty_results():
     assert "reddit (timed out)" in md
 
 
+def test_build_markdown_escapes_brackets_in_title():
+    # An unescaped "[" / "]" in a title (e.g. "[Show HN] thing") breaks the
+    # enclosing Markdown link syntax in chat clients.
+    grouped = {
+        "hackernews": [
+            {"title": "[Show HN] thing", "url": "https://news.ycombinator.com/item?id=1", "published": "", "snippet": ""}
+        ],
+    }
+    md = last30days.build_markdown("test topic", 30, grouped, [])
+    assert "[\\[Show HN\\] thing](https://news.ycombinator.com/item?id=1)" in md
+
+
 def test_build_html_escapes_and_includes_sections():
     grouped = {
         "web": [
@@ -152,6 +164,28 @@ def test_fetch_reddit_accepts_naive_timestamp_as_utc():
         items = sources.fetch_reddit("thing", 365, 10)
     assert len(items) == 1
     assert items[0]["url"] == "https://reddit.com/r/x/1"
+
+
+def test_reddit_time_filter_widens_for_long_windows():
+    # Reddit's `t` bucket must be at least as wide as --days, else posts
+    # inside the requested window (e.g. day 45 of a 90-day search) are never
+    # returned by Reddit in the first place, regardless of local filtering.
+    assert sources._reddit_time_filter(1) == "day"
+    assert sources._reddit_time_filter(7) == "week"
+    assert sources._reddit_time_filter(30) == "month"
+    assert sources._reddit_time_filter(90) == "year"
+
+
+def test_fetch_reddit_uses_widened_time_filter_for_long_windows():
+    captured = {}
+
+    def fake_open(req, timeout=None):
+        captured["url"] = req.full_url
+        return _FakeResponse(b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>')
+
+    with patch.object(sources._OPENER, "open", side_effect=fake_open):
+        sources.fetch_reddit("thing", 90, 10)
+    assert "t=year" in captured["url"]
 
 
 def test_fetch_arxiv_uses_https():
