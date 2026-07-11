@@ -36,12 +36,27 @@ const EXPECTED_MARKS = [
   ATRIUM_COMMENT_MARK,
   ATRIUM_SUGGESTION_INSERT_MARK,
   ATRIUM_SUGGESTION_DELETE_MARK,
+  // Meridian floating-toolbar mark (slice C): TextStyle+Color add `textStyle`.
+  "textStyle",
 ];
+
+// Meridian floating-toolbar NODES (slice C): TableKit adds these. They must be in
+// the ONE shared schema so a table typed in the client editor maps identically on
+// the server transformer / collab bundle. Underline is a MARK from StarterKit v3
+// (already covered by the mark parity check) — no separate node here.
+const EXPECTED_TABLE_NODES = ["table", "tableRow", "tableHeader", "tableCell"];
 
 check("server schema (getCollabSchema) exposes all Atrium marks", () => {
   const schema = getCollabSchema();
   for (const mark of EXPECTED_MARKS) {
     assert.ok(schema.marks[mark], `server schema missing mark: ${mark}`);
+  }
+});
+
+check("server schema exposes the Meridian table nodes", () => {
+  const schema = getCollabSchema();
+  for (const node of EXPECTED_TABLE_NODES) {
+    assert.ok(schema.nodes[node], `server schema missing node: ${node}`);
   }
 });
 
@@ -55,6 +70,68 @@ check("client schema (getSchema(getSchemaExtensions)) == server schema mark set"
     serverMarks,
     `client/server mark sets diverge:\n  client=${clientMarks}\n  server=${serverMarks}`
   );
+});
+
+check("client schema == server schema NODE set (table nodes stay in lockstep)", () => {
+  const client = getSchema(getSchemaExtensions());
+  const server = getCollabSchema();
+  const clientNodes = Object.keys(client.nodes).sort();
+  const serverNodes = Object.keys(server.nodes).sort();
+  assert.deepEqual(
+    clientNodes,
+    serverNodes,
+    `client/server node sets diverge:\n  client=${clientNodes}\n  server=${serverNodes}`
+  );
+});
+
+check("a table + color-marked span survive a Yjs round-trip", () => {
+  const schema = getCollabSchema();
+  const docJSON = {
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        content: [
+          {
+            type: "text",
+            text: "tinted",
+            marks: [{ type: "textStyle", attrs: { color: "#6d4fc2" } }],
+          },
+        ],
+      },
+      {
+        type: "table",
+        content: [
+          {
+            type: "tableRow",
+            content: [
+              {
+                type: "tableHeader",
+                content: [{ type: "paragraph", content: [{ type: "text", text: "H" }] }],
+              },
+              {
+                type: "tableCell",
+                content: [{ type: "paragraph", content: [{ type: "text", text: "C" }] }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  const ydoc = prosemirrorJSONToYDoc(schema, docJSON, "default");
+  const back = yDocToProsemirrorJSON(ydoc, "default") as {
+    content: Array<{ type: string; content?: unknown[] }>;
+  };
+  const types = back.content.map((n) => n.type);
+  assert.ok(types.includes("table"), "table node lost in Yjs round-trip");
+  const para = back.content[0] as {
+    content: Array<{ text?: string; marks?: Array<{ type: string; attrs?: Record<string, unknown> }> }>;
+  };
+  const tinted = para.content.find((s) => s.text === "tinted");
+  const style = tinted?.marks?.find((m) => m.type === "textStyle");
+  assert.equal(style?.attrs?.color, "#6d4fc2", "textStyle color lost in Yjs round-trip");
 });
 
 check("comment + suggestion marks survive a Yjs round-trip with attrs intact", () => {

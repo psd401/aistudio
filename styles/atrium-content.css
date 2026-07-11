@@ -11,10 +11,17 @@
  */
 
 :root {
-  --atrium-human: #16a34a; /* green — human */
-  --atrium-human-soft: rgba(22, 163, 74, 0.16);
-  --atrium-agent: #7c3aed; /* purple — agent */
-  --atrium-agent-soft: rgba(124, 58, 237, 0.16);
+  /*
+   * Provenance palette. Re-shaded to the Meridian design tokens (Epic #1059
+   * slice C): human = calm forest green #3E7C4F, agent = violet #6D4FC2 (violet =
+   * agent, always and only). This file loads only on Atrium surfaces (editor +
+   * both readers), so the re-shade reaches the whole loop — the editor rail /
+   * attribution underlines AND the reader's ProvenanceFooter badges — consistently.
+   */
+  --atrium-human: #3e7c4f; /* green — human (Meridian human-you) */
+  --atrium-human-soft: rgba(62, 124, 79, 0.14);
+  --atrium-agent: #6d4fc2; /* violet — agent (Meridian agent) */
+  --atrium-agent-soft: rgba(109, 79, 194, 0.1);
   --atrium-rail-width: 4px;
 }
 
@@ -144,7 +151,9 @@
 :root {
   --atrium-comment: #d97706;      /* amber — comment anchor */
   --atrium-comment-soft: rgba(217, 119, 6, 0.16);
-  --atrium-suggest-insert: #16a34a; /* green underline — proposed insertion */
+  /* Proposed insertion re-shaded to the Meridian human green (slice C); deletion
+   * stays red — a strikethrough deletion reads as "removed", not "human vs agent". */
+  --atrium-suggest-insert: #3e7c4f; /* green underline — proposed insertion */
   --atrium-suggest-delete: #dc2626; /* red strikethrough — proposed deletion */
 }
 
