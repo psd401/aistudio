@@ -24,13 +24,14 @@
  * connection would be pinned during slow external IO.)
  */
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   executeQuery,
   executeTransaction,
   type DbTransaction,
 } from "@/lib/db/drizzle-client";
-import { contentObjects, contentVersions } from "@/lib/db/schema";
+import { contentEmbedLinks, contentObjects, contentVersions } from "@/lib/db/schema";
+import { parseEmbeddedArtifactIds } from "./embed-directive";
 import { pgTimestampAsText } from "@/lib/db/drizzle-helpers";
 import { createLogger } from "@/lib/logger";
 import { actorKindOf, agentIdOf, assertCanEdit, authorUserIdOf } from "./helpers";
@@ -82,6 +83,54 @@ function defaultBodyFormat(kind: "document" | "artifact"): BodyFormat {
 
 function artifactFileName(format: BodyFormat): string {
   return format === "jsx" ? "artifact.jsx" : "artifact.html";
+}
+
+/**
+ * Maintain the `content_embed_links` backlinks for a DOCUMENT snapshot (Meridian
+ * slice D). The document's canonical markdown is the source of truth for which
+ * artifacts it embeds (`::atrium-artifact{id="…"}` directives), so on every version
+ * write we REPLACE this document's rows to match the new body: parse the referenced
+ * ids, keep only those that are EXISTING artifacts (so a stale/typo id can never
+ * abort the snapshot on the FK, and a non-artifact edge is never stored), then
+ * delete-then-insert inside the same transaction. Runs in-tx so the backlinks are
+ * transactionally consistent with the committed version. Called for documents only
+ * (artifacts never embed).
+ */
+async function syncEmbedBacklinksInTx(
+  tx: DbTransaction,
+  documentId: string,
+  markdown: string
+): Promise<void> {
+  const referenced = parseEmbeddedArtifactIds(markdown);
+  let validArtifactIds: string[] = [];
+  if (referenced.length > 0) {
+    const rows = await tx
+      .select({ id: contentObjects.id })
+      .from(contentObjects)
+      .where(
+        and(
+          inArray(contentObjects.id, referenced),
+          eq(contentObjects.kind, "artifact")
+        )
+      );
+    validArtifactIds = rows.map((r) => r.id);
+  }
+  // Replace this document's backlink set to match the latest snapshot (also clears
+  // links when an embed was removed, since referenced may now be empty).
+  await tx
+    .delete(contentEmbedLinks)
+    .where(eq(contentEmbedLinks.documentObjectId, documentId));
+  if (validArtifactIds.length > 0) {
+    await tx
+      .insert(contentEmbedLinks)
+      .values(
+        validArtifactIds.map((artifactObjectId) => ({
+          documentObjectId: documentId,
+          artifactObjectId,
+        }))
+      )
+      .onConflictDoNothing();
+  }
 }
 
 /** Postgres unique-violation (SQLSTATE 23505) detector for typed-error mapping. */
@@ -287,6 +336,13 @@ export async function snapshotInTx(
     .update(contentObjects)
     .set({ currentVersionId: versionRow.id, updatedAt: new Date() })
     .where(eq(contentObjects.id, obj.id));
+
+  // Maintain the "EMBEDDED IN" backlinks from this document's embed directives
+  // (Meridian slice D). Documents only — artifacts never embed. In-tx so the
+  // backlinks stay consistent with the committed version body.
+  if (isDocument) {
+    await syncEmbedBacklinksInTx(tx, obj.id, input.body);
+  }
 
   return {
     version: rowToVersionDTO(versionRow as VersionRowAsText),

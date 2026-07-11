@@ -214,3 +214,166 @@
   color: var(--atrium-agent);
   background: var(--atrium-agent-soft);
 }
+
+/* ----------------------------------------------------------------------------
+ * Embedded-artifact block (Meridian slice D). Lives in this SHARED sink (imported
+ * by the editor AND both readers) so the block is styled everywhere it renders. It
+ * prefers the Meridian tokens (`--mer-*`, resolved inside `.atrium-meridian` — the
+ * editor today, the readers once slice E wraps them) and falls back to the literal
+ * Meridian hex so the readers render correctly before that scope exists.
+ * -------------------------------------------------------------------------- */
+.atrium-embed {
+  margin: 1.5em 0;
+  border: 1px solid var(--mer-border, #e4e7e3);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--mer-surface, #ffffff);
+  box-shadow: var(--mer-shadow-card, 0 1px 3px rgba(16, 50, 46, 0.05));
+}
+.atrium-embed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 14px;
+  background: var(--mer-canvas, #f6f7f5);
+  border-bottom: 1px solid var(--mer-border, #e4e7e3);
+  font-size: 12.5px;
+}
+.atrium-embed-head-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--mer-ink, #191d1c);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atrium-embed-mark {
+  color: var(--mer-agent, #6d4fc2);
+  flex-shrink: 0;
+}
+.atrium-embed-head-label {
+  font-weight: 400;
+  color: var(--mer-ink-muted, #8b948f);
+}
+.atrium-embed-expand {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mer-brand, #10322e);
+  text-decoration: none;
+}
+.atrium-embed-expand:hover {
+  text-decoration: underline;
+}
+.atrium-embed-frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+/* Unavailable placeholder (existence mask) + loading state — quiet, no content. */
+.atrium-embed-unavailable,
+.atrium-embed-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 18px;
+  font-size: 13px;
+  color: var(--mer-ink-muted, #8b948f);
+  background: var(--mer-canvas, #f6f7f5);
+}
+.atrium-embed-unavailable {
+  border-style: dashed;
+}
+.atrium-embed-unavailable-mark {
+  color: var(--mer-ink-muted, #8b948f);
+  flex-shrink: 0;
+}
+/* The editor NodeView wrapper: keep the block non-selectable-looking and spaced. */
+.atrium-embed-nodeview {
+  margin: 0.5em 0;
+}
+
+/* ----------------------------------------------------------------------------
+ * Artifact canvas toolbar (Preview/Code tabs, version select) — Meridian tokens
+ * with hex fallbacks (this sink is imported by the Meridian-scoped artifact viewer
+ * AND the un-scoped Nexus workspace panel, so both must render).
+ * -------------------------------------------------------------------------- */
+.atrium-artifact-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--mer-ink-muted, #8b948f);
+}
+.atrium-artifact-tabs {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--mer-border, #e4e7e3);
+  border-radius: 8px;
+}
+.atrium-artifact-tab {
+  padding: 5px 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--mer-ink-secondary, #454d49);
+  background: var(--mer-surface, #fff);
+  border: none;
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out;
+}
+.atrium-artifact-tab + .atrium-artifact-tab {
+  border-left: 1px solid var(--mer-border, #e4e7e3);
+}
+.atrium-artifact-tab:hover {
+  background: var(--mer-brand-tint, #e9f2ef);
+}
+.atrium-artifact-tab[data-active="true"] {
+  background: var(--mer-brand, #10322e);
+  color: #fff;
+  font-weight: 600;
+}
+.atrium-artifact-verlabel {
+  display: inline-flex;
+  align-items: center;
+}
+.atrium-artifact-select {
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--mer-border, #e4e7e3);
+  background: var(--mer-surface, #fff);
+  color: var(--mer-ink-secondary, #454d49);
+  font-size: 12.5px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+.atrium-artifact-restore {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--mer-border, #e4e7e3);
+  background: var(--mer-surface, #fff);
+  color: var(--mer-ink-secondary, #454d49);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.atrium-artifact-restore:hover:not(:disabled) {
+  background: var(--mer-brand-tint, #e9f2ef);
+}
+.atrium-artifact-restore:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.atrium-artifact-status {
+  margin-left: auto;
+  color: var(--mer-ink-muted, #8b948f);
+}
+.atrium-artifact-hint {
+  font-size: 12px;
+  color: var(--mer-ink-muted, #8b948f);
+}

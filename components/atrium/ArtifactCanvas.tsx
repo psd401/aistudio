@@ -159,14 +159,15 @@ function CanvasToolbar({
   const selected = versions.find((v) => v.id === selectedVersionId) ?? null;
   const canRestore = canEdit && selected !== null && !selected.isCurrent;
   return (
-    <div className="flex items-center gap-3 text-xs text-gray-500">
-      <div className="inline-flex overflow-hidden rounded border" role="tablist">
+    <div className="atrium-artifact-toolbar">
+      <div className="atrium-artifact-tabs" role="tablist">
         <button
           type="button"
           role="tab"
           aria-selected={tab === "preview"}
           onClick={() => onTab("preview")}
-          className={`px-2 py-1 ${tab === "preview" ? "bg-gray-100 font-medium" : "hover:bg-gray-50"}`}
+          className="atrium-artifact-tab"
+          data-active={tab === "preview" ? "true" : "false"}
         >
           Preview
         </button>
@@ -175,19 +176,20 @@ function CanvasToolbar({
           role="tab"
           aria-selected={tab === "code"}
           onClick={() => onTab("code")}
-          className={`border-l px-2 py-1 ${tab === "code" ? "bg-gray-100 font-medium" : "hover:bg-gray-50"}`}
+          className="atrium-artifact-tab"
+          data-active={tab === "code" ? "true" : "false"}
         >
           Code
         </button>
       </div>
 
       {versions.length > 0 && (
-        <label className="flex items-center gap-1">
+        <label className="atrium-artifact-verlabel">
           <span className="sr-only">Version</span>
           <select
             value={selectedVersionId ?? ""}
             onChange={(e) => onSelectVersion(e.target.value)}
-            className="rounded border px-1 py-1"
+            className="atrium-artifact-select"
             data-testid="artifact-version-select"
           >
             {versions.map((v) => (
@@ -204,14 +206,14 @@ function CanvasToolbar({
           type="button"
           onClick={onRestore}
           disabled={restoring || state === "loading"}
-          className="rounded border px-2 py-1 hover:bg-gray-50 disabled:opacity-50"
+          className="atrium-artifact-restore"
           data-testid="artifact-restore-version"
         >
           {restoring ? "Restoring…" : "Restore this version"}
         </button>
       )}
 
-      <span aria-live="polite" className="ml-auto">
+      <span aria-live="polite" className="atrium-artifact-status">
         {state === "loading" && "Loading…"}
         {state === "error" && (message ?? "Error")}
         {state === "ready" && notice}
@@ -471,7 +473,7 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
         />
       )}
 
-      <p className="text-xs text-gray-500">
+      <p className="atrium-artifact-hint">
         Tweak by asking in chat — or edit the code directly.
       </p>
     </div>

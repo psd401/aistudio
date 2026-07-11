@@ -1095,6 +1095,26 @@
 .mer-bubble-pop-item[data-active="true"] {
   background: rgba(246, 247, 245, 0.22);
 }
+
+/* Embed-artifact picker popover (scrollable list of the viewer's artifacts) */
+.mer-bubble-embed-pop {
+  min-width: 210px;
+  max-width: 300px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.mer-bubble-embed-pop .mer-bubble-pop-item {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mer-bubble-pop-empty {
+  padding: 7px 12px;
+  font-size: 12.5px;
+  color: rgba(246, 247, 245, 0.6);
+  white-space: nowrap;
+}
 .mer-bubble-colors {
   position: absolute;
   top: calc(100% + 6px);
@@ -1281,4 +1301,166 @@
 }
 .mer-editor-status[data-tone="pending"] {
   color: #b4552d;
+}
+
+/* ============================================================================
+ * ARTIFACT VIEWER (slice D) — topbar (reuses .mer-editor-topbar / .mer-breadcrumb
+ * / .mer-badge-live from above) + canvas column + 300px metadata rail.
+ * ========================================================================== */
+.mer-artifact {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--mer-canvas);
+}
+.mer-artifact-body {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  padding: 28px 24px 56px;
+}
+@media (max-width: 1040px) {
+  .mer-artifact-body {
+    flex-wrap: wrap;
+  }
+}
+.mer-artifact-canvas-col {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--mer-surface);
+  border: 1px solid var(--mer-border);
+  border-radius: var(--mer-r-card);
+  box-shadow: var(--mer-shadow-card);
+  padding: 16px 18px;
+}
+
+/* ---- Metadata rail (manage-rights only) ---- */
+.mer-artifact-rail {
+  width: 300px;
+  flex: 0 0 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+@media (max-width: 1040px) {
+  .mer-artifact-rail {
+    width: 100%;
+    flex-basis: 100%;
+  }
+}
+.mer-artifact-rail-card {
+  background: var(--mer-surface);
+  border: 1px solid var(--mer-border);
+  border-radius: var(--mer-r-card);
+  box-shadow: var(--mer-shadow-card);
+  padding: 15px 16px;
+}
+.mer-artifact-rail-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mer-ink-muted);
+  margin-bottom: 10px;
+}
+.mer-artifact-about-lead {
+  font-size: 12.5px;
+  color: var(--mer-ink-secondary);
+  margin: 0 0 12px;
+}
+.mer-artifact-about-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 0;
+  border-top: 1px solid var(--mer-border);
+  font-size: 12.5px;
+}
+.mer-artifact-about-key {
+  color: var(--mer-ink-muted);
+}
+.mer-artifact-about-val {
+  color: var(--mer-ink);
+  font-weight: 600;
+  text-align: right;
+}
+.mer-artifact-rail-empty {
+  font-size: 12.5px;
+  color: var(--mer-ink-muted);
+  margin: 0;
+}
+.mer-artifact-backlinks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mer-artifact-backlink {
+  display: block;
+  font-size: 13px;
+  color: var(--mer-brand);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mer-artifact-backlink:hover {
+  text-decoration: underline;
+}
+
+/* ---- Ask-the-agent card (gradient tint, agent violet) ---- */
+.mer-artifact-ask {
+  background: var(--mer-grad-agent-callout);
+  border-color: var(--mer-border-agent);
+}
+.mer-artifact-ask-hint {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--mer-ink-secondary);
+  margin: 0 0 12px;
+}
+.mer-artifact-ask-examples {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.mer-artifact-ask-chip {
+  text-align: left;
+  font-size: 12px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--mer-border-agent);
+  background: var(--mer-surface);
+  color: var(--mer-ink-secondary);
+  cursor: pointer;
+  transition: background 150ms ease-out, border-color 150ms ease-out;
+}
+.mer-artifact-ask-chip:hover {
+  background: var(--mer-agent-tint);
+  border-color: var(--mer-agent);
+}
+.mer-artifact-ask-form {
+  display: flex;
+  gap: 6px;
+}
+.mer-artifact-ask-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 36px;
+  border-radius: var(--mer-r-button);
+  border: 1px solid var(--mer-border);
+  background: var(--mer-surface);
+  color: var(--mer-ink);
+  font-size: 13px;
+  padding: 0 10px;
+}
+.mer-artifact-ask-input:focus {
+  outline: none;
+  border-color: var(--mer-agent);
+  box-shadow: 0 0 0 3px rgba(109, 79, 194, 0.12);
 }

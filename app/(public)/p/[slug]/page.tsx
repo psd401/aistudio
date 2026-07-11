@@ -48,12 +48,13 @@ import { and, eq } from "drizzle-orm";
 import type { Metadata } from "next";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentObjects, contentPublications } from "@/lib/db/schema";
-import { renderMarkdownToHtml } from "@/lib/content/render/markdown-render";
 import { s3Store } from "@/lib/content/storage/s3-store";
 import { versionService } from "@/lib/content/version-service";
+import { resolveDocumentParts } from "@/lib/content/embed-resolver";
 import { createLogger } from "@/lib/logger";
 import { ProvenanceFooter } from "@/components/atrium/ProvenanceFooter";
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
+import { ReaderDocumentBody } from "@/components/atrium/ReaderDocumentBody";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import "@/styles/atrium-content.css";
 import "katex/dist/katex.min.css";
@@ -266,9 +267,12 @@ export default async function PublicReaderPage({
     });
   }
 
-  // renderMarkdownToHtml returns SANITIZED HTML (see module header) — safe for
-  // dangerouslySetInnerHTML; it is the only sink for the document body.
-  const html = renderMarkdownToHtml(markdown);
+  // Render the body as ordered parts: sanitized-HTML runs (the same
+  // renderMarkdownToHtml sink) interleaved with live embedded-artifact blocks. Each
+  // embed is gated STRICTLY on the artifact's own `visibility_level === 'public'`
+  // (public audience, no session) — a non-public embed renders a quiet placeholder,
+  // never its content, so the public page never leaks non-public artifacts.
+  const parts = await resolveDocumentParts(markdown, { audience: "public" });
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-8">
@@ -276,10 +280,7 @@ export default async function PublicReaderPage({
         <h1 className="text-3xl font-semibold">{published.title}</h1>
       </header>
       {/* `.atrium-content` is the single rendered-body sink (and the test anchor). */}
-      <article
-        className="atrium-content"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
+      <ReaderDocumentBody parts={parts} />
       <ProvenanceFooter objectId={published.id} publishedVersionNumber={version.versionNumber} />
     </main>
   );

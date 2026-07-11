@@ -59,16 +59,17 @@ import {
   contentObjects,
   contentPublications,
 } from "@/lib/db/schema";
-import { renderMarkdownToHtml } from "@/lib/content/render/markdown-render";
 import { s3Store } from "@/lib/content/storage/s3-store";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { versionService } from "@/lib/content/version-service";
+import { resolveDocumentParts } from "@/lib/content/embed-resolver";
 import { canEdit } from "@/lib/content/helpers";
 import { getOptionalRequester } from "@/actions/db/atrium/requester";
 import { countUnresolvedCommentThreadsAction } from "@/actions/db/atrium/comments";
 import { createLogger } from "@/lib/logger";
 import { ProvenanceFooter } from "@/components/atrium/ProvenanceFooter";
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
+import { ReaderDocumentBody } from "@/components/atrium/ReaderDocumentBody";
 import { ReaderCollectionSidebar } from "@/components/atrium/ReaderCollectionSidebar";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import "@/styles/atrium-content.css";
@@ -343,9 +344,15 @@ export default async function ReaderPage({
     });
   }
 
-  // renderMarkdownToHtml returns SANITIZED HTML (see module header) — safe for
-  // dangerouslySetInnerHTML; it is the only sink for the document body.
-  const html = renderMarkdownToHtml(markdown);
+  // Render the body as ordered parts: sanitized-HTML runs (the same
+  // renderMarkdownToHtml sink) interleaved with live embedded-artifact blocks. Each
+  // embed is resolved on the ARTIFACT's own visibility for THIS viewer (internal
+  // audience → canView) — a non-viewable embed renders a quiet placeholder, never
+  // its content.
+  const parts = await resolveDocumentParts(markdown, {
+    audience: "internal",
+    requester,
+  });
 
   return (
     <ReaderShell
@@ -356,10 +363,7 @@ export default async function ReaderPage({
       mainClassName="min-w-0 max-w-3xl flex-1"
     >
       {/* `.atrium-content` is the single rendered-body sink (and the test anchor). */}
-      <article
-        className="atrium-content"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
+      <ReaderDocumentBody parts={parts} />
       <ProvenanceFooter objectId={published.id} publishedVersionNumber={version.versionNumber} />
     </ReaderShell>
   );

@@ -30,10 +30,13 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
-import { useEditor, EditorContent } from "@tiptap/react";
+import { useEditor, EditorContent, ReactNodeViewRenderer } from "@tiptap/react";
 import { Collaboration } from "@tiptap/extension-collaboration";
 import { Markdown } from "tiptap-markdown";
+import type { Node as TiptapNode, Extensions } from "@tiptap/core";
 import { getSchemaExtensions } from "@/lib/content/collab/editor-extensions";
+import { ARTIFACT_EMBED_NODE_NAME } from "@/lib/content/collab/artifact-embed-node";
+import { ArtifactEmbedNodeView } from "./ArtifactEmbedNodeView";
 import { makeAuthorTag } from "@/lib/content/collab/provenance";
 import { useUser } from "@/components/auth/user-provider";
 import { EditorToolbar } from "./EditorToolbar";
@@ -58,6 +61,23 @@ import "@/styles/atrium-content.css";
 import "@/styles/atrium-meridian.css";
 
 type Status = CollabStatus;
+
+/**
+ * Attach the live React NodeView to the shared `atriumArtifactEmbed` node for the
+ * CLIENT editor only. The shared schema (`getSchemaExtensions`) defines the node
+ * schema-only (React-free) so the server/collab bundle stays lean; here we
+ * `.extend` just that one node with `addNodeView` — which does NOT alter the node
+ * spec, so client/server schema parity (asserted by the collab-schema smoke) holds.
+ */
+function withEmbedNodeView(extensions: Extensions): Extensions {
+  return extensions.map((ext) =>
+    ext.name === ARTIFACT_EMBED_NODE_NAME
+      ? (ext as TiptapNode).extend({
+          addNodeView: () => ReactNodeViewRenderer(ArtifactEmbedNodeView),
+        })
+      : ext
+  );
+}
 
 /** A breadcrumb crumb — a plain label, optionally a link. */
 export interface BreadcrumbCrumb {
@@ -329,7 +349,9 @@ export function DocumentEditor({
       immediatelyRender: false,
       editable: false,
       extensions: [
-        ...getSchemaExtensions(),
+        // Client editor: the shared schema + the live embed NodeView attached to
+        // the (schema-only) atriumArtifactEmbed node.
+        ...withEmbedNodeView(getSchemaExtensions()),
         Markdown,
         Collaboration.configure({ document: ydoc }),
         AuthoredTracker.configure({ by: makeAuthorTag("human", userId) }),

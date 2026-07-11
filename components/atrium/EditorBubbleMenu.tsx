@@ -16,11 +16,16 @@
  * never see the toolbar (`shouldShow` gates on `editor.isEditable`).
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Editor } from "@tiptap/core";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { useEditorState } from "@tiptap/react";
+import { ARTIFACT_EMBED_NODE_NAME } from "@/lib/content/collab/artifact-embed-node";
+import { listContentAction } from "@/actions/db/atrium/list-content";
+import { createLogger } from "@/lib/client-logger";
+
+const bubbleLog = createLogger({ component: "EditorBubbleMenu" });
 
 /** Text colors offered by the color chip. Violet = agent, so it is intentionally
  *  NOT offered here as a manual text color (violet stays reserved for agent
@@ -134,6 +139,96 @@ function ColorPopover({
   );
 }
 
+/** One artifact option in the embed picker. */
+interface EmbedOption {
+  id: string;
+  title: string;
+}
+
+/**
+ * The "✦ Embed" popover: lists the artifacts the viewer can see (visibility-gated
+ * by `listContentAction`) and inserts the selected one as an `atriumArtifactEmbed`
+ * block AFTER the current selection (never replacing the selected text). The reader
+ * re-gates each embed per viewer, so listing here is a convenience, not the
+ * authorization boundary.
+ */
+function ArtifactEmbedPicker({
+  editor,
+  onPick,
+}: {
+  editor: Editor;
+  onPick: () => void;
+}): React.JSX.Element {
+  const [items, setItems] = useState<EmbedOption[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await listContentAction({ kind: "artifact", limit: 50 });
+        if (cancelled) return;
+        if (res.isSuccess) {
+          setItems(res.data.map((o) => ({ id: o.id, title: o.title })));
+        } else {
+          bubbleLog.warn("listContentAction failed", { message: res.message });
+        }
+      } catch (e) {
+        if (cancelled) return;
+        bubbleLog.error("listContentAction threw", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const insert = (opt: EmbedOption): void => {
+    // Insert the block at the END of the selection so the selected text is kept
+    // (a plain insertContent would replace it).
+    const at = editor.state.selection.to;
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(at, {
+        type: ARTIFACT_EMBED_NODE_NAME,
+        attrs: { artifactId: opt.id, title: opt.title },
+      })
+      .run();
+    onPick();
+  };
+
+  return (
+    <div className="mer-bubble-pop mer-bubble-embed-pop" role="menu">
+      {loading ? (
+        <span className="mer-bubble-pop-empty">Loading artifacts…</span>
+      ) : items.length === 0 ? (
+        <span className="mer-bubble-pop-empty">No artifacts to embed yet</span>
+      ) : (
+        items.map((opt) => (
+          <button
+            key={opt.id}
+            type="button"
+            role="menuitem"
+            className="mer-bubble-pop-item"
+            title={opt.title}
+            onClick={() => insert(opt)}
+          >
+            <span className="mer-agent-mark" aria-hidden="true">
+              ✦
+            </span>{" "}
+            {opt.title}
+          </button>
+        ))
+      )}
+    </div>
+  );
+}
+
 export interface EditorBubbleMenuProps {
   editor: Editor;
   /** Where "✦ Ask agent" navigates — the doc opened beside the Nexus chat. */
@@ -145,7 +240,7 @@ export function EditorBubbleMenu({
   askAgentHref,
 }: EditorBubbleMenuProps): React.JSX.Element {
   const router = useRouter();
-  const [pop, setPop] = useState<"none" | "text" | "color">("none");
+  const [pop, setPop] = useState<"none" | "text" | "color" | "embed">("none");
 
   // Re-render the toolbar when the active-mark state changes so B/I/U/S and the
   // Text ▾ label reflect the current selection.
@@ -277,6 +372,19 @@ export function EditorBubbleMenu({
         >
           ☰
         </button>
+        <button
+          type="button"
+          className="mer-bubble-btn"
+          aria-label="Embed artifact"
+          title="Embed an artifact"
+          aria-haspopup="menu"
+          aria-expanded={pop === "embed"}
+          data-testid="editor-embed-artifact"
+          onClick={() => setPop(pop === "embed" ? "none" : "embed")}
+        >
+          ✦▦
+        </button>
+        {pop === "embed" && <ArtifactEmbedPicker editor={editor} onPick={closePops} />}
 
         <button
           type="button"
