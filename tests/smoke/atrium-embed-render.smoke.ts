@@ -72,6 +72,58 @@ check("an embed directive INSIDE a fenced code block is NOT split", () => {
   );
 });
 
+check("a fenced example directive creates NO backlink (render + backlinks agree)", () => {
+  // The reader render (renderDocumentToParts) and the snapshot backlink parser
+  // (parseEmbeddedArtifactIds) share ONE fence-aware recognizer, so a directive that
+  // only documents the syntax inside a code fence is inert for BOTH — no live embed
+  // AND no content_embed_links row.
+  const md = `Docs:\n\n\`\`\`\n::atrium-artifact{id="${UUID_A}"}\n\`\`\`\n\nafter`;
+  assert.deepEqual(
+    parseEmbeddedArtifactIds(md),
+    [],
+    "a fenced example must not create a backlink"
+  );
+  const parts = renderDocumentToParts(md);
+  assert.ok(parts.every((p) => p.kind === "html"), "fenced example must render inert");
+});
+
+check("a mismatched ~~~ inside an unclosed ``` does not resurrect a live embed", () => {
+  // CommonMark: a ``` fence closes only on a ``` line — a ~~~ line does NOT close it,
+  // and an unclosed fence runs to EOF. A naive any-fence toggle would treat the ~~~
+  // as a close and then tokenize the following directive as a LIVE embed. It must not.
+  const md = `\`\`\`\n~~~\n::atrium-artifact{id="${UUID_A}"}\nstill code`;
+  const parts = renderDocumentToParts(md);
+  assert.ok(
+    parts.every((p) => p.kind === "html"),
+    "a mismatched inner fence must not reopen the doc to a live embed"
+  );
+  assert.deepEqual(
+    parseEmbeddedArtifactIds(md),
+    [],
+    "a directive inside an unclosed fence must not create a backlink"
+  );
+});
+
+check("a real ``` close DOES re-enable a following embed", () => {
+  // The counter-case: after a properly matched ``` close, a subsequent directive on
+  // its own line IS a live embed again (the fence tracker must not stay stuck open).
+  const md = `\`\`\`\ncode\n\`\`\`\n\n::atrium-artifact{id="${UUID_A}"}`;
+  const parts = renderDocumentToParts(md);
+  const kinds = parts.map((p) => p.kind);
+  assert.ok(kinds.includes("embed"), "an embed after a closed fence must be live");
+  assert.deepEqual(parseEmbeddedArtifactIds(md), [UUID_A]);
+});
+
+check("a directive TRAILING prose on the same line is inert (whole-line only)", () => {
+  // The reader's whole-line recognizer requires the directive to own the entire line
+  // (matches the editor tokenizer's line-anchoring fix). Prose + directive on one
+  // line is one inert paragraph — never a live embed and never a backlink.
+  const md = `see this ::atrium-artifact{id="${UUID_A}"} inline`;
+  const parts = renderDocumentToParts(md);
+  assert.ok(parts.every((p) => p.kind === "html"), "an inline directive must stay text");
+  assert.deepEqual(parseEmbeddedArtifactIds(md), []);
+});
+
 check("two embeds around text produce html · embed · html · embed", () => {
   const md = `a\n\n::atrium-artifact{id="${UUID_A}"}\n\nb\n\n::atrium-artifact{id="${UUID_B}"}`;
   const parts = renderDocumentToParts(md);

@@ -76,8 +76,19 @@ const artifactEmbedMarkedExtension: TokenizerAndRendererExtension = {
   name: "atriumArtifactEmbed",
   level: "block",
   start(src: string) {
-    const idx = src.indexOf("::atrium-artifact{");
-    return idx < 0 ? undefined : idx;
+    // Only a LINE-ANCHORED directive is a real embed: it must occupy its own whole
+    // line (preceded by start-of-string or a newline, up to leading whitespace),
+    // exactly like the reader's whole-line ARTIFACT_EMBED_LINE_RE. A plain
+    // `indexOf("::atrium-artifact{")` would also point at a directive TRAILING other
+    // prose on the same line, so marked would cut the paragraph and tokenize it as a
+    // live embed here — while the reader treats that same line as inert text (the
+    // whole-line regex fails on the leading prose). Anchoring `start` keeps the two
+    // in lockstep: prose + directive on one line stays one inert paragraph.
+    const m = /(?:^|\n)[ \t]*::atrium-artifact\{/.exec(src);
+    if (!m) return undefined;
+    // Advance past a leading newline (if matched) to the start of the directive line
+    // so the tokenizer's `^[ \t]*…` rule fires at that position.
+    return m[0].startsWith("\n") ? m.index + 1 : m.index;
   },
   tokenizer(src: string) {
     const rule = /^[ \t]*::atrium-artifact\{([^}]*)\}[ \t]*(?:\n|$)/;

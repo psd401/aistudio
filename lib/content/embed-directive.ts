@@ -72,22 +72,89 @@ export function serializeArtifactEmbedDirective(id: string): string | null {
 }
 
 /**
+ * A fenced-code delimiter on its own line: a run of ≥3 backticks or ≥3 tildes
+ * (after up to some leading whitespace). Returns the delimiter char + run length
+ * and whether any non-whitespace TRAILS the run, or null when the line is not a
+ * fence. CommonMark distinguishes the open fence (may carry an info string, so
+ * trailing text is allowed) from the CLOSE fence (delimiters only, trailing must
+ * be whitespace) — the caller uses `hasTrailing` to enforce that.
+ */
+function matchFence(
+  line: string
+): { char: string; len: number; hasTrailing: boolean } | null {
+  const m = /^[ \t]*(`{3,}|~{3,})([^\n]*)$/.exec(line);
+  if (!m) return null;
+  return { char: m[1][0], len: m[1].length, hasTrailing: m[2].trim().length > 0 };
+}
+
+/**
+ * The ONE definition of "which lines of a raw markdown body are real block-level
+ * artifact-embed directives", shared by the reader split (`renderDocumentToParts`)
+ * and the snapshot backlink parser (`parseEmbeddedArtifactIds`) so the two can
+ * never disagree (a directive that is a live embed for one but inert text for the
+ * other would desync the rendered doc from its `content_embed_links` backlinks).
+ *
+ * Fenced-code tracking mirrors CommonMark, NOT a naive toggle:
+ *  - a fence OPENS on a ```/~~~ line (an info string after the run is allowed);
+ *  - it CLOSES only on a later line using the SAME fence character with a run
+ *    length ≥ the opener's AND no trailing text (delimiters + whitespace only);
+ *  - an unmatched fence stays OPEN to end-of-input — so one mismatched ~~~ inside
+ *    an unclosed ``` block cannot resurrect a live embed for everything after it.
+ *
+ * `onLine(line, embedId)` is invoked for EVERY line in order; `embedId` is the
+ * validated artifact id when the line is a real block-level embed directive
+ * (its own whole line, outside any fence), else null (ordinary text — including a
+ * malformed directive or one documented inside a code fence).
+ */
+export function scanMarkdownEmbedLines(
+  markdown: string,
+  onLine: (line: string, embedId: string | null) => void
+): void {
+  let openChar = "";
+  let openLen = 0;
+  let inFence = false;
+  for (const line of markdown.split(/\r?\n/)) {
+    const fence = matchFence(line);
+    if (inFence) {
+      // Close only on the SAME delimiter char, run length ≥ opener, delimiters only.
+      if (fence && fence.char === openChar && fence.len >= openLen && !fence.hasTrailing) {
+        inFence = false;
+        openChar = "";
+        openLen = 0;
+      }
+      onLine(line, null);
+      continue;
+    }
+    if (fence) {
+      inFence = true;
+      openChar = fence.char;
+      openLen = fence.len;
+      onLine(line, null);
+      continue;
+    }
+    const m = line.match(ARTIFACT_EMBED_LINE_RE);
+    onLine(line, m ? parseArtifactEmbedAttrs(m[1]) : null);
+  }
+}
+
+/**
  * Parse every embedded artifact id out of a document markdown body (deduped, in
  * first-seen order). Used by the snapshot write primitive to maintain the
- * `content_embed_links` backlink table. Pure + cheap (line scan + regex).
+ * `content_embed_links` backlink table. Pure + cheap (fence-aware line scan).
+ *
+ * Fence-aware via the shared `scanMarkdownEmbedLines`: a directive that merely
+ * DOCUMENTS the syntax inside a ```/~~~ code block is NOT a real embed and never
+ * creates a backlink row.
  */
 export function parseEmbeddedArtifactIds(markdown: string): string[] {
   if (!markdown) return [];
   const ids: string[] = [];
   const seen = new Set<string>();
-  for (const line of markdown.split(/\r?\n/)) {
-    const m = line.match(ARTIFACT_EMBED_LINE_RE);
-    if (!m) continue;
-    const id = parseArtifactEmbedAttrs(m[1]);
-    if (id && !seen.has(id)) {
-      seen.add(id);
-      ids.push(id);
+  scanMarkdownEmbedLines(markdown, (_line, embedId) => {
+    if (embedId && !seen.has(embedId)) {
+      seen.add(embedId);
+      ids.push(embedId);
     }
-  }
+  });
   return ids;
 }

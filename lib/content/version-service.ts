@@ -90,13 +90,30 @@ function artifactFileName(format: BodyFormat): string {
  * slice D). The document's canonical markdown is the source of truth for which
  * artifacts it embeds (`::atrium-artifact{id="…"}` directives), so on every version
  * write we REPLACE this document's rows to match the new body: parse the referenced
- * ids, keep only those that are EXISTING artifacts (so a stale/typo id can never
- * abort the snapshot on the FK, and a non-artifact edge is never stored), then
- * delete-then-insert inside the same transaction. Runs in-tx so the backlinks are
- * transactionally consistent with the committed version. Called for documents only
- * (artifacts never embed).
+ * ids (fence-aware via `parseEmbeddedArtifactIds` — a directive inside a ```/~~~
+ * code example is NOT counted), keep only those that are EXISTING artifacts (so a
+ * stale/typo id can never abort the snapshot on the FK, and a non-artifact edge is
+ * never stored), then delete-then-insert inside the same transaction. Runs in-tx so
+ * the backlinks are transactionally consistent with the committed version. Called
+ * for documents only (artifacts never embed).
+ *
+ * KNOWN LIMITATION — agent-bridge live edits (Meridian slice D, P2 adversarial
+ * finding). The agent bridge (`app/api/content/[id]/agent-bridge/route.ts` →
+ * `applyAgentEdit`) mutates the live Y.Doc directly and does NOT go through
+ * `snapshotInTx`, so a live agent edit that ADDS or REMOVES an embed leaves this
+ * backlink set stale until the next HUMAN snapshot re-syncs it. Impact is bounded
+ * and self-healing: backlinks feed only the "EMBEDDED IN" rail (`embed-backlinks.ts`)
+ * — the reader-facing render and per-viewer visibility gate resolve embeds from the
+ * live body every time and are unaffected — and the very next version write corrects
+ * the rows. The clean fix (re-sync here from the post-edit live markdown, reusing
+ * this parser inside a small `executeTransaction` in the bridge route) depends on the
+ * server-side ProseMirror-JSON→markdown serializer / `readAgentDocMarkdown` added in
+ * PR #1186, which is NOT present in this branch's parent chain; wiring it now would
+ * require either restructuring `apply-agent-edit`/collab-server or a partial
+ * replace-only sync that silently diverges from append/suggest — both explicitly out
+ * of scope for this slice. Deferred to the follow-up that lands on top of #1186.
  */
-async function syncEmbedBacklinksInTx(
+export async function syncEmbedBacklinksInTx(
   tx: DbTransaction,
   documentId: string,
   markdown: string

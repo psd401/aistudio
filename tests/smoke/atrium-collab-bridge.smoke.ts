@@ -157,6 +157,19 @@ check("a malformed embed directive (bad id) is NOT parsed as an embed", () => {
   assert.equal(embeds.length, 0, "invalid id falls through, no embed node");
 });
 
+check("a directive TRAILING prose on the same line is NOT a live embed (line-anchored)", () => {
+  // Fix (P2): the editor tokenizer must require the directive to occupy its OWN whole
+  // line — matching the reader's whole-line ARTIFACT_EMBED_LINE_RE. A directive that
+  // trails other prose on the same line must stay inert text in the editor too, or the
+  // editor would show a live embed the reader renders as plain text (a desync). The
+  // preceding-prose text must survive as content.
+  const json = markdownToProseMirrorJSON(`see this ::atrium-artifact{id="${EMBED_UUID}"} inline`);
+  const embeds = findNodes(json, "atriumArtifactEmbed");
+  assert.equal(embeds.length, 0, "an inline (non-line-anchored) directive is not an embed");
+  const text = collectText(json).join(" ");
+  assert.match(text, /see this/, "surrounding prose is preserved as text");
+});
+
 check("the embed node serializes back to its canonical directive line", () => {
   // Invoke the node's tiptap-markdown serializer directly (a headless editor is
   // not constructible in Bun without a DOM); the serializer is pure over a

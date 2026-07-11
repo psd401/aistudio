@@ -20,27 +20,24 @@
  */
 
 import { renderMarkdownToHtml } from "./markdown-render";
-import {
-  ARTIFACT_EMBED_LINE_RE,
-  parseArtifactEmbedAttrs,
-} from "../embed-directive";
+import { scanMarkdownEmbedLines } from "../embed-directive";
 
 /** One rendered segment of a document body. */
 export type DocumentPart =
   | { kind: "html"; html: string }
   | { kind: "embed"; artifactId: string };
 
-/** Fenced-code delimiter (``` or ~~~), so a directive INSIDE a code block that
- *  merely documents the syntax is NOT treated as a real embed. */
-const FENCE_RE = /^[ \t]*(`{3,}|~{3,})/;
-
 /**
  * Split a document's canonical markdown into ordered html + embed parts.
  *
  * A real embed is the leaf directive `::atrium-artifact{id="<uuid>"}` on its own
- * line at block level (never inside a fenced code block). Malformed directives
- * (bad/absent id) are left as ordinary text, so they render harmlessly rather than
- * silently vanishing.
+ * line at block level (never inside a fenced code block). The fence-aware line
+ * classification is the SHARED `scanMarkdownEmbedLines` — the exact same recognizer
+ * the backlink parser (`parseEmbeddedArtifactIds`) uses — so the reader render and
+ * the persisted `content_embed_links` backlinks always agree on what is an embed
+ * (CommonMark fence rules, incl. an unmatched fence that stays open to EOF).
+ * Malformed directives (bad/absent id) fall through as ordinary text, so they
+ * render harmlessly rather than silently vanishing.
  */
 export function renderDocumentToParts(markdown: string): DocumentPart[] {
   if (!markdown) return [];
@@ -53,27 +50,14 @@ export function renderDocumentToParts(markdown: string): DocumentPart[] {
     buffer.length = 0;
   };
 
-  let inFence = false;
-  for (const line of markdown.split(/\r?\n/)) {
-    if (FENCE_RE.test(line)) {
-      inFence = !inFence;
+  scanMarkdownEmbedLines(markdown, (line, embedId) => {
+    if (embedId) {
+      flush();
+      parts.push({ kind: "embed", artifactId: embedId });
+    } else {
       buffer.push(line);
-      continue;
     }
-    if (!inFence) {
-      const m = line.match(ARTIFACT_EMBED_LINE_RE);
-      if (m) {
-        const id = parseArtifactEmbedAttrs(m[1]);
-        if (id) {
-          flush();
-          parts.push({ kind: "embed", artifactId: id });
-          continue;
-        }
-        // Malformed id: fall through and keep the line as ordinary text.
-      }
-    }
-    buffer.push(line);
-  }
+  });
   flush();
   return parts;
 }
