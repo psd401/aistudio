@@ -103,7 +103,9 @@ globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
 const { seedYDocFromMarkdown, yDocToProseMirrorJSON } = await import(
   "@/lib/content/collab/markdown-bridge"
 );
-const { readAgentDocMarkdown } = await import("@/lib/content/collab/apply-agent-edit");
+const { readAgentDocMarkdown, withHydratedDoc } = await import(
+  "@/lib/content/collab/apply-agent-edit"
+);
 const { proseMirrorJSONToMarkdown } = await import(
   "@/lib/content/collab/prosemirror-markdown"
 );
@@ -162,6 +164,30 @@ await check("readAgentDocMarkdown returns null when the socket closes before hyd
   server.doc = null;
   const out = await readAgentDocMarkdown(OID);
   assert.equal(out, null);
+});
+
+await check("withHydratedDoc REJECTS (does not hang) when the read callback throws", async () => {
+  // Regression (claude-review): finish() flips `done` before invoking its fn, so a
+  // throw from read(ydoc) must be caught BEFORE finish or the promise hangs forever
+  // (socket leak, no fallback). The server hydrates normally; the read callback throws.
+  server.mode = "hydrate";
+  server.doc = seedYDocFromMarkdown("anything", "human:7");
+  let rejected = false;
+  // Bound the wait well under SYNC_TIMEOUT_MS so a hang (bug) fails fast rather
+  // than blocking the whole smoke for 10s.
+  const guard = new Promise<never>((_, r) => setTimeout(() => r(new Error("HUNG")), 3000));
+  try {
+    await Promise.race([
+      withHydratedDoc(OID, () => {
+        throw new Error("serialize boom");
+      }),
+      guard,
+    ]);
+  } catch (err) {
+    rejected = true;
+    assert.match((err as Error).message, /serialize boom/, "rejects with the read error, not a timeout/hang");
+  }
+  assert.ok(rejected, "withHydratedDoc rejected");
 });
 
 globalThis.WebSocket = realWebSocket;

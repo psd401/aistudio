@@ -44,12 +44,13 @@ const MAX_EDIT_BYTES = 512 * 1024;
  * True when an agent-bridge failure is a transient TRANSPORT problem (the live
  * collab listener is unreachable / the sync round-trip timed out or the socket
  * closed) rather than a genuine content-apply failure. `applyAgentEdit` rejects
- * with these messages from `runLoopbackEdit` (see apply-agent-edit.ts): "collab
- * websocket error", "collab websocket closed", "collab sync timeout". Used to give
- * the model an accurate, retryable message instead of a generic "could not apply".
+ * with exactly these messages from `runLoopbackEdit` (see apply-agent-edit.ts):
+ * "collab websocket error", "collab websocket closed", "collab sync timeout" — all
+ * matched by this pattern. Used to give the model an accurate, retryable message
+ * instead of a generic "could not apply".
  */
 function isCollabTransportError(message: string): boolean {
-  return /websocket|sync timeout|connect|econnrefused/i.test(message);
+  return /websocket|timeout/i.test(message);
 }
 
 export interface WorkspaceChatTools {

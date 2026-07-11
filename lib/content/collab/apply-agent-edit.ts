@@ -333,9 +333,12 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
  * Read-only means the token carries `w:false`: the collab server still replies to
  * our SyncStep1 with a SyncStep2 (reads are permitted) but ignores any inbound
  * mutation, so this can never alter the live document. Rejects on the SYNC_TIMEOUT
- * window, a socket error, or a close before hydration.
+ * window, a socket error, a close before hydration, OR a throw from `read` (so a
+ * bad serialization settles the promise rather than hanging it).
+ *
+ * Exported for the read-path smoke (a throwing `read` must reject, not hang).
  */
-async function withHydratedDoc<T>(
+export async function withHydratedDoc<T>(
   objectId: string,
   read: (ydoc: Y.Doc) => T
 ): Promise<T> {
@@ -387,8 +390,20 @@ async function withHydratedDoc<T>(
             ws.send(encoding.toUint8Array(enc));
           }
           // The server's SyncStep2 has applied its state to our doc — read it.
+          // Run `read(ydoc)` BEFORE `finish` flips `done`: if it throws, `done` is
+          // still false so the reject below settles the promise. Calling read
+          // INSIDE finish() would flip `done` first, making the subsequent
+          // reject a no-op and hanging the promise forever (socket leak, no
+          // fallback) — the exact bug the fallback contract must avoid.
           if (syncType === SYNC_STEP_2) {
-            finish(() => resolve(read(ydoc)));
+            let value: T;
+            try {
+              value = read(ydoc);
+            } catch (e) {
+              finish(() => reject(e instanceof Error ? e : new Error(String(e))));
+              return;
+            }
+            finish(() => resolve(value));
           }
         } catch (e) {
           finish(() => reject(e instanceof Error ? e : new Error(String(e))));
