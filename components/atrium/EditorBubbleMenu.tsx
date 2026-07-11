@@ -22,6 +22,7 @@ import type { Editor } from "@tiptap/core";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { useEditorState } from "@tiptap/react";
 import { ARTIFACT_EMBED_NODE_NAME } from "@/lib/content/collab/artifact-embed-node";
+import { isSafeMediaUrl } from "@/lib/content/block-directives";
 import { listContentAction } from "@/actions/db/atrium/list-content";
 import { createLogger } from "@/lib/client-logger";
 
@@ -139,6 +140,158 @@ function ColorPopover({
   );
 }
 
+/** The "📣" callout popover: insert a note or warning callout. */
+function CalloutPopover({
+  editor,
+  onPick,
+}: {
+  editor: Editor;
+  onPick: () => void;
+}): React.JSX.Element {
+  return (
+    <div className="mer-bubble-pop" role="menu">
+      <button
+        type="button"
+        role="menuitem"
+        className="mer-bubble-pop-item"
+        data-testid="editor-callout-note"
+        onClick={() => {
+          editor.chain().focus().setCallout("note").run();
+          onPick();
+        }}
+      >
+        📣 Callout
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className="mer-bubble-pop-item"
+        data-testid="editor-callout-warn"
+        onClick={() => {
+          editor.chain().focus().setCallout("warn").run();
+          onPick();
+        }}
+      >
+        ⚠️ Warning
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The "🖼" media picker: insert an image, an image grid, or a video by URL. Media
+ * is referenced by a durable http/https URL — the reader (including the anonymous
+ * public reader) renders it directly, so no expiring presigned URL ever lands in
+ * the persisted document body. (Direct file-upload-to-S3 is deferred: this codebase
+ * has no durable public asset origin — see the slice-F report — so a presigned URL
+ * baked into a snapshot would break the published page when it expires.)
+ */
+function MediaPicker({
+  editor,
+  onPick,
+}: {
+  editor: Editor;
+  onPick: () => void;
+}): React.JSX.Element {
+  const [mode, setMode] = useState<"image" | "grid" | "video">("image");
+  const [url, setUrl] = useState("");
+  const [gridUrls, setGridUrls] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const insert = (): void => {
+    setError(null);
+    if (mode === "grid") {
+      const urls = gridUrls
+        .split(/[\n,]/)
+        .map((u) => u.trim())
+        .filter((u) => u.length > 0);
+      const valid = urls.filter((u) => isSafeMediaUrl(u));
+      if (valid.length === 0) {
+        setError("Enter one or more image URLs (http/https).");
+        return;
+      }
+      editor
+        .chain()
+        .focus()
+        .setAtriumImageGrid(valid.map((src) => ({ src })))
+        .run();
+      onPick();
+      return;
+    }
+    const trimmed = url.trim();
+    if (!isSafeMediaUrl(trimmed)) {
+      setError("Enter a valid http/https URL.");
+      return;
+    }
+    if (mode === "image") {
+      editor.chain().focus().setAtriumImage({ src: trimmed }).run();
+    } else {
+      editor.chain().focus().setAtriumVideo({ src: trimmed }).run();
+    }
+    onPick();
+  };
+
+  return (
+    <div className="mer-bubble-pop mer-bubble-media-pop" role="menu" data-testid="editor-media-pop">
+      <div className="mer-bubble-media-tabs" role="tablist">
+        {(["image", "grid", "video"] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            role="tab"
+            aria-selected={mode === m}
+            className="mer-bubble-media-tab"
+            data-active={mode === m ? "true" : "false"}
+            data-testid={`editor-media-tab-${m}`}
+            onClick={() => {
+              setMode(m);
+              setError(null);
+            }}
+          >
+            {m === "image" ? "Image" : m === "grid" ? "Grid" : "Video"}
+          </button>
+        ))}
+      </div>
+      {mode === "grid" ? (
+        <textarea
+          className="mer-bubble-media-input"
+          rows={3}
+          value={gridUrls}
+          placeholder="Image URLs, one per line"
+          aria-label="Image grid URLs"
+          data-testid="editor-media-grid-input"
+          onChange={(e) => setGridUrls(e.target.value)}
+        />
+      ) : (
+        <input
+          type="url"
+          className="mer-bubble-media-input"
+          value={url}
+          placeholder={mode === "image" ? "Image URL" : "Video URL (mp4/webm)"}
+          aria-label={mode === "image" ? "Image URL" : "Video URL"}
+          data-testid="editor-media-url-input"
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              insert();
+            }
+          }}
+        />
+      )}
+      {error && <span className="mer-bubble-media-error">{error}</span>}
+      <button
+        type="button"
+        className="mer-bubble-media-insert"
+        data-testid="editor-media-insert"
+        onClick={insert}
+      >
+        Insert {mode === "grid" ? "grid" : mode}
+      </button>
+    </div>
+  );
+}
+
 /** One artifact option in the embed picker. */
 interface EmbedOption {
   id: string;
@@ -233,6 +386,59 @@ function ArtifactEmbedPicker({
   );
 }
 
+/** Which floating popover (if any) is open above the bubble toolbar. */
+type BubblePop = "none" | "text" | "color" | "embed" | "callout" | "media";
+
+/**
+ * The rich-block insert buttons (callout + media) and their popovers (slice F),
+ * extracted from the toolbar so `EditorBubbleMenu`'s render stays within the
+ * max-lines budget. Behaviour is identical to inlining these two buttons.
+ */
+function RichInsertButtons({
+  editor,
+  pop,
+  setPop,
+  closePops,
+}: {
+  editor: Editor;
+  pop: BubblePop;
+  setPop: (next: BubblePop) => void;
+  closePops: () => void;
+}): React.JSX.Element {
+  return (
+    <>
+      <span className="mer-bubble-sep" aria-hidden="true" />
+      <button
+        type="button"
+        className="mer-bubble-btn"
+        aria-label="Insert callout"
+        title="Insert a callout"
+        aria-haspopup="menu"
+        aria-expanded={pop === "callout"}
+        data-testid="editor-callout"
+        onClick={() => setPop(pop === "callout" ? "none" : "callout")}
+      >
+        📣
+      </button>
+      {pop === "callout" && <CalloutPopover editor={editor} onPick={closePops} />}
+
+      <button
+        type="button"
+        className="mer-bubble-btn"
+        aria-label="Insert image or video"
+        title="Insert image, image grid, or video"
+        aria-haspopup="menu"
+        aria-expanded={pop === "media"}
+        data-testid="editor-media"
+        onClick={() => setPop(pop === "media" ? "none" : "media")}
+      >
+        🖼
+      </button>
+      {pop === "media" && <MediaPicker editor={editor} onPick={closePops} />}
+    </>
+  );
+}
+
 export interface EditorBubbleMenuProps {
   editor: Editor;
   /** Where "✦ Ask agent" navigates — the doc opened beside the Nexus chat. */
@@ -244,7 +450,7 @@ export function EditorBubbleMenu({
   askAgentHref,
 }: EditorBubbleMenuProps): React.JSX.Element {
   const router = useRouter();
-  const [pop, setPop] = useState<"none" | "text" | "color" | "embed">("none");
+  const [pop, setPop] = useState<BubblePop>("none");
 
   // Re-render the toolbar when the active-mark state changes so B/I/U/S and the
   // Text ▾ label reflect the current selection.
@@ -376,6 +582,13 @@ export function EditorBubbleMenu({
         >
           ☰
         </button>
+        <RichInsertButtons
+          editor={editor}
+          pop={pop}
+          setPop={setPop}
+          closePops={closePops}
+        />
+
         <button
           type="button"
           className="mer-bubble-btn"

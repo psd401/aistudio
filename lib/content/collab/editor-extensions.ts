@@ -51,6 +51,8 @@ import {
   AtriumSuggestionDelete,
 } from "./suggestion-marks";
 import { AtriumArtifactEmbed } from "./artifact-embed-node";
+import { AtriumCallout } from "./callout-node";
+import { AtriumImage, AtriumImageGrid, AtriumVideo } from "./media-nodes";
 
 /**
  * The schema-defining extensions shared by client editor and server transformer.
@@ -76,6 +78,16 @@ export function getSchemaExtensions(): Extensions {
     // and collab bundle build the identical schema — the live React NodeView is
     // attached client-side (DocumentEditor) and never touches the schema.
     AtriumArtifactEmbed,
+    // Meridian rich-block nodes (slice F). Callout (container), image, image grid
+    // (container of images), and video — all in THIS shared set (like TableKit /
+    // the embed node) so the client editor, server transformer, and collab bundle
+    // build the identical schema. Schema-only (no React): the in-editor look is CSS
+    // (.atrium-callout / .atrium-image-grid / .atrium-video), so no NodeView is
+    // attached and client/server parity holds (asserted in the collab-schema smoke).
+    AtriumCallout,
+    AtriumImage,
+    AtriumImageGrid,
+    AtriumVideo,
     AtriumAuthored,
     // §18.1 comments + track-changes marks. These MUST live here (the ONE shared
     // schema) so the client editor, server transformer, agent bridge, and seeding

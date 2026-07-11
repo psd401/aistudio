@@ -103,4 +103,34 @@ check("empty input -> empty string", () => {
   assert.equal(renderMarkdownToHtml(""), "");
 });
 
+// --- Meridian slice F: image grid + video reader render -----------------------
+
+check(":::grid -> image-grid div with allowlisted class + imgs", () => {
+  const html = renderMarkdownToHtml(
+    ":::grid\n![a](https://cdn.example/a.png)\n![b](https://cdn.example/b.png)\n:::"
+  );
+  assert.match(html, /class="atrium-image-grid"/, "grid container class survives sanitize");
+  assert.match(html, /src="https:\/\/cdn\.example\/a\.png"/);
+  assert.match(html, /src="https:\/\/cdn\.example\/b\.png"/);
+});
+
+check("::video{src} -> allowlisted <video> player", () => {
+  const html = renderMarkdownToHtml('::video{src="https://cdn.example/clip.mp4"}');
+  assert.match(html, /<video[^>]*class="atrium-video"/, "video tag + class survive sanitize");
+  assert.match(html, /src="https:\/\/cdn\.example\/clip\.mp4"/);
+  assert.match(html, /controls/, "native controls are kept");
+});
+
+check("a video with a javascript: src is stripped (no player)", () => {
+  const html = renderMarkdownToHtml('::video{src="javascript:alert(1)"}');
+  // The remark transform leaves the node inert (no <video> emitted) when the src is
+  // unsafe, and the sanitizer's http/https `src` protocol pin is the backstop.
+  assert.doesNotMatch(html, /javascript:/i, "no unsafe url in the output");
+});
+
+check("no <video> autoplay is ever emitted (published pages never auto-play)", () => {
+  const html = renderMarkdownToHtml('::video{src="https://cdn.example/clip.mp4"}');
+  assert.doesNotMatch(html, /autoplay/i, "autoplay is not an allowed attribute");
+});
+
 console.log(`\natrium-markdown-render smoke: ${passed} checks passed`);

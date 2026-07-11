@@ -52,6 +52,17 @@ const EXPECTED_TABLE_NODES = ["table", "tableRow", "tableHeader", "tableCell"];
 // React NodeView is attached client-side only and does not affect the schema).
 const EXPECTED_EMBED_NODE = "atriumArtifactEmbed";
 
+// Meridian rich-block NODES (slice F): callout (container), image, image grid
+// (container of images), and video. All schema-only (no NodeView), so they must
+// appear identically in the client + server schema — a media block typed in the
+// editor has to map the same on the server transformer / collab bundle.
+const EXPECTED_RICH_NODES = [
+  "atriumCallout",
+  "atriumImage",
+  "atriumImageGrid",
+  "atriumVideo",
+];
+
 check("server schema (getCollabSchema) exposes all Atrium marks", () => {
   const schema = getCollabSchema();
   for (const mark of EXPECTED_MARKS) {
@@ -72,6 +83,19 @@ check("server schema exposes the Meridian embedded-artifact node", () => {
     schema.nodes[EXPECTED_EMBED_NODE],
     `server schema missing node: ${EXPECTED_EMBED_NODE}`
   );
+});
+
+check("server schema exposes the Meridian rich-block nodes (slice F)", () => {
+  const schema = getCollabSchema();
+  for (const node of EXPECTED_RICH_NODES) {
+    assert.ok(schema.nodes[node], `server schema missing node: ${node}`);
+  }
+});
+
+check("callout node carries only a `variant` attr", () => {
+  const schema = getCollabSchema();
+  const attrs = Object.keys(schema.nodes.atriumCallout.spec.attrs ?? {}).sort();
+  assert.deepEqual(attrs, ["variant"], `callout attrs: ${attrs.join(", ")}`);
 });
 
 check("embedded-artifact node has NO title attr (title-leak regression guard)", () => {
@@ -183,6 +207,58 @@ check("an embedded-artifact node survives a Yjs round-trip with its id intact", 
     embed?.attrs?.artifactId,
     artifactId,
     "embed artifactId lost in Yjs round-trip"
+  );
+});
+
+check("rich-block nodes (callout / image / grid / video) survive a Yjs round-trip", () => {
+  const schema = getCollabSchema();
+  const docJSON = {
+    type: "doc",
+    content: [
+      {
+        type: "atriumCallout",
+        attrs: { variant: "warn" },
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "heads up" }] },
+        ],
+      },
+      {
+        type: "atriumImageGrid",
+        content: [
+          { type: "atriumImage", attrs: { src: "https://cdn.example/a.png", alt: "A" } },
+          { type: "atriumImage", attrs: { src: "https://cdn.example/b.png", alt: "" } },
+        ],
+      },
+      { type: "atriumVideo", attrs: { src: "https://cdn.example/clip.mp4" } },
+    ],
+  };
+  const ydoc = prosemirrorJSONToYDoc(schema, docJSON, "default");
+  const back = yDocToProsemirrorJSON(ydoc, "default") as {
+    content: Array<{ type: string; attrs?: Record<string, unknown>; content?: unknown[] }>;
+  };
+  const types = back.content.map((n) => n.type);
+  assert.ok(types.includes("atriumCallout"), "callout lost in Yjs round-trip");
+  assert.ok(types.includes("atriumImageGrid"), "image grid lost in Yjs round-trip");
+  assert.ok(types.includes("atriumVideo"), "video lost in Yjs round-trip");
+
+  const callout = back.content.find((n) => n.type === "atriumCallout");
+  assert.equal(callout?.attrs?.variant, "warn", "callout variant lost in round-trip");
+
+  const grid = back.content.find((n) => n.type === "atriumImageGrid") as
+    | { content: Array<{ type: string; attrs?: Record<string, unknown> }> }
+    | undefined;
+  assert.equal(grid?.content?.length, 2, "grid image count changed in round-trip");
+  assert.equal(
+    grid?.content?.[0]?.attrs?.src,
+    "https://cdn.example/a.png",
+    "grid image src lost in round-trip"
+  );
+
+  const video = back.content.find((n) => n.type === "atriumVideo");
+  assert.equal(
+    video?.attrs?.src,
+    "https://cdn.example/clip.mp4",
+    "video src lost in Yjs round-trip"
   );
 });
 

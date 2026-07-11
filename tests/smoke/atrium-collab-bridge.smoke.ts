@@ -20,6 +20,42 @@ import {
 import { AUTHORED_MARK } from "@/lib/content/collab/provenance";
 import { AtriumArtifactEmbed } from "@/lib/content/collab/artifact-embed-node";
 import { serializeArtifactEmbedDirective } from "@/lib/content/embed-directive";
+import { AtriumCallout } from "@/lib/content/collab/callout-node";
+import { AtriumVideo } from "@/lib/content/collab/media-nodes";
+
+/** Invoke a node's tiptap-markdown serializer headlessly (no DOM). */
+function serializeNode(
+  node: unknown,
+  attrs: Record<string, unknown>,
+  children = ""
+): string {
+  const cfg = (
+    node as unknown as {
+      config: {
+        addStorage?: () => {
+          markdown: { serialize: (s: unknown, n: unknown) => void };
+        };
+      };
+    }
+  ).config;
+  const storage = cfg.addStorage?.();
+  if (!storage) throw new Error("node exposes no markdown storage spec");
+  let out = "";
+  const state = {
+    write: (s: string) => {
+      out += s;
+    },
+    renderContent: () => {
+      out += children;
+    },
+    ensureNewLine: () => {
+      if (!out.endsWith("\n")) out += "\n";
+    },
+    closeBlock: () => {},
+  };
+  storage.markdown.serialize(state, { attrs, childCount: 0 });
+  return out;
+}
 
 let passed = 0;
 function check(name: string, fn: () => void): void {
@@ -186,6 +222,76 @@ check("the embed node serializes back to its canonical directive line", () => {
   storage!.markdown.serialize(state, { attrs: { artifactId: EMBED_UUID } });
   assert.equal(out, serializeArtifactEmbedDirective(EMBED_UUID));
   assert.match(out, /^::atrium-artifact\{id="[0-9a-f-]+"\}$/);
+});
+
+// --- Meridian slice F: rich-block directive round-trip ------------------------
+// markdown → node : the marked container/leaf extensions rewrite the directives to
+// DOM and generateJSON parses them into the callout / grid / image / video nodes.
+// node → markdown : each node's tiptap-markdown serializer re-emits the directive.
+
+check(":::callout container seeds an atriumCallout node (variant note)", () => {
+  const json = markdownToProseMirrorJSON(
+    "intro\n\n:::callout\n📣 **Families:** street closures start at 4 PM.\n:::\n\nafter"
+  );
+  const callouts = findNodes(json, "atriumCallout") as Array<{
+    attrs?: { variant?: string };
+  }>;
+  assert.equal(callouts.length, 1, "one callout node parsed");
+  assert.equal(callouts[0].attrs?.variant, "note", "note variant");
+  const text = collectText(json).join(" ");
+  assert.match(text, /Families/, "callout inner text survives");
+  assert.match(text, /intro/);
+  assert.match(text, /after/);
+});
+
+check(":::warn container seeds a callout with variant warn", () => {
+  const json = markdownToProseMirrorJSON(":::warn\nBe careful.\n:::");
+  const callouts = findNodes(json, "atriumCallout") as Array<{
+    attrs?: { variant?: string };
+  }>;
+  assert.equal(callouts.length, 1, "one callout node parsed");
+  assert.equal(callouts[0].attrs?.variant, "warn", "warn variant");
+});
+
+check(":::grid seeds an image grid of atriumImage children", () => {
+  const json = markdownToProseMirrorJSON(
+    ":::grid\n![parade](https://cdn.example/a.png)\n![rally](https://cdn.example/b.png)\n:::"
+  );
+  const grids = findNodes(json, "atriumImageGrid");
+  assert.equal(grids.length, 1, "one grid node parsed");
+  const imgs = findNodes(json, "atriumImage") as Array<{ attrs?: { src?: string } }>;
+  assert.equal(imgs.length, 2, "two image children parsed");
+  assert.equal(imgs[0].attrs?.src, "https://cdn.example/a.png");
+});
+
+check("::video{src} seeds an atriumVideo node with the src", () => {
+  const json = markdownToProseMirrorJSON('::video{src="https://cdn.example/clip.mp4"}');
+  const videos = findNodes(json, "atriumVideo") as Array<{ attrs?: { src?: string } }>;
+  assert.equal(videos.length, 1, "one video node parsed");
+  assert.equal(videos[0].attrs?.src, "https://cdn.example/clip.mp4");
+});
+
+check("a video directive with an unsafe (javascript:) src is NOT seeded", () => {
+  const json = markdownToProseMirrorJSON('::video{src="javascript:alert(1)"}');
+  const videos = findNodes(json, "atriumVideo");
+  // The directive falls through to inert paragraph TEXT (like a malformed embed) —
+  // no video NODE is created, so the unsafe url never becomes a rendered src
+  // attribute. It survives only as harmless characters in a text node.
+  assert.equal(videos.length, 0, "unsafe src falls through, no video node");
+  assert.ok(!jsonContainsString(json, "<video"), "no <video> element with the unsafe src");
+});
+
+check("callout / video nodes serialize back to their canonical directives", () => {
+  const callout = serializeNode(AtriumCallout, { variant: "warn" }, "Be careful.\n");
+  assert.match(callout, /^:::warn\n[\s\S]*\n:::$/, "warn callout round-trips");
+  const note = serializeNode(AtriumCallout, { variant: "note" }, "note body\n");
+  assert.match(note, /^:::callout\n/, "note callout uses :::callout");
+
+  const video = serializeNode(AtriumVideo, { src: "https://cdn.example/clip.mp4" });
+  assert.equal(video, '::video{src="https://cdn.example/clip.mp4"}');
+
+  const badVideo = serializeNode(AtriumVideo, { src: "javascript:alert(1)" });
+  assert.equal(badVideo, "", "an unsafe src serializes to nothing, not a directive");
 });
 
 console.log(`\natrium-collab-bridge smoke: ${passed} checks passed`);

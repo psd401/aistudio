@@ -113,6 +113,78 @@
 .atrium-content img { max-width: 100%; height: auto; border-radius: 12px; }
 
 /* ----------------------------------------------------------------------------
+ * Rich media blocks (Meridian slice F) — image grid + video. In this SHARED sink
+ * (imported by the editor AND both readers) so they render identically wherever a
+ * document is shown. The image node itself is plain `![]()` (styled by the `img`
+ * rule above); these style the grid CONTAINER and the video player.
+ * -------------------------------------------------------------------------- */
+
+/* Image grid: one tall cell on the left + stacked cells on the right (README §2b).
+ * Works for both the editor (bare `<img>` children) and the reader (remark wraps
+ * each image in a `<p>`) by laying out the DIRECT children as grid cells and
+ * filling them with the image. */
+.atrium-image-grid {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  grid-auto-rows: 96px;
+  gap: 10px;
+  margin: 1.15em 0;
+  position: relative;
+}
+.atrium-image-grid > * {
+  margin: 0;
+  min-width: 0;
+  min-height: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  position: relative;
+}
+.atrium-image-grid > :first-child {
+  grid-row: span 2;
+}
+.atrium-image-grid img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  border-radius: 12px;
+  margin: 0;
+}
+/* Editor overflow pill: the grid node's renderHTML sets `data-extra` (= images
+ * beyond 3). Hide the rest and show a "+N" pill at the grid's bottom-right (over
+ * the third cell). The pseudo lives on the DIV (not the replaced <img>, which has
+ * no ::after). The reader render carries no `data-extra`, so a published grid
+ * shows every image uncapped. */
+.atrium-image-grid[data-extra] > :nth-child(n + 4) {
+  display: none;
+}
+.atrium-image-grid[data-extra]::after {
+  content: "+ " attr(data-extra);
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(25, 29, 28, 0.8);
+  color: #fff;
+  padding: 3px 8px;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+/* Video: a dark 12px-radius HTML5 player block (README §2b). Native controls
+ * supply the play button, progress bar, and timestamp. No autoplay. */
+.atrium-video {
+  display: block;
+  width: 100%;
+  max-height: 60vh;
+  margin: 1.15em 0;
+  border-radius: 12px;
+  background: #191d1c;
+  overflow: hidden;
+}
+
+/* ----------------------------------------------------------------------------
  * Curated directives (:::callout / :::warn)
  *
  * Meridian callout (Epic #1059 slice E): the agent-callout gradient tint from the

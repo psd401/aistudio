@@ -147,4 +147,37 @@ check("parseEmbeddedArtifactIds dedupes and preserves first-seen order", () => {
   assert.deepEqual(parseEmbeddedArtifactIds(md), [UUID_A, UUID_B]);
 });
 
+// --- Meridian slice F: rich blocks render inside the reader's html parts --------
+// The slice-F callout / image-grid / video blocks are NOT embeds — they ride inside
+// the ordinary html runs `renderDocumentToParts` produces around each embed. This
+// proves the reader's actual body-render path (the one both readers call), not just
+// `renderMarkdownToHtml` in isolation, emits their allowlisted markup un-split.
+check("slice-F rich blocks render inside the html parts around an embed", () => {
+  const md = [
+    ":::callout",
+    "📣 **Heads up:** shuttle map below.",
+    ":::",
+    "",
+    `::atrium-artifact{id="${UUID_A}"}`,
+    "",
+    ":::grid",
+    "![a](https://cdn.example/a.png)",
+    "![b](https://cdn.example/b.png)",
+    ":::",
+    "",
+    '::video{src="https://cdn.example/clip.mp4"}',
+  ].join("\n");
+  const parts = renderDocumentToParts(md);
+  const kinds = parts.map((p) => p.kind);
+  assert.ok(kinds.includes("embed"), "the embed still splits out on its own");
+  const html = parts
+    .filter((p) => p.kind === "html")
+    .map((p) => (p.kind === "html" ? p.html : ""))
+    .join("\n");
+  assert.match(html, /class="atrium-callout"/, "callout renders in an html part");
+  assert.match(html, /class="atrium-image-grid"/, "image grid renders in an html part");
+  assert.match(html, /<video[^>]*class="atrium-video"/, "video renders in an html part");
+  assert.doesNotMatch(html, /javascript:/i, "no unsafe url survives the reader path");
+});
+
 console.log(`\natrium-embed-render smoke: ${passed} checks passed`);
