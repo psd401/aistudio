@@ -214,6 +214,22 @@ The dispatcher enqueues one message per enabled user; the worker does per-user G
 
 **Sources**: `/infra/lambdas/agent-triage-poll/dispatcher.ts`, `/infra/lambdas/agent-triage-poll/sweep.ts`, `/docs/operations/email-triage.md`
 
+### Canva Integration (psd-canva)
+
+Per-user Canva access for AI Studio agents via the Canva Connect REST API (#1176). Mirrors the Google Workspace integration model: a confidential OAuth client owned by the deploying district, per-user refresh tokens in Secrets Manager, and a self-serve consent flow.
+
+**Deployment prerequisites** (one-time per district/environment):
+1. Create an integration in Canva Developer Portal with redirect URL `https://<your-app-domain>/agent-connect-canva/callback`
+2. Enable scopes: `design:content:read design:meta:read design:content:write asset:read asset:write folder:read profile:read`
+3. Populate Secrets Manager: `aws secretsmanager put-secret-value --secret-id psd-agent/<env>/canva-oauth-client --secret-string '{"client_id":"...","client_secret":"..."}'`
+4. Deploy AgentPlatformStack + FrontendStack, then rebuild/push the agent image
+
+**User flow**: User asks agent something Canva-related → skill emits `needs-auth` (exit 10) with consent link → user clicks and completes OAuth → refresh token stored in per-user secret. Subsequent requests work automatically.
+
+**Known limits** (by design): No autofill/brand templates (Enterprise-gated), no in-design content editing (Connect REST API limitation).
+
+**Source**: `/docs/features/agent-canva-integration.md`
+
 ### Harness Adapter
 
 Python abstraction for provider integration:
