@@ -103,6 +103,9 @@ async function loadPublishedObject(slug: string): Promise<{
   title: string;
   /** The object's collection name (via left join), for the reader meta line. */
   collectionName: string | null;
+  /** Cover-gradient preset key + emoji icon (slice F) for the reader cover band. */
+  coverGradient: string | null;
+  icon: string | null;
   publishedVersionId: string;
   /** When the live intranet publication went live, for the "Published …" meta. */
   publishedAt: Date | null;
@@ -120,6 +123,9 @@ async function loadPublishedObject(slug: string): Promise<{
           // surfaced in the reader's "Published … · <collection>" meta. No extra
           // query: it rides on the existing slug lookup.
           collectionName: contentCollections.name,
+          // Slice F cover band + emoji icon (migration 103).
+          coverGradient: contentObjects.coverGradient,
+          icon: contentObjects.icon,
         })
         .from(contentObjects)
         .leftJoin(
@@ -333,6 +339,8 @@ export default async function ReaderPage({
       publishedAt={published.publishedAt}
       collectionName={published.collectionName}
       headings={headings}
+      coverGradient={published.coverGradient}
+      icon={published.icon}
       footer={
         <ProvenanceFooter
           objectId={published.id}

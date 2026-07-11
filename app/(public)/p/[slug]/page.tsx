@@ -94,6 +94,9 @@ const loadPublicObject = cache(async (
   title: string;
   /** The object's collection name (via left join), for the reader meta line. */
   collectionName: string | null;
+  /** Cover-gradient preset key + emoji icon (slice F) for the reader cover band. */
+  coverGradient: string | null;
+  icon: string | null;
   publishedVersionId: string;
   /** When the live public_web publication went live, for the "Published …" meta. */
   publishedAt: Date | null;
@@ -109,6 +112,9 @@ const loadPublicObject = cache(async (
           // Left join → collection name (or null), for the reader meta. Rides on
           // the existing slug lookup — no extra query and no session read.
           collectionName: contentCollections.name,
+          // Slice F cover band + emoji icon (migration 103).
+          coverGradient: contentObjects.coverGradient,
+          icon: contentObjects.icon,
         })
         .from(contentObjects)
         .leftJoin(
@@ -151,6 +157,8 @@ const loadPublicObject = cache(async (
     kind: obj.kind,
     title: obj.title,
     collectionName: obj.collectionName ?? null,
+    coverGradient: obj.coverGradient,
+    icon: obj.icon,
     publishedVersionId: publication.publishedVersionId,
     publishedAt: publication.publishedAt ?? null,
   };
@@ -322,6 +330,8 @@ export default async function PublicReaderPage({
       publishedAt={published.publishedAt}
       collectionName={published.collectionName}
       headings={headings}
+      coverGradient={published.coverGradient}
+      icon={published.icon}
       footer={
         <ProvenanceFooter
           objectId={published.id}

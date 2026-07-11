@@ -96,6 +96,7 @@
     "099-atrium-publish-approvals-unpublish-kind.sql",
     "100-agent-iteration-telemetry.sql",
     "101-agent-workspace-canva.sql",
-    "102-atrium-embed-links.sql"
+    "102-atrium-embed-links.sql",
+    "103-atrium-content-cover-icon.sql"
   ]
 }

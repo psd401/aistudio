@@ -107,6 +107,10 @@ export interface UpdatePatch {
   tags?: string[] | null;
   collectionId?: string | null;
   status?: "draft" | "published" | "archived";
+  /** Cover-gradient preset key (slice F), or `null` to clear the cover band. */
+  coverGradient?: string | null;
+  /** Doc emoji icon (slice F), or `null` to clear it. */
+  icon?: string | null;
 }
 
 export interface ListFilter {
@@ -148,6 +152,14 @@ export interface ContentObjectDTO {
   currentVersionId: string | null;
   sourceRef: SourceRef | null;
   tags: string[];
+  /**
+   * Meridian slice F (migration 103). `coverGradient` is a preset key selecting one
+   * of the fixed cover gradients (styles/atrium-meridian.css `--mer-grad-cover-*`),
+   * or null for no cover band. `icon` is a single emoji shown on the library card /
+   * cover tile, or null for the kind's default icon. Both presentation-only.
+   */
+  coverGradient: string | null;
+  icon: string | null;
   status: "draft" | "published" | "archived";
   indexedAt: string | null;
   createdAt: string | null;

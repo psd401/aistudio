@@ -128,6 +128,8 @@ export default async function AtriumEditPage({
           : []
       }
       askAgentHref={`/nexus?workspace=${obj.id}`}
+      coverGradient={obj.coverGradient}
+      icon={obj.icon}
       historyControl={
         <VersionMenu key={`versions-${obj.id}`} idOrSlug={obj.id} canEdit={userCanEdit} />
       }

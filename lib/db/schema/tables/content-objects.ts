@@ -85,6 +85,13 @@ export const contentObjects = pgTable(
     currentVersionId: uuid("current_version_id"),
     sourceRef: jsonb("source_ref").$type<SourceRef>(),
     tags: text("tags").array(),
+    // Meridian slice F (migration 103) — the "2b" rich-document cover band + doc
+    // icon. `coverGradient` is a PRESET KEY (validated to an allowlist on write, not
+    // raw CSS) selecting one of a fixed set of gradients; `icon` is a single emoji
+    // grapheme rendered as plain text. Both nullable — null = the default look
+    // (no cover band, the kind's default lucide icon on the library card).
+    coverGradient: varchar("cover_gradient", { length: 40 }),
+    icon: varchar("icon", { length: 32 }),
     status: contentStatusEnum("status").default("draft").notNull(),
     indexedAt: timestamp("indexed_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),

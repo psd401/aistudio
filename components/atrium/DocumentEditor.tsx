@@ -41,6 +41,7 @@ import { makeAuthorTag } from "@/lib/content/collab/provenance";
 import { useUser } from "@/components/auth/user-provider";
 import { EditorToolbar } from "./EditorToolbar";
 import { EditorBubbleMenu } from "./EditorBubbleMenu";
+import { DocumentCover } from "./DocumentCover";
 import { useEditorActions } from "./use-editor-actions";
 import { AuthoredTracker } from "./authored-tracker";
 import { ProvenanceRail } from "./provenance-rail";
@@ -109,6 +110,10 @@ export interface DocumentEditorProps {
   settingsControl?: React.ReactNode;
   /** Where the bubble-menu "✦ Ask agent" navigates (doc beside the Nexus chat). */
   askAgentHref?: string;
+  /** Persisted cover-gradient preset key (slice F), or null. Page layout only. */
+  coverGradient?: string | null;
+  /** Persisted doc emoji icon (slice F), or null. Page layout only. */
+  icon?: string | null;
 }
 
 /** The topbar presence avatar stack (real awareness roster + live agent). */
@@ -278,6 +283,7 @@ function EditorTopbar({
 function MeridianDesk({
   sheetRef,
   margins,
+  cover,
   eyebrow,
   title,
   byline,
@@ -286,6 +292,7 @@ function MeridianDesk({
 }: {
   sheetRef: React.RefObject<HTMLDivElement | null>;
   margins: MarginAvatar[];
+  cover?: React.ReactNode;
   eyebrow?: string;
   title: string;
   byline: string;
@@ -307,6 +314,7 @@ function MeridianDesk({
           </span>
         ))}
         <div className="mer-sheet">
+          {cover}
           {eyebrow && <div className="mer-sheet-eyebrow">{eyebrow}</div>}
           <h1 className="mer-sheet-title">{title}</h1>
           <div className="mer-sheet-byline" data-testid="editor-byline">
@@ -330,6 +338,8 @@ export function DocumentEditor({
   historyControl,
   settingsControl,
   askAgentHref,
+  coverGradient,
+  icon,
 }: DocumentEditorProps) {
   // The collab session (Y.Doc + provider + status + canEdit) lives in a dedicated
   // hook so this component stays focused on layout + presence composition.
@@ -483,6 +493,14 @@ export function DocumentEditor({
       <MeridianDesk
         sheetRef={sheetRef}
         margins={margins}
+        cover={
+          <DocumentCover
+            objectId={idOrSlug}
+            coverGradient={coverGradient ?? null}
+            icon={icon ?? null}
+            canEdit={canEdit}
+          />
+        }
         eyebrow={eyebrow}
         title={docTitle}
         byline={bylineText(roster, userId, agentWriting, status)}

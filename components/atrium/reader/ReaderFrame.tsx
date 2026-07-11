@@ -20,6 +20,7 @@
 import Link from "next/link";
 import { fontMeridian } from "@/lib/atrium/meridian-fonts";
 import type { DocumentHeading } from "@/lib/content/render/headings";
+import { coverGradientClass } from "@/lib/atrium/cover";
 import { AtriumReaderNav } from "./AtriumReaderNav";
 import { ReaderToc } from "./ReaderToc";
 // The readers live OUTSIDE the `/atrium` layout that scopes Meridian elsewhere, so
@@ -45,6 +46,10 @@ export interface ReaderFrameProps {
   collectionName: string | null;
   /** Rendered-document headings for the TOC ([] ⇒ no TOC, e.g. artifact readers). */
   headings: DocumentHeading[];
+  /** Cover-gradient preset key (slice F), or null for no cover band. */
+  coverGradient?: string | null;
+  /** Doc emoji icon (slice F), shown on the cover tile, or null. */
+  icon?: string | null;
   /** The reader body (document parts or the artifact sandbox). */
   children: React.ReactNode;
   /** The provenance footer element (kept at the bottom of the sheet). */
@@ -63,6 +68,37 @@ function formatPublished(publishedAt: Date | string | null): string | null {
   });
 }
 
+/**
+ * The read-only cover band + emoji tile (slice F). Renders the band when a gradient
+ * was chosen OR an icon is set (an icon needs the band as its backdrop; falls back
+ * to the default gradient in that case). Read-only — no "Change cover" pill.
+ */
+function ReaderCover({
+  coverGradient,
+  icon,
+}: {
+  coverGradient?: string | null;
+  icon?: string | null;
+}): React.JSX.Element | null {
+  const trimmedIcon = icon?.trim() || null;
+  const gradClass = coverGradientClass(coverGradient);
+  if (!gradClass && !trimmedIcon) return null;
+  return (
+    <>
+      <div
+        className={`mer-cover ${gradClass ?? "mer-cover--default"}`}
+        data-testid="reader-cover"
+        aria-hidden="true"
+      />
+      {trimmedIcon && (
+        <div className="mer-cover-icon" data-testid="reader-icon" aria-hidden="true">
+          {trimmedIcon}
+        </div>
+      )}
+    </>
+  );
+}
+
 export function ReaderFrame({
   title,
   authenticated,
@@ -72,6 +108,8 @@ export function ReaderFrame({
   publishedAt,
   collectionName,
   headings,
+  coverGradient,
+  icon,
   children,
   footer,
 }: ReaderFrameProps): React.JSX.Element {
@@ -104,6 +142,7 @@ export function ReaderFrame({
 
         <div className="mer-reader-sheet-wrap">
           <div className="mer-reader-sheet">
+            <ReaderCover coverGradient={coverGradient} icon={icon} />
             <div className="mer-reader-head">
               <h1 className="mer-reader-title">{title}</h1>
               {editHref && (

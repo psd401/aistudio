@@ -36,6 +36,9 @@ export const objectSelectFields = {
   currentVersionId: contentObjects.currentVersionId,
   sourceRef: contentObjects.sourceRef,
   tags: contentObjects.tags,
+  // Meridian slice F cover band + doc icon (migration 103).
+  coverGradient: contentObjects.coverGradient,
+  icon: contentObjects.icon,
   status: contentObjects.status,
   indexedAt: pgTimestampAsText(contentObjects.indexedAt),
   createdAt: pgTimestampAsText(contentObjects.createdAt),
@@ -56,6 +59,8 @@ export interface ObjectRowAsText {
   currentVersionId: string | null;
   sourceRef: SourceRef | null;
   tags: string[];
+  coverGradient: string | null;
+  icon: string | null;
   status: string;
   indexedAt: string | null;
   createdAt: string | null;
@@ -80,6 +85,8 @@ export function rowToObjectDTO(row: ObjectRowAsText): ContentObjectDTO {
     currentVersionId: row.currentVersionId,
     sourceRef: row.sourceRef,
     tags: row.tags ?? [],
+    coverGradient: row.coverGradient,
+    icon: row.icon,
     status: row.status as "draft" | "published" | "archived",
     indexedAt: stripJsonQuotes(row.indexedAt),
     createdAt: stripJsonQuotes(row.createdAt),
