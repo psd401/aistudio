@@ -146,6 +146,26 @@ class FetchGuardTests(unittest.TestCase):
                 mock.Mock(), mock.Mock(), 302, "Found", {},
                 "https://169.254.169.254/latest/meta-data/")
 
+    def test_cross_host_redirect_strips_authorization(self):
+        handler = last30days._GuardedRedirectHandler()
+        req = last30days.urllib.request.Request(
+            "https://api.github.com/search/repositories?q=x",
+            headers={"Authorization": "Bearer secret", "User-Agent": "t"})
+        new_req = handler.redirect_request(
+            req, None, 302, "Found", {}, "https://news.google.com/rss/search?q=x")
+        self.assertIsNotNone(new_req)
+        self.assertFalse(new_req.has_header("Authorization"))
+
+    def test_same_host_redirect_keeps_authorization(self):
+        handler = last30days._GuardedRedirectHandler()
+        req = last30days.urllib.request.Request(
+            "https://api.github.com/search/repositories?q=x",
+            headers={"Authorization": "Bearer secret"})
+        new_req = handler.redirect_request(
+            req, None, 302, "Found", {}, "https://api.github.com/search/repositories?q=x&page=2")
+        self.assertIsNotNone(new_req)
+        self.assertTrue(new_req.has_header("Authorization"))
+
     def test_oversized_response_is_rejected(self):
         big = b"x" * (last30days.MAX_RESPONSE_BYTES + 10)
 
@@ -269,6 +289,30 @@ class RenderTests(unittest.TestCase):
         # Self-contained: no external resource references.
         self.assertNotIn("http://", page.replace("http://www.w3.org", ""))
 
+    def test_failed_source_not_listed_as_returned_nothing(self):
+        # A source that FAILED (warning present) must not also be reported as
+        # "returned nothing" — that would misread an outage as absence of chatter.
+        results = {"hackernews": [_item("hackernews", "HN top", score=3, label="3 pts")],
+                   "reddit": []}
+        warnings = ["Reddit: HTTPError: HTTP Error 429: Too Many Requests"]
+        md = last30days.render_markdown("x", 30, "2026-06-10", "2026-07-10 12:00Z",
+                                        results, warnings=warnings,
+                                        sources=["hackernews", "reddit"])
+        self.assertIn("Source unavailable — Reddit", md)
+        self.assertNotIn("Returned nothing in this window", md)
+        page = last30days.render_html("x", 30, "2026-06-10", "2026-07-10 12:00Z",
+                                      results, warnings=warnings,
+                                      sources=["hackernews", "reddit"])
+        self.assertNotIn("Returned nothing in this window", page)
+
+    def test_genuinely_empty_source_still_listed(self):
+        results = {"hackernews": [_item("hackernews", "HN top", score=3, label="3 pts")],
+                   "reddit": []}
+        md = last30days.render_markdown("x", 30, "2026-06-10", "2026-07-10 12:00Z",
+                                        results, warnings=[],
+                                        sources=["hackernews", "reddit"])
+        self.assertIn("Returned nothing in this window: Reddit.", md)
+
     def test_safe_url_filters_non_http_schemes(self):
         self.assertEqual(last30days._safe_url("https://a.example/x"), "https://a.example/x")
         self.assertEqual(last30days._safe_url("javascript:alert(1)"), "")
@@ -326,6 +370,7 @@ class MainOutputTests(unittest.TestCase):
 
 _REDDIT_ATOM = b"""<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
+  <!-- a feed comment: its non-string tag must not crash the parser -->
   <entry>
     <title>Cool post about thing</title>
     <link rel="self" href="https://www.reddit.com/api/self-link"/>
@@ -373,6 +418,11 @@ class CleanTests(unittest.TestCase):
 
     def test_literal_tags_still_stripped(self):
         self.assertEqual(last30days._clean("<b>Bold</b> move"), "Bold move")
+
+    def test_local_normalizes_non_string_tags(self):
+        # XML comments/PIs expose a callable tag; _local must not crash on them.
+        self.assertEqual(last30days._local(last30days.ET.Comment), "")
+        self.assertEqual(last30days._local("{ns}entry"), "entry")
 
 
 class DedupeTests(unittest.TestCase):

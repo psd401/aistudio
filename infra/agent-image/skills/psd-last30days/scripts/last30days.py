@@ -155,7 +155,8 @@ class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
         ):
             # Never forward credentials across hosts — urllib copies request
             # headers (including the GitHub bearer token) onto redirects.
-            new_req.headers.pop("Authorization", None)
+            # remove_header covers unredirected_hdrs and normalizes casing.
+            new_req.remove_header("Authorization")
         return new_req
 
 
@@ -191,7 +192,7 @@ def parse_iso(value):
     text = value.strip().replace("Z", "+00:00")
     try:
         parsed = dt.datetime.fromisoformat(text)
-    except ValueError:
+    except Exception:  # noqa: BLE001 — a malformed feed date must never sink parsing
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
@@ -204,7 +205,7 @@ def parse_rfc822(value):
         return None
     try:
         parsed = parsedate_to_datetime(value.strip())
-    except (TypeError, ValueError):
+    except Exception:  # noqa: BLE001 — parsedate_to_datetime can raise IndexError etc. on corrupt input
         return None
     if parsed is None:
         return None
@@ -222,7 +223,11 @@ def fmt_date(when):
 # --------------------------------------------------------------------------- #
 
 def _local(tag):
-    """Strip an XML namespace: '{http://www.w3.org/2005/Atom}entry' -> 'entry'."""
+    """Strip an XML namespace: '{http://www.w3.org/2005/Atom}entry' -> 'entry'.
+    Comments/processing instructions surface a non-string tag (a callable) —
+    normalize those to "" so a feed comment can't crash an adapter."""
+    if not isinstance(tag, str):
+        return ""
     return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
 
@@ -587,6 +592,18 @@ def top_signals(results, per_source=1):
 # Rendering
 # --------------------------------------------------------------------------- #
 
+def _empty_sources(results, warnings, sources):
+    """Labels of sources that were queried, SUCCEEDED, and returned nothing.
+    A failed/timed-out source is already reported under warnings — also listing
+    it as 'returned nothing' would misread an outage as absence of chatter.
+    Warnings are keyed by label prefix (run_source/gather build them that way)."""
+    failed = {w.split(":", 1)[0] for w in warnings}
+    return [
+        _SOURCE_LABELS[n] for n in sources
+        if not (results.get(n) or []) and _SOURCE_LABELS[n] not in failed
+    ]
+
+
 def _safe_url(url):
     """Only http(s) links are rendered as links; anything else (javascript:,
     data:, mailto:) is dropped so a hostile source URL can't inject a scheme."""
@@ -651,7 +668,7 @@ def render_markdown(query, days, since, generated, results, warnings, sources):
         "- Engagement signals: Hacker News = points/comments, GitHub = stars. "
         "Reddit, arXiv, and Web are ranked by recency (no keyless engagement metric)."
     )
-    empty = [_SOURCE_LABELS[n] for n in sources if not (results.get(n) or [])]
+    empty = _empty_sources(results, warnings, sources)
     if empty:
         lines.append(f"- Returned nothing in this window: {', '.join(empty)}.")
     if warnings:
@@ -747,7 +764,7 @@ def render_html(query, days, since, generated, results, warnings, sources):
         "Engagement signals: Hacker News = points/comments, GitHub = stars. "
         "Reddit, arXiv, and Web are ranked by recency.",
     ]
-    empty = [_SOURCE_LABELS[n] for n in sources if not (results.get(n) or [])]
+    empty = _empty_sources(results, warnings, sources)
     if empty:
         note_lines.append("Returned nothing in this window: " + ", ".join(empty) + ".")
     for warning in warnings:
