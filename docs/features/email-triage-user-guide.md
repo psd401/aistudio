@@ -84,10 +84,13 @@ enabled before the sweep feature existed and want your backlog filed, say
 
 - **Work out of the labels, not the Inbox.** Check `@psd/Important` when you
   get pinged or on your own rhythm; batch `@psd/Later` and `@psd/News`.
-- **A message the agent gets wrong? Just act naturally in Gmail.** Archiving
-  something out of `@psd/Important`, or dragging a `@psd/Later` message back to
-  Inbox, is automatically recorded as a correction — you're training it
-  without saying anything (see §6).
+- **A message the agent gets wrong? Correct it — it learns from you** (see §6).
+  For mail wrongly buried in `@psd/Later`/`@psd/News`, just drag it back to
+  Inbox in Gmail — that's recorded automatically. For mail wrongly marked
+  Important, tell the agent ("that email from X should have been News") — it
+  re-files the message and records the correction. Note that archiving an
+  `@psd/Important` message does **not** register as a correction: Important
+  mail is already out of the Inbox, so there's nothing for archive to do.
 - Mail that a Gmail filter or you already labeled is **left alone** — triage
   never overrides an existing classification.
 - Expect up to ~5 minutes of latency on everything (classification, pings,
@@ -104,16 +107,20 @@ Chat DM**. If that's too noisy, pick a stricter mode:
 
 | Mode | What pings you |
 |------|----------------|
-| `all` (default) | Everything labeled Important |
-| `high-confidence` | Your rule matches, plus AI classifications at ≥ 0.85 confidence (threshold tunable: "set my escalation threshold to 0.9") |
-| `rules-only` | Only VIP senders and your escalation sender/keyword rules — the AI alone never pings |
+| `all` (default) | Everything labeled Important — **unless** you've added escalation senders/keywords (below), in which case only those explicit matches ping |
+| `high-confidence` | Any deterministic-rule Important (VIP, a thread you've replied in, your keyword rules), plus AI classifications at ≥ 0.85 confidence (threshold tunable: "set my escalation threshold to 0.9") |
+| `rules-only` | Any deterministic-rule Important (VIP, a thread you've replied in, your keyword rules) — the AI alone never pings |
 | `none` | Never ping. The label and daily digest are your only surfaces |
 
-You can also target pings precisely regardless of mode:
+You can also target pings precisely:
 
 - "Always page me when `superintendent@psd401.net` emails" (escalation sender)
 - "Ping me when a message mentions 'board meeting'" (escalation keyword)
 - "Show my escalation rules" / "remove that escalation rule"
+
+These explicit escalation rules ping in **every** mode except `none` — they
+mean "always tell me about this." In `all` mode they also act as a filter:
+once you have any, only they ping.
 
 Note the distinction: **escalation tuning changes what pings you; it does not
 change what gets labeled Important.** To change the labels themselves, tune
@@ -152,9 +159,14 @@ offer'?" — it dry-runs the rule engine without waiting for real mail.
 
 ### b. Correct individual messages
 
-Either **act in Gmail** (archive a wrong Important; drag a wrongly-filed
-message back to Inbox) or **tell the agent**: "that email from X should have
-been News." Both record a correction.
+Two signals, by direction:
+
+- **Wrongly buried** (`@psd/Later`/`@psd/News` mail you wanted to see):
+  drag it back to Inbox in Gmail — recorded automatically.
+- **Wrongly Important**: tell the agent — "that email from X should have
+  been News." It re-files the message in Gmail and records the correction.
+  (Archiving an Important in Gmail is *not* a signal — it's already
+  archived; only Inbox-direction moves are detected automatically.)
 
 ### c. Let the nightly learning loop propose rules
 
@@ -169,9 +181,10 @@ Every night the agent analyzes your corrections:
   **Nothing is ever auto-applied** — dismissed suggestions are remembered and
   not re-raised.
 
-So the lazy-but-effective workflow is: archive what's wrong as you process
-mail, approve the suggestion cards that follow, and add explicit mutes for
-anything `training recent` shows repeatedly slipping through.
+So the lazy-but-effective workflow is: flick wrongly-buried mail back to
+Inbox, tell the agent about wrong Importants as you notice them, approve the
+suggestion cards that follow, and add explicit mutes for anything
+`training recent` shows repeatedly slipping through.
 
 ---
 
@@ -227,7 +240,7 @@ the email. Requirements:
 | Never miss a person | "Add the superintendent as a VIP" |
 | Fewer pings, same labels | "Set my escalation mode to high-confidence" |
 | Ping on a topic | "Page me when anything mentions 'levy'" |
-| Fix one mistake | "That email from X should have been News" (or just archive/move it in Gmail) |
+| Fix one mistake | "That email from X should have been News" (or drag a buried message back to Inbox in Gmail) |
 | Review pending suggestions | "Show my triage suggestions" |
 | Daily summary timing | "Set my digest time to 7:30" |
 | Email → task | Apply `@psd/Task` in Gmail (after "enable task creation from email") |
