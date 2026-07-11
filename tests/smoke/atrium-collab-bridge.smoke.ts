@@ -18,6 +18,8 @@ import {
   yDocToProseMirrorJSON,
 } from "@/lib/content/collab/markdown-bridge";
 import { AUTHORED_MARK } from "@/lib/content/collab/provenance";
+import { AtriumArtifactEmbed } from "@/lib/content/collab/artifact-embed-node";
+import { serializeArtifactEmbedDirective } from "@/lib/content/embed-directive";
 
 let passed = 0;
 function check(name: string, fn: () => void): void {
@@ -119,6 +121,58 @@ check("legitimate markdown formatting still parses (no over-stripping)", () => {
   const text = collectText(json).join(" ");
   assert.match(text, /bold/);
   assert.match(text, /em/);
+});
+
+// --- Meridian slice D: embedded-artifact directive round-trip -----------------
+// markdown → node : the marked seed extension recognizes the leaf directive and
+// generateJSON parses it into the atriumArtifactEmbed node (carrying the id).
+// node → markdown : the node's tiptap-markdown serializer re-emits that directive.
+const EMBED_UUID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+
+function findNodes(node: unknown, type: string, out: unknown[] = []): unknown[] {
+  const n = node as { type?: string; content?: unknown[] };
+  if (n.type === type) out.push(n);
+  if (Array.isArray(n.content)) for (const c of n.content) findNodes(c, type, out);
+  return out;
+}
+
+check("embed directive in markdown seeds an atriumArtifactEmbed node", () => {
+  const json = markdownToProseMirrorJSON(
+    `intro paragraph\n\n::atrium-artifact{id="${EMBED_UUID}"}\n\ntrailing text`
+  );
+  const embeds = findNodes(json, "atriumArtifactEmbed") as Array<{
+    attrs?: { artifactId?: string };
+  }>;
+  assert.equal(embeds.length, 1, "exactly one embed node parsed");
+  assert.equal(embeds[0].attrs?.artifactId, EMBED_UUID, "embed carries the artifact id");
+  // Surrounding blocks survive (the directive is a clean block boundary).
+  const text = collectText(json).join(" ");
+  assert.match(text, /intro paragraph/);
+  assert.match(text, /trailing text/);
+});
+
+check("a malformed embed directive (bad id) is NOT parsed as an embed", () => {
+  const json = markdownToProseMirrorJSON('::atrium-artifact{id="not-a-uuid"}');
+  const embeds = findNodes(json, "atriumArtifactEmbed");
+  assert.equal(embeds.length, 0, "invalid id falls through, no embed node");
+});
+
+check("the embed node serializes back to its canonical directive line", () => {
+  // Invoke the node's tiptap-markdown serializer directly (a headless editor is
+  // not constructible in Bun without a DOM); the serializer is pure over a
+  // MarkdownSerializerState stub.
+  const cfg = (
+    AtriumArtifactEmbed as unknown as {
+      config: { addStorage?: () => { markdown: { serialize: (s: unknown, n: unknown) => void } } };
+    }
+  ).config;
+  const storage = cfg.addStorage?.();
+  assert.ok(storage, "embed node exposes a markdown storage spec");
+  let out = "";
+  const state = { write: (s: string) => { out += s; }, closeBlock: () => {} };
+  storage!.markdown.serialize(state, { attrs: { artifactId: EMBED_UUID } });
+  assert.equal(out, serializeArtifactEmbedDirective(EMBED_UUID));
+  assert.match(out, /^::atrium-artifact\{id="[0-9a-f-]+"\}$/);
 });
 
 console.log(`\natrium-collab-bridge smoke: ${passed} checks passed`);

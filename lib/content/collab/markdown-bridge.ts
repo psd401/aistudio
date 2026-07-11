@@ -21,12 +21,18 @@
  */
 
 import { Marked } from "marked";
+import type { TokenizerAndRendererExtension, Tokens } from "marked";
 import { generateJSON } from "@tiptap/html";
 import type { JSONContent } from "@tiptap/core";
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
 import type { Doc as YDoc } from "yjs";
 import { getSchemaExtensions, getCollabSchema } from "./editor-extensions";
 import { AUTHORED_MARK, COLLAB_FIELD } from "./provenance";
+import {
+  ARTIFACT_EMBED_DATA_ATTR,
+  ARTIFACT_EMBED_ID_ATTR,
+  parseArtifactEmbedAttrs,
+} from "../embed-directive";
 
 /**
  * A `marked` instance whose renderer DROPS raw HTML tokens (both block and inline)
@@ -53,6 +59,46 @@ editorMarked.use({
     },
   },
 });
+
+/**
+ * markdown → editor for embedded artifacts (Meridian slice D). A custom BLOCK
+ * extension that recognizes the `::atrium-artifact{id="<uuid>"}` leaf directive
+ * (lib/content/embed-directive.ts) and emits the embed node's DOM
+ * (`div[data-atrium-artifact-embed]`), which `generateJSON` then parses into the
+ * `atriumArtifactEmbed` node via the node's `parseHTML`. Registered as a NAMED
+ * token type (not `html`), so it uses THIS renderer rather than the raw-HTML
+ * dropper above — the embed div survives while arbitrary author HTML is still
+ * dropped. This closes the round-trip: the editor serializes the node back to the
+ * same directive (`artifact-embed-node.ts`), so seeding/agent writes reconstruct
+ * the live embed instead of leaving inert directive text.
+ */
+const artifactEmbedMarkedExtension: TokenizerAndRendererExtension = {
+  name: "atriumArtifactEmbed",
+  level: "block",
+  start(src: string) {
+    const idx = src.indexOf("::atrium-artifact{");
+    return idx < 0 ? undefined : idx;
+  },
+  tokenizer(src: string) {
+    const rule = /^[ \t]*::atrium-artifact\{([^}]*)\}[ \t]*(?:\n|$)/;
+    const match = rule.exec(src);
+    if (!match) return undefined;
+    // Validate the id here (UUID shape) — an unparseable directive falls through
+    // to normal paragraph handling rather than emitting an embed with a bad id.
+    const artifactId = parseArtifactEmbedAttrs(match[1]);
+    if (!artifactId) return undefined;
+    return { type: "atriumArtifactEmbed", raw: match[0], artifactId };
+  },
+  renderer(token: Tokens.Generic) {
+    const artifactId =
+      typeof token.artifactId === "string" ? token.artifactId : "";
+    if (!artifactId) return "";
+    // The id is UUID-validated at tokenize time, so it is safe to interpolate into
+    // the attribute; generateJSON parses this div into the embed node.
+    return `<div ${ARTIFACT_EMBED_DATA_ATTR} ${ARTIFACT_EMBED_ID_ATTR}="${artifactId}"></div>\n`;
+  },
+};
+editorMarked.use({ extensions: [artifactEmbedMarkedExtension] });
 
 /**
  * Parse markdown into ProseMirror JSON against the shared Atrium schema.

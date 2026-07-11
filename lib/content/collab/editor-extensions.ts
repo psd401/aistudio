@@ -29,6 +29,11 @@
  *    `underline` mark by default, so the toolbar's U button toggles the existing
  *    mark; adding `@tiptap/extension-underline` again would register a duplicate
  *    extension and corrupt the shared schema.
+ *  - `AtriumArtifactEmbed` (slice D) adds the `atriumArtifactEmbed` block ATOM node
+ *    (an embedded-artifact reference). Schema-only here; its live React NodeView is
+ *    attached CLIENT-side in DocumentEditor, so the server transformer / collab
+ *    bundle get the node without any React dependency (same pattern as TableKit's
+ *    browser-only plugins).
  * Because both the client editor and the server (markdown-bridge / agent bridge /
  * collab-server bundle) build from THIS function, editor and bridge stay in
  * lockstep automatically (asserted by tests/smoke/atrium-collab-schema.smoke.ts).
@@ -45,6 +50,7 @@ import {
   AtriumSuggestionInsert,
   AtriumSuggestionDelete,
 } from "./suggestion-marks";
+import { AtriumArtifactEmbed } from "./artifact-embed-node";
 
 /**
  * The schema-defining extensions shared by client editor and server transformer.
@@ -64,6 +70,12 @@ export function getSchemaExtensions(): Extensions {
     TableKit,
     TextStyle,
     Color,
+    // Meridian embedded-artifact node (slice D). A block ATOM referencing an
+    // artifact by id, serialized to markdown as `::atrium-artifact{id="…"}`. Lives
+    // in THIS shared set (like TableKit) so the client editor, server transformer,
+    // and collab bundle build the identical schema — the live React NodeView is
+    // attached client-side (DocumentEditor) and never touches the schema.
+    AtriumArtifactEmbed,
     AtriumAuthored,
     // §18.1 comments + track-changes marks. These MUST live here (the ONE shared
     // schema) so the client editor, server transformer, agent bridge, and seeding

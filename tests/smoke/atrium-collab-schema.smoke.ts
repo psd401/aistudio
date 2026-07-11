@@ -46,6 +46,12 @@ const EXPECTED_MARKS = [
 // (already covered by the mark parity check) — no separate node here.
 const EXPECTED_TABLE_NODES = ["table", "tableRow", "tableHeader", "tableCell"];
 
+// Meridian embedded-artifact NODE (slice D): AtriumArtifactEmbed adds this block
+// ATOM. It must be in the ONE shared schema so an embed inserted in the client
+// editor maps identically on the server transformer / collab bundle (the live
+// React NodeView is attached client-side only and does not affect the schema).
+const EXPECTED_EMBED_NODE = "atriumArtifactEmbed";
+
 check("server schema (getCollabSchema) exposes all Atrium marks", () => {
   const schema = getCollabSchema();
   for (const mark of EXPECTED_MARKS) {
@@ -58,6 +64,14 @@ check("server schema exposes the Meridian table nodes", () => {
   for (const node of EXPECTED_TABLE_NODES) {
     assert.ok(schema.nodes[node], `server schema missing node: ${node}`);
   }
+});
+
+check("server schema exposes the Meridian embedded-artifact node", () => {
+  const schema = getCollabSchema();
+  assert.ok(
+    schema.nodes[EXPECTED_EMBED_NODE],
+    `server schema missing node: ${EXPECTED_EMBED_NODE}`
+  );
 });
 
 check("client schema (getSchema(getSchemaExtensions)) == server schema mark set", () => {
@@ -132,6 +146,30 @@ check("a table + color-marked span survive a Yjs round-trip", () => {
   const tinted = para.content.find((s) => s.text === "tinted");
   const style = tinted?.marks?.find((m) => m.type === "textStyle");
   assert.equal(style?.attrs?.color, "#6d4fc2", "textStyle color lost in Yjs round-trip");
+});
+
+check("an embedded-artifact node survives a Yjs round-trip with its id intact", () => {
+  const schema = getCollabSchema();
+  const artifactId = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+  const docJSON = {
+    type: "doc",
+    content: [
+      { type: "paragraph", content: [{ type: "text", text: "before" }] },
+      { type: "atriumArtifactEmbed", attrs: { artifactId, title: "Metrics" } },
+      { type: "paragraph", content: [{ type: "text", text: "after" }] },
+    ],
+  };
+  const ydoc = prosemirrorJSONToYDoc(schema, docJSON, "default");
+  const back = yDocToProsemirrorJSON(ydoc, "default") as {
+    content: Array<{ type: string; attrs?: Record<string, unknown> }>;
+  };
+  const embed = back.content.find((n) => n.type === "atriumArtifactEmbed");
+  assert.ok(embed, "embedded-artifact node lost in Yjs round-trip");
+  assert.equal(
+    embed?.attrs?.artifactId,
+    artifactId,
+    "embed artifactId lost in Yjs round-trip"
+  );
 });
 
 check("comment + suggestion marks survive a Yjs round-trip with attrs intact", () => {
