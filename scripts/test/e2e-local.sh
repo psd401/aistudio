@@ -117,6 +117,11 @@ if docker exec -i aistudio-postgres pg_isready -U postgres >/dev/null 2>&1; then
     < tests/e2e/fixtures/atrium-editor-seed.sql >/dev/null 2>&1 || true
   docker exec -i aistudio-postgres psql -U postgres -d aistudio -v ON_ERROR_STOP=0 -q \
     < tests/e2e/fixtures/atrium-meridian-artifact-seed.sql >/dev/null 2>&1 || true
+  # Public-reader (/p/[slug]) objects: a public doc live on public_web + an internal
+  # doc also live on public_web (the strict-gate 404 case). Feeds both the Phase 7
+  # public-reader spec and the Meridian slice-E anonymous reader assertions.
+  docker exec -i aistudio-postgres psql -U postgres -d aistudio -v ON_ERROR_STOP=0 -q \
+    < tests/e2e/fixtures/atrium-public-seed.sql >/dev/null 2>&1 || true
   DATABASE_URL="postgresql://postgres:postgres@localhost:5432/aistudio" DB_SSL=false \
     bun run scripts/dev/seed-atrium-doc-state.ts >/dev/null 2>&1 || true
 else

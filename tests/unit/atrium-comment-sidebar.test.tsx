@@ -102,7 +102,9 @@ describe("CommentSidebar", () => {
     render(<CommentSidebar idOrSlug="doc-1" editor={fakeEditor(true)} canEdit />);
 
     await waitFor(() =>
-      expect(screen.getByText("No comments yet.")).toBeInTheDocument()
+      expect(
+        screen.getByText("Highlight text to comment or ask the agent")
+      ).toBeInTheDocument()
     );
     expect(screen.getByRole("button", { name: "Add comment" })).toBeDisabled();
   });
@@ -120,7 +122,7 @@ describe("CommentSidebar", () => {
     });
     render(<CommentSidebar idOrSlug="doc-1" editor={fakeEditor(false)} canEdit />);
 
-    const resolveBtn = await screen.findByRole("button", { name: "Resolve" });
+    const resolveBtn = await screen.findByRole("button", { name: "✓ Resolve" });
     fireEvent.click(resolveBtn);
 
     await waitFor(() =>
