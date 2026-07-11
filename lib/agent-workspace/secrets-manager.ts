@@ -145,6 +145,134 @@ export async function storePlaudRefreshToken(
   }
 }
 
+/**
+ * Canva per-user OAuth token slot.
+ *   Path: psd-agent-creds/{env}/user/{email}/canva
+ * Written by the /agent-connect-canva callback; read headlessly by the
+ * psd-canva skill. Covered by the existing psd-agent-creds/{env}/* IAM grants
+ * (no new IAM). Record shape below.
+ *
+ * Canva is a CONFIDENTIAL OAuth client — the client_id/client_secret live in
+ * the SHARED secret psd-agent/{env}/canva-oauth-client, NOT per-user; so the
+ * per-user record carries only the refresh token (single-use, rotates on each
+ * exchange) plus the granted scope and mint time.
+ */
+export interface CanvaTokenData {
+  refresh_token: string
+  scope?: string
+  obtained_at: string
+}
+
+export function canvaSecretId(ownerEmail: string): string {
+  if (!SAFE_EMAIL_RE.test(ownerEmail)) {
+    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
+  }
+  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  return `psd-agent-creds/${environment}/user/${ownerEmail}/canva`
+}
+
+/**
+ * Store the Canva refresh token. Create-or-put with the same concurrency
+ * handling as storeRefreshToken/storePlaudRefreshToken. No-op in local dev.
+ * Returns the real ARN. The CreateSecret tags MUST stay {Environment,
+ * ManagedBy=aistudio, OwnerEmail} to satisfy the ECS task role's tag-scoped
+ * CreateSecret grant (see infra/lib/constructs/ecs-service.ts).
+ */
+export async function storeCanvaRefreshToken(
+  ownerEmail: string,
+  tokenData: CanvaTokenData
+): Promise<string | null> {
+  const secretId = canvaSecretId(ownerEmail)
+  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  if (process.env.NODE_ENV === "development") {
+    log.info("Local dev mode — skipping Canva secret write", { secretId })
+    return null
+  }
+  const {
+    PutSecretValueCommand,
+    CreateSecretCommand,
+    DescribeSecretCommand,
+    ResourceNotFoundException,
+  } = await import("@aws-sdk/client-secrets-manager")
+  const client = await getSecretsManagerClient()
+  const secretString = JSON.stringify(tokenData)
+  try {
+    const putResp = await client.send(
+      new PutSecretValueCommand({ SecretId: secretId, SecretString: secretString })
+    )
+    log.info("Canva refresh token stored", { secretId })
+    return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+  } catch (error) {
+    if (error instanceof ResourceNotFoundException) {
+      try {
+        const createResp = await client.send(
+          new CreateSecretCommand({
+            Name: secretId,
+            SecretString: secretString,
+            Description: `Canva refresh token for ${ownerEmail}`,
+            Tags: [
+              { Key: "Environment", Value: environment },
+              { Key: "ManagedBy", Value: "aistudio" },
+              { Key: "OwnerEmail", Value: ownerEmail },
+            ],
+          })
+        )
+        log.info("Canva refresh token secret created", { secretId })
+        return createResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+      } catch (createError) {
+        if (createError instanceof Error && createError.name === "ResourceExistsException") {
+          const putResp = await client.send(
+            new PutSecretValueCommand({ SecretId: secretId, SecretString: secretString })
+          )
+          return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
+        }
+        throw createError
+      }
+    }
+    throw error
+  }
+}
+
+/**
+ * Delete the per-user Canva refresh token secret. Called from the user-deletion
+ * path so a removed account's Canva OAuth refresh token doesn't linger as an
+ * orphan secret. Force-deletes (no recovery window) for the same reason as
+ * deleteWorkspaceSecret. Returns true if deleted, false if it didn't exist.
+ * No-op in local dev.
+ */
+export async function deleteCanvaSecret(ownerEmail: string): Promise<boolean> {
+  const secretId = canvaSecretId(ownerEmail)
+
+  if (process.env.NODE_ENV === "development") {
+    return false
+  }
+
+  const { DeleteSecretCommand, ResourceNotFoundException } = await import(
+    "@aws-sdk/client-secrets-manager"
+  )
+  const client = await getSecretsManagerClient()
+
+  try {
+    await client.send(
+      new DeleteSecretCommand({
+        SecretId: secretId,
+        ForceDeleteWithoutRecovery: true,
+      })
+    )
+    log.info("Canva refresh token secret deleted", { secretId })
+    return true
+  } catch (err) {
+    if (err instanceof ResourceNotFoundException) {
+      return false
+    }
+    log.error("Failed to delete Canva refresh token secret", {
+      secretId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    throw err
+  }
+}
+
 // Module-scoped client — reuses the HTTP connection pool across calls.
 // Lazily initialized on first non-dev invocation.
 let _smClient: InstanceType<typeof import("@aws-sdk/client-secrets-manager").SecretsManagerClient> | null = null

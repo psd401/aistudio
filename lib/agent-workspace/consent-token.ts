@@ -23,8 +23,12 @@ const log = createLogger({ module: "consent-token" })
  *   'cognito_data'  — Cognito refresh token for the data-MCP integration.
  *                     Captured by the /agent-connect-data page, stored at
  *                     psd-agent-creds/{env}/user/{email}/cognito-refresh.
+ *   'plaud'         — Plaud OAuth refresh token (public client, PKCE).
+ *   'canva'         — Canva Connect OAuth refresh token (confidential client,
+ *                     PKCE). Captured by /agent-connect-canva, stored at
+ *                     psd-agent-creds/{env}/user/{email}/canva.
  */
-export type ConsentTokenKind = "agent_account" | "user_account" | "cognito_data" | "plaud"
+export type ConsentTokenKind = "agent_account" | "user_account" | "cognito_data" | "plaud" | "canva"
 
 export interface ConsentTokenPayload {
   /** Human user email (e.g. hagelk@psd401.net) */
@@ -129,7 +133,8 @@ export async function verifyConsentToken(token: string): Promise<ConsentTokenPay
       kind === "agent_account" ||
       kind === "user_account" ||
       kind === "cognito_data" ||
-      kind === "plaud"
+      kind === "plaud" ||
+      kind === "canva"
     ) {
       resolvedKind = kind
     } else if (kind !== undefined) {

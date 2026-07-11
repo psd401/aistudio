@@ -23,6 +23,28 @@ import { randomBytes, timingSafeEqual } from "node:crypto"
 
 const log = createLogger({ module: "agent-consent-link" })
 
+/** The credential slot a consent link is capturing. */
+type Kind = "agent_account" | "user_account" | "cognito_data" | "plaud" | "canva"
+const ALLOWED_KINDS: Kind[] = ["agent_account", "user_account", "cognito_data", "plaud", "canva"]
+
+/**
+ * Map a consent kind to its public start page. cognito_data captures a
+ * NextAuth session's Cognito refresh token; plaud/canva start their own
+ * OAuth flow; everything else routes to the Google Workspace OAuth page.
+ */
+function resolveConsentPath(kind: Kind): string {
+  switch (kind) {
+    case "cognito_data":
+      return "/agent-connect-data"
+    case "plaud":
+      return "/agent-connect-plaud"
+    case "canva":
+      return "/agent-connect-canva"
+    default:
+      return "/agent-connect"
+  }
+}
+
 /**
  * Resolve the shared secret. Prefers AGENT_INTERNAL_API_KEY env var (local
  * dev) and falls back to Secrets Manager at AGENT_INTERNAL_API_KEY_SECRET_ID
@@ -142,19 +164,16 @@ export async function POST(request: NextRequest) {
 
   // Validate kind. Default to 'agent_account' for backwards compatibility
   // with skills that haven't been updated to pass kind explicitly.
-  type Kind = "agent_account" | "user_account" | "cognito_data" | "plaud"
-  const allowedKinds: Kind[] = ["agent_account", "user_account", "cognito_data", "plaud"]
-  const kind: Kind = body.kind === undefined
-    ? "agent_account"
-    : (allowedKinds as readonly string[]).includes(body.kind)
-      ? (body.kind as Kind)
-      : "agent_account"
-  if (body.kind !== undefined && !(allowedKinds as readonly string[]).includes(body.kind)) {
+  if (body.kind !== undefined && !(ALLOWED_KINDS as readonly string[]).includes(body.kind)) {
     return NextResponse.json(
-      { error: "kind must be 'agent_account', 'user_account', 'cognito_data', or 'plaud' if provided" },
+      { error: "kind must be 'agent_account', 'user_account', 'cognito_data', 'plaud', or 'canva' if provided" },
       { status: 400 }
     )
   }
+  const kind: Kind =
+    body.kind !== undefined && (ALLOWED_KINDS as readonly string[]).includes(body.kind)
+      ? (body.kind as Kind)
+      : "agent_account"
 
   // Rate limit
   const withinLimit = await checkRateLimit(ownerEmail)
@@ -176,10 +195,11 @@ export async function POST(request: NextRequest) {
   // see migration 072).
   const nonce = randomBytes(32).toString("hex")
 
-  // PKCE (S256) code_verifier for the Plaud flow only. base64url(32 bytes) =
-  // 43 chars, within RFC 7636's 43–128 range. Stored server-side; only the
-  // S256 challenge ever leaves in a URL.
-  const codeVerifier = kind === "plaud" ? randomBytes(32).toString("base64url") : null
+  // PKCE (S256) code_verifier for the PKCE-based flows (Plaud, Canva).
+  // base64url(32 bytes) = 43 chars, within RFC 7636's 43–128 range. Stored
+  // server-side; only the S256 challenge ever leaves in a URL.
+  const codeVerifier =
+    kind === "plaud" || kind === "canva" ? randomBytes(32).toString("base64url") : null
 
   await executeQuery(
     (db) =>
@@ -210,11 +230,7 @@ export async function POST(request: NextRequest) {
   // captures a NextAuth session's Cognito refresh token; the other kinds
   // route to the Google Workspace OAuth start page.
   const baseUrl = getIssuerUrl()
-  const path =
-    kind === "cognito_data" ? "/agent-connect-data"
-    : kind === "plaud" ? "/agent-connect-plaud"
-    : "/agent-connect"
-  const url = `${baseUrl}${path}?token=${encodeURIComponent(token)}`
+  const url = `${baseUrl}${resolveConsentPath(kind)}?token=${encodeURIComponent(token)}`
 
   log.info("Consent link generated", sanitizeForLogging({ ownerEmail, agentEmail, kind, requestId }))
 
