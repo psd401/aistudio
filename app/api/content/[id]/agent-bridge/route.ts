@@ -46,12 +46,7 @@ import { canEdit } from "@/lib/content/helpers";
 import { screenAgentContent } from "@/lib/content/agent-screening";
 import { publishService } from "@/lib/content/publish-service";
 import { assertEditorDestination } from "@/lib/content/validators";
-import {
-  ApprovalRequiredError,
-  ForbiddenError,
-  NotFoundError,
-  ValidationError,
-} from "@/lib/content/errors";
+import { mapAgentPublishError } from "@/lib/content/agent-publish-response";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { agentIdentities } from "@/lib/db/schema";
 import {
@@ -364,9 +359,8 @@ async function handlePublishOp(ctx: PublishOpContext): Promise<NextResponse> {
   try {
     destination = assertEditorDestination(destinationRaw ?? "intranet", op);
   } catch (error) {
-    if (error instanceof ValidationError) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
-    }
+    const mapped = mapAgentPublishError(error, op, destinationRaw ?? "intranet");
+    if (mapped) return NextResponse.json(mapped.body, { status: mapped.status });
     throw error;
   }
 
@@ -395,33 +389,14 @@ async function handlePublishOp(ctx: PublishOpContext): Promise<NextResponse> {
       unpublished: result.unpublished,
     });
   } catch (error) {
-    // §26.4: a public destination the operator may not publish/unpublish directly
-    // is a pending-approval outcome (approval-queue event emitted in the service),
-    // NOT a failure. Report it honestly with 202 so the agent tells the user it is
-    // queued rather than claiming success or bypassing the gate.
-    if (error instanceof ApprovalRequiredError) {
-      log.info("Agent publish requires approval", { objectId, destination, op });
-      return NextResponse.json(
-        {
-          applied: false,
-          op,
-          destination,
-          approvalRequired: true,
-          message:
-            "This destination requires administrator approval — the request has been submitted for review.",
-        },
-        { status: 202 }
-      );
-    }
-    // Defensive mapping (loadEditableObject already gated, so these are rare):
-    if (error instanceof NotFoundError) {
-      return NextResponse.json({ error: "Not found" }, { status: 404 });
-    }
-    if (error instanceof ForbiddenError) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
-    if (error instanceof ValidationError) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
+    // Error semantics (§26.4 approval → 202, defensive 404/403/400) live in the
+    // jest-covered `mapAgentPublishError`; unmapped errors rethrow to a 500.
+    const mapped = mapAgentPublishError(error, op, destination);
+    if (mapped) {
+      if (mapped.status === 202) {
+        log.info("Agent publish requires approval", { objectId, destination, op });
+      }
+      return NextResponse.json(mapped.body, { status: mapped.status });
     }
     throw error;
   }
