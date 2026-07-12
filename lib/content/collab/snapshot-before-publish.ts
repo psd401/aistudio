@@ -10,9 +10,11 @@
  * empty) head while the assistant reports success.
  *
  * The human editor gets this guarantee for free from a client-side debounced
- * autosave (`snapshotDocumentAction`); the server-side agent has no such loop, so
- * we snapshot here — reading the authoritative live Yjs markdown and persisting it
- * as a new version (advancing the head) right before publish.
+ * autosave (`snapshotDocumentAction` over `toCleanMarkdown`); the server-side agent
+ * has no such loop, so we snapshot here — reading the live Yjs doc as CLEAN,
+ * accepted-baseline markdown (`readAgentDocCleanMarkdown`, matching the human path:
+ * pending suggestion insertions removed, deletions kept, comment/suggestion marks
+ * stripped) and persisting it as a new version (advancing the head) before publish.
  *
  * SAFE + best-effort:
  *  - documents only (artifacts advance their head via `createVersion` already);
@@ -26,7 +28,7 @@
  * here — mirroring the human `snapshotDocumentAction` path.
  */
 
-import { readAgentDocMarkdown } from "./apply-agent-edit";
+import { readAgentDocCleanMarkdown } from "./apply-agent-edit";
 import { versionService } from "@/lib/content";
 import type { Requester } from "@/lib/content/types";
 import { createLogger } from "@/lib/logger";
@@ -43,7 +45,10 @@ export async function snapshotLiveDocumentForPublish(params: {
 
   let live: string | null;
   try {
-    live = await readAgentDocMarkdown(objectId);
+    // Clean, accepted-baseline markdown (pending suggestion insertions removed,
+    // deletions kept, comment/suggestion marks stripped) — same as the human
+    // toCleanMarkdown snapshot, so no unaccepted-suggestion residue is published.
+    live = await readAgentDocCleanMarkdown(objectId);
   } catch (err) {
     log.warn("pre-publish live read failed; publishing existing version head", {
       objectId,

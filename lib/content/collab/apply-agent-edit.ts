@@ -33,6 +33,7 @@ import {
   yDocToProseMirrorJSON,
 } from "./markdown-bridge";
 import { proseMirrorJSONToMarkdown } from "./prosemirror-markdown";
+import { resolveDocToCleanJSON } from "./suggestions";
 import { COLLAB_FIELD, makeAuthorTag } from "./provenance";
 import { ATRIUM_COMMENT_MARK } from "./comment-mark";
 import {
@@ -440,6 +441,38 @@ export async function readAgentDocMarkdown(objectId: string): Promise<string | n
     return proseMirrorJSONToMarkdown(json);
   } catch (err) {
     log.warn("readAgentDocMarkdown failed", {
+      objectId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Read the live document as CLEAN, accepted-baseline markdown for a snapshot /
+ * publish body: pending suggestion INSERTIONS removed, pending DELETIONS kept, and
+ * comment/suggestion marks stripped — via the same `resolveDocToCleanJSON` the
+ * human editor's `toCleanMarkdown` uses, so no comment or unaccepted-suggestion
+ * residue (or struck-through text) leaks into a published version. Distinct from
+ * `readAgentDocMarkdown` (which returns the raw current text for the chat READ
+ * tool, where seeing pending edits is desirable). Returns `null` on an unreachable
+ * live read so the caller can fall back to the persisted head.
+ */
+export async function readAgentDocCleanMarkdown(objectId: string): Promise<string | null> {
+  try {
+    return await withHydratedDoc(objectId, (ydoc) => {
+      // resolveDocToCleanJSON is a pure ProseMirror-JSON→JSON transform whose param
+      // is typed `PmNode` as a type-level lie (it walks .type/.marks/.content on the
+      // plain JSON); the human toCleanMarkdown casts the same way. Pass the live
+      // JSON straight through, then serialize the cleaned JSON to markdown.
+      const json = yDocToProseMirrorJSON(ydoc);
+      const cleaned = resolveDocToCleanJSON(
+        json as unknown as Parameters<typeof resolveDocToCleanJSON>[0]
+      );
+      return proseMirrorJSONToMarkdown(cleaned as unknown as JSONContent);
+    });
+  } catch (err) {
+    log.warn("readAgentDocCleanMarkdown failed", {
       objectId,
       error: err instanceof Error ? err.message : String(err),
     });
