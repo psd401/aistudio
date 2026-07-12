@@ -53,9 +53,9 @@ function emit(obj) {
  * Minimal long-form argv parser. `--foo bar` and `--foo` (boolean) supported;
  * dashes in key names become underscores. Mirrors psd-aistudio/psd-data.
  */
-function parseArgs(argv) {
+function parseArgs(argv, startIndex = 2) {
   const args = {};
-  for (let i = 2; i < argv.length; i++) {
+  for (let i = startIndex; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') {
       args.help = true;
@@ -138,7 +138,10 @@ async function resolveApiKey() {
         12
       );
     }
-    // Secret exists but is empty — the credential is effectively missing.
+    // NOTE: `fail()` calls `process.exit()`, which never returns — so if the
+    // catch above ran (retrieval error), execution stopped there and we never
+    // reach this line. This guard only handles the retrieval-SUCCEEDED-but-empty
+    // case (a real, distinct outcome), not a double-fail after the catch.
     if (!value) {
       fail(
         `Secret ${AISTUDIO_CONTENT_API_KEY_SECRET_ID} has no SecretString value`,

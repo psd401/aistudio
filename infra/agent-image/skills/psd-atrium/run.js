@@ -159,9 +159,8 @@ async function main() {
     process.exit(0);
   }
 
-  // parseArgs reads flags starting at argv index 3 (after the subcommand); pass a
-  // synthetic argv so its i=2 loop start aligns with the first flag.
-  const args = parseArgs([process.argv[0], process.argv[1], ...process.argv.slice(3)]);
+  // Flags start after `node run.js <subcommand>` — i.e. process.argv index 3.
+  const args = parseArgs(process.argv, 3);
   if (args.help) {
     usage();
     process.exit(0);
