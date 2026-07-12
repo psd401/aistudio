@@ -1,0 +1,7 @@
+{
+  "name": "psd-atrium",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenClaw skill: version-based read/write access to AI Studio's Atrium content surface (/api/v1/content) via a scoped sk- content key. find/read/create/edit/publish documents + artifacts. @aws-sdk/client-secrets-manager (only for the secret-id auth path) is resolved at runtime via psd-workspace's node_modules — no image dependency of its own.",
+  "main": "run.js"
+}
