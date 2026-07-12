@@ -225,14 +225,26 @@ async function restFetch(method, path, opts = {}) {
     fail(`Network error calling AI Studio content API: ${err.message}`, 12);
   }
 
+  // Read the body ONCE as text, then try to parse it as JSON. Keeping the raw text
+  // lets the error branches surface a NON-JSON infra body (an ALB/nginx 502/503
+  // HTML page) verbatim, instead of the useless "{}" a consumed `.json()` gives.
+  const rawText = await resp.text().catch(() => '');
+  let data = null;
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = null; // non-JSON body (e.g. an infra proxy error page)
+    }
+  }
+
   if (resp.status === 401) {
-    const text = await resp.text().catch(() => '');
     emit({
       status: 'unauthorized',
       message:
         'AI Studio rejected the content API key (401). The key must be a valid ' +
         'sk- key holding the content: scopes for this operation.',
-      detail: text.slice(0, 512),
+      detail: rawText.slice(0, 512),
     });
     process.exit(11);
   }
@@ -244,8 +256,6 @@ async function restFetch(method, path, opts = {}) {
     process.exit(14);
   }
 
-  const data = await resp.json().catch(() => null);
-
   // §26.4: a public publish/unpublish/widen the caller may not perform directly
   // comes back as HTTP 202 with { data: { status: 'approval_required', message } }.
   // This is NOT an error — it is queued for a human/admin to approve.
@@ -256,7 +266,8 @@ async function restFetch(method, path, opts = {}) {
 
   if (!resp.ok) {
     // Error envelope is { error: { code, message, details? }, requestId }. Surface
-    // it verbatim (exit 12); a non-JSON body (infra 502/503) is surfaced too.
+    // it verbatim (exit 12); a non-JSON body (infra 502/503) has no envelope, so
+    // fall back to the RAW text for debug context rather than an empty "{}".
     const err = data && data.error ? data.error : null;
     emit({
       status: 'error',
@@ -265,7 +276,7 @@ async function restFetch(method, path, opts = {}) {
       message: err
         ? err.message
         : `AI Studio content API returned HTTP ${resp.status}`,
-      detail: err ? undefined : JSON.stringify(data ?? {}).slice(0, 512),
+      detail: err ? undefined : rawText.slice(0, 512),
     });
     process.exit(12);
   }

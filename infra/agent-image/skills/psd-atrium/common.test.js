@@ -192,6 +192,28 @@ test('restFetch maps a 4xx error envelope to exit 12 with the code + message', a
   expect(emitted.message).toBe('You cannot edit this');
 });
 
+test('restFetch surfaces a non-JSON infra error body (502) verbatim in detail (exit 12)', async () => {
+  globalThis.fetch = mock(
+    async () =>
+      new Response('<html>502 Bad Gateway</html>', {
+        status: 502,
+        headers: { 'content-type': 'text/html' },
+      })
+  );
+
+  let code;
+  try {
+    await common.restFetch('GET', '/obj-1');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(12);
+  const emitted = lastEmitted();
+  expect(emitted.status).toBe('error');
+  expect(emitted.http_status).toBe(502);
+  expect(emitted.detail).toContain('502 Bad Gateway');
+});
+
 test('restFetch maps 429 to exit 14', async () => {
   globalThis.fetch = mock(async () => jsonResponse({}, 429));
 
