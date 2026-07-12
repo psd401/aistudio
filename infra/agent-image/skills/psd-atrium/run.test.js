@@ -180,22 +180,32 @@ test('read requires --id (exit 1)', async () => {
   expect(code).toBe(1);
 });
 
-test('create-document POSTs / with kind=document and markdown body', async () => {
+test('create-document POSTs / with kind=document and a base64-encoded markdown body', async () => {
   restResponder = () => ({ approvalRequired: false, status: 201, payload: { id: 'obj-9', slug: 'doc' } });
 
   await run('create-document', '--title', 'Sample', '--markdown', '# Hello', '--collection', 'lessons', '--tags', 'a,b');
 
   expect(restCalls[0].method).toBe('POST');
   expect(restCalls[0].path).toBe('');
+  // Body is base64-encoded in transit with codeEncoding: 'base64' so the edge WAF
+  // never inspects raw markup; the server decodes it before screening.
   expect(restCalls[0].opts.body).toEqual({
     kind: 'document',
     title: 'Sample',
     collectionId: 'lessons',
-    body: '# Hello',
+    body: Buffer.from('# Hello', 'utf8').toString('base64'),
     bodyFormat: 'markdown',
+    codeEncoding: 'base64',
     visibility: undefined,
     tags: ['a', 'b'],
   });
+});
+
+test('create-document with no --markdown sends no body and no codeEncoding', async () => {
+  await run('create-document', '--title', 'Empty');
+  const body = restCalls[0].opts.body;
+  expect(body.body).toBeUndefined();
+  expect(body.codeEncoding).toBeUndefined();
 });
 
 test('create-document carries a visibility object built from --visibility/--grants', async () => {
@@ -250,14 +260,29 @@ test('a value-less optional flag is a usage error (exit 1), not silently dropped
   expect(code).toBe(1);
 });
 
-test('create-artifact POSTs / with kind=artifact, code→body, and bodyFormat', async () => {
+test('create-artifact POSTs / with kind=artifact, base64 code→body, and bodyFormat', async () => {
   await run('create-artifact', '--title', 'Chart', '--code', '<html></html>', '--body-format', 'html');
-  expect(restCalls[0].opts.body).toMatchObject({
+  const body = restCalls[0].opts.body;
+  expect(body).toMatchObject({
     kind: 'artifact',
     title: 'Chart',
-    body: '<html></html>',
     bodyFormat: 'html',
+    codeEncoding: 'base64',
   });
+  expect(Buffer.from(body.body, 'base64').toString('utf8')).toBe('<html></html>');
+});
+
+test('create-artifact with <script>/<style> produces a WAF-opaque base64 body', async () => {
+  const code =
+    '<html><style>b{color:red}</style><script>alert(1)</script></html>';
+  await run('create-artifact', '--title', 'X', '--code', code, '--body-format', 'html');
+  const body = restCalls[0].opts.body;
+  expect(body.codeEncoding).toBe('base64');
+  // Canonical base64: no <, >, ", : — so the WAF's CrossSiteScripting_BODY rule
+  // has no XSS signature to match. The server round-trips it back to the real code.
+  expect(body.body).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+  expect(body.body).not.toContain('<script');
+  expect(Buffer.from(body.body, 'base64').toString('utf8')).toBe(code);
 });
 
 test('create-artifact requires --body-format (exit 1)', async () => {
@@ -277,7 +302,12 @@ test('edit (replace) POSTs a new version with the given body', async () => {
 
   expect(restCalls).toHaveLength(1);
   expect(restCalls[0]).toMatchObject({ method: 'POST', path: '/obj-1/versions' });
-  expect(restCalls[0].opts.body).toEqual({ body: 'new text', bodyFormat: undefined, summary: 'rev' });
+  expect(restCalls[0].opts.body).toEqual({
+    body: Buffer.from('new text', 'utf8').toString('base64'),
+    bodyFormat: undefined,
+    summary: 'rev',
+    codeEncoding: 'base64',
+  });
   expect(emitted[0].mode).toBe('replace');
 });
 
@@ -297,7 +327,11 @@ test('edit (append) reads the saved body then POSTs the concatenation', async ()
 
   expect(restCalls[0]).toMatchObject({ method: 'GET', path: '/obj-1' });
   expect(restCalls[1]).toMatchObject({ method: 'POST', path: '/obj-1/versions' });
-  expect(restCalls[1].opts.body.body).toBe('first\n\nsecond');
+  // The concatenated body is base64-encoded in transit; it decodes to the join.
+  expect(restCalls[1].opts.body.codeEncoding).toBe('base64');
+  expect(Buffer.from(restCalls[1].opts.body.body, 'base64').toString('utf8')).toBe(
+    'first\n\nsecond'
+  );
   expect(restCalls[1].opts.body.bodyFormat).toBe('markdown');
 });
 
@@ -317,6 +351,32 @@ test('edit (append) fails cleanly when the current body is not inline', async ()
   expect(code).toBe(1);
   // Only the GET happened; no version was written.
   expect(restCalls).toHaveLength(1);
+});
+
+test('archive PATCHes /<id> with status archived', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: { id: 'obj-1', slug: 'doc', status: 'archived' },
+  });
+
+  await run('archive', '--id', 'obj-1');
+
+  expect(restCalls).toHaveLength(1);
+  expect(restCalls[0]).toMatchObject({ method: 'PATCH', path: '/obj-1' });
+  expect(restCalls[0].opts.body).toEqual({ status: 'archived' });
+  expect(emitted[0].archived).toBe(true);
+  expect(emitted[0].status).toBe('archived');
+});
+
+test('archive requires --id (exit 1)', async () => {
+  let code;
+  try {
+    await run('archive');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
 });
 
 test('set-visibility PATCHes /<id>/visibility with level + grants', async () => {

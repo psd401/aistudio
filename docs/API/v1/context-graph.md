@@ -774,10 +774,24 @@ initial version (v1) is snapshotted. Requires `content:create`.
 | `kind` | `document` \| `artifact` | yes | — |
 | `title` | string | yes | 1-500 chars |
 | `collectionId` | string | no | Collection slug or UUID; resolved server-side |
-| `body` | string | no | markdown (document) or code (artifact). Omit to create no v1 |
+| `body` | string | no | markdown (document) or code (artifact). Omit to create no v1. base64 when `codeEncoding: "base64"` |
 | `bodyFormat` | `markdown` \| `html` \| `jsx` | no | — |
+| `codeEncoding` | `base64` | no | Transit encoding for `body` (see below) |
 | `visibility` | object | no | `{ level, grants? }` (see Visibility below). Defaults to the collection default, else `private` |
 | `tags` | string[] | no | — |
+
+**Artifact code with JS/CSS — `codeEncoding: "base64"`:** artifacts are self-contained
+HTML/JS/CSS, so their code legitimately contains `<script>`, `<style>`, and inline
+`style="…"`. The edge WAF (AWS managed `CrossSiteScripting_BODY`) inspects every raw
+request body and BLOCKS that markup with a bare `403` (the request never reaches the
+app). To send it, set `codeEncoding: "base64"` and put the **base64-encoded** body in
+`body`; the server decodes it BEFORE the §28.3 screening and the decoded-size cap
+(max 5,000,000 decoded bytes) run, so screening always operates on the real content.
+Invalid base64 → `400 CONTENT_VALIDATION`. base64's alphabet carries no XSS signature,
+so the WAF stays fully active for every other request. Omit `codeEncoding` for plain
+text/markdown (raw body — unchanged behavior). The same field is accepted by
+`POST /content/{id}/versions`. Artifact code is rendered only inside a cross-origin
+sandboxed iframe (§28.1), never on the app origin.
 
 **Example request:**
 
@@ -792,6 +806,22 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
     "bodyFormat": "markdown",
     "visibility": { "level": "group", "grants": [{ "kind": "role", "value": "staff" }] },
     "tags": ["policy"]
+  }' \
+  "https://your-domain/api/v1/content"
+```
+
+**Example — an artifact with JS/CSS (base64):**
+
+```bash
+# body is base64("<html><style>…</style><script>…</script></html>")
+curl -X POST -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kind": "artifact",
+    "title": "Enrollment Chart",
+    "bodyFormat": "html",
+    "codeEncoding": "base64",
+    "body": "PGh0bWw+PHN0eWxlPi4uLjwvc3R5bGU+PHNjcmlwdD4uLi48L3NjcmlwdD48L2h0bWw+"
   }' \
   "https://your-domain/api/v1/content"
 ```
@@ -921,8 +951,9 @@ Snapshot a new version from `body` and make it the current version. Requires `co
 
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
-| `body` | string | yes | min 1 char |
+| `body` | string | yes | min 1 char. base64 when `codeEncoding: "base64"` |
 | `bodyFormat` | `markdown` \| `html` \| `jsx` | no | — |
+| `codeEncoding` | `base64` | no | Set `base64` when `body` is artifact code with `<script>`/`<style>` — decoded server-side before screening/size cap (see `POST /content`). Invalid base64 → 400 |
 | `summary` | string | no | max 2000 chars — change note |
 
 **Example request:**

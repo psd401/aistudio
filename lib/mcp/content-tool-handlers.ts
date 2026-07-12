@@ -33,6 +33,10 @@ import {
   contentDeepLink,
   resolveCollectionId,
 } from "@/lib/content/surface-helpers";
+import {
+  decodeContentBody,
+  type ContentCodeEncoding,
+} from "@/lib/content/code-encoding";
 // Reuse the REST-side schemas verbatim so MCP and REST validate the same grant /
 // visibility contract from ONE definition (they were byte-identical copies).
 import {
@@ -159,6 +163,8 @@ const createDocumentSchema = z.object({
   title: z.string().min(1).max(500),
   collection: z.string().min(1).max(200).optional(),
   markdown: z.string().optional(),
+  // `"base64"` marks `markdown` as WAF-opaque base64 (decoded before screening).
+  codeEncoding: z.enum(["base64"]).optional(),
   visibility: visibilityZ.optional(),
   tags: z.array(z.string()).optional(),
 });
@@ -179,7 +185,11 @@ async function createContent(
     visibility?: z.infer<typeof visibilityZ>;
     tags?: string[];
   },
-  body: { body?: string; bodyFormat?: "markdown" | "html" | "jsx" }
+  body: {
+    body?: string;
+    bodyFormat?: "markdown" | "html" | "jsx";
+    codeEncoding?: ContentCodeEncoding;
+  }
 ): Promise<McpToolResult> {
   const resolved = await resolveReq(context);
   if ("result" in resolved) return resolved.result;
@@ -187,6 +197,9 @@ async function createContent(
   try {
     // Session humans must also hold the atrium-content capability (see helper).
     await assertContentAuthoringCapability(context);
+    // Decode a base64 (WAF-opaque) body BEFORE the service's §28.3 screening +
+    // size caps — screening always sees the real, decoded content.
+    const decodedBody = decodeContentBody(body.body, body.codeEncoding);
     const collectionId = await resolveCollectionId(common.collection);
     const hasPublishPublicCapability = hasPublishPublicScope(context.scopes);
     const created = await contentService.create(
@@ -195,7 +208,7 @@ async function createContent(
         kind,
         title: common.title,
         collectionId,
-        body: body.body,
+        body: decodedBody,
         bodyFormat: body.bodyFormat,
         visibility: common.visibility,
         tags: common.tags,
@@ -227,12 +240,13 @@ async function handleCreateDocument(
 ): Promise<McpToolResult> {
   const parsed = createDocumentSchema.safeParse(args);
   if (!parsed.success) return zodFail(parsed.error);
-  const { title, collection, markdown, visibility, tags } = parsed.data;
+  const { title, collection, markdown, codeEncoding, visibility, tags } =
+    parsed.data;
   return createContent(
     context,
     "document",
     { title, collection, visibility, tags },
-    { body: markdown, bodyFormat: markdown ? "markdown" : undefined }
+    { body: markdown, bodyFormat: markdown ? "markdown" : undefined, codeEncoding }
   );
 }
 
@@ -242,6 +256,10 @@ const createArtifactSchema = z.object({
   collection: z.string().min(1).max(200).optional(),
   code: z.string().min(1),
   bodyFormat: z.enum(["html", "jsx"]),
+  // `"base64"` marks `code` as WAF-opaque base64 — REQUIRED in practice for
+  // artifact code that contains <script>/<style> (the ALB WAF blocks that markup
+  // in a raw body). Decoded before §28.3 screening / size caps.
+  codeEncoding: z.enum(["base64"]).optional(),
   visibility: visibilityZ.optional(),
   tags: z.array(z.string()).optional(),
 });
@@ -252,12 +270,13 @@ async function handleCreateArtifact(
 ): Promise<McpToolResult> {
   const parsed = createArtifactSchema.safeParse(args);
   if (!parsed.success) return zodFail(parsed.error);
-  const { title, collection, code, bodyFormat, visibility, tags } = parsed.data;
+  const { title, collection, code, bodyFormat, codeEncoding, visibility, tags } =
+    parsed.data;
   return createContent(
     context,
     "artifact",
     { title, collection, visibility, tags },
-    { body: code, bodyFormat }
+    { body: code, bodyFormat, codeEncoding }
   );
 }
 
@@ -397,6 +416,8 @@ const createVersionSchema = z.object({
   id: z.string().min(1),
   body: z.string().min(1),
   bodyFormat: z.enum(["markdown", "html", "jsx"]).optional(),
+  // `"base64"` marks `body` as WAF-opaque base64 (decoded before screening).
+  codeEncoding: z.enum(["base64"]).optional(),
   summary: z.string().optional(),
 });
 
@@ -412,8 +433,12 @@ async function handleCreateVersion(
   try {
     // Session humans must also hold the atrium-content capability (see helper).
     await assertContentAuthoringCapability(context);
+    // Decode a base64 (WAF-opaque) body BEFORE the service screens/size-caps it.
+    const decodedBody =
+      decodeContentBody(parsed.data.body, parsed.data.codeEncoding) ??
+      parsed.data.body;
     const result = await contentService.createVersion(req, parsed.data.id, {
-      body: parsed.data.body,
+      body: decodedBody,
       bodyFormat: parsed.data.bodyFormat,
       summary: parsed.data.summary,
     });

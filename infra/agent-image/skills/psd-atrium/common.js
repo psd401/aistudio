@@ -50,6 +50,33 @@ function emit(obj) {
 }
 
 /**
+ * base64-encode a content body for transit. AI Studio's edge WAF blocks any
+ * request body that looks like reflected XSS (`<script>`, `<style>`, `style="…"`,
+ * `onerror=`) via the managed CrossSiteScripting_BODY rule — which is exactly the
+ * markup a real Atrium ARTIFACT carries — returning a bare 403 with no detail.
+ * base64's alphabet (`[A-Za-z0-9+/=]`) contains none of those characters, so an
+ * encoded body is inert to the WAF; the server decodes it (via the request's
+ * `codeEncoding: "base64"` flag) BEFORE screening/size caps. JS/CSS artifact code
+ * is therefore fully supported — this makes it opaque in transit, not stripped.
+ */
+function encodeContentBody(text) {
+  return Buffer.from(String(text), 'utf8').toString('base64');
+}
+
+/**
+ * Return a REST write body with its `body` field base64-encoded and
+ * `codeEncoding: "base64"` set, so <script>/<style>-bearing content survives the
+ * edge WAF. A no-op when there is no body to send (e.g. a metadata-only create),
+ * so an empty document is posted unchanged.
+ */
+function withEncodedBody(body) {
+  if (!body || typeof body.body !== 'string' || body.body.length === 0) {
+    return body;
+  }
+  return { ...body, body: encodeContentBody(body.body), codeEncoding: 'base64' };
+}
+
+/**
  * Minimal long-form argv parser. `--foo bar` and `--foo` (boolean) supported;
  * dashes in key names become underscores. Mirrors psd-aistudio/psd-data.
  */
@@ -338,4 +365,6 @@ module.exports = {
   resolveContentBaseUrl,
   resolveApiKey,
   restFetch,
+  encodeContentBody,
+  withEncodedBody,
 };

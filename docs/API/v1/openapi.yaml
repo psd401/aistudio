@@ -2731,10 +2731,24 @@ components:
           description: Collection slug or UUID; resolved to a collection id server-side.
         body:
           type: string
-          description: Initial body (markdown for a document, code for an artifact). When omitted, no v1 is created.
+          description: >-
+            Initial body (markdown for a document, code for an artifact). When
+            omitted, no v1 is created. If `codeEncoding` is `base64`, this field
+            is the base64-encoded body and is decoded server-side before
+            screening and size caps.
         bodyFormat:
           type: string
           enum: [markdown, html, jsx]
+        codeEncoding:
+          type: string
+          enum: [base64]
+          description: >-
+            Transit encoding for `body`. Set `base64` when the body contains
+            HTML/JS/CSS (e.g. `<script>`, `<style>`, `style="…"`): the edge WAF
+            blocks that markup in a raw request body, so send the body
+            base64-encoded and the server decodes it BEFORE §28.3 screening and
+            the decoded-size cap (max 5,000,000 decoded bytes). Invalid base64 →
+            400. Omit for plain text/markdown (raw body, unchanged behavior).
         visibility:
           $ref: "#/components/schemas/ContentVisibility"
         tags:
@@ -2771,9 +2785,21 @@ components:
         body:
           type: string
           minLength: 1
+          description: >-
+            New body. If `codeEncoding` is `base64`, this is the base64-encoded
+            body, decoded server-side before screening and the size cap.
         bodyFormat:
           type: string
           enum: [markdown, html, jsx]
+        codeEncoding:
+          type: string
+          enum: [base64]
+          description: >-
+            Transit encoding for `body`. Set `base64` when the body contains
+            HTML/JS/CSS (`<script>`, `<style>`, `style="…"`) so it is opaque to
+            the edge WAF; the server decodes it BEFORE §28.3 screening and the
+            decoded-size cap (max 5,000,000 decoded bytes). Invalid base64 → 400.
+            Omit for plain text/markdown.
         summary:
           type: string
           maxLength: 2000

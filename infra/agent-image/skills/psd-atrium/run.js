@@ -22,8 +22,14 @@
  *                    [--visibility <level>] [--grants ...]
  *   node run.js edit --id <id> --body <text> [--mode replace|append]
  *                    [--body-format markdown|html|jsx] [--summary <s>]
+ *   node run.js archive --id <id>
  *   node run.js set-visibility --id <id> --level private|group|internal|public
  *                    [--grants role:staff,building:GHS]
+ *
+ * Artifact code is HTML/JS/CSS (including <script>/<style>) and is FULLY
+ * supported: run.js base64-encodes every write body automatically (codeEncoding:
+ * "base64") so the code is opaque to the edge WAF and decoded server-side before
+ * screening. Pass raw code — do not escape or strip tags.
  *   node run.js publish --id <id> [--destination intranet|public_web|schoology|google|okf]
  *   node run.js unpublish --id <id> --destination intranet|public_web|schoology|google
  *
@@ -45,6 +51,7 @@ const {
   parseList,
   parseGrants,
   restFetch,
+  withEncodedBody,
 } = require('./common');
 
 const KINDS = ['document', 'artifact'];
@@ -73,8 +80,12 @@ function usage() {
       '                  [--visibility <level>] [--grants k:v,...]',
       '  edit --id <id> --body <text> [--mode replace|append]',
       '       [--body-format markdown|html|jsx] [--summary <s>]',
+      '  archive --id <id>   (soft-remove; no hard delete in Phase 1)',
       '  set-visibility --id <id> --level private|group|internal|public',
       '                 [--grants role:staff,building:GHS]',
+      '',
+      'Artifact code (HTML/JS/CSS, incl. <script>/<style>) is fully supported and',
+      'sent base64-encoded automatically — you pass raw code, nothing to escape.',
       '',
       'Publish (§26.4 — a public destination you may not publish directly returns',
       'a queued-for-approval result; relay its message verbatim):',
@@ -222,7 +233,9 @@ async function main() {
         visibility,
         tags: parseList(args.tags, 'tags'),
       };
-      const { payload } = await restFetch('POST', '', { body });
+      // base64-encode the body so <script>/<style> in a fenced block survives the
+      // edge WAF; the server decodes before screening (no-op when bodyless).
+      const { payload } = await restFetch('POST', '', { body: withEncodedBody(body) });
       emitCreated(payload, visibility);
       return;
     }
@@ -242,7 +255,9 @@ async function main() {
         visibility,
         tags: parseList(args.tags, 'tags'),
       };
-      const { payload } = await restFetch('POST', '', { body });
+      // Artifact code is HTML/JS/CSS — ALWAYS base64-encode it so <script>/<style>
+      // is opaque to the edge WAF; the server decodes it before screening.
+      const { payload } = await restFetch('POST', '', { body: withEncodedBody(body) });
       emitCreated(payload, visibility);
       return;
     }
@@ -276,10 +291,25 @@ async function main() {
         if (!bodyFormat) bodyFormat = version.bodyFormat;
       }
 
+      // base64-encode the new body so <script>/<style> content survives the edge
+      // WAF; the server decodes it before screening.
       const { payload } = await restFetch('POST', `/${encodeURIComponent(id)}/versions`, {
-        body: { body: finalBody, bodyFormat, summary },
+        body: withEncodedBody({ body: finalBody, bodyFormat, summary }),
       });
       emit({ ...payload, mode });
+      return;
+    }
+
+    case 'archive': {
+      // Soft-remove: flip status to "archived" via the metadata PATCH (needs
+      // content:update, which the content key holds). Atrium Phase 1 has no hard
+      // delete by design, so this is how you clean up throwaway content you made.
+      // Archiving also takes any live publication offline (server-side).
+      const id = requireStr(args, 'id', 'id');
+      const { payload } = await restFetch('PATCH', `/${encodeURIComponent(id)}`, {
+        body: { status: 'archived' },
+      });
+      emit({ ...payload, archived: true });
       return;
     }
 
