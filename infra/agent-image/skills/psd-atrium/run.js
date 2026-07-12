@@ -194,15 +194,19 @@ async function main() {
       // is empty.
       const version = payload && payload.version;
       const body = version && typeof version.bodyInline === 'string' ? version.bodyInline : null;
-      emit({
-        ...payload,
-        body,
-        bodyAvailableInline: body !== null,
-        note:
-          version && body === null
-            ? 'Body not returned inline: documents keep their text in the collaborative store (version.bodyLocation "proof"), and large artifacts are offloaded to object storage. This read shows the last SAVED version metadata only; the live editor state is not reachable here.'
-            : 'Shows the last SAVED version body (not the live collaborative editor state).',
-      });
+      let note;
+      if (!version) {
+        // A bodyless object (e.g. create-document with no --markdown) has no saved
+        // version — don't claim "here is the saved body" for something empty.
+        note =
+          'This object has no saved version yet (it was created without a body). There is nothing to read back.';
+      } else if (body === null) {
+        note =
+          'Body not returned inline: documents keep their text in the collaborative store (version.bodyLocation "proof"), and large artifacts are offloaded to object storage. This read shows the last SAVED version metadata only; the live editor state is not reachable here.';
+      } else {
+        note = 'Shows the last SAVED version body (not the live collaborative editor state).';
+      }
+      emit({ ...payload, body, bodyAvailableInline: body !== null, note });
       return;
     }
 

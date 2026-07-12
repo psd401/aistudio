@@ -156,6 +156,20 @@ test('read reports when the body is not inline (S3-offloaded)', async () => {
   expect(out.bodyAvailableInline).toBe(false);
 });
 
+test('read reports the no-saved-version case (bodyless object) without claiming a body', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: { id: 'obj-1', title: 'Empty', version: null },
+  });
+
+  await run('read', '--id', 'obj-1');
+  const out = emitted[0];
+  expect(out.body).toBeNull();
+  expect(out.bodyAvailableInline).toBe(false);
+  expect(out.note).toMatch(/no saved version/i);
+});
+
 test('read requires --id (exit 1)', async () => {
   let code;
   try {

@@ -85,6 +85,11 @@ returns no explicit signal for this, so the skill compares requested vs. returne
 visibility and adds `approvalRequired: true` + a `visibilityNote` when they differ —
 relay that the widen is **pending approval**, not that the object is public.
 
+> Edge case the skill can't auto-flag: if you create **into a collection whose
+> default visibility is public** and pass **no** `--visibility`, the same downgrade
+> happens server-side, but with nothing to diff against the skill can't add the
+> note. Always trust the returned `visibilityLevel` over what you expected.
+
 ### Edit (creates a new version)
 
 ```bash
