@@ -128,6 +128,10 @@ export function PublishMenu({
               value={o.value}
               disabled={o.disabled}
               className="gap-2"
+              // Keep the menu OPEN when picking a destination (Radix closes it by
+              // default on select) so the user can then click Publish/Unpublish in
+              // the same dropdown without reopening it.
+              onSelect={(e) => e.preventDefault()}
             >
               {o.icon}
               {o.label}

@@ -426,6 +426,24 @@ function FullPageLayout({
   );
 }
 
+/**
+ * Local title state that re-syncs when the server `title` prop changes (e.g. a
+ * Settings-dialog rename → router.refresh() delivers a fresh prop; the page keys
+ * the editor on the object id only, so it never remounts). Uses the React
+ * "adjust state on prop change during render" pattern — no effect, no cascading
+ * render. An inline commit updates both this state and the DB, so the eventual
+ * refreshed prop is a no-op here.
+ */
+function useSyncedTitle(title?: string): [string, (next: string) => void] {
+  const [docTitle, setDocTitle] = useState(title ?? "Untitled");
+  const [syncedTitle, setSyncedTitle] = useState(title);
+  if (title !== syncedTitle) {
+    setSyncedTitle(title);
+    setDocTitle(title ?? "Untitled");
+  }
+  return [docTitle, setDocTitle];
+}
+
 export function DocumentEditor({
   idOrSlug,
   userId,
@@ -508,10 +526,9 @@ export function DocumentEditor({
   });
 
   // The title is inline-editable (README: New-doc lands on a blank sheet with an
-  // editable title). Kept in local state so the sheet H1 rename lifts to the
-  // topbar breadcrumb + byline live, without a full reload. Seeded from the
-  // server prop; the page keys the editor on the object id, so this is stable.
-  const [docTitle, setDocTitle] = useState(title ?? "Untitled");
+  // editable title); the hook keeps the sheet H1 / breadcrumb / byline in sync
+  // with both inline commits and out-of-band renames (Settings dialog).
+  const [docTitle, setDocTitle] = useSyncedTitle(title);
   const crumbs = breadcrumb ?? [];
 
   const toolbar = (

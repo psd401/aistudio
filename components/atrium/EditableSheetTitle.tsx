@@ -15,7 +15,7 @@
  * TipTap/Yjs schema or the live collab document.
  */
 
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { updateContentAction } from "@/actions/db/atrium/update-content";
 import { createLogger } from "@/lib/client-logger";
 
@@ -38,13 +38,28 @@ export function EditableSheetTitle({
   onCommit,
 }: EditableSheetTitleProps): React.JSX.Element {
   // The last value we persisted — so blur without a real change never fires a
-  // needless server round-trip (typing then tabbing away unchanged).
+  // needless server round-trip (typing then tabbing away unchanged). Synced to
+  // the prop each render so an EXTERNAL rename (e.g. the Settings dialog → a
+  // refreshed `value`) is never overwritten by a stale local baseline.
   const savedRef = useRef(value);
+  // Sync in an effect (never during render) so an EXTERNAL rename (Settings dialog
+  // → refreshed `value`) updates the baseline. An inline commit sets savedRef
+  // directly in the blur handler, so this only tracks out-of-band changes.
+  useEffect(() => {
+    savedRef.current = value;
+  }, [value]);
 
   const commit = useCallback(
-    async (raw: string) => {
+    async (raw: string, element: HTMLElement) => {
       const next = raw.replace(/\s+/g, " ").trim();
-      if (!next || next === savedRef.current) return;
+      if (!next) {
+        // Cleared + blurred: restore the visible title (never persist an empty
+        // one, and never leave the H1 showing a placeholder while the real title
+        // stands in the breadcrumb/DB).
+        element.textContent = savedRef.current;
+        return;
+      }
+      if (next === savedRef.current) return;
       // Optimistic: reflect immediately, roll back on failure.
       const previous = savedRef.current;
       savedRef.current = next;
@@ -91,7 +106,7 @@ export function EditableSheetTitle({
           (e.currentTarget as HTMLElement).blur();
         }
       }}
-      onBlur={(e) => void commit(e.currentTarget.textContent ?? "")}
+      onBlur={(e) => void commit(e.currentTarget.textContent ?? "", e.currentTarget)}
     >
       {value}
     </h1>
