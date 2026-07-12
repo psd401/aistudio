@@ -25,12 +25,26 @@
  * written to Secrets Manager and is NEVER logged. Hashing uses `hash-wasm`
  * (pure-WASM Argon2id) with the SAME parameters as the app's native `argon2`
  * loader (lib/api-keys/argon2-loader.ts) — the two produce interoperable PHC
- * strings (verified: native `argon2.verify()` accepts a hash-wasm hash), so the
- * app's `validateApiKey` authenticates the key with no code change. WASM avoids
+ * strings, so the app's `validateApiKey` authenticates the key with no code
+ * change. The cross-library claim is enforced by a unit test that verifies a
+ * hash-wasm-produced hash with the app's native `argon2.verify()` (hash-wasm is
+ * pinned exact so a bump can't silently change PHC encoding). WASM avoids
  * shipping a native, arch-specific `.node` binary in the Lambda bundle.
  *
+ * Failure posture: a MISSING service user (migration 104 not applied yet — e.g.
+ * a partial single-stack deploy against a cluster whose DatabaseStack predates
+ * the migration) is reported as SUCCESS with Outcome `skipped-migration-pending`
+ * plus an error log, NOT a CFN FAILED. A FAILED here rolls back the ENTIRE
+ * shared AgentPlatformStack, and the CFN rollback re-invokes this handler with
+ * the same inputs — which would fail again and wedge the stack in
+ * UPDATE_ROLLBACK_FAILED. Skipping degrades to "key not provisioned yet"; the
+ * per-deploy Nonce re-runs the bootstrap on the next (full) deploy, which
+ * self-heals. Transient AWS errors still fail loudly (retry = redeploy).
+ *
  * DB access is the repo's standard Aurora deploy-pipeline pattern: the RDS Data
- * API (rds-data:ExecuteStatement), same as the db-init migration Lambda.
+ * API (rds-data:ExecuteStatement), same as the db-init migration Lambda. The
+ * revoke-old + insert-new pair runs inside ONE Data API transaction so a crash
+ * between them cannot leave the two DB states disagreeing.
  */
 
 import crypto from 'node:crypto';
@@ -38,6 +52,9 @@ import { argon2id, argon2Verify } from 'hash-wasm';
 import {
   RDSDataClient,
   ExecuteStatementCommand,
+  BeginTransactionCommand,
+  CommitTransactionCommand,
+  RollbackTransactionCommand,
   type SqlParameter,
   type Field,
 } from '@aws-sdk/client-rds-data';
@@ -45,6 +62,7 @@ import {
   SecretsManagerClient,
   GetSecretValueCommand,
   PutSecretValueCommand,
+  ResourceNotFoundException,
 } from '@aws-sdk/client-secrets-manager';
 import type {
   CloudFormationCustomResourceEvent,
@@ -66,6 +84,22 @@ const ARGON2_ITERATIONS = 3;
 const ARGON2_PARALLELISM = 4;
 const ARGON2_HASH_LENGTH = 32;
 const ARGON2_SALT_BYTES = 16;
+
+// ---------------------------------------------------------------------------
+// Key identity — single source of truth (the CDK stack passes neither; a
+// duplicated literal in the stack drifted from the Lambda's fallback once).
+// KEY_SCOPES must stay a subset of ROLE_SCOPES.staff's content:* scopes and
+// MUST NOT include content:publish_public (the §26.4 public-publish approval
+// gate is deliberately human/admin-held) — enforced by a unit test against
+// lib/api-keys/scopes.ts.
+// ---------------------------------------------------------------------------
+export const KEY_NAME = 'psd-atrium agent (auto-provisioned)';
+export const KEY_SCOPES: readonly string[] = [
+  'content:read',
+  'content:create',
+  'content:update',
+  'content:publish_internal',
+];
 
 // ---------------------------------------------------------------------------
 // Pure crypto helpers (exported for unit tests)
@@ -107,10 +141,15 @@ export async function verifyKey(rawKey: string, phcHash: string): Promise<boolea
   }
 }
 
-/** True iff `keyScopes` covers every scope in `required` (exact-match only). */
-export function coversScopes(keyScopes: string[], required: string[]): boolean {
+/**
+ * True iff the key's scopes are EXACTLY the required set (order-insensitive).
+ * Set-equality, not subset: a live key that holds MORE than required (e.g.
+ * KEY_SCOPES was narrowed in a later deploy) must also re-mint, or a
+ * least-privilege reduction would never propagate to the standing credential.
+ */
+export function scopesMatch(keyScopes: readonly string[], required: readonly string[]): boolean {
   const held = new Set(keyScopes);
-  return required.every((s) => held.has(s));
+  return held.size === new Set(required).size && required.every((s) => held.has(s));
 }
 
 // ---------------------------------------------------------------------------
@@ -134,25 +173,27 @@ export interface ContentKeyOps {
   resolveServiceUserId(): Promise<number | null>;
   /** All api_keys rows for (prefix, userId) — usually 0 or 1. */
   keysByPrefix(prefix: string, userId: number): Promise<ExistingKeyRow[]>;
-  /** Revoke every currently-active key owned by the service user. */
-  revokeActiveKeys(userId: number): Promise<void>;
-  /** Insert a new active api_keys row owned by the service user. */
-  insertKey(row: {
+  /**
+   * Atomically revoke every currently-active key owned by the service user AND
+   * insert the new active row — ONE transaction, so a crash between the two
+   * cannot leave the service user with zero (or two) active keys recorded.
+   */
+  replaceActiveKey(row: {
     userId: number;
     name: string;
     keyPrefix: string;
     keyHash: string;
-    scopes: string[];
+    scopes: readonly string[];
   }): Promise<void>;
 }
 
 export interface EnsureConfig {
   serviceUserCognitoSub: string;
   keyName: string;
-  requiredScopes: string[];
+  requiredScopes: readonly string[];
 }
 
-export type EnsureOutcome = 'noop' | 'minted';
+export type EnsureOutcome = 'noop' | 'minted' | 'skipped-migration-pending';
 
 export interface Logger {
   info(msg: string, meta?: Record<string, unknown>): void;
@@ -162,12 +203,16 @@ export interface Logger {
 
 /**
  * Core idempotency logic. Returns `noop` when the secret already holds a valid,
- * active, sufficiently-scoped key owned by the service user; otherwise mints a
- * fresh key, revokes the service user's other active keys, and returns `minted`.
+ * active key owned by the service user whose scopes EXACTLY match the required
+ * set; otherwise mints a fresh key (revoke-old + insert-new in one transaction
+ * via `ops.replaceActiveKey`) and returns `minted`.
  *
- * NEVER logs the raw key. Throws when the service user row is missing (the
- * migration must have run first — the stack orders AgentPlatformStack after
- * DatabaseStack, so this is a genuine misconfiguration worth failing loudly on).
+ * NEVER logs the raw key. A missing service user row (migration 104 not applied
+ * to this cluster yet) returns `skipped-migration-pending` with an error log
+ * instead of throwing: a throw here becomes a CFN FAILED that rolls back — and
+ * can wedge — the entire shared AgentPlatformStack, whereas skipping degrades to
+ * "key not provisioned yet" and self-heals on the next full deploy (the Nonce
+ * re-fires this handler every deploy).
  */
 export async function ensureContentKey(
   ops: ContentKeyOps,
@@ -176,10 +221,15 @@ export async function ensureContentKey(
 ): Promise<EnsureOutcome> {
   const userId = await ops.resolveServiceUserId();
   if (userId == null) {
-    throw new Error(
-      `Atrium service user not found (cognito_sub=${cfg.serviceUserCognitoSub}). ` +
-        `Migration 104-atrium-agent-service-user.sql must run before this bootstrap.`
+    log.error(
+      'Atrium service user not found — skipping key provisioning (self-heals on the next full deploy)',
+      {
+        cognitoSub: cfg.serviceUserCognitoSub,
+        remediation:
+          'Deploy AIStudio-DatabaseStack first (migration 104-atrium-agent-service-user.sql), then redeploy this stack — use the canonical full deploy, never a partial one.',
+      }
     );
+    return 'skipped-migration-pending';
   }
 
   const current = await ops.readSecret();
@@ -188,7 +238,7 @@ export async function ensureContentKey(
     const candidates = await ops.keysByPrefix(prefix, userId);
     for (const row of candidates) {
       if (!row.isActive || row.revoked) continue;
-      if (!coversScopes(row.scopes, cfg.requiredScopes)) continue;
+      if (!scopesMatch(row.scopes, cfg.requiredScopes)) continue;
       if (await verifyKey(current, row.keyHash)) {
         log.info('Atrium content key present and valid — no-op', {
           keyPrefix: `${KEY_PREFIX}${prefix}`,
@@ -196,21 +246,20 @@ export async function ensureContentKey(
         return 'noop';
       }
     }
-    log.warn('Secret holds a key with no matching active/scoped api_keys row — re-minting', {
+    log.warn('Secret holds a key with no matching active/exactly-scoped api_keys row — re-minting', {
       keyPrefix: `${KEY_PREFIX}${prefix}`,
     });
   } else {
     log.info('Secret empty or malformed — minting Atrium content key', {});
   }
 
-  // Mint. Revoke the service user's other active keys FIRST so exactly one
-  // active service key exists (cleans orphans left by a cleared secret).
-  await ops.revokeActiveKeys(userId);
-
+  // Mint: revoke-old + insert-new atomically (exactly one active service key),
+  // then persist the plaintext. If the secret write fails after the DB commit,
+  // the deploy fails loudly and the next run's re-mint sweeps the orphaned row.
   const rawKey = generateRawKey();
   const keyPrefix = keyPrefixOf(rawKey);
   const keyHash = await hashKey(rawKey);
-  await ops.insertKey({
+  await ops.replaceActiveKey({
     userId,
     name: cfg.keyName,
     keyPrefix,
@@ -250,7 +299,7 @@ export interface RdsOpsConfig {
 }
 
 export function buildRdsOps(cfg: RdsOpsConfig): ContentKeyOps {
-  const exec = async (sql: string, parameters?: SqlParameter[]) =>
+  const exec = async (sql: string, parameters?: SqlParameter[], transactionId?: string) =>
     rds.send(
       new ExecuteStatementCommand({
         resourceArn: cfg.clusterArn,
@@ -258,6 +307,7 @@ export function buildRdsOps(cfg: RdsOpsConfig): ContentKeyOps {
         database: cfg.database,
         sql,
         parameters,
+        transactionId,
         includeResultMetadata: true,
       })
     );
@@ -273,7 +323,7 @@ export function buildRdsOps(cfg: RdsOpsConfig): ContentKeyOps {
       } catch (err) {
         // A secret created by CDK with no value has no version -> ResourceNotFound.
         // Treat as empty; any other error propagates (fail the deploy loudly).
-        if ((err as { name?: string })?.name === 'ResourceNotFoundException') {
+        if (err instanceof ResourceNotFoundException) {
           return null;
         }
         throw err;
@@ -324,32 +374,66 @@ export function buildRdsOps(cfg: RdsOpsConfig): ContentKeyOps {
           keyHash: fieldStr(rec[0]) ?? '',
           scopes,
           isActive: rec[2]?.booleanValue === true,
-          revoked: !(rec[3]?.isNull ?? true),
+          // RDS Data API OMITS `isNull` on non-null fields (it does not send
+          // `isNull: false`), so `!(isNull ?? true)` was permanently false.
+          // A non-null `revoked_at` surfaces via fieldStr's stringValue path.
+          revoked: fieldStr(rec[3]) !== null,
         };
       });
     },
 
-    async revokeActiveKeys(userId: number) {
-      await exec(
-        `UPDATE api_keys
-            SET is_active = false, revoked_at = now(), updated_at = now()
-          WHERE user_id = :uid AND is_active = true`,
-        [{ name: 'uid', value: { longValue: userId } }]
+    async replaceActiveKey(row) {
+      // Revoke-old + insert-new inside ONE Data API transaction: a crash
+      // between the statements can never commit a half-replaced key state.
+      const { transactionId } = await rds.send(
+        new BeginTransactionCommand({
+          resourceArn: cfg.clusterArn,
+          secretArn: cfg.secretArn,
+          database: cfg.database,
+        })
       );
-    },
-
-    async insertKey(row) {
-      await exec(
-        `INSERT INTO api_keys (user_id, name, key_prefix, key_hash, scopes)
-         VALUES (:uid, :name, :prefix, :hash, CAST(:scopes AS jsonb))`,
-        [
-          { name: 'uid', value: { longValue: row.userId } },
-          strParam('name', row.name),
-          strParam('prefix', row.keyPrefix),
-          strParam('hash', row.keyHash),
-          strParam('scopes', JSON.stringify(row.scopes)),
-        ]
-      );
+      if (!transactionId) throw new Error('RDS Data API returned no transactionId');
+      try {
+        await exec(
+          `UPDATE api_keys
+              SET is_active = false, revoked_at = now(), updated_at = now()
+            WHERE user_id = :uid AND is_active = true`,
+          [{ name: 'uid', value: { longValue: row.userId } }],
+          transactionId
+        );
+        await exec(
+          `INSERT INTO api_keys (user_id, name, key_prefix, key_hash, scopes)
+           VALUES (:uid, :name, :prefix, :hash, CAST(:scopes AS jsonb))`,
+          [
+            { name: 'uid', value: { longValue: row.userId } },
+            strParam('name', row.name),
+            strParam('prefix', row.keyPrefix),
+            strParam('hash', row.keyHash),
+            strParam('scopes', JSON.stringify(row.scopes)),
+          ],
+          transactionId
+        );
+        await rds.send(
+          new CommitTransactionCommand({
+            resourceArn: cfg.clusterArn,
+            secretArn: cfg.secretArn,
+            transactionId,
+          })
+        );
+      } catch (err) {
+        try {
+          await rds.send(
+            new RollbackTransactionCommand({
+              resourceArn: cfg.clusterArn,
+              secretArn: cfg.secretArn,
+              transactionId,
+            })
+          );
+        } catch {
+          // Rollback is best-effort; the Data API expires abandoned txns itself.
+        }
+        throw err;
+      }
     },
   };
 }
@@ -369,14 +453,6 @@ const consoleLogger: Logger = {
   warn: (msg, meta) => console.warn(msg, meta ? JSON.stringify(meta) : ''),
   error: (msg, meta) => console.error(msg, meta ? JSON.stringify(meta) : ''),
 };
-
-function parseScopes(raw: string): string[] {
-  const parsed = JSON.parse(raw);
-  if (!Array.isArray(parsed) || parsed.some((s) => typeof s !== 'string' || s.length === 0)) {
-    throw new Error('KEY_SCOPES must be a non-empty JSON array of strings');
-  }
-  return parsed as string[];
-}
 
 // ---------------------------------------------------------------------------
 // CloudFormation Custom Resource handler
@@ -410,15 +486,14 @@ export async function handler(
       contentKeySecretId: must('CONTENT_KEY_SECRET_ID'),
       serviceUserCognitoSub: must('SERVICE_USER_COGNITO_SUB'),
     };
-    const requiredScopes = parseScopes(must('KEY_SCOPES'));
     const ops = buildRdsOps(cfg);
 
     const outcome = await ensureContentKey(
       ops,
       {
         serviceUserCognitoSub: cfg.serviceUserCognitoSub,
-        keyName: process.env.KEY_NAME || 'psd-atrium agent (auto-provisioned)',
-        requiredScopes,
+        keyName: KEY_NAME,
+        requiredScopes: KEY_SCOPES,
       },
       consoleLogger
     );
@@ -426,7 +501,7 @@ export async function handler(
     return {
       ...base,
       Status: 'SUCCESS',
-      PhysicalResourceId: 'atrium-content-key-bootstrap',
+      PhysicalResourceId: physicalId,
       Data: { Outcome: outcome },
     };
   } catch (err) {

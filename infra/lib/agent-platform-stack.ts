@@ -586,19 +586,19 @@ export class AgentPlatformStack extends cdk.Stack {
 
     // Atrium content API key (#1055 Path 2) for the psd-atrium skill. A scoped
     // `sk-` key holding content: scopes (content:read/create/update/
-    // publish_internal), minted in AI Studio → Settings → API Keys by an owner
-    // whose role grants those scopes (staff or administrator). Created EMPTY
-    // (Google/Canva pattern); populated after deploy with the raw key string:
-    //   aws secretsmanager put-secret-value \
-    //     --secret-id psd-agent/<env>/atrium-content-api-key \
-    //     --secret-string 'sk-...'
+    // publish_internal). Created empty, then AUTO-POPULATED on every deploy by
+    // the AtriumContentKeyBootstrapLambda custom resource (section 4g below),
+    // which idempotently mints the key for the migration-104 service user —
+    // DO NOT populate it manually; a hand-written value is detected as
+    // stale/unowned and replaced on the next deploy. Rotation: clear the secret
+    // value or revoke the api_keys row, then deploy.
     // Read (not written) by the AgentCore runtime, which already holds
     // GetSecretValue on psd-agent/${environment}/* (see the execution-role policy
     // below) — so no new IAM grant is required. The value is a RAW sk- string,
     // NOT JSON (the skill reads SecretString verbatim).
     const atriumContentApiKeySecret = new secretsmanager.Secret(this, 'AtriumContentApiKeySecret', {
       secretName: `psd-agent/${environment}/atrium-content-api-key`,
-      description: `Scoped sk- content API key for the psd-atrium skill (Atrium /api/v1/content access). Populate after minting a content-scoped key in AI Studio Settings → API Keys. Issue #1055.`,
+      description: `Scoped sk- content API key for the psd-atrium skill (Atrium /api/v1/content access). AUTO-POPULATED each deploy by AtriumContentKeyBootstrapLambda — do not set manually. Issue #1055.`,
     });
     cdk.Tags.of(atriumContentApiKeySecret).add('Environment', environment);
     cdk.Tags.of(atriumContentApiKeySecret).add('ManagedBy', 'cdk');
@@ -794,9 +794,15 @@ export class AgentPlatformStack extends cdk.Stack {
     //     The DB stores only the hash; the plaintext goes to the secret and is
     //     never logged.
     //   - Idempotent: no-op when the secret already holds a valid key; re-mints
-    //     when the secret is empty/stale or the key is revoked/under-scoped.
+    //     when the secret is empty/stale or the key is revoked/scope-drifted
+    //     (exact scope match — a scope REDUCTION also re-mints).
     //   - Runs AFTER DatabaseStack (bin/infra.ts addDependency), so migration
-    //     104 (the service user) has been applied before it mints.
+    //     104 (the service user) has been applied before it mints. That ordering
+    //     only holds for `cdk deploy --all`; a partial single-stack deploy
+    //     against a cluster missing migration 104 does NOT fail the stack — the
+    //     Lambda logs an error and reports Outcome=skipped-migration-pending
+    //     (a CFN FAILED would roll back, and could wedge, this entire shared
+    //     stack). The next full deploy self-heals via the per-deploy Nonce.
     //
     // Least-privilege role (ServiceRoleFactory): RDS Data API on the cluster +
     // read the DB credential secret + read/write ONLY the content-key secret.
@@ -882,8 +888,12 @@ export class AgentPlatformStack extends cdk.Stack {
           },
         },
       ),
-      memorySize: 256,
-      timeout: cdk.Duration.minutes(2),
+      // 512 MB: Argon2id reserves 64 MB for the hash itself atop the Node/WASM
+      // baseline — 256 left thin headroom, and an OOM mid-mint is exactly the
+      // crash the transactional replace exists to survive. 5 min: dev Aurora
+      // auto-pauses to 0 ACU; a cold resume can exceed the old 2-min budget.
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(5),
       architecture: lambda.Architecture.ARM_64,
       logGroup: atriumKeyBootstrapLogGroup,
       environment: {
@@ -892,16 +902,8 @@ export class AgentPlatformStack extends cdk.Stack {
         DB_NAME: props.databaseName ?? 'aistudio',
         CONTENT_KEY_SECRET_ID: atriumContentApiKeySecret.secretArn,
         SERVICE_USER_COGNITO_SUB: 'service-account:psd-atrium-agent',
-        KEY_NAME: 'psd-atrium agent (auto-provisioned)',
-        // Content scopes: read/create/update/publish_internal — NOT
-        // publish_public (the §26.4 public-publish approval gate stays).
-        KEY_SCOPES: JSON.stringify([
-          'content:read',
-          'content:create',
-          'content:update',
-          'content:publish_internal',
-        ]),
-        ENVIRONMENT: environment,
+        // Key name + scopes live as constants in the Lambda (single source of
+        // truth, unit-tested against ROLE_SCOPES.staff — see index.ts KEY_SCOPES).
       },
     });
 
