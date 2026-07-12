@@ -788,7 +788,9 @@ export class AgentPlatformStack extends cdk.Stack {
     // by migration 104 (`cognito_sub = service-account:psd-atrium-agent`).
     //
     //   - Reuses the repo's Aurora deploy pattern: the RDS Data API
-    //     (rds-data:ExecuteStatement, same as the db-init migration Lambda).
+    //     (rds-data:ExecuteStatement/BatchExecuteStatement, same as the db-init
+    //     migration Lambda, plus BeginTransaction/CommitTransaction/
+    //     RollbackTransaction for the revoke+insert replace transaction).
     //   - Argon2id-hashes the key with hash-wasm using the SAME params as the
     //     app's argon2 loader, so `validateApiKey` authenticates it unchanged.
     //     The DB stores only the hash; the plaintext goes to the secret and is
@@ -821,7 +823,13 @@ export class AgentPlatformStack extends cdk.Stack {
             new iam.PolicyStatement({
               sid: 'AuroraDataApi',
               effect: iam.Effect.ALLOW,
-              actions: ['rds-data:ExecuteStatement', 'rds-data:BatchExecuteStatement'],
+              actions: [
+                'rds-data:ExecuteStatement',
+                'rds-data:BatchExecuteStatement',
+                'rds-data:BeginTransaction',
+                'rds-data:CommitTransaction',
+                'rds-data:RollbackTransaction',
+              ],
               resources: [props.databaseResourceArn],
             }),
             new iam.PolicyStatement({
