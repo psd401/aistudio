@@ -108,10 +108,10 @@ function artifactFileName(format: BodyFormat): string {
  * the rows. The clean fix (re-sync here from the post-edit live markdown, reusing
  * this parser inside a small `executeTransaction` in the bridge route) depends on the
  * server-side ProseMirror-JSON→markdown serializer / `readAgentDocMarkdown` added in
- * PR #1186, which is NOT present in this branch's parent chain; wiring it now would
- * require either restructuring `apply-agent-edit`/collab-server or a partial
- * replace-only sync that silently diverges from append/suggest — both explicitly out
- * of scope for this slice. Deferred to the follow-up that lands on top of #1186.
+ * PR #1186 (now on dev); wiring it in still requires restructuring
+ * `apply-agent-edit`/collab-server or a partial replace-only sync that silently
+ * diverges from append/suggest — both out of scope for the Meridian redesign.
+ * Deferred to a dedicated follow-up on top of #1186's serializer.
  */
 export async function syncEmbedBacklinksInTx(
   tx: DbTransaction,

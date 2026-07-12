@@ -181,8 +181,8 @@ function ThreadCard({
   // live-edit loopback (`applyAgentEdit` → the doc gains the embed) which — exactly
   // like the slice-D backlink re-sync deferred at
   // `lib/content/version-service.ts:100-115` — depends on the server-side
-  // ProseMirror-JSON→markdown serializer / `readAgentDocMarkdown` added in PR #1186,
-  // NOT present in this branch's parent chain. The comment schema (migration 098)
+  // ProseMirror-JSON→markdown serializer / `readAgentDocMarkdown` added in PR #1186
+  // (now on dev) plus new thread-lifecycle plumbing. The comment schema (migration 098)
   // carries only thread-level `resolved`, no working/pending state. Adding a
   // `working` flag now would either never clear (a chip stuck on "Working…"
   // forever) or fake it from the global `agentWriting` presence signal (which is
