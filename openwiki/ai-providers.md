@@ -155,15 +155,29 @@ const CONTENT_TOOL_SCOPE_MAP = {
 
 ### Workspace Chat Tools
 
-Server-side tools for editing workspace documents in Nexus chat:
+Server-side tools for editing workspace documents in Nexus chat. When a document/artifact is open beside the chat (`?workspace=<id>`), these tools let the model read, edit, and publish that content:
 
 ```typescript
 // lib/nexus/workspace-chat-tools.ts
-buildReadTool(workspaceId)      // Read current content
-buildDocumentEditTool(workspaceId) // Live Yjs doc editing
+buildReadTool(workspaceId)           // Read current live content
+buildDocumentEditTool(workspaceId)   // Live Yjs doc editing (replace/append)
+buildArtifactUpdateTool(workspaceId) // Create new artifact version
+buildPublishTool(workspaceId)        // Publish/unpublish to destinations
+buildFindDocumentsTool()             // Find editable Atrium documents
+buildEditDocumentByIdTool()          // Edit any document by id/slug
 ```
 
-Security: Tools built from resolved `workspaceId`, never client input.
+**Tool set**:
+- `read_workspace_content` - Read the live Yjs document content
+- `edit_workspace_document` - Write markdown to the live doc (append or replace)
+- `update_workspace_artifact` - Create a new artifact version with updated code
+- `publish_workspace_content` / `unpublish_workspace_content` - Publish to `intranet` or `public_web` destinations
+- `find_atrium_documents` - Search for editable documents (not the workspace-bound one)
+- `edit_atrium_document` - Edit any document by id/slug (not the workspace-bound one)
+
+**Snapshot-before-publish**: Agent edits land only on the live Yjs doc, not the persisted version head. `snapshotLiveDocumentForPublish` reads the clean, accepted-baseline markdown and advances the version head before `publishService.publish` ships it.
+
+**Sources**: `/lib/nexus/workspace-chat-tools.ts`, `/lib/content/collab/snapshot-before-publish.ts`
 
 ## Nexus Chat Architecture
 
