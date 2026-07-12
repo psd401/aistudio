@@ -105,12 +105,51 @@ function optEnum(args, name, label, allowed) {
   return v;
 }
 
+/** Validate an optional STRING flag; returns the string or undefined. A value-less
+ *  flag (parseArgs yields `true`) is a usage error, not a silently dropped value. */
+function optStr(args, name, label) {
+  const v = args[name];
+  if (v === undefined) return undefined;
+  if (v === true) fail(`--${label} requires a value`);
+  return v;
+}
+
 /** Build the { level, grants? } visibility object from --visibility/--grants. */
 function buildVisibility(args) {
   const level = optEnum(args, 'visibility', 'visibility', LEVELS);
   if (level === undefined) return undefined;
-  const grants = parseGrants(args.grants);
+  const grants = parseGrants(args.grants, 'grants');
   return grants ? { level, grants } : { level };
+}
+
+/**
+ * Emit a create result, flagging the §26.4 "create-as-private" downgrade. Unlike
+ * publish/set-visibility/unpublish (which return a real 202 approval signal), an
+ * unauthorized PUBLIC create is silently created PRIVATE and a widen request is
+ * queued server-side with NO field on the response. Compare requested vs. returned
+ * level and synthesize the signal so the agent relays "widen pending", not "public".
+ */
+function emitCreated(payload, requestedVisibility) {
+  const requested = requestedVisibility && requestedVisibility.level;
+  if (
+    requested &&
+    payload &&
+    typeof payload.visibilityLevel === 'string' &&
+    payload.visibilityLevel !== requested
+  ) {
+    emit({
+      ...payload,
+      requestedVisibilityLevel: requested,
+      approvalRequired: true,
+      visibilityNote:
+        `Requested visibility "${requested}" was not applied — the object was created ` +
+        `"${payload.visibilityLevel}". A public create you may not perform directly is ` +
+        `created PRIVATE and a widen-to-public request is queued for admin approval ` +
+        `(§26.4). Tell the user the widen is pending approval — do NOT report it as public.`,
+    });
+    return;
+  }
+  emit(payload);
 }
 
 async function main() {
@@ -136,9 +175,9 @@ async function main() {
       const query = {
         kind,
         status,
-        collection: typeof args.collection === 'string' ? args.collection : undefined,
-        tag: typeof args.tag === 'string' ? args.tag : undefined,
-        query: typeof args.query === 'string' ? args.query : undefined,
+        collection: optStr(args, 'collection', 'collection'),
+        tag: optStr(args, 'tag', 'tag'),
+        query: optStr(args, 'query', 'query'),
       };
       const { payload } = await restFetch('GET', '', { query });
       emit(payload);
@@ -169,17 +208,19 @@ async function main() {
 
     case 'create-document': {
       const title = requireStr(args, 'title', 'title');
+      const markdown = optStr(args, 'markdown', 'markdown');
+      const visibility = buildVisibility(args);
       const body = {
         kind: 'document',
         title,
-        collectionId: typeof args.collection === 'string' ? args.collection : undefined,
-        body: typeof args.markdown === 'string' ? args.markdown : undefined,
-        bodyFormat: typeof args.markdown === 'string' ? 'markdown' : undefined,
-        visibility: buildVisibility(args),
-        tags: parseList(args.tags),
+        collectionId: optStr(args, 'collection', 'collection'),
+        body: markdown,
+        bodyFormat: markdown !== undefined ? 'markdown' : undefined,
+        visibility,
+        tags: parseList(args.tags, 'tags'),
       };
       const { payload } = await restFetch('POST', '', { body });
-      emit(payload);
+      emitCreated(payload, visibility);
       return;
     }
 
@@ -188,17 +229,18 @@ async function main() {
       const code = requireStr(args, 'code', 'code');
       const bodyFormat = optEnum(args, 'body_format', 'body-format', ARTIFACT_FORMATS);
       if (!bodyFormat) fail('--body-format html|jsx is required for create-artifact');
+      const visibility = buildVisibility(args);
       const body = {
         kind: 'artifact',
         title,
-        collectionId: typeof args.collection === 'string' ? args.collection : undefined,
+        collectionId: optStr(args, 'collection', 'collection'),
         body: code,
         bodyFormat,
-        visibility: buildVisibility(args),
-        tags: parseList(args.tags),
+        visibility,
+        tags: parseList(args.tags, 'tags'),
       };
       const { payload } = await restFetch('POST', '', { body });
-      emit(payload);
+      emitCreated(payload, visibility);
       return;
     }
 
@@ -207,7 +249,7 @@ async function main() {
       const text = requireStr(args, 'body', 'body');
       const mode = optEnum(args, 'mode', 'mode', ['replace', 'append']) || 'replace';
       let bodyFormat = optEnum(args, 'body_format', 'body-format', BODY_FORMATS);
-      const summary = typeof args.summary === 'string' ? args.summary : undefined;
+      const summary = optStr(args, 'summary', 'summary');
 
       let finalBody = text;
       if (mode === 'append') {
@@ -242,7 +284,7 @@ async function main() {
       const id = requireStr(args, 'id', 'id');
       const level = optEnum(args, 'level', 'level', LEVELS);
       if (!level) fail('--level private|group|internal|public is required');
-      const grants = parseGrants(args.grants);
+      const grants = parseGrants(args.grants, 'grants');
       const { approvalRequired, payload } = await restFetch(
         'PATCH',
         `/${encodeURIComponent(id)}/visibility`,

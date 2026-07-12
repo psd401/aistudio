@@ -33,6 +33,13 @@ const AISTUDIO_CONTENT_API_KEY = process.env.AISTUDIO_CONTENT_API_KEY || '';
 const AISTUDIO_CONTENT_API_KEY_SECRET_ID =
   process.env.AISTUDIO_CONTENT_API_KEY_SECRET_ID || '';
 
+/** Per-request timeout (ms) so a hung upstream surfaces as a clear error instead
+ *  of hanging the CLI invocation. Overridable via AISTUDIO_CONTENT_API_TIMEOUT_MS. */
+const REQUEST_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.AISTUDIO_CONTENT_API_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30000;
+})();
+
 function fail(message, code = 1) {
   process.stderr.write(`psd-atrium: ${message}\n`);
   process.exit(code);
@@ -202,8 +209,16 @@ async function restFetch(method, path, opts = {}) {
       method,
       headers,
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (err) {
+    // AbortSignal.timeout rejects with a DOMException named 'TimeoutError'.
+    if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      fail(
+        `AI Studio content API request timed out after ${REQUEST_TIMEOUT_MS}ms`,
+        12
+      );
+    }
     fail(`Network error calling AI Studio content API: ${err.message}`, 12);
   }
 
@@ -260,11 +275,13 @@ async function restFetch(method, path, opts = {}) {
 
 /**
  * Parse a comma-separated `--tags a,b,c` flag into a string[] (trimmed,
- * empties dropped). Returns undefined when the flag was absent so callers can
- * leave the field unset.
+ * empties dropped). Returns undefined when the flag was absent. A value-LESS
+ * flag (`--tags` with nothing after it — parseArgs yields `true`) is a usage
+ * error, NOT a silent no-op, so a typo can't drop the field unnoticed.
  */
-function parseList(value) {
-  if (value === undefined || value === true) return undefined;
+function parseList(value, label = 'tags') {
+  if (value === undefined) return undefined;
+  if (value === true) fail(`--${label} requires a value`);
   const items = String(value)
     .split(',')
     .map((s) => s.trim())
@@ -274,11 +291,12 @@ function parseList(value) {
 
 /**
  * Parse `--grants kind:value,kind:value` into the group-grant shape
- * [{ kind, value }]. Throws (via fail) on a malformed entry so a typo is a clear
- * usage error, not a silently dropped grant.
+ * [{ kind, value }]. Throws (via fail) on a value-less flag or a malformed entry
+ * so a typo is a clear usage error, not a silently dropped grant.
  */
-function parseGrants(value) {
-  if (value === undefined || value === true) return undefined;
+function parseGrants(value, label = 'grants') {
+  if (value === undefined) return undefined;
+  if (value === true) fail(`--${label} requires a value`);
   const VALID = ['role', 'building', 'department', 'grade', 'user'];
   const grants = [];
   for (const raw of String(value).split(',')) {

@@ -78,8 +78,12 @@ node run.js create-artifact --title "Chart" --code "<html>…</html>" --body-for
 ```
 
 Optional on both: `--visibility private|group|internal|public` and
-`--grants role:staff,building:GHS` (group grants; widening to `public` needs the
-human-held `content:publish_public` — otherwise it returns queued-for-approval).
+`--grants role:staff,building:GHS` (group grants). Requesting `public` needs the
+human-held `content:publish_public`; **without it the object is created PRIVATE**
+and a widen-to-public request is queued for admin approval. Unlike publish, the API
+returns no explicit signal for this, so the skill compares requested vs. returned
+visibility and adds `approvalRequired: true` + a `visibilityNote` when they differ —
+relay that the widen is **pending approval**, not that the object is public.
 
 ### Edit (creates a new version)
 
@@ -145,5 +149,9 @@ node run.js set-visibility --id <id> --level group --grants role:staff,building:
    tell the user it is awaiting approval.
 5. **New content is private + draft.** Creating does not publish or share it; use
    `publish` (destination) and/or `set-visibility` as separate, explicit steps.
-6. **Screening.** Agent-authored text is safety-screened server-side before it
-   persists; a blocked write returns an error (exit 12) — do not retry it verbatim.
+6. **Your writes are NOT §28.3 agent-screened — you are accountable as the key
+   owner.** The Bedrock Guardrails / PII screening runs only for *agent-identity*
+   writes (the future delegated path). An `sk-` content key resolves to its owner
+   (a human / service account), so your create/edit content goes in as that owner's
+   trusted content, un-screened. Keep everything you write appropriate; it is
+   attributed to, and gated by the permissions of, the content key's owner.

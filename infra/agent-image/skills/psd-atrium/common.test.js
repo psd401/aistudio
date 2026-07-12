@@ -208,7 +208,16 @@ test('restFetch maps 429 to exit 14', async () => {
 test('parseList splits comma lists and drops empties; undefined when absent', () => {
   expect(common.parseList('a, b ,c,')).toEqual(['a', 'b', 'c']);
   expect(common.parseList(undefined)).toBeUndefined();
-  expect(common.parseList(true)).toBeUndefined();
+});
+
+test('parseList rejects a value-less flag (exit 1) instead of silently dropping it', () => {
+  let code;
+  try {
+    common.parseList(true, 'tags');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
 });
 
 test('parseGrants parses kind:value pairs', () => {
@@ -227,4 +236,54 @@ test('parseGrants rejects a malformed entry (exit 1)', () => {
     code = err.code;
   }
   expect(code).toBe(1);
+});
+
+test('parseGrants rejects a value-less flag (exit 1)', () => {
+  let code;
+  try {
+    common.parseGrants(true, 'grants');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+});
+
+test('restFetch maps a request timeout to exit 12', async () => {
+  globalThis.fetch = mock(async () => {
+    const err = new Error('The operation timed out.');
+    err.name = 'TimeoutError';
+    throw err;
+  });
+
+  let code;
+  try {
+    await common.restFetch('GET', '/obj-1');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(12);
+});
+
+test('resolveApiKey exits 12 when the Secrets Manager fetch fails (secret missing)', async () => {
+  // The secret id is configured (module env) but absent from the store → the
+  // fake GetSecretValueCommand throws → retrieval failure surfaces as exit 12.
+  delete secretsStore[KEY_SECRET_ID];
+  let code;
+  try {
+    await common.resolveApiKey();
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(12);
+});
+
+test('resolveApiKey exits 11 when the secret is present but empty', async () => {
+  secretsStore[KEY_SECRET_ID] = '';
+  let code;
+  try {
+    await common.resolveApiKey();
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(11);
 });

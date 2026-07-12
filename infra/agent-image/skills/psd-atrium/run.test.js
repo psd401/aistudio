@@ -20,8 +20,15 @@
 
 'use strict';
 
+// bun loads every *.test.js into ONE process and common.js reads these env vars at
+// module-load time, so this file MUST set the SAME values as common.test.js — else
+// whichever file requires common.js first fixes the module consts and the other's
+// expectations drift. run.js's restFetch is stubbed here, so the actual credential
+// values are irrelevant to these tests; only cross-file consistency matters.
 process.env.AISTUDIO_CONTENT_API_URL = 'https://app.test/api/v1/content';
-process.env.AISTUDIO_CONTENT_API_KEY = 'sk-testkey';
+process.env.AISTUDIO_CONTENT_API_KEY = '';
+process.env.AISTUDIO_CONTENT_API_KEY_SECRET_ID = 'psd-agent/dev/atrium-content-api-key';
+process.env.APP_BASE_URL = '';
 
 const { test, expect, beforeEach, afterEach } = require('bun:test');
 
@@ -186,6 +193,47 @@ test('create-document carries a visibility object built from --visibility/--gran
       { kind: 'building', value: 'GHS' },
     ],
   });
+});
+
+test('create-document flags the §26.4 create-as-private downgrade (requested public → private)', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 201,
+    payload: { id: 'obj-9', slug: 'doc', visibilityLevel: 'private' },
+  });
+
+  await run('create-document', '--title', 'T', '--visibility', 'public');
+
+  const out = emitted[0];
+  expect(out.approvalRequired).toBe(true);
+  expect(out.requestedVisibilityLevel).toBe('public');
+  expect(out.visibilityLevel).toBe('private');
+  expect(typeof out.visibilityNote).toBe('string');
+});
+
+test('create-document does NOT add a downgrade note when the requested level is applied', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 201,
+    payload: { id: 'obj-9', slug: 'doc', visibilityLevel: 'internal' },
+  });
+
+  await run('create-document', '--title', 'T', '--visibility', 'internal');
+
+  const out = emitted[0];
+  expect(out.approvalRequired).toBeUndefined();
+  expect(out.visibilityNote).toBeUndefined();
+});
+
+test('a value-less optional flag is a usage error (exit 1), not silently dropped', async () => {
+  let code;
+  try {
+    // `--collection` with no value → parseArgs yields `true` → optStr fails.
+    await run('find', '--collection');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
 });
 
 test('create-artifact POSTs / with kind=artifact, code→body, and bodyFormat', async () => {

@@ -61,10 +61,15 @@ Consequences for external agents:
    | `export_okf` | `content:read` | `--audience public` additionally needs `content:publish_public` |
    | `import_okf` | `content:create` | Imports land private + draft |
 
-**Safety invariants that apply to every agent write:** content is screened
-(§28.3 Bedrock Guardrails + PII telemetry) before persisting; agent-created
-objects start **private + draft** (create → widen, never create-public);
-everything is attributed to the agent identity.
+**Safety invariants:** all agent-created objects start **private + draft**
+(create → widen, never create-public), and every write is permission-gated by the
+caller. **§28.3 screening (Bedrock Guardrails + PII telemetry) applies only to
+writes that reach the server as an AGENT requester** (`agent-autonomous` /
+`agent-delegated` — see `screenAgentBodyForWrite`, which no-ops for `user`
+requesters). A plain `sk-` key resolves to its **owner** (`kind: "user"`), so those
+writes are trusted, attributed to the key owner, and NOT guardrail/PII-screened —
+mint the key to an accountable staff/service identity. True agent-identity writes
+(the delegated/autonomous path) are screened and attributed to the agent.
 
 ## Path 2 — PSD AI Agents (OpenClaw on AgentCore)
 
@@ -85,9 +90,11 @@ agents Atrium abilities. It wraps the `/api/v1/content/*` REST surface (which is
 202 for the approval gate), authenticated with a scoped `sk-` **content** key.
 Subcommands: `find`, `read`, `create-document`, `create-artifact`, `edit`
 (`--mode replace|append`), `set-visibility`, `publish`, `unpublish`. The agent
-works **version-based**, like any other `sk-` caller — same private+draft +
-screening invariants — and acts as the **content key's owner identity** (not the
-asking user; per-user delegation is the future phase below).
+works **version-based**, like any other `sk-` caller (create-as-private, permission
+gating), and acts as the **content key's owner identity** — a `user` requester, so
+its writes are trusted + attributed to the owner and are NOT §28.3-screened (that
+runs only for true agent-identity writes; see the Safety invariants above). Not the
+asking user, either; per-user delegation is the future phase below.
 
 Deployment prerequisites (mirrors the `psd-canva` #1176 prereq pattern):
 
