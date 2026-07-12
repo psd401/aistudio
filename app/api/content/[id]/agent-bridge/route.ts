@@ -13,6 +13,13 @@
  *     write the thread root to `atrium_doc_comments`.
  *   - `suggest`: propose an insertion / deletion (track-changes suggestion marks) for
  *     a human to accept or reject — NOT a direct rewrite.
+ *   - `publish` / `unpublish`: take the object's working head live at a destination
+ *     (default `intranet`) — or take it offline — through the SAME `publishService`
+ *     gate humans use (canView 404-mask → canEdit → §26.4 public-destination
+ *     approval). These ops author NO new text, so they skip the guardrails/PII
+ *     screening and the `X-Agent-Id` attribution the write ops carry. A public
+ *     destination the caller may not publish directly returns 202 (queued for
+ *     approval), never a silent bypass.
  *
  * Safety (spec §28.3): the agent-authored text of EVERY op (markdown / comment body /
  * suggestion text) is screened by Bedrock Guardrails (blocked content is rejected,
@@ -37,6 +44,9 @@ import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { canEdit } from "@/lib/content/helpers";
 import { screenAgentContent } from "@/lib/content/agent-screening";
+import { publishService } from "@/lib/content/publish-service";
+import { assertEditorDestination } from "@/lib/content/validators";
+import { mapAgentPublishError } from "@/lib/content/agent-publish-response";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { agentIdentities } from "@/lib/db/schema";
 import {
@@ -46,6 +56,7 @@ import {
   QuoteNotLocatedError,
   type AgentEditMode,
 } from "@/lib/content/collab/apply-agent-edit";
+import { snapshotLiveDocumentForPublish } from "@/lib/content/collab/snapshot-before-publish";
 
 /** UUID v4-ish shape — the form `agent_identities.id` takes (defaultRandom()). */
 const UUID_RE =
@@ -149,7 +160,9 @@ async function isAttributableAgentId(agentId: string): Promise<boolean> {
  * are imposed here — the existing 512 KB guard (see handler) bounds screened text.
  */
 const bridgeBodySchema = z.object({
-  op: z.enum(["replace", "append", "comment", "suggest"]).optional(),
+  op: z
+    .enum(["replace", "append", "comment", "suggest", "publish", "unpublish"])
+    .optional(),
   markdown: z.string().optional(),
   mode: z.enum(["replace", "append"]).optional(),
   // comment op
@@ -159,6 +172,10 @@ const bridgeBodySchema = z.object({
   // suggest op
   kind: z.enum(["insert", "delete"]).optional(),
   suggestionId: z.string().uuid().optional(),
+  // publish / unpublish op — the destination is narrowed at runtime via
+  // `assertEditorDestination` (rejects `okf` and unknown values). Defaults to
+  // `intranet` (the safe internal reader) when omitted.
+  destination: z.string().max(50).optional(),
 });
 
 type BridgeBody = z.infer<typeof bridgeBodySchema>;
@@ -182,7 +199,10 @@ function resolveEditMode(op: BridgeBody["op"], mode: BridgeBody["mode"]): AgentE
 async function loadEditableObject(
   id: string,
   req: Awaited<ReturnType<typeof getUserRequester>>
-): Promise<{ obj: { id: string; ownerUserId: number } } | { error: NextResponse }> {
+): Promise<
+  | { obj: { id: string; ownerUserId: number; kind: "document" | "artifact" } }
+  | { error: NextResponse }
+> {
   const obj = await contentService.loadByIdOrSlug(id);
   if (!obj) return { error: NextResponse.json({ error: "Not found" }, { status: 404 }) };
   const viewable = await visibilityService.canView(req, {
@@ -194,7 +214,9 @@ async function loadEditableObject(
   if (!canEdit(req, obj.ownerUserId)) {
     return { error: NextResponse.json({ error: "Forbidden" }, { status: 403 }) };
   }
-  return { obj: { id: obj.id, ownerUserId: obj.ownerUserId } };
+  return {
+    obj: { id: obj.id, ownerUserId: obj.ownerUserId, kind: obj.kind as "document" | "artifact" },
+  };
 }
 
 /** Screen agent markdown via the shared §28.3 core (`lib/content/agent-screening`
@@ -306,6 +328,198 @@ function buildBridgeAction(op: BridgeBody["op"], data: BridgeBody): ActionResult
   return buildEditAction(op, data);
 }
 
+/**
+ * Handle the `publish` / `unpublish` ops. These author no new agent text, so they
+ * bypass the guardrails/PII screening + `X-Agent-Id` attribution the write ops use
+ * and go straight through `publishService`, which owns the full authorization gate
+ * (canView 404-mask → canEdit → §26.4 public-destination approval). The acting
+ * SESSION user's permissions decide: `req` is the delegated-human requester, so an
+ * agent can only publish what its operator could publish by hand. A public
+ * destination the operator may not publish directly surfaces as 202 (queued for
+ * approval), never a silent bypass. `intranet` (the internal reader) is the default.
+ */
+interface PublishOpContext {
+  id: string;
+  op: "publish" | "unpublish";
+  destinationRaw: string | undefined;
+  req: Awaited<ReturnType<typeof getUserRequester>>;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+}
+
+async function handlePublishOp(ctx: PublishOpContext): Promise<NextResponse> {
+  const { id, op, destinationRaw, req, requestId, log } = ctx;
+  // Resolve + authorize the object exactly like the write ops (canView 404 /
+  // canEdit 403). publishService re-checks the same gate defensively.
+  const loaded = await loadEditableObject(id, req);
+  if ("error" in loaded) return loaded.error;
+  const objectId = loaded.obj.id;
+
+  let destination: ReturnType<typeof assertEditorDestination>;
+  try {
+    destination = assertEditorDestination(destinationRaw ?? "intranet", op);
+  } catch (error) {
+    const mapped = mapAgentPublishError(error, op, destinationRaw ?? "intranet");
+    if (mapped) return NextResponse.json(mapped.body, { status: mapped.status });
+    throw error;
+  }
+
+  try {
+    if (op === "publish") {
+      // Advance the version head to the live doc content first: agent writes land
+      // only on the live Yjs/atrium_doc_state path, so publishing the persisted
+      // head without this would ship the stale/empty version (Codex review P1).
+      await snapshotLiveDocumentForPublish({ req, objectId, kind: loaded.obj.kind, requestId });
+      const result = await publishService.publish(req, objectId, { destination });
+      log.info("Agent published object", { objectId, destination });
+      return NextResponse.json({
+        applied: true,
+        op: "publish",
+        destination,
+        publicationId: result.publicationId,
+        publishedVersionId: result.publishedVersionId,
+      });
+    }
+    const result = await publishService.unpublish(req, objectId, destination);
+    log.info("Agent unpublished object", { objectId, destination });
+    return NextResponse.json({
+      applied: true,
+      op: "unpublish",
+      destination,
+      unpublished: result.unpublished,
+    });
+  } catch (error) {
+    // Error semantics (§26.4 approval → 202, defensive 404/403/400) live in the
+    // jest-covered `mapAgentPublishError`; unmapped errors rethrow to a 500.
+    const mapped = mapAgentPublishError(error, op, destination);
+    if (mapped) {
+      if (mapped.status === 202) {
+        log.info("Agent publish requires approval", { objectId, destination, op });
+      }
+      return NextResponse.json(mapped.body, { status: mapped.status });
+    }
+    throw error;
+  }
+}
+
+/**
+ * Handle the write ops (`replace` / `append` / `comment` / `suggest`): validate the
+ * op-specific fields, resolve + edit-gate the object, validate the `X-Agent-Id`
+ * attribution, then screen→apply under the per-document lock. Extracted from
+ * postHandler so the dispatcher stays under the cyclomatic-complexity budget; the
+ * publish/unpublish ops are handled separately (they author no text).
+ */
+interface WriteOpContext {
+  id: string;
+  data: BridgeBody;
+  session: Parameters<typeof getUserRequester>[1];
+  request: NextRequest;
+  requestId: string;
+  timer: ReturnType<typeof startTimer>;
+  log: ReturnType<typeof createLogger>;
+}
+
+async function handleWriteOp(ctx: WriteOpContext): Promise<NextResponse> {
+  const { id, data, session, request, requestId, timer, log } = ctx;
+  // Resolve the op into a concrete action + the agent-authored text to screen.
+  // Op-specific required-field / size validation happens here (before auth).
+  const built = buildBridgeAction(data.op, data);
+  if ("error" in built) {
+    timer({ status: "error" });
+    return built.error;
+  }
+  const action = built.action;
+
+  // Validate X-Agent-Id: it's stamped into every CRDT node and JWT sub.
+  // An unbounded value would bloat the Y.Doc and could overflow JWT headers.
+  const rawAgentId = (request.headers.get("x-agent-id") || "agent").trim();
+  const agentId = /^[\w-]{1,128}$/.test(rawAgentId) ? rawAgentId : "agent";
+
+  // Thread the already-resolved session so getUserRequester reuses it instead of
+  // calling getServerSession() a second time (double JWT-verify per request).
+  const req = await getUserRequester(requestId, session);
+  const loaded = await loadEditableObject(id, req);
+  if ("error" in loaded) {
+    timer({ status: "error" });
+    return loaded.error;
+  }
+  const objectId = loaded.obj.id;
+
+  // Validate attribution AFTER the edit-rights gate so a caller without edit
+  // rights can't probe which agent_identities ids exist. A UUID-shaped id must
+  // map to an active registered identity; spoofing a real bot's uuid is rejected.
+  if (!(await isAttributableAgentId(agentId))) {
+    log.warn("Agent write rejected: unknown/inactive agent identity", { objectId });
+    timer({ status: "error" });
+    return NextResponse.json({ error: "Unknown agent identity" }, { status: 403 });
+  }
+
+  // Serialize screen→apply for this document to prevent a TOCTOU race:
+  // two concurrent requests could each pass Bedrock Guardrails independently and
+  // then both apply in overlapping CRDT transactions, letting their combined
+  // content bypass the guardrail that reviewed each in isolation. withDocumentLock
+  // ensures only one screen→apply sequence runs per objectId at a time within this
+  // ECS task. See the _docLocks comment for cross-task scope. ALL ops (edit,
+  // comment, suggest) run inside it — the comment body / suggestion text is
+  // screened the same way as a replace/append markdown payload.
+  const result = await withDocumentLock(objectId, async (): Promise<{
+    ok: boolean;
+    response: NextResponse;
+  }> => {
+    const blocked = await screenAgentMarkdown(action.screenText, objectId, requestId);
+    if (blocked) return { ok: false, response: blocked };
+
+    switch (action.kind) {
+      case "edit": {
+        await applyAgentEdit({ objectId, markdown: action.markdown, agentId, mode: action.mode });
+        return {
+          ok: true,
+          response: NextResponse.json({ applied: true, op: action.mode, mode: action.mode }),
+        };
+      }
+      case "comment": {
+        const { threadId } = await applyAgentComment({
+          objectId,
+          agentId,
+          quote: action.quote,
+          body: action.body,
+          threadId: action.threadId,
+        });
+        return { ok: true, response: NextResponse.json({ applied: true, op: "comment", threadId }) };
+      }
+      case "suggest": {
+        const { suggestionId } = await applyAgentSuggestion({
+          objectId,
+          agentId,
+          kind: action.suggestKind,
+          markdown: action.markdown,
+          quote: action.quote,
+          suggestionId: action.suggestionId,
+        });
+        return {
+          ok: true,
+          response: NextResponse.json({
+            applied: true,
+            op: "suggest",
+            kind: action.suggestKind,
+            suggestionId,
+          }),
+        };
+      }
+    }
+  });
+
+  if (!result.ok) {
+    // screenAgentMarkdown returned a blocked (422) response inside the lock.
+    timer({ status: "error" });
+    return result.response;
+  }
+
+  timer({ status: "success" });
+  log.info("Applied agent op", { objectId, agentId, op: action.kind });
+  return result.response;
+}
+
 async function postHandler(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -336,103 +550,24 @@ async function postHandler(
     }
     const data = parsed.data;
 
-    // Resolve the op into a concrete action + the agent-authored text to screen.
-    // Op-specific required-field / size validation happens here (before auth).
-    const built = buildBridgeAction(data.op, data);
-    if ("error" in built) {
-      timer({ status: "error" });
-      return built.error;
-    }
-    const action = built.action;
-
-    // Validate X-Agent-Id: it's stamped into every CRDT node and JWT sub.
-    // An unbounded value would bloat the Y.Doc and could overflow JWT headers.
-    const rawAgentId = (request.headers.get("x-agent-id") || "agent").trim();
-    const agentId = /^[\w-]{1,128}$/.test(rawAgentId) ? rawAgentId : "agent";
-
-    // Thread the already-resolved session so getUserRequester reuses it instead of
-    // calling getServerSession() a second time (double JWT-verify per request).
-    const req = await getUserRequester(requestId, session);
-    const loaded = await loadEditableObject(id, req);
-    if ("error" in loaded) {
-      timer({ status: "error" });
-      return loaded.error;
-    }
-    const objectId = loaded.obj.id;
-
-    // Validate attribution AFTER the edit-rights gate so a caller without edit
-    // rights can't probe which agent_identities ids exist. A UUID-shaped id must
-    // map to an active registered identity; spoofing a real bot's uuid is rejected.
-    if (!(await isAttributableAgentId(agentId))) {
-      log.warn("Agent write rejected: unknown/inactive agent identity", { objectId });
-      timer({ status: "error" });
-      return NextResponse.json({ error: "Unknown agent identity" }, { status: 403 });
+    // Publish / unpublish author no new text — handle them through publishService's
+    // own gate (canView/canEdit/§26.4) before the screening + attribution machinery
+    // the write ops need. The session user is the authorization conduit (delegated).
+    if (data.op === "publish" || data.op === "unpublish") {
+      const req = await getUserRequester(requestId, session);
+      const response = await handlePublishOp({
+        id,
+        op: data.op,
+        destinationRaw: data.destination,
+        req,
+        requestId,
+        log,
+      });
+      timer({ status: response.status >= 400 ? "error" : "success" });
+      return response;
     }
 
-    // Serialize screen→apply for this document to prevent a TOCTOU race:
-    // two concurrent requests could each pass Bedrock Guardrails independently and
-    // then both apply in overlapping CRDT transactions, letting their combined
-    // content bypass the guardrail that reviewed each in isolation. withDocumentLock
-    // ensures only one screen→apply sequence runs per objectId at a time within this
-    // ECS task. See the _docLocks comment for cross-task scope. ALL ops (edit,
-    // comment, suggest) run inside it — the comment body / suggestion text is
-    // screened the same way as a replace/append markdown payload.
-    const result = await withDocumentLock(objectId, async (): Promise<{
-      ok: boolean;
-      response: NextResponse;
-    }> => {
-      const blocked = await screenAgentMarkdown(action.screenText, objectId, requestId);
-      if (blocked) return { ok: false, response: blocked };
-
-      switch (action.kind) {
-        case "edit": {
-          await applyAgentEdit({ objectId, markdown: action.markdown, agentId, mode: action.mode });
-          return {
-            ok: true,
-            response: NextResponse.json({ applied: true, op: action.mode, mode: action.mode }),
-          };
-        }
-        case "comment": {
-          const { threadId } = await applyAgentComment({
-            objectId,
-            agentId,
-            quote: action.quote,
-            body: action.body,
-            threadId: action.threadId,
-          });
-          return { ok: true, response: NextResponse.json({ applied: true, op: "comment", threadId }) };
-        }
-        case "suggest": {
-          const { suggestionId } = await applyAgentSuggestion({
-            objectId,
-            agentId,
-            kind: action.suggestKind,
-            markdown: action.markdown,
-            quote: action.quote,
-            suggestionId: action.suggestionId,
-          });
-          return {
-            ok: true,
-            response: NextResponse.json({
-              applied: true,
-              op: "suggest",
-              kind: action.suggestKind,
-              suggestionId,
-            }),
-          };
-        }
-      }
-    });
-
-    if (!result.ok) {
-      // screenAgentMarkdown returned a blocked (422) response inside the lock.
-      timer({ status: "error" });
-      return result.response;
-    }
-
-    timer({ status: "success" });
-    log.info("Applied agent op", { objectId, agentId, op: action.kind });
-    return result.response;
+    return handleWriteOp({ id, data, session, request, requestId, timer, log });
   } catch (error) {
     // A comment / suggest:delete whose quote is absent surfaces as this typed
     // error — the client sent a stale/unmatched anchor, so map it to 422 (not 500).

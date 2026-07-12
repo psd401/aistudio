@@ -16,7 +16,9 @@ import {
   stampAuthor,
   seedYDocFromMarkdown,
   yDocToProseMirrorJSON,
+  trimBoundaryEmptyParagraphs,
 } from "@/lib/content/collab/markdown-bridge";
+import type { JSONContent } from "@tiptap/core";
 import { AUTHORED_MARK } from "@/lib/content/collab/provenance";
 import { AtriumArtifactEmbed } from "@/lib/content/collab/artifact-embed-node";
 import { serializeArtifactEmbedDirective } from "@/lib/content/embed-directive";
@@ -292,6 +294,70 @@ check("callout / video nodes serialize back to their canonical directives", () =
 
   const badVideo = serializeNode(AtriumVideo, { src: "javascript:alert(1)" });
   assert.equal(badVideo, "", "an unsafe src serializes to nothing, not a directive");
+});
+
+// ---------------------------------------------------------------------------
+// Editor vertical-spacing regression (Epic #1059 follow-up)
+//
+// A freshly-created Atrium doc is a single empty ProseMirror paragraph. The agent
+// append path (`applyAgentEdit` append mode) merges the agent's blocks AFTER the
+// doc's current content — a naive merge strands `[emptyParagraph, ...agentBlocks]`,
+// which renders as ~1 dead line + block margins between the title/byline and the
+// agent's first heading. `trimBoundaryEmptyParagraphs` removes the boundary empties
+// before the merge. These checks pin that behavior.
+// ---------------------------------------------------------------------------
+
+const emptyPara: JSONContent = { type: "paragraph" };
+const emptyParaWithBlankChildren: JSONContent = { type: "paragraph", content: [] };
+const heading = (t: string): JSONContent => ({
+  type: "heading",
+  attrs: { level: 2 },
+  content: [{ type: "text", text: t }],
+});
+const para = (t: string): JSONContent => ({
+  type: "paragraph",
+  content: [{ type: "text", text: t }],
+});
+
+check("markdownToProseMirrorJSON emits NO empty-paragraph nodes for multi-section markdown", () => {
+  const json = markdownToProseMirrorJSON(
+    "## Background\n\nText one.\n\n## Goals\n\n- a\n- b\n\n## Timeline\n\nText two.\n"
+  );
+  const empties = (json.content ?? []).filter(
+    (n) => n.type === "paragraph" && (!Array.isArray(n.content) || n.content.length === 0)
+  );
+  assert.equal(empties.length, 0, "no empty paragraphs from clean markdown");
+});
+
+check("trimBoundaryEmptyParagraphs on a BLANK doc ([emptyParagraph]) yields []", () => {
+  assert.deepEqual(trimBoundaryEmptyParagraphs([emptyPara]), []);
+  assert.deepEqual(trimBoundaryEmptyParagraphs([emptyParaWithBlankChildren]), []);
+});
+
+check("append-onto-blank leaves NO leading empty paragraph after trimming", () => {
+  // Simulate `applyAgentEdit` append onto a blank doc: current = [emptyParagraph],
+  // agent content = [h2, p]. The fixed merge trims boundary empties first.
+  const agent = [heading("Background"), para("Body.")];
+  const merged = [...trimBoundaryEmptyParagraphs([emptyPara]), ...agent];
+  assert.equal(merged.length, 2, "no stranded empty paragraph");
+  assert.equal(merged[0].type, "heading", "first block is the heading, not dead space");
+});
+
+check("trimBoundaryEmptyParagraphs trims leading AND trailing empties but PRESERVES interior ones", () => {
+  const content = [emptyPara, heading("H"), emptyPara, para("mid"), emptyPara, emptyPara];
+  const out = trimBoundaryEmptyParagraphs(content);
+  // Leading empty dropped, trailing two dropped, the interior empty (intentional
+  // editorial spacing between H and "mid") is preserved.
+  assert.equal(out.length, 3, "leading + trailing empties removed, interior kept");
+  assert.equal(out[0].type, "heading");
+  assert.equal(out[1].type, "paragraph"); // the preserved interior empty
+  assert.equal(out[2].type, "paragraph"); // "mid"
+  assert.equal(out[2].content?.[0]?.text, "mid");
+});
+
+check("trimBoundaryEmptyParagraphs returns the SAME array reference when nothing to trim (no needless copy)", () => {
+  const content = [heading("H"), para("body")];
+  assert.equal(trimBoundaryEmptyParagraphs(content), content);
 });
 
 console.log(`\natrium-collab-bridge smoke: ${passed} checks passed`);
