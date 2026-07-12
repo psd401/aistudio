@@ -19,11 +19,21 @@
 // --- mocks (hoisted above imports by jest) ---
 
 let queuedRows: unknown[] = [];
+// Rows for the public-audience live-publication lookup (second query). Defaults to a
+// live public_web publication so the public positive-control test resolves.
+let queuedPublicationRows: unknown[] = [];
 jest.mock("@/lib/db/drizzle-client", () => ({
-  executeQuery: jest.fn(async () => queuedRows),
+  // Dispatch on the operation label so the object lookup and the publication lookup
+  // can be staged independently.
+  executeQuery: jest.fn(async (_fn: unknown, op: string) =>
+    op === "atrium.embed.livePublication" ? queuedPublicationRows : queuedRows
+  ),
 }));
-jest.mock("@/lib/db/schema", () => ({ contentObjects: {} }));
-jest.mock("drizzle-orm", () => ({ eq: (...a: unknown[]) => a }));
+jest.mock("@/lib/db/schema", () => ({ contentObjects: {}, contentPublications: {} }));
+jest.mock("drizzle-orm", () => ({
+  eq: (...a: unknown[]) => a,
+  and: (...a: unknown[]) => a,
+}));
 
 let canViewResult = false;
 jest.mock("@/lib/content/visibility-service", () => ({
@@ -33,10 +43,12 @@ jest.mock("@/lib/content/visibility-service", () => ({
 // A viewable artifact loads its current head code; default to a version + code so the
 // positive-control test can assert a live render. Overridden per test where needed.
 let currentVersion: unknown = { id: "v1" };
+let publishedVersion: unknown = { id: "pv1" };
 let artifactCode = "<h1>live</h1>";
 jest.mock("@/lib/content/version-service", () => ({
   versionService: {
     current: jest.fn(async () => currentVersion),
+    getById: jest.fn(async () => publishedVersion),
     loadArtifactCode: jest.fn(async () => artifactCode),
   },
 }));
@@ -62,9 +74,12 @@ function expectedMask(id: string): ResolvedEmbed {
 
 beforeEach(() => {
   queuedRows = [];
+  queuedPublicationRows = [{ publishedVersionId: "pv1" }];
   canViewResult = false;
   currentVersion = { id: "v1" };
+  publishedVersion = { id: "pv1" };
   artifactCode = "<h1>live</h1>";
+  jest.clearAllMocks();
 });
 
 describe("resolveEmbedForReader masks non-viewable embeds identically", () => {
@@ -159,6 +174,40 @@ describe("resolveEmbedForReader resolves a viewable artifact", () => {
     const res = await resolveEmbedForReader(ARTIFACT_ID, { audience: "public" });
     expect(res.available).toBe(true);
     expect(res.href).toBe("/p/metrics");
+  });
+
+  it("public: renders the PUBLISHED version, never the live head", async () => {
+    queuedRows = [artifactRow];
+    const { versionService } = jest.requireMock("@/lib/content/version-service") as {
+      versionService: { current: jest.Mock; getById: jest.Mock };
+    };
+    const res = await resolveEmbedForReader(ARTIFACT_ID, { audience: "public" });
+    expect(res.available).toBe(true);
+    // The published version (from the live public_web publication) is loaded; the
+    // head — which may carry unpublished edits — is never consulted for public.
+    expect(versionService.getById).toHaveBeenCalledWith(ARTIFACT_ID, "pv1");
+    expect(versionService.current).not.toHaveBeenCalled();
+  });
+
+  it("public: masks a public-visibility artifact with NO live public_web publication", async () => {
+    // Retraction/unpublish leaves visibility 'public' but removes the live
+    // publication — the embed must mask exactly like the top-level /p/ route 404s.
+    queuedRows = [artifactRow];
+    queuedPublicationRows = [];
+    const res = await resolveEmbedForReader(ARTIFACT_ID, { audience: "public" });
+    expect(res).toEqual(expectedMask(ARTIFACT_ID));
+  });
+
+  it("internal: uses the live head, not the published version", async () => {
+    queuedRows = [artifactRow];
+    canViewResult = true;
+    const { versionService } = jest.requireMock("@/lib/content/version-service") as {
+      versionService: { current: jest.Mock; getById: jest.Mock };
+    };
+    const res = await resolveEmbedForReader(ARTIFACT_ID, { audience: "internal", requester });
+    expect(res.available).toBe(true);
+    expect(versionService.current).toHaveBeenCalled();
+    expect(versionService.getById).not.toHaveBeenCalled();
   });
 
   it("degrades to an empty live preview (not a mask) when the body load fails", async () => {

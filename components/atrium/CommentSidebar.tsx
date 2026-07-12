@@ -127,10 +127,7 @@ function CommentRow({ comment }: { comment: CommentDTO }): React.JSX.Element {
         <span className="mer-comment-avatar" data-kind={comment.authorKind}>
           {isAgent ? "✦" : initialsFromName(comment.authorLabel)}
         </span>
-        <span className="mer-comment-name">
-          {comment.authorLabel}
-          {isAgent ? "" : ""}
-        </span>
+        <span className="mer-comment-name">{comment.authorLabel}</span>
         {/* toLocaleString differs by server/client locale+tz → suppress the
             SSR/hydration diff on this non-semantic timestamp. */}
         <span className="mer-comment-time" suppressHydrationWarning>

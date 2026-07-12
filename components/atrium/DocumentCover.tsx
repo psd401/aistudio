@@ -140,6 +140,7 @@ export function DocumentCover({
                   data-selected={grad === key ? "true" : "false"}
                   title={COVER_GRADIENT_LABELS[key]}
                   aria-label={COVER_GRADIENT_LABELS[key]}
+                  disabled={saving}
                   onClick={() => void persist({ coverGradient: key })}
                 />
               ))}
@@ -155,6 +156,7 @@ export function DocumentCover({
                 placeholder="🎉 (paste an emoji)"
                 aria-label="Doc emoji icon"
                 data-testid="editor-cover-emoji-input"
+                disabled={saving}
                 onBlur={(e) => {
                   const v = e.target.value.trim();
                   if (v !== (trimmedEmoji ?? "")) void persist({ icon: v || null });
@@ -169,6 +171,7 @@ export function DocumentCover({
                 type="button"
                 className="mer-cover-picker-remove"
                 data-testid="editor-remove-cover"
+                disabled={saving}
                 onClick={removeCover}
               >
                 Remove cover

@@ -18,18 +18,22 @@
  *   `visibilityService.canView(requester, …)` — the SAME gate every internal read
  *   uses. Expand links target `/c/<slug>`.
  * - `public` (the anonymous `/p/[slug]` reader) gates STRICTLY on
- *   `visibility_level === 'public'` and consults NO session — matching the public
- *   reader's own contract (a public surface must serve the same thing to everyone).
- *   Expand links target `/p/<slug>`.
+ *   `visibility_level === 'public'` AND a LIVE `public_web` publication, and
+ *   consults NO session — matching the public reader's own contract (a public
+ *   surface must serve the same thing to everyone, and an unpublish must mask
+ *   immediately). Expand links target `/p/<slug>`.
  *
- * The resolved `code` is the artifact's CURRENT head (the "live artifact" the
- * mockup describes). It is UNTRUSTED and is only ever handed to the cross-origin
+ * The resolved `code` is the artifact's CURRENT head for internal audiences (the
+ * "live artifact" the mockup describes). The PUBLIC audience instead receives the
+ * PUBLISHED version — the same version the top-level `/p/<slug>` route serves —
+ * so unpublished head edits never leak through a public document's embed. Either
+ * way the code is UNTRUSTED and is only ever handed to the cross-origin
  * `<ArtifactSandbox>` (§28.1), never rendered on the app origin.
  */
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
-import { contentObjects } from "@/lib/db/schema";
+import { contentObjects, contentPublications } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
 import { versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
@@ -114,10 +118,39 @@ export async function resolveEmbedForReader(
         }));
   if (!visible) return unavailable(artifactId);
 
-  // Viewable: load the current (live) head code. Best-effort — degrade to empty.
+  // The PUBLIC audience is held to the public reader's stricter contract: only an
+  // artifact with a LIVE `public_web` publication may render, and it renders the
+  // PUBLISHED version — never unpublished head edits — so a retraction masks the
+  // embed immediately, exactly like the top-level `/p/<slug>` route. (Internal
+  // audiences see the current head: the "live artifact" the mockup describes.)
+  let publishedVersionId: string | null = null;
+  if (opts.audience === "public") {
+    const [publication] = await executeQuery(
+      (db) =>
+        db
+          .select({ publishedVersionId: contentPublications.publishedVersionId })
+          .from(contentPublications)
+          .where(
+            and(
+              eq(contentPublications.objectId, obj.id),
+              eq(contentPublications.destination, "public_web"),
+              eq(contentPublications.status, "live")
+            )
+          )
+          .limit(1),
+      "atrium.embed.livePublication"
+    );
+    if (!publication) return unavailable(artifactId);
+    publishedVersionId = publication.publishedVersionId;
+  }
+
+  // Viewable: load the code (published version for public, live head otherwise).
+  // Best-effort — a missing body degrades to an empty live preview.
   let code = "";
   try {
-    const version = await versionService.current(obj.id);
+    const version = publishedVersionId
+      ? await versionService.getById(obj.id, publishedVersionId)
+      : await versionService.current(obj.id);
     if (version) code = await versionService.loadArtifactCode(version);
   } catch (error) {
     log.warn("embedded artifact body unavailable; rendering empty live preview", {
