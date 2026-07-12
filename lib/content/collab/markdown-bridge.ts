@@ -250,6 +250,46 @@ export function markdownToProseMirrorJSON(markdown: string): JSONContent {
 }
 
 /**
+ * True when `node` is an EMPTY paragraph — a `paragraph` node with no inline
+ * content. This is the exact shape ProseMirror gives a blank document (a new
+ * Atrium doc is a single empty paragraph) and the shape `markdownToProseMirrorJSON`
+ * never emits from real markdown (marked collapses blank lines, so headings/lists/
+ * paragraphs come through with content). An empty paragraph carries no text but
+ * still renders a full line box + block margins + provenance-rail gutter in the
+ * editor — dead vertical space.
+ */
+function isEmptyParagraph(node: JSONContent | undefined): boolean {
+  return (
+    node?.type === "paragraph" &&
+    (!Array.isArray(node.content) || node.content.length === 0)
+  );
+}
+
+/**
+ * Trim runs of empty paragraphs from the LEADING and TRAILING edges of a block
+ * list, preserving every interior block (including interior empty paragraphs a
+ * human may have added as intentional spacing).
+ *
+ * Why this exists (Epic #1059 follow-up — editor spacing bug): the agent write
+ * path (`applyAgentEdit` append mode) concatenates the agent's blocks AFTER the
+ * document's current content. A freshly-created Atrium doc is a single empty
+ * paragraph, so appending strands `[emptyParagraph, ...agentBlocks]` — the empty
+ * block reads as ~1 dead line + its block margins between the title/byline and the
+ * agent's first heading. Trimming the boundary empties before the concatenation
+ * (a) removes that leading dead space when the agent writes into a blank doc, and
+ * (b) gracefully cleans an ALREADY-SEEDED doc's boundary empties the next time the
+ * agent appends — without a migration and without touching interior editorial
+ * blank lines. Exported for the seeding-path smoke test.
+ */
+export function trimBoundaryEmptyParagraphs(content: JSONContent[]): JSONContent[] {
+  let start = 0;
+  let end = content.length;
+  while (start < end && isEmptyParagraph(content[start])) start += 1;
+  while (end > start && isEmptyParagraph(content[end - 1])) end -= 1;
+  return start === 0 && end === content.length ? content : content.slice(start, end);
+}
+
+/**
  * Return a deep copy of `node` with the `atriumAuthored` mark set to `by` on
  * every text node (replacing any existing author mark). Non-text nodes are
  * recursed into. Used to stamp a freshly-seeded draft with its creator.

@@ -29,6 +29,7 @@ import { getCollabSchema } from "./editor-extensions";
 import {
   markdownToProseMirrorJSON,
   stampAuthor,
+  trimBoundaryEmptyParagraphs,
   yDocToProseMirrorJSON,
 } from "./markdown-bridge";
 import { proseMirrorJSONToMarkdown } from "./prosemirror-markdown";
@@ -304,9 +305,15 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
   await runLoopbackEdit(objectId, agentId, (current) => {
     const agentJson = stampAuthor(markdownToProseMirrorJSON(markdown), by);
     if (mode !== "append") return agentJson;
+    // Trim boundary empty paragraphs from the doc's CURRENT content before
+    // concatenating the agent's blocks. A freshly-created doc is a single empty
+    // paragraph, so a naive append would strand `[emptyParagraph, ...agentBlocks]`
+    // — dead vertical space between the title and the agent's first block. Trimming
+    // the leading/trailing empties keeps interior editorial blank lines intact.
+    const existing = trimBoundaryEmptyParagraphs(current.content ?? []);
     return {
       ...current,
-      content: [...(current.content ?? []), ...(agentJson.content ?? [])],
+      content: [...existing, ...(agentJson.content ?? [])],
     };
   });
 }
