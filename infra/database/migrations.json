@@ -97,6 +97,7 @@
     "100-agent-iteration-telemetry.sql",
     "101-agent-workspace-canva.sql",
     "102-atrium-embed-links.sql",
-    "103-atrium-content-cover-icon.sql"
+    "103-atrium-content-cover-icon.sql",
+    "104-atrium-agent-service-user.sql"
   ]
 }
