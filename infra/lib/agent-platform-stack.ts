@@ -779,6 +779,149 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     // =====================================================================
+    // 4g. Atrium content API key — deploy-time zero-touch provisioning
+    // =====================================================================
+    // Removes the two manual steps PR #1195 left behind (mint an `sk-` key in
+    // AI Studio Settings + `aws secretsmanager put-secret-value`). This custom
+    // resource idempotently ensures `atriumContentApiKeySecret` (created above)
+    // holds a valid, active, content-scoped key owned by the service user seeded
+    // by migration 104 (`cognito_sub = service-account:psd-atrium-agent`).
+    //
+    //   - Reuses the repo's Aurora deploy pattern: the RDS Data API
+    //     (rds-data:ExecuteStatement, same as the db-init migration Lambda).
+    //   - Argon2id-hashes the key with hash-wasm using the SAME params as the
+    //     app's argon2 loader, so `validateApiKey` authenticates it unchanged.
+    //     The DB stores only the hash; the plaintext goes to the secret and is
+    //     never logged.
+    //   - Idempotent: no-op when the secret already holds a valid key; re-mints
+    //     when the secret is empty/stale or the key is revoked/under-scoped.
+    //   - Runs AFTER DatabaseStack (bin/infra.ts addDependency), so migration
+    //     104 (the service user) has been applied before it mints.
+    //
+    // Least-privilege role (ServiceRoleFactory): RDS Data API on the cluster +
+    // read the DB credential secret + read/write ONLY the content-key secret.
+    // Secrets are granted directly via additionalPolicies (not the factory's
+    // `secrets` array) to avoid the token double-wrap on cross-stack ARNs.
+    const atriumKeyBootstrapRole = ServiceRoleFactory.createLambdaRole(this, 'AtriumContentKeyBootstrapRole', {
+      functionName: 'psd-agent-atrium-key-bootstrap',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      secrets: [],
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              sid: 'AuroraDataApi',
+              effect: iam.Effect.ALLOW,
+              actions: ['rds-data:ExecuteStatement', 'rds-data:BatchExecuteStatement'],
+              resources: [props.databaseResourceArn],
+            }),
+            new iam.PolicyStatement({
+              sid: 'ReadDatabaseSecret',
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [props.databaseSecretArn],
+            }),
+            new iam.PolicyStatement({
+              sid: 'ReadWriteContentKeySecret',
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+              resources: [atriumContentApiKeySecret.secretArn],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const atriumKeyBootstrapLogGroup = new logs.LogGroup(this, 'AtriumContentKeyBootstrapLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-atrium-key-bootstrap-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const atriumKeyBootstrap = new lambda.Function(this, 'AtriumContentKeyBootstrapLambda', {
+      functionName: `psd-agent-atrium-key-bootstrap-${environment}`,
+      role: atriumKeyBootstrapRole,
+      runtime: AGENT_LAMBDA_RUNTIME,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'atrium-content-key-bootstrap'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'atrium-content-key-bootstrap');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 256,
+      timeout: cdk.Duration.minutes(2),
+      architecture: lambda.Architecture.ARM_64,
+      logGroup: atriumKeyBootstrapLogGroup,
+      environment: {
+        DB_CLUSTER_ARN: props.databaseResourceArn,
+        DB_SECRET_ARN: props.databaseSecretArn,
+        DB_NAME: props.databaseName ?? 'aistudio',
+        CONTENT_KEY_SECRET_ID: atriumContentApiKeySecret.secretArn,
+        SERVICE_USER_COGNITO_SUB: 'service-account:psd-atrium-agent',
+        KEY_NAME: 'psd-atrium agent (auto-provisioned)',
+        // Content scopes: read/create/update/publish_internal — NOT
+        // publish_public (the §26.4 public-publish approval gate stays).
+        KEY_SCOPES: JSON.stringify([
+          'content:read',
+          'content:create',
+          'content:update',
+          'content:publish_internal',
+        ]),
+        ENVIRONMENT: environment,
+      },
+    });
+
+    const atriumKeyProvider = new customResources.Provider(this, 'AtriumContentKeyProvider', {
+      onEventHandler: atriumKeyBootstrap,
+    });
+    const atriumKeyProvisioner = new cdk.CustomResource(this, 'AtriumContentKeyProvisioner', {
+      serviceToken: atriumKeyProvider.serviceToken,
+      properties: {
+        // Bump on every synth so the custom resource's Update handler fires on
+        // EVERY deploy. The ensure logic is idempotent (a no-op when the key is
+        // valid), so re-running is cheap; the benefit is self-healing — a
+        // cleared secret or revoked key row is re-minted on the next deploy,
+        // which is exactly the documented rotation story.
+        Nonce: Date.now().toString(),
+      },
+    });
+    atriumKeyProvisioner.node.addDependency(atriumContentApiKeySecret);
+
+    // =====================================================================
     // 5. IAM Roles
     // =====================================================================
 
