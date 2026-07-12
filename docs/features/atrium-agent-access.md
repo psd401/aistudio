@@ -79,16 +79,39 @@ do — it deliberately does not execute content actions.
 endpoints — it is **not scope-aware and cannot authenticate to `/api/mcp`**.
 Content access needs its own `sk-` key.
 
-**To give the agents Atrium abilities** (the follow-up build):
+**The `psd-atrium` skill** (`infra/agent-image/skills/psd-atrium/`) gives the
+agents Atrium abilities. It wraps the `/api/v1/content/*` REST surface (which is
+1:1 with the MCP content tools but returns the saved body inline and a real HTTP
+202 for the approval gate), authenticated with a scoped `sk-` **content** key.
+Subcommands: `find`, `read`, `create-document`, `create-artifact`, `edit`
+(`--mode replace|append`), `set-visibility`, `publish`, `unpublish`. The agent
+works **version-based**, like any other `sk-` caller — same private+draft +
+screening invariants — and acts as the **content key's owner identity** (not the
+asking user; per-user delegation is the future phase below).
 
-1. Mint an `sk-` key with the content scopes above.
-2. Store it in Secrets Manager under the `psd-agent/{env}/…` convention (mirror
-   the `AISTUDIO_MCP_API_KEY_SECRET_ID` pattern the discovery skill already uses).
-3. Add a skill (e.g. `infra/agent-image/skills/psd-atrium/`) wrapping the MCP
-   content tools, following the `psd-aistudio` runner shape.
+Deployment prerequisites (mirrors the `psd-canva` #1176 prereq pattern):
 
-The agent then works **version-based**, like any other MCP caller — same
-semantics, same private+draft + screening invariants.
+1. **Mint a content-scoped `sk-` key.** In AI Studio → **Settings → API Keys**,
+   as a user whose role grants the content scopes (staff or administrator), mint a
+   key holding `content:read content:create content:update
+   content:publish_internal`. Grant `content:publish_public` only if the agent
+   should publish publicly without the approval gate (otherwise public publishes
+   return `approval_required`, which is the intended safe default).
+2. **Populate the secret** the CDK stack creates
+   (`psd-agent/{env}/atrium-content-api-key`) with the **raw** key string:
+
+   ```bash
+   aws secretsmanager put-secret-value \
+     --secret-id psd-agent/<env>/atrium-content-api-key \
+     --secret-string 'sk-...'
+   ```
+
+3. **Runtime env** (wired by `infra/lib/agent-platform-stack.ts`, no manual step):
+   `AISTUDIO_CONTENT_API_KEY_SECRET_ID` points the skill at that secret;
+   `APP_BASE_URL` supplies the `/api/v1/content` base. (`AISTUDIO_CONTENT_API_KEY`
+   may be set directly for local/dev instead of the secret.)
+4. **Rebuild + redeploy the agent image** — the agent discovers the skill only
+   after `infra/agent-image` is rebuilt and the AgentCore runtime redeployed.
 
 ## Acting on behalf of a specific user (delegated tokens)
 
@@ -129,6 +152,8 @@ Boot-log check: `Local: http://localhost:3000` = healthy;
 | Symptom | Likely cause |
 |---|---|
 | 401 from `/api/mcp` using `AGENT_INTERNAL_API_KEY` | Wrong credential class — mint an `sk-` key (see gotcha above) |
+| `psd-atrium` exits 11 (unauthorized / not configured) | The content key isn't set — populate `psd-agent/{env}/atrium-content-api-key` (or `AISTUDIO_CONTENT_API_KEY`) with a content-scoped `sk-` key (see Path 2 prereqs) |
+| `psd-atrium publish` returns `approval_required` | Public destination without `content:publish_public` — expected; relay the message so the user knows it's queued |
 | 403 `INSUFFICIENT_SCOPE` on a content tool | Key lacks the scope in the table above |
 | `publish_content` returns `approval_required` | Public destination — needs human/admin `content:publish_public`; internal destinations publish directly |
 | Agent reads stale document text | Expected: `get_content` returns the last saved **version**; live editor changes appear after a snapshot |
