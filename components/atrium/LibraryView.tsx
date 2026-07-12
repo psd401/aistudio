@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Search, Plus, Sparkles } from "lucide-react";
+import { Search, Plus, Sparkles, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { listContentAction } from "@/actions/db/atrium/list-content";
@@ -55,6 +55,89 @@ type LibraryFilterView = (typeof VIEWS)[number]["value"];
 const PAGE_SIZE = 50;
 
 /**
+ * Derive a short, editable artifact title from the agent prompt (README: "Title
+ * auto-suggested, editable inline"). First non-empty line, trimmed to a sane
+ * length; falls back to a neutral placeholder the user can rename.
+ */
+function deriveArtifactTitle(promptText: string): string {
+  const firstLine = promptText
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  if (!firstLine) return "Untitled artifact";
+  return firstLine.length > 80 ? `${firstLine.slice(0, 77).trimEnd()}…` : firstLine;
+}
+
+/**
+ * The Meridian creation flow (README Interactions), extracted from `LibraryView`
+ * so its body stays under the max-lines lint:
+ *  - `handleNewDoc` creates an untitled document and navigates straight to the
+ *    editor (a blank sheet, no modal — the title is editable inline there).
+ *  - `handleAgentCreate` creates the artifact, then deep-links into the Nexus
+ *    workspace with the prompt prefilled (`?draft=`) so the agent builds it
+ *    beside its live preview; returns an error string for the dialog, or null.
+ */
+function useLibraryCreate(collectionId: string | null) {
+  const router = useRouter();
+  const [agentPromptOpen, setAgentPromptOpen] = useState(false);
+  const [creatingDoc, setCreatingDoc] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  const handleNewDoc = useCallback(async () => {
+    if (creatingDoc) return;
+    setCreatingDoc(true);
+    setCreateError(null);
+    try {
+      const res = await createContentAction({
+        kind: "document",
+        title: "Untitled",
+        collectionId: collectionId ?? undefined,
+      });
+      if (res.isSuccess) {
+        router.push(`/atrium/${res.data.id}/edit`);
+        return; // keep the button disabled through the navigation
+      }
+      setCreateError(res.message ?? "Could not create the document");
+      log.warn("createContentAction (doc) failed", { message: res.message });
+    } catch (e) {
+      setCreateError("Could not create the document");
+      log.error("createContentAction (doc) threw", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+    setCreatingDoc(false);
+  }, [creatingDoc, collectionId, router]);
+
+  const handleAgentCreate = useCallback(
+    async (promptText: string): Promise<string | null> => {
+      const res = await createContentAction({
+        kind: "artifact",
+        title: deriveArtifactTitle(promptText),
+        collectionId: collectionId ?? undefined,
+      });
+      if (res.isSuccess) {
+        router.push(
+          `/nexus?workspace=${res.data.id}&draft=${encodeURIComponent(promptText)}`
+        );
+        return null;
+      }
+      log.warn("createContentAction (artifact) failed", { message: res.message });
+      return res.message ?? "Could not create the artifact";
+    },
+    [collectionId, router]
+  );
+
+  return {
+    agentPromptOpen,
+    setAgentPromptOpen,
+    creatingDoc,
+    createError,
+    handleNewDoc,
+    handleAgentCreate,
+  };
+}
+
+/**
  * The library header: title, ⌘K-focusable search, and the create buttons.
  * Presentational — all state lives in the parent.
  */
@@ -64,12 +147,15 @@ function LibraryHeader({
   searchRef,
   onNewArtifact,
   onNewDoc,
+  creatingDoc,
 }: {
   search: string;
   onSearch: (v: string) => void;
   searchRef: React.RefObject<HTMLInputElement | null>;
   onNewArtifact: () => void;
   onNewDoc: () => void;
+  /** A blank-doc create is in flight — disables the "New doc" button. */
+  creatingDoc: boolean;
 }): React.JSX.Element {
   return (
     <header className="mer-lib-header">
@@ -93,8 +179,17 @@ function LibraryHeader({
         <Sparkles className="h-4 w-4" aria-hidden="true" />
         New artifact
       </button>
-      <button type="button" className="mer-btn mer-btn-primary" onClick={onNewDoc}>
-        <Plus className="h-4 w-4" aria-hidden="true" />
+      <button
+        type="button"
+        className="mer-btn mer-btn-primary"
+        onClick={onNewDoc}
+        disabled={creatingDoc}
+      >
+        {creatingDoc ? (
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+        ) : (
+          <Plus className="h-4 w-4" aria-hidden="true" />
+        )}
         New doc
       </button>
     </header>
@@ -159,7 +254,6 @@ export interface LibraryViewProps {
 export function LibraryView({
   sandboxSrc = null,
 }: LibraryViewProps = {}): React.JSX.Element {
-  const router = useRouter();
   const searchParams = useSearchParams();
 
   // Section selection is URL-driven (`?collection=<id>`): the Meridian shell's
@@ -205,7 +299,16 @@ export function LibraryView({
   const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [createKind, setCreateKind] = useState<ContentKind | null>(null);
+  // The Meridian creation flow (New doc → blank sheet; New artifact / create card
+  // → agent-prompt dialog). Extracted to a hook to keep this body under the lint.
+  const {
+    agentPromptOpen,
+    setAgentPromptOpen,
+    creatingDoc,
+    createError,
+    handleNewDoc,
+    handleAgentCreate,
+  } = useLibraryCreate(collectionId);
 
   // Monotonic sequence so a slow earlier response cannot overwrite a newer one.
   const reqSeqRef = useRef(0);
@@ -281,24 +384,6 @@ export function LibraryView({
     return items.filter((it) => it.title.toLowerCase().includes(q));
   }, [items, search]);
 
-  const handleCreate = useCallback(
-    async (title: string): Promise<string | null> => {
-      if (!createKind) return "No content kind selected";
-      const res = await createContentAction({
-        kind: createKind,
-        title,
-        collectionId: collectionId ?? undefined,
-      });
-      if (res.isSuccess) {
-        router.push(`/atrium/${res.data.id}/edit`);
-        return null;
-      }
-      log.warn("createContentAction failed", { message: res.message });
-      return res.message ?? "Could not create content";
-    },
-    [createKind, collectionId, router]
-  );
-
   return (
     <div className="w-full px-5 py-6 md:px-8 md:py-8">
       <section className="mx-auto min-w-0 max-w-6xl">
@@ -306,9 +391,16 @@ export function LibraryView({
           search={search}
           onSearch={setSearch}
           searchRef={searchRef}
-          onNewArtifact={() => setCreateKind("artifact")}
-          onNewDoc={() => setCreateKind("document")}
+          onNewArtifact={() => setAgentPromptOpen(true)}
+          onNewDoc={() => void handleNewDoc()}
+          creatingDoc={creatingDoc}
         />
+
+        {createError && (
+          <p className="mb-3 text-sm text-destructive" role="alert">
+            {createError}
+          </p>
+        )}
 
         <LibraryChips view={view} onView={setView} tag={tag} onTag={setTag} />
 
@@ -316,7 +408,7 @@ export function LibraryView({
           items={visibleItems}
           loading={loading}
           error={error}
-          onCreate={() => setCreateKind("document")}
+          onCreate={() => setAgentPromptOpen(true)}
           sandboxSrc={sandboxSrc}
         />
 
@@ -337,10 +429,10 @@ export function LibraryView({
       </section>
 
       <CreateContentDialog
-        key={createKind ?? "closed"}
-        kind={createKind}
-        onClose={() => setCreateKind(null)}
-        onCreate={handleCreate}
+        key={agentPromptOpen ? "open" : "closed"}
+        open={agentPromptOpen}
+        onClose={() => setAgentPromptOpen(false)}
+        onSubmit={handleAgentCreate}
       />
     </div>
   );

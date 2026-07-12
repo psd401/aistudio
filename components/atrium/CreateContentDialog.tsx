@@ -1,24 +1,26 @@
 "use client";
 
 /**
- * Atrium CreateContentDialog — "New doc / New artifact" creation (Issue #1054).
+ * Atrium AgentCreateDialog — "Create with the agent" prompt surface (Epic #1059
+ * redesign; README Interactions: creation is a PROMPT, not a form).
  *
- * Collects a title and delegates creation to the parent's `onCreate`, which calls
- * `createContentAction` (server-side `canCreate` + capability gate) and navigates
- * to the editor on success. Returns an error string for the dialog to show, or
- * null on success. Focus is moved to the title input on open via a ref (avoiding
- * the `autoFocus` prop, which the a11y lint flags).
+ * The Meridian creation flow splits by kind:
+ *  - "New doc" opens a blank sheet IMMEDIATELY (no modal) — handled in
+ *    `LibraryView` by creating an untitled document and navigating to its editor.
+ *  - "New artifact" / the dashed "Create with the agent" card open THIS single
+ *    prompt field. The caller (`LibraryView`) creates the artifact and deep-links
+ *    into the Nexus workspace chat with the prompt prefilled, so the agent builds
+ *    the artifact beside its live preview (the §17 `?workspace=` machinery).
  *
- * The parent gives this component a `key` of the current kind, so each open is a
- * FRESH mount — initial `title`/`error` state without a reset-in-effect (which the
- * react-hooks lint flags as a cascading render).
+ * Presentation only: it collects one free-text description and delegates to
+ * `onSubmit`, which returns an error string to show, or null on success (the
+ * caller navigates away). Focus moves to the field on open via a ref (not the
+ * `autoFocus` prop, which the a11y lint flags). The parent gives this a `key` so
+ * each open is a FRESH mount — initial state without a reset-in-effect.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Loader2, Sparkles } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -27,31 +29,38 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { ContentKind } from "@/lib/content";
+import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
 
-interface CreateContentDialogProps {
-  /** The kind being created, or null when the dialog is closed. */
-  kind: ContentKind | null;
+interface AgentCreateDialogProps {
+  /** Whether the prompt surface is open. */
+  open: boolean;
   onClose: () => void;
-  /** Returns an error message to display, or null on success (navigates away). */
-  onCreate: (title: string) => Promise<string | null>;
+  /**
+   * Submit the agent prompt. Returns an error message to display, or null on
+   * success (the caller navigates to the new artifact's workspace).
+   */
+  onSubmit: (prompt: string) => Promise<string | null>;
 }
 
+/** A few starter prompts, so an empty field is never a blank wall. */
+const EXAMPLE_PROMPTS: ReadonlyArray<string> = [
+  "A dashboard summarizing our enrollment trends by school",
+  "An interactive FAQ for the new bell schedule",
+  "A one-page budget explainer with a donut chart",
+];
+
 export function CreateContentDialog({
-  kind,
+  open,
   onClose,
-  onCreate,
-}: CreateContentDialogProps): React.JSX.Element {
-  const [title, setTitle] = useState("");
+  onSubmit,
+}: AgentCreateDialogProps): React.JSX.Element {
+  const [prompt, setPrompt] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  const open = kind !== null;
-
-  // Focus the title input when the dialog opens. No state reset here — the parent
-  // remounts this component per kind via `key`, so `title`/`error` already start
-  // fresh (avoids the cascading-render lint on setState-in-effect).
+  // Focus the prompt field when the surface opens. No state reset here — the
+  // parent remounts this via `key`, so `prompt`/`error` already start fresh.
   useEffect(() => {
     if (!open) return;
     const t = setTimeout(() => inputRef.current?.focus(), 0);
@@ -59,20 +68,20 @@ export function CreateContentDialog({
   }, [open]);
 
   const submit = useCallback(async () => {
-    const trimmed = title.trim();
+    const trimmed = prompt.trim();
     if (!trimmed) {
-      setError("Title is required");
+      setError("Describe what you'd like the agent to build.");
       return;
     }
     setCreating(true);
     setError(null);
-    const message = await onCreate(trimmed);
+    const message = await onSubmit(trimmed);
     // On success the parent navigates away; on failure show the message.
     if (message) {
       setError(message);
       setCreating(false);
     }
-  }, [title, onCreate]);
+  }, [prompt, onSubmit]);
 
   return (
     <Dialog
@@ -81,42 +90,67 @@ export function CreateContentDialog({
         if (!next) onClose();
       }}
     >
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
-          <DialogTitle>
-            New {kind === "artifact" ? "artifact" : "doc"}
-          </DialogTitle>
+          <DialogTitle>Create with the agent</DialogTitle>
           <DialogDescription>
-            {kind === "artifact"
-              ? "Create an interactive artifact. You can edit and preview it next."
-              : "Create a document. You'll edit it in the live editor next."}
+            Describe what you want — the agent drafts the artifact and opens it
+            beside the chat so you can refine it together.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-2">
-          <Label htmlFor="new-content-title">Title</Label>
-          <Input
-            id="new-content-title"
+        <div className="space-y-3">
+          <textarea
             ref={inputRef}
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Untitled"
+            className="mer-prompt-field"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="e.g. An interactive attendance dashboard for our leadership team…"
+            rows={4}
+            aria-label="Describe the artifact for the agent to build"
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !creating) {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !creating) {
                 e.preventDefault();
                 void submit();
               }
             }}
           />
+          <div className="mer-prompt-examples">
+            {EXAMPLE_PROMPTS.map((ex) => (
+              <button
+                key={ex}
+                type="button"
+                className="mer-prompt-example"
+                disabled={creating}
+                onClick={() => setPrompt(ex)}
+              >
+                {ex}
+              </button>
+            ))}
+          </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={onClose} disabled={creating}>
+          <button
+            type="button"
+            className="mer-btn"
+            onClick={onClose}
+            disabled={creating}
+          >
             Cancel
-          </Button>
-          <Button onClick={() => void submit()} disabled={creating}>
-            {creating && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
-            Create
-          </Button>
+          </button>
+          <button
+            type="button"
+            className="mer-btn mer-btn-agent"
+            onClick={() => void submit()}
+            disabled={creating}
+          >
+            {creating ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <Sparkles className="h-4 w-4" aria-hidden="true" />
+            )}
+            Create with the agent
+          </button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
