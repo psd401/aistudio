@@ -43,6 +43,7 @@ import {
 } from "@/components/ui/select";
 import { updateContentAction } from "@/actions/db/atrium/update-content";
 import { collectionTreeAction } from "@/actions/db/atrium/collection-tree";
+import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
 import type { CollectionTreeNode } from "@/lib/content";
 import { createLogger } from "@/lib/client-logger";
 
@@ -199,7 +200,7 @@ function SettingsFields({
           <SelectTrigger id="content-settings-collection">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value={NO_COLLECTION}>No section</SelectItem>
             {options.map((opt) => (
               <SelectItem key={opt.id} value={opt.id}>
@@ -349,12 +350,16 @@ export function ContentSettings({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <Button type="button" size="sm" variant="outline" className="gap-1">
-          <Settings2 className="h-3.5 w-3.5" />
-          Settings
-        </Button>
+        <button
+          type="button"
+          className="mer-ectl mer-ectl-icon"
+          aria-label="Content settings"
+          title="Content settings"
+        >
+          <Settings2 className="h-4 w-4" aria-hidden="true" />
+        </button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>Content settings</DialogTitle>
           <DialogDescription>
