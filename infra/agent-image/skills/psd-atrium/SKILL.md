@@ -31,6 +31,11 @@ client uses.
   as live-editor edits.
 - A document open in the editor may be **ahead** of what `read` returns until
   someone snapshots a version.
+- **A document's body TEXT** is not returned by `read` at all — it lives in the
+  collaborative store. `read` gives a document's metadata; only small **artifact**
+  code comes back inline. You can still **replace** a document's body with
+  `edit --mode replace` (a full new version), you just can't read the old text
+  back or `append` to it.
 
 ## Authentication & identity
 
@@ -55,7 +60,10 @@ provisioned yet** — see `docs/features/atrium-agent-access.md`.
 # Find content you can view (permission-filtered). All filters optional.
 node run.js find --kind document --query "field trip" --status published
 
-# Read one object + its last saved version (body inline when small).
+# Read one object + its last saved version.
+# Document TEXT is NOT returned here — it lives in the collaborative store, so
+# `read` gives a document's metadata only. Small ARTIFACT code IS returned inline
+# (in `body`); large artifacts are offloaded to storage and not inlined.
 node run.js read --id <uuid-or-slug>
 ```
 

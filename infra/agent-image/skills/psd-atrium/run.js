@@ -148,9 +148,11 @@ async function main() {
     case 'read': {
       const id = requireStr(args, 'id', 'id');
       const { payload } = await restFetch('GET', `/${encodeURIComponent(id)}`);
-      // Surface the saved markdown/code body inline for the agent. Large bodies are
-      // offloaded to S3 (bodyLocation) and NOT returned inline — say so plainly
-      // rather than implying the document is empty.
+      // Surface the saved body inline when available. Only small ARTIFACTS carry
+      // an inline body; DOCUMENT text lives in the collaborative store
+      // (bodyLocation "proof") and large artifacts are offloaded to object storage
+      // — neither is returned here. Say so plainly rather than implying the object
+      // is empty.
       const version = payload && payload.version;
       const body = version && typeof version.bodyInline === 'string' ? version.bodyInline : null;
       emit({
@@ -159,8 +161,8 @@ async function main() {
         bodyAvailableInline: body !== null,
         note:
           version && body === null
-            ? 'Body is stored externally (see version.bodyLocation) and is not returned inline; this read shows the last SAVED version metadata only.'
-            : 'Shows the last SAVED version (not the live collaborative editor state).',
+            ? 'Body not returned inline: documents keep their text in the collaborative store (version.bodyLocation "proof"), and large artifacts are offloaded to object storage. This read shows the last SAVED version metadata only; the live editor state is not reachable here.'
+            : 'Shows the last SAVED version body (not the live collaborative editor state).',
       });
       return;
     }
