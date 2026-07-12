@@ -816,6 +816,13 @@ export class AgentPlatformStack extends cdk.Stack {
       region: this.region,
       account: this.account,
       vpcEnabled: false,
+      // The account-wide AIStudio-PermissionBoundary allows secretsmanager
+      // READS only — it cannot express this role's one write duty
+      // (PutSecretValue on exactly the content-key secret), and the first
+      // deploy failed on precisely that denial. Opt out of the boundary
+      // (the AgentCore execution role precedent for secret-writing roles);
+      // the identity policies below remain the sole grant and are exact-ARN.
+      enablePermissionBoundary: false,
       secrets: [],
       additionalPolicies: [
         new iam.PolicyDocument({

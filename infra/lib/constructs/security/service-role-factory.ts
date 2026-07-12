@@ -83,6 +83,7 @@ export class ServiceRoleFactory {
       policies,
       environment: props.environment,
       maxSessionDuration: cdk.Duration.hours(1),
+      enablePermissionBoundary: props.enablePermissionBoundary,
     })
 
     return baseRole.role
