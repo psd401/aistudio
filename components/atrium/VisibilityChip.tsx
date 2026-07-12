@@ -46,6 +46,7 @@ import { Globe, Lock, Users, Building2, X } from "lucide-react";
 import { getVisibilityAction } from "@/actions/db/atrium/get-visibility";
 import { setVisibilityAction } from "@/actions/db/atrium/set-visibility";
 import { listGrantOptionsAction } from "@/actions/db/atrium/list-grant-options";
+import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
 import { POSITIVE_INT_RE } from "@/lib/content/validators";
 
 /** The visibility levels, in widening order, with their picker labels. */
@@ -442,7 +443,7 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
           <ChipBadge levelKnown={levelKnown} chrome={chrome} />
         </button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>Visibility</DialogTitle>
           <DialogDescription>
@@ -514,7 +515,7 @@ function LevelPicker({ level, disabled, onChange }: LevelPickerProps) {
         <SelectTrigger id="visibility-level">
           <SelectValue />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           {LEVELS.map((l) => (
             <SelectItem key={l.value} value={l.value}>
               {l.label}
@@ -608,7 +609,7 @@ function GroupGrantEditor({
               <SelectTrigger id="grant-kind" className="w-32">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 {GRANT_KINDS.map((k) => (
                   <SelectItem key={k.value} value={k.value}>
                     {k.label}
@@ -631,7 +632,7 @@ function GroupGrantEditor({
                 <SelectTrigger id="grant-value">
                   <SelectValue placeholder="Select a role" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className={meridianPortalClassName}>
                   {roleOptions.map((r) => (
                     <SelectItem key={r} value={r}>
                       {r}

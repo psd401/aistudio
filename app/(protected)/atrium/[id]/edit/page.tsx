@@ -21,6 +21,7 @@
  */
 
 import { forbidden, notFound } from "next/navigation";
+import { PanelRight } from "lucide-react";
 import { getUserRequester } from "@/actions/db/atrium/requester";
 import { contentService } from "@/lib/content/content-service";
 import { collectionService } from "@/lib/content/collection-service";
@@ -95,11 +96,13 @@ export default async function AtriumEditPage({
     <div className="flex shrink-0 items-center gap-2">
       <a
         href={`/nexus?workspace=${obj.id}`}
-        className="mer-ectl"
+        className="mer-ectl mer-ectl-icon"
+        aria-label="Open beside chat"
+        title="Open beside chat"
         // Nexus workspace (spec §17): open this object BESIDE the chat so the
         // adjacent conversation becomes the re-prompt/tweak path.
       >
-        Open beside chat
+        <PanelRight className="h-4 w-4" aria-hidden="true" />
       </a>
       {userCanEdit && (
         <ContentSettings

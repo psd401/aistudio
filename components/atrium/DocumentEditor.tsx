@@ -28,7 +28,7 @@
  * stable conversation id.
  */
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useEditor, EditorContent, ReactNodeViewRenderer } from "@tiptap/react";
 import { Collaboration } from "@tiptap/extension-collaboration";
@@ -40,6 +40,8 @@ import { ArtifactEmbedNodeView } from "./ArtifactEmbedNodeView";
 import { makeAuthorTag } from "@/lib/content/collab/provenance";
 import { useUser } from "@/components/auth/user-provider";
 import { EditorToolbar } from "./EditorToolbar";
+import { PublishMenu } from "./PublishMenu";
+import { EditableSheetTitle } from "./EditableSheetTitle";
 import { EditorBubbleMenu } from "./EditorBubbleMenu";
 import { DocumentCover } from "./DocumentCover";
 import { useEditorActions } from "./use-editor-actions";
@@ -285,7 +287,7 @@ function MeridianDesk({
   margins,
   cover,
   eyebrow,
-  title,
+  titleNode,
   byline,
   body,
   comments,
@@ -294,7 +296,8 @@ function MeridianDesk({
   margins: MarginAvatar[];
   cover?: React.ReactNode;
   eyebrow?: string;
-  title: string;
+  /** The sheet H1 — an inline-editable title for editors, static for viewers. */
+  titleNode: React.ReactNode;
   byline: string;
   body: React.ReactNode;
   comments: React.ReactNode;
@@ -316,7 +319,7 @@ function MeridianDesk({
         <div className="mer-sheet">
           {cover}
           {eyebrow && <div className="mer-sheet-eyebrow">{eyebrow}</div>}
-          <h1 className="mer-sheet-title">{title}</h1>
+          {titleNode}
           <div className="mer-sheet-byline" data-testid="editor-byline">
             {byline}
           </div>
@@ -326,6 +329,119 @@ function MeridianDesk({
       <div className="mer-comments">{comments}</div>
     </div>
   );
+}
+
+/**
+ * The narrow Nexus workspace panel (§17) — a compact stacked form. It mounts
+ * under /nexus (outside the Atrium layout), so it carries the `.atrium-meridian`
+ * scope class itself to resolve the `.mer-*` tokens. Extracted so the
+ * DocumentEditor body stays under the max-lines lint.
+ */
+function PanelLayout({
+  presence,
+  controls,
+  editorBody,
+  comments,
+  statusCaption,
+}: {
+  presence: React.ReactNode;
+  controls: React.ReactNode;
+  editorBody: React.ReactNode;
+  comments: React.ReactNode;
+  statusCaption: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <div className="atrium-meridian flex flex-col gap-2 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {presence}
+        <div className="mer-ectl-group">{controls}</div>
+      </div>
+      {editorBody}
+      <div className="w-full border-t pt-3">{comments}</div>
+      {statusCaption}
+    </div>
+  );
+}
+
+/**
+ * The full-page Meridian editor: the topbar + the sheet-on-desk + the status
+ * caption. Composes the already-extracted EditorTopbar + MeridianDesk so the
+ * DocumentEditor body stays under the max-lines lint.
+ */
+function FullPageLayout({
+  docTitle,
+  crumbs,
+  agentWriting,
+  roster,
+  localUserId,
+  controls,
+  sheetRef,
+  margins,
+  cover,
+  eyebrow,
+  titleNode,
+  byline,
+  editorBody,
+  comments,
+  statusCaption,
+}: {
+  docTitle: string;
+  crumbs: BreadcrumbCrumb[];
+  agentWriting: boolean;
+  roster: PresenceUser[];
+  localUserId: number;
+  controls: React.ReactNode;
+  sheetRef: React.RefObject<HTMLDivElement | null>;
+  margins: MarginAvatar[];
+  cover: React.ReactNode;
+  eyebrow?: string;
+  titleNode: React.ReactNode;
+  byline: string;
+  editorBody: React.ReactNode;
+  comments: React.ReactNode;
+  statusCaption: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <div className="mer-editor">
+      <EditorTopbar
+        title={docTitle}
+        breadcrumb={crumbs}
+        agentWriting={agentWriting}
+        roster={roster}
+        localUserId={localUserId}
+        controls={controls}
+      />
+      <MeridianDesk
+        sheetRef={sheetRef}
+        margins={margins}
+        cover={cover}
+        eyebrow={eyebrow}
+        titleNode={titleNode}
+        byline={byline}
+        body={editorBody}
+        comments={comments}
+      />
+      {statusCaption}
+    </div>
+  );
+}
+
+/**
+ * Local title state that re-syncs when the server `title` prop changes (e.g. a
+ * Settings-dialog rename → router.refresh() delivers a fresh prop; the page keys
+ * the editor on the object id only, so it never remounts). Uses the React
+ * "adjust state on prop change during render" pattern — no effect, no cascading
+ * render. An inline commit updates both this state and the DB, so the eventual
+ * refreshed prop is a no-op here.
+ */
+function useSyncedTitle(title?: string): [string, (next: string) => void] {
+  const [docTitle, setDocTitle] = useState(title ?? "Untitled");
+  const [syncedTitle, setSyncedTitle] = useState(title);
+  if (title !== syncedTitle) {
+    setSyncedTitle(title);
+    setDocTitle(title ?? "Untitled");
+  }
+  return [docTitle, setDocTitle];
 }
 
 export function DocumentEditor({
@@ -409,7 +525,10 @@ export function DocumentEditor({
     localUser,
   });
 
-  const docTitle = title ?? "Untitled";
+  // The title is inline-editable (README: New-doc lands on a blank sheet with an
+  // editable title); the hook keeps the sheet H1 / breadcrumb / byline in sync
+  // with both inline commits and out-of-band renames (Settings dialog).
+  const [docTitle, setDocTitle] = useSyncedTitle(title);
   const crumbs = breadcrumb ?? [];
 
   const toolbar = (
@@ -419,15 +538,23 @@ export function DocumentEditor({
       busy={busy}
       suggesting={suggesting}
       suggestionCount={suggestionCount}
-      onSnapshot={handleSnapshot}
-      onPublish={handlePublish}
-      onUnpublish={handleUnpublish}
       onToggleSuggesting={() => editor?.commands.toggleSuggesting()}
       onAcceptAll={() => {
         if (editor) acceptAllSuggestions(editor);
       }}
     />
   );
+
+  // The primary "Publish ▾" split control (destination + publish + unpublish +
+  // snapshot). Editors only; rendered LAST in the control row per the spec topbar.
+  const publishControl = canEdit ? (
+    <PublishMenu
+      busy={busy}
+      onSnapshot={handleSnapshot}
+      onPublish={handlePublish}
+      onUnpublish={handleUnpublish}
+    />
+  ) : null;
 
   const bubble =
     editor && canEdit ? (
@@ -452,63 +579,56 @@ export function DocumentEditor({
     <CommentSidebar idOrSlug={idOrSlug} editor={editor} canEdit={canEdit} />
   );
 
-  // --- Narrow Nexus workspace panel: compact stacked form ----------------------
-  // The panel mounts under /nexus (outside the Atrium layout), so it carries the
-  // `.atrium-meridian` scope class itself to resolve the `.mer-*` tokens.
+  const presence = (
+    <PresenceStack roster={roster} localUserId={userId} agentWriting={agentWriting} />
+  );
+
+  // --- Narrow Nexus workspace panel (§17): compact stacked form ----------------
   if (layout === "panel") {
     return (
-      <div className="atrium-meridian flex flex-col gap-2 p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <PresenceStack
-            roster={roster}
-            localUserId={userId}
-            agentWriting={agentWriting}
-          />
-          {toolbar}
-        </div>
-        {editorBody}
-        <div className="w-full border-t pt-3">{comments}</div>
-        {statusCaption}
-      </div>
+      <PanelLayout
+        presence={presence}
+        controls={<>{toolbar}{publishControl}</>}
+        editorBody={editorBody}
+        comments={comments}
+        statusCaption={statusCaption}
+      />
     );
   }
 
   // --- Full page: the Meridian sheet on the desk -------------------------------
   return (
-    <div className="mer-editor">
-      <EditorTopbar
-        title={docTitle}
-        breadcrumb={crumbs}
-        agentWriting={agentWriting}
-        roster={roster}
-        localUserId={userId}
-        controls={
-          <>
-            {toolbar}
-            {historyControl}
-            {settingsControl}
-          </>
-        }
-      />
-      <MeridianDesk
-        sheetRef={sheetRef}
-        margins={margins}
-        cover={
-          <DocumentCover
-            objectId={idOrSlug}
-            coverGradient={coverGradient ?? null}
-            icon={icon ?? null}
-            canEdit={canEdit}
-          />
-        }
-        eyebrow={eyebrow}
-        title={docTitle}
-        byline={bylineText(roster, userId, agentWriting, status)}
-        body={editorBody}
-        comments={comments}
-      />
-      {statusCaption}
-    </div>
+    <FullPageLayout
+      docTitle={docTitle}
+      crumbs={crumbs}
+      agentWriting={agentWriting}
+      roster={roster}
+      localUserId={userId}
+      controls={<>{toolbar}{historyControl}{settingsControl}{publishControl}</>}
+      sheetRef={sheetRef}
+      margins={margins}
+      cover={
+        <DocumentCover
+          objectId={idOrSlug}
+          coverGradient={coverGradient ?? null}
+          icon={icon ?? null}
+          canEdit={canEdit}
+        />
+      }
+      eyebrow={eyebrow}
+      titleNode={
+        <EditableSheetTitle
+          objectId={idOrSlug}
+          value={docTitle}
+          canEdit={canEdit}
+          onCommit={setDocTitle}
+        />
+      }
+      byline={bylineText(roster, userId, agentWriting, status)}
+      editorBody={editorBody}
+      comments={comments}
+      statusCaption={statusCaption}
+    />
   );
 }
 

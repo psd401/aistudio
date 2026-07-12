@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/dialog";
 import { listContentVersionsAction, rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
 import type { VersionSummary } from "@/actions/db/atrium/list-versions";
+import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
 import { createLogger } from "@/lib/client-logger";
 
 const log = createLogger({ component: "VersionMenu" });
@@ -146,12 +147,12 @@ export function VersionMenu({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button type="button" size="sm" variant="outline" className="gap-1">
-          <History className="h-3.5 w-3.5" />
+        <button type="button" className="mer-ectl">
+          <History className="h-3.5 w-3.5" aria-hidden="true" />
           History
-        </Button>
+        </button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>Version history</DialogTitle>
           <DialogDescription>

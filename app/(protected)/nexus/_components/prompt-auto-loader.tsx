@@ -35,6 +35,47 @@ export function PromptAutoLoader() {
   })
 
   const promptId = searchParams.get('promptId')
+  // `?draft=<text>` — a free-text prompt prefill (Atrium "Create with the agent"
+  // deep-links here with the new artifact bound via `?workspace=`). Unlike
+  // `promptId`, a draft is PREFILLED only (never auto-sent) so the author reviews
+  // it before the agent builds. Composer-only: it never touches the conversation
+  // tree (docs/features/nexus-conversation-architecture.md invariants hold).
+  const draft = searchParams.get('draft')
+  const processedDraftRef = useRef(false)
+
+  useEffect(() => {
+    if (!draft) return
+    if (processedDraftRef.current) return
+
+    // The composer may not be mounted on this effect's first run. Poll briefly
+    // (bounded, ~5s) so the prefill is never silently lost — an early return with
+    // no dep change would otherwise strand the draft. Cleaned up on unmount.
+    let active = true
+    let attempts = 0
+    const fill = () => {
+      if (!active || processedDraftRef.current) return
+      const composerState = composer.getState()
+      if (!composerState) {
+        if (attempts++ < 50) setTimeout(fill, 100)
+        return
+      }
+      processedDraftRef.current = true
+
+      // Cap the prefill defensively (a URL param is user-controlled).
+      composer.setText(draft.slice(0, 4000))
+      log.info('Draft prompt prefilled in composer', { length: draft.length })
+
+      // Strip `draft` from the URL, preserving every other param (workspace/id/…).
+      const params = new URLSearchParams(searchParams.toString())
+      params.delete('draft')
+      const qs = params.toString()
+      router.replace(qs ? `/nexus?${qs}` : '/nexus')
+    }
+    fill()
+    return () => {
+      active = false
+    }
+  }, [draft, composer, router, searchParams])
 
   useEffect(() => {
     async function loadAndSendPrompt() {

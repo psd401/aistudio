@@ -16,7 +16,8 @@
  * RULE: violet = agent, always and only. Humans get green / terracotta / blue.
  */
 
-.atrium-meridian {
+.atrium-meridian,
+.mer-portal {
   /* ---- Surfaces ---- */
   --mer-canvas: #f6f7f5; /* app background */
   --mer-canvas-sunken: #edefec; /* editor desk behind the sheet */
@@ -67,13 +68,80 @@
   --mer-grad-cover: linear-gradient(115deg, #10322e 0%, #1d5a4b 45%, #6d4fc2 130%);
   --mer-grad-agent-callout: linear-gradient(135deg, #eaf1ee, #f0edfa);
 
+  /* ---- shadcn/Tailwind-v4 theme remap (scoped to Atrium) ----
+   * The shared shadcn primitives (Dialog / Select / Popover / DropdownMenu /
+   * Button / Input / Label) read the Tailwind-v4 `--color-*` theme tokens
+   * (`bg-background`, `bg-popover`, `border`, `text-foreground`, …). Remapping
+   * those tokens HERE — under the Atrium scope only — makes every shadcn surface
+   * rendered inside Atrium (including portaled content that carries `.mer-portal`)
+   * render Meridian instead of the global cream palette. Nothing leaks to
+   * /dashboard or /nexus (they are outside this scope). */
+  --color-background: var(--mer-surface);
+  --color-foreground: var(--mer-ink);
+  --color-card: var(--mer-surface);
+  --color-card-foreground: var(--mer-ink);
+  --color-popover: var(--mer-surface);
+  --color-popover-foreground: var(--mer-ink);
+  --color-primary: var(--mer-brand);
+  --color-primary-foreground: #ffffff;
+  --color-secondary: var(--mer-canvas-sunken);
+  --color-secondary-foreground: var(--mer-ink-secondary);
+  --color-muted: var(--mer-canvas-sunken);
+  --color-muted-foreground: var(--mer-ink-muted);
+  --color-accent: var(--mer-brand-tint);
+  --color-accent-foreground: var(--mer-brand);
+  --color-destructive: #b4552d;
+  --color-destructive-foreground: #ffffff;
+  --color-border: var(--mer-border);
+  --color-input: var(--mer-border);
+  --color-ring: var(--mer-brand-mid);
+
   font-family: var(--font-meridian), ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", sans-serif;
   color: var(--mer-ink);
-  background: var(--mer-canvas);
   letter-spacing: -0.01em;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* The app canvas background belongs to the full-page Atrium scope only — a
+ * portaled modal/menu must NOT paint the canvas behind its own white surface. */
+.atrium-meridian {
+  background: var(--mer-canvas);
+}
+
+/* ============================================================================
+ * PORTALED SURFACES (Meridian) — Radix Dialog / Select / Popover / DropdownMenu
+ * content portals to document.body, OUTSIDE the `.atrium-meridian` shell scope.
+ * Each Atrium portal carries `meridianPortalClassName` (`.mer-portal` + the
+ * Schibsted Grotesk font var), which the token block above turns Meridian. These
+ * rules add the real Meridian dialog surface (white, 16px radius, elevated
+ * shadow, centered max-width — NEVER the full-viewport width the base shadcn
+ * DialogContent renders because this repo's variant carries no max-width).
+ * ========================================================================== */
+.mer-portal[data-slot="dialog-content"] {
+  background: var(--mer-surface);
+  border: 1px solid var(--mer-border);
+  border-radius: 16px;
+  box-shadow: 0 2px 16px rgba(16, 50, 46, 0.07);
+  /* Cap the width — the base non-wide DialogContent is `w-full` with no
+   * max-width, so without this every Atrium modal stretches edge-to-edge. */
+  max-width: min(520px, calc(100vw - 32px));
+}
+/* Keep opt-in wide dialogs (data-wide-mode) at their own size. */
+.mer-portal[data-slot="dialog-content"][data-wide-mode="active"] {
+  max-width: 95vw;
+  border-radius: 16px;
+}
+/* Meridian dialog title/description type + close affordance. */
+.mer-portal[data-slot="dialog-content"] [data-slot="dialog-title"] {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--mer-ink);
+}
+.mer-portal[data-slot="dialog-content"] [data-slot="dialog-description"] {
+  color: var(--mer-ink-muted);
 }
 
 /* ============================================================================
@@ -639,6 +707,54 @@
   line-height: 1.4;
 }
 
+/* "Create with the agent" prompt dialog (README Interactions: creation is a
+ * single prompt field, not a form). Rendered inside a `.mer-portal` dialog. */
+.mer-prompt-field {
+  width: 100%;
+  min-height: 92px;
+  border: 1px solid var(--mer-border);
+  border-radius: var(--mer-r-button);
+  padding: 11px 13px;
+  font-size: 14px;
+  line-height: 1.55;
+  font-family: inherit;
+  color: var(--mer-ink);
+  background: var(--mer-surface);
+  resize: vertical;
+}
+.mer-prompt-field::placeholder {
+  color: var(--mer-ink-muted);
+}
+.mer-prompt-field:focus {
+  outline: none;
+  border-color: var(--mer-agent);
+  box-shadow: 0 0 0 3px rgba(109, 79, 194, 0.12);
+}
+.mer-prompt-examples {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mer-prompt-example {
+  text-align: left;
+  font-size: 12.5px;
+  padding: 8px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--mer-border-agent);
+  background: var(--mer-surface);
+  color: var(--mer-ink-secondary);
+  cursor: pointer;
+  transition: background 150ms ease-out, border-color 150ms ease-out;
+}
+.mer-prompt-example:hover:not(:disabled) {
+  background: var(--mer-agent-tint);
+  border-color: var(--mer-agent);
+}
+.mer-prompt-example:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* ============================================================================
  * EDITOR (slice C) — Meridian sheet on a soft desk, topbar, floating toolbar,
  * clean comment rail, real presence avatars.
@@ -785,6 +901,17 @@
   border-color: var(--mer-border-agent);
   color: var(--mer-agent);
 }
+/* Icon-only control chip (secondary actions: Settings, Open-beside-chat) — a
+ * compact square that keeps the topbar close to the mockup's light weight. */
+.mer-ectl-icon {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+  color: var(--mer-ink-muted);
+}
+.mer-ectl-icon:hover:not(:disabled) {
+  color: var(--mer-ink-secondary);
+}
 .mer-ectl-primary {
   background: var(--mer-brand);
   color: #fff;
@@ -882,6 +1009,29 @@
   line-height: 1.15;
   color: var(--mer-ink);
   margin: 0 0 10px;
+}
+/* Inline-editable title (editors): a subtle hover affordance + an "Untitled"
+ * placeholder when the field is emptied. */
+.mer-sheet-title-edit {
+  outline: none;
+  cursor: text;
+  border-radius: 7px;
+  margin-left: -6px;
+  margin-right: -6px;
+  padding: 0 6px;
+  transition: background 150ms ease-out, box-shadow 150ms ease-out;
+}
+.mer-sheet-title-edit:hover {
+  background: var(--mer-canvas-sunken);
+}
+.mer-sheet-title-edit:focus {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--mer-brand-tint);
+}
+.mer-sheet-title-edit:empty::before {
+  content: attr(data-placeholder);
+  color: var(--mer-ink-muted);
+  pointer-events: none;
 }
 .mer-sheet-byline {
   display: flex;
