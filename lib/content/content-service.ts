@@ -169,6 +169,24 @@ async function assertCollectionExists(collectionId: string): Promise<void> {
 }
 
 /**
+ * Slice-F presentation columns (cover gradient + emoji icon) as a TYPED
+ * `setValues` partial. Both use `?? null` so an explicit clear writes NULL (never
+ * `undefined`, which Drizzle would drop — the silent-failure pattern for clearable
+ * fields). Extracted from `update()` to keep that method's control flow flat; the
+ * values are already validated at the action boundary (`updateContentAction`).
+ */
+function presentationSetValues(
+  patch: UpdatePatch
+): Partial<typeof contentObjects.$inferInsert> {
+  const values: Partial<typeof contentObjects.$inferInsert> = {};
+  if (patch.coverGradient !== undefined) {
+    values.coverGradient = patch.coverGradient ?? null;
+  }
+  if (patch.icon !== undefined) values.icon = patch.icon ?? null;
+  return values;
+}
+
+/**
  * Load an object by id (UUID) or slug. Returns the DTO or null.
  *
  * A UUID-shaped input is tried as an id first; if no row matches it falls back to
@@ -624,6 +642,9 @@ export const contentService = {
       }
       setValues.status = patch.status;
     }
+    // Slice-F presentation fields (cover gradient + emoji icon), validated at the
+    // action boundary and merged as a typed partial (see presentationSetValues).
+    Object.assign(setValues, presentationSetValues(patch));
 
     const rows = await executeQuery(
       (db) =>

@@ -39,37 +39,41 @@
  *   is NEVER passed to `dangerouslySetInnerHTML` or served as text/html on the
  *   app origin — the public reader applies the same containment.
  *
- * ## Reader chrome (Epic #1059 completion)
+ * ## Reader chrome (Epic #1059 Meridian redesign, slice E)
+ * The body is wrapped in `<ReaderFrame>` (the Meridian published-page shell — screen
+ * 2c): a branded "{org} Intranet" top nav (with the viewer's avatar), a left "ON
+ * THIS PAGE" TOC built from the document's headings, and the reading sheet with a
+ * "Published … · <collection>" meta + "UP TO DATE" pill.
  * - An owner/editor-gated "Edit" link (the same `canEdit` predicate the authoring
- *   page's save controls use) renders in the header; non-editors see nothing.
- * - When the object belongs to a collection, the visibility-filtered
- *   `CollectionTree` mounts as a left sidebar (hidden on small screens); section
- *   clicks navigate to the library filtered to that section.
+ *   page's save controls use) renders in the sheet header; non-editors instead see
+ *   an explicit "👁 View only" notice.
  *
  * `dynamic = "force-dynamic"`: visibility depends on the caller's session, so the
  * page must never be statically cached or shared across principals.
  */
 
 import { notFound } from "next/navigation";
-import Link from "next/link";
 import { and, eq } from "drizzle-orm";
 import type { Metadata } from "next";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
+  contentCollections,
   contentObjects,
   contentPublications,
 } from "@/lib/db/schema";
-import { renderMarkdownToHtml } from "@/lib/content/render/markdown-render";
 import { s3Store } from "@/lib/content/storage/s3-store";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { versionService } from "@/lib/content/version-service";
+import { resolveDocumentParts } from "@/lib/content/embed-resolver";
+import { extractDocumentHeadings } from "@/lib/content/render/headings";
 import { canEdit } from "@/lib/content/helpers";
 import { getOptionalRequester } from "@/actions/db/atrium/requester";
 import { countUnresolvedCommentThreadsAction } from "@/actions/db/atrium/comments";
 import { createLogger } from "@/lib/logger";
 import { ProvenanceFooter } from "@/components/atrium/ProvenanceFooter";
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
-import { ReaderCollectionSidebar } from "@/components/atrium/ReaderCollectionSidebar";
+import { ReaderDocumentBody } from "@/components/atrium/ReaderDocumentBody";
+import { ReaderFrame } from "@/components/atrium/reader/ReaderFrame";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import "@/styles/atrium-content.css";
 import "katex/dist/katex.min.css";
@@ -97,8 +101,14 @@ async function loadPublishedObject(slug: string): Promise<{
   ownerUserId: number;
   visibilityLevel: "private" | "group" | "internal" | "public";
   title: string;
-  collectionId: string | null;
+  /** The object's collection name (via left join), for the reader meta line. */
+  collectionName: string | null;
+  /** Cover-gradient preset key + emoji icon (slice F) for the reader cover band. */
+  coverGradient: string | null;
+  icon: string | null;
   publishedVersionId: string;
+  /** When the live intranet publication went live, for the "Published …" meta. */
+  publishedAt: Date | null;
 } | null> {
   const [obj] = await executeQuery(
     (db) =>
@@ -109,9 +119,19 @@ async function loadPublishedObject(slug: string): Promise<{
           ownerUserId: contentObjects.ownerUserId,
           visibilityLevel: contentObjects.visibilityLevel,
           title: contentObjects.title,
-          collectionId: contentObjects.collectionId,
+          // Left join → collection name (or null when the object is uncollected),
+          // surfaced in the reader's "Published … · <collection>" meta. No extra
+          // query: it rides on the existing slug lookup.
+          collectionName: contentCollections.name,
+          // Slice F cover band + emoji icon (migration 103).
+          coverGradient: contentObjects.coverGradient,
+          icon: contentObjects.icon,
         })
         .from(contentObjects)
+        .leftJoin(
+          contentCollections,
+          eq(contentCollections.id, contentObjects.collectionId)
+        )
         .where(eq(contentObjects.slug, slug))
         .limit(1),
     "atrium.reader.objectBySlug"
@@ -123,6 +143,7 @@ async function loadPublishedObject(slug: string): Promise<{
       db
         .select({
           publishedVersionId: contentPublications.publishedVersionId,
+          publishedAt: contentPublications.publishedAt,
         })
         .from(contentPublications)
         .where(
@@ -137,7 +158,12 @@ async function loadPublishedObject(slug: string): Promise<{
   );
   if (!publication) return null;
 
-  return { ...obj, publishedVersionId: publication.publishedVersionId };
+  return {
+    ...obj,
+    collectionName: obj.collectionName ?? null,
+    publishedVersionId: publication.publishedVersionId,
+    publishedAt: publication.publishedAt ?? null,
+  };
 }
 
 /**
@@ -151,70 +177,6 @@ export async function generateMetadata(_props: ReaderPageProps): Promise<Metadat
   // exposed here because canView hasn't run yet, and the title would leak via tab
   // bar, browser history, and link previews to any authenticated user.
   return { title: "Atrium Document" };
-}
-
-/**
- * Shared reader chrome (Epic #1059 completion): the optional collection-tree
- * sidebar (mounted only when the object belongs to a section; hidden on small
- * screens) around the kind-specific `<main>`, and the header row with the
- * owner/editor-gated Edit link. Server-rendered — `showEdit` was computed with
- * the same `canEdit` predicate the authoring page uses for its Save controls,
- * so a viewer who could not edit sees nothing (the edit page re-checks anyway).
- */
-function ReaderShell({
-  title,
-  editHref,
-  commentCount,
-  collectionId,
-  mainClassName,
-  children,
-}: {
-  title: string;
-  /** The `/atrium/[id]/edit` link, or null when the viewer may not edit. */
-  editHref: string | null;
-  /** Unresolved root-comment threads; the editors-only chip is hidden when 0. */
-  commentCount: number;
-  collectionId: string | null;
-  mainClassName: string;
-  children: React.ReactNode;
-}): React.JSX.Element {
-  return (
-    <div className="mx-auto flex w-full max-w-6xl gap-6 px-4 py-8">
-      {collectionId && (
-        <aside className="hidden w-60 shrink-0 border-r pr-4 md:block">
-          <ReaderCollectionSidebar collectionId={collectionId} />
-        </aside>
-      )}
-      <main className={mainClassName}>
-        <header className="mb-6 flex items-start justify-between gap-3">
-          <h1 className="text-3xl font-semibold">{title}</h1>
-          {editHref && (
-            <div className="flex shrink-0 items-center gap-2">
-              {/* Editors-only comment chip (editHref is null for non-editors, so
-                  this whole block never renders for them) linking to the editor. */}
-              {commentCount > 0 && (
-                <Link
-                  href={editHref}
-                  className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted"
-                  data-testid="reader-comment-chip"
-                >
-                  {commentCount} comment{commentCount === 1 ? "" : "s"}
-                </Link>
-              )}
-              <Link
-                href={editHref}
-                className="rounded-md border px-3 py-1.5 text-sm hover:bg-muted"
-                data-testid="reader-edit-link"
-              >
-                Edit
-              </Link>
-            </div>
-          )}
-        </header>
-        {children}
-      </main>
-    </div>
-  );
 }
 
 /**
@@ -310,16 +272,25 @@ export default async function ReaderPage({
       });
     }
     return (
-      <ReaderShell
+      <ReaderFrame
         title={published.title}
+        authenticated
         editHref={editHref}
+        commentHref={editHref}
         commentCount={commentCount}
-        collectionId={published.collectionId}
-        mainClassName="min-w-0 max-w-4xl flex-1"
+        publishedAt={published.publishedAt}
+        collectionName={published.collectionName}
+        // Artifact readers skip the TOC (no document headings to walk).
+        headings={[]}
+        footer={
+          <ProvenanceFooter
+            objectId={published.id}
+            publishedVersionNumber={version.versionNumber}
+          />
+        }
       >
         <ArtifactSandbox code={code} src={getArtifactSandboxRenderUrl()} className="atrium-artifact-preview" />
-        <ProvenanceFooter objectId={published.id} publishedVersionNumber={version.versionNumber} />
-      </ReaderShell>
+      </ReaderFrame>
     );
   }
 
@@ -343,24 +314,42 @@ export default async function ReaderPage({
     });
   }
 
-  // renderMarkdownToHtml returns SANITIZED HTML (see module header) — safe for
-  // dangerouslySetInnerHTML; it is the only sink for the document body.
-  const html = renderMarkdownToHtml(markdown);
+  // Render the body as ordered parts: sanitized-HTML runs (the same
+  // renderMarkdownToHtml sink) interleaved with live embedded-artifact blocks. Each
+  // embed is resolved on the ARTIFACT's own visibility for THIS viewer (internal
+  // audience → canView) — a non-viewable embed renders a quiet placeholder, never
+  // its content.
+  const parts = await resolveDocumentParts(markdown, {
+    audience: "internal",
+    requester,
+  });
+
+  // "ON THIS PAGE" TOC — built server-side from the document's own headings, with
+  // ids matching the rendered `<h1..h3>` (rehype-slug). Empty when the body is
+  // empty (e.g. S3 unavailable) → the TOC simply doesn't render.
+  const headings = extractDocumentHeadings(markdown);
 
   return (
-    <ReaderShell
+    <ReaderFrame
       title={published.title}
+      authenticated
       editHref={editHref}
+      commentHref={editHref}
       commentCount={commentCount}
-      collectionId={published.collectionId}
-      mainClassName="min-w-0 max-w-3xl flex-1"
+      publishedAt={published.publishedAt}
+      collectionName={published.collectionName}
+      headings={headings}
+      coverGradient={published.coverGradient}
+      icon={published.icon}
+      footer={
+        <ProvenanceFooter
+          objectId={published.id}
+          publishedVersionNumber={version.versionNumber}
+        />
+      }
     >
       {/* `.atrium-content` is the single rendered-body sink (and the test anchor). */}
-      <article
-        className="atrium-content"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-      <ProvenanceFooter objectId={published.id} publishedVersionNumber={version.versionNumber} />
-    </ReaderShell>
+      <ReaderDocumentBody parts={parts} />
+    </ReaderFrame>
   );
 }

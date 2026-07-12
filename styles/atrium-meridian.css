@@ -580,6 +580,30 @@
   color: rgba(255, 255, 255, 0.85);
 }
 
+/* Live artifact thumbnail (slice F): the ArtifactSandbox iframe rendered at a
+ * larger logical size and scaled down to fill the 120px preview band, clipped by
+ * the band's overflow:hidden. pointer-events:none keeps the card a single link
+ * target. The scale wrapper is 360% wide × scaled 0.2778 ≈ card width. */
+.mer-artifact-thumb-scale {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 360%;
+  transform: scale(0.2778);
+  transform-origin: top left;
+  pointer-events: none;
+}
+.mer-artifact-thumb-frame {
+  height: 432px;
+  border: 0;
+  background: #fff;
+}
+/* Doc-card emoji icon (slice F) sized to fill the 34px icon chip. */
+.mer-icon-emoji {
+  font-size: 18px;
+  line-height: 1;
+}
+
 /* Dashed "Create with the agent" card */
 .mer-create-card {
   display: flex;
@@ -613,4 +637,1414 @@
   font-size: 12.5px;
   color: var(--mer-ink-muted);
   line-height: 1.4;
+}
+
+/* ============================================================================
+ * EDITOR (slice C) — Meridian sheet on a soft desk, topbar, floating toolbar,
+ * clean comment rail, real presence avatars.
+ * ========================================================================== */
+
+/* ---- Topbar (white, spans the fluid main region) ---- */
+.mer-editor-topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 24px;
+  background: var(--mer-surface);
+  border-bottom: 1px solid var(--mer-border);
+  min-height: 56px;
+}
+.mer-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.mer-breadcrumb-crumb {
+  font-size: 12.5px;
+  color: var(--mer-ink-muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.mer-breadcrumb-crumb:hover {
+  color: var(--mer-ink-secondary);
+}
+.mer-breadcrumb-sep {
+  color: var(--mer-ink-muted);
+  font-size: 12.5px;
+}
+.mer-breadcrumb-crumb-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.mer-breadcrumb-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--mer-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40ch;
+}
+.mer-editor-topbar-spacer {
+  flex: 1 1 auto;
+}
+.mer-editor-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.mer-ectl-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.mer-ectl-select-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* "✦ AGENT WRITING" live pill (violet = agent). Only rendered while an agent
+ * edit has landed recently — the dot pulses to signal live activity. */
+.mer-pill-agent-writing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--mer-agent);
+  background: var(--mer-agent-tint);
+  padding: 3px 9px;
+  border-radius: var(--mer-r-pill);
+  white-space: nowrap;
+}
+.mer-pill-agent-writing .mer-pill-spark {
+  animation: mer-pulse 1.6s infinite;
+  border-radius: 999px;
+}
+
+/* ---- Presence avatar stack (topbar) ---- */
+.mer-presence {
+  display: flex;
+  align-items: center;
+}
+.mer-presence-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--mer-surface);
+  flex-shrink: 0;
+}
+.mer-presence-avatar + .mer-presence-avatar {
+  margin-left: -8px;
+}
+.mer-presence-avatar[data-kind="agent"] {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ---- Editor control buttons (Suggesting / History / Publish split) ---- */
+.mer-ectl {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 13px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  border: 1px solid var(--mer-border);
+  background: var(--mer-surface);
+  color: var(--mer-ink-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 150ms ease-out, border-color 150ms ease-out,
+    color 150ms ease-out;
+}
+.mer-ectl:hover:not(:disabled) {
+  background: var(--mer-brand-tint);
+}
+.mer-ectl:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.mer-ectl[data-active="true"] {
+  background: var(--mer-agent-tint);
+  border-color: var(--mer-border-agent);
+  color: var(--mer-agent);
+}
+.mer-ectl-primary {
+  background: var(--mer-brand);
+  color: #fff;
+  border-color: var(--mer-brand);
+  padding: 0 16px;
+}
+.mer-ectl-primary:hover:not(:disabled) {
+  background: #0b2622;
+}
+.mer-ectl-danger:hover:not(:disabled) {
+  color: #b4552d;
+  border-color: #b4552d;
+  background: transparent;
+}
+.mer-ectl-select {
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--mer-border);
+  background: var(--mer-surface);
+  color: var(--mer-ink-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+/* Legend dots (You / Agent) shown next to the controls */
+.mer-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--mer-ink-muted);
+}
+.mer-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.mer-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+.mer-legend-warn {
+  color: #b4552d;
+  font-weight: 600;
+}
+
+/* ---- Desk + sheet ---- */
+.mer-editor-desk {
+  display: flex;
+  gap: 24px;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 32px 24px 56px;
+  background: var(--mer-canvas-sunken);
+  min-height: calc(100vh - 56px);
+}
+@media (max-width: 1040px) {
+  .mer-editor-desk {
+    flex-wrap: wrap;
+  }
+}
+.mer-sheet-wrap {
+  position: relative;
+  width: 700px;
+  max-width: 100%;
+  flex-shrink: 1;
+}
+.mer-sheet {
+  background: var(--mer-surface);
+  border-radius: 14px;
+  box-shadow: var(--mer-shadow-sheet);
+  padding: 48px 60px;
+  position: relative;
+}
+@media (max-width: 720px) {
+  .mer-sheet {
+    padding: 32px 26px;
+  }
+}
+.mer-sheet-eyebrow {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--mer-agent);
+  margin-bottom: 12px;
+}
+.mer-sheet-title {
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+  color: var(--mer-ink);
+  margin: 0 0 10px;
+}
+.mer-sheet-byline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--mer-ink-muted);
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--mer-canvas-sunken);
+  margin-bottom: 24px;
+}
+.mer-sheet-byline .mer-agent-mark {
+  font-weight: 600;
+}
+
+/* ---- Cover band + emoji doc icon (Meridian slice F, README §"2b") ------------
+ * Shared by the editor sheet and both reader sheets. The band is a CSS GRADIENT
+ * (no raster) selected by a preset key (`lib/atrium/cover.ts` → `.mer-cover--<key>`)
+ * with two soft radial glows; the 56px emoji tile overlaps its bottom by −28px. The
+ * band bleeds to the sheet edges via negative margins matching each sheet's padding
+ * and clips its own rounded top corners (so the sheet needs no overflow:hidden that
+ * would clip the floating toolbar). */
+.mer-cover {
+  position: relative;
+  height: 170px;
+  overflow: hidden;
+  border-radius: 14px 14px 0 0;
+  background: var(--mer-grad-cover);
+}
+.mer-cover::before,
+.mer-cover::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.mer-cover::before {
+  left: 34px;
+  bottom: -26px;
+  width: 180px;
+  height: 180px;
+  background: radial-gradient(circle, rgba(233, 242, 239, 0.16), transparent 66%);
+}
+.mer-cover::after {
+  right: 60px;
+  top: -40px;
+  width: 150px;
+  height: 150px;
+  background: radial-gradient(circle, rgba(157, 123, 244, 0.3), transparent 66%);
+}
+/* Preset gradients (keys in lib/atrium/cover.ts). `default` is the handoff cover. */
+.mer-cover--default { background: var(--mer-grad-cover); }
+.mer-cover--sunrise { background: linear-gradient(115deg, #b4552d 0%, #c07a1e 48%, #6d4fc2 130%); }
+.mer-cover--forest { background: linear-gradient(115deg, #10322e 0%, #2c7a6b 55%, #3e7c4f 120%); }
+.mer-cover--violet { background: linear-gradient(115deg, #3b2a6b 0%, #6d4fc2 55%, #8d74dc 120%); }
+.mer-cover--dusk { background: linear-gradient(115deg, #191d1c 0%, #454d49 45%, #6d4fc2 130%); }
+
+/* "Change cover · 🖼" glass pill (editor only). */
+.mer-cover-change {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  padding: 4px 11px;
+  border-radius: var(--mer-r-pill);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+}
+.mer-cover-change:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+/* 56px emoji tile overlapping the cover bottom edge. */
+.mer-cover-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(16, 50, 46, 0.14);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  line-height: 1;
+  margin: -28px 0 0;
+  position: relative;
+  z-index: 2;
+}
+
+/* Editor sheet: bleed the cover to the sheet edges (cancel the 48px/60px padding). */
+.mer-sheet .mer-cover {
+  margin: -48px -60px 0;
+}
+@media (max-width: 720px) {
+  .mer-sheet .mer-cover {
+    margin: -32px -26px 0;
+  }
+}
+
+/* Cover-gradient picker popover (Change-cover pill → swatches + emoji field). */
+.mer-cover-picker {
+  position: absolute;
+  right: 14px;
+  top: 46px;
+  z-index: 5;
+  width: 232px;
+  background: var(--mer-surface);
+  border: 1px solid var(--mer-border);
+  border-radius: 12px;
+  box-shadow: var(--mer-shadow-toolbar);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mer-cover-picker-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mer-ink-muted);
+}
+.mer-cover-swatches {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mer-cover-swatch {
+  width: 40px;
+  height: 26px;
+  border-radius: 7px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.mer-cover-swatch[data-selected="true"] {
+  border-color: var(--mer-ink);
+}
+.mer-cover-emoji-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mer-cover-emoji-input {
+  width: 100%;
+  height: 32px;
+  border: 1px solid var(--mer-border);
+  border-radius: 8px;
+  padding: 0 10px;
+  font-size: 15px;
+  background: var(--mer-surface);
+  color: var(--mer-ink);
+}
+.mer-cover-picker-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mer-cover-picker-remove {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--mer-ink-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.mer-cover-picker-remove:hover {
+  color: var(--mer-ink-secondary);
+}
+
+/* "Add cover" affordance shown above the title when a doc has no cover yet. */
+.mer-cover-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mer-ink-muted);
+  background: var(--mer-canvas);
+  border: 1px solid var(--mer-border);
+  border-radius: var(--mer-r-button);
+  cursor: pointer;
+}
+.mer-cover-add:hover {
+  color: var(--mer-ink-secondary);
+  background: var(--mer-brand-tint);
+}
+
+/* Sheet body typography — scoped to the Meridian editor only (readers keep the
+ * base .atrium-content type until slice E wraps them in .atrium-meridian). */
+.atrium-meridian .mer-sheet .atrium-content {
+  font-size: 15.5px;
+  line-height: 1.75;
+  color: #2b302e;
+}
+.atrium-meridian .mer-sheet .atrium-content .ProseMirror {
+  min-height: 320px;
+}
+.atrium-meridian .mer-sheet .atrium-content .ProseMirror:focus {
+  outline: none;
+}
+
+/* Editor tables (ProseMirror) — the TableKit nodes need visible cell borders,
+ * a selected-cell wash, and a column-resize handle. */
+.atrium-meridian .mer-sheet .atrium-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+  table-layout: fixed;
+  overflow: hidden;
+}
+.atrium-meridian .mer-sheet .atrium-content td,
+.atrium-meridian .mer-sheet .atrium-content th {
+  border: 1px solid var(--mer-border);
+  padding: 6px 10px;
+  vertical-align: top;
+  position: relative;
+}
+.atrium-meridian .mer-sheet .atrium-content th {
+  background: var(--mer-canvas);
+  font-weight: 600;
+  text-align: left;
+}
+.atrium-meridian .mer-sheet .atrium-content .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--mer-brand-tint);
+  opacity: 0.55;
+  pointer-events: none;
+}
+.atrium-meridian .mer-sheet .atrium-content .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--mer-brand-mid);
+  pointer-events: none;
+}
+
+/* ---- Margin avatars (hang half outside the sheet's left edge) ---- */
+.mer-margin-avatar {
+  position: absolute;
+  left: -13px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--mer-canvas-sunken);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  transition: top 150ms ease-out;
+  z-index: 3;
+  pointer-events: none;
+}
+.mer-margin-avatar[data-kind="agent"] {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ---- Inline remote carets (yCursorPlugin widget) ---- */
+.mer-caret {
+  position: relative;
+  margin-left: -1px;
+  margin-right: -1px;
+  border-left: 2px solid var(--mer-caret-color, var(--mer-agent));
+  border-right: none;
+  word-break: normal;
+  pointer-events: none;
+}
+.mer-caret-label {
+  position: absolute;
+  top: -1.4em;
+  left: -2px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: #fff;
+  padding: 1px 6px;
+  border-radius: 6px 6px 6px 0;
+  white-space: nowrap;
+  user-select: none;
+  opacity: 0.9;
+}
+
+/* ---- Floating dark selection toolbar (TipTap BubbleMenu) ---- */
+.mer-bubble {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--mer-ink);
+  color: var(--mer-canvas);
+  border-radius: 10px;
+  box-shadow: var(--mer-shadow-toolbar);
+  padding: 5px;
+  font-size: 12.5px;
+}
+.mer-bubble-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 28px;
+  padding: 0 9px;
+  border: none;
+  background: transparent;
+  color: var(--mer-canvas);
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1;
+  transition: background 130ms ease-out;
+}
+.mer-bubble-btn:hover {
+  background: rgba(246, 247, 245, 0.14);
+}
+.mer-bubble-btn[data-active="true"] {
+  background: rgba(246, 247, 245, 0.22);
+}
+.mer-bubble-btn-b {
+  font-weight: 700;
+}
+.mer-bubble-btn-i {
+  font-style: italic;
+}
+.mer-bubble-btn-u {
+  text-decoration: underline;
+}
+.mer-bubble-btn-s {
+  text-decoration: line-through;
+}
+.mer-bubble-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 3px;
+  background: rgba(246, 247, 245, 0.18);
+}
+.mer-bubble-text {
+  font-weight: 600;
+  padding: 0 11px;
+  gap: 4px;
+}
+.mer-bubble-swatch {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border-radius: 4px;
+  background: conic-gradient(
+    #e85d4a,
+    #e8b45a,
+    #3e7c4f,
+    #4a7ce8,
+    #6d4fc2,
+    #e85d4a
+  );
+}
+.mer-bubble-ask {
+  background: var(--mer-agent);
+  color: #fff;
+  font-weight: 600;
+  border-radius: 0 7px 7px 0;
+  padding: 0 12px;
+  height: 28px;
+  margin-left: 2px;
+}
+.mer-bubble-ask:hover {
+  background: #5b3fa8;
+}
+
+/* Text-style dropdown + color palette popovers anchored under the bubble */
+.mer-bubble-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  background: var(--mer-ink);
+  border-radius: 8px;
+  box-shadow: var(--mer-shadow-toolbar);
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 5;
+}
+.mer-bubble-pop-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--mer-canvas);
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+}
+.mer-bubble-pop-item:hover {
+  background: rgba(246, 247, 245, 0.14);
+}
+.mer-bubble-pop-item[data-active="true"] {
+  background: rgba(246, 247, 245, 0.22);
+}
+
+/* Embed-artifact picker popover (scrollable list of the viewer's artifacts) */
+.mer-bubble-embed-pop {
+  min-width: 210px;
+  max-width: 300px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.mer-bubble-embed-pop .mer-bubble-pop-item {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mer-bubble-pop-empty {
+  padding: 7px 12px;
+  font-size: 12.5px;
+  color: rgba(246, 247, 245, 0.6);
+  white-space: nowrap;
+}
+
+/* Media picker popover (image / grid / video by URL) — dark like the toolbar. */
+.mer-bubble-media-pop {
+  min-width: 236px;
+  padding: 8px;
+  gap: 8px;
+}
+.mer-bubble-media-tabs {
+  display: inline-flex;
+  gap: 2px;
+  background: rgba(246, 247, 245, 0.1);
+  border-radius: 7px;
+  padding: 2px;
+}
+.mer-bubble-media-tab {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(246, 247, 245, 0.7);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.mer-bubble-media-tab[data-active="true"] {
+  color: var(--mer-ink);
+  background: var(--mer-canvas);
+}
+.mer-bubble-media-input {
+  width: 100%;
+  font-size: 12.5px;
+  color: var(--mer-ink);
+  background: var(--mer-canvas);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 7px 9px;
+  resize: vertical;
+  font-family: inherit;
+}
+.mer-bubble-media-input:focus {
+  outline: none;
+  border-color: var(--mer-agent-light);
+}
+.mer-bubble-media-error {
+  font-size: 11.5px;
+  color: #f3a68f;
+}
+.mer-bubble-media-insert {
+  padding: 7px 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--mer-agent);
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.mer-bubble-media-insert:hover {
+  background: var(--mer-agent-light);
+}
+.mer-bubble-colors {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  background: var(--mer-ink);
+  border-radius: 8px;
+  box-shadow: var(--mer-shadow-toolbar);
+  padding: 7px;
+  display: grid;
+  grid-template-columns: repeat(4, 22px);
+  gap: 6px;
+  z-index: 5;
+}
+.mer-color-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid rgba(246, 247, 245, 0.25);
+  cursor: pointer;
+  padding: 0;
+}
+.mer-color-dot[data-clear="true"] {
+  background: transparent;
+  color: var(--mer-canvas);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---- Comment rail (Meridian) ---- */
+.mer-comments {
+  width: 296px;
+  flex: 0 0 296px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+@media (max-width: 1040px) {
+  .mer-comments {
+    width: 100%;
+    flex-basis: 100%;
+  }
+}
+.mer-comments-head {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mer-ink-muted);
+  padding: 4px 2px;
+}
+.mer-comment-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mer-comment-card {
+  background: var(--mer-surface);
+  border: 1px solid var(--mer-border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: var(--mer-shadow-card);
+}
+.mer-comment-card[data-resolved="true"] {
+  border-style: dashed;
+  opacity: 0.7;
+}
+.mer-comment-card-agent {
+  border-color: var(--mer-border-agent);
+  box-shadow: 0 1px 3px rgba(109, 79, 194, 0.08);
+}
+.mer-comment-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.mer-comment-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 8.5px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.mer-comment-avatar[data-kind="agent"] {
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--mer-agent);
+}
+.mer-comment-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mer-ink);
+}
+.mer-comment-time {
+  font-size: 10.5px;
+  color: var(--mer-ink-muted);
+  margin-left: auto;
+}
+.mer-comment-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #2b302e;
+  white-space: pre-wrap;
+}
+.mer-comment-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  align-items: center;
+}
+.mer-comment-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 11px;
+  border-radius: 7px;
+  border: none;
+  cursor: pointer;
+  background: var(--mer-canvas-sunken);
+  color: var(--mer-ink);
+}
+.mer-comment-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.mer-comment-chip-ghost {
+  background: transparent;
+  color: var(--mer-ink-muted);
+}
+.mer-comment-chip-agent {
+  background: var(--mer-agent-tint);
+  color: var(--mer-agent);
+}
+.mer-comments-empty {
+  border: 1.5px dashed #c9cfcb;
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--mer-ink-muted);
+}
+.mer-comment-reply {
+  width: 100%;
+  border: 1px solid var(--mer-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--mer-ink);
+  resize: vertical;
+  background: var(--mer-surface);
+}
+.mer-comment-reply:focus {
+  outline: none;
+  border-color: var(--mer-brand-mid);
+}
+.mer-comment-jump {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--mer-brand);
+  background: none;
+  border: none;
+  padding: 0 0 6px;
+  cursor: pointer;
+  text-align: left;
+}
+.mer-comment-jump:hover {
+  text-decoration: underline;
+}
+
+/* Status / feedback caption below the desk */
+.mer-editor-status {
+  font-size: 12px;
+  padding: 6px 24px;
+  color: var(--mer-ink-muted);
+}
+.mer-editor-status[data-tone="error"] {
+  color: #b4552d;
+}
+.mer-editor-status[data-tone="pending"] {
+  color: #b4552d;
+}
+
+/* ============================================================================
+ * ARTIFACT VIEWER (slice D) — topbar (reuses .mer-editor-topbar / .mer-breadcrumb
+ * / .mer-badge-live from above) + canvas column + 300px metadata rail.
+ * ========================================================================== */
+.mer-artifact {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--mer-canvas);
+}
+.mer-artifact-body {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  padding: 28px 24px 56px;
+}
+@media (max-width: 1040px) {
+  .mer-artifact-body {
+    flex-wrap: wrap;
+  }
+}
+.mer-artifact-canvas-col {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--mer-surface);
+  border: 1px solid var(--mer-border);
+  border-radius: var(--mer-r-card);
+  box-shadow: var(--mer-shadow-card);
+  padding: 16px 18px;
+}
+
+/* ---- Metadata rail (manage-rights only) ---- */
+.mer-artifact-rail {
+  width: 300px;
+  flex: 0 0 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+@media (max-width: 1040px) {
+  .mer-artifact-rail {
+    width: 100%;
+    flex-basis: 100%;
+  }
+}
+.mer-artifact-rail-card {
+  background: var(--mer-surface);
+  border: 1px solid var(--mer-border);
+  border-radius: var(--mer-r-card);
+  box-shadow: var(--mer-shadow-card);
+  padding: 15px 16px;
+}
+.mer-artifact-rail-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mer-ink-muted);
+  margin-bottom: 10px;
+}
+.mer-artifact-about-lead {
+  font-size: 12.5px;
+  color: var(--mer-ink-secondary);
+  margin: 0 0 12px;
+}
+.mer-artifact-about-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 0;
+  border-top: 1px solid var(--mer-border);
+  font-size: 12.5px;
+}
+.mer-artifact-about-key {
+  color: var(--mer-ink-muted);
+}
+.mer-artifact-about-val {
+  color: var(--mer-ink);
+  font-weight: 600;
+  text-align: right;
+}
+.mer-artifact-rail-empty {
+  font-size: 12.5px;
+  color: var(--mer-ink-muted);
+  margin: 0;
+}
+.mer-artifact-backlinks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mer-artifact-backlink {
+  display: block;
+  font-size: 13px;
+  color: var(--mer-brand);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mer-artifact-backlink:hover {
+  text-decoration: underline;
+}
+
+/* ---- Ask-the-agent card (gradient tint, agent violet) ---- */
+.mer-artifact-ask {
+  background: var(--mer-grad-agent-callout);
+  border-color: var(--mer-border-agent);
+}
+.mer-artifact-ask-hint {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--mer-ink-secondary);
+  margin: 0 0 12px;
+}
+.mer-artifact-ask-examples {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.mer-artifact-ask-chip {
+  text-align: left;
+  font-size: 12px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--mer-border-agent);
+  background: var(--mer-surface);
+  color: var(--mer-ink-secondary);
+  cursor: pointer;
+  transition: background 150ms ease-out, border-color 150ms ease-out;
+}
+.mer-artifact-ask-chip:hover {
+  background: var(--mer-agent-tint);
+  border-color: var(--mer-agent);
+}
+.mer-artifact-ask-form {
+  display: flex;
+  gap: 6px;
+}
+.mer-artifact-ask-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 36px;
+  border-radius: var(--mer-r-button);
+  border: 1px solid var(--mer-border);
+  background: var(--mer-surface);
+  color: var(--mer-ink);
+  font-size: 13px;
+  padding: 0 10px;
+}
+.mer-artifact-ask-input:focus {
+  outline: none;
+  border-color: var(--mer-agent);
+  box-shadow: 0 0 0 3px rgba(109, 79, 194, 0.12);
+}
+
+/* ============================================================================
+ * READER (slice E) — the published intranet page (screen 2c). A branded
+ * "{org} Intranet" top nav, a left "ON THIS PAGE" TOC rail + "View only" notice,
+ * and the reading sheet with a title + "Published … · UP TO DATE" meta. Both the
+ * internal (/c/[slug]) and public (/p/[slug]) readers wrap their content in
+ * `.atrium-meridian` so these tokens + Schibsted Grotesk resolve; the public
+ * reader renders the SAME nav WITHOUT the session-dependent avatar.
+ * ========================================================================== */
+.mer-reader {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--mer-canvas);
+}
+
+/* ---- Branded intranet top nav ---- */
+.mer-reader-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 24px;
+  background: var(--mer-surface);
+  border-bottom: 1px solid var(--mer-border);
+}
+.mer-reader-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  text-decoration: none;
+  color: var(--mer-ink);
+}
+.mer-reader-brand-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--mer-brand);
+  color: var(--mer-brand-tint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 12px;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.mer-reader-brand-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.mer-reader-brand-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.mer-reader-nav-spacer {
+  flex: 1 1 auto;
+}
+.mer-reader-nav-links {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+@media (max-width: 720px) {
+  .mer-reader-nav-links {
+    display: none;
+  }
+}
+.mer-reader-nav-link {
+  font-size: 12.5px;
+  color: var(--mer-ink-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.mer-reader-nav-link:hover {
+  color: var(--mer-ink);
+}
+.mer-reader-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--mer-canvas);
+  border: 1px solid var(--mer-border);
+  border-radius: 8px;
+  padding: 7px 12px;
+  color: var(--mer-ink-muted);
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.mer-reader-search:hover {
+  border-color: var(--mer-ink-muted);
+}
+@media (max-width: 560px) {
+  .mer-reader-search-label {
+    display: none;
+  }
+}
+.mer-reader-search-kbd {
+  font-size: 10px;
+  border: 1px solid var(--mer-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.mer-reader-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--mer-human-other-2);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* ---- Body layout: centered TOC rail + reading sheet ---- */
+.mer-reader-body {
+  display: flex;
+  justify-content: center;
+  gap: 40px;
+  padding: 40px 24px 64px;
+}
+@media (max-width: 900px) {
+  .mer-reader-body {
+    gap: 24px;
+  }
+}
+
+/* ---- Left rail: "ON THIS PAGE" TOC + view-only notice ---- */
+.mer-reader-rail {
+  width: 210px;
+  flex: none;
+  padding-top: 8px;
+  position: sticky;
+  top: 84px;
+  align-self: flex-start;
+}
+@media (max-width: 900px) {
+  .mer-reader-rail {
+    display: none;
+  }
+}
+.mer-reader-toc-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mer-ink-muted);
+  margin-bottom: 12px;
+}
+.mer-reader-toc {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+  border-left: 2px solid var(--mer-border);
+}
+.mer-reader-toc-link {
+  padding: 6px 0 6px 14px;
+  border-left: 2px solid transparent;
+  margin-left: -2px;
+  color: var(--mer-ink-muted);
+  text-decoration: none;
+  line-height: 1.35;
+  transition: color 150ms ease-out, border-color 150ms ease-out;
+}
+.mer-reader-toc-link[data-depth="3"] {
+  padding-left: 26px;
+}
+.mer-reader-toc-link:hover {
+  color: var(--mer-ink-secondary);
+}
+.mer-reader-toc-link[data-active="true"] {
+  border-left-color: var(--mer-brand);
+  font-weight: 600;
+  color: var(--mer-brand);
+}
+.mer-reader-viewonly {
+  margin-top: 24px;
+  background: var(--mer-surface);
+  border: 1px solid var(--mer-border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 11.5px;
+  color: var(--mer-ink-muted);
+  line-height: 1.55;
+}
+.mer-reader-viewonly-strong {
+  font-weight: 600;
+  color: var(--mer-ink-secondary);
+}
+
+/* ---- Reading sheet ---- */
+.mer-reader-sheet-wrap {
+  width: 720px;
+  max-width: 100%;
+  min-width: 0;
+}
+.mer-reader-sheet {
+  background: var(--mer-surface);
+  border: 1px solid var(--mer-border);
+  border-radius: 16px;
+  box-shadow: 0 2px 16px rgba(16, 50, 46, 0.07);
+  padding: 44px 56px 48px;
+}
+@media (max-width: 720px) {
+  .mer-reader-sheet {
+    padding: 30px 24px 36px;
+  }
+}
+/* Reader cover band (slice F): a slightly shorter 150px band + 52px tile, bled to
+ * the reader sheet's 16px corners. No "Change cover" pill — the reader is read-only. */
+.mer-reader-sheet .mer-cover {
+  margin: -44px -56px 0;
+  height: 150px;
+  border-radius: 16px 16px 0 0;
+}
+@media (max-width: 720px) {
+  .mer-reader-sheet .mer-cover {
+    margin: -30px -24px 0;
+  }
+}
+.mer-reader-sheet .mer-cover-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 13px;
+  font-size: 24px;
+  margin-top: -26px;
+}
+.mer-reader-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.mer-reader-title {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+  color: var(--mer-ink);
+  margin: 0 0 10px;
+}
+.mer-reader-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--mer-ink-muted);
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--mer-canvas-sunken);
+  margin-bottom: 24px;
+}
+.mer-reader-pill-uptodate {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--mer-brand);
+  background: var(--mer-brand-tint);
+  padding: 3px 9px;
+  border-radius: var(--mer-r-pill);
+  white-space: nowrap;
+}
+
+/* Editors-only header actions (Edit link + comment chip) */
+.mer-reader-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.mer-reader-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: var(--mer-r-button);
+  font-size: 12.5px;
+  font-weight: 600;
+  border: 1px solid var(--mer-border);
+  background: var(--mer-surface);
+  color: var(--mer-ink-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 150ms ease-out, border-color 150ms ease-out;
+}
+.mer-reader-edit:hover {
+  background: var(--mer-brand-tint);
+  border-color: var(--mer-brand-mid);
+}
+.mer-reader-comment-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 11px;
+  border-radius: var(--mer-r-pill);
+  font-size: 11.5px;
+  border: 1px solid var(--mer-border);
+  background: var(--mer-surface);
+  color: var(--mer-ink-muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.mer-reader-comment-chip:hover {
+  background: var(--mer-brand-tint);
 }

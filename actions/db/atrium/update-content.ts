@@ -27,6 +27,7 @@ import {
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import { ValidationError } from "@/lib/content/errors";
+import { isCoverGradientKey } from "@/lib/atrium/cover";
 import type { ContentObjectDTO, UpdatePatch } from "@/lib/content";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
@@ -53,6 +54,40 @@ function assertEditorStatus(status: string): EditorStatus {
   return status as EditorStatus;
 }
 
+/**
+ * Validate + apply the slice-F presentation inputs (cover gradient + emoji icon)
+ * onto the patch, in ONE helper so the action's control flow stays flat.
+ *  - `coverGradient` must be a known preset KEY (never raw CSS — the value only ever
+ *    selects a class) or null to clear; anything else is a 400.
+ *  - `icon` is a short plain-text emoji (rendered as text, never HTML): trim,
+ *    empty → clear (null), and cap the length so it can't stash a paragraph.
+ * Only provided fields are touched (an omitted field is never written).
+ */
+function applyPresentationInput(
+  input: { coverGradient?: string | null; icon?: string | null },
+  patch: UpdatePatch
+): void {
+  if (input.coverGradient !== undefined) {
+    if (input.coverGradient !== null && !isCoverGradientKey(input.coverGradient)) {
+      throw new ValidationError("Invalid cover", { coverGradient: input.coverGradient });
+    }
+    patch.coverGradient = input.coverGradient;
+  }
+  if (input.icon !== undefined) {
+    if (input.icon === null) {
+      patch.icon = null;
+    } else {
+      const trimmed = input.icon.trim();
+      if (trimmed.length > 16) {
+        throw new ValidationError("Icon must be a single emoji", {
+          length: trimmed.length,
+        });
+      }
+      patch.icon = trimmed.length === 0 ? null : trimmed;
+    }
+  }
+}
+
 export async function updateContentAction(
   // Accepts a UUID OR a slug — `contentService.update` resolves via
   // `loadByIdOrSlug`. Named to match the other slug-tolerant actions.
@@ -65,6 +100,10 @@ export async function updateContentAction(
     collectionId?: string | null;
     /** Widened `string`, narrowed at runtime; "draft" | "archived" only. */
     status?: string;
+    /** Cover-gradient preset key (slice F); `null` clears the cover. Validated below. */
+    coverGradient?: string | null;
+    /** Doc emoji icon (slice F); `null` clears it. Length-capped below. */
+    icon?: string | null;
   }
 ): Promise<ActionState<ContentObjectDTO>> {
   const requestId = generateRequestId();
@@ -112,6 +151,9 @@ export async function updateContentAction(
     if (input.tags !== undefined) patch.tags = input.tags;
     if (input.collectionId !== undefined) patch.collectionId = input.collectionId;
     if (input.status !== undefined) patch.status = assertEditorStatus(input.status);
+    // Slice-F cover band + icon (validated + applied in one helper so this action's
+    // control flow stays flat).
+    applyPresentationInput(input, patch);
 
     if (Object.keys(patch).length === 0) {
       throw new ValidationError("Nothing to update", {});

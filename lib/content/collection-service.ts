@@ -34,7 +34,7 @@
  * See docs/features/atrium-design-spec.md §21.
  */
 
-import { asc } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentCollections } from "@/lib/db/schema";
 import { principalOf } from "./helpers";
@@ -166,6 +166,27 @@ function computeKeepSet(
 }
 
 export const collectionService = {
+  /**
+   * The display name of a single collection by id, or `null` if it does not
+   * exist. Used for the Meridian editor breadcrumb (Epic #1059 slice C) — a
+   * section LABEL, not sensitive content, and only ever shown for an object the
+   * caller has already been cleared to view. Returns `null` for a `null` id so
+   * callers can pass `obj.collectionId` straight through.
+   */
+  async nameById(collectionId: string | null): Promise<string | null> {
+    if (!collectionId) return null;
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select({ name: contentCollections.name })
+          .from(contentCollections)
+          .where(eq(contentCollections.id, collectionId))
+          .limit(1),
+      "collection.nameById"
+    );
+    return rows[0]?.name ?? null;
+  },
+
   /**
    * Build the requester-visible collection tree (the reader sidebar / library
    * section tree). Returns only the collections the requester may enter, with the

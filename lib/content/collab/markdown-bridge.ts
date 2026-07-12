@@ -21,12 +21,26 @@
  */
 
 import { Marked } from "marked";
+import type { TokenizerAndRendererExtension, Tokens } from "marked";
 import { generateJSON } from "@tiptap/html";
 import type { JSONContent } from "@tiptap/core";
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
 import type { Doc as YDoc } from "yjs";
 import { getSchemaExtensions, getCollabSchema } from "./editor-extensions";
 import { AUTHORED_MARK, COLLAB_FIELD } from "./provenance";
+import {
+  ARTIFACT_EMBED_DATA_ATTR,
+  ARTIFACT_EMBED_ID_ATTR,
+  parseArtifactEmbedAttrs,
+} from "../embed-directive";
+import {
+  CALLOUT_CLASS,
+  CALLOUT_WARN_CLASS,
+  IMAGE_GRID_CLASS,
+  VIDEO_CLASS,
+  isSafeMediaUrl,
+  parseVideoDirectiveAttrs,
+} from "../block-directives";
 
 /**
  * A `marked` instance whose renderer DROPS raw HTML tokens (both block and inline)
@@ -52,6 +66,168 @@ editorMarked.use({
       return "";
     },
   },
+});
+
+/**
+ * markdown → editor for embedded artifacts (Meridian slice D). A custom BLOCK
+ * extension that recognizes the `::atrium-artifact{id="<uuid>"}` leaf directive
+ * (lib/content/embed-directive.ts) and emits the embed node's DOM
+ * (`div[data-atrium-artifact-embed]`), which `generateJSON` then parses into the
+ * `atriumArtifactEmbed` node via the node's `parseHTML`. Registered as a NAMED
+ * token type (not `html`), so it uses THIS renderer rather than the raw-HTML
+ * dropper above — the embed div survives while arbitrary author HTML is still
+ * dropped. This closes the round-trip: the editor serializes the node back to the
+ * same directive (`artifact-embed-node.ts`), so seeding/agent writes reconstruct
+ * the live embed instead of leaving inert directive text.
+ */
+const artifactEmbedMarkedExtension: TokenizerAndRendererExtension = {
+  name: "atriumArtifactEmbed",
+  level: "block",
+  start(src: string) {
+    // Only a LINE-ANCHORED directive is a real embed: it must occupy its own whole
+    // line (preceded by start-of-string or a newline, up to leading whitespace),
+    // exactly like the reader's whole-line ARTIFACT_EMBED_LINE_RE. A plain
+    // `indexOf("::atrium-artifact{")` would also point at a directive TRAILING other
+    // prose on the same line, so marked would cut the paragraph and tokenize it as a
+    // live embed here — while the reader treats that same line as inert text (the
+    // whole-line regex fails on the leading prose). Anchoring `start` keeps the two
+    // in lockstep: prose + directive on one line stays one inert paragraph.
+    const m = /(?:^|\n)[ \t]*::atrium-artifact\{/.exec(src);
+    if (!m) return undefined;
+    // Advance past a leading newline (if matched) to the start of the directive line
+    // so the tokenizer's `^[ \t]*…` rule fires at that position.
+    return m[0].startsWith("\n") ? m.index + 1 : m.index;
+  },
+  tokenizer(src: string) {
+    const rule = /^[ \t]*::atrium-artifact\{([^}]*)\}[ \t]*(?:\n|$)/;
+    const match = rule.exec(src);
+    if (!match) return undefined;
+    // Validate the id here (UUID shape) — an unparseable directive falls through
+    // to normal paragraph handling rather than emitting an embed with a bad id.
+    const artifactId = parseArtifactEmbedAttrs(match[1]);
+    if (!artifactId) return undefined;
+    return { type: "atriumArtifactEmbed", raw: match[0], artifactId };
+  },
+  renderer(token: Tokens.Generic) {
+    const artifactId =
+      typeof token.artifactId === "string" ? token.artifactId : "";
+    if (!artifactId) return "";
+    // The id is UUID-validated at tokenize time, so it is safe to interpolate into
+    // the attribute; generateJSON parses this div into the embed node.
+    return `<div ${ARTIFACT_EMBED_DATA_ATTR} ${ARTIFACT_EMBED_ID_ATTR}="${artifactId}"></div>\n`;
+  },
+};
+editorMarked.use({ extensions: [artifactEmbedMarkedExtension] });
+
+/** Escape a string for safe interpolation into a double-quoted HTML attribute. */
+function escapeAttr(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/** Match every `![alt](url)` image on a line (the grid's children). */
+const GRID_IMAGE_RE = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
+
+/**
+ * markdown → editor for the slice-F rich CONTAINER directives (Meridian slice F):
+ * `:::callout` / `:::warn` (rich-text callouts) and `:::grid` (image grid). Emits
+ * the same DOM the reader render + the TipTap nodes agree on:
+ *  - callout/warn → `div.atrium-callout[ .atrium-callout-warn]` wrapping the inner
+ *    markdown rendered recursively (so paragraphs/lists inside survive), which
+ *    `generateJSON` parses into the `atriumCallout` node.
+ *  - grid → `div.atrium-image-grid` of bare `<img>` (extracted from the `![]()`
+ *    lines only, so the grid's `atriumImage+` content model matches exactly — no
+ *    stray `<p>` wrappers), parsed into `atriumImageGrid` + `atriumImage` children.
+ * Registered as NAMED token types (not `html`), so the raw-HTML dropper above does
+ * NOT strip them — arbitrary author HTML is still dropped.
+ */
+const containerDirectiveMarkedExtension: TokenizerAndRendererExtension = {
+  name: "atriumContainer",
+  level: "block",
+  start(src: string) {
+    const m = /(?:^|\n):::(?:callout|warn|grid)\b/.exec(src);
+    if (!m) return undefined;
+    return m[0].startsWith("\n") ? m.index + 1 : m.index;
+  },
+  tokenizer(src: string) {
+    // `:::name` on its own line … closing `:::` on its own line (or EOF).
+    const rule =
+      /^:::(callout|warn|grid)[^\n]*\n([\s\S]*?)(?:\n:::[ \t]*(?:\n|$)|$)/;
+    const match = rule.exec(src);
+    if (!match) return undefined;
+    const name = match[1];
+    const inner = match[2];
+    const token: Tokens.Generic = {
+      type: "atriumContainer",
+      raw: match[0],
+      name,
+      inner,
+    };
+    // Callout/warn hold rich blocks → tokenize their inner markdown recursively.
+    // Grid holds only image lines → parsed in the renderer, no child tokens.
+    if (name !== "grid") token.tokens = this.lexer.blockTokens(inner);
+    return token;
+  },
+  renderer(token: Tokens.Generic) {
+    const name = typeof token.name === "string" ? token.name : "callout";
+    if (name === "grid") {
+      const inner = typeof token.inner === "string" ? token.inner : "";
+      const imgs: string[] = [];
+      GRID_IMAGE_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = GRID_IMAGE_RE.exec(inner)) !== null) {
+        const url = m[2];
+        if (isSafeMediaUrl(url)) {
+          imgs.push(
+            `<img src="${escapeAttr(url)}" alt="${escapeAttr(m[1])}">`
+          );
+        }
+      }
+      if (imgs.length === 0) return "";
+      return `<div class="${IMAGE_GRID_CLASS}">${imgs.join("")}</div>\n`;
+    }
+    const cls =
+      name === "warn" ? `${CALLOUT_CLASS} ${CALLOUT_WARN_CLASS}` : CALLOUT_CLASS;
+    const rendered = token.tokens
+      ? this.parser.parse(token.tokens as Tokens.Generic[])
+      : "";
+    return `<div class="${cls}">${rendered}</div>\n`;
+  },
+};
+
+/**
+ * markdown → editor for the slice-F `::video{src="…"}` LEAF directive. Emits
+ * `<video class="atrium-video" controls src="…">` (src is UUID-free but URL-safety
+ * validated at tokenize time), which `generateJSON` parses into `atriumVideo`.
+ */
+const videoMarkedExtension: TokenizerAndRendererExtension = {
+  name: "atriumVideo",
+  level: "block",
+  start(src: string) {
+    const m = /(?:^|\n)[ \t]*::video\{/.exec(src);
+    if (!m) return undefined;
+    return m[0].startsWith("\n") ? m.index + 1 : m.index;
+  },
+  tokenizer(src: string) {
+    const rule = /^[ \t]*::video\{([^}]*)\}[ \t]*(?:\n|$)/;
+    const match = rule.exec(src);
+    if (!match) return undefined;
+    const videoSrc = parseVideoDirectiveAttrs(match[1]);
+    if (!videoSrc) return undefined;
+    return { type: "atriumVideo", raw: match[0], videoSrc };
+  },
+  renderer(token: Tokens.Generic) {
+    const videoSrc = typeof token.videoSrc === "string" ? token.videoSrc : "";
+    if (!isSafeMediaUrl(videoSrc)) return "";
+    return `<video class="${VIDEO_CLASS}" controls src="${escapeAttr(videoSrc)}"></video>\n`;
+  },
+};
+
+editorMarked.use({
+  extensions: [containerDirectiveMarkedExtension, videoMarkedExtension],
 });
 
 /**

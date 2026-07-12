@@ -45,13 +45,17 @@ test.describe("Atrium editor — human edits paint the green rail (authenticated
       await page.goto(`/atrium/${OBJ_ID}/edit`);
 
       // The collab session resolved and granted edit (owner): the editor flips
-      // editable and the toolbar reports Connected. Generous timeouts — the WS
+      // editable and the Meridian sheet byline reports the synced ("saved") state
+      // (the old "Connected" toolbar label was superseded by the sheet byline +
+      // live presence in the slice-C redesign). Generous timeouts — the WS
       // handshake + Yjs sync can be slow on a cold dev server.
       const pm = page.locator(".ProseMirror");
       await expect(pm).toHaveAttribute("contenteditable", "true", {
         timeout: 60000,
       });
-      await expect(page.getByText("Connected")).toBeVisible({ timeout: 60000 });
+      await expect(page.getByTestId("editor-byline")).toContainText("saved", {
+        timeout: 60000,
+      });
 
       // Type two lines as the human. Unique markers per run — the Y.Doc state
       // persists across runs, so fixed strings would not prove THIS run typed.

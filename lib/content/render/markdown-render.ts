@@ -52,9 +52,17 @@ import remarkMath from "remark-math";
 import remarkDirective from "remark-directive";
 import remarkRehype from "remark-rehype";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import rehypeSlug from "rehype-slug";
 import rehypeKatex from "rehype-katex";
 import rehypeStringify from "rehype-stringify";
 import { visit } from "unist-util-visit";
+import {
+  CALLOUT_CLASS,
+  CALLOUT_WARN_CLASS,
+  IMAGE_GRID_CLASS,
+  VIDEO_CLASS,
+  isSafeMediaUrl,
+} from "../block-directives";
 
 // NOTE: `sanitizeHtml` lives in ./html-sanitize (DOMPurify + jsdom). It is
 // intentionally NOT re-exported here: this module is imported by version-service
@@ -62,11 +70,70 @@ import { visit } from "unist-util-visit";
 // that bundle. Import sanitizeHtml from "./html-sanitize" directly.
 
 /**
- * remark transform: render the two curated container/leaf directives
- * (`:::callout`, `:::warn`) to a `<div>`/`<span>` with a fixed class. Any other
- * directive name is left untouched (mdast-util-to-hast renders its children as
- * plain content) — we never emit a tag derived from an arbitrary directive name.
+ * remark transform: render the curated Atrium directives to a fixed tag + class.
+ * Any other directive name is left untouched (mdast-util-to-hast renders its
+ * children as plain content) — we never emit a tag derived from an arbitrary
+ * directive name. The curated set:
+ *  - `:::callout` / `:::warn` — the gradient-tint callout (`<div>`/`<span>`).
+ *  - `:::grid` — the image grid container (`<div class="atrium-image-grid">`,
+ *    children are the `![]()` images the author dropped, slice F).
+ *  - `::video{src="…"}` — the HTML5 video block (`<video controls src>`), slice F.
+ *    The src is validated to http/https here; a directive without a safe src is
+ *    left inert (rendered as its plain children) so no unsafe URL reaches the DOM.
+ * The only tags this can emit are the fixed `div`/`span`/`video` above — never a
+ * tag derived from the directive name.
  */
+/** The shape of a remark directive node this transform reads + mutates. */
+type DirectiveNode = {
+  type: string;
+  name?: string;
+  data?: { hName?: string; hProperties?: Record<string, unknown> };
+  attributes?: Record<string, string | null | undefined>;
+};
+
+/**
+ * Map ONE curated Atrium directive node to its fixed hast tag + class (mutating the
+ * node's `data`). Only ever emits the fixed div/span/video tags above — never a tag
+ * derived from the directive name. Split out of the visitor so `remarkAtriumDirectives`
+ * stays a thin walker (keeps that closure's cyclomatic complexity low).
+ */
+function applyAtriumDirective(node: DirectiveNode): void {
+  if (node.name === "callout" || node.name === "warn") {
+    const data = (node.data ??= {});
+    data.hName = node.type === "textDirective" ? "span" : "div";
+    data.hProperties = {
+      className:
+        node.name === "warn"
+          ? [CALLOUT_CLASS, CALLOUT_WARN_CLASS]
+          : [CALLOUT_CLASS],
+    };
+    return;
+  }
+  if (node.name === "grid") {
+    const data = (node.data ??= {});
+    data.hName = "div";
+    data.hProperties = { className: [IMAGE_GRID_CLASS] };
+    return;
+  }
+  if (node.name === "video") {
+    // The leaf directive carries the src as a remark-directive attribute. Only an
+    // http/https src is rendered; otherwise leave the node inert (no hName), so
+    // mdast-util-to-hast emits its (empty) children rather than a <video> pointing
+    // at an unsafe URL.
+    const src = node.attributes?.src;
+    if (typeof src !== "string" || !isSafeMediaUrl(src)) return;
+    const data = (node.data ??= {});
+    data.hName = "video";
+    data.hProperties = {
+      className: [VIDEO_CLASS],
+      controls: true,
+      preload: "metadata",
+      playsInline: true,
+      src,
+    };
+  }
+}
+
 function remarkAtriumDirectives() {
   return (tree: Root): undefined => {
     visit(tree, (node) => {
@@ -77,15 +144,7 @@ function remarkAtriumDirectives() {
       ) {
         return;
       }
-      if (node.name !== "callout" && node.name !== "warn") return;
-      const data = (node.data ??= {});
-      data.hName = node.type === "textDirective" ? "span" : "div";
-      data.hProperties = {
-        className:
-          node.name === "warn"
-            ? ["atrium-callout", "atrium-callout-warn"]
-            : ["atrium-callout"],
-      };
+      applyAtriumDirective(node as unknown as DirectiveNode);
     });
   };
 }
@@ -113,6 +172,9 @@ const classAllow: [string, ...string[]] = [
   "math-display",
   "atrium-callout",
   "atrium-callout-warn",
+  // Slice-F rich blocks: the image-grid container + the video player class.
+  IMAGE_GRID_CLASS,
+  VIDEO_CLASS,
 ];
 
 const sanitizeSchema: typeof defaultSchema = {
@@ -128,10 +190,19 @@ const sanitizeSchema: typeof defaultSchema = {
     ...defaultSchema.protocols,
     src: ["http", "https"],
   },
+  // Slice F: admit the <video> player tag. Its `src` is already pinned to
+  // http/https by `protocols.src` above (which hast-util-sanitize applies to the
+  // `src` attribute wherever it appears), so a `javascript:`/`data:` video src is
+  // stripped exactly like an <img> src. Only the fixed presentation attributes are
+  // allowed — no event handlers, no `autoplay` (a published page never auto-plays),
+  // no arbitrary attributes. Authored video is trusted district content and no
+  // worse a privacy surface than the already-allowed remote <img>.
+  tagNames: [...(defaultSchema.tagNames ?? []), "video"],
   attributes: {
     ...defaultSchema.attributes,
     span: [...(defaultSchema.attributes?.span ?? []), classAllow],
     div: [...(defaultSchema.attributes?.div ?? []), classAllow],
+    video: [classAllow, "src", "controls", "preload", "playsinline", "poster", "width", "height"],
   },
 };
 
@@ -148,6 +219,15 @@ const buildProcessor = () =>
     .use(remarkAtriumDirectives)
     .use(remarkRehype)
     .use(rehypeSanitize, sanitizeSchema)
+    // rehype-slug runs AFTER the sanitize gate on purpose: it adds a stable `id`
+    // to every heading so the reader's "ON THIS PAGE" TOC (Epic #1059 slice E) can
+    // anchor to it and in-page `#slug` links resolve. The id is derived by
+    // github-slugger from the heading text (lower-cased, `[a-z0-9-]` only), so it
+    // is fully generated — never author-controlled raw — and opens no injection
+    // surface even though it is applied after sanitize. `lib/content/render/
+    // headings.ts` slugs the SAME heading text with the SAME github-slugger, so the
+    // TOC ids and these DOM ids always agree.
+    .use(rehypeSlug)
     // rehype-katex defaults to catching parse errors (rendering them inline in
     // errorColor) rather than throwing, and `trust: false` (no \href/\url). No
     // options needed; sanitize already ran, so KaTeX's inline styles survive.

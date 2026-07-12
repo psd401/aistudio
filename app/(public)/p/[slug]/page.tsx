@@ -47,13 +47,20 @@ import { notFound } from "next/navigation";
 import { and, eq } from "drizzle-orm";
 import type { Metadata } from "next";
 import { executeQuery } from "@/lib/db/drizzle-client";
-import { contentObjects, contentPublications } from "@/lib/db/schema";
-import { renderMarkdownToHtml } from "@/lib/content/render/markdown-render";
+import {
+  contentCollections,
+  contentObjects,
+  contentPublications,
+} from "@/lib/db/schema";
 import { s3Store } from "@/lib/content/storage/s3-store";
 import { versionService } from "@/lib/content/version-service";
+import { resolveDocumentParts } from "@/lib/content/embed-resolver";
+import { extractDocumentHeadings } from "@/lib/content/render/headings";
 import { createLogger } from "@/lib/logger";
 import { ProvenanceFooter } from "@/components/atrium/ProvenanceFooter";
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
+import { ReaderDocumentBody } from "@/components/atrium/ReaderDocumentBody";
+import { ReaderFrame } from "@/components/atrium/reader/ReaderFrame";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import "@/styles/atrium-content.css";
 import "katex/dist/katex.min.css";
@@ -85,7 +92,14 @@ const loadPublicObject = cache(async (
   id: string;
   kind: "document" | "artifact";
   title: string;
+  /** The object's collection name (via left join), for the reader meta line. */
+  collectionName: string | null;
+  /** Cover-gradient preset key + emoji icon (slice F) for the reader cover band. */
+  coverGradient: string | null;
+  icon: string | null;
   publishedVersionId: string;
+  /** When the live public_web publication went live, for the "Published …" meta. */
+  publishedAt: Date | null;
 } | null> => {
   const [obj] = await executeQuery(
     (db) =>
@@ -95,8 +109,18 @@ const loadPublicObject = cache(async (
           kind: contentObjects.kind,
           title: contentObjects.title,
           visibilityLevel: contentObjects.visibilityLevel,
+          // Left join → collection name (or null), for the reader meta. Rides on
+          // the existing slug lookup — no extra query and no session read.
+          collectionName: contentCollections.name,
+          // Slice F cover band + emoji icon (migration 103).
+          coverGradient: contentObjects.coverGradient,
+          icon: contentObjects.icon,
         })
         .from(contentObjects)
+        .leftJoin(
+          contentCollections,
+          eq(contentCollections.id, contentObjects.collectionId)
+        )
         .where(eq(contentObjects.slug, slug))
         .limit(1),
     "atrium.publicReader.objectBySlug"
@@ -113,6 +137,7 @@ const loadPublicObject = cache(async (
       db
         .select({
           publishedVersionId: contentPublications.publishedVersionId,
+          publishedAt: contentPublications.publishedAt,
         })
         .from(contentPublications)
         .where(
@@ -131,7 +156,11 @@ const loadPublicObject = cache(async (
     id: obj.id,
     kind: obj.kind,
     title: obj.title,
+    collectionName: obj.collectionName ?? null,
+    coverGradient: obj.coverGradient,
+    icon: obj.icon,
     publishedVersionId: publication.publishedVersionId,
+    publishedAt: publication.publishedAt ?? null,
   };
 });
 
@@ -232,17 +261,31 @@ export default async function PublicReaderPage({
       });
     }
     return (
-      <main className="mx-auto max-w-4xl px-4 py-8">
-        <header className="mb-6">
-          <h1 className="text-3xl font-semibold">{published.title}</h1>
-        </header>
+      <ReaderFrame
+        title={published.title}
+        // Anonymous: NO avatar / no session read (the public reader consults none).
+        authenticated={false}
+        // A public page is always view-only (renders the "👁 View only" notice).
+        editHref={null}
+        commentHref={null}
+        commentCount={0}
+        publishedAt={published.publishedAt}
+        collectionName={published.collectionName}
+        // Artifact readers skip the TOC (no document headings to walk).
+        headings={[]}
+        footer={
+          <ProvenanceFooter
+            objectId={published.id}
+            publishedVersionNumber={version.versionNumber}
+          />
+        }
+      >
         <ArtifactSandbox
           code={code}
           src={getArtifactSandboxRenderUrl()}
           className="atrium-artifact-preview"
         />
-        <ProvenanceFooter objectId={published.id} publishedVersionNumber={version.versionNumber} />
-      </main>
+      </ReaderFrame>
     );
   }
 
@@ -266,21 +309,38 @@ export default async function PublicReaderPage({
     });
   }
 
-  // renderMarkdownToHtml returns SANITIZED HTML (see module header) — safe for
-  // dangerouslySetInnerHTML; it is the only sink for the document body.
-  const html = renderMarkdownToHtml(markdown);
+  // Render the body as ordered parts: sanitized-HTML runs (the same
+  // renderMarkdownToHtml sink) interleaved with live embedded-artifact blocks. Each
+  // embed is gated STRICTLY on the artifact's own `visibility_level === 'public'`
+  // (public audience, no session) — a non-public embed renders a quiet placeholder,
+  // never its content, so the public page never leaks non-public artifacts.
+  const parts = await resolveDocumentParts(markdown, { audience: "public" });
+
+  // "ON THIS PAGE" TOC — built server-side from the document's own headings (no
+  // session read); empty when the body is empty.
+  const headings = extractDocumentHeadings(markdown);
 
   return (
-    <main className="mx-auto max-w-3xl px-4 py-8">
-      <header className="mb-6">
-        <h1 className="text-3xl font-semibold">{published.title}</h1>
-      </header>
+    <ReaderFrame
+      title={published.title}
+      authenticated={false}
+      editHref={null}
+      commentHref={null}
+      commentCount={0}
+      publishedAt={published.publishedAt}
+      collectionName={published.collectionName}
+      headings={headings}
+      coverGradient={published.coverGradient}
+      icon={published.icon}
+      footer={
+        <ProvenanceFooter
+          objectId={published.id}
+          publishedVersionNumber={version.versionNumber}
+        />
+      }
+    >
       {/* `.atrium-content` is the single rendered-body sink (and the test anchor). */}
-      <article
-        className="atrium-content"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-      <ProvenanceFooter objectId={published.id} publishedVersionNumber={version.versionNumber} />
-    </main>
+      <ReaderDocumentBody parts={parts} />
+    </ReaderFrame>
   );
 }

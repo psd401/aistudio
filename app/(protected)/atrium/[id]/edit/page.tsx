@@ -23,14 +23,14 @@
 import { forbidden, notFound } from "next/navigation";
 import { getUserRequester } from "@/actions/db/atrium/requester";
 import { contentService } from "@/lib/content/content-service";
+import { collectionService } from "@/lib/content/collection-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { canEdit } from "@/lib/content/helpers";
 import { DocumentEditor } from "@/components/atrium/DocumentEditor";
-import { ArtifactCanvas } from "@/components/atrium/ArtifactCanvas";
+import { ArtifactAuthoringView } from "@/components/atrium/ArtifactAuthoringView";
 import { VisibilityChip } from "@/components/atrium/VisibilityChip";
 import { ContentSettings } from "@/components/atrium/ContentSettings";
 import { VersionMenu } from "@/components/atrium/VersionMenu";
-import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 
 export const dynamic = "force-dynamic";
 
@@ -68,24 +68,39 @@ export default async function AtriumEditPage({
   // to show/hide the Save control; the create-version action re-checks server-side.
   const userCanEdit = canEdit(req, obj.ownerUserId);
 
-  // Header controls (Epic #1059 completion): the ContentSettings dialog (rename /
-  // tags / section / archive-restore) for editors, and — for documents — the
-  // VersionMenu (history + restore; the artifact canvas has its own inline
-  // version select + restore). Server actions re-check permission regardless;
-  // the settings dialog is simply not rendered for read-only viewers.
-  const headerControls = (
+  // The collection name for the Meridian breadcrumb + eyebrow (a section label,
+  // not sensitive; the object is already cleared for view above).
+  const collectionName = await collectionService.nameById(obj.collectionId);
+
+  if (obj.kind === "artifact") {
+    // The Meridian artifact chrome (topbar + canvas + manage-rights-only rail) is
+    // its own server component so this route handler stays lean.
+    return (
+      <ArtifactAuthoringView
+        obj={obj}
+        req={req}
+        userCanEdit={userCanEdit}
+        collectionName={collectionName}
+      />
+    );
+  }
+
+  // Documents render the full-bleed Meridian editor: the topbar (breadcrumb,
+  // title, live AGENT-WRITING pill, presence, controls) + the sheet on the desk.
+  // The topbar OWNS the chrome, so the page adds no header/main wrapper here —
+  // the history (VersionMenu) + settings/visibility controls are injected into
+  // the topbar via props. The narrow Nexus workspace panel is a separate mount
+  // (WorkspacePanel) that passes layout="panel".
+  const documentTopbarControls = (
     <div className="flex shrink-0 items-center gap-2">
-      {/* Nexus workspace (spec §17): open this object BESIDE the chat so the
-          adjacent conversation becomes the re-prompt/tweak path. */}
       <a
         href={`/nexus?workspace=${obj.id}`}
-        className="rounded border px-2 py-1 text-xs text-muted-foreground hover:bg-accent"
+        className="mer-ectl"
+        // Nexus workspace (spec §17): open this object BESIDE the chat so the
+        // adjacent conversation becomes the re-prompt/tweak path.
       >
         Open beside chat
       </a>
-      {obj.kind === "document" && (
-        <VersionMenu key={`versions-${obj.id}`} idOrSlug={obj.id} canEdit={userCanEdit} />
-      )}
       {userCanEdit && (
         <ContentSettings
           key={`settings-${obj.id}`}
@@ -100,35 +115,25 @@ export default async function AtriumEditPage({
     </div>
   );
 
-  if (obj.kind === "artifact") {
-    return (
-      <main className="mx-auto max-w-4xl px-4 py-6">
-        <header className="mb-4 flex items-start justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold">{obj.title}</h1>
-            <p className="text-xs text-gray-500">
-              Interactive artifact · preview runs in an isolated sandbox
-            </p>
-          </div>
-          {headerControls}
-        </header>
-        <ArtifactCanvas key={obj.id} idOrSlug={obj.id} canEdit={userCanEdit} sandboxSrc={getArtifactSandboxRenderUrl()} />
-      </main>
-    );
-  }
-
   return (
-    <main className="mx-auto max-w-3xl px-4 py-6">
-      <header className="mb-4 flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">{obj.title}</h1>
-          <p className="text-xs text-gray-500">
-            Live document · agent edits show purple, your edits show green
-          </p>
-        </div>
-        {headerControls}
-      </header>
-      <DocumentEditor key={obj.id} idOrSlug={obj.id} userId={req.userId} />
-    </main>
+    <DocumentEditor
+      key={obj.id}
+      idOrSlug={obj.id}
+      userId={req.userId}
+      title={obj.title}
+      eyebrow={collectionName ? `${collectionName} · Document` : "Document"}
+      breadcrumb={
+        collectionName && obj.collectionId
+          ? [{ label: collectionName, href: `/atrium?collection=${obj.collectionId}` }]
+          : []
+      }
+      askAgentHref={`/nexus?workspace=${obj.id}`}
+      coverGradient={obj.coverGradient}
+      icon={obj.icon}
+      historyControl={
+        <VersionMenu key={`versions-${obj.id}`} idOrSlug={obj.id} canEdit={userCanEdit} />
+      }
+      settingsControl={documentTopbarControls}
+    />
   );
 }

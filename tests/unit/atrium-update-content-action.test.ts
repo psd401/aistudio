@@ -109,6 +109,55 @@ describe("updateContentAction — status runtime narrowing", () => {
   });
 });
 
+describe("updateContentAction — cover + icon (slice F)", () => {
+  it.each(["default", "sunrise", "forest", "violet", "dusk"])(
+    "accepts the preset cover key %s and forwards it",
+    async (coverGradient) => {
+      const result = await updateContentAction("obj-1", { coverGradient });
+      expect(result.isSuccess).toBe(true);
+      const patch = updateMock.mock.calls[0][2] as { coverGradient?: string };
+      expect(patch.coverGradient).toBe(coverGradient);
+    }
+  );
+
+  it("forwards an explicit cover clear (null) distinctly from omission", async () => {
+    const result = await updateContentAction("obj-1", { coverGradient: null });
+    expect(result.isSuccess).toBe(true);
+    const patch = updateMock.mock.calls[0][2] as Record<string, unknown>;
+    expect(patch).toEqual({ coverGradient: null });
+  });
+
+  it("rejects a non-preset cover value before the service (no raw CSS/arbitrary keys)", async () => {
+    const result = await updateContentAction("obj-1", {
+      coverGradient: "linear-gradient(#000,#fff)",
+    });
+    expect(result.isSuccess).toBe(false);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it("trims and forwards a valid emoji icon", async () => {
+    const result = await updateContentAction("obj-1", { icon: "  🎉  " });
+    expect(result.isSuccess).toBe(true);
+    const patch = updateMock.mock.calls[0][2] as { icon?: string | null };
+    expect(patch.icon).toBe("🎉");
+  });
+
+  it("coerces an empty/whitespace icon to a null clear", async () => {
+    const result = await updateContentAction("obj-1", { icon: "   " });
+    expect(result.isSuccess).toBe(true);
+    const patch = updateMock.mock.calls[0][2] as Record<string, unknown>;
+    expect(patch.icon).toBeNull();
+  });
+
+  it("rejects an over-long icon before the service (guards against stashing text)", async () => {
+    const result = await updateContentAction("obj-1", {
+      icon: "this is not a single emoji",
+    });
+    expect(result.isSuccess).toBe(false);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("updateContentAction — gates", () => {
   it("blocks a caller without the atrium-content capability before the service", async () => {
     hasCapabilityAccessMock.mockResolvedValue(false);

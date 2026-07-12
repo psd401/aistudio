@@ -23,6 +23,13 @@ jest.mock("@/lib/content/render/markdown-render", () => ({
   renderMarkdownToHtml: (md: string) => `<rendered>${md}</rendered>`,
 }));
 
+// The TOC heading extractor imports the same pure-ESM remark ecosystem (github-
+// slugger / mdast-util-to-string) and is likewise not jest-loadable; the reader
+// calls it to build "ON THIS PAGE", so mock it to an empty list here.
+jest.mock("@/lib/content/render/headings", () => ({
+  extractDocumentHeadings: () => [],
+}));
+
 // `notFound()` in production THROWS to halt rendering. The shared next/navigation
 // mock is a no-op jest.fn(), which would let execution fall through past the guard
 // and mask a real regression. Override it to throw a sentinel so the test observes
@@ -98,18 +105,17 @@ jest.mock("@/lib/content/artifact-sandbox-config", () => ({
 }));
 
 // Presentational components — render to inert stand-ins so the page returns a tree
-// without pulling real component internals into the unit test. The sidebar mock
-// also matters structurally: the real ReaderCollectionSidebar imports the
-// collection-tree action, whose `@/lib/content` barrel would drag the whole
-// content stack (okf/retrieval/embeddings) into this unit test.
+// without pulling real component internals into the unit test. The reader nav mock
+// also matters structurally: the real AtriumReaderNav imports `@/lib/branding`
+// (Settings + S3), which we do not want to reach in this unit test.
 jest.mock("@/components/atrium/ProvenanceFooter", () => ({
   ProvenanceFooter: () => null,
 }));
 jest.mock("@/components/atrium/ArtifactSandbox", () => ({
   ArtifactSandbox: () => null,
 }));
-jest.mock("@/components/atrium/ReaderCollectionSidebar", () => ({
-  ReaderCollectionSidebar: () => null,
+jest.mock("@/components/atrium/reader/AtriumReaderNav", () => ({
+  AtriumReaderNav: () => null,
 }));
 
 import ReaderPage from "@/app/(protected)/c/[slug]/page";
@@ -215,25 +221,25 @@ describe("Atrium reader page — 404 existence masking", () => {
 });
 
 /**
- * Reader chrome gating (Epic #1059 completion): the page computes the Edit link
- * with the REAL `canEdit` predicate (the same one the authoring page's save
- * controls use) and threads the object's collection into the sidebar slot. The
- * page returns a `<ReaderShell>` element, so both decisions are directly
- * inspectable on its props without rendering the tree.
+ * Reader chrome gating (Epic #1059 Meridian redesign, slice E): the page computes
+ * the Edit link with the REAL `canEdit` predicate (the same one the authoring
+ * page's save controls use) and threads the object's collection NAME into the
+ * reader meta line. The page returns a `<ReaderFrame>` element, so both decisions
+ * are directly inspectable on its props without rendering the tree.
  */
-describe("Atrium reader page — Edit link + collection sidebar gating", () => {
-  /** The ReaderShell props the page's returned element carries. */
+describe("Atrium reader page — Edit link + collection meta gating", () => {
+  /** The ReaderFrame props the page's returned element carries. */
   interface ShellProps {
     editHref: string | null;
-    collectionId: string | null;
+    collectionName: string | null;
   }
 
   function shellProps(result: unknown): ShellProps {
     return (result as { props: ShellProps }).props;
   }
 
-  function viewableDoc(collectionId: string | null = null): void {
-    withLookups({ ...OBJ_ROW, collectionId }, PUBLICATION_ROW);
+  function viewableDoc(collectionName: string | null = null): void {
+    withLookups({ ...OBJ_ROW, collectionName }, PUBLICATION_ROW);
     canViewMock.mockResolvedValue(true);
     getByIdMock.mockResolvedValue({ objectId: "obj-1", versionNumber: 3 });
     getTextMock.mockResolvedValue("# hello");
@@ -279,13 +285,13 @@ describe("Atrium reader page — Edit link + collection sidebar gating", () => {
     expect(shellProps(result).editHref).toBeNull();
   });
 
-  it("threads the object's collection into the sidebar slot (and null when uncollected)", async () => {
-    viewableDoc("col-1");
+  it("threads the object's collection NAME into the reader meta (and null when uncollected)", async () => {
+    viewableDoc("High School office");
     const withCollection = await render();
-    expect(shellProps(withCollection).collectionId).toBe("col-1");
+    expect(shellProps(withCollection).collectionName).toBe("High School office");
 
     viewableDoc(null);
     const withoutCollection = await render();
-    expect(shellProps(withoutCollection).collectionId).toBeNull();
+    expect(shellProps(withoutCollection).collectionName).toBeNull();
   });
 });

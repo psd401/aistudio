@@ -146,7 +146,19 @@ function LibraryChips({
   );
 }
 
-export function LibraryView(): React.JSX.Element {
+export interface LibraryViewProps {
+  /**
+   * The cross-origin sandbox render URL, resolved SERVER-SIDE
+   * (`getArtifactSandboxRenderUrl()`) and passed from the Atrium page. Threaded to
+   * each artifact card's live thumbnail (slice F). `null` (unconfigured sandbox
+   * origin) → cards keep the gradient placeholder.
+   */
+  sandboxSrc?: string | null;
+}
+
+export function LibraryView({
+  sandboxSrc = null,
+}: LibraryViewProps = {}): React.JSX.Element {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -305,6 +317,7 @@ export function LibraryView(): React.JSX.Element {
           loading={loading}
           error={error}
           onCreate={() => setCreateKind("document")}
+          sandboxSrc={sandboxSrc}
         />
 
         {/* Pagination: hidden once a short page signals the end, while the first

@@ -19,9 +19,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Editor } from "@tiptap/core";
 import { v4 as uuidv4 } from "uuid";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { initialsFromName } from "@/lib/atrium/presence";
 import { ATRIUM_COMMENT_MARK } from "@/lib/content/collab/comment-mark";
 import { useComments } from "./use-comments";
 import type { CommentDTO, CommentThreadDTO } from "@/actions/db/atrium/comments";
@@ -118,20 +117,24 @@ function removeCommentMarkByThread(editor: Editor | null, threadId: string): voi
   editor.view.dispatch(tr);
 }
 
-/** One comment (body + author + time). */
+/** One comment (author head + body). Meridian: 22px avatar (violet ✦ for agent),
+ *  name, time, then the body. */
 function CommentRow({ comment }: { comment: CommentDTO }): React.JSX.Element {
+  const isAgent = comment.authorKind === "agent";
   return (
-    <li className="rounded border border-border/60 bg-background px-2 py-1.5">
-      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span className="font-medium text-foreground/80">
-          {comment.authorLabel}
-          {comment.authorKind === "agent" ? " (agent)" : ""}
+    <li>
+      <div className="mer-comment-head">
+        <span className="mer-comment-avatar" data-kind={comment.authorKind}>
+          {isAgent ? "✦" : initialsFromName(comment.authorLabel)}
         </span>
+        <span className="mer-comment-name">{comment.authorLabel}</span>
         {/* toLocaleString differs by server/client locale+tz → suppress the
             SSR/hydration diff on this non-semantic timestamp. */}
-        <span suppressHydrationWarning>{formatTime(comment.createdAt)}</span>
+        <span className="mer-comment-time" suppressHydrationWarning>
+          {formatTime(comment.createdAt)}
+        </span>
       </div>
-      <p className="whitespace-pre-wrap text-sm">{comment.body}</p>
+      <p className="mer-comment-body">{comment.body}</p>
     </li>
   );
 }
@@ -162,31 +165,50 @@ function ThreadCard({
     if (ok) setReply("");
   };
 
+  // The card reads as an AGENT card (violet-tinted border) when the thread was
+  // opened by the agent — the first comment's author kind (README §"Comments").
+  const isAgentThread = thread.comments[0]?.authorKind === "agent";
+
+  // DEFERRED — the agent "⟳ Working…" chip (README §"2b", Meridian slice F). The
+  // mockup shows an agent reply ("On it — building the shuttle map… I'll embed it
+  // when it's ready") carrying a "⟳ Working…" chip that clears when the artifact
+  // LANDS in the doc. Rendering that honestly needs a per-thread agent-task
+  // lifecycle: SET when the agent acknowledges a request, CLEARED when its async
+  // result is applied to the document body. The clear signal is the agent-bridge
+  // live-edit loopback (`applyAgentEdit` → the doc gains the embed) which — exactly
+  // like the slice-D backlink re-sync deferred at
+  // `lib/content/version-service.ts:100-115` — depends on the server-side
+  // ProseMirror-JSON→markdown serializer / `readAgentDocMarkdown` added in PR #1186
+  // (now on dev) plus new thread-lifecycle plumbing. The comment schema (migration 098)
+  // carries only thread-level `resolved`, no working/pending state. Adding a
+  // `working` flag now would either never clear (a chip stuck on "Working…"
+  // forever) or fake it from the global `agentWriting` presence signal (which is
+  // not thread-scoped and would mislabel every agent comment) — both hacks. So the
+  // chip is deferred to the follow-up that lands on top of #1186; the agent card's
+  // violet treatment ships now, the working-state chip does not.
+
   return (
     <li
       className={cn(
-        "rounded-md border p-2",
-        thread.resolved ? "border-dashed opacity-70" : "border-border"
+        "mer-comment-card",
+        isAgentThread && "mer-comment-card-agent"
       )}
       data-testid="comment-thread"
       data-resolved={thread.resolved ? "true" : "false"}
     >
-      <button
-        type="button"
-        onClick={onFocus}
-        className="mb-1 text-left text-[11px] font-medium text-primary hover:underline"
-      >
+      <button type="button" onClick={onFocus} className="mer-comment-jump">
         Jump to text{thread.resolved ? " · resolved" : ""}
       </button>
-      <ul className="space-y-1">
+      <ul>
         {thread.comments.map((c) => (
           <CommentRow key={c.id} comment={c} />
         ))}
       </ul>
       {canEdit && (
-        <div className="mt-2 space-y-1">
+        <div className="mt-2 space-y-2">
           {!thread.resolved && (
-            <Textarea
+            <textarea
+              className="mer-comment-reply"
               value={reply}
               onChange={(e) => setReply(e.target.value)}
               placeholder="Reply…"
@@ -194,25 +216,25 @@ function ThreadCard({
               aria-label="Reply to thread"
             />
           )}
-          <div className="flex justify-end gap-2">
+          <div className="mer-comment-actions" style={{ justifyContent: "flex-end" }}>
             {!thread.resolved && (
-              <Button
-                size="sm"
-                variant="outline"
+              <button
+                type="button"
+                className="mer-comment-chip"
                 disabled={busy || !reply.trim()}
                 onClick={submitReply}
               >
                 Reply
-              </Button>
+              </button>
             )}
-            <Button
-              size="sm"
-              variant="ghost"
+            <button
+              type="button"
+              className="mer-comment-chip mer-comment-chip-ghost"
               disabled={busy}
               onClick={() => onResolve(!thread.resolved)}
             >
-              {thread.resolved ? "Reopen" : "Resolve"}
-            </Button>
+              {thread.resolved ? "Reopen" : "✓ Resolve"}
+            </button>
           </div>
         </div>
       )}
@@ -271,20 +293,25 @@ export function CommentSidebar({
       [...threads].sort((a, b) => Number(a.resolved) - Number(b.resolved)),
     [threads]
   );
+  const openCount = useMemo(
+    () => threads.filter((t) => !t.resolved).length,
+    [threads]
+  );
 
   return (
     <aside
-      className="flex w-full flex-col gap-3 text-sm"
+      className="flex w-full flex-col gap-3"
       aria-label="Comments"
       data-testid="comment-sidebar"
     >
-      <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        Comments
+      <h2 className="mer-comments-head">
+        Comments{openCount > 0 ? ` · ${openCount} open` : ""}
       </h2>
 
       {canEdit && (
-        <div className="space-y-1">
-          <Textarea
+        <div className="mer-comment-composer">
+          <textarea
+            className="mer-comment-reply"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder={
@@ -294,28 +321,30 @@ export function CommentSidebar({
             rows={2}
             aria-label="New comment"
           />
-          <Button
-            size="sm"
-            className="w-full"
+          <button
+            type="button"
+            className="mer-comment-chip mer-comment-chip-agent"
             disabled={!hasSelection || !draft.trim() || posting}
             onClick={addComment}
           >
             Add comment
-          </Button>
+          </button>
         </div>
       )}
 
       {error && (
-        <p role="alert" className="text-xs text-destructive">
+        <p role="alert" className="text-xs" style={{ color: "#b4552d" }}>
           {error}
         </p>
       )}
       {loading ? (
-        <p className="text-xs text-muted-foreground">Loading comments…</p>
+        <p className="mer-comments-empty">Loading comments…</p>
       ) : ordered.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No comments yet.</p>
+        <div className="mer-comments-empty">
+          Highlight text to comment or ask the agent
+        </div>
       ) : (
-        <ul className="space-y-2">
+        <ul className="flex flex-col gap-3">
           {ordered.map((thread) => (
             <ThreadCard
               key={thread.threadId}

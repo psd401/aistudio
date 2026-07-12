@@ -197,6 +197,8 @@ export * from "./tables/content-publish-requests";
 export * from "./tables/atrium-doc-state";
 // Comments / track-changes thread store (§18.1)
 export * from "./tables/atrium-doc-comments";
+// Meridian slice D (#1059): embedded-artifact backlinks ("EMBEDDED IN")
+export * from "./tables/content-embed-links";
 
 // ============================================
 // Relations

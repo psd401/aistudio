@@ -11,46 +11,73 @@
  */
 
 :root {
-  --atrium-human: #16a34a; /* green — human */
-  --atrium-human-soft: rgba(22, 163, 74, 0.16);
-  --atrium-agent: #7c3aed; /* purple — agent */
-  --atrium-agent-soft: rgba(124, 58, 237, 0.16);
+  /*
+   * Provenance palette. Re-shaded to the Meridian design tokens (Epic #1059
+   * slice C): human = calm forest green #3E7C4F, agent = violet #6D4FC2 (violet =
+   * agent, always and only). This file loads only on Atrium surfaces (editor +
+   * both readers), so the re-shade reaches the whole loop — the editor rail /
+   * attribution underlines AND the reader's ProvenanceFooter badges — consistently.
+   */
+  --atrium-human: #3e7c4f; /* green — human (Meridian human-you) */
+  --atrium-human-soft: rgba(62, 124, 79, 0.14);
+  --atrium-agent: #6d4fc2; /* violet — agent (Meridian agent) */
+  --atrium-agent-soft: rgba(109, 79, 194, 0.1);
   --atrium-rail-width: 4px;
 }
 
 /* ----------------------------------------------------------------------------
  * Rendered document typography (.atrium-content wraps reader/public_web output)
+ *
+ * Meridian scale (Epic #1059 slice E): body 15.5px/1.75 in Schibsted Grotesk
+ * (`--font-meridian`, resolved inside the `.atrium-meridian` scope both readers +
+ * the editor sheet now carry) with the Meridian ink `#2B302E`. Every color routes
+ * through a `--mer-*` token with a literal Meridian hex fallback so this shared
+ * sink also renders correctly on any surface that imports it WITHOUT the scope
+ * (e.g. the Nexus workspace artifact panel via ArtifactCanvas).
  * -------------------------------------------------------------------------- */
 .atrium-content {
-  line-height: 1.65;
-  color: #1f2937;
-  font-size: 1rem;
+  font-family: var(--font-meridian), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  line-height: 1.75;
+  color: #2b302e;
+  font-size: 15.5px;
+  letter-spacing: -0.01em;
   word-break: break-word;
 }
 .atrium-content h1,
 .atrium-content h2,
 .atrium-content h3 {
-  font-weight: 600;
+  font-weight: 700;
   line-height: 1.25;
+  letter-spacing: -0.02em;
+  color: var(--mer-ink, #191d1c);
   margin: 1.6em 0 0.6em;
+  /* Anchor targets (rehype-slug ids) must clear the sticky reader top nav so a
+   * TOC jump lands the heading below the bar rather than under it. */
+  scroll-margin-top: 84px;
 }
-.atrium-content h1 { font-size: 1.875rem; }
-.atrium-content h2 { font-size: 1.5rem; }
-.atrium-content h3 { font-size: 1.25rem; }
-.atrium-content p { margin: 0.75em 0; }
+.atrium-content h1 { font-size: 1.7rem; }
+.atrium-content h2 { font-size: 1.3rem; }
+.atrium-content h3 { font-size: 1.075rem; font-weight: 600; }
+.atrium-content p { margin: 0.85em 0; }
 .atrium-content ul,
-.atrium-content ol { margin: 0.75em 0; padding-left: 1.5rem; }
-.atrium-content li { margin: 0.25em 0; }
+.atrium-content ol { margin: 0.85em 0; padding-left: 1.5rem; }
+.atrium-content li { margin: 0.3em 0; }
 .atrium-content a {
-  color: #2563eb;
+  color: var(--mer-brand, #10322e);
   text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: var(--mer-brand-mid, #2c7a6b);
   text-underline-offset: 2px;
+}
+.atrium-content a:hover {
+  text-decoration-color: var(--mer-brand, #10322e);
 }
 .atrium-content blockquote {
   margin: 1em 0;
   padding: 0.25em 1rem;
-  border-left: 3px solid #d1d5db;
-  color: #4b5563;
+  border-left: 3px solid var(--mer-border, #e4e7e3);
+  color: var(--mer-ink-secondary, #454d49);
 }
 .atrium-content pre {
   background: #0f172a;
@@ -64,7 +91,7 @@
   font-size: 0.9em;
 }
 .atrium-content :not(pre) > code {
-  background: #f1f5f9;
+  background: var(--mer-brand-tint, #e9f2ef);
   padding: 0.1em 0.35em;
   border-radius: 0.3rem;
 }
@@ -75,30 +102,116 @@
 }
 .atrium-content th,
 .atrium-content td {
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--mer-border, #e4e7e3);
   padding: 0.5rem 0.75rem;
   text-align: left;
 }
-.atrium-content th { background: #f9fafb; font-weight: 600; }
-.atrium-content img { max-width: 100%; height: auto; }
+.atrium-content th {
+  background: var(--mer-canvas, #f6f7f5);
+  font-weight: 600;
+}
+.atrium-content img { max-width: 100%; height: auto; border-radius: 12px; }
+
+/* ----------------------------------------------------------------------------
+ * Rich media blocks (Meridian slice F) — image grid + video. In this SHARED sink
+ * (imported by the editor AND both readers) so they render identically wherever a
+ * document is shown. The image node itself is plain `![]()` (styled by the `img`
+ * rule above); these style the grid CONTAINER and the video player.
+ * -------------------------------------------------------------------------- */
+
+/* Image grid: one tall cell on the left + stacked cells on the right (README §2b).
+ * Works for both the editor (bare `<img>` children) and the reader (remark wraps
+ * each image in a `<p>`) by laying out the DIRECT children as grid cells and
+ * filling them with the image. */
+.atrium-image-grid {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  grid-auto-rows: 96px;
+  gap: 10px;
+  margin: 1.15em 0;
+  position: relative;
+}
+.atrium-image-grid > * {
+  margin: 0;
+  min-width: 0;
+  min-height: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  position: relative;
+}
+.atrium-image-grid > :first-child {
+  grid-row: span 2;
+}
+.atrium-image-grid img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  border-radius: 12px;
+  margin: 0;
+}
+/* Editor overflow pill: the grid node's renderHTML sets `data-extra` (= images
+ * beyond 3). Hide the rest and show a "+N" pill at the grid's bottom-right (over
+ * the third cell). The pseudo lives on the DIV (not the replaced <img>, which has
+ * no ::after). The reader render carries no `data-extra`, so a published grid
+ * shows every image uncapped. */
+.atrium-image-grid[data-extra] > :nth-child(n + 4) {
+  display: none;
+}
+.atrium-image-grid[data-extra]::after {
+  content: "+ " attr(data-extra);
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(25, 29, 28, 0.8);
+  color: #fff;
+  padding: 3px 8px;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+/* Video: a dark 12px-radius HTML5 player block (README §2b). Native controls
+ * supply the play button, progress bar, and timestamp. No autoplay. */
+.atrium-video {
+  display: block;
+  width: 100%;
+  max-height: 60vh;
+  margin: 1.15em 0;
+  border-radius: 12px;
+  background: #191d1c;
+  overflow: hidden;
+}
 
 /* ----------------------------------------------------------------------------
  * Curated directives (:::callout / :::warn)
+ *
+ * Meridian callout (Epic #1059 slice E): the agent-callout gradient tint from the
+ * handoff (`linear-gradient(135deg,#EAF1EE,#F0EDFA)`) with a hairline border and
+ * 12px radius — the calm teal→violet wash the reader mockup uses. `warn` keeps a
+ * distinct amber-tinted treatment so a caution reads differently from a note.
  * -------------------------------------------------------------------------- */
 .atrium-callout {
-  margin: 1em 0;
-  padding: 0.85rem 1rem;
-  border-left: 4px solid #2563eb;
-  border-radius: 0.4rem;
-  background: #eff6ff;
+  display: flex;
+  gap: 12px;
+  margin: 1.15em 0;
+  padding: 15px 18px;
+  border: 1px solid var(--mer-border-agent, #ded8f2);
+  border-radius: 12px;
+  background: var(--mer-grad-agent-callout, linear-gradient(135deg, #eaf1ee, #f0edfa));
+  color: var(--mer-ink, #191d1c);
+  font-size: 13.5px;
+  line-height: 1.6;
 }
 .atrium-callout-warn {
-  border-left-color: #d97706;
-  background: #fffbeb;
+  border-color: #ecd8a6;
+  background: linear-gradient(135deg, #fdf6e6, #fbeccb);
 }
 .atrium-callout-title {
   font-weight: 600;
   margin-bottom: 0.25rem;
+  color: var(--mer-ink, #191d1c);
 }
 
 /* ----------------------------------------------------------------------------
@@ -144,7 +257,9 @@
 :root {
   --atrium-comment: #d97706;      /* amber — comment anchor */
   --atrium-comment-soft: rgba(217, 119, 6, 0.16);
-  --atrium-suggest-insert: #16a34a; /* green underline — proposed insertion */
+  /* Proposed insertion re-shaded to the Meridian human green (slice C); deletion
+   * stays red — a strikethrough deletion reads as "removed", not "human vs agent". */
+  --atrium-suggest-insert: #3e7c4f; /* green underline — proposed insertion */
   --atrium-suggest-delete: #dc2626; /* red strikethrough — proposed deletion */
 }
 
@@ -181,9 +296,9 @@
 .atrium-provenance-footer {
   margin-top: 2.5rem;
   padding-top: 1rem;
-  border-top: 1px solid #e5e7eb;
-  font-size: 0.85rem;
-  color: #6b7280;
+  border-top: 1px solid var(--mer-border, #e4e7e3);
+  font-size: 0.8rem;
+  color: var(--mer-ink-muted, #8b948f);
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem 1rem;
@@ -204,4 +319,167 @@
 .atrium-provenance-badge[data-author="agent"] {
   color: var(--atrium-agent);
   background: var(--atrium-agent-soft);
+}
+
+/* ----------------------------------------------------------------------------
+ * Embedded-artifact block (Meridian slice D). Lives in this SHARED sink (imported
+ * by the editor AND both readers) so the block is styled everywhere it renders. It
+ * prefers the Meridian tokens (`--mer-*`, resolved inside `.atrium-meridian` — the
+ * editor today, the readers once slice E wraps them) and falls back to the literal
+ * Meridian hex so the readers render correctly before that scope exists.
+ * -------------------------------------------------------------------------- */
+.atrium-embed {
+  margin: 1.5em 0;
+  border: 1px solid var(--mer-border, #e4e7e3);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--mer-surface, #ffffff);
+  box-shadow: var(--mer-shadow-card, 0 1px 3px rgba(16, 50, 46, 0.05));
+}
+.atrium-embed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 14px;
+  background: var(--mer-canvas, #f6f7f5);
+  border-bottom: 1px solid var(--mer-border, #e4e7e3);
+  font-size: 12.5px;
+}
+.atrium-embed-head-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--mer-ink, #191d1c);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atrium-embed-mark {
+  color: var(--mer-agent, #6d4fc2);
+  flex-shrink: 0;
+}
+.atrium-embed-head-label {
+  font-weight: 400;
+  color: var(--mer-ink-muted, #8b948f);
+}
+.atrium-embed-expand {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mer-brand, #10322e);
+  text-decoration: none;
+}
+.atrium-embed-expand:hover {
+  text-decoration: underline;
+}
+.atrium-embed-frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+/* Unavailable placeholder (existence mask) + loading state — quiet, no content. */
+.atrium-embed-unavailable,
+.atrium-embed-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 18px;
+  font-size: 13px;
+  color: var(--mer-ink-muted, #8b948f);
+  background: var(--mer-canvas, #f6f7f5);
+}
+.atrium-embed-unavailable {
+  border-style: dashed;
+}
+.atrium-embed-unavailable-mark {
+  color: var(--mer-ink-muted, #8b948f);
+  flex-shrink: 0;
+}
+/* The editor NodeView wrapper: keep the block non-selectable-looking and spaced. */
+.atrium-embed-nodeview {
+  margin: 0.5em 0;
+}
+
+/* ----------------------------------------------------------------------------
+ * Artifact canvas toolbar (Preview/Code tabs, version select) — Meridian tokens
+ * with hex fallbacks (this sink is imported by the Meridian-scoped artifact viewer
+ * AND the un-scoped Nexus workspace panel, so both must render).
+ * -------------------------------------------------------------------------- */
+.atrium-artifact-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--mer-ink-muted, #8b948f);
+}
+.atrium-artifact-tabs {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--mer-border, #e4e7e3);
+  border-radius: 8px;
+}
+.atrium-artifact-tab {
+  padding: 5px 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--mer-ink-secondary, #454d49);
+  background: var(--mer-surface, #fff);
+  border: none;
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out;
+}
+.atrium-artifact-tab + .atrium-artifact-tab {
+  border-left: 1px solid var(--mer-border, #e4e7e3);
+}
+.atrium-artifact-tab:hover {
+  background: var(--mer-brand-tint, #e9f2ef);
+}
+.atrium-artifact-tab[data-active="true"] {
+  background: var(--mer-brand, #10322e);
+  color: #fff;
+  font-weight: 600;
+}
+.atrium-artifact-verlabel {
+  display: inline-flex;
+  align-items: center;
+}
+.atrium-artifact-select {
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--mer-border, #e4e7e3);
+  background: var(--mer-surface, #fff);
+  color: var(--mer-ink-secondary, #454d49);
+  font-size: 12.5px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+.atrium-artifact-restore {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--mer-border, #e4e7e3);
+  background: var(--mer-surface, #fff);
+  color: var(--mer-ink-secondary, #454d49);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.atrium-artifact-restore:hover:not(:disabled) {
+  background: var(--mer-brand-tint, #e9f2ef);
+}
+.atrium-artifact-restore:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.atrium-artifact-status {
+  margin-left: auto;
+  color: var(--mer-ink-muted, #8b948f);
+}
+.atrium-artifact-hint {
+  font-size: 12px;
+  color: var(--mer-ink-muted, #8b948f);
 }

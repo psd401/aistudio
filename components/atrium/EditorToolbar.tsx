@@ -21,7 +21,6 @@
  */
 
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
 import type { EditorPublishDestination } from "@/actions/db/atrium/publish-document";
 
 type Status = "connecting" | "ready" | "error";
@@ -75,119 +74,102 @@ export function EditorToolbar({
   const [destination, setDestination] =
     useState<EditorPublishDestination>("intranet");
 
-  return (
-    // flex-wrap so the status legend + action buttons wrap onto a second line in
-    // the narrow Nexus workspace panel (Epic #1059 §17) instead of clipping off
-    // the right edge. The full-width page has room and never wraps.
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-gray-500">
-      <span aria-live="polite">
+  // Read-only viewers get no action cluster — a quiet status chip instead. Live
+  // presence + the sheet byline convey connection state for editors (the old
+  // static You/Agent legend is superseded by the real presence avatars).
+  if (!canEdit) {
+    return (
+      <span className="mer-legend" aria-live="polite">
         {status === "connecting" && "Connecting…"}
-        {status === "ready" && (canEdit ? "Connected" : "Read-only")}
-        {status === "error" && "Connection error"}
+        {status === "ready" && "Read-only"}
+        {status === "error" && (
+          <span className="mer-legend-warn">Connection error</span>
+        )}
       </span>
-      <span className="flex items-center gap-1">
-        <span
-          className="inline-block h-2 w-2 rounded-full"
-          style={{ background: "var(--atrium-human)" }}
-        />
-        You
-      </span>
-      <span className="flex items-center gap-1">
-        <span
-          className="inline-block h-2 w-2 rounded-full"
-          style={{ background: "var(--atrium-agent)" }}
-        />
-        Agent
-      </span>
+    );
+  }
+
+  return (
+    // The Meridian editor controls cluster — Suggesting / Accept all / Snapshot /
+    // Publish ▾ / Unpublish. History + Settings are injected alongside by the
+    // parent topbar. flex-wrap keeps it from clipping in the narrow §17 panel.
+    <div className="mer-ectl-group" data-testid="editor-controls">
       {suggestionCount > 0 && (
-        // Non-blocking hint — surfaced to everyone; only editors get Accept all.
-        <span data-testid="suggestion-count" className="text-amber-600">
-          {suggestionCount} unresolved suggestion{suggestionCount === 1 ? "" : "s"}
+        <span data-testid="suggestion-count" className="mer-legend-warn">
+          {suggestionCount} unresolved
         </span>
       )}
-      {canEdit && (
-        // flex-wrap here too (PR #1131 review): the action group's min-content
-        // width (~500px across six controls) exceeds the workspace panel's
-        // 380px minimum, so without wrapping INSIDE the group the outer wrap
-        // still clips Publish/Unpublish off the panel edge.
-        <span className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
-          {/* Track-changes toggle: while ON, edits become proposed suggestions. */}
-          <Button
-            type="button"
-            size="sm"
-            variant={suggesting ? "default" : "outline"}
-            aria-pressed={suggesting}
-            disabled={busy}
-            onClick={onToggleSuggesting}
-            data-testid="suggesting-toggle"
-          >
-            Suggesting{suggesting ? " on" : ""}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={busy || suggestionCount === 0}
-            onClick={onAcceptAll}
-            data-testid="accept-all"
-          >
-            Accept all
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={onSnapshot}
-          >
-            Snapshot
-          </Button>
-          <label className="flex items-center gap-1">
-            <span className="sr-only">Publish destination</span>
-            {/* A native select (like the ArtifactCanvas version dropdown) — one
-                small control, no new design-system surface. */}
-            <select
-              value={destination}
-              onChange={(e) =>
-                setDestination(e.target.value as EditorPublishDestination)
-              }
-              disabled={busy}
-              className="rounded border px-1 py-1"
-              data-testid="publish-destination-select"
-              aria-label="Publish destination"
-            >
-              {DESTINATION_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value} disabled={opt.disabled}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <Button
-            type="button"
-            size="sm"
-            disabled={busy}
-            onClick={() => onPublish(destination)}
-          >
-            Publish
-          </Button>
-          {/* Visually separated as the "undo a public action" control so it isn't
-              mistaken for Snapshot/Publish — unpublish removes a live page. It
-              acts on the SAME picked destination as Publish, so an object live on
-              several destinations (e.g. intranet + public web) can have each
-              taken down individually. */}
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            disabled={busy}
-            onClick={() => onUnpublish(destination)}
-            className="text-destructive hover:text-destructive"
-          >
-            Unpublish
-          </Button>
-        </span>
-      )}
+      {/* Track-changes toggle: while ON, edits become proposed suggestions. */}
+      <button
+        type="button"
+        className="mer-ectl"
+        data-active={suggesting ? "true" : "false"}
+        aria-pressed={suggesting}
+        disabled={busy}
+        onClick={onToggleSuggesting}
+        data-testid="suggesting-toggle"
+      >
+        Suggesting {suggesting ? "on" : "▾"}
+      </button>
+      <button
+        type="button"
+        className="mer-ectl"
+        disabled={busy || suggestionCount === 0}
+        onClick={onAcceptAll}
+        data-testid="accept-all"
+      >
+        Accept all
+      </button>
+      <button
+        type="button"
+        className="mer-ectl"
+        disabled={busy}
+        onClick={onSnapshot}
+      >
+        Snapshot
+      </button>
+      <label className="mer-ectl-select-wrap">
+        <span className="sr-only">Publish destination</span>
+        {/* A native select (like the ArtifactCanvas version dropdown) — one small
+            control, no new design-system surface. */}
+        <select
+          value={destination}
+          onChange={(e) =>
+            setDestination(e.target.value as EditorPublishDestination)
+          }
+          disabled={busy}
+          className="mer-ectl-select"
+          data-testid="publish-destination-select"
+          aria-label="Publish destination"
+        >
+          {DESTINATION_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value} disabled={opt.disabled}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        type="button"
+        className="mer-ectl mer-ectl-primary"
+        disabled={busy}
+        onClick={() => onPublish(destination)}
+      >
+        Publish ▾
+      </button>
+      {/* Visually separated as the "undo a public action" control so it isn't
+          mistaken for Snapshot/Publish — unpublish removes a live page. It acts on
+          the SAME picked destination as Publish, so an object live on several
+          destinations (e.g. intranet + public web) can have each taken down
+          individually. */}
+      <button
+        type="button"
+        className="mer-ectl mer-ectl-danger"
+        disabled={busy}
+        onClick={() => onUnpublish(destination)}
+      >
+        Unpublish
+      </button>
     </div>
   );
 }

@@ -24,6 +24,12 @@ jest.mock("@/lib/content/render/markdown-render", () => ({
   renderMarkdownToHtml: (md: string) => `<rendered>${md}</rendered>`,
 }));
 
+// The TOC heading extractor imports the same pure-ESM remark ecosystem and is not
+// jest-loadable; the reader calls it to build "ON THIS PAGE", so mock it here.
+jest.mock("@/lib/content/render/headings", () => ({
+  extractDocumentHeadings: () => [],
+}));
+
 // notFound() THROWS to halt rendering in production. The default shared mock is a
 // no-op, which would mask a fall-through regression. Override it to throw a
 // sentinel so the test observes the same halt-on-404 control flow. Everything is
@@ -52,6 +58,15 @@ jest.mock("drizzle-orm", () => ({
   eq: (...a: unknown[]) => a,
 }));
 
+// The reader imports the embed resolver, which transitively loads
+// visibility-service -> content mappers -> drizzle-helpers (whose module-level
+// `pgTimestampAsText` calls `sql`, absent from the minimal drizzle-orm mock above).
+// Stub visibility-service so that chain never loads — the PUBLIC reader gates on
+// `visibility_level='public'` and never calls canView anyway.
+jest.mock("@/lib/content/visibility-service", () => ({
+  visibilityService: { canView: jest.fn() },
+}));
+
 const getByIdMock = jest.fn();
 const loadArtifactCodeMock = jest.fn();
 jest.mock("@/lib/content/version-service", () => ({
@@ -78,6 +93,11 @@ jest.mock("@/components/atrium/ProvenanceFooter", () => ({
 }));
 jest.mock("@/components/atrium/ArtifactSandbox", () => ({
   ArtifactSandbox: () => null,
+}));
+// The reader frame's nav imports `@/lib/branding` (Settings + S3); the public reader
+// must consult no session, and this unit test should not reach that stack — stub it.
+jest.mock("@/components/atrium/reader/AtriumReaderNav", () => ({
+  AtriumReaderNav: () => null,
 }));
 
 import PublicReaderPage, {
