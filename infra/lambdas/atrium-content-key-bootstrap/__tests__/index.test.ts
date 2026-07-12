@@ -553,25 +553,24 @@ describe('handler (CloudFormation custom resource entry point)', () => {
     process.env = { ...savedEnv };
   });
 
-  it('Delete -> SUCCESS no-op preserving the incoming PhysicalResourceId', async () => {
+  it('Delete -> clean no-op return preserving the incoming PhysicalResourceId', async () => {
+    // Provider-framework contract: a normal return IS success (no Status field).
     const res = await handler({
       ...BASE_EVENT,
       RequestType: 'Delete',
       PhysicalResourceId: 'atrium-content-key-bootstrap',
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
-    expect(res.Status).toBe('SUCCESS');
     expect(res.PhysicalResourceId).toBe('atrium-content-key-bootstrap');
     expect(rdsSend).not.toHaveBeenCalled();
     expect(smSend).not.toHaveBeenCalled();
   });
 
-  it('Create with a missing service user -> SUCCESS with Outcome=skipped-migration-pending', async () => {
+  it('Create with a missing service user -> returns Outcome=skipped-migration-pending (no throw)', async () => {
     rdsSend.mockResolvedValue({ records: [] }); // resolveServiceUserId -> null
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const res = await handler({ ...BASE_EVENT, RequestType: 'Create' } as any);
-    expect(res.Status).toBe('SUCCESS');
-    expect((res as { Data?: { Outcome?: string } }).Data?.Outcome).toBe('skipped-migration-pending');
+    expect(res.Data?.Outcome).toBe('skipped-migration-pending');
   });
 
   it('Create end-to-end mint: resolve user -> empty secret -> txn replace -> secret write -> SUCCESS minted', async () => {
@@ -599,18 +598,26 @@ describe('handler (CloudFormation custom resource entry point)', () => {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const res = await handler({ ...BASE_EVENT, RequestType: 'Create' } as any);
-    expect(res.Status).toBe('SUCCESS');
-    expect((res as { Data?: { Outcome?: string } }).Data?.Outcome).toBe('minted');
+    expect(res.Data?.Outcome).toBe('minted');
     expect(written).toHaveLength(1);
     expect(isValidKeyFormat(written[0])).toBe(true);
   });
 
-  it('missing required env var -> FAILED with the var named in Reason', async () => {
+  it('failures THROW (the Provider framework signals CFN FAILED only via a throw)', async () => {
+    // A returned Status:'FAILED' object would be read as SUCCESS by the CDK
+    // custom-resources Provider — so errors must propagate out of the handler.
     delete process.env.DB_CLUSTER_ARN;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res = await handler({ ...BASE_EVENT, RequestType: 'Update', PhysicalResourceId: 'p-1' } as any);
-    expect(res.Status).toBe('FAILED');
-    expect(res.Reason).toContain('DB_CLUSTER_ARN');
-    expect(res.PhysicalResourceId).toBe('p-1');
+    await expect(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      handler({ ...BASE_EVENT, RequestType: 'Update', PhysicalResourceId: 'p-1' } as any)
+    ).rejects.toThrow('DB_CLUSTER_ARN');
+  });
+
+  it('a transient AWS error propagates as a throw (never swallowed into a return)', async () => {
+    rdsSend.mockRejectedValue(new Error('rds throttled'));
+    await expect(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      handler({ ...BASE_EVENT, RequestType: 'Create' } as any)
+    ).rejects.toThrow('rds throttled');
   });
 });

@@ -64,10 +64,18 @@ import {
   PutSecretValueCommand,
   ResourceNotFoundException,
 } from '@aws-sdk/client-secrets-manager';
-import type {
-  CloudFormationCustomResourceEvent,
-  CloudFormationCustomResourceResponse,
-} from 'aws-lambda';
+import type { CloudFormationCustomResourceEvent } from 'aws-lambda';
+
+/**
+ * Return shape for the CDK `custom-resources.Provider` framework's onEvent
+ * handler. The framework — NOT this Lambda — posts the CFN response: a normal
+ * return means SUCCESS (only PhysicalResourceId/Data/NoEcho are read; a
+ * `Status` field would be IGNORED), and a FAILURE is signaled by THROWING.
+ */
+interface ProviderOnEventResponse {
+  PhysicalResourceId: string;
+  Data?: Record<string, string>;
+}
 
 // ---------------------------------------------------------------------------
 // Key format + Argon2 params — MUST match lib/api-keys/key-service.ts and
@@ -460,14 +468,9 @@ const consoleLogger: Logger = {
 
 export async function handler(
   event: CloudFormationCustomResourceEvent
-): Promise<CloudFormationCustomResourceResponse> {
+): Promise<ProviderOnEventResponse> {
   console.info('event', JSON.stringify({ RequestType: event.RequestType, LogicalResourceId: event.LogicalResourceId }));
 
-  const base = {
-    StackId: event.StackId,
-    RequestId: event.RequestId,
-    LogicalResourceId: event.LogicalResourceId,
-  };
   const physicalId =
     'PhysicalResourceId' in event ? event.PhysicalResourceId : 'atrium-content-key-bootstrap';
 
@@ -476,7 +479,7 @@ export async function handler(
       // Leave the key + secret in place: the secret is CDK-owned and destroyed
       // with the stack in dev; revoking here would strand the running agent if a
       // stack is merely replaced. Nothing to do.
-      return { ...base, Status: 'SUCCESS', PhysicalResourceId: physicalId };
+      return { PhysicalResourceId: physicalId };
     }
 
     const cfg: RdsOpsConfig = {
@@ -498,19 +501,12 @@ export async function handler(
       consoleLogger
     );
 
-    return {
-      ...base,
-      Status: 'SUCCESS',
-      PhysicalResourceId: physicalId,
-      Data: { Outcome: outcome },
-    };
+    return { PhysicalResourceId: physicalId, Data: { Outcome: outcome } };
   } catch (err) {
+    // The Provider framework signals CFN failure ONLY via a throw — a returned
+    // `Status: 'FAILED'` object would be read as SUCCESS and silently swallow
+    // the error. Log for CloudWatch, then rethrow so the deploy fails loudly.
     console.error('atrium-content-key-bootstrap error', err instanceof Error ? err.message : String(err));
-    return {
-      ...base,
-      Status: 'FAILED',
-      Reason: err instanceof Error ? err.message : String(err),
-      PhysicalResourceId: physicalId,
-    };
+    throw err;
   }
 }
