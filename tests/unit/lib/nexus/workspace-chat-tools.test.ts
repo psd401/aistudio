@@ -31,6 +31,7 @@ const screenMock = jest.fn();
 const loadDocStateMock = jest.fn();
 const publishMock = jest.fn();
 const unpublishMock = jest.fn();
+const snapshotBeforePublishMock = jest.fn();
 
 jest.mock("@/lib/content/content-service", () => ({
   contentService: {
@@ -44,6 +45,9 @@ jest.mock("@/lib/content/publish-service", () => ({
     publish: (...a: unknown[]) => publishMock(...a),
     unpublish: (...a: unknown[]) => unpublishMock(...a),
   },
+}));
+jest.mock("@/lib/content/collab/snapshot-before-publish", () => ({
+  snapshotLiveDocumentForPublish: (...a: unknown[]) => snapshotBeforePublishMock(...a),
 }));
 jest.mock("@/lib/content/helpers", () => ({
   canEdit: (...a: unknown[]) => canEditMock(...a),
@@ -86,6 +90,7 @@ beforeEach(() => {
   loadDocStateMock.mockResolvedValue({ markdown: "# Projection", revision: 5 });
   publishMock.mockResolvedValue({ publicationId: "pub-1", publishedVersionId: "ver-1" });
   unpublishMock.mockResolvedValue({ unpublished: true });
+  snapshotBeforePublishMock.mockResolvedValue(undefined);
   listMock.mockResolvedValue([]);
 });
 
@@ -313,13 +318,30 @@ describe("buildWorkspaceChatTools", () => {
 
   // --- ITEM 2: publish / unpublish the OPEN object ---------------------------
 
-  it("publish_workspace_content defaults to intranet and publishes via publishService", async () => {
+  it("publish_workspace_content SNAPSHOTS the live document into a version BEFORE publishing (Codex P1)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    // Order guard: the snapshot must complete before publishService.publish reads
+    // the head, else the stale/empty version is published.
+    const order: string[] = [];
+    snapshotBeforePublishMock.mockImplementation(async () => { order.push("snapshot"); });
+    publishMock.mockImplementation(async () => { order.push("publish"); return { publicationId: "pub-1" }; });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.publish_workspace_content, {});
+    expect(snapshotBeforePublishMock).toHaveBeenCalledWith(
+      expect.objectContaining({ objectId: "doc-1", kind: "document", requestId: "r" })
+    );
+    expect(order).toEqual(["snapshot", "publish"]);
+    expect(publishMock).toHaveBeenCalledWith(REQ, "doc-1", { destination: "intranet" });
+    expect(out).toEqual({ ok: true, published: true, destination: "intranet", publicationId: "pub-1" });
+  });
+
+  it("unpublish_workspace_content does NOT snapshot (nothing to advance when taking a page offline)", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(true);
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
-    const out = await exec(tools.publish_workspace_content, {});
-    expect(publishMock).toHaveBeenCalledWith(REQ, "doc-1", { destination: "intranet" });
-    expect(out).toEqual({ ok: true, published: true, destination: "intranet", publicationId: "pub-1" });
+    await exec(tools.unpublish_workspace_content, {});
+    expect(snapshotBeforePublishMock).not.toHaveBeenCalled();
   });
 
   it("publish_workspace_content returns an HONEST queued-for-approval status for a public destination needing approval (never a bypass)", async () => {

@@ -61,6 +61,7 @@ import {
   QuoteNotLocatedError,
   type AgentEditMode,
 } from "@/lib/content/collab/apply-agent-edit";
+import { snapshotLiveDocumentForPublish } from "@/lib/content/collab/snapshot-before-publish";
 
 /** UUID v4-ish shape — the form `agent_identities.id` takes (defaultRandom()). */
 const UUID_RE =
@@ -203,7 +204,10 @@ function resolveEditMode(op: BridgeBody["op"], mode: BridgeBody["mode"]): AgentE
 async function loadEditableObject(
   id: string,
   req: Awaited<ReturnType<typeof getUserRequester>>
-): Promise<{ obj: { id: string; ownerUserId: number } } | { error: NextResponse }> {
+): Promise<
+  | { obj: { id: string; ownerUserId: number; kind: "document" | "artifact" } }
+  | { error: NextResponse }
+> {
   const obj = await contentService.loadByIdOrSlug(id);
   if (!obj) return { error: NextResponse.json({ error: "Not found" }, { status: 404 }) };
   const viewable = await visibilityService.canView(req, {
@@ -215,7 +219,9 @@ async function loadEditableObject(
   if (!canEdit(req, obj.ownerUserId)) {
     return { error: NextResponse.json({ error: "Forbidden" }, { status: 403 }) };
   }
-  return { obj: { id: obj.id, ownerUserId: obj.ownerUserId } };
+  return {
+    obj: { id: obj.id, ownerUserId: obj.ownerUserId, kind: obj.kind as "document" | "artifact" },
+  };
 }
 
 /** Screen agent markdown via the shared §28.3 core (`lib/content/agent-screening`
@@ -337,13 +343,17 @@ function buildBridgeAction(op: BridgeBody["op"], data: BridgeBody): ActionResult
  * destination the operator may not publish directly surfaces as 202 (queued for
  * approval), never a silent bypass. `intranet` (the internal reader) is the default.
  */
-async function handlePublishOp(
-  id: string,
-  op: "publish" | "unpublish",
-  destinationRaw: string | undefined,
-  req: Awaited<ReturnType<typeof getUserRequester>>,
-  log: ReturnType<typeof createLogger>
-): Promise<NextResponse> {
+interface PublishOpContext {
+  id: string;
+  op: "publish" | "unpublish";
+  destinationRaw: string | undefined;
+  req: Awaited<ReturnType<typeof getUserRequester>>;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+}
+
+async function handlePublishOp(ctx: PublishOpContext): Promise<NextResponse> {
+  const { id, op, destinationRaw, req, requestId, log } = ctx;
   // Resolve + authorize the object exactly like the write ops (canView 404 /
   // canEdit 403). publishService re-checks the same gate defensively.
   const loaded = await loadEditableObject(id, req);
@@ -362,6 +372,10 @@ async function handlePublishOp(
 
   try {
     if (op === "publish") {
+      // Advance the version head to the live doc content first: agent writes land
+      // only on the live Yjs/atrium_doc_state path, so publishing the persisted
+      // head without this would ship the stale/empty version (Codex review P1).
+      await snapshotLiveDocumentForPublish({ req, objectId, kind: loaded.obj.kind, requestId });
       const result = await publishService.publish(req, objectId, { destination });
       log.info("Agent published object", { objectId, destination });
       return NextResponse.json({
@@ -566,7 +580,14 @@ async function postHandler(
     // the write ops need. The session user is the authorization conduit (delegated).
     if (data.op === "publish" || data.op === "unpublish") {
       const req = await getUserRequester(requestId, session);
-      const response = await handlePublishOp(id, data.op, data.destination, req, log);
+      const response = await handlePublishOp({
+        id,
+        op: data.op,
+        destinationRaw: data.destination,
+        req,
+        requestId,
+        log,
+      });
       timer({ status: response.status >= 400 ? "error" : "success" });
       return response;
     }

@@ -31,6 +31,7 @@ import { contentService } from "@/lib/content/content-service";
 import { canEdit } from "@/lib/content/helpers";
 import { requesterForUserId } from "@/lib/content/requester-from-auth";
 import { applyAgentEdit, readAgentDocMarkdown } from "@/lib/content/collab/apply-agent-edit";
+import { snapshotLiveDocumentForPublish } from "@/lib/content/collab/snapshot-before-publish";
 import { loadDocState } from "@/lib/content/collab/doc-state-store";
 import { screenAgentContent } from "@/lib/content/agent-screening";
 import { publishService } from "@/lib/content/publish-service";
@@ -342,13 +343,18 @@ function buildArtifactUpdateTool(
  * user may not publish directly returns `queuedForApproval` — an HONEST pending
  * status, never a bypass. `intranet` (internal reader) is the default destination.
  */
-async function runWorkspacePublishOp(
-  op: "publish" | "unpublish",
-  objectId: string,
-  userId: number,
-  destinationRaw: string | undefined,
-  log: ReturnType<typeof createLogger>
-): Promise<Record<string, unknown>> {
+interface WorkspacePublishArgs {
+  op: "publish" | "unpublish";
+  objectId: string;
+  kind: "document" | "artifact";
+  userId: number;
+  requestId: string;
+  destinationRaw: string | undefined;
+  log: ReturnType<typeof createLogger>;
+}
+
+async function runWorkspacePublishOp(args: WorkspacePublishArgs): Promise<Record<string, unknown>> {
+  const { op, objectId, kind, userId, requestId, destinationRaw, log } = args;
   const req = await requesterForUserId(userId);
   if (!req) return { error: "Could not resolve your identity." };
   let destination: ReturnType<typeof assertEditorDestination>;
@@ -359,6 +365,10 @@ async function runWorkspacePublishOp(
   }
   try {
     if (op === "publish") {
+      // Advance the version head to the live doc content first: chat edits land only
+      // on the live Yjs/atrium_doc_state path, so publishing the persisted head
+      // without this would ship the stale/empty version (Codex review P1).
+      await snapshotLiveDocumentForPublish({ req, objectId, kind, requestId });
       const result = await publishService.publish(req, objectId, { destination });
       return { ok: true, published: true, destination, publicationId: result.publicationId };
     }
@@ -385,12 +395,15 @@ async function runWorkspacePublishOp(
 }
 
 /** Build the publish/unpublish tool for the WORKSPACE-bound object (ITEM 2). */
-function buildPublishTool(
-  op: "publish" | "unpublish",
-  objectId: string,
-  userId: number,
-  log: ReturnType<typeof createLogger>
-): Tool {
+function buildPublishTool(args: {
+  op: "publish" | "unpublish";
+  objectId: string;
+  kind: "document" | "artifact";
+  userId: number;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+}): Tool {
+  const { op, objectId, kind, userId, requestId, log } = args;
   const verb = op === "publish" ? "Publish" : "Unpublish";
   return tool({
     description:
@@ -409,8 +422,16 @@ function buildPublishTool(
       },
       additionalProperties: false,
     }),
-    execute: async (args): Promise<Record<string, unknown>> =>
-      runWorkspacePublishOp(op, objectId, userId, args?.destination, log),
+    execute: async (toolArgs): Promise<Record<string, unknown>> =>
+      runWorkspacePublishOp({
+        op,
+        objectId,
+        kind,
+        userId,
+        requestId,
+        destinationRaw: toolArgs?.destination,
+        log,
+      }),
   });
 }
 
@@ -483,7 +504,15 @@ function buildEditDocumentByIdTool(
       let obj: Awaited<ReturnType<typeof contentService.get>>;
       try {
         obj = await contentService.get(req, documentId);
-      } catch {
+      } catch (err) {
+        // A NotFoundError here is the EXPECTED existence-mask (non-viewable target),
+        // so log at info — not warn — mirroring buildWorkspaceChatTools' bind-time
+        // catch. Logging keeps a genuine system fault (DB timeout, internal error)
+        // diagnosable instead of swallowed, without spamming warnings on routine
+        // authz misses (gemini review).
+        log.info("edit_atrium_document: target not viewable/available", {
+          error: err instanceof Error ? err.message : String(err),
+        });
         return { error: "No document with that id or slug is available to you." };
       }
       if (obj.kind !== "document") {
@@ -543,8 +572,8 @@ export async function buildWorkspaceChatTools(params: {
       );
     }
     // ITEM 2: publish/unpublish the OPEN object through the human publish gate.
-    tools.publish_workspace_content = buildPublishTool("publish", obj.id, userId, log);
-    tools.unpublish_workspace_content = buildPublishTool("unpublish", obj.id, userId, log);
+    tools.publish_workspace_content = buildPublishTool({ op: "publish", objectId: obj.id, kind, userId, requestId, log });
+    tools.unpublish_workspace_content = buildPublishTool({ op: "unpublish", objectId: obj.id, kind, userId, requestId, log });
   }
 
   // ITEM 3: let the agent find and edit OTHER Atrium documents the user can edit —
