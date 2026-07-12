@@ -1,37 +1,30 @@
 "use client";
 
 /**
- * Atrium LibraryView — the permission-filtered content library (spec §21)
+ * Atrium LibraryView — the permission-filtered content library (spec §21),
+ * restyled to the Meridian card grid (Epic #1059 redesign, slice B).
  *
- * Issue #1054 (Epic #1059, Atrium Phase 4). The library lists exactly the content
- * the requester may view (the list action is permission-pushed via `canView`),
- * with client-side title search and server-side filters by kind / collection /
- * tag, plus "New doc" / "New artifact" creation that calls `contentService.create`
- * through the create-content action and routes to the editor.
+ * The library lists exactly the content the requester may view (the list action
+ * is permission-pushed via `canView`), with client-side title search, filter
+ * chips (All / Docs / Artifacts / Shared with me — the last driven by the new
+ * server-side `owner: "shared"` filter), a debounced tag filter, and
+ * "New doc" / "New artifact" creation.
  *
- * The `CollectionTree` sidebar (also visibility-filtered) selects a collection to
- * filter by; "All content" clears the section filter. Authorization is entirely
- * server-side — this component renders only what the actions return.
+ * The section tree lives in the Meridian shell's workspace nav column
+ * (`atrium/layout.tsx`); this view reads the shell's `?collection=` selection
+ * reactively. Authorization is entirely server-side — this component renders only
+ * what the actions return.
  *
  * Pagination (Epic #1059 completion): the list is fetched in 50-row pages
  * (limit/offset through `listContentAction`) with a "Load more" append control;
- * any server-side filter change resets to page one. `?collection=<id>` deep-links
- * a section selection (the reader sidebar links here).
+ * any server-side filter change resets to page one.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Search } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Search, Plus, Sparkles } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { CollectionTree } from "@/components/atrium/CollectionTree";
 import { listContentAction } from "@/actions/db/atrium/list-content";
 import { createContentAction } from "@/actions/db/atrium/create-content";
 import type { ContentObjectDTO, ContentKind } from "@/lib/content";
@@ -41,73 +34,114 @@ import { CreateContentDialog } from "./CreateContentDialog";
 
 const log = createLogger({ component: "LibraryView" });
 
-/** Kind filter options for the library (all = no kind filter). */
-const KIND_FILTERS = [
-  { value: "all", label: "All kinds" },
+/**
+ * The library filter chips. "shared" maps to the server `owner: "shared"`
+ * ownership filter (content shared with the caller, not owned by them); the
+ * others map to the `kind` filter (or no kind for "all").
+ */
+const VIEWS = [
+  { value: "all", label: "All" },
   { value: "document", label: "Docs" },
   { value: "artifact", label: "Artifacts" },
+  { value: "shared", label: "Shared with me" },
 ] as const;
 
-type KindFilter = (typeof KIND_FILTERS)[number]["value"];
+type LibraryFilterView = (typeof VIEWS)[number]["value"];
 
 /**
  * Server page size for the library list (Epic #1059 completion). Matches the
- * service default; "Load more" appends the next offset page. A short page
- * (< PAGE_SIZE rows) means the end was reached and the control hides.
+ * service default; "Load more" appends the next offset page.
  */
 const PAGE_SIZE = 50;
 
 /**
- * The filter row: client-side title search + server-side kind/tag filters.
- * Extracted from LibraryView so its body stays under the max-lines-per-function
- * lint; purely presentational — all state lives in the parent.
+ * The library header: title, ⌘K-focusable search, and the create buttons.
+ * Presentational — all state lives in the parent.
  */
-function LibraryFilters({
+function LibraryHeader({
   search,
   onSearch,
-  kind,
-  onKind,
-  tag,
-  onTag,
+  searchRef,
+  onNewArtifact,
+  onNewDoc,
 }: {
   search: string;
   onSearch: (v: string) => void;
-  kind: KindFilter;
-  onKind: (v: KindFilter) => void;
+  searchRef: React.RefObject<HTMLInputElement | null>;
+  onNewArtifact: () => void;
+  onNewDoc: () => void;
+}): React.JSX.Element {
+  return (
+    <header className="mer-lib-header">
+      <h1 className="mer-lib-title">Content library</h1>
+      <div className="mer-search">
+        <Search className="mer-search-icon h-4 w-4" aria-hidden="true" />
+        <input
+          ref={searchRef}
+          type="text"
+          aria-label="Search content by title"
+          placeholder="Search or ask the agent to find it…"
+          value={search}
+          onChange={(e) => onSearch(e.target.value)}
+          className="mer-search-input"
+        />
+        <kbd className="mer-search-kbd" aria-hidden="true">
+          ⌘K
+        </kbd>
+      </div>
+      <button type="button" className="mer-btn" onClick={onNewArtifact}>
+        <Sparkles className="h-4 w-4" aria-hidden="true" />
+        New artifact
+      </button>
+      <button type="button" className="mer-btn mer-btn-primary" onClick={onNewDoc}>
+        <Plus className="h-4 w-4" aria-hidden="true" />
+        New doc
+      </button>
+    </header>
+  );
+}
+
+/**
+ * The filter chip row: view chips + a debounced tag filter + a "sorted by
+ * recent" affordance. Presentational — all state lives in the parent.
+ */
+function LibraryChips({
+  view,
+  onView,
+  tag,
+  onTag,
+}: {
+  view: LibraryFilterView;
+  onView: (v: LibraryFilterView) => void;
   tag: string;
   onTag: (v: string) => void;
 }): React.JSX.Element {
   return (
-    <div className="mb-4 flex flex-wrap items-center gap-2">
-      <div className="relative min-w-[12rem] flex-1">
-        <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          aria-label="Search content by title"
-          placeholder="Search by title…"
-          value={search}
-          onChange={(e) => onSearch(e.target.value)}
-          className="pl-8"
-        />
+    <div className="mer-chip-row">
+      <div className="mer-chips" role="group" aria-label="Filter content">
+        {VIEWS.map((v) => (
+          <button
+            key={v.value}
+            type="button"
+            className="mer-chip"
+            data-active={view === v.value ? "true" : "false"}
+            aria-pressed={view === v.value}
+            onClick={() => onView(v.value)}
+          >
+            {v.label}
+          </button>
+        ))}
       </div>
-      <Select value={kind} onValueChange={(v) => onKind(v as KindFilter)}>
-        <SelectTrigger className="w-36" aria-label="Filter by kind">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {KIND_FILTERS.map((k) => (
-            <SelectItem key={k.value} value={k.value}>
-              {k.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Input
-        aria-label="Filter by tag"
-        placeholder="Tag…"
-        value={tag}
-        onChange={(e) => onTag(e.target.value)}
-        className="w-32"
-      />
+      <div className="mer-chip-row-end">
+        <Input
+          aria-label="Filter by tag"
+          placeholder="Tag…"
+          value={tag}
+          onChange={(e) => onTag(e.target.value)}
+          className="h-9 w-28"
+        />
+        <span className="mer-sorted-label">Sorted by recent</span>
+      </div>
     </div>
   );
 }
@@ -116,30 +150,40 @@ export function LibraryView(): React.JSX.Element {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Deep-link support: the reader's collection sidebar links to
-  // `/atrium?collection=<id>`. Seed the section filter from the URL on the FIRST
-  // render via `useSearchParams` (it returns the param on both the SSR pass — the
-  // page is force-dynamic — and on client hydration, so server and client agree
-  // and there is no hydration mismatch). Seeding at init makes the very first
-  // `fetchPage` ALREADY filtered instead of firing an unfiltered page-1 request
-  // that the reqSeq guard then has to discard (the content flash + wasted round
-  // trip on every reader→library deep link). Mount-once semantics are preserved:
-  // as with the prior effect, a later `?collection=` change is not re-read.
-  const [collectionId, setCollectionId] = useState<string | null>(
-    () => searchParams.get("collection") || null
-  );
-  const [kind, setKind] = useState<KindFilter>("all");
+  // Section selection is URL-driven (`?collection=<id>`): the Meridian shell's
+  // workspace nav column owns the tree and pushes the selection into the URL, and
+  // the reader's collection sidebar deep-links here the same way. `useSearchParams`
+  // already re-renders on any URL change, so reading the param directly (no local
+  // state + sync effect) is all that's needed for the shell tree to drive the grid.
+  const collectionId = searchParams.get("collection");
+
+  const [view, setView] = useState<LibraryFilterView>("all");
   const [tag, setTag] = useState("");
   // Debounced copy of `tag`: the tag filter is a SERVER round-trip (unlike the
   // client-side title search), so feeding every keystroke into `load` fires a
   // request storm and flickers the list. Debounce 300ms before it reaches `load`.
   const [debouncedTag, setDebouncedTag] = useState("");
   const [search, setSearch] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedTag(tag), 300);
     return () => clearTimeout(t);
   }, [tag]);
+
+  // ⌘K / Ctrl+K focuses the library search (design "⌘K" hint). Global listener,
+  // cleaned up on unmount; ignores the combo when a modifier-less field already
+  // has focus is unnecessary — ⌘/Ctrl+K is not a text-entry combo.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const [items, setItems] = useState<ContentObjectDTO[]>([]);
   const [loading, setLoading] = useState(true);
@@ -151,17 +195,17 @@ export function LibraryView(): React.JSX.Element {
 
   const [createKind, setCreateKind] = useState<ContentKind | null>(null);
 
-  // Monotonic sequence so a slow earlier response cannot overwrite a newer one
-  // (filters change rapidly, and a filter change mid-"Load more" must discard
-  // the stale append). Each load captures its seq and discards a stale result.
-  // (Named `reqSeq`, not `token`, to avoid a false-positive timing-attack lint
-  // on the comparison.)
+  // Monotonic sequence so a slow earlier response cannot overwrite a newer one.
   const reqSeqRef = useRef(0);
+
+  // Derive the server filter from the active chip.
+  const kind: ContentKind | undefined =
+    view === "document" ? "document" : view === "artifact" ? "artifact" : undefined;
+  const owner: "shared" | undefined = view === "shared" ? "shared" : undefined;
 
   /**
    * Fetch one page. `offset === 0` replaces the list (a fresh load for the
-   * current filters); a non-zero offset APPENDS (the "Load more" path, which
-   * preserves the already-rendered pages under the same filters).
+   * current filters); a non-zero offset APPENDS (the "Load more" path).
    */
   const fetchPage = useCallback(
     async (offset: number) => {
@@ -176,7 +220,8 @@ export function LibraryView(): React.JSX.Element {
       try {
         const res = await listContentAction({
           collectionId: collectionId ?? undefined,
-          kind: kind === "all" ? undefined : kind,
+          kind,
+          owner,
           tag: debouncedTag.trim() || undefined,
           limit: PAGE_SIZE,
           offset,
@@ -202,12 +247,10 @@ export function LibraryView(): React.JSX.Element {
         }
       }
     },
-    [collectionId, kind, debouncedTag]
+    [collectionId, kind, owner, debouncedTag]
   );
 
-  // Filters changed (or first mount): reload page one. `fetchPage`'s identity
-  // changes exactly when a server-side filter changes, so this both resets
-  // pagination and re-queries.
+  // Filters changed (or first mount): reload page one.
   useEffect(() => {
     void fetchPage(0);
   }, [fetchPage]);
@@ -232,9 +275,6 @@ export function LibraryView(): React.JSX.Element {
       const res = await createContentAction({
         kind: createKind,
         title,
-        // Place the new object in the currently-selected section (if any) so it
-        // lands where the user is browsing; visibility defaults to the collection
-        // default (else private) in the service.
         collectionId: collectionId ?? undefined,
       });
       if (res.isSuccess) {
@@ -248,54 +288,37 @@ export function LibraryView(): React.JSX.Element {
   );
 
   return (
-    <div className="flex w-full gap-6">
-      <aside className="hidden w-60 shrink-0 border-r pr-4 md:block">
-        <CollectionTree
-          selectedCollectionId={collectionId}
-          onSelect={setCollectionId}
-        />
-      </aside>
-
-      <section className="min-w-0 flex-1">
-        <header className="mb-4 flex flex-wrap items-center gap-3">
-          <h1 className="mr-auto text-2xl font-semibold">Content library</h1>
-          <Button size="sm" onClick={() => setCreateKind("document")}>
-            New doc
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => setCreateKind("artifact")}
-          >
-            New artifact
-          </Button>
-        </header>
-
-        <LibraryFilters
+    <div className="w-full px-5 py-6 md:px-8 md:py-8">
+      <section className="mx-auto min-w-0 max-w-6xl">
+        <LibraryHeader
           search={search}
           onSearch={setSearch}
-          kind={kind}
-          onKind={setKind}
-          tag={tag}
-          onTag={setTag}
+          searchRef={searchRef}
+          onNewArtifact={() => setCreateKind("artifact")}
+          onNewDoc={() => setCreateKind("document")}
         />
 
-        <LibraryList items={visibleItems} loading={loading} error={error} />
+        <LibraryChips view={view} onView={setView} tag={tag} onTag={setTag} />
 
-        {/* Pagination (Epic #1059 completion): hidden once a short page signals
-            the end, while the first page loads, or on error. Appends under the
-            CURRENT filters; a filter change resets to page one. */}
+        <LibraryList
+          items={visibleItems}
+          loading={loading}
+          error={error}
+          onCreate={() => setCreateKind("document")}
+        />
+
+        {/* Pagination: hidden once a short page signals the end, while the first
+            page loads, or on error. */}
         {hasMore && !loading && !error && (
-          <div className="mt-4 flex justify-center">
-            <Button
+          <div className="mt-5 flex justify-center">
+            <button
               type="button"
-              size="sm"
-              variant="outline"
+              className={cn("mer-btn", loadingMore && "opacity-60")}
               disabled={loadingMore}
               onClick={loadMore}
             >
               {loadingMore ? "Loading…" : "Load more"}
-            </Button>
+            </button>
           </div>
         )}
       </section>

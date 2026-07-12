@@ -9,8 +9,9 @@
  * Gating: the AUTHORING surface is gated on the `atrium-content` capability here
  * (a non-holder is redirected to the dashboard). The data itself is additionally
  * bounded by `canView` inside every action the client calls, so the capability
- * gate is the feature gate, not the data gate. Self-contained `<main>` (matching
- * `/atrium/[id]/edit`) — no nested navigation chrome.
+ * gate is the feature gate, not the data gate. The Meridian shell
+ * (`atrium/layout.tsx`) provides the icon rail + workspace nav column; this page
+ * renders only the library main area.
  *
  * `dynamic = "force-dynamic"`: the library content depends on the caller's
  * session/visibility, so it must never be statically cached or shared.
@@ -36,9 +37,5 @@ export default async function AtriumLibraryPage(): Promise<React.JSX.Element> {
     redirect("/dashboard");
   }
 
-  return (
-    <main className="mx-auto max-w-6xl px-4 py-6">
-      <LibraryView />
-    </main>
-  );
+  return <LibraryView />;
 }

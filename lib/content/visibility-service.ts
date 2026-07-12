@@ -669,6 +669,19 @@ export const visibilityService = {
     ];
     if (filter.collectionId) filters.push(eq(o.collectionId, filter.collectionId));
     if (filter.kind) filters.push(eq(o.kind, filter.kind));
+    if (filter.owner === "shared") {
+      // "Shared with me": content the caller can see but does not own, that
+      // reached them through an explicit grant (group/private) rather than the
+      // public/internal firehose. Additive AND on top of `visiblePredicate`, so
+      // it can only narrow the already-authorized set. A guest owns nothing and
+      // has no personal grants, so it yields no rows.
+      if (principal.userId != null) {
+        filters.push(sql`${o.ownerUserId} <> ${principal.userId}`);
+        filters.push(sql`${o.visibilityLevel} IN ('group', 'private')`);
+      } else {
+        filters.push(sql`false`);
+      }
+    }
     if (filter.tag) {
       // Bound parameter (injection-safe); cap length so an oversized tag string
       // cannot be pushed to the driver on every list call. Array-overlap (`&&`

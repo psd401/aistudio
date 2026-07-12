@@ -119,6 +119,17 @@ export interface ListFilter {
    */
   query?: string;
   status?: "draft" | "published" | "archived";
+  /**
+   * Ownership scope for the "Shared with me" library filter. "shared" narrows to
+   * objects the caller can see but does NOT own and that reached them via an
+   * explicit grant (group/private visibility) — i.e. content someone shared with
+   * them, not the public/internal firehose. It is an ADDITIONAL restriction on
+   * top of the visibility gate (it can only narrow results, never widen them), so
+   * it is not a visibility rule and needs no `canView` mirroring. Omitted / "all"
+   * applies no ownership restriction; a guest (no user id) gets no rows under
+   * "shared".
+   */
+  owner?: "all" | "shared";
   limit?: number;
   offset?: number;
 }
