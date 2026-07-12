@@ -586,19 +586,19 @@ export class AgentPlatformStack extends cdk.Stack {
 
     // Atrium content API key (#1055 Path 2) for the psd-atrium skill. A scoped
     // `sk-` key holding content: scopes (content:read/create/update/
-    // publish_internal), minted in AI Studio → Settings → API Keys by an owner
-    // whose role grants those scopes (staff or administrator). Created EMPTY
-    // (Google/Canva pattern); populated after deploy with the raw key string:
-    //   aws secretsmanager put-secret-value \
-    //     --secret-id psd-agent/<env>/atrium-content-api-key \
-    //     --secret-string 'sk-...'
+    // publish_internal). Created empty, then AUTO-POPULATED on every deploy by
+    // the AtriumContentKeyBootstrapLambda custom resource (section 4g below),
+    // which idempotently mints the key for the migration-104 service user —
+    // DO NOT populate it manually; a hand-written value is detected as
+    // stale/unowned and replaced on the next deploy. Rotation: clear the secret
+    // value or revoke the api_keys row, then deploy.
     // Read (not written) by the AgentCore runtime, which already holds
     // GetSecretValue on psd-agent/${environment}/* (see the execution-role policy
     // below) — so no new IAM grant is required. The value is a RAW sk- string,
     // NOT JSON (the skill reads SecretString verbatim).
     const atriumContentApiKeySecret = new secretsmanager.Secret(this, 'AtriumContentApiKeySecret', {
       secretName: `psd-agent/${environment}/atrium-content-api-key`,
-      description: `Scoped sk- content API key for the psd-atrium skill (Atrium /api/v1/content access). Populate after minting a content-scoped key in AI Studio Settings → API Keys. Issue #1055.`,
+      description: `Scoped sk- content API key for the psd-atrium skill (Atrium /api/v1/content access). AUTO-POPULATED each deploy by AtriumContentKeyBootstrapLambda — do not set manually. Issue #1055.`,
     });
     cdk.Tags.of(atriumContentApiKeySecret).add('Environment', environment);
     cdk.Tags.of(atriumContentApiKeySecret).add('ManagedBy', 'cdk');
@@ -777,6 +777,159 @@ export class AgentPlatformStack extends cdk.Stack {
         }),
       })],
     });
+
+    // =====================================================================
+    // 4g. Atrium content API key — deploy-time zero-touch provisioning
+    // =====================================================================
+    // Removes the two manual steps PR #1195 left behind (mint an `sk-` key in
+    // AI Studio Settings + `aws secretsmanager put-secret-value`). This custom
+    // resource idempotently ensures `atriumContentApiKeySecret` (created above)
+    // holds a valid, active, content-scoped key owned by the service user seeded
+    // by migration 104 (`cognito_sub = service-account:psd-atrium-agent`).
+    //
+    //   - Reuses the repo's Aurora deploy pattern: the RDS Data API
+    //     (rds-data:ExecuteStatement/BatchExecuteStatement, same as the db-init
+    //     migration Lambda, plus BeginTransaction/CommitTransaction/
+    //     RollbackTransaction for the revoke+insert replace transaction).
+    //   - Argon2id-hashes the key with hash-wasm using the SAME params as the
+    //     app's argon2 loader, so `validateApiKey` authenticates it unchanged.
+    //     The DB stores only the hash; the plaintext goes to the secret and is
+    //     never logged.
+    //   - Idempotent: no-op when the secret already holds a valid key; re-mints
+    //     when the secret is empty/stale or the key is revoked/scope-drifted
+    //     (exact scope match — a scope REDUCTION also re-mints).
+    //   - Runs AFTER DatabaseStack (bin/infra.ts addDependency), so migration
+    //     104 (the service user) has been applied before it mints. That ordering
+    //     only holds for `cdk deploy --all`; a partial single-stack deploy
+    //     against a cluster missing migration 104 does NOT fail the stack — the
+    //     Lambda logs an error and reports Outcome=skipped-migration-pending
+    //     (a CFN FAILED would roll back, and could wedge, this entire shared
+    //     stack). The next full deploy self-heals via the per-deploy Nonce.
+    //
+    // Least-privilege role (ServiceRoleFactory): RDS Data API on the cluster +
+    // read the DB credential secret + read/write ONLY the content-key secret.
+    // Secrets are granted directly via additionalPolicies (not the factory's
+    // `secrets` array) to avoid the token double-wrap on cross-stack ARNs.
+    const atriumKeyBootstrapRole = ServiceRoleFactory.createLambdaRole(this, 'AtriumContentKeyBootstrapRole', {
+      functionName: 'psd-agent-atrium-key-bootstrap',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      secrets: [],
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              sid: 'AuroraDataApi',
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'rds-data:ExecuteStatement',
+                'rds-data:BatchExecuteStatement',
+                'rds-data:BeginTransaction',
+                'rds-data:CommitTransaction',
+                'rds-data:RollbackTransaction',
+              ],
+              resources: [props.databaseResourceArn],
+            }),
+            new iam.PolicyStatement({
+              sid: 'ReadDatabaseSecret',
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [props.databaseSecretArn],
+            }),
+            new iam.PolicyStatement({
+              sid: 'ReadWriteContentKeySecret',
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+              resources: [atriumContentApiKeySecret.secretArn],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const atriumKeyBootstrapLogGroup = new logs.LogGroup(this, 'AtriumContentKeyBootstrapLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-atrium-key-bootstrap-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const atriumKeyBootstrap = new lambda.Function(this, 'AtriumContentKeyBootstrapLambda', {
+      functionName: `psd-agent-atrium-key-bootstrap-${environment}`,
+      role: atriumKeyBootstrapRole,
+      runtime: AGENT_LAMBDA_RUNTIME,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'atrium-content-key-bootstrap'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'atrium-content-key-bootstrap');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      // 512 MB: Argon2id reserves 64 MB for the hash itself atop the Node/WASM
+      // baseline — 256 left thin headroom, and an OOM mid-mint is exactly the
+      // crash the transactional replace exists to survive. 5 min: dev Aurora
+      // auto-pauses to 0 ACU; a cold resume can exceed the old 2-min budget.
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(5),
+      architecture: lambda.Architecture.ARM_64,
+      logGroup: atriumKeyBootstrapLogGroup,
+      environment: {
+        DB_CLUSTER_ARN: props.databaseResourceArn,
+        DB_SECRET_ARN: props.databaseSecretArn,
+        DB_NAME: props.databaseName ?? 'aistudio',
+        CONTENT_KEY_SECRET_ID: atriumContentApiKeySecret.secretArn,
+        SERVICE_USER_COGNITO_SUB: 'service-account:psd-atrium-agent',
+        // Key name + scopes live as constants in the Lambda (single source of
+        // truth, unit-tested against ROLE_SCOPES.staff — see index.ts KEY_SCOPES).
+      },
+    });
+
+    const atriumKeyProvider = new customResources.Provider(this, 'AtriumContentKeyProvider', {
+      onEventHandler: atriumKeyBootstrap,
+    });
+    const atriumKeyProvisioner = new cdk.CustomResource(this, 'AtriumContentKeyProvisioner', {
+      serviceToken: atriumKeyProvider.serviceToken,
+      properties: {
+        // Bump on every synth so the custom resource's Update handler fires on
+        // EVERY deploy. The ensure logic is idempotent (a no-op when the key is
+        // valid), so re-running is cheap; the benefit is self-healing — a
+        // cleared secret or revoked key row is re-minted on the next deploy,
+        // which is exactly the documented rotation story.
+        Nonce: Date.now().toString(),
+      },
+    });
+    atriumKeyProvisioner.node.addDependency(atriumContentApiKeySecret);
 
     // =====================================================================
     // 5. IAM Roles
