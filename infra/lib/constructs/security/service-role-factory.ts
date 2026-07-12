@@ -83,6 +83,7 @@ export class ServiceRoleFactory {
       policies,
       environment: props.environment,
       maxSessionDuration: cdk.Duration.hours(1),
+      enablePermissionBoundary: props.enablePermissionBoundary,
     })
 
     return baseRole.role
@@ -163,6 +164,7 @@ export class ServiceRoleFactory {
       description: `Task role for ${props.taskName} ECS service`,
       policies,
       environment: props.environment,
+      enablePermissionBoundary: props.enablePermissionBoundary,
     })
 
     return baseRole.role
@@ -205,6 +207,7 @@ export class ServiceRoleFactory {
       description: `Execution role for ${props.taskName} ECS service`,
       policies,
       environment: props.environment,
+      enablePermissionBoundary: props.enablePermissionBoundary,
     })
 
     return baseRole.role
