@@ -33,6 +33,9 @@ import { requesterForUserId } from "@/lib/content/requester-from-auth";
 import { applyAgentEdit, readAgentDocMarkdown } from "@/lib/content/collab/apply-agent-edit";
 import { loadDocState } from "@/lib/content/collab/doc-state-store";
 import { screenAgentContent } from "@/lib/content/agent-screening";
+import { publishService } from "@/lib/content/publish-service";
+import { assertEditorDestination } from "@/lib/content/validators";
+import { ApprovalRequiredError, ValidationError } from "@/lib/content/errors";
 import { createLogger } from "@/lib/logger";
 
 /** Free-form attribution label stamped on the purple rail for chat-driven edits. */
@@ -167,6 +170,54 @@ function buildReadTool(
   });
 }
 
+/**
+ * Screen (§28.3) the agent-authored markdown and, if allowed, write it into the
+ * live document via the agent bridge. Shared by the workspace-bound edit tool AND
+ * the edit-by-id tool (ITEM 3) so both flow through the identical guardrails + PII
+ * screen and the same apply/transport-error handling — no divergence. The CALLER
+ * is responsible for confirming edit rights on `objectId` before calling this
+ * (the bound tool via bind-time canEdit; the by-id tool via a per-call canEdit).
+ */
+async function screenAndApplyDocEdit(
+  objectId: string,
+  markdown: string,
+  mode: "append" | "replace",
+  requestId: string,
+  log: ReturnType<typeof createLogger>
+): Promise<{ ok: true; mode: string } | { error: string }> {
+  if (!markdown.trim()) return { error: "No markdown provided to write." };
+  if (Buffer.byteLength(markdown, "utf8") > MAX_EDIT_BYTES) {
+    return { error: "That edit is too large to apply in one step." };
+  }
+  // §28.3: screen the agent-authored markdown BEFORE writing (same gate as the
+  // agent-bridge route). Only a positive guardrails detection refuses the write;
+  // a degraded/unavailable evaluation fails OPEN in the core.
+  const verdict = await screenAgentContent(markdown, objectId, requestId);
+  if (!verdict.allowed) {
+    log.warn("workspace doc edit blocked by screening", { objectId, reason: verdict.reason });
+    return {
+      error:
+        verdict.message ??
+        "That content was blocked by the safety screen and was not written.",
+    };
+  }
+  try {
+    await applyAgentEdit({ objectId, markdown, agentId: NEXUS_CHAT_AGENT_LABEL, mode });
+    return { ok: true, mode };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error("workspace doc edit apply failed", { objectId, error: message });
+    // Distinguish an unreachable live-collab listener (transient, retryable) from a
+    // genuine apply failure. Neither is a permission problem — edit access was
+    // confirmed before this call — so do not imply one.
+    return {
+      error: isCollabTransportError(message)
+        ? "The live document service is temporarily unreachable, so the edit was not applied. Please try again in a moment."
+        : "The edit could not be applied to the live document.",
+    };
+  }
+}
+
 /** Build the live document-edit tool (documents only). */
 function buildDocumentEditTool(
   objectId: string,
@@ -197,45 +248,9 @@ function buildDocumentEditTool(
     execute: async (args): Promise<{ ok: true; mode: string } | { error: string }> => {
       const markdown = typeof args?.markdown === "string" ? args.markdown : "";
       const mode = args?.mode === "replace" ? "replace" : "append";
-      if (!markdown.trim()) return { error: "No markdown provided to write." };
-      if (Buffer.byteLength(markdown, "utf8") > MAX_EDIT_BYTES) {
-        return { error: "That edit is too large to apply in one step." };
-      }
-      // §28.3: screen the agent-authored markdown BEFORE writing (same gate as the
-      // agent-bridge route). Only a positive guardrails detection refuses the
-      // write; a degraded/unavailable evaluation fails OPEN in the core.
-      const verdict = await screenAgentContent(markdown, objectId, requestId);
-      if (!verdict.allowed) {
-        log.warn("edit_workspace_document blocked by screening", {
-          objectId,
-          reason: verdict.reason,
-        });
-        return {
-          error:
-            verdict.message ??
-            "That content was blocked by the safety screen and was not written.",
-        };
-      }
-      try {
-        await applyAgentEdit({
-          objectId,
-          markdown,
-          agentId: NEXUS_CHAT_AGENT_LABEL,
-          mode,
-        });
-        return { ok: true, mode };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log.error("edit_workspace_document apply failed", { objectId, error: message });
-        // Distinguish an unreachable live-collab listener (transient, retryable)
-        // from a genuine apply failure. Neither is a permission problem — the
-        // edit tool is only bound for an editable document — so do not imply one.
-        return {
-          error: isCollabTransportError(message)
-            ? "The live document service is temporarily unreachable, so the edit was not applied. Please try again in a moment."
-            : "The edit could not be applied to the live document.",
-        };
-      }
+      // Edit rights were confirmed at bind time (this tool is only bound for an
+      // editable document); the shared helper screens + applies.
+      return screenAndApplyDocEdit(objectId, markdown, mode, requestId, log);
     },
   });
 }
@@ -320,6 +335,169 @@ function buildArtifactUpdateTool(
 }
 
 /**
+ * Run a `publish` / `unpublish` op on `objectId` through the SAME `publishService`
+ * gate humans use — canView (404-mask), canEdit, and the §26.4 public-destination
+ * approval gate. `req` is the delegated SESSION user, so the acting principal's
+ * permissions decide (matching the agent-bridge route). A public destination the
+ * user may not publish directly returns `queuedForApproval` — an HONEST pending
+ * status, never a bypass. `intranet` (internal reader) is the default destination.
+ */
+async function runWorkspacePublishOp(
+  op: "publish" | "unpublish",
+  objectId: string,
+  userId: number,
+  destinationRaw: string | undefined,
+  log: ReturnType<typeof createLogger>
+): Promise<Record<string, unknown>> {
+  const req = await requesterForUserId(userId);
+  if (!req) return { error: "Could not resolve your identity." };
+  let destination: ReturnType<typeof assertEditorDestination>;
+  try {
+    destination = assertEditorDestination(destinationRaw ?? "intranet", op);
+  } catch (err) {
+    return { error: err instanceof ValidationError ? err.message : "Unknown publish destination." };
+  }
+  try {
+    if (op === "publish") {
+      const result = await publishService.publish(req, objectId, { destination });
+      return { ok: true, published: true, destination, publicationId: result.publicationId };
+    }
+    const result = await publishService.unpublish(req, objectId, destination);
+    return { ok: true, unpublished: result.unpublished, destination };
+  } catch (err) {
+    // §26.4: a public destination this user may not publish/unpublish directly is a
+    // pending-approval outcome, not a failure — report it honestly so the model tells
+    // the user it is queued for review, never that it is live.
+    if (err instanceof ApprovalRequiredError) {
+      return {
+        queuedForApproval: true,
+        destination,
+        message:
+          "This destination requires administrator approval — the request was submitted for review. Tell the user it is pending approval, not live.",
+      };
+    }
+    log.warn(`workspace ${op} failed`, {
+      objectId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { error: `The ${op} could not be completed right now.` };
+  }
+}
+
+/** Build the publish/unpublish tool for the WORKSPACE-bound object (ITEM 2). */
+function buildPublishTool(
+  op: "publish" | "unpublish",
+  objectId: string,
+  userId: number,
+  log: ReturnType<typeof createLogger>
+): Tool {
+  const verb = op === "publish" ? "Publish" : "Unpublish";
+  return tool({
+    description:
+      `${verb} the document or artifact open in the workspace panel. ` +
+      `destination 'intranet' (default) is the internal reader everyone in the district can reach. ` +
+      `destination 'public_web' is the public site and REQUIRES administrator approval — if this user is not permitted, ` +
+      `the tool returns queuedForApproval:true and you MUST tell the user it is pending approval, not that it is live.`,
+    inputSchema: jsonSchema<{ destination?: "intranet" | "public_web" }>({
+      type: "object",
+      properties: {
+        destination: {
+          type: "string",
+          enum: ["intranet", "public_web"],
+          description: "intranet (default) = internal reader; public_web = public site (needs approval).",
+        },
+      },
+      additionalProperties: false,
+    }),
+    execute: async (args): Promise<Record<string, unknown>> =>
+      runWorkspacePublishOp(op, objectId, userId, args?.destination, log),
+  });
+}
+
+/** Build the find-documents tool (ITEM 3): list Atrium documents the user can edit. */
+function buildFindDocumentsTool(userId: number, log: ReturnType<typeof createLogger>): Tool {
+  return tool({
+    description:
+      "Find Atrium documents the current user can EDIT, so you can then edit one that is NOT the document open in the workspace panel. Optionally filter by a title search. Returns id, title and slug for each match — pass the id to edit_atrium_document.",
+    inputSchema: jsonSchema<{ query?: string }>({
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Optional case-insensitive title search." },
+      },
+      additionalProperties: false,
+    }),
+    execute: async (args): Promise<{ documents: Array<{ id: string; title: string; slug: string }> } | { error: string }> => {
+      const req = await requesterForUserId(userId);
+      if (!req) return { error: "Could not resolve your identity." };
+      const query = typeof args?.query === "string" && args.query.trim() ? args.query.trim().slice(0, 200) : undefined;
+      try {
+        // list is visibility-gated (listVisible) — it only returns objects the user
+        // can VIEW. Narrow to the ones they can EDIT with the same canEdit predicate
+        // the editor uses (never a bypass), and cap the payload.
+        const objs = await contentService.list(req, { kind: "document", ...(query ? { query } : {}) });
+        const documents = objs
+          .filter((o) => canEdit(req, o.ownerUserId))
+          .slice(0, 25)
+          .map((o) => ({ id: o.id, title: o.title, slug: o.slug }));
+        return { documents };
+      } catch (err) {
+        log.warn("find_atrium_documents failed", { error: err instanceof Error ? err.message : String(err) });
+        return { error: "The document list could not be loaded right now." };
+      }
+    },
+  });
+}
+
+/** Build the edit-existing-document tool (ITEM 3): edit any document the user can edit, by id/slug. */
+function buildEditDocumentByIdTool(
+  userId: number,
+  requestId: string,
+  log: ReturnType<typeof createLogger>
+): Tool {
+  return tool({
+    description:
+      "Edit an EXISTING Atrium document that is NOT the one open in the workspace panel, identified by its id or slug (use find_atrium_documents to get ids). Your markdown is written into that document's live content, attributed to the assistant. mode 'append' (default) adds to the end; 'replace' rewrites the whole document.",
+    inputSchema: jsonSchema<{ documentId: string; markdown: string; mode?: "append" | "replace" }>({
+      type: "object",
+      properties: {
+        documentId: { type: "string", description: "The id or slug of the document to edit." },
+        markdown: { type: "string", description: "The markdown to write into that document." },
+        mode: {
+          type: "string",
+          enum: ["append", "replace"],
+          description: "append (default) adds blocks at the end; replace rewrites the whole document.",
+        },
+      },
+      required: ["documentId", "markdown"],
+      additionalProperties: false,
+    }),
+    execute: async (args): Promise<{ ok: true; mode: string } | { error: string }> => {
+      const documentId = typeof args?.documentId === "string" ? args.documentId.trim() : "";
+      const markdown = typeof args?.markdown === "string" ? args.markdown : "";
+      const mode = args?.mode === "replace" ? "replace" : "append";
+      if (!documentId) return { error: "No document id or slug was provided." };
+      const req = await requesterForUserId(userId);
+      if (!req) return { error: "Could not resolve your identity." };
+      // Resolve + canView-gate (contentService.get 404-masks a non-viewable object),
+      // then require canEdit — the same predicates the editor/agent-bridge enforce.
+      let obj: Awaited<ReturnType<typeof contentService.get>>;
+      try {
+        obj = await contentService.get(req, documentId);
+      } catch {
+        return { error: "No document with that id or slug is available to you." };
+      }
+      if (obj.kind !== "document") {
+        return { error: "That item is not a document — only documents can be edited this way." };
+      }
+      if (!canEdit(req, obj.ownerUserId)) {
+        return { error: "You do not have edit access to that document." };
+      }
+      return screenAndApplyDocEdit(obj.id, markdown, mode, requestId, log);
+    },
+  });
+}
+
+/**
  * Build the workspace chat tool set for the object identified by `workspaceIdOrSlug`,
  * or `null` when there is no editable/viewable object to bind (chat proceeds with
  * no workspace tools — never an error).
@@ -364,12 +542,24 @@ export async function buildWorkspaceChatTools(params: {
         log
       );
     }
+    // ITEM 2: publish/unpublish the OPEN object through the human publish gate.
+    tools.publish_workspace_content = buildPublishTool("publish", obj.id, userId, log);
+    tools.unpublish_workspace_content = buildPublishTool("unpublish", obj.id, userId, log);
   }
+
+  // ITEM 3: let the agent find and edit OTHER Atrium documents the user can edit —
+  // not just the one bound via `?workspace=`. Both tools resolve their target and
+  // re-check canView/canEdit PER CALL (never a bypass), so they are safe to expose
+  // whenever a workspace is open, independent of the bound object's own editability.
+  tools.find_atrium_documents = buildFindDocumentsTool(userId, log);
+  tools.edit_atrium_document = buildEditDocumentByIdTool(userId, requestId, log);
 
   const editHint = editable
     ? kind === "document"
-      ? " You can edit it with the edit_workspace_document tool; your edits appear live in the panel."
-      : " You can update it with the update_workspace_artifact tool (provide the complete new code)."
+      ? " You can edit it with the edit_workspace_document tool; your edits appear live in the panel." +
+        " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content."
+      : " You can update it with the update_workspace_artifact tool (provide the complete new code)." +
+        " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content."
     : " It is read-only for this user.";
 
   // Escape the title via JSON.stringify: a content title is user-controlled and
@@ -380,7 +570,8 @@ export async function buildWorkspaceChatTools(params: {
     `A ${kind} titled ${safeTitle} is open in the workspace panel beside this chat. ` +
     `When the user asks you to change, add to, or fix it, act on THAT ${kind} rather than answering in chat only. ` +
     `Call read_workspace_content first to see its current content.` +
-    editHint;
+    editHint +
+    ` To work on a DIFFERENT Atrium document, use find_atrium_documents to locate it and edit_atrium_document to change it (only documents the user can edit).`;
 
   log.info("Workspace chat tools bound", {
     objectId: obj.id,

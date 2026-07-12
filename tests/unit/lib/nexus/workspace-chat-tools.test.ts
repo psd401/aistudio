@@ -22,17 +22,27 @@ jest.mock("@/lib/content/render/html-sanitize", () => ({ sanitizeHtml: jest.fn()
 
 const getMock = jest.fn();
 const createVersionMock = jest.fn();
+const listMock = jest.fn();
 const canEditMock = jest.fn();
 const requesterMock = jest.fn();
 const applyAgentEditMock = jest.fn();
 const readAgentDocMarkdownMock = jest.fn();
 const screenMock = jest.fn();
 const loadDocStateMock = jest.fn();
+const publishMock = jest.fn();
+const unpublishMock = jest.fn();
 
 jest.mock("@/lib/content/content-service", () => ({
   contentService: {
     get: (...a: unknown[]) => getMock(...a),
     createVersion: (...a: unknown[]) => createVersionMock(...a),
+    list: (...a: unknown[]) => listMock(...a),
+  },
+}));
+jest.mock("@/lib/content/publish-service", () => ({
+  publishService: {
+    publish: (...a: unknown[]) => publishMock(...a),
+    unpublish: (...a: unknown[]) => unpublishMock(...a),
   },
 }));
 jest.mock("@/lib/content/helpers", () => ({
@@ -56,6 +66,7 @@ jest.mock("@/lib/logger", () => ({
 }));
 
 import { buildWorkspaceChatTools } from "@/lib/nexus/workspace-chat-tools";
+import { ApprovalRequiredError } from "@/lib/content/errors";
 
 const REQ = { kind: "user", userId: 7, isAdmin: false };
 const DOC = { id: "doc-1", kind: "document", title: "My Doc", ownerUserId: 7, version: { bodyFormat: "markdown", bodyInline: "# Hi", versionNumber: 3 } };
@@ -73,7 +84,14 @@ beforeEach(() => {
   // Default: the live Yjs read succeeds (the authoritative on-screen text).
   readAgentDocMarkdownMock.mockResolvedValue("# Live doc");
   loadDocStateMock.mockResolvedValue({ markdown: "# Projection", revision: 5 });
+  publishMock.mockResolvedValue({ publicationId: "pub-1", publishedVersionId: "ver-1" });
+  unpublishMock.mockResolvedValue({ unpublished: true });
+  listMock.mockResolvedValue([]);
 });
+
+// The find/edit-by-id ITEM 3 tools are bound whenever a workspace is open (they
+// re-check permission per call), so every bound tool set now includes them.
+const ITEM3 = ["edit_atrium_document", "find_atrium_documents"];
 
 describe("buildWorkspaceChatTools", () => {
   it("returns null when the requester cannot be resolved", async () => {
@@ -88,26 +106,44 @@ describe("buildWorkspaceChatTools", () => {
     expect(result).toBeNull();
   });
 
-  it("binds ONLY the read tool when the caller cannot edit", async () => {
+  it("binds the read tool + the ITEM 3 find/edit tools when the caller cannot edit the OPEN object", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(false);
     const result = await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" });
-    expect(Object.keys(result!.tools).sort()).toEqual(["read_workspace_content"]);
+    // No edit/publish tool for the OPEN (read-only) object, but the per-call-gated
+    // find/edit-by-id tools are still available (the user may edit OTHER docs).
+    expect(Object.keys(result!.tools).sort()).toEqual([...ITEM3, "read_workspace_content"].sort());
     expect(result!.systemPromptFragment).toContain("read-only");
   });
 
-  it("binds read + edit_workspace_document for an editable document", async () => {
+  it("binds read + edit + publish/unpublish (+ ITEM 3) for an editable document", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(true);
     const result = await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" });
-    expect(Object.keys(result!.tools).sort()).toEqual(["edit_workspace_document", "read_workspace_content"]);
+    expect(Object.keys(result!.tools).sort()).toEqual(
+      [
+        ...ITEM3,
+        "edit_workspace_document",
+        "publish_workspace_content",
+        "read_workspace_content",
+        "unpublish_workspace_content",
+      ].sort()
+    );
   });
 
-  it("binds read + update_workspace_artifact for an editable artifact", async () => {
+  it("binds read + update_workspace_artifact + publish/unpublish (+ ITEM 3) for an editable artifact", async () => {
     getMock.mockResolvedValue(ART);
     canEditMock.mockReturnValue(true);
     const result = await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" });
-    expect(Object.keys(result!.tools).sort()).toEqual(["read_workspace_content", "update_workspace_artifact"]);
+    expect(Object.keys(result!.tools).sort()).toEqual(
+      [
+        ...ITEM3,
+        "publish_workspace_content",
+        "read_workspace_content",
+        "unpublish_workspace_content",
+        "update_workspace_artifact",
+      ].sort()
+    );
   });
 
   it("edit_workspace_document screens then applies via the agent bridge (append default)", async () => {
@@ -273,5 +309,111 @@ describe("buildWorkspaceChatTools", () => {
       body: null,
       bodyUnavailable: true,
     });
+  });
+
+  // --- ITEM 2: publish / unpublish the OPEN object ---------------------------
+
+  it("publish_workspace_content defaults to intranet and publishes via publishService", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.publish_workspace_content, {});
+    expect(publishMock).toHaveBeenCalledWith(REQ, "doc-1", { destination: "intranet" });
+    expect(out).toEqual({ ok: true, published: true, destination: "intranet", publicationId: "pub-1" });
+  });
+
+  it("publish_workspace_content returns an HONEST queued-for-approval status for a public destination needing approval (never a bypass)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    publishMock.mockRejectedValue(new ApprovalRequiredError("needs approval"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.publish_workspace_content, { destination: "public_web" })) as Record<string, unknown>;
+    expect(publishMock).toHaveBeenCalledWith(REQ, "doc-1", { destination: "public_web" });
+    expect(out.queuedForApproval).toBe(true);
+    expect(out.ok).toBeUndefined();
+    expect(out.published).toBeUndefined();
+    expect(String(out.message)).toMatch(/approval/i);
+  });
+
+  it("publish_workspace_content rejects an unknown destination without calling publishService", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.publish_workspace_content, { destination: "okf" })) as { error: string };
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(out.error).toBeDefined();
+  });
+
+  it("unpublish_workspace_content takes the object offline via publishService", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.unpublish_workspace_content, {});
+    expect(unpublishMock).toHaveBeenCalledWith(REQ, "doc-1", "intranet");
+    expect(out).toEqual({ ok: true, unpublished: true, destination: "intranet" });
+  });
+
+  // --- ITEM 3: find + edit an EXISTING document by id -----------------------
+
+  it("find_atrium_documents returns ONLY documents the user can edit (canEdit filter, never a bypass)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    listMock.mockResolvedValue([
+      { id: "d1", title: "Mine", slug: "mine", ownerUserId: 7 },
+      { id: "d2", title: "Theirs", slug: "theirs", ownerUserId: 99 },
+    ]);
+    // Editable only for the user's own doc (owner 7), not owner 99.
+    canEditMock.mockImplementation((_req: unknown, owner: number) => owner === 7);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.find_atrium_documents, { query: "m" })) as { documents: Array<{ id: string }> };
+    expect(listMock).toHaveBeenCalledWith(REQ, { kind: "document", query: "m" });
+    expect(out.documents).toEqual([{ id: "d1", title: "Mine", slug: "mine" }]);
+  });
+
+  it("edit_atrium_document edits a DIFFERENT document by id after re-checking canEdit", async () => {
+    getMock.mockResolvedValueOnce(DOC); // bind-time workspace object
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    // The target doc resolved per-call.
+    getMock.mockResolvedValueOnce({ id: "other-doc", kind: "document", ownerUserId: 7 });
+    const out = await exec(tools.edit_atrium_document, { documentId: "other-doc", markdown: "## Added" });
+    expect(getMock).toHaveBeenLastCalledWith(REQ, "other-doc");
+    expect(screenMock).toHaveBeenCalledWith("## Added", "other-doc", "r");
+    expect(applyAgentEditMock).toHaveBeenCalledWith(
+      expect.objectContaining({ objectId: "other-doc", markdown: "## Added", mode: "append" })
+    );
+    expect(out).toEqual({ ok: true, mode: "append" });
+  });
+
+  it("edit_atrium_document DENIES a non-editor (canEdit false) and does NOT apply", async () => {
+    getMock.mockResolvedValueOnce(DOC);
+    canEditMock.mockReturnValue(true); // editable workspace object → tools bind
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    // Target doc is viewable but NOT editable by this user.
+    getMock.mockResolvedValueOnce({ id: "other-doc", kind: "document", ownerUserId: 99 });
+    canEditMock.mockImplementation((_req: unknown, owner: number) => owner === 7);
+    const out = (await exec(tools.edit_atrium_document, { documentId: "other-doc", markdown: "hi" })) as { error: string };
+    expect(applyAgentEditMock).not.toHaveBeenCalled();
+    expect(out.error).toMatch(/edit access/i);
+  });
+
+  it("edit_atrium_document masks an unviewable target (contentService.get throws → no such doc)", async () => {
+    getMock.mockResolvedValueOnce(DOC);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    getMock.mockRejectedValueOnce(new Error("Content not found"));
+    const out = (await exec(tools.edit_atrium_document, { documentId: "secret", markdown: "hi" })) as { error: string };
+    expect(applyAgentEditMock).not.toHaveBeenCalled();
+    expect(out.error).toMatch(/no document with that id or slug/i);
+  });
+
+  it("edit_atrium_document refuses to edit an ARTIFACT (documents only)", async () => {
+    getMock.mockResolvedValueOnce(DOC);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    getMock.mockResolvedValueOnce({ id: "art-9", kind: "artifact", ownerUserId: 7 });
+    const out = (await exec(tools.edit_atrium_document, { documentId: "art-9", markdown: "hi" })) as { error: string };
+    expect(applyAgentEditMock).not.toHaveBeenCalled();
+    expect(out.error).toMatch(/not a document/i);
   });
 });
