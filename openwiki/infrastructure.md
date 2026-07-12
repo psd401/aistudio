@@ -40,6 +40,8 @@ AgentPlatformStack (depends on FrontendStack)
 - **Hosting**: ECS Fargate with Application Load Balancer
 - **Auto-scaling**: Based on CPU/memory utilization
 
+**ECS HOSTNAME injection**: ECS/Docker inject `HOSTNAME=<task-hostname>` at runtime, overriding Dockerfile `ENV HOSTNAME=0.0.0.0`. The entrypoint script (`/entrypoint.sh`) forces `HOSTNAME=0.0.0.0` to ensure the server binds loopback. Without this, the agent-bridge collab websocket (`ws://127.0.0.1:PORT/...`) cannot connect. The boot log shows `Local: http://localhost:3000` when healthy; a hostname/IP indicates loopback is broken. **Rule**: Never rely on image ENV for HOSTNAME; force it in entrypoint or code.
+
 **Dockerfile**: `/Dockerfile`
 
 ### Agent Platform (OpenClaw)
