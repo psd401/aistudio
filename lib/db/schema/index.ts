@@ -201,6 +201,13 @@ export * from "./tables/atrium-doc-comments";
 export * from "./tables/content-embed-links";
 
 // ============================================
+// Google Directory Group Sync (Epic #1202, Phase 0 / #1203)
+// ============================================
+export * from "./tables/groups";
+export * from "./tables/group-members";
+export * from "./tables/group-selection-rules";
+
+// ============================================
 // Relations
 // ============================================
 export * from "./relations";
