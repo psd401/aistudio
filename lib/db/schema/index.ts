@@ -206,6 +206,8 @@ export * from "./tables/content-embed-links";
 export * from "./tables/groups";
 export * from "./tables/group-members";
 export * from "./tables/group-selection-rules";
+// Phase 1 (#1204): group→role mappings that drive managed roles.
+export * from "./tables/group-role-mappings";
 
 // ============================================
 // Relations

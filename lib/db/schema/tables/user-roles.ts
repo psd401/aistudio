@@ -3,14 +3,25 @@
  * Many-to-many relationship between users and roles
  */
 
-import { integer, pgTable, serial, timestamp, unique } from "drizzle-orm/pg-core";
+import { integer, pgTable, serial, timestamp, unique, varchar } from "drizzle-orm/pg-core";
 import { users } from "./users";
 import { roles } from "./roles";
+
+/**
+ * How a user_roles row was granted (Epic #1202, Phase 1 / #1204).
+ * 'manual'     — an admin assigned the role by hand (also the value for every
+ *                pre-group-sync row). Reconciliation NEVER touches these.
+ * 'group-sync' — reconciliation granted it from a group→role mapping; it is the
+ *                only source reconciliation ever adds or removes.
+ */
+export type UserRoleSource = "manual" | "group-sync";
 
 export const userRoles = pgTable("user_roles", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }),
   roleId: integer("role_id").references(() => roles.id),
+  // Managed-role flag — see UserRoleSource. Defaults to 'manual' (migration 108).
+  source: varchar("source", { length: 20 }).$type<UserRoleSource>().default("manual").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 }, (table) => ({

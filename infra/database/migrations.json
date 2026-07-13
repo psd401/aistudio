@@ -101,6 +101,7 @@
     "104-atrium-agent-service-user.sql",
     "105-atrium-content-audit-details.sql",
     "106-groups.sql",
-    "107-groups-nav-entry.sql"
+    "107-groups-nav-entry.sql",
+    "108-group-role-mappings.sql"
   ]
 }
