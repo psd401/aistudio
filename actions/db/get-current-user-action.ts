@@ -7,7 +7,8 @@ import {
   updateUser,
   getRoleByName,
   addUserRole,
-  getUserRolesByCognitoSub
+  getUserRolesByCognitoSub,
+  reconcileUserManagedRoles
 } from "@/lib/db/drizzle"
 import { getServerSession } from "@/lib/auth/server-session"
 import { ActionState } from "@/types"
@@ -191,6 +192,22 @@ export async function getCurrentUserAction(): Promise<
 
     const updatedUser = await updateUser(user.id, updatePayload)
     user = updatedUser as unknown as SelectUser
+
+    // Reconcile managed (group-sync) roles from the user's current Google group
+    // memberships BEFORE reading roles back, so the response reflects any
+    // sync-driven grant/revoke. Manual role assignments are never touched. This
+    // is the canonical login-time hook (Epic #1202, Phase 1 / #1204). Non-fatal:
+    // a reconciliation failure must not break "who am I" — the user keeps their
+    // last-known roles and the hourly sync will reconcile on its next run.
+    try {
+      // user.email is typed nullable; reconciliation no-ops on an empty email.
+      await reconcileUserManagedRoles(user.id, user.email ?? "")
+    } catch (reconcileError) {
+      log.warn("Managed-role reconciliation failed (non-fatal)", {
+        userId: user.id,
+        error: reconcileError instanceof Error ? reconcileError.message : "Unknown error"
+      })
+    }
 
     // Get user's roles
     log.debug("Fetching user roles")

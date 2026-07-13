@@ -63,6 +63,11 @@ export {
   removeUserRole,
   updateUserRole,
   assignRoleToUser,
+  // Managed-role reconciliation (#1204)
+  computeManagedRoleDiff,
+  reconcileUserManagedRoles,
+  type ExistingUserRole,
+  type ManagedRoleDiff,
 } from "./user-roles";
 
 // ============================================
