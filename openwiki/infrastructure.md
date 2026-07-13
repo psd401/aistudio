@@ -202,6 +202,7 @@ Key skills:
 | `psd-last30days` | Keyless social/community research (HN, Reddit, arXiv, GitHub, Google News) with cited briefs (#1180) | `/infra/agent-image/skills/psd-last30days/` |
 | `psd-aistudio` | Live capability catalog from AI Studio's registries via `describe_capabilities` MCP meta-tool (#1173) | `/infra/agent-image/skills/psd-aistudio/` |
 | `psd-email-triage` | Configure smart email triage from chat (rules, escalation, digest) | `/infra/agent-image/skills/psd-email-triage/` |
+| `psd-atrium` | Read and write Atrium content — find/read/create/edit/archive/delete documents and artifacts, publish/unpublish over `/api/v1/content` (#1195) | `/infra/agent-image/skills/psd-atrium/` |
 
 ### MCP describe_capabilities Meta-Tool (#1100)
 
@@ -249,6 +250,31 @@ Per-user Canva access for AI Studio agents via the Canva Connect REST API (#1176
 **Known limits** (by design): No autofill/brand templates (Enterprise-gated), no in-design content editing (Connect REST API limitation).
 
 **Source**: `/docs/features/agent-canva-integration.md`
+
+### Atrium Agent Access (psd-atrium)
+
+The `psd-atrium` skill gives PSD AI Agents read/write access to Atrium content over `/api/v1/content`:
+
+- **Subcommands**: `find`, `read`, `create-document`, `create-artifact`, `edit`, `archive`, `delete`, `publish`, `unpublish`, `set-visibility`
+- **Auth**: Scoped `sk-` content key from `psd-agent/<env>/atrium-content-api-key` secret
+- **Version-based**: Reads return last saved version; writes create new versions
+- **Artifact code**: Automatically base64-encodes HTML/JS/CSS (transparent WAF bypass)
+
+**Source**: `/infra/agent-image/skills/psd-atrium/SKILL.md`
+
+### Atrium Content Key Bootstrap
+
+Zero-touch provisioning for the psd-atrium agent credential (#1197):
+
+1. **Migration 104** seeds a service user (`service-account:psd-atrium-agent`) with the staff role
+2. **`AtriumContentKeyProvisioner`** CloudFormation custom resource runs on every `cdk deploy`:
+   - Idempotently ensures the secret holds a valid, active, content-scoped key
+   - Revokes stale keys when re-minting (exactly one active service key)
+   - DB stores only Argon2id hash; plaintext goes to Secrets Manager (never logged)
+
+**Rotation**: Delete the secret value or revoke the `api_keys` row → next deploy re-mints.
+
+**Source**: `/infra/lambdas/atrium-content-key-bootstrap/index.ts`
 
 ### Harness Adapter
 
@@ -380,6 +406,7 @@ bunx cdk destroy AIStudio-FrontendStack-Dev    # Tear down
 | Capability Catalog | `/lib/capabilities/capability-catalog.ts` |
 | Email Triage Dispatcher | `/infra/lambdas/agent-triage-poll/dispatcher.ts` |
 | Email Triage Worker | `/infra/lambdas/agent-triage-poll/worker.ts` |
+| Atrium Key Bootstrap | `/infra/lambdas/atrium-content-key-bootstrap/index.ts` |
 | Skill Authoring Guide | `/docs/guides/agent-skill-authoring.md` |
 | Deploy Commands | `/infra/DEPLOYMENT_COMMANDS.md` |
 | Safety Checklist | `/infra/DEPLOYMENT_SAFETY_CHECKLIST.md` |
