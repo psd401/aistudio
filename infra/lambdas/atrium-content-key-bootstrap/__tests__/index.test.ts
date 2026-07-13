@@ -36,6 +36,9 @@ import {
   handler,
   KEY_SCOPES,
   KEY_NAME,
+  MCP_KEY_SCOPES,
+  MCP_KEY_NAME,
+  resolveKeyProfile,
   type ContentKeyOps,
   type ExistingKeyRow,
   type EnsureConfig,
@@ -185,6 +188,59 @@ describe('KEY_SCOPES drift guard (tethered to lib/api-keys/scopes.ts)', () => {
     for (const scope of KEY_SCOPES) {
       expect(ROLE_SCOPES.staff).toContain(scope);
     }
+  });
+});
+
+describe('MCP_KEY_SCOPES drift guard (Issue #1100 — tethered to lib/api-keys/scopes.ts)', () => {
+  it('is exactly [platform:read]', () => {
+    expect([...MCP_KEY_SCOPES]).toEqual(['platform:read']);
+  });
+
+  it('every minted scope is grantable to the staff role (the migration-108 role)', () => {
+    for (const scope of MCP_KEY_SCOPES) {
+      expect(ROLE_SCOPES.staff).toContain(scope);
+    }
+  });
+
+  it('holds NO content scopes — the MCP key is discovery-only, never a content credential', () => {
+    for (const scope of MCP_KEY_SCOPES) {
+      expect(scope.startsWith('content:')).toBe(false);
+    }
+  });
+
+  it('is disjoint from the atrium content KEY_SCOPES (distinct, non-overlapping profiles)', () => {
+    const contentSet = new Set(KEY_SCOPES);
+    for (const scope of MCP_KEY_SCOPES) {
+      expect(contentSet.has(scope)).toBe(false);
+    }
+  });
+});
+
+describe('resolveKeyProfile (KEY_PROFILE selector)', () => {
+  it('defaults to the atrium content profile when the env var is absent/empty/blank', () => {
+    for (const input of [undefined, '', '   ']) {
+      const profile = resolveKeyProfile(input);
+      expect(profile.keyName).toBe(KEY_NAME);
+      expect([...profile.scopes]).toEqual([...KEY_SCOPES]);
+    }
+  });
+
+  it("selects the mcp profile for KEY_PROFILE='mcp' (case/whitespace-insensitive)", () => {
+    for (const input of ['mcp', 'MCP', '  Mcp  ']) {
+      const profile = resolveKeyProfile(input);
+      expect(profile.keyName).toBe(MCP_KEY_NAME);
+      expect([...profile.scopes]).toEqual([...MCP_KEY_SCOPES]);
+    }
+  });
+
+  it("selects the atrium profile for an explicit KEY_PROFILE='atrium'", () => {
+    const profile = resolveKeyProfile('atrium');
+    expect(profile.keyName).toBe(KEY_NAME);
+    expect([...profile.scopes]).toEqual([...KEY_SCOPES]);
+  });
+
+  it('THROWS on an unknown profile (a misconfigured selector must fail the deploy loudly)', () => {
+    expect(() => resolveKeyProfile('bogus')).toThrow(/Unknown KEY_PROFILE 'bogus'/);
   });
 });
 
@@ -373,6 +429,105 @@ describe('ensureContentKey idempotency', () => {
     for (const line of lines) {
       expect(line).not.toContain(plaintext);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MCP profile: the same ensureContentKey idempotency contract, driven with the
+// platform:read scope set + the psd-aistudio service user. Proves the generalized
+// core is scope-set-agnostic (the atrium content scopes are NOT baked in).
+// ---------------------------------------------------------------------------
+describe('ensureContentKey — mcp profile (platform:read)', () => {
+  const MCP_CFG: EnsureConfig = {
+    serviceUserCognitoSub: 'service-account:psd-aistudio-agent',
+    keyName: MCP_KEY_NAME,
+    requiredScopes: [...MCP_KEY_SCOPES],
+  };
+
+  it('empty secret -> MINT (platform:read key stored, valid, correctly scoped)', async () => {
+    const ops = makeOps({ secret: null });
+    const outcome = await ensureContentKey(ops, MCP_CFG, noopLog);
+
+    expect(outcome).toBe('minted');
+    expect(ops.replaceActiveKey).toHaveBeenCalledTimes(1);
+    expect(ops.writeSecret).toHaveBeenCalledTimes(1);
+
+    const stored = ops.state.secret!;
+    expect(isValidKeyFormat(stored)).toBe(true);
+    const row = ops.state.keys.find((k) => k.keyPrefix === keyPrefixOf(stored))!;
+    expect(row).toBeDefined();
+    expect(row.userId).toBe(SERVICE_USER_ID);
+    expect(row.scopes).toEqual(['platform:read']);
+    // The MCP key must never carry a content scope.
+    expect(row.scopes.some((s) => s.startsWith('content:'))).toBe(false);
+    expect(await verifyKey(stored, row.keyHash)).toBe(true);
+  });
+
+  it('valid existing platform:read key -> NO-OP (no mint, no secret write)', async () => {
+    const raw = generateRawKey();
+    const hash = await hashKey(raw);
+    const ops = makeOps({
+      secret: raw,
+      keys: [
+        {
+          userId: SERVICE_USER_ID,
+          keyPrefix: keyPrefixOf(raw),
+          keyHash: hash,
+          scopes: [...MCP_KEY_SCOPES],
+          isActive: true,
+          revoked: false,
+        },
+      ],
+    });
+
+    const outcome = await ensureContentKey(ops, MCP_CFG, noopLog);
+    expect(outcome).toBe('noop');
+    expect(ops.replaceActiveKey).not.toHaveBeenCalled();
+    expect(ops.writeSecret).not.toHaveBeenCalled();
+    expect(ops.state.secret).toBe(raw);
+  });
+
+  it('stale/orphaned secret (no matching active row) -> RE-MINT', async () => {
+    const orphan = generateRawKey();
+    const ops = makeOps({ secret: orphan, keys: [] });
+
+    const outcome = await ensureContentKey(ops, MCP_CFG, noopLog);
+    expect(outcome).toBe('minted');
+    expect(ops.state.secret).not.toBe(orphan);
+    expect(isValidKeyFormat(ops.state.secret!)).toBe(true);
+  });
+
+  it('scope drift (a content-scoped row on the MCP secret) -> RE-MINT to exactly platform:read', async () => {
+    const raw = generateRawKey();
+    const hash = await hashKey(raw);
+    const ops = makeOps({
+      secret: raw,
+      keys: [
+        {
+          userId: SERVICE_USER_ID,
+          keyPrefix: keyPrefixOf(raw),
+          keyHash: hash,
+          // Wrong scope set entirely — exact-match semantics must re-mint.
+          scopes: ['platform:read', 'content:read'],
+          isActive: true,
+          revoked: false,
+        },
+      ],
+    });
+
+    const outcome = await ensureContentKey(ops, MCP_CFG, noopLog);
+    expect(outcome).toBe('minted');
+    const stored = ops.state.secret!;
+    const row = ops.state.keys.find((k) => k.keyPrefix === keyPrefixOf(stored) && k.isActive)!;
+    expect(row.scopes).toEqual(['platform:read']);
+  });
+
+  it('minted key uses the MCP key name (distinct from the atrium content key name)', async () => {
+    const ops = makeOps({ secret: null });
+    await ensureContentKey(ops, MCP_CFG, noopLog);
+    const call = ops.replaceActiveKey.mock.calls[0][0] as { name: string };
+    expect(call.name).toBe(MCP_KEY_NAME);
+    expect(call.name).not.toBe(KEY_NAME);
   });
 });
 
@@ -601,6 +756,50 @@ describe('handler (CloudFormation custom resource entry point)', () => {
     expect(res.Data?.Outcome).toBe('minted');
     expect(written).toHaveLength(1);
     expect(isValidKeyFormat(written[0])).toBe(true);
+  });
+
+  it('KEY_PROFILE=mcp mints the platform:read key with the MCP key name (env -> profile wiring)', async () => {
+    process.env.KEY_PROFILE = 'mcp';
+    let insertedName: string | undefined;
+    let insertedScopes: string | undefined;
+    rdsSend.mockImplementation(async (cmd: { constructor: { name: string }; input?: Record<string, unknown> }) => {
+      const name = cmd.constructor.name;
+      if (name === 'BeginTransactionCommand') return { transactionId: 'tx-mcp' };
+      if (name === 'ExecuteStatementCommand') {
+        const input = cmd.input as { sql?: string; parameters?: Array<{ name: string; value: { stringValue?: string } }> };
+        const sql = String(input.sql ?? '');
+        if (sql.includes('SELECT id FROM users')) return { records: [[{ longValue: 7 }]] };
+        if (sql.includes('INSERT INTO api_keys')) {
+          const byName = (n: string) => input.parameters?.find((p) => p.name === n)?.value.stringValue;
+          insertedName = byName('name');
+          insertedScopes = byName('scopes');
+        }
+        return { records: [] };
+      }
+      return {};
+    });
+    smSend.mockImplementation(async (cmd: { constructor: { name: string } }) => {
+      if (cmd.constructor.name === 'GetSecretValueCommand') {
+        throw new ResourceNotFoundException({ message: 'no version', $metadata: {} });
+      }
+      return {};
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = await handler({ ...BASE_EVENT, RequestType: 'Create' } as any);
+    expect(res.Data?.Outcome).toBe('minted');
+    expect(insertedName).toBe('psd-aistudio agent MCP (auto-provisioned)');
+    expect(JSON.parse(insertedScopes ?? '[]')).toEqual(['platform:read']);
+  });
+
+  it('an unknown KEY_PROFILE THROWS (CFN FAILED — loud deploy-author error)', async () => {
+    process.env.KEY_PROFILE = 'bogus';
+    rdsSend.mockResolvedValue({ records: [[{ longValue: 7 }]] });
+    smSend.mockRejectedValue(new ResourceNotFoundException({ message: 'no version', $metadata: {} }));
+    await expect(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      handler({ ...BASE_EVENT, RequestType: 'Create' } as any)
+    ).rejects.toThrow(/Unknown KEY_PROFILE 'bogus'/);
   });
 
   it('failures THROW (the Provider framework signals CFN FAILED only via a throw)', async () => {
