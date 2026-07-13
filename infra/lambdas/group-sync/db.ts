@@ -183,3 +183,96 @@ export async function deactivateGroupsNotIn(
   `;
   return rows.length;
 }
+
+export interface RoleReconcileResult {
+  /** group-sync user_roles rows inserted. */
+  added: number;
+  /** group-sync user_roles rows removed. */
+  removed: number;
+  /** distinct users whose role_version was bumped. */
+  usersChanged: number;
+}
+
+/**
+ * Bulk managed-role reconciliation (Epic #1202, Phase 1 / #1204).
+ *
+ * The set-based, all-users mirror of the app's per-user reconciler
+ * (lib/db/drizzle/user-roles.ts#reconcileUserManagedRoles). This Lambda cannot
+ * import @/lib, so the two paths share a documented contract, NOT code (same
+ * boundary that forces the duplicated sync core / normalize helpers). The
+ * invariants are identical:
+ *   - computed = (user, role) for every ACTIVE group→role mapping the user is a
+ *     transitive member of (matched by lowercased email);
+ *   - add computed roles the user lacks in ANY source, tagged 'group-sync';
+ *   - remove only 'group-sync' rows no longer computed — 'manual' rows are never
+ *     eligible, so a hand-assigned role always survives;
+ *   - bump role_version once per changed user (no churn on a no-op).
+ *
+ * Runs in ONE transaction so a reader never sees a half-applied role set. The
+ * computed set is materialized into an ON COMMIT DROP temp table so the add and
+ * remove passes see an identical snapshot.
+ */
+export async function reconcileManagedRoles(
+  sql: postgres.Sql
+): Promise<RoleReconcileResult> {
+  return sql.begin(async (tx) => {
+    await tx`
+      CREATE TEMP TABLE _computed_roles ON COMMIT DROP AS
+      SELECT DISTINCT u.id AS user_id, grm.role_id
+        FROM group_role_mappings grm
+        JOIN groups g
+          ON lower(g.group_email) = grm.group_email
+         AND g.is_active = true
+        JOIN group_members gm ON gm.group_id = g.id
+        JOIN users u ON lower(u.email) = lower(gm.member_email)
+    `;
+
+    // Add computed roles the user does not already hold (any source). ON CONFLICT
+    // DO NOTHING guards a race with the login-time reconciler on the unique
+    // (user_id, role_id) index; RETURNING then reports only rows actually inserted.
+    const added = await tx<{ user_id: number }[]>`
+      INSERT INTO user_roles (user_id, role_id, source)
+      SELECT c.user_id, c.role_id, 'group-sync'
+        FROM _computed_roles c
+       WHERE NOT EXISTS (
+         SELECT 1 FROM user_roles ur
+          WHERE ur.user_id = c.user_id AND ur.role_id = c.role_id
+       )
+      ON CONFLICT (user_id, role_id) DO NOTHING
+      RETURNING user_id
+    `;
+
+    // Remove group-sync rows no longer computed. Manual rows are never matched.
+    const removed = await tx<{ user_id: number }[]>`
+      DELETE FROM user_roles ur
+       WHERE ur.source = 'group-sync'
+         AND NOT EXISTS (
+           SELECT 1 FROM _computed_roles c
+            WHERE c.user_id = ur.user_id AND c.role_id = ur.role_id
+         )
+      RETURNING ur.user_id
+    `;
+
+    const changedUserIds = [
+      ...new Set([
+        ...added.map((r) => r.user_id),
+        ...removed.map((r) => r.user_id),
+      ]),
+    ];
+
+    if (changedUserIds.length > 0) {
+      await tx`
+        UPDATE users
+           SET role_version = COALESCE(role_version, 0) + 1,
+               updated_at = now()
+         WHERE id = ANY(${changedUserIds}::int[])
+      `;
+    }
+
+    return {
+      added: added.length,
+      removed: removed.length,
+      usersChanged: changedUserIds.length,
+    };
+  });
+}
