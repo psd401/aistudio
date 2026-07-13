@@ -11,7 +11,7 @@
  * Reconciliation (lib/db/drizzle/user-roles.ts + the sync Lambda) reads these to
  * compute the set of 'group-sync' roles each user should hold.
  *
- * See migration 108-group-role-mappings.sql.
+ * See migration 109-group-role-mappings.sql.
  */
 
 import { index, integer, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";

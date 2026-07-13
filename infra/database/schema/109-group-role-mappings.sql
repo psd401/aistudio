@@ -1,4 +1,4 @@
--- Migration 108: group→role mappings + managed-role flag (Epic #1202, Phase 1 / #1204)
+-- Migration 109: group→role mappings + managed-role flag (Epic #1202, Phase 1 / #1204)
 --
 -- Google Directory group membership (synced in Phase 0 / #1203) now drives AI
 -- Studio roles automatically. Two additive changes land here:

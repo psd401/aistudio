@@ -78,7 +78,9 @@ mint the key to an accountable staff/service identity. True agent-identity write
 `describe_capabilities` meta-tool over `/api/mcp` with a `platform:read`-scoped
 key (from `AISTUDIO_MCP_API_KEY` or Secrets Manager via
 `AISTUDIO_MCP_API_KEY_SECRET_ID`) so the agent always knows what AI Studio can
-do — it deliberately does not execute content actions.
+do — it deliberately does not execute content actions. That `platform:read` key
+is **zero-touch provisioned** exactly like the content key (see below) — the two
+were previously conflated; the MCP key now has its own secret + service user.
 
 **Gotcha:** `AGENT_INTERNAL_API_KEY` is a pre-shared key for the internal agent
 endpoints — it is **not scope-aware and cannot authenticate to `/api/mcp`**.
@@ -134,11 +136,40 @@ rotation trigger.)
 `APP_BASE_URL` supplies the `/api/v1/content` base. (`AISTUDIO_CONTENT_API_KEY`
 may be set directly for local/dev instead of the secret.)
 
+#### The psd-aistudio MCP key (`platform:read`, Issue #1100)
+
+The `psd-aistudio` discovery skill's `platform:read` key is provisioned by the
+**same bootstrap Lambda body under a second profile** (`KEY_PROFILE=mcp`) — it is
+**not** a reuse of the content key:
+
+1. **Migration `108-aistudio-mcp-service-user.sql`** seeds a *separate* service
+   user (`cognito_sub = service-account:psd-aistudio-agent`, email
+   `aistudio-mcp-agent-service@psd401.net`, display name **"PSD Agent
+   (aistudio MCP)"**) with the **staff** role (staff grants `platform:read`).
+2. **The `AistudioMcpKeyProvisioner` custom resource** — a second instance of the
+   bootstrap Lambda (`psd-agent-aistudio-mcp-key-bootstrap-<env>`, `KEY_PROFILE=mcp`)
+   — idempotently ensures `psd-agent/{env}/aistudio-mcp-api-key` holds a valid,
+   active `sk-` key scoped to **exactly `platform:read`** (no content scopes)
+   owned by that service user. Same idempotency / rotation / skip-on-missing-
+   migration / per-deploy-Nonce self-heal contract as the content key.
+3. **Runtime env**: `AISTUDIO_MCP_API_KEY_SECRET_ID` points the skill at that
+   secret; `AISTUDIO_MCP_URL` (derived from `APP_BASE_URL`) is the `/api/mcp`
+   endpoint. Before #1100 this secret id was never wired, so the skill's
+   `resolveApiKey()` exited 11 ("no credential configured").
+
+> **Why a separate secret AND a separate service user (not a shared one):** the
+> bootstrap's `replaceActiveKey` revokes **every** active key the service user
+> owns before minting the new one (so exactly one active service key exists per
+> user). If the content key and the MCP key shared a service user, the two
+> bootstrap custom resources would revoke each other's key on every deploy. Two
+> profiles → two secrets → two service users → two independent credentials.
+
 **The only remaining human steps:**
 
-1. **`cdk deploy`** — applies migration 104 and runs the key-bootstrap custom
-   resource (DatabaseStack deploys before AgentPlatformStack, so the service user
-   exists before the key is minted).
+1. **`cdk deploy`** — applies migrations 104 (atrium content service user) and
+   108 (psd-aistudio MCP service user) and runs BOTH key-bootstrap custom
+   resources (DatabaseStack deploys before AgentPlatformStack, so the service
+   users exist before the keys are minted).
 2. **Rebuild + redeploy the agent image** — the agent discovers the skill only
    after `infra/agent-image` is rebuilt and the AgentCore runtime redeployed.
 
@@ -189,6 +220,7 @@ Boot-log check: `Local: http://localhost:3000` = healthy;
 |---|---|
 | 401 from `/api/mcp` using `AGENT_INTERNAL_API_KEY` | Wrong credential class — mint an `sk-` key (see gotcha above) |
 | `psd-atrium` exits 11 (unauthorized / not configured) | The content key isn't in the secret. It is auto-provisioned by the `AtriumContentKeyProvisioner` custom resource on `cdk deploy` — check its CloudWatch logs (`/aws/lambda/psd-agent-atrium-key-bootstrap-<env>`). A re-deploy re-mints. (`AISTUDIO_CONTENT_API_KEY` may be set directly for local/dev.) |
+| `psd-aistudio` exits 11 (no credential configured) | The `platform:read` MCP key isn't in the secret. It is auto-provisioned by the `AistudioMcpKeyProvisioner` custom resource on `cdk deploy` — check its CloudWatch logs (`/aws/lambda/psd-agent-aistudio-mcp-key-bootstrap-<env>`); confirm migration 108 applied. A re-deploy re-mints. (`AISTUDIO_MCP_API_KEY` may be set directly for local/dev.) |
 | `psd-atrium publish` returns `approval_required` | Public destination without `content:publish_public` — expected; relay the message so the user knows it's queued |
 | 403 `INSUFFICIENT_SCOPE` on a content tool | Key lacks the scope in the table above |
 | `publish_content` returns `approval_required` | Public destination — needs human/admin `content:publish_public`; internal destinations publish directly |
