@@ -49,6 +49,32 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeOrigin } from "@/lib/content/artifact-sandbox-config";
 
 type FrameLoadStatus = "loading" | "loaded" | "error";
+/**
+ * Whether the framed host has acknowledged the render:
+ *  - "pending"  : code posted (or being retried); no ack yet.
+ *  - "rendered" : the host acked `{ ok: true }` — the artifact is live.
+ *  - "error"    : the host acked `{ ok: false }`, OR no ack ever arrived within
+ *                 the retry budget (the "waiting forever" guard).
+ */
+type RenderStatus = "pending" | "rendered" | "error";
+
+/**
+ * Re-post the artifact code every RENDER_RETRY_MS until the host acks. The very
+ * first post can miss: an SSR-rendered reader iframe may finish loading BEFORE
+ * React hydrates and attaches `onLoad`, so the single onLoad-driven post never
+ * fires (the "Waiting for artifact…" host placeholder then sticks forever). The
+ * host has no retry of its own, so the parent drives redelivery until the render
+ * acknowledgement arrives — at which point retries stop (the host re-renders
+ * idempotently, but we never post more than the first ack requires).
+ */
+const RENDER_RETRY_MS = 300;
+/**
+ * How many posts to attempt before giving up and showing an explicit error
+ * instead of waiting forever. 40 × 300ms ≈ 12s — generous enough that a slow
+ * host page still acks first, but bounded so a genuinely dead sandbox surfaces a
+ * failure notice rather than a perpetual "Waiting for artifact…".
+ */
+const RENDER_MAX_ATTEMPTS = 40;
 
 export interface ArtifactSandboxProps {
   /**
@@ -104,6 +130,14 @@ export function ArtifactSandbox({
   // Track whether the iframe load succeeded or failed (e.g. CSP blocked or
   // sandbox origin returned 404) so we can show a meaningful error notice.
   const [frameStatus, setFrameStatus] = useState<FrameLoadStatus>("loading");
+  // Track the host's render acknowledgement so we can (a) stop re-posting once
+  // the artifact is live and (b) surface an explicit error instead of leaving the
+  // host stuck on "Waiting for artifact…" when a render never lands.
+  const [renderStatus, setRenderStatus] = useState<RenderStatus>("pending");
+  // A ref mirror of "the host has acked ok" that the retry interval reads without
+  // being re-created on every render (the setInterval closure would otherwise see
+  // a stale `renderStatus`).
+  const renderedRef = useRef(false);
 
   /**
    * Post the current code to the framed host. Reads `code` and `origin` via
@@ -130,26 +164,63 @@ export function ArtifactSandbox({
     frame.contentWindow?.postMessage({ type: "atrium-render", code }, "*");
   }, [code, origin]);
 
-  // Optional: listen for the host's render acknowledgement for observability /
-  // future error surfacing. We validate the event origin strictly and ignore
-  // anything else; we do not act on the payload beyond bookkeeping so a forged
-  // message cannot influence app behavior.
+  // Listen for the host's render acknowledgement. We validate the event origin
+  // strictly and ignore anything else. The ack carries only a boolean outcome
+  // (never artifact data), so acting on it cannot be influenced by frame content
+  // beyond "did the render succeed" — an `ok: false` (a throw inside the host's
+  // render) flips us to the error notice; an `ok: true` marks the artifact live
+  // and stops the retry loop below.
   useEffect(() => {
     if (!origin) return;
     const onMessage = (event: MessageEvent) => {
       if (event.origin !== origin) return; // strict origin check
       if (!isRenderAck(event.data)) return;
-      // Intentionally no state mutation from frame content; reserved for future
-      // non-trust-bearing telemetry. Kept minimal to avoid trusting frame input.
+      if (event.data.ok) {
+        renderedRef.current = true;
+        setRenderStatus("rendered");
+      } else {
+        setRenderStatus("error");
+      }
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [origin]);
 
+  // Drive code delivery: post immediately, then re-post on an interval until the
+  // host acks (renderedRef) or the attempt budget is exhausted. This does NOT
+  // depend on the iframe's `onLoad` — an SSR reader frame can finish loading
+  // before hydration, so onLoad may never fire; posting on a timer (the frame's
+  // contentWindow already exists and buffers nothing, but the host, once loaded,
+  // acts on the next post) closes that race. Re-runs when the frame flips to
+  // "loaded" (post again right after load) and short-circuits once rendered/errored.
+  useEffect(() => {
+    if (!origin) return; // fail closed: nothing posted without a sandbox origin
+    if (frameStatus === "error") return; // the frame itself failed to load
+    if (renderStatus !== "pending") return; // already rendered or errored out
+    postCode(); // immediate attempt (covers the already-loaded SSR frame)
+    let attempts = 0;
+    const timer = setInterval(() => {
+      if (renderedRef.current) {
+        clearInterval(timer);
+        return;
+      }
+      attempts += 1;
+      if (attempts >= RENDER_MAX_ATTEMPTS) {
+        clearInterval(timer);
+        // Only escalate if still pending — a late ack could have resolved us.
+        setRenderStatus((prev) => (prev === "pending" ? "error" : prev));
+        return;
+      }
+      postCode();
+    }, RENDER_RETRY_MS);
+    return () => clearInterval(timer);
+  }, [origin, frameStatus, renderStatus, postCode]);
+
   const handleLoad = useCallback(() => {
+    // Marking the frame loaded re-runs the retry effect, which posts again right
+    // after load; posting is idempotent on the host (it replaces its subtree).
     setFrameStatus("loaded");
-    postCode();
-  }, [postCode]);
+  }, []);
 
   const handleError = useCallback(() => {
     setFrameStatus("error");
@@ -184,7 +255,11 @@ export function ArtifactSandbox({
     );
   }
 
-  if (frameStatus === "error") {
+  // Explicit failure surface (instead of an endless "Waiting for artifact…"):
+  // either the iframe itself failed to load (`frameStatus`), or the host never
+  // acknowledged a render within the retry budget / acked a render failure
+  // (`renderStatus`).
+  if (frameStatus === "error" || renderStatus === "error") {
     return (
       <div
         className={className}
@@ -203,8 +278,9 @@ export function ArtifactSandbox({
           textAlign: "center",
         }}
       >
-        Artifact preview could not load. The sandbox host may be unreachable or
-        blocked by the browser&apos;s content security policy.
+        Artifact preview could not load. The sandbox host may be unreachable,
+        blocked by the browser&apos;s content security policy, or the artifact
+        took too long to render.
       </div>
     );
   }
@@ -227,7 +303,12 @@ export function ArtifactSandbox({
       onError={handleError}
       data-testid="artifact-sandbox-frame"
       className={className}
-      style={{ width: "100%", minHeight: 360, border: 0, background: "#fff" }}
+      // Height is intentionally NOT set inline here: an inline min-height beats
+      // the per-surface class rule, which is exactly what made every surface a
+      // tiny 360px box. Each caller's className owns the height now
+      // (.atrium-artifact-preview / -viewport / -reader-frame / .atrium-embed-frame
+      // / .mer-artifact-thumb-frame). Keep only the frame reset here.
+      style={{ width: "100%", border: 0, background: "#fff" }}
     />
   );
 }
