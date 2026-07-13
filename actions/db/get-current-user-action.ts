@@ -184,11 +184,24 @@ export async function getCurrentUserAction(): Promise<
     }
 
     // Build update payload conditionally
-    const updatePayload: { firstName?: string; lastName?: string; lastSignInAt: Date } = {
+    const updatePayload: { firstName?: string; lastName?: string; email?: string; lastSignInAt: Date } = {
       lastSignInAt: new Date()
     }
     if (userGivenName) updatePayload.firstName = userGivenName
     if (userFamilyName) updatePayload.lastName = userFamilyName
+    // Refresh users.email from the session when it changed (Workspace rename):
+    // group_members and the hourly BULK reconciler join on users.email, so a
+    // stale value makes the bulk pass compute zero mapped roles and revoke what
+    // the login-time reconciler grants — hourly flapping until the email is
+    // fresh again (#1222 review). Session establishment is the earliest point
+    // the new address is known; between the rename and this next sign-in the
+    // bulk pass may drop managed roles once (documented residual).
+    if (userEmail && userEmail.toLowerCase() !== (user.email ?? "").toLowerCase()) {
+      log.info("Refreshing user email from session (directory rename)", {
+        userId: user.id
+      })
+      updatePayload.email = userEmail
+    }
 
     const updatedUser = await updateUser(user.id, updatePayload)
     user = updatedUser as unknown as SelectUser

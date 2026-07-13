@@ -84,6 +84,38 @@ function toIso(value: Date | string | null): string | null {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
+type SyncPollOutcome = "completed" | "timeout" | "unmounted"
+
+/**
+ * Poll the sync summary until the run SETTLES, not merely starts: each group
+ * commits its last_synced_at independently mid-run, so "advanced past the
+ * pre-trigger snapshot" fires on the FIRST group of a multi-group run. Only
+ * report completion once an advanced last-run holds still for a full poll
+ * interval (no group finished in ~4s ⇒ the loop is done or effectively done).
+ */
+async function pollUntilRunSettles(
+  before: number,
+  isMounted: () => boolean
+): Promise<SyncPollOutcome> {
+  const deadline = Date.now() + 120_000
+  let lastSeen = before
+  let advanced = false
+  while (isMounted() && Date.now() < deadline) {
+    await sleep(4000)
+    if (!isMounted()) return "unmounted"
+    const poll = await getGroupSyncSummaryAction()
+    if (!poll.isSuccess) continue
+    const current = toMillis(poll.data.lastRunAt)
+    if (current > lastSeen) {
+      advanced = true
+      lastSeen = current
+      continue
+    }
+    if (advanced) return "completed"
+  }
+  return isMounted() ? "timeout" : "unmounted"
+}
+
 /**
  * Shared action-runner for the tab components: wraps a server action in the
  * page transition, toasts success (optional title) or failure, and refreshes
@@ -133,10 +165,15 @@ export function GroupsAdmin({ initialData, initialError }: GroupsAdminProps) {
 
   const lastRunAt = initialData?.summary.lastRunAt ?? null
 
+  // Ref, not state: setState is async, so two clicks in the same tick could
+  // both pass an isSyncing check before either re-render (#1222 review).
+  const syncInFlightRef = useRef(false)
+
   const handleSyncNow = async () => {
-    // Set BEFORE the trigger round trip: a second click during the server-action
-    // await must not dispatch a second Lambda invocation (#1204 review).
-    if (isSyncing) return
+    // Guard BEFORE the trigger round trip: a second click during the server-
+    // action await must not dispatch a second Lambda invocation (#1204 review).
+    if (syncInFlightRef.current) return
+    syncInFlightRef.current = true
     setIsSyncing(true)
     // Snapshot the current last-run so we can detect when the async run advances it.
     const before = toMillis(lastRunAt)
@@ -144,48 +181,28 @@ export function GroupsAdmin({ initialData, initialError }: GroupsAdminProps) {
     const trigger = await triggerGroupSyncAction()
     if (!mountedRef.current) return
     if (!trigger.isSuccess) {
+      syncInFlightRef.current = false
       setIsSyncing(false)
       toast({ title: "Error", description: trigger.message, variant: "destructive" })
       return
     }
     toast({ title: "Sync started", description: "Running the directory sync…" })
 
-    // Poll until the run SETTLES, not merely starts: each group commits its
-    // last_synced_at independently mid-run, so "advanced past `before`" fires on
-    // the FIRST group of a multi-group run. Only report complete once an
-    // advanced last-run holds still for a full poll interval (no group finished
-    // in ~4s ⇒ the loop is done or effectively done).
-    const deadline = Date.now() + 120_000
-    let lastSeen = before
-    let advanced = false
-    while (mountedRef.current && Date.now() < deadline) {
-      await sleep(4000)
-      if (!mountedRef.current) return
-      const poll = await getGroupSyncSummaryAction()
-      if (!poll.isSuccess) continue
-      const current = toMillis(poll.data.lastRunAt)
-      if (current > lastSeen) {
-        advanced = true
-        lastSeen = current
-        continue
-      }
-      if (advanced) {
-        setIsSyncing(false)
-        toast({ title: "Sync complete", description: "Membership refreshed." })
-        router.refresh()
-        return
-      }
-    }
-    if (mountedRef.current) {
-      setIsSyncing(false)
-      toast({
-        title: "Sync still running",
-        description: "Taking longer than usual — showing what has finished so far.",
-      })
-      // Refresh here too: covers the all-groups-fail run, where last_synced_at
-      // never advances but the failed-count banner has data worth surfacing.
-      router.refresh()
-    }
+    const outcome = await pollUntilRunSettles(before, () => mountedRef.current)
+    if (outcome === "unmounted") return
+    syncInFlightRef.current = false
+    setIsSyncing(false)
+    toast(
+      outcome === "completed"
+        ? { title: "Sync complete", description: "Membership refreshed." }
+        : {
+            title: "Sync still running",
+            description: "Taking longer than usual — showing what has finished so far.",
+          }
+    )
+    // Timeout refreshes too: an all-groups-fail run never advances
+    // last_synced_at, but its failed-count banner has data worth surfacing.
+    router.refresh()
   }
 
   if (!initialData) {

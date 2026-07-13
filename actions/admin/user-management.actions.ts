@@ -15,7 +15,7 @@ import type { ActionState } from "@/types"
 import { getServerSession } from "@/lib/auth/server-session"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
-import { eq, sql, desc, count, inArray, ilike, or, and, type SQL } from "drizzle-orm"
+import { eq, sql, desc, count, inArray, notInArray, ilike, or, and, type SQL } from "drizzle-orm"
 import { users, userRoles, roles } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { promptUsageEvents } from "@/lib/db/schema/tables/prompt-usage-events"
@@ -555,16 +555,31 @@ export async function updateUser(
           }
         }
 
-        // Delete existing role assignments
-        await tx.delete(userRoles).where(eq(userRoles.userId, userId))
+        // Managed (source='group-sync') rows are INVISIBLE to this editor
+        // (#1204): never deleted (reconciliation would silently re-add them on
+        // the next pass) and never re-inserted as 'manual' (which would exempt
+        // them from auto-revocation forever). This editor owns manual rows only.
+        const submittedRoleIds = roleList.map((role) => role.id)
 
-        // Insert new role assignments
-        await tx.insert(userRoles).values(
-          roleList.map((role) => ({
-            userId,
-            roleId: role.id,
-          }))
+        // Delete MANUAL role assignments no longer in the submitted set
+        await tx.delete(userRoles).where(
+          and(
+            eq(userRoles.userId, userId),
+            eq(userRoles.source, "manual"),
+            submittedRoleIds.length > 0
+              ? notInArray(userRoles.roleId, submittedRoleIds)
+              : sql`TRUE`
+          )
         )
+
+        // Insert submitted roles the user lacks entirely (source defaults to
+        // 'manual'); roles already held — manual OR group-sync — keep their source.
+        if (submittedRoleIds.length > 0) {
+          await tx
+            .insert(userRoles)
+            .values(submittedRoleIds.map((roleId) => ({ userId, roleId })))
+            .onConflictDoNothing({ target: [userRoles.userId, userRoles.roleId] })
+        }
       },
       "updateUser-transaction"
     )

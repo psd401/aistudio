@@ -10,7 +10,7 @@
  * @see https://orm.drizzle.team/docs/transactions
  */
 
-import { eq, inArray, and, sql } from "drizzle-orm";
+import { eq, ne, inArray, notInArray, and, sql } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   users,
@@ -121,10 +121,7 @@ export async function updateUserRoles(
                 eq(userRoles.userId, userId),
                 eq(userRoles.source, "manual"),
                 submittedIds.length > 0
-                  ? sql`${userRoles.roleId} NOT IN (${sql.join(
-                      submittedIds.map((id) => sql`${id}`),
-                      sql`, `
-                    )})`
+                  ? notInArray(userRoles.roleId, submittedIds)
                   : sql`TRUE`
               )
             )
@@ -511,7 +508,7 @@ export async function reconcileUserManagedRoles(
                 .where(
                   and(
                     eq(userRoles.roleId, adminRole.id),
-                    sql`${userRoles.userId} <> ${userId}`
+                    ne(userRoles.userId, userId)
                   )
                 );
               const guarded = applyLastAdminGuard(

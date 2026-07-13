@@ -1,6 +1,6 @@
 import { executeQuery, executeTransaction } from './drizzle-client';
 import { users, userRoles, roles } from './schema';
-import { eq, inArray, sql, and } from 'drizzle-orm';
+import { eq, inArray, notInArray, sql, and } from 'drizzle-orm';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
 /**
@@ -124,10 +124,7 @@ export async function updateUserRoles(userId: number, roleNames: string[]): Prom
               eq(userRoles.userId, userId),
               eq(userRoles.source, 'manual'),
               submittedIds.length > 0
-                ? sql`${userRoles.roleId} NOT IN (${sql.join(
-                    submittedIds.map(id => sql`${id}`),
-                    sql`, `
-                  )})`
+                ? notInArray(userRoles.roleId, submittedIds)
                 : sql`TRUE`
             )
           )
