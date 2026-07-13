@@ -1,0 +1,29 @@
+{
+  "commands": {
+    "lint": "bunx eslint .",
+    "typecheck": "bun run typecheck",
+    "test": "bunx jest --config=jest.config.ci.js --testPathPattern groups"
+  },
+  "e2e_required": false,
+  "e2e_flows": ["admin-groups"],
+  "strictness": "block",
+  "reviewers": ["chatgpt-codex-connector[bot]", "gemini-code-assist[bot]", "copilot-pull-request-reviewer[bot]"],
+  "commit_learnings": true,
+  "auto_worktree": true,
+  "screenshot_dir": ".verification",
+  "baseline": { "allow_preexisting_failures": true },
+  "review_agents": {
+    "alwaysOn": {
+      "architecture-strategist": true,
+      "code-simplicity-reviewer": true,
+      "pattern-recognition-specialist": true,
+      "correctness-reviewer": true,
+      "adversarial-reviewer": true,
+      "security-reviewer": true
+    },
+    "languageReviewers": {
+      "typescript-reviewer": true,
+      "sql-reviewer": true
+    }
+  }
+}
