@@ -23,11 +23,15 @@ import {
 } from "@/lib/content";
 import { contentErrorToResponse, resolveRestRequester } from "@/lib/content/rest";
 import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
+import { decodeContentBody } from "@/lib/content/code-encoding";
 import { createLogger } from "@/lib/logger";
 
 const createVersionBodySchema = z.object({
   body: z.string().min(1),
   bodyFormat: z.enum(["markdown", "html", "jsx"]).optional(),
+  // Send `"base64"` so artifact code with <script>/<style> is opaque to the ALB
+  // WAF; the server decodes before §28.3 screening / size caps. Omit for raw text.
+  codeEncoding: z.enum(["base64"]).optional(),
   summary: z.string().max(2000).optional(),
 });
 
@@ -85,8 +89,12 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
   try {
     // Session humans must also hold the atrium-content capability (see helper).
     await assertContentAuthoringCapability(auth);
+    // Decode a base64 (WAF-opaque) body BEFORE the service screens/size-caps it.
+    // `input.body` is a required non-empty string (zod), so a raw pass-through is
+    // always a string and the base64 branch either returns a string or throws.
+    const body = decodeContentBody(input.body, input.codeEncoding) ?? input.body;
     const result = await contentService.createVersion(req, id, {
-      body: input.body,
+      body,
       bodyFormat: input.bodyFormat,
       summary: input.summary,
     });

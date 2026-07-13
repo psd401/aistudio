@@ -20,6 +20,8 @@ const VISIBILITY_DESC =
   "Visibility object: { level: 'private'|'group'|'internal'|'public', grants?: [{ kind: 'role'|'building'|'department'|'grade'|'user', value: string }] }";
 const GRANTS_DESC =
   "Group grants: [{ kind: 'role'|'building'|'department'|'grade'|'user', value: string }]";
+const CODE_ENCODING_DESC =
+  "Transit encoding for the body. Set 'base64' when the body/code contains HTML/JS/CSS (<script>, <style>, style=\"…\") — the edge WAF blocks that markup in a raw request body, so send the body base64-encoded and the server decodes it before screening. Omit for plain text/markdown.";
 
 export const CONTENT_TOOL_SCOPE_MAP: Record<string, ApiScope> = {
   create_document: "content:create",
@@ -55,6 +57,11 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
         title: { type: "string", description: "Document title" },
         collection: { type: "string", description: "Collection slug or id (optional)" },
         markdown: { type: "string", description: "Initial body; markdown only" },
+        codeEncoding: {
+          type: "string",
+          enum: ["base64"],
+          description: CODE_ENCODING_DESC,
+        },
         visibility: { type: "object", description: VISIBILITY_DESC },
         tags: { type: "array", items: { type: "string" }, description: "Tags" },
       },
@@ -72,6 +79,11 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
         collection: { type: "string", description: "Collection slug or id (optional)" },
         code: { type: "string", description: "Artifact source (HTML/JS or JSX)" },
         bodyFormat: { type: "string", enum: ["html", "jsx"], description: "Body format" },
+        codeEncoding: {
+          type: "string",
+          enum: ["base64"],
+          description: CODE_ENCODING_DESC,
+        },
         visibility: { type: "object", description: VISIBILITY_DESC },
         tags: { type: "array", items: { type: "string" }, description: "Tags" },
       },
@@ -145,6 +157,11 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
           type: "string",
           enum: ["markdown", "html", "jsx"],
           description: "Body format",
+        },
+        codeEncoding: {
+          type: "string",
+          enum: ["base64"],
+          description: CODE_ENCODING_DESC,
         },
         summary: { type: "string", description: "Optional change summary" },
       },

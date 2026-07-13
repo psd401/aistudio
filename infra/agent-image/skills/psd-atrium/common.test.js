@@ -242,6 +242,38 @@ test('parseList rejects a value-less flag (exit 1) instead of silently dropping 
   expect(code).toBe(1);
 });
 
+test('encodeContentBody base64-encodes UTF-8 and round-trips', () => {
+  const text = '<script>alert("héllo — 日本")</script>';
+  const encoded = common.encodeContentBody(text);
+  // Canonical base64: no XSS-signature characters for the WAF to match.
+  expect(encoded).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+  expect(encoded).not.toContain('<');
+  // Canonical base64 (re-decode → re-encode is a fixed point).
+  expect(Buffer.from(encoded, 'base64').toString('base64')).toBe(encoded);
+  expect(Buffer.from(encoded, 'base64').toString('utf8')).toBe(text);
+});
+
+test('withEncodedBody encodes a present body and sets codeEncoding', () => {
+  const out = common.withEncodedBody({ body: '<style>b{}</style>', bodyFormat: 'html' });
+  expect(out.codeEncoding).toBe('base64');
+  expect(out.bodyFormat).toBe('html');
+  expect(Buffer.from(out.body, 'base64').toString('utf8')).toBe('<style>b{}</style>');
+});
+
+test('withEncodedBody is a no-op when there is no body (metadata-only create)', () => {
+  const input = { kind: 'document', title: 'T', body: undefined };
+  const out = common.withEncodedBody(input);
+  expect(out.body).toBeUndefined();
+  expect(out.codeEncoding).toBeUndefined();
+  expect(out).toEqual(input);
+});
+
+test('withEncodedBody leaves an empty-string body unencoded (no codeEncoding)', () => {
+  const out = common.withEncodedBody({ body: '' });
+  expect(out.codeEncoding).toBeUndefined();
+  expect(out.body).toBe('');
+});
+
 test('parseGrants parses kind:value pairs', () => {
   expect(common.parseGrants('role:staff,building:GHS')).toEqual([
     { kind: 'role', value: 'staff' },

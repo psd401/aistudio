@@ -80,4 +80,58 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     const body = await res.json()
     expect(body?.data?.id).toBeTruthy()
   })
+
+  test('codeEncoding base64 -> a <script>/<style> artifact round-trips as the DECODED code', async ({
+    page,
+  }) => {
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    // Real artifact code — exactly the markup the edge WAF's CrossSiteScripting_BODY
+    // rule blocks in a RAW body (and which this base64 path makes opaque in transit).
+    const code =
+      '<html><head><style>body{background:#0af;font-family:sans-serif}</style></head>' +
+      '<body><h1>Chart</h1><script>document.body.dataset.ready="1";console.log("hi")</script></body></html>'
+    const encoded = Buffer.from(code, 'utf8').toString('base64')
+
+    const res = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'artifact',
+        title: 'e2e base64 script artifact',
+        bodyFormat: 'html',
+        codeEncoding: 'base64',
+        body: encoded,
+      },
+    })
+    expect(res.status()).toBe(201)
+    const created = await res.json()
+    const id = created?.data?.id
+    expect(id).toBeTruthy()
+    // The server DECODED the base64 before storing: the inline artifact body is the
+    // real <script>/<style> code, NOT the base64 wrapper. This is the whole contract
+    // (screening + storage operate on decoded content). Small artifacts store inline.
+    expect(created?.data?.version?.bodyInline).toBe(code)
+
+    // And it reads back the same decoded code via GET (what the reader/sandbox loads).
+    const read = await page.request.get(`/api/v1/content/${id}`)
+    expect(read.ok()).toBeTruthy()
+    const fetched = await read.json()
+    expect(fetched?.data?.version?.bodyInline).toBe(code)
+  })
+
+  test('codeEncoding base64 with an invalid body -> 400 (never silently stored)', async ({
+    page,
+  }) => {
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    const res = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'artifact',
+        title: 'e2e invalid base64 artifact',
+        bodyFormat: 'html',
+        codeEncoding: 'base64',
+        // Contains characters outside the base64 alphabet — a raw <script> that a
+        // mis-set flag would otherwise decode to garbage.
+        body: '<script>not base64</script>',
+      },
+    })
+    expect(res.status()).toBe(400)
+  })
 })

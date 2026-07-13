@@ -33,6 +33,7 @@ import {
   contentDeepLink,
   resolveCollectionId,
 } from "@/lib/content/surface-helpers";
+import { decodeContentBody } from "@/lib/content/code-encoding";
 import { createLogger } from "@/lib/logger";
 
 const listQuerySchema = z.object({
@@ -51,6 +52,10 @@ const createBodySchema = z.object({
   collectionId: z.string().min(1).optional(),
   body: z.string().optional(),
   bodyFormat: z.enum(["markdown", "html", "jsx"]).optional(),
+  // Transit encoding for `body`. Send `"base64"` so artifact code containing
+  // <script>/<style> is opaque to the ALB WAF's CrossSiteScripting_BODY rule; the
+  // server decodes it here BEFORE §28.3 screening / size caps. Omit for raw text.
+  codeEncoding: z.enum(["base64"]).optional(),
   visibility: restVisibilitySchema.optional(),
   tags: z.array(z.string()).optional(),
 });
@@ -127,6 +132,10 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     // Session humans must ALSO hold the atrium-content capability (scope alone is
     // the wildcard ["*"] for a session); sk-/OIDC callers are gated by scope.
     await assertContentAuthoringCapability(auth);
+    // Decode a base64 (WAF-opaque) body to its real content BEFORE the service's
+    // §28.3 screening + size caps run — screening always sees decoded content.
+    // Invalid base64 / over-cap throws a ValidationError (mapped to 400 below).
+    const body = decodeContentBody(input.body, input.codeEncoding);
     const collectionId = await resolveCollectionId(input.collectionId);
     const created = await contentService.create(
       req,
@@ -134,7 +143,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
         kind: input.kind,
         title: input.title,
         collectionId,
-        body: input.body,
+        body,
         bodyFormat: input.bodyFormat,
         visibility: input.visibility,
         tags: input.tags,

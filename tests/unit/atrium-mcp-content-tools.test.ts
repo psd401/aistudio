@@ -108,4 +108,16 @@ describe("Atrium MCP content tools registry", () => {
     // Optional: `query` must not be in required.
     expect(tool?.inputSchema.required ?? []).not.toContain("query");
   });
+
+  it("the body-carrying create/version tools expose an optional codeEncoding: base64", () => {
+    // WAF-opaque transit: an artifact whose code contains <script>/<style> must be
+    // sendable base64-encoded so the edge WAF's CrossSiteScripting_BODY rule can't
+    // match it. Every tool that carries a body offers the flag; it stays optional
+    // (a bodyless / plain-text call omits it).
+    for (const name of ["create_document", "create_artifact", "create_version"]) {
+      const tool = CONTENT_MCP_TOOLS.find((t) => t.name === name);
+      expect(tool?.inputSchema.properties.codeEncoding?.enum).toEqual(["base64"]);
+      expect(tool?.inputSchema.required ?? []).not.toContain("codeEncoding");
+    }
+  });
 });
