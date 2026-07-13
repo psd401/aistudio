@@ -22,8 +22,10 @@ jest.mock("@/lib/content/render/html-sanitize", () => ({ sanitizeHtml: jest.fn()
 
 const getMock = jest.fn();
 const createVersionMock = jest.fn();
+const deleteMock = jest.fn();
 const listMock = jest.fn();
 const canEditMock = jest.fn();
+const canDeleteMock = jest.fn();
 const requesterMock = jest.fn();
 const applyAgentEditMock = jest.fn();
 const readAgentDocMarkdownMock = jest.fn();
@@ -37,6 +39,7 @@ jest.mock("@/lib/content/content-service", () => ({
   contentService: {
     get: (...a: unknown[]) => getMock(...a),
     createVersion: (...a: unknown[]) => createVersionMock(...a),
+    delete: (...a: unknown[]) => deleteMock(...a),
     list: (...a: unknown[]) => listMock(...a),
   },
 }));
@@ -51,6 +54,7 @@ jest.mock("@/lib/content/collab/snapshot-before-publish", () => ({
 }));
 jest.mock("@/lib/content/helpers", () => ({
   canEdit: (...a: unknown[]) => canEditMock(...a),
+  canDelete: (...a: unknown[]) => canDeleteMock(...a),
 }));
 jest.mock("@/lib/content/requester-from-auth", () => ({
   requesterForUserId: (...a: unknown[]) => requesterMock(...a),
@@ -70,7 +74,11 @@ jest.mock("@/lib/logger", () => ({
 }));
 
 import { buildWorkspaceChatTools } from "@/lib/nexus/workspace-chat-tools";
-import { ApprovalRequiredError } from "@/lib/content/errors";
+import {
+  ApprovalRequiredError,
+  ConflictError,
+  ForbiddenError,
+} from "@/lib/content/errors";
 
 const REQ = { kind: "user", userId: 7, isAdmin: false };
 const DOC = { id: "doc-1", kind: "document", title: "My Doc", ownerUserId: 7, version: { bodyFormat: "markdown", bodyInline: "# Hi", versionNumber: 3 } };
@@ -82,6 +90,10 @@ const exec = (t: unknown, args: unknown = {}) => (t as ExecTool).execute(args, {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // canDelete mirrors canEdit by default (identical for a session user), so tests
+  // that toggle canEditMock also drive the delete-tool bind. Override canDeleteMock
+  // alone to exercise the deliberate canDelete-vs-canEdit decoupling.
+  canDeleteMock.mockImplementation((...a: unknown[]) => canEditMock(...a));
   requesterMock.mockResolvedValue(REQ);
   screenMock.mockResolvedValue({ allowed: true });
   applyAgentEditMock.mockResolvedValue(undefined);
@@ -92,6 +104,7 @@ beforeEach(() => {
   unpublishMock.mockResolvedValue({ unpublished: true });
   snapshotBeforePublishMock.mockResolvedValue(undefined);
   listMock.mockResolvedValue([]);
+  deleteMock.mockResolvedValue({ id: "doc-1", slug: "my-doc", title: "My Doc", kind: "document", versionsDeleted: 3 });
 });
 
 // The find/edit-by-id ITEM 3 tools are bound whenever a workspace is open (they
@@ -128,6 +141,7 @@ describe("buildWorkspaceChatTools", () => {
     expect(Object.keys(result!.tools).sort()).toEqual(
       [
         ...ITEM3,
+        "delete_workspace_content",
         "edit_workspace_document",
         "publish_workspace_content",
         "read_workspace_content",
@@ -143,12 +157,59 @@ describe("buildWorkspaceChatTools", () => {
     expect(Object.keys(result!.tools).sort()).toEqual(
       [
         ...ITEM3,
+        "delete_workspace_content",
         "publish_workspace_content",
         "read_workspace_content",
         "unpublish_workspace_content",
         "update_workspace_artifact",
       ].sort()
     );
+  });
+
+  it("does NOT bind delete_workspace_content when canDelete is false even if canEdit is true (decoupling)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    // Simulate a future world where edit widened (e.g. collaborator grants) but the
+    // requester is not the owner/admin — delete must NOT be offered.
+    canDeleteMock.mockReturnValue(false);
+    const result = await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" });
+    expect(Object.keys(result!.tools)).not.toContain("delete_workspace_content");
+    // Edit is still bound (canEdit true) — only delete is gated off.
+    expect(Object.keys(result!.tools)).toContain("edit_workspace_document");
+  });
+
+  it("delete_workspace_content deletes via the service (surface 'ui') and reports success", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.delete_workspace_content)) as Record<string, unknown>;
+    expect(deleteMock).toHaveBeenCalledWith(REQ, "doc-1", { surface: "ui" });
+    expect(out.ok).toBe(true);
+    expect(out.deleted).toBe(true);
+    expect(out.title).toBe("My Doc");
+  });
+
+  it("delete_workspace_content surfaces the live-publication refusal (409) so the model relays it", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    deleteMock.mockRejectedValue(
+      new ConflictError("Cannot delete published content — unpublish from intranet first, then delete.")
+    );
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.delete_workspace_content)) as Record<string, unknown>;
+    expect(out.blocked).toBe(true);
+    expect(out.reason).toBe("published");
+    expect(String(out.message)).toContain("unpublish");
+  });
+
+  it("delete_workspace_content returns a permission error (not blocked) on a Forbidden", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    deleteMock.mockRejectedValue(new ForbiddenError("Not permitted to delete this content"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.delete_workspace_content)) as Record<string, unknown>;
+    expect(out.blocked).toBeUndefined();
+    expect(String(out.error)).toMatch(/permission|owner|administrator/i);
   });
 
   it("edit_workspace_document screens then applies via the agent bridge (append default)", async () => {

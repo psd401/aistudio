@@ -9,6 +9,7 @@
  */
 
 export { contentService } from "./content-service";
+export type { DeletedContentSummary } from "./content-service";
 export { versionService } from "./version-service";
 export { visibilityService } from "./visibility-service";
 export { collectionService } from "./collection-service";
@@ -67,7 +68,9 @@ export {
 
 export {
   assertCanCreate,
+  assertCanDelete,
   assertCanEdit,
+  canDelete,
   canEdit,
   canPublishPublic,
   hasPublishPublicScope,

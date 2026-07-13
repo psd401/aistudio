@@ -223,6 +223,52 @@ export function assertCanEdit(req: Requester, ownerUserId: number): void {
 }
 
 /**
+ * Whether a requester may HARD-DELETE an object: the OWNER or an admin (and, for
+ * agent callers, holding the `content:delete` scope). Deliberately its OWN
+ * predicate rather than reusing `canEdit`, for two reasons:
+ *
+ *  1. Delete is irreversible; keeping it strictly owner-or-admin means a future
+ *     widening of `canEdit` (e.g. a "group collaborator can edit" grant) can never
+ *     silently hand out delete. The two authorities evolve independently.
+ *  2. It keys the agent authorization off the DELETE scope (`content:delete`), not
+ *     the UPDATE scope — so a key granted delete-but-not-update (or vice versa) is
+ *     evaluated against the correct scope, never the wrong one.
+ *
+ * Autonomous agents have no `userId`; they own via the configured system user, so
+ * ownership is checked against `systemUserId()`. A delegated agent may delete only
+ * content its human owns AND only with the delete scope.
+ */
+export function canDelete(req: Requester, ownerUserId: number): boolean {
+  const principal = principalOf(req);
+  if (principal.isAdmin) return true;
+
+  if (req.kind === "agent-autonomous") {
+    // Owns via the system user; must also hold the delete scope. A missing
+    // system-user config denies rather than throws (read/permission path).
+    const sysId = systemUserIdOrNull();
+    return (
+      sysId != null &&
+      ownerUserId === sysId &&
+      scopesOf(req).includes("content:delete")
+    );
+  }
+
+  if (principal.userId != null && principal.userId === ownerUserId) {
+    if (req.kind === "user") return true;
+    // Delegated agents additionally need the delete scope.
+    return scopesOf(req).includes("content:delete");
+  }
+  return false;
+}
+
+/** Throw `ForbiddenError` unless the requester may delete the object. */
+export function assertCanDelete(req: Requester, ownerUserId: number): void {
+  if (!canDelete(req, ownerUserId)) {
+    throw new ForbiddenError("Not permitted to delete this content");
+  }
+}
+
+/**
  * §26.4 — only humans (admins or holders of the `content.publish_public`
  * capability) and delegated agents the human granted `content:publish_public`
  * may publish publicly. Autonomous agents never hold it. Phase 0 exposes this

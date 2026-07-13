@@ -23,6 +23,7 @@
  *   node run.js edit --id <id> --body <text> [--mode replace|append]
  *                    [--body-format markdown|html|jsx] [--summary <s>]
  *   node run.js archive --id <id>
+ *   node run.js delete --id <id>
  *   node run.js set-visibility --id <id> --level private|group|internal|public
  *                    [--grants role:staff,building:GHS]
  *
@@ -80,7 +81,9 @@ function usage() {
       '                  [--visibility <level>] [--grants k:v,...]',
       '  edit --id <id> --body <text> [--mode replace|append]',
       '       [--body-format markdown|html|jsx] [--summary <s>]',
-      '  archive --id <id>   (soft-remove; no hard delete in Phase 1)',
+      '  archive --id <id>   (soft-remove: status -> archived, stays findable)',
+      '  delete  --id <id>   (HARD delete: permanent; owner/admin only; refused',
+      '                       while published — unpublish everywhere first)',
       '  set-visibility --id <id> --level private|group|internal|public',
       '                 [--grants role:staff,building:GHS]',
       '',
@@ -302,14 +305,27 @@ async function main() {
 
     case 'archive': {
       // Soft-remove: flip status to "archived" via the metadata PATCH (needs
-      // content:update, which the content key holds). Atrium Phase 1 has no hard
-      // delete by design, so this is how you clean up throwaway content you made.
-      // Archiving also takes any live publication offline (server-side).
+      // content:update, which the content key holds). Reversible and still findable
+      // under `find --status archived`. Archiving also takes any live publication
+      // offline (server-side). Use `delete` for permanent removal.
       const id = requireStr(args, 'id', 'id');
       const { payload } = await restFetch('PATCH', `/${encodeURIComponent(id)}`, {
         body: { status: 'archived' },
       });
       emit({ ...payload, archived: true });
+      return;
+    }
+
+    case 'delete': {
+      // HARD delete: permanently removes the object and every version/body. Needs
+      // content:delete (which the content key holds) AND you must OWN it (the key
+      // deletes as its owner) — a non-owner object comes back as an error you
+      // relay verbatim. Refused with a clear message while the object is published
+      // anywhere: delete NEVER auto-unpublishes — run `unpublish` first, then
+      // `delete`. Irreversible: there is no undo and `find` will no longer show it.
+      const id = requireStr(args, 'id', 'id');
+      const { payload } = await restFetch('DELETE', `/${encodeURIComponent(id)}`);
+      emit({ ...payload, deleted: true });
       return;
     }
 

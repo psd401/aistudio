@@ -1,7 +1,8 @@
 /**
  * Atrium Content Item Endpoint (Issue #1055, Phase 5 §23)
- * GET   /api/v1/content/:id — object + current version (permission-checked)
- * PATCH /api/v1/content/:id — update metadata (title, tags, collection, status)
+ * GET    /api/v1/content/:id — object + current version (permission-checked)
+ * PATCH  /api/v1/content/:id — update metadata (title, tags, collection, status)
+ * DELETE /api/v1/content/:id — hard-delete the object (owner/admin, no live pub)
  *
  * Mirrors the MCP get_content + update_content tools.
  */
@@ -117,6 +118,51 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId, p
     void recordContentAudit({
       req,
       action: "update",
+      surface: "rest",
+      objectId: id,
+      outcome: "error",
+      error: err instanceof Error ? err.message : String(err),
+      requestId,
+    });
+    return contentErrorToResponse(err, requestId);
+  }
+});
+
+// ============================================
+// DELETE — hard-delete the object
+// ============================================
+
+export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
+  const scopeError = requireScope(auth, "content:delete", requestId);
+  if (scopeError) return scopeError;
+
+  const log = createLogger({ requestId, route: "api.v1.content.delete" });
+
+  const id = params.id;
+  if (!id) {
+    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Missing content id");
+  }
+
+  const resolved = await resolveRestRequester(auth, requestId);
+  if ("response" in resolved) return resolved.response;
+  const { req } = resolved;
+
+  try {
+    // Session humans must also hold the atrium-content capability (see helper).
+    await assertContentAuthoringCapability(auth);
+    // The service writes the transactional SUCCESS audit (with title/kind/owner
+    // details) inside the delete tx, so we deliberately do NOT recordContentAudit
+    // on success here — only on the error path below, matching PATCH.
+    const deleted = await contentService.delete(req, id, { surface: "rest" });
+    log.info("Deleted content via REST", {
+      objectId: deleted.id,
+      versionsDeleted: deleted.versionsDeleted,
+    });
+    return createApiResponse({ data: deleted, meta: { requestId } }, requestId);
+  } catch (err) {
+    void recordContentAudit({
+      req,
+      action: "delete",
       surface: "rest",
       objectId: id,
       outcome: "error",

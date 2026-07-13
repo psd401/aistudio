@@ -45,6 +45,11 @@ export const API_SCOPES = {
   "content:read": "Read Atrium content objects and versions",
   "content:create": "Create Atrium content objects and initial versions",
   "content:update": "Update Atrium content object metadata and create new versions",
+  // Hard-delete an Atrium content object (owner/admin-gated in the service, so a
+  // key holding this can only remove content its OWNER owns). Separate from
+  // content:update so delete authority is granted deliberately, not as a
+  // side effect of edit access.
+  "content:delete": "Delete Atrium content objects (owner/admin only)",
   "content:publish_internal": "Publish Atrium content to internal destinations",
   "content:publish_public": "Publish Atrium content publicly",
   // Agent-held AUTHORITY scope (Atrium §26.1, #1059): permits an autonomous agent
@@ -89,6 +94,10 @@ export const ROLE_SCOPES: Record<string, ApiScope[]> = {
     "content:read",
     "content:create",
     "content:update",
+    // Staff may clean up (hard-delete) Atrium content — the service still gates
+    // every delete to the object's OWNER or an admin, so a staff key can only
+    // remove content that key's owner owns. "Agents do what people can."
+    "content:delete",
     "content:publish_internal",
   ],
   administrator: ALL_SCOPES,

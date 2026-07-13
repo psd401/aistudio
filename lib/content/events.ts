@@ -25,6 +25,8 @@ export type ContentEventType =
   | "content.published"
   | "content.version_created"
   | "content.unpublished"
+  // Hard delete (Epic #1059 follow-up): the object and all its rows/bodies are
+  | "content.deleted"
   | "content.public_publish_requested";
 
 export interface ContentEventPayload {

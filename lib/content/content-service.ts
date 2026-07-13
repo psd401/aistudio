@@ -11,19 +11,27 @@
  * driver); JSONB columns insert via `sql\`${safeJsonbStringify(v)}::jsonb\``.
  */
 
-import { eq, like, sql } from "drizzle-orm";
+import { and, count, eq, like, sql } from "drizzle-orm";
 import { createLogger } from "@/lib/logger";
 import {
   executeQuery,
   executeTransaction,
   type DbTransaction,
 } from "@/lib/db/drizzle-client";
-import { contentCollections, contentObjects } from "@/lib/db/schema";
+import {
+  contentAuditLogs,
+  contentCollections,
+  contentObjects,
+  contentPublications,
+  contentVersions,
+  navigationItems,
+} from "@/lib/db/schema";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 import {
   actorKindOf,
   agentIdOf,
   assertCanCreate,
+  assertCanDelete,
   assertCanEdit,
   canPublishPublic,
   persistPublishApprovalRequest,
@@ -31,6 +39,7 @@ import {
   slugifyTitle,
   systemUserId,
 } from "./helpers";
+import { contentAuditInsertValues, type ContentAuditSurface } from "./audit";
 import { contentEvents } from "./events";
 import { screenAgentBodyForWrite } from "./agent-screening";
 import {
@@ -47,6 +56,7 @@ import {
   ValidationError,
 } from "./errors";
 import type {
+  ContentKind,
   ContentObjectDTO,
   ContentObjectWithVersion,
   CreateObjectInput,
@@ -57,6 +67,16 @@ import type {
   VisibilityGrant,
   VisibilityLevel,
 } from "./types";
+
+/** What a successful hard delete returns — the identity of what was removed. */
+export interface DeletedContentSummary {
+  id: string;
+  slug: string;
+  title: string;
+  kind: ContentKind;
+  /** Immutable version rows removed with the object (cascade). */
+  versionsDeleted: number;
+}
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -676,6 +696,218 @@ export const contentService = {
       await pruneRetrievalIndexBestEffort(existing.id);
     }
     return rowToObjectDTO(rows[0] as ObjectRowAsText);
+  },
+
+  /**
+   * HARD-DELETE an object: remove its row and every dependent row/body permanently.
+   * The single delete path for every surface (REST, skill, Nexus chat tool, UI).
+   *
+   * Guards, in strict order (an unviewable object must never reveal its existence):
+   *  1. 404 (NotFound) when the object doesn't exist OR the requester cannot
+   *     `canView` it — existence-masking BEFORE any permission signal.
+   *  2. 403 (Forbidden) unless the requester is the OWNER or an admin (agents also
+   *     need the `content:delete` scope) — `assertCanDelete`.
+   *  3. 409 (Conflict) when the object is LIVE at any destination — delete NEVER
+   *     auto-retracts a publication; the caller must `unpublish` first. Checked as
+   *     a fast pre-flight AND authoritatively on the FOR-UPDATE-locked row inside
+   *     the transaction (TOCTOU-safe, per the §26.4 gate-order lesson).
+   * Any kind/status otherwise (draft / archived / private / internal) is deletable —
+   * the guards above are the protection, not the lifecycle status.
+   *
+   * Ordering that makes an external-cleanup failure UNABLE to orphan DB state:
+   *  - Retrieval-index removal runs via the sanctioned `retrievalService.removeFromIndex`
+   *    BEFORE the delete tx (it reads `content_index_links` to find the SHARED
+   *    `repository_item`, which the object-delete cascade would otherwise erase —
+   *    leaving orphaned shared rows). It opens its own tx (can't nest) and is a
+   *    no-op for an unindexed object.
+   *  - ALL row deletes happen in ONE transaction: a `delete` audit row is written
+   *    (capturing title/kind/owner that the cascade erases), then the object row is
+   *    deleted — cascading `content_versions`, `content_publications`,
+   *    `atrium_doc_state`, `atrium_doc_comments`, `content_embed_links`,
+   *    `content_visibility_grants`, `content_publish_requests`, `content_index_links`
+   *    via their ON DELETE CASCADE FKs. `content_audit_logs` has no FK to the object,
+   *    so the trail SURVIVES.
+   *  - S3 body cleanup runs AFTER the commit, best-effort: an orphaned S3 key is
+   *    invisible (its DB rows are gone) and only logged, never rolled back into the
+   *    committed delete.
+   */
+  async delete(
+    req: Requester,
+    id: string,
+    opts: { surface: ContentAuditSurface }
+  ): Promise<DeletedContentSummary> {
+    const existing = await loadByIdOrSlug(id);
+    if (!existing) throw new NotFoundError("Content not found", { id });
+    // 404 (not 403) on a non-viewable object to avoid leaking existence, BEFORE
+    // the delete-permission check.
+    await assertViewable(req, existing, id);
+    // 403 unless owner/admin (agents also need content:delete).
+    assertCanDelete(req, existing.ownerUserId);
+
+    // Pre-flight: refuse while any destination is live (never auto-retract). This
+    // is a fast, racy rejection + a clear message; the tx re-checks authoritatively.
+    const { publishService } = await import("./publish-service");
+    const liveBefore = await publishService.liveDestinations(existing.id);
+    if (liveBefore.length > 0) {
+      throw new ConflictError(
+        `Cannot delete published content — unpublish from ${liveBefore.join(
+          ", "
+        )} first, then delete.`,
+        { objectId: existing.id, liveDestinations: liveBefore }
+      );
+    }
+
+    // Clean the SHARED retrieval index (repository_item + chunks) via the sanctioned
+    // inverse BEFORE the delete tx — see the method doc. Runs in its own tx.
+    const { retrievalService } = await import("./retrieval-service");
+    await retrievalService.removeFromIndex(existing.id);
+
+    let versionsDeleted: number;
+    try {
+      versionsDeleted = await executeTransaction(async (tx) => {
+      // Lock the object row so a concurrent publish cannot slip a live publication
+      // in between the pre-flight check and the delete (TOCTOU).
+      const locked = await tx
+        .select({ id: contentObjects.id })
+        .from(contentObjects)
+        .where(eq(contentObjects.id, existing.id))
+        .for("update")
+        .limit(1);
+      // Concurrent delete already removed it — surface cleanly, don't double-delete.
+      if (!locked[0]) {
+        throw new NotFoundError("Content not found", { id: existing.id });
+      }
+
+      // AUTHORITATIVE live-publication guard on the locked row.
+      const live = await tx
+        .select({ destination: contentPublications.destination })
+        .from(contentPublications)
+        .where(
+          and(
+            eq(contentPublications.objectId, existing.id),
+            eq(contentPublications.status, "live")
+          )
+        );
+      if (live.length > 0) {
+        throw new ConflictError(
+          `Cannot delete published content — unpublish from ${live
+            .map((l) => l.destination)
+            .join(", ")} first, then delete.`,
+          { objectId: existing.id }
+        );
+      }
+
+      const [versionCountRow] = await tx
+        .select({ value: count() })
+        .from(contentVersions)
+        .where(eq(contentVersions.objectId, existing.id));
+      const vCount = Number(versionCountRow?.value ?? 0);
+
+      // Audit BEFORE the row disappears (in-tx = atomic with the delete): the
+      // object_id becomes a dangling UUID after this, so `details` is the only
+      // durable record of what was removed.
+      await tx.insert(contentAuditLogs).values(
+        contentAuditInsertValues({
+          req,
+          action: "delete",
+          surface: opts.surface,
+          objectId: existing.id,
+          outcome: "ok",
+          details: {
+            title: existing.title,
+            kind: existing.kind,
+            ownerUserId: existing.ownerUserId,
+            versionsDeleted: vCount,
+          },
+        })
+      );
+
+      // Remove the object's intranet nav entry FIRST. `navigation_items.content_object_id`
+      // is ON DELETE NO ACTION (not cascade) and unpublish only SOFT-hides the row
+      // (navItemService.hideNavItem sets is_active=false, never deletes it), so a
+      // published-then-unpublished object still carries a nav row that would block the
+      // object delete's end-of-statement FK check. Deleting it in the SAME tx clears
+      // the reference before the object row goes. (A never-published object has none —
+      // this is a no-op.) A content nav item is a leaf, so nothing cascades off it.
+      await tx
+        .delete(navigationItems)
+        .where(eq(navigationItems.contentObjectId, existing.id));
+
+      // The object row + everything ON DELETE CASCADE hangs off it (versions,
+      // publications, doc_state, doc_comments, embed_links, visibility_grants,
+      // publish_requests, index_links). content_publications.published_version_id is
+      // NO ACTION but both it and the version cascade-delete here, so the deferred
+      // end-of-statement check sees no dangling reference.
+      await tx.delete(contentObjects).where(eq(contentObjects.id, existing.id));
+      return vCount;
+      }, "content.delete");
+    } catch (err) {
+      // The pre-flight index prune runs BEFORE this tx (it needs the not-yet-cascaded
+      // content_index_links to find the shared repository_item via the sanctioned
+      // removeFromIndex). If the AUTHORITATIVE in-tx guard then aborts the delete —
+      // a publish committed between the racy pre-flight liveDestinations() read and
+      // the FOR-UPDATE lock — the object stays live+published but has already been
+      // de-indexed. Re-index it (best-effort, fire-and-forget) so a REFUSED delete
+      // never silently drops still-live content out of assistant retrieval. Only the
+      // in-tx live-publication guard raises ConflictError inside the tx.
+      if (err instanceof ConflictError) {
+        void retrievalService
+          .indexObject(existing.id)
+          .catch((reindexError) =>
+            createLogger({ action: "content.delete" }).warn(
+              "Re-index after aborted delete failed (object left de-indexed until next publish/edit)",
+              {
+                objectId: existing.id,
+                error:
+                  reindexError instanceof Error
+                    ? reindexError.message
+                    : String(reindexError),
+              }
+            )
+          );
+      }
+      throw err;
+    }
+
+    const log = createLogger({ action: "content.delete" });
+    // Best-effort external cleanup AFTER commit — orphaned S3 keys are acceptable.
+    // Lazy import (like publish-service/retrieval-service above): a static import
+    // pulls s3-store → settings-manager → drizzle into content-service's module
+    // graph, which breaks unit tests that import this module with only shallow mocks.
+    try {
+      const { s3Store } = await import("./storage/s3-store");
+      const s3KeysDeleted = await s3Store.deleteObjectTree(existing.id);
+      log.info("Deleted content object", {
+        objectId: existing.id,
+        slug: existing.slug,
+        kind: existing.kind,
+        versionsDeleted,
+        s3KeysDeleted,
+        surface: opts.surface,
+      });
+    } catch (s3Error) {
+      log.warn("Content deleted; S3 body cleanup failed (orphaned keys acceptable)", {
+        objectId: existing.id,
+        error: s3Error instanceof Error ? s3Error.message : String(s3Error),
+      });
+    }
+
+    // Lifecycle event AFTER commit, best-effort (never throws) — subscribers that
+    // cached the object learn it is gone.
+    void contentEvents.emit("content.deleted", {
+      objectId: existing.id,
+      slug: existing.slug,
+      actorKind: actorKindOf(req),
+      agentLabel: req.kind === "user" ? null : req.agentLabel,
+    });
+
+    return {
+      id: existing.id,
+      slug: existing.slug,
+      title: existing.title,
+      kind: existing.kind,
+      versionsDeleted,
+    };
   },
 };
 

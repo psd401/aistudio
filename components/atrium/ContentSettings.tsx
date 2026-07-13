@@ -6,9 +6,12 @@
  *
  * The metadata surface `contentService.update` has had since Phase 0 but the UI
  * could not reach: rename the title, edit tags, move the object to another
- * collection, and archive/restore. Persists via `updateContentAction` (which
- * runs the capability gate + the service's canView/assertCanEdit gates
- * server-side), so this component is presentation only.
+ * collection, and archive/restore — plus a permanent hard DELETE (via
+ * `deleteContentAction`). Persists via `updateContentAction` / `deleteContentAction`
+ * (which run the capability gate + the service's canView/assertCanEdit/assertCanDelete
+ * gates server-side), so this component is presentation only. Delete is disabled
+ * for a published object (unpublish/archive first); the server refuses it
+ * authoritatively with a 409 regardless.
  *
  * The collection options come from `collectionTreeAction` — the SAME
  * visibility-filtered source the LibraryView sidebar uses — flattened with a
@@ -42,6 +45,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { updateContentAction } from "@/actions/db/atrium/update-content";
+import { deleteContentAction } from "@/actions/db/atrium/delete-content";
 import { collectionTreeAction } from "@/actions/db/atrium/collection-tree";
 import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
 import type { CollectionTreeNode } from "@/lib/content";
@@ -118,6 +122,99 @@ async function runUpdate(
   } finally {
     setSaving(false);
   }
+}
+
+/**
+ * Confirm + run a permanent hard delete, then navigate. Module-level with the
+ * component's setters threaded in (mirrors `runUpdate`) so the component body stays
+ * under the max-lines-per-function lint. The `window.confirm` states permanence;
+ * on success the object is gone from every list and its routes 404, so we navigate
+ * back to the library. The server re-checks owner/admin and refuses (409) a still-
+ * published object regardless of the client-side disabled hint.
+ */
+async function runDelete(
+  objectId: string,
+  ctx: {
+    router: ReturnType<typeof useRouter>;
+    setDeleting: (v: boolean) => void;
+    setError: (v: string | null) => void;
+    setOpen: (v: boolean) => void;
+  }
+): Promise<void> {
+  const { router, setDeleting, setError, setOpen } = ctx;
+  if (
+    typeof window !== "undefined" &&
+    !window.confirm(
+      "Permanently delete this content? This removes it and ALL of its versions, " +
+        "comments, and history for everyone, and CANNOT be undone. To keep it " +
+        "recoverable instead, use Archive."
+    )
+  ) {
+    return;
+  }
+  setDeleting(true);
+  setError(null);
+  try {
+    const res = await deleteContentAction(objectId);
+    if (res.isSuccess) {
+      setOpen(false);
+      router.push("/atrium");
+    } else {
+      setError(res.message ?? "Could not delete this content");
+      log.warn("deleteContentAction failed", { message: res.message });
+    }
+  } catch (e) {
+    setError("Could not delete this content — please try again.");
+    log.error("deleteContentAction threw", {
+      error: e instanceof Error ? e.message : String(e),
+    });
+  } finally {
+    setDeleting(false);
+  }
+}
+
+/**
+ * The "Danger zone" hard-delete row. Extracted from ContentSettings so its body
+ * stays under the max-lines-per-function lint (mirrors SettingsFields). Delete is
+ * disabled while a publication is live (a published object must be
+ * unpublished/archived first); the server enforces the same refusal authoritatively.
+ */
+function DangerZone({
+  status,
+  deleting,
+  busy,
+  onDelete,
+}: {
+  status: "draft" | "published" | "archived";
+  deleting: boolean;
+  busy: boolean;
+  onDelete: () => void;
+}): React.JSX.Element {
+  return (
+    <div className="space-y-1.5 border-t border-border/60 pt-3">
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          disabled={busy || status === "published"}
+          onClick={onDelete}
+          className="text-destructive hover:text-destructive"
+        >
+          {deleting ? "Deleting…" : "Delete permanently"}
+        </Button>
+        {status === "published" && (
+          <span className="text-xs text-muted-foreground">
+            Unpublish or archive it before deleting.
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Permanently removes this content and all of its versions and history. This
+        cannot be undone — use Archive to keep it recoverable.
+      </p>
+    </div>
+  );
 }
 
 /** Parse the comma-separated tags input into trimmed, deduped tags. */
@@ -263,6 +360,7 @@ export function ContentSettings({
     collectionId ?? NO_COLLECTION
   );
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [options, setOptions] = useState<CollectionOption[]>([]);
@@ -347,6 +445,17 @@ export function ContentSettings({
     [objectId, router]
   );
 
+  // Hard delete (permanent). Confirms permanence, then navigates back to the
+  // library on success (the object is gone from every list and its routes 404).
+  // Extracted to the module-level `runDelete` to keep this component under the
+  // max-lines-per-function lint.
+  const deleteContent = useCallback(
+    () => runDelete(objectId, { router, setDeleting, setError, setOpen }),
+    [objectId, router]
+  );
+
+  const busy = saving || deleting;
+
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
@@ -363,8 +472,8 @@ export function ContentSettings({
         <DialogHeader>
           <DialogTitle>Content settings</DialogTitle>
           <DialogDescription>
-            Rename, tag, move, or archive this content. Body changes are made in
-            the editor.
+            Rename, tag, move, archive, or permanently delete this content. Body
+            changes are made in the editor.
           </DialogDescription>
         </DialogHeader>
 
@@ -378,8 +487,16 @@ export function ContentSettings({
             onCollection={setDraftCollection}
             options={options}
             status={status}
-            saving={saving}
+            saving={busy}
             onStatus={(next) => void setStatus(next)}
+          />
+
+          {/* Danger zone — permanent hard delete (extracted sub-component). */}
+          <DangerZone
+            status={status}
+            deleting={deleting}
+            busy={busy}
+            onDelete={() => void deleteContent()}
           />
 
           {error && <p className="text-sm text-destructive">{error}</p>}
@@ -390,11 +507,11 @@ export function ContentSettings({
             type="button"
             variant="ghost"
             onClick={() => handleOpenChange(false)}
-            disabled={saving}
+            disabled={busy}
           >
             Cancel
           </Button>
-          <Button type="button" onClick={() => void save()} disabled={saving}>
+          <Button type="button" onClick={() => void save()} disabled={busy}>
             {saving ? "Saving…" : "Save"}
           </Button>
         </DialogFooter>

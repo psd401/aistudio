@@ -28,7 +28,7 @@
 
 import { tool, jsonSchema, type Tool, type ToolSet } from "ai";
 import { contentService } from "@/lib/content/content-service";
-import { canEdit } from "@/lib/content/helpers";
+import { canDelete, canEdit } from "@/lib/content/helpers";
 import { requesterForUserId } from "@/lib/content/requester-from-auth";
 import { applyAgentEdit, readAgentDocMarkdown } from "@/lib/content/collab/apply-agent-edit";
 import { snapshotLiveDocumentForPublish } from "@/lib/content/collab/snapshot-before-publish";
@@ -36,7 +36,13 @@ import { loadDocState } from "@/lib/content/collab/doc-state-store";
 import { screenAgentContent } from "@/lib/content/agent-screening";
 import { publishService } from "@/lib/content/publish-service";
 import { assertEditorDestination } from "@/lib/content/validators";
-import { ApprovalRequiredError, ValidationError } from "@/lib/content/errors";
+import {
+  ApprovalRequiredError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from "@/lib/content/errors";
 import { createLogger } from "@/lib/logger";
 
 /** Free-form attribution label stamped on the purple rail for chat-driven edits. */
@@ -435,6 +441,78 @@ function buildPublishTool(args: {
   });
 }
 
+/**
+ * Build the hard-delete tool for the WORKSPACE-bound object. Bound only when the
+ * session user can edit (owner/admin) the open object; the service re-checks
+ * canView (404-mask) → canDelete (owner/admin 403) → live-publication (409) on
+ * every call, so this is never a bypass. Runs as the SESSION user (`kind: "user"`),
+ * so a human can only delete content they own (or as admin) via chat.
+ */
+function buildDeleteTool(args: {
+  objectId: string;
+  kind: "document" | "artifact";
+  userId: number;
+  log: ReturnType<typeof createLogger>;
+}): Tool {
+  const { objectId, kind, userId, log } = args;
+  return tool({
+    description:
+      `PERMANENTLY delete the ${kind} open in the workspace panel — it and ALL its ` +
+      `versions, comments, and history are removed and CANNOT be recovered (this is ` +
+      `not archive). Only call this when the user has EXPLICITLY asked to permanently ` +
+      `delete this ${kind}; if there is any doubt, ask them to confirm first. It is ` +
+      `refused (returns blocked:true with a message) while the ${kind} is published ` +
+      `anywhere — then tell the user to unpublish it first. Only the owner or an ` +
+      `administrator may delete.`,
+    inputSchema: jsonSchema<Record<string, never>>({
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    }),
+    execute: async (): Promise<Record<string, unknown>> => {
+      const req = await requesterForUserId(userId);
+      if (!req) return { error: "Could not resolve your identity." };
+      try {
+        const deleted = await contentService.delete(req, objectId, {
+          surface: "ui",
+        });
+        log.info("workspace content deleted via chat", { objectId, kind });
+        return {
+          ok: true,
+          deleted: true,
+          title: deleted.title,
+          kind: deleted.kind,
+          message:
+            `Deleted "${deleted.title}". It is permanently gone; the workspace panel ` +
+            `will show it is no longer available.`,
+        };
+      } catch (err) {
+        // A live-publication refusal (409) is an ACTIONABLE, honest state — surface
+        // its message so the model tells the user to unpublish first, not a failure.
+        if (err instanceof ConflictError) {
+          return { blocked: true, reason: "published", message: err.message };
+        }
+        // 403 (not owner/admin) and 404 (existence-masked) are permission outcomes,
+        // reported without leaking which one it was beyond what the user may know.
+        if (err instanceof ForbiddenError) {
+          return {
+            error:
+              "You do not have permission to delete this item — only its owner or an administrator can.",
+          };
+        }
+        if (err instanceof NotFoundError) {
+          return { error: "That item is no longer available." };
+        }
+        log.warn("workspace delete failed", {
+          objectId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { error: "The item could not be deleted right now." };
+      }
+    },
+  });
+}
+
 /** Build the find-documents tool (ITEM 3): list Atrium documents the user can edit. */
 function buildFindDocumentsTool(userId: number, log: ReturnType<typeof createLogger>): Tool {
   return tool({
@@ -576,6 +654,16 @@ export async function buildWorkspaceChatTools(params: {
     tools.unpublish_workspace_content = buildPublishTool({ op: "unpublish", objectId: obj.id, kind, userId, requestId, log });
   }
 
+  // Hard delete of the OPEN object, bound on `canDelete` — NOT `canEdit`. helpers.ts
+  // documents canDelete as deliberately decoupled from canEdit (owner/admin only, so a
+  // future widening of edit — e.g. collaborator grants — can never silently imply
+  // delete). canDelete === canEdit for a session user today, but binding the LLM's
+  // delete affordance on the delete authority keeps it aligned with that discipline;
+  // the service still re-checks assertCanDelete + the live-publication guard per call.
+  if (canDelete(req, obj.ownerUserId)) {
+    tools.delete_workspace_content = buildDeleteTool({ objectId: obj.id, kind, userId, log });
+  }
+
   // ITEM 3: let the agent find and edit OTHER Atrium documents the user can edit —
   // not just the one bound via `?workspace=`. Both tools resolve their target and
   // re-check canView/canEdit PER CALL (never a bypass), so they are safe to expose
@@ -586,9 +674,11 @@ export async function buildWorkspaceChatTools(params: {
   const editHint = editable
     ? kind === "document"
       ? " You can edit it with the edit_workspace_document tool; your edits appear live in the panel." +
-        " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content."
+        " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content." +
+        " If the user EXPLICITLY asks to permanently delete it (not archive), use delete_workspace_content — it is irreversible and refused while the document is published."
       : " You can update it with the update_workspace_artifact tool (provide the complete new code)." +
-        " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content."
+        " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content." +
+        " If the user EXPLICITLY asks to permanently delete it (not archive), use delete_workspace_content — it is irreversible and refused while the artifact is published."
     : " It is read-only for this user.";
 
   // Escape the title via JSON.stringify: a content title is user-controlled and

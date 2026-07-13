@@ -2,7 +2,7 @@
   "summary": {
     "actions": 24,
     "features": 8,
-    "scopes": 24,
+    "scopes": 25,
     "agentInvocableActions": 17
   },
   "actions": [
@@ -650,6 +650,14 @@
       "scope": "content:delegate",
       "description": "Mint delegated Atrium content tokens on behalf of a user",
       "roles": [
+        "administrator"
+      ]
+    },
+    {
+      "scope": "content:delete",
+      "description": "Delete Atrium content objects (owner/admin only)",
+      "roles": [
+        "staff",
         "administrator"
       ]
     },
