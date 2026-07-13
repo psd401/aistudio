@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { IconPlus, IconEdit, IconTrash } from '@tabler/icons-react';
 import { User } from '@/lib/types';
-import { MultiRoleSelector } from './multi-role-selector';
+import { MultiRoleSelector, type RoleChoice } from './multi-role-selector';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   ColumnDef,
@@ -26,14 +26,16 @@ interface UserFormProps {
   onSubmit: () => void;
   onCancel: () => void;
   isEditing: boolean;
+  availableRoles: RoleChoice[];
 }
 
-const UserForm = React.memo(function UserForm({ 
-  userData, 
-  setUserData, 
-  onSubmit, 
-  onCancel, 
-  isEditing 
+const UserForm = React.memo(function UserForm({
+  userData,
+  setUserData,
+  onSubmit,
+  onCancel,
+  isEditing,
+  availableRoles
 }: UserFormProps) {
   
   const handleFirstNameChange = (e: React.ChangeEvent<HTMLInputElement>) => 
@@ -95,15 +97,18 @@ const UserForm = React.memo(function UserForm({
       <div className="space-y-2">
         <div className="text-sm font-medium" aria-label="User roles">Roles</div>
         <div className="space-y-2 border rounded-md p-3">
-          {['administrator', 'staff', 'student'].map((role) => (
-            <div key={role} className="flex items-center space-x-2">
-              <Checkbox 
-                id={`role-${role}`}
-                checked={userData.roles?.includes(role) || false}
-                onCheckedChange={(checked) => handleRoleCheckboxChange(!!checked, role)}
+          {availableRoles.length === 0 && (
+            <div className="text-sm text-muted-foreground">Loading roles…</div>
+          )}
+          {availableRoles.map((role) => (
+            <div key={role.value} className="flex items-center space-x-2">
+              <Checkbox
+                id={`role-${role.value}`}
+                checked={userData.roles?.includes(role.value) || false}
+                onCheckedChange={(checked) => handleRoleCheckboxChange(!!checked, role.value)}
               />
-              <label htmlFor={`role-${role}`} className="text-sm cursor-pointer capitalize">
-                {role}
+              <label htmlFor={`role-${role.value}`} className="text-sm cursor-pointer capitalize">
+                {role.label}
               </label>
             </div>
           ))}
@@ -121,6 +126,8 @@ const UserForm = React.memo(function UserForm({
 interface UsersTableProps {
   users: User[];
   currentUserId?: string;
+  /** Roles available for assignment — fetched dynamically from the DB (#1204). */
+  availableRoles: RoleChoice[];
   onAddUser?: (user: Omit<User, 'id' | 'createdAt' | 'updatedAt'>) => Promise<void>;
   onUpdateUser?: (userId: number | string, updates: Partial<User>) => Promise<void>;
   onDeleteUser: (userId: number | string) => void;
@@ -143,9 +150,10 @@ const emptyUser: UserFormData = {
   roles: ['student'],
 };
 
-export function UsersTable({ 
-  users, 
+export function UsersTable({
+  users,
   currentUserId,
+  availableRoles,
   onAddUser,
   onUpdateUser,
   onDeleteUser,
@@ -225,6 +233,7 @@ export function UsersTable({
             <MultiRoleSelector
               userId={row.original.id}
               currentRoles={userRoles}
+              availableRoles={availableRoles}
               onRolesChange={onRoleChange}
               disabled={currentUserId ? row.original.id === currentUserId : false}
             />
@@ -283,7 +292,7 @@ export function UsersTable({
         ),
       },
     ],
-    [SortableColumnHeader, handleEditClick, handleDeleteClick, onRoleChange, currentUserId]
+    [SortableColumnHeader, handleEditClick, handleDeleteClick, onRoleChange, currentUserId, availableRoles]
   );
 
   const table = useReactTable({
@@ -360,6 +369,7 @@ export function UsersTable({
             onSubmit={handleSubmit}
             onCancel={handleCancel}
             isEditing={!!editingUser}
+            availableRoles={availableRoles}
           />
         </DialogContent>
       </Dialog>

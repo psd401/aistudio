@@ -13,10 +13,18 @@ import {
 } from "@/components/ui/alert-dialog"
 import { useToast } from "@/components/ui/use-toast"
 import { UsersTable } from "@/components/user/users-table"
+import type { RoleChoice } from "@/components/user/multi-role-selector"
+import { getRoles } from "@/actions/admin/user-management.actions"
 import { User } from "@/lib/types"
+
+/** Title-case a raw role name (e.g. "administrator" → "Administrator") for display. */
+function toRoleLabel(name: string): string {
+  return name.length > 0 ? name.charAt(0).toUpperCase() + name.slice(1) : name
+}
 
 export function UsersClient() {
   const [users, setUsers] = useState<User[]>([])
+  const [availableRoles, setAvailableRoles] = useState<RoleChoice[]>([])
   const [loading, setLoading] = useState(true)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [userToDelete, setUserToDelete] = useState<{ id: number | string } | null>(null)
@@ -61,8 +69,25 @@ export function UsersClient() {
   useEffect(() => {
     const abortController = new AbortController()
     fetchUsers(abortController.signal)
-    
+
+    // Roles are dynamic — the assignment UI must reflect any role, including
+    // those mapped in from Google groups (#1204), not a hardcoded list.
+    let active = true
+    getRoles()
+      .then((result) => {
+        if (!active) return
+        if (result.isSuccess) {
+          setAvailableRoles(
+            result.data.map((r) => ({ value: r.name, label: toRoleLabel(r.name) }))
+          )
+        }
+      })
+      .catch(() => {
+        /* non-fatal: the selector shows a "Loading roles…" hint until this resolves */
+      })
+
     return () => {
+      active = false
       abortController.abort()
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -146,6 +171,7 @@ export function UsersClient() {
       <UsersTable
         users={users}
         currentUserId="" // Admin pages don't need to restrict self-edits
+        availableRoles={availableRoles}
         onRoleChange={handleRoleChange}
         onDeleteUser={handleDeleteUser}
       />

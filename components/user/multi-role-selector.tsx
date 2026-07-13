@@ -11,22 +11,26 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { ChevronDown } from 'lucide-react';
 
+/** A selectable role option. `description` is optional (roles from the DB may not carry one). */
+export interface RoleChoice {
+  value: string;
+  label: string;
+  description?: string;
+}
+
 interface MultiRoleSelectorProps {
   userId: number | string;
   currentRoles: string[];
+  /** Roles to choose from — fetched dynamically from the DB (getRoles), #1204. */
+  availableRoles: RoleChoice[];
   onRolesChange: (userId: number | string, roles: string[]) => void;
   disabled?: boolean;
 }
 
-const availableRoles = [
-  { value: 'administrator', label: 'Administrator', description: 'Full system access' },
-  { value: 'staff', label: 'Staff', description: 'Staff member access' },
-  { value: 'student', label: 'Student', description: 'Basic user access' },
-];
-
 export function MultiRoleSelector({
   userId,
   currentRoles,
+  availableRoles,
   onRolesChange,
   disabled = false,
 }: MultiRoleSelectorProps) {
@@ -91,6 +95,9 @@ export function MultiRoleSelector({
           <div>
             <h4 className="font-medium text-sm mb-3">Assign Roles</h4>
             <div className="space-y-2">
+              {availableRoles.length === 0 && (
+                <div className="text-xs text-muted-foreground">Loading roles…</div>
+              )}
               {availableRoles.map((role) => (
                 <div
                   key={role.value}
@@ -107,9 +114,11 @@ export function MultiRoleSelector({
                     className="flex-1 cursor-pointer"
                   >
                     <div className="font-medium text-sm">{role.label}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {role.description}
-                    </div>
+                    {role.description && (
+                      <div className="text-xs text-muted-foreground">
+                        {role.description}
+                      </div>
+                    )}
                   </label>
                 </div>
               ))}
