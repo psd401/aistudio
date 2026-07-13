@@ -29,13 +29,23 @@ import {
   addSelectionRule,
   deleteSelectionRule,
   setSelectionRuleActive,
+  listGroupRoleMappings,
+  addGroupRoleMapping,
+  deleteGroupRoleMapping,
   type GroupWithCount,
   type GroupSyncSummary,
+  type GroupRoleMappingView,
 } from "@/lib/groups/queries"
 import type { GroupSelectionRuleRow, GroupSelectionRuleType } from "@/lib/db/schema"
 import { triggerGroupSyncNow } from "@/lib/groups/trigger"
 import { getGroupSyncSettings } from "@/lib/groups/settings"
-import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle"
+import { getUserIdByCognitoSubAsNumber, getRoles } from "@/lib/db/drizzle"
+
+/** A role option for the mapping role picker. */
+export interface RoleOption {
+  id: number
+  name: string
+}
 
 const ADMIN_GROUPS_PATH = "/admin/groups"
 
@@ -44,6 +54,9 @@ export interface GroupsAdminData {
   summary: GroupSyncSummary
   groups: GroupWithCount[]
   rules: GroupSelectionRuleRow[]
+  /** Group→role mappings (#1204) + the roles available to map them to. */
+  mappings: GroupRoleMappingView[]
+  roles: RoleOption[]
   /** Whether the hourly sync is enabled + configured (drives a UI banner). */
   syncEnabled: boolean
   syncConfigured: boolean
@@ -75,10 +88,12 @@ export async function getGroupsAdminDataAction(): Promise<ActionState<GroupsAdmi
   try {
     await requireAdminSession(log, "load group admin data")
 
-    const [summary, groups, rules, settings] = await Promise.all([
+    const [summary, groups, rules, mappings, roleRows, settings] = await Promise.all([
       getGroupSyncSummary(),
       listGroupsWithCounts(),
       listSelectionRules(),
+      listGroupRoleMappings(),
+      getRoles(),
       getGroupSyncSettings(),
     ])
 
@@ -88,6 +103,8 @@ export async function getGroupsAdminDataAction(): Promise<ActionState<GroupsAdmi
         summary,
         groups,
         rules,
+        mappings,
+        roles: roleRows.map((r) => ({ id: r.id, name: r.name })),
         syncEnabled: settings.enabled,
         // Runnable = SA key + a directory path: Cloud Identity needs customerId,
         // the Admin SDK fallback needs dwdSubject. The ARN alone would clear the
@@ -241,6 +258,91 @@ export async function triggerGroupSyncAction(): Promise<ActionState<{ dispatched
       context: "triggerGroupSyncAction",
       requestId,
       operation: "triggerGroupSyncAction",
+    })
+  }
+}
+
+/**
+ * Lightweight sync-status poll (#1204). The admin UI calls this on an interval
+ * after "Sync now" to detect when the async Lambda has finished — the run is done
+ * once `lastRunAt` (max groups.last_synced_at) advances past the pre-trigger value.
+ */
+export async function getGroupSyncSummaryAction(): Promise<ActionState<GroupSyncSummary>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getGroupSyncSummaryAction")
+  const log = createLogger({ requestId, action: "getGroupSyncSummaryAction" })
+
+  try {
+    await requireAdminSession(log, "poll group sync summary")
+    const summary = await getGroupSyncSummary()
+    timer({ status: "success" })
+    return createSuccess(summary, "Sync summary loaded")
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to load sync summary.", {
+      context: "getGroupSyncSummaryAction",
+      requestId,
+      operation: "getGroupSyncSummaryAction",
+    })
+  }
+}
+
+/** Add a group→role mapping — members of the group get the role on next sync/login. */
+export async function addGroupRoleMappingAction(
+  groupEmail: string,
+  roleId: number
+): Promise<ActionState<GroupRoleMappingView>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("addGroupRoleMappingAction")
+  const log = createLogger({ requestId, action: "addGroupRoleMappingAction" })
+
+  try {
+    await requireAdminSession(log, "add group role mapping")
+    if (!groupEmail || !groupEmail.trim()) {
+      throw ErrorFactories.missingRequiredField("groupEmail")
+    }
+    if (!Number.isInteger(roleId) || roleId <= 0) {
+      throw ErrorFactories.invalidInput("roleId", roleId, "Select a role")
+    }
+
+    log.info("Adding group role mapping", {
+      input: sanitizeForLogging({ groupEmail, roleId }),
+    })
+    const mapping = await addGroupRoleMapping(groupEmail, roleId)
+
+    revalidatePath(ADMIN_GROUPS_PATH)
+    timer({ status: "success", mappingId: mapping.id })
+    return createSuccess(mapping, "Role mapping added")
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to add role mapping.", {
+      context: "addGroupRoleMappingAction",
+      requestId,
+      operation: "addGroupRoleMappingAction",
+    })
+  }
+}
+
+/** Delete a group→role mapping — sync-managed grants of that role are removed next run. */
+export async function deleteGroupRoleMappingAction(id: string): Promise<ActionState<void>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("deleteGroupRoleMappingAction")
+  const log = createLogger({ requestId, action: "deleteGroupRoleMappingAction" })
+
+  try {
+    await requireAdminSession(log, "delete group role mapping")
+    if (!id) throw ErrorFactories.missingRequiredField("id")
+
+    await deleteGroupRoleMapping(id)
+    revalidatePath(ADMIN_GROUPS_PATH)
+    timer({ status: "success" })
+    return createSuccess(undefined, "Role mapping deleted")
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to delete role mapping.", {
+      context: "deleteGroupRoleMappingAction",
+      requestId,
+      operation: "deleteGroupRoleMappingAction",
     })
   }
 }

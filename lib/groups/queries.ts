@@ -7,13 +7,15 @@
  * write via the shared normalize helpers.
  */
 
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { executeQuery, toPgRows } from "@/lib/db/drizzle-client";
 import { ErrorFactories } from "@/lib/error-utils";
 import {
   groups,
   groupMembers,
   groupSelectionRules,
+  groupRoleMappings,
+  roles,
   type GroupSelectionRuleRow,
   type GroupSelectionRuleType,
   type GroupSource,
@@ -201,5 +203,106 @@ export async function setSelectionRuleActive(
         .set({ isActive, updatedAt: new Date() })
         .where(eq(groupSelectionRules.id, id)),
     "setSelectionRuleActive"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Group → role mappings (Epic #1202, Phase 1 / #1204)
+// ---------------------------------------------------------------------------
+
+/** A group→role mapping joined to its role name, for the admin table. */
+export interface GroupRoleMappingView {
+  id: string;
+  groupEmail: string;
+  roleId: number;
+  roleName: string;
+  createdAt: Date;
+}
+
+const groupRoleMappingSelection = {
+  id: groupRoleMappings.id,
+  groupEmail: groupRoleMappings.groupEmail,
+  roleId: groupRoleMappings.roleId,
+  roleName: roles.name,
+  createdAt: groupRoleMappings.createdAt,
+} as const;
+
+/** List every mapping with its role name (by group email, then role name). */
+export async function listGroupRoleMappings(): Promise<GroupRoleMappingView[]> {
+  return executeQuery(
+    (db) =>
+      db
+        .select(groupRoleMappingSelection)
+        .from(groupRoleMappings)
+        .innerJoin(roles, eq(roles.id, groupRoleMappings.roleId))
+        .orderBy(asc(groupRoleMappings.groupEmail), asc(roles.name)),
+    "listGroupRoleMappings"
+  );
+}
+
+/**
+ * Add a group→role mapping. Normalizes the group email (lowercase + trim) and
+ * upserts on the (lower(group_email), role_id) expression index — a duplicate add
+ * is a silent no-op rather than an error, and two concurrent identical adds
+ * cannot race the unique index (mirrors addSelectionRule). Raw SQL because
+ * Drizzle's onConflict builder cannot target an expression index. A bad role_id
+ * fails the FK and surfaces as a DB error to the caller.
+ */
+export async function addGroupRoleMapping(
+  rawGroupEmail: string,
+  roleId: number
+): Promise<GroupRoleMappingView> {
+  const groupEmail = normalizeEmail(rawGroupEmail);
+  if (!groupEmail) {
+    throw ErrorFactories.invalidInput(
+      "groupEmail",
+      rawGroupEmail,
+      "must be a non-empty group email"
+    );
+  }
+  if (!Number.isInteger(roleId) || roleId <= 0) {
+    throw ErrorFactories.invalidInput("roleId", roleId, "must be a positive integer role id");
+  }
+
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        INSERT INTO group_role_mappings (group_email, role_id)
+        VALUES (${groupEmail}, ${roleId})
+        ON CONFLICT (lower(group_email), role_id) DO NOTHING
+      `),
+    "addGroupRoleMapping"
+  );
+
+  // Re-read the canonical row (newly inserted OR pre-existing) with its role name.
+  const [row] = await executeQuery(
+    (db) =>
+      db
+        .select(groupRoleMappingSelection)
+        .from(groupRoleMappings)
+        .innerJoin(roles, eq(roles.id, groupRoleMappings.roleId))
+        .where(
+          and(
+            eq(sql`lower(${groupRoleMappings.groupEmail})`, groupEmail),
+            eq(groupRoleMappings.roleId, roleId)
+          )
+        )
+        .limit(1),
+    "addGroupRoleMappingFetch"
+  );
+
+  if (!row) {
+    // The INSERT would have thrown on a bad role_id FK; a missing row here means
+    // the role vanished between insert and read — surface it clearly.
+    throw ErrorFactories.dbRecordNotFound("roles", String(roleId));
+  }
+  return row;
+}
+
+/** Delete a mapping by id. */
+export async function deleteGroupRoleMapping(id: string): Promise<void> {
+  await executeQuery(
+    (db) => db.delete(groupRoleMappings).where(eq(groupRoleMappings.id, id)),
+    "deleteGroupRoleMapping"
   );
 }
