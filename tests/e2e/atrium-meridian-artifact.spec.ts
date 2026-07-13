@@ -77,10 +77,11 @@ test.describe("Atrium Meridian artifact viewer + embed (authenticated)", () => {
       await expect(backlink).toBeVisible();
       await expect(backlink).toHaveText(HOST_DOC_TITLE);
 
-      // The primary "Open full screen ↗" links to the reader route.
+      // The primary "Open full screen ↗" links to the chrome-free viewer route
+      // (#1052) — it works for unpublished artifacts, unlike the /c and /p readers.
       const fullscreen = page.locator('[data-testid="artifact-open-fullscreen"]');
       await expect(fullscreen).toBeVisible();
-      await expect(fullscreen).toHaveAttribute("href", "/c/atrium-meridian-artifact");
+      await expect(fullscreen).toHaveAttribute("href", `/atrium/${ARTIFACT_ID}/view`);
 
       await page.screenshot({
         path: `${SHOT_DIR}/05-artifact-viewer.png`,

@@ -54,6 +54,14 @@ export interface ReaderFrameProps {
   children: React.ReactNode;
   /** The provenance footer element (kept at the bottom of the sheet). */
   footer: React.ReactNode;
+  /**
+   * Full-bleed variant (#1052): render the body edge-to-edge under a slim header
+   * bar instead of inside the 720px reading sheet. The artifact readers pass this
+   * so an interactive artifact fills the viewport; documents keep the sheet (the
+   * default). It drops the TOC rail (artifacts have no headings anyway) and moves
+   * the title/meta/edit chrome into a top bar above the full-width stage.
+   */
+  fullBleed?: boolean;
 }
 
 /** Format a publish timestamp as e.g. "Oct 1, 2026", or null when absent/invalid. */
@@ -112,6 +120,7 @@ export function ReaderFrame({
   icon,
   children,
   footer,
+  fullBleed = false,
 }: ReaderFrameProps): React.JSX.Element {
   const viewOnly = editHref === null;
   const publishedLabel = formatPublished(publishedAt);
@@ -122,6 +131,66 @@ export function ReaderFrame({
   // The rail carries the TOC and/or the view-only notice; render it only when it
   // would have content (an editor viewing a heading-less doc gets no empty rail).
   const showRail = headings.length > 0 || viewOnly;
+
+  // Full-bleed variant: a slim header bar over an edge-to-edge, viewport-filling
+  // stage (used by the artifact readers). Keeps the same nav + the reader testids
+  // (reader-view-only / reader-edit-link / reader-comment-chip / reader-uptodate).
+  if (fullBleed) {
+    return (
+      <div
+        className={`atrium-meridian ${fontMeridian.variable} mer-reader mer-reader--artifact`}
+      >
+        <AtriumReaderNav authenticated={authenticated} />
+        <div className="mer-reader-artifact-bar">
+          <div>
+            <h1 className="mer-reader-artifact-title">{title}</h1>
+            <div className="mer-reader-artifact-meta">
+              {metaBits.length > 0 && <span>{metaBits.join(" · ")}</span>}
+              <span
+                className="mer-reader-pill-uptodate"
+                data-testid="reader-uptodate"
+              >
+                UP TO DATE
+              </span>
+            </div>
+          </div>
+          <div className="mer-reader-artifact-bar-actions">
+            {viewOnly ? (
+              <span
+                className="mer-reader-viewonly-inline"
+                data-testid="reader-view-only"
+              >
+                👁 View only
+              </span>
+            ) : (
+              <>
+                {commentHref && commentCount > 0 && (
+                  <Link
+                    href={commentHref}
+                    className="mer-reader-comment-chip"
+                    data-testid="reader-comment-chip"
+                  >
+                    {commentCount} comment{commentCount === 1 ? "" : "s"}
+                  </Link>
+                )}
+                {editHref && (
+                  <Link
+                    href={editHref}
+                    className="mer-reader-edit"
+                    data-testid="reader-edit-link"
+                  >
+                    Edit
+                  </Link>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+        <div className="mer-reader-artifact-stage">{children}</div>
+        <div className="mer-reader-artifact-foot">{footer}</div>
+      </div>
+    );
+  }
 
   return (
     <div className={`atrium-meridian ${fontMeridian.variable} mer-reader`}>

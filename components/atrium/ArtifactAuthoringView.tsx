@@ -100,7 +100,11 @@ export async function ArtifactAuthoringView({
           )}
           <VisibilityChip key={obj.id} idOrSlug={obj.id} />
           <Link
-            href={readerHref}
+            // Full screen opens the chrome-free viewer route (#1052) — it works
+            // for UNPUBLISHED artifacts and any viewer who canView, unlike the
+            // /c and /p readers (which require a live publication). The readers
+            // remain the Share targets (ArtifactTopbarActions, via readerHref).
+            href={`/atrium/${obj.id}/view`}
             target="_blank"
             rel="noreferrer"
             className="mer-ectl mer-ectl-primary"

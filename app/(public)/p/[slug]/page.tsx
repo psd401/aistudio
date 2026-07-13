@@ -273,6 +273,9 @@ export default async function PublicReaderPage({
         collectionName={published.collectionName}
         // Artifact readers skip the TOC (no document headings to walk).
         headings={[]}
+        // Full-bleed: the interactive artifact fills the viewport instead of the
+        // 720px reading sheet (#1052).
+        fullBleed
         footer={
           <ProvenanceFooter
             objectId={published.id}
@@ -283,7 +286,7 @@ export default async function PublicReaderPage({
         <ArtifactSandbox
           code={code}
           src={getArtifactSandboxRenderUrl()}
-          className="atrium-artifact-preview"
+          className="atrium-artifact-reader-frame"
         />
       </ReaderFrame>
     );
