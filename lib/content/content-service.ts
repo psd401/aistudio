@@ -762,7 +762,9 @@ export const contentService = {
     const { retrievalService } = await import("./retrieval-service");
     await retrievalService.removeFromIndex(existing.id);
 
-    const versionsDeleted = await executeTransaction(async (tx) => {
+    let versionsDeleted: number;
+    try {
+      versionsDeleted = await executeTransaction(async (tx) => {
       // Lock the object row so a concurrent publish cannot slip a live publication
       // in between the pre-flight check and the delete (TOCTOU).
       const locked = await tx
@@ -838,7 +840,34 @@ export const contentService = {
       // end-of-statement check sees no dangling reference.
       await tx.delete(contentObjects).where(eq(contentObjects.id, existing.id));
       return vCount;
-    }, "content.delete");
+      }, "content.delete");
+    } catch (err) {
+      // The pre-flight index prune runs BEFORE this tx (it needs the not-yet-cascaded
+      // content_index_links to find the shared repository_item via the sanctioned
+      // removeFromIndex). If the AUTHORITATIVE in-tx guard then aborts the delete —
+      // a publish committed between the racy pre-flight liveDestinations() read and
+      // the FOR-UPDATE lock — the object stays live+published but has already been
+      // de-indexed. Re-index it (best-effort, fire-and-forget) so a REFUSED delete
+      // never silently drops still-live content out of assistant retrieval. Only the
+      // in-tx live-publication guard raises ConflictError inside the tx.
+      if (err instanceof ConflictError) {
+        void retrievalService
+          .indexObject(existing.id)
+          .catch((reindexError) =>
+            createLogger({ action: "content.delete" }).warn(
+              "Re-index after aborted delete failed (object left de-indexed until next publish/edit)",
+              {
+                objectId: existing.id,
+                error:
+                  reindexError instanceof Error
+                    ? reindexError.message
+                    : String(reindexError),
+              }
+            )
+          );
+      }
+      throw err;
+    }
 
     const log = createLogger({ action: "content.delete" });
     // Best-effort external cleanup AFTER commit — orphaned S3 keys are acceptable.

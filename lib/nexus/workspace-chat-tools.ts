@@ -28,7 +28,7 @@
 
 import { tool, jsonSchema, type Tool, type ToolSet } from "ai";
 import { contentService } from "@/lib/content/content-service";
-import { canEdit } from "@/lib/content/helpers";
+import { canDelete, canEdit } from "@/lib/content/helpers";
 import { requesterForUserId } from "@/lib/content/requester-from-auth";
 import { applyAgentEdit, readAgentDocMarkdown } from "@/lib/content/collab/apply-agent-edit";
 import { snapshotLiveDocumentForPublish } from "@/lib/content/collab/snapshot-before-publish";
@@ -652,8 +652,15 @@ export async function buildWorkspaceChatTools(params: {
     // ITEM 2: publish/unpublish the OPEN object through the human publish gate.
     tools.publish_workspace_content = buildPublishTool({ op: "publish", objectId: obj.id, kind, userId, requestId, log });
     tools.unpublish_workspace_content = buildPublishTool({ op: "unpublish", objectId: obj.id, kind, userId, requestId, log });
-    // Hard delete of the OPEN object (owner/admin, refused while published). The
-    // service re-checks canDelete + live-publication per call.
+  }
+
+  // Hard delete of the OPEN object, bound on `canDelete` — NOT `canEdit`. helpers.ts
+  // documents canDelete as deliberately decoupled from canEdit (owner/admin only, so a
+  // future widening of edit — e.g. collaborator grants — can never silently imply
+  // delete). canDelete === canEdit for a session user today, but binding the LLM's
+  // delete affordance on the delete authority keeps it aligned with that discipline;
+  // the service still re-checks assertCanDelete + the live-publication guard per call.
+  if (canDelete(req, obj.ownerUserId)) {
     tools.delete_workspace_content = buildDeleteTool({ objectId: obj.id, kind, userId, log });
   }
 

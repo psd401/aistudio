@@ -128,8 +128,14 @@ jest.mock("@/lib/content/audit", () => ({
 const removeFromIndexMock = jest.fn(async (_id: string) => {
   callOrder.push("removeFromIndex");
 });
+const indexObjectMock = jest.fn(async (_id: string) => undefined);
 jest.mock("@/lib/content/retrieval-service", () => ({
-  retrievalService: { removeFromIndex: (id: string) => removeFromIndexMock(id) },
+  retrievalService: {
+    removeFromIndex: (id: string) => removeFromIndexMock(id),
+    // The delete path re-indexes a still-live object when the in-tx guard aborts
+    // the delete (409) after the pre-flight index prune (Claude/Codex review fix).
+    indexObject: (id: string) => indexObjectMock(id),
+  },
 }));
 
 const liveDestinationsMock = jest.fn(async (_id: string) => [] as string[]);
@@ -182,6 +188,7 @@ beforeEach(() => {
   assertCanDeleteMock.mockClear();
   assertCanDeleteMock.mockReset();
   removeFromIndexMock.mockClear();
+  indexObjectMock.mockClear();
   liveDestinationsMock.mockClear();
   liveDestinationsMock.mockResolvedValue([]);
   // Only clear call history — keep the default implementation that records the
@@ -251,6 +258,10 @@ describe("contentService.delete", () => {
     ).rejects.toBeInstanceOf(ConflictError);
     // No audit / no delete when the in-tx guard rejects.
     expect(txDeleteCalls).toHaveLength(0);
+    // The pre-flight prune already ran, so the refused (still-live) object is
+    // RE-INDEXED — a 409 must never leave live content out of retrieval.
+    expect(removeFromIndexMock).toHaveBeenCalledWith(OBJ_ID);
+    expect(indexObjectMock).toHaveBeenCalledWith(OBJ_ID);
   });
 
   it("deletes: prunes index BEFORE the tx, writes a delete audit with details, deletes the row, cleans S3 after", async () => {

@@ -25,6 +25,7 @@ const createVersionMock = jest.fn();
 const deleteMock = jest.fn();
 const listMock = jest.fn();
 const canEditMock = jest.fn();
+const canDeleteMock = jest.fn();
 const requesterMock = jest.fn();
 const applyAgentEditMock = jest.fn();
 const readAgentDocMarkdownMock = jest.fn();
@@ -53,6 +54,7 @@ jest.mock("@/lib/content/collab/snapshot-before-publish", () => ({
 }));
 jest.mock("@/lib/content/helpers", () => ({
   canEdit: (...a: unknown[]) => canEditMock(...a),
+  canDelete: (...a: unknown[]) => canDeleteMock(...a),
 }));
 jest.mock("@/lib/content/requester-from-auth", () => ({
   requesterForUserId: (...a: unknown[]) => requesterMock(...a),
@@ -88,6 +90,10 @@ const exec = (t: unknown, args: unknown = {}) => (t as ExecTool).execute(args, {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // canDelete mirrors canEdit by default (identical for a session user), so tests
+  // that toggle canEditMock also drive the delete-tool bind. Override canDeleteMock
+  // alone to exercise the deliberate canDelete-vs-canEdit decoupling.
+  canDeleteMock.mockImplementation((...a: unknown[]) => canEditMock(...a));
   requesterMock.mockResolvedValue(REQ);
   screenMock.mockResolvedValue({ allowed: true });
   applyAgentEditMock.mockResolvedValue(undefined);
@@ -158,6 +164,18 @@ describe("buildWorkspaceChatTools", () => {
         "update_workspace_artifact",
       ].sort()
     );
+  });
+
+  it("does NOT bind delete_workspace_content when canDelete is false even if canEdit is true (decoupling)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    // Simulate a future world where edit widened (e.g. collaborator grants) but the
+    // requester is not the owner/admin — delete must NOT be offered.
+    canDeleteMock.mockReturnValue(false);
+    const result = await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" });
+    expect(Object.keys(result!.tools)).not.toContain("delete_workspace_content");
+    // Edit is still bound (canEdit true) — only delete is gated off.
+    expect(Object.keys(result!.tools)).toContain("edit_workspace_document");
   });
 
   it("delete_workspace_content deletes via the service (surface 'ui') and reports success", async () => {
