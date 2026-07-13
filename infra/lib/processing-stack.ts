@@ -12,6 +12,8 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as path from 'path';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import { execSync } from 'child_process';
 import { ServiceRoleFactory } from './constructs/security';
 import { VPCProvider, EnvironmentConfig } from './constructs';
@@ -436,7 +438,146 @@ export class ProcessingStack extends cdk.Stack {
       maxBatchingWindow: cdk.Duration.seconds(5),
     }));
 
+    // =====================================================================
+    // Group Sync Lambda (Epic #1202, Phase 0 / #1203)
+    // =====================================================================
+    // Hourly Google Directory sync: resolves the admin selection (picks ∪ prefix
+    // rules), fetches each group's transitive membership, and full-replaces
+    // group_members per group with last-known-good fail-safety. Reads all config
+    // (SA secret ARN, customer id, optional DWD subject, enabled flag) from the
+    // settings table at runtime — so no redeploy is needed to (re)configure it.
+    // In VPC (PRIVATE_WITH_EGRESS) for postgres.js → Aurora AND NAT egress to the
+    // Google Directory / Cloud Identity APIs. Same role/VPC pattern as
+    // embedding-generator and AgentHealthDaily.
+    //
+    // The SA JSON key secret is admin-chosen at runtime, so the read grant is
+    // scoped by NAME PATTERN (aistudio-<env>-google-directory-*) rather than a
+    // single ARN — least-privilege to the directory-sync secret family only.
+    const groupSyncSaSecretArnPattern =
+      `arn:aws:secretsmanager:${this.region}:${this.account}:secret:aistudio-${props.environment}-google-directory-*`;
+
+    const groupSyncRole = ServiceRoleFactory.createLambdaRole(this, 'GroupSyncRole', {
+      functionName: 'psd-group-sync',
+      environment: props.environment,
+      region: this.region,
+      account: this.account,
+      // vpcEnabled: false — VPC access added manually via the managed policy below
+      // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
+      vpcEnabled: false,
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [
+            // Aurora credentials (DatabaseStack secret) — no tag condition (same
+            // as EmbeddingGeneratorRole/AgentHealthDailyRole).
+            new iam.PolicyStatement({
+              sid: 'AuroraSecretAccess',
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [databaseSecretArn],
+            }),
+            // Google service-account JSON key — scoped to the directory-sync
+            // secret name family.
+            new iam.PolicyStatement({
+              sid: 'GoogleDirectorySaSecretAccess',
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [groupSyncSaSecretArnPattern],
+            }),
+            // Sync-run metrics (namespace-scoped).
+            new iam.PolicyStatement({
+              sid: 'GroupSyncMetrics',
+              effect: iam.Effect.ALLOW,
+              actions: ['cloudwatch:PutMetricData'],
+              resources: ['*'],
+              conditions: {
+                StringEquals: { 'cloudwatch:namespace': 'AIStudio/GroupSync' },
+              },
+            }),
+          ],
+        }),
+      ],
+    });
+    groupSyncRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
+
+    const groupSyncSg = new ec2.SecurityGroup(this, 'GroupSyncSg', {
+      vpc,
+      description: 'Security group for group-sync Lambda (Aurora + Google Directory egress)',
+      allowAllOutbound: true,
+    });
+
+    const groupSyncLambda = new lambda.Function(this, 'GroupSync', {
+      functionName: `psd-group-sync-${props.environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '../lambdas/group-sync'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'group-sync');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  process.stderr.write(`Local bundling failed, falling back to Docker: ${e}\n`);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      timeout: cdk.Duration.minutes(10),
+      memorySize: 512,
+      architecture: lambda.Architecture.ARM_64,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [groupSyncSg],
+      environment: {
+        NODE_OPTIONS: '--enable-source-maps',
+        DATABASE_HOST: databaseHost,
+        DATABASE_SECRET_ARN: databaseSecretArn,
+        DATABASE_NAME: 'aistudio',
+        DATABASE_PORT: '5432',
+        ENVIRONMENT: props.environment,
+      },
+      role: groupSyncRole,
+    });
+    cdk.Tags.of(groupSyncLambda).add('Environment', props.environment);
+    cdk.Tags.of(groupSyncLambda).add('ManagedBy', 'cdk');
+
+    // Hourly schedule. The same function is async-invoked by the admin
+    // "Sync now" action (see lib/groups/trigger.ts).
+    new events.Rule(this, 'GroupSyncHourlySchedule', {
+      description: 'Hourly Google Directory group membership sync (#1203)',
+      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      targets: [new eventsTargets.LambdaFunction(groupSyncLambda)],
+    });
+
     // Outputs
+    new cdk.CfnOutput(this, 'GroupSyncFunctionName', {
+      value: groupSyncLambda.functionName,
+      description: 'Name of the Google Directory group-sync Lambda function',
+      exportName: `${props.environment}-GroupSyncFunctionName`,
+    });
+
     new cdk.CfnOutput(this, 'FileProcessingQueueUrl', {
       value: this.fileProcessingQueue.queueUrl,
       description: 'URL of the file processing queue',
