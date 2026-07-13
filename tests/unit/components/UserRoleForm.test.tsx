@@ -4,6 +4,19 @@ import userEvent from '@testing-library/user-event';
 import { UserRoleForm } from '../../../components/user/user-role-form';
 import { TestWrapper } from '../../utils';
 
+// Roles are now fetched dynamically (getRoles) rather than hardcoded (#1204).
+// Provide the standard three so the option labels render for the tests below.
+jest.mock('@/actions/admin/user-management.actions', () => ({
+  getRoles: jest.fn().mockResolvedValue({
+    isSuccess: true,
+    data: [
+      { id: '1', name: 'administrator' },
+      { id: '2', name: 'staff' },
+      { id: '3', name: 'student' },
+    ],
+  }),
+}));
+
 describe('UserRoleForm', () => {
   beforeEach(() => {
     jest.clearAllMocks();
