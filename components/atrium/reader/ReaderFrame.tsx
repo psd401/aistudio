@@ -107,6 +107,106 @@ function ReaderCover({
   );
 }
 
+/**
+ * The header-bar actions shared by the full-bleed variant: the view-only notice
+ * (when the viewer can't edit) OR the comment chip + Edit link. Extracted so the
+ * variant frame stays under the complexity lint. Preserves the reader testids.
+ */
+function ReaderBarActions({
+  viewOnly,
+  commentHref,
+  commentCount,
+  editHref,
+}: {
+  viewOnly: boolean;
+  commentHref: string | null;
+  commentCount: number;
+  editHref: string | null;
+}): React.JSX.Element {
+  if (viewOnly) {
+    return (
+      <span className="mer-reader-viewonly-inline" data-testid="reader-view-only">
+        👁 View only
+      </span>
+    );
+  }
+  return (
+    <>
+      {commentHref && commentCount > 0 && (
+        <Link
+          href={commentHref}
+          className="mer-reader-comment-chip"
+          data-testid="reader-comment-chip"
+        >
+          {commentCount} comment{commentCount === 1 ? "" : "s"}
+        </Link>
+      )}
+      {editHref && (
+        <Link href={editHref} className="mer-reader-edit" data-testid="reader-edit-link">
+          Edit
+        </Link>
+      )}
+    </>
+  );
+}
+
+/**
+ * Full-bleed reader variant: a slim header bar (title · meta · UP TO DATE ·
+ * edit/view-only) over an edge-to-edge, viewport-filling stage — used by the
+ * artifact readers so an interactive artifact isn't boxed into the 720px sheet.
+ * Same nav + the same reader testids as the sheet variant.
+ */
+function FullBleedReaderFrame({
+  title,
+  authenticated,
+  viewOnly,
+  metaBits,
+  commentHref,
+  commentCount,
+  editHref,
+  children,
+  footer,
+}: {
+  title: string;
+  authenticated: boolean;
+  viewOnly: boolean;
+  metaBits: string[];
+  commentHref: string | null;
+  commentCount: number;
+  editHref: string | null;
+  children: React.ReactNode;
+  footer: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <div
+      className={`atrium-meridian ${fontMeridian.variable} mer-reader mer-reader--artifact`}
+    >
+      <AtriumReaderNav authenticated={authenticated} />
+      <div className="mer-reader-artifact-bar">
+        <div>
+          <h1 className="mer-reader-artifact-title">{title}</h1>
+          <div className="mer-reader-artifact-meta">
+            {metaBits.length > 0 && <span>{metaBits.join(" · ")}</span>}
+            <span className="mer-reader-pill-uptodate" data-testid="reader-uptodate">
+              UP TO DATE
+            </span>
+          </div>
+        </div>
+        <div className="mer-reader-artifact-bar-actions">
+          <ReaderBarActions
+            viewOnly={viewOnly}
+            commentHref={commentHref}
+            commentCount={commentCount}
+            editHref={editHref}
+          />
+        </div>
+      </div>
+      <div className="mer-reader-artifact-stage">{children}</div>
+      <div className="mer-reader-artifact-foot">{footer}</div>
+    </div>
+  );
+}
+
 export function ReaderFrame({
   title,
   authenticated,
@@ -132,63 +232,22 @@ export function ReaderFrame({
   // would have content (an editor viewing a heading-less doc gets no empty rail).
   const showRail = headings.length > 0 || viewOnly;
 
-  // Full-bleed variant: a slim header bar over an edge-to-edge, viewport-filling
-  // stage (used by the artifact readers). Keeps the same nav + the reader testids
-  // (reader-view-only / reader-edit-link / reader-comment-chip / reader-uptodate).
+  // Artifact readers render full-bleed (see FullBleedReaderFrame); documents keep
+  // the 720px reading sheet below.
   if (fullBleed) {
     return (
-      <div
-        className={`atrium-meridian ${fontMeridian.variable} mer-reader mer-reader--artifact`}
+      <FullBleedReaderFrame
+        title={title}
+        authenticated={authenticated}
+        viewOnly={viewOnly}
+        metaBits={metaBits}
+        commentHref={commentHref}
+        commentCount={commentCount}
+        editHref={editHref}
+        footer={footer}
       >
-        <AtriumReaderNav authenticated={authenticated} />
-        <div className="mer-reader-artifact-bar">
-          <div>
-            <h1 className="mer-reader-artifact-title">{title}</h1>
-            <div className="mer-reader-artifact-meta">
-              {metaBits.length > 0 && <span>{metaBits.join(" · ")}</span>}
-              <span
-                className="mer-reader-pill-uptodate"
-                data-testid="reader-uptodate"
-              >
-                UP TO DATE
-              </span>
-            </div>
-          </div>
-          <div className="mer-reader-artifact-bar-actions">
-            {viewOnly ? (
-              <span
-                className="mer-reader-viewonly-inline"
-                data-testid="reader-view-only"
-              >
-                👁 View only
-              </span>
-            ) : (
-              <>
-                {commentHref && commentCount > 0 && (
-                  <Link
-                    href={commentHref}
-                    className="mer-reader-comment-chip"
-                    data-testid="reader-comment-chip"
-                  >
-                    {commentCount} comment{commentCount === 1 ? "" : "s"}
-                  </Link>
-                )}
-                {editHref && (
-                  <Link
-                    href={editHref}
-                    className="mer-reader-edit"
-                    data-testid="reader-edit-link"
-                  >
-                    Edit
-                  </Link>
-                )}
-              </>
-            )}
-          </div>
-        </div>
-        <div className="mer-reader-artifact-stage">{children}</div>
-        <div className="mer-reader-artifact-foot">{footer}</div>
-      </div>
+        {children}
+      </FullBleedReaderFrame>
     );
   }
 
