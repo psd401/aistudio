@@ -66,6 +66,10 @@ bun run test:streaming:contract  # Contract tests
 - `atrium-publish-service.test.ts` - Publishing logic
 - `atrium-visibility.test.ts` - Visibility filtering
 - `atrium-version-snapshot.test.ts` - Versioning
+- `atrium-content-delete.test.ts` - Hard delete logic (#1200)
+- `atrium-can-delete.test.ts` - Delete permission checks (#1200)
+- `atrium-code-encoding.test.ts` - Base64 artifact transit encoding (#1199)
+- `atrium-content-code-encoding-routes.test.ts` - Route-level encoding tests (#1199)
 
 **Authentication**:
 - Tests in `/tests/unit/lib/auth/`
@@ -87,10 +91,15 @@ bun run test:streaming:contract  # Contract tests
 - `/infra/lambdas/agent-triage-poll/sweep.test.ts` - Inbox backfill state machine (#1172)
 - `/infra/lambdas/agent-triage-poll/worker.test.ts` - Per-user worker logic (#1172)
 
+**Atrium Key Bootstrap (Lambda)**:
+- `/infra/lambdas/atrium-content-key-bootstrap/__tests__/index.test.ts` - Key provisioning custom resource (#1197)
+
 **Agent Skills**:
 - `/infra/agent-image/skills/psd-canva/common.test.js` - Canva skill helpers (#1176)
 - `/infra/agent-image/skills/psd-canva/run.test.js` - Canva skill runner (#1176)
 - `/infra/agent-image/skills/psd-last30days/scripts/test_last30days.py` - Last30days skill (#1180)
+- `/infra/agent-image/skills/psd-atrium/run.test.js` - Atrium skill tests (#1195)
+- `/infra/agent-image/skills/psd-atrium/common.test.js` - Atrium skill helpers (#1195)
 
 ## E2E Tests
 
@@ -112,6 +121,8 @@ bun run test:streaming:contract  # Contract tests
 | Atrium Documents | `atrium-document.guard.spec.ts` | Document editing |
 | Atrium Artifacts | `atrium-artifact.guard.spec.ts` | Artifact creation |
 | Atrium Publishing | `atrium-visibility-editor.spec.ts` | Publishing workflow |
+| Atrium Delete | `atrium-delete.functional.spec.ts` | Hard delete workflow (#1200) |
+| Atrium Archived View | `atrium-archived-view.functional.spec.ts` | Archived content library (#1201) |
 | Nexus Chat | `nexus-tools.spec.ts` | Chat functionality |
 | Nexus Workspace | `nexus-workspace-panel.spec.ts` | Workspace integration |
 | Assistant Architect | `assistant-architect-streaming.spec.ts` | Tool execution |

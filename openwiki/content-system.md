@@ -238,6 +238,7 @@ const CONTENT_TOOLS = [
   'list_content',
   'publish_content',
   'unpublish_content',
+  'delete_content',      // Hard delete (owner/admin, unpublish-first)
   // ...more
 ];
 ```
@@ -250,6 +251,7 @@ const CONTENT_TOOLS = [
 - `content.updated` → Version created
 - `content.published` → Publication event
 - `content.archived` → Archived
+- `content.deleted` → Hard deleted (permanent removal)
 
 ### Audit Trail
 
@@ -259,7 +261,61 @@ const CONTENT_TOOLS = [
 - Timestamp
 - Previous/new values
 
+Audit rows for deletes include a `surface` field (`ui` for in-app, `api` for REST/MCP).
+
 **Source**: `/lib/content/audit.ts`
+
+## Hard Delete
+
+Permanent removal of content objects (PR #1200). Unlike archive (reversible soft-remove), delete is **irreversible** and removes the object and all its versions, bodies, comments, and index entries.
+
+### Guardrails
+
+1. **Owner/admin only**: The `assertCanDelete` gate checks that the requester is the object's owner or has admin privileges. A non-owner attempting delete receives 404 (existence masked) rather than 403.
+
+2. **Unpublish first**: A published object cannot be deleted. The API returns 409 Conflict with a message like "unpublish from … first". Delete never auto-unpublishes — the caller must explicitly unpublish from each live destination first.
+
+3. **Cascade cleanup**: Delete removes `content_objects`, `content_versions` (cascade), S3 snapshots, and index entries in a single transaction.
+
+### Delete Flow
+
+```
+DELETE /api/v1/content/:id → 204 No Content
+```
+
+The in-app surface is the "Delete" button in the content-settings dialog (`ContentSettings.tsx`), which calls `deleteContentAction`.
+
+### MCP Tool
+
+`delete_content` (requires `content:delete` scope) — permanent removal wrapper.
+
+**Sources**: `/actions/db/atrium/delete-content.ts`, `/lib/content/content-service.ts`
+
+## Code Encoding (Artifacts)
+
+Artifact code (HTML/JS/CSS) is transmitted base64-encoded to bypass AWS WAF's `CrossSiteScripting_BODY` rule (PR #1199). The WAF blocks request bodies containing `<script>`, `<style>`, `onerror=`, etc. — which legitimate artifact code often contains.
+
+### How It Works
+
+1. Client sends artifact code in a `codeEncoding: "base64"` field (base64 of the UTF-8 body)
+2. Server decodes at the transport boundary (`decodeContentBody` in `lib/content/code-encoding.ts`)
+3. Decoded content runs through the normal §28.3 guardrails and size caps
+4. Artifact renders only in a cross-origin sandboxed iframe — never on the app origin
+
+### Supported Encodings
+
+- `undefined` (default): Body is raw UTF-8 (pre-existing contract)
+- `"base64"`: Body is canonical base64, decoded server-side
+
+### Size Limit
+
+`MAX_DECODED_BODY_BYTES = 5_000_000` — decoded content cannot exceed 5MB.
+
+**Source**: `/lib/content/code-encoding.ts`
+
+### Agent Skill
+
+The `psd-atrium` skill automatically base64-encodes artifact code on writes — agents pass raw HTML/JS/CSS and the skill handles encoding transparently.
 
 ## Source References
 
@@ -270,6 +326,8 @@ const CONTENT_TOOLS = [
 | Visibility Service | `/lib/content/visibility-service.ts` |
 | Publish Service | `/lib/content/publish-service.ts` |
 | Retrieval Service | `/lib/content/retrieval-service.ts` |
+| Delete Action | `/actions/db/atrium/delete-content.ts` |
+| Code Encoding | `/lib/content/code-encoding.ts` |
 | MCP Content Tools | `/lib/mcp/content-tools.ts` |
 | Database Schema | `/lib/db/schema/tables/content-*.ts` |
 | Design Spec | `/docs/features/atrium-design-spec.md` |
