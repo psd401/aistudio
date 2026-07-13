@@ -17,7 +17,7 @@
  */
 
 import Link from "next/link";
-import { FileText, Loader2, Sparkles, ArrowUpRight } from "lucide-react";
+import { FileText, Loader2, Sparkles, ArrowUpRight, Archive } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { timeAgo } from "@/lib/atrium/relative-time";
 import type { ContentObjectDTO } from "@/lib/content";
@@ -48,10 +48,15 @@ function cardMeta(it: ContentObjectDTO): string {
 function DocCard({ it }: { it: ContentObjectDTO }): React.JSX.Element {
   const status = statusBadge(it.status);
   const isAgent = it.createdByActor === "agent";
+  const isArchived = it.status === "archived";
   return (
     <Link
       href={`/atrium/${it.id}/edit`}
-      className={cn("mer-lib-card", isAgent && "mer-card-agent")}
+      className={cn(
+        "mer-lib-card",
+        isAgent && "mer-card-agent",
+        isArchived && "mer-card-archived"
+      )}
     >
       <div className="mer-lib-card-head">
         <span className="mer-icon-chip" data-emoji={it.icon ? "true" : undefined}>
@@ -90,12 +95,28 @@ function ArtifactCard({
   sandboxSrc: string | null;
 }): React.JSX.Element {
   const isAgent = it.createdByActor === "agent";
+  const isArchived = it.status === "archived";
   return (
     <Link
       href={`/atrium/${it.id}/edit`}
-      className={cn("mer-lib-card mer-lib-card-artifact", isAgent && "mer-card-agent")}
+      className={cn(
+        "mer-lib-card mer-lib-card-artifact",
+        isAgent && "mer-card-agent",
+        isArchived && "mer-card-archived"
+      )}
     >
-      <ArtifactThumbnail artifactId={it.id} sandboxSrc={sandboxSrc} />
+      {/* Positioned wrapper so the ARCHIVED pill can overlay the preview's
+          top-left corner (the thumbnail itself is aria-hidden and carries the
+          top-right "Live artifact" badge — the pill must sit outside it to stay
+          in the accessibility tree). */}
+      <div className="mer-artifact-preview-wrap">
+        <ArtifactThumbnail artifactId={it.id} sandboxSrc={sandboxSrc} />
+        {isArchived && (
+          <span className="mer-badge mer-badge-draft mer-artifact-archived-badge">
+            Archived
+          </span>
+        )}
+      </div>
       <p className="mer-lib-card-title">{it.title}</p>
       <div className="mer-lib-card-foot">
         <span className="mer-lib-card-meta">
@@ -122,6 +143,22 @@ function CreateCard({ onCreate }: { onCreate: () => void }): React.JSX.Element {
   );
 }
 
+/** The archived-view empty state ("Nothing archived"). */
+function ArchivedEmpty(): React.JSX.Element {
+  return (
+    <div className="mer-lib-empty" role="status">
+      <span className="mer-lib-empty-icon" aria-hidden="true">
+        <Archive className="h-6 w-6" />
+      </span>
+      <p className="mer-lib-empty-title">Nothing archived</p>
+      <p className="mer-lib-empty-sub">
+        Archived docs and artifacts appear here. Open one to restore it or delete
+        it permanently.
+      </p>
+    </div>
+  );
+}
+
 interface LibraryListProps {
   items: ContentObjectDTO[];
   loading: boolean;
@@ -134,6 +171,13 @@ interface LibraryListProps {
    * → cards keep the gradient placeholder.
    */
   sandboxSrc: string | null;
+  /**
+   * The "Archived" filter is active. The archived view is a MANAGEMENT surface:
+   * it drops the dashed "Create with the agent" card (you never create archived
+   * content) and shows a dedicated "Nothing archived" empty state instead of the
+   * create affordance.
+   */
+  archivedView: boolean;
 }
 
 export function LibraryList({
@@ -142,6 +186,7 @@ export function LibraryList({
   error,
   onCreate,
   sandboxSrc,
+  archivedView,
 }: LibraryListProps): React.JSX.Element {
   if (loading) {
     return (
@@ -158,6 +203,11 @@ export function LibraryList({
     );
   }
 
+  // Archived view + nothing archived: its own empty state, no create card.
+  if (archivedView && items.length === 0) {
+    return <ArchivedEmpty />;
+  }
+
   return (
     <div className="mer-card-grid">
       {items.map((it) =>
@@ -167,7 +217,8 @@ export function LibraryList({
           <DocCard key={it.id} it={it} />
         )
       )}
-      <CreateCard onCreate={onCreate} />
+      {/* No "create" affordance in the archived management view. */}
+      {!archivedView && <CreateCard onCreate={onCreate} />}
     </div>
   );
 }

@@ -707,6 +707,71 @@
   line-height: 1.4;
 }
 
+/* ============================================================================
+ * ARCHIVED VIEW (Epic #1059 follow-up) — the "Archived" filter's muted cards,
+ * the ARCHIVED pill overlay on artifact previews, and the empty state. The
+ * ARCHIVED pill reuses the gray DRAFT pill (.mer-badge-draft). Light-only
+ * Meridian — no dark-mode variant.
+ * ========================================================================== */
+
+/* A muted, de-emphasized card. Faded + lightly desaturated so archived content
+ * reads as inactive at a glance; hover restores full color/opacity to invite the
+ * open-to-restore/delete action. */
+.mer-card-archived {
+  opacity: 0.66;
+  filter: grayscale(0.2);
+  transition: opacity 160ms ease-out, filter 160ms ease-out,
+    box-shadow 160ms ease-out, transform 160ms ease-out,
+    border-color 160ms ease-out;
+}
+.mer-card-archived:hover {
+  opacity: 0.94;
+  filter: grayscale(0);
+}
+
+/* Positioned wrapper so the ARCHIVED pill can overlay the artifact preview's
+ * top-left corner (top-right carries the "Live artifact" badge). */
+.mer-artifact-preview-wrap {
+  position: relative;
+}
+.mer-artifact-archived-badge {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  z-index: 1;
+}
+
+/* "Nothing archived" empty state — centered, muted, no create affordance. */
+.mer-lib-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  padding: 56px 20px;
+  color: var(--mer-ink-muted);
+}
+.mer-lib-empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: #f1f2f0;
+  color: var(--mer-ink-secondary);
+}
+.mer-lib-empty-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--mer-ink);
+}
+.mer-lib-empty-sub {
+  font-size: 13px;
+  max-width: 340px;
+  line-height: 1.5;
+}
+
 /* "Create with the agent" prompt dialog (README Interactions: creation is a
  * single prompt field, not a form). Rendered inside a `.mer-portal` dialog. */
 .mer-prompt-field {

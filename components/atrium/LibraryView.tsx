@@ -36,14 +36,19 @@ const log = createLogger({ component: "LibraryView" });
 
 /**
  * The library filter chips. "shared" maps to the server `owner: "shared"`
- * ownership filter (content shared with the caller, not owned by them); the
- * others map to the `kind` filter (or no kind for "all").
+ * ownership filter (content shared with the caller, not owned by them);
+ * "archived" maps to the server `status: "archived"` filter (the ONLY view that
+ * surfaces archived content — every other view excludes it, matching the default
+ * list behavior in `visibilityService.listVisible`); the remaining chips map to
+ * the `kind` filter (or no kind for "all"). The chips are single-select, so
+ * "Archived" is a distinct lifecycle view showing all archived docs + artifacts.
  */
 const VIEWS = [
   { value: "all", label: "All" },
   { value: "document", label: "Docs" },
   { value: "artifact", label: "Artifacts" },
   { value: "shared", label: "Shared with me" },
+  { value: "archived", label: "Archived" },
 ] as const;
 
 type LibraryFilterView = (typeof VIEWS)[number]["value"];
@@ -317,6 +322,12 @@ export function LibraryView({
   const kind: ContentKind | undefined =
     view === "document" ? "document" : view === "artifact" ? "artifact" : undefined;
   const owner: "shared" | undefined = view === "shared" ? "shared" : undefined;
+  // The "Archived" chip is the ONLY view that requests archived content; every
+  // other view leaves `status` undefined, and the service then excludes archived
+  // rows (default list behavior is preserved — no regression).
+  const status: "archived" | undefined =
+    view === "archived" ? "archived" : undefined;
+  const archivedView = view === "archived";
 
   /**
    * Fetch one page. `offset === 0` replaces the list (a fresh load for the
@@ -337,6 +348,7 @@ export function LibraryView({
           collectionId: collectionId ?? undefined,
           kind,
           owner,
+          status,
           tag: debouncedTag.trim() || undefined,
           limit: PAGE_SIZE,
           offset,
@@ -362,7 +374,7 @@ export function LibraryView({
         }
       }
     },
-    [collectionId, kind, owner, debouncedTag]
+    [collectionId, kind, owner, status, debouncedTag]
   );
 
   // Filters changed (or first mount): reload page one.
@@ -410,6 +422,7 @@ export function LibraryView({
           error={error}
           onCreate={() => setAgentPromptOpen(true)}
           sandboxSrc={sandboxSrc}
+          archivedView={archivedView}
         />
 
         {/* Pagination: hidden once a short page signals the end, while the first
