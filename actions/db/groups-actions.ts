@@ -35,6 +35,7 @@ import {
 import type { GroupSelectionRuleRow, GroupSelectionRuleType } from "@/lib/db/schema"
 import { triggerGroupSyncNow } from "@/lib/groups/trigger"
 import { getGroupSyncSettings } from "@/lib/groups/settings"
+import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle"
 
 const ADMIN_GROUPS_PATH = "/admin/groups"
 
@@ -88,7 +89,12 @@ export async function getGroupsAdminDataAction(): Promise<ActionState<GroupsAdmi
         groups,
         rules,
         syncEnabled: settings.enabled,
-        syncConfigured: Boolean(settings.saSecretArn),
+        // Runnable = SA key + a directory path: Cloud Identity needs customerId,
+        // the Admin SDK fallback needs dwdSubject. The ARN alone would clear the
+        // banner while every run still failed in the client constructor.
+        syncConfigured: Boolean(
+          settings.saSecretArn && (settings.customerId || settings.dwdSubject)
+        ),
       },
       "Group admin data loaded"
     )
@@ -219,12 +225,14 @@ export async function triggerGroupSyncAction(): Promise<ActionState<{ dispatched
   const log = createLogger({ requestId, action: "triggerGroupSyncAction" })
 
   try {
-    const userId = await requireAdminSession(log, "trigger group sync")
+    const cognitoSub = await requireAdminSession(log, "trigger group sync")
 
-    const numericUserId = Number(userId)
-    await triggerGroupSyncNow(Number.isFinite(numericUserId) ? numericUserId : null)
+    // session.sub is a Cognito UUID, not the numeric users.id — resolve it so
+    // the Lambda's audit log can actually record who pressed "Sync now".
+    const dbUserId = await getUserIdByCognitoSubAsNumber(cognitoSub)
+    await triggerGroupSyncNow(dbUserId)
 
-    log.info("Group sync dispatched", { userId })
+    log.info("Group sync dispatched", { userId: cognitoSub, dbUserId })
     timer({ status: "success" })
     return createSuccess({ dispatched: true }, "Sync started — refresh in a minute to see results")
   } catch (error) {

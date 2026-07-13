@@ -2,7 +2,7 @@
   "commands": {
     "lint": "bunx eslint .",
     "typecheck": "bun run typecheck",
-    "test": "bunx jest --config=jest.config.ci.js groups"
+    "test": "cd infra/lambdas/group-sync && bun test"
   },
   "e2e_required": false,
   "e2e_flows": ["admin-groups"],
