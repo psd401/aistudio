@@ -441,6 +441,8 @@ export class EcsServiceConstruct extends Construct {
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:aistudio-${environment}-schedule-executor`,
                 // Issue #925: skill-builder scans/promotes published skill drafts
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
+                // #1203: admin "Sync now" async-invokes the hourly group-sync Lambda
+                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-group-sync-${environment}`,
               ],
             }),
             // Issue #925: write SKILL.md draft folders to the agent workspace
