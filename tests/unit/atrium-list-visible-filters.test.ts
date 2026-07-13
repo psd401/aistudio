@@ -48,6 +48,10 @@ interface CapturedIlike {
   column: unknown;
   pattern: unknown;
 }
+interface CapturedEq {
+  op: "eq";
+  a: unknown[];
+}
 
 jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
@@ -106,6 +110,15 @@ const isSql = (f: unknown): f is CapturedSql =>
   typeof f === "object" && f !== null && (f as { op?: string }).op === "sql";
 const isIlike = (f: unknown): f is CapturedIlike =>
   typeof f === "object" && f !== null && (f as { op?: string }).op === "ilike";
+const isEq = (f: unknown): f is CapturedEq =>
+  typeof f === "object" && f !== null && (f as { op?: string }).op === "eq";
+
+/** Find the `<status> <> 'archived'` default-exclusion guard, if present. */
+const archivedGuard = (filters: unknown[]): CapturedSql | undefined =>
+  filters.filter(isSql).find((f) => f.chunks.some((c) => c.includes("<> 'archived'")));
+/** Find the top-level equality filter on the status column, if present. */
+const statusEq = (filters: unknown[]): CapturedEq | undefined =>
+  filters.filter(isEq).find((f) => f.a[0] === "COL_status");
 
 beforeEach(() => {
   executeQueryMock.mockReset();
@@ -159,5 +172,40 @@ describe("listVisible query filter (title ILIKE)", () => {
   it("adds no title filter when query is absent or empty", async () => {
     expect((await captureFilters({})).find(isIlike)).toBeUndefined();
     expect((await captureFilters({ query: "" })).find(isIlike)).toBeUndefined();
+  });
+});
+
+describe("listVisible status filter (archived visibility)", () => {
+  it("excludes archived rows by default (`status <> 'archived'`, no status eq)", async () => {
+    // The Library's default view (and every non-archived chip) sends no status,
+    // and the service must then hide archived rows — the exact behavior the new
+    // "Archived" chip is the sole opt-out for. A regression here would leak
+    // archived content into the default library.
+    const filters = await captureFilters({});
+    const guard = archivedGuard(filters);
+    expect(guard).toBeDefined();
+    // The column is a bound value, never string-concatenated into the SQL.
+    expect(guard!.values).toEqual(["COL_status"]);
+    // No equality narrowing on status when none was requested.
+    expect(statusEq(filters)).toBeUndefined();
+  });
+
+  it("returns ONLY archived rows for status:'archived' (eq, and drops the guard)", async () => {
+    // The "Archived" chip maps to `status: 'archived'`. It must switch to an
+    // equality filter AND drop the `<> 'archived'` guard — keeping the guard
+    // would exclude the very rows the view exists to show.
+    const filters = await captureFilters({ status: "archived" });
+    const eq = statusEq(filters);
+    expect(eq).toBeDefined();
+    expect(eq!.a).toEqual(["COL_status", "archived"]);
+    expect(archivedGuard(filters)).toBeUndefined();
+  });
+
+  it("narrows to a single status for draft/published without the archived guard", async () => {
+    for (const status of ["draft", "published"] as const) {
+      const filters = await captureFilters({ status });
+      expect(statusEq(filters)!.a).toEqual(["COL_status", status]);
+      expect(archivedGuard(filters)).toBeUndefined();
+    }
   });
 });
