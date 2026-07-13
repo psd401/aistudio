@@ -14,6 +14,9 @@
  *   - Fail-safety: a group whose member fetch throws keeps its last-known-good
  *     membership — replaceMembers is NEVER called for it, only markError. One
  *     group's failure never aborts the others (partial sync, never mass-revoke).
+ *     Metadata writes (markSynced/markError) are their own failure domain: they
+ *     are best-effort and can neither mislabel a fresh membership as failed nor
+ *     abort the loop for the remaining groups.
  *   - Normalization: every member email is lowercased + trimmed + de-duplicated
  *     before it is written (Google emails are case-insensitive; email is an
  *     authorization join key).
@@ -256,9 +259,20 @@ export async function runGroupSync(ports: GroupSyncPorts): Promise<GroupSyncResu
       const rawMembers = await ports.fetchTransitiveMembers(group.email);
       const members = dedupeNormalizedEmails(rawMembers);
       await ports.replaceMembers(groupId, members);
-      await ports.markSynced(groupId);
       synced += 1;
       totalMembers += members.length;
+      // Separate failure domain: membership is already committed and fresh, so
+      // a markSynced hiccup must NOT route through markError (which would
+      // mislabel the group as failed in the admin UI / GroupsFailed metric).
+      // last_synced_at self-heals on the next successful run.
+      try {
+        await ports.markSynced(groupId);
+      } catch (metaError) {
+        ports.log.warn("markSynced failed after a successful membership write", {
+          groupEmail: group.email,
+          error: errorMessage(metaError),
+        });
+      }
       ports.log.info("Synced group membership", {
         groupEmail: group.email,
         source: group.source,
@@ -268,7 +282,16 @@ export async function runGroupSync(ports: GroupSyncPorts): Promise<GroupSyncResu
       // Fail-safety: DO NOT touch membership — last-known-good survives.
       failed += 1;
       const message = errorMessage(error);
-      await ports.markError(groupId, message);
+      // markError is best-effort: a metadata-write failure must never abort the
+      // loop and starve every group after this one.
+      try {
+        await ports.markError(groupId, message);
+      } catch (metaError) {
+        ports.log.error("markError failed; continuing with remaining groups", {
+          groupEmail: group.email,
+          error: errorMessage(metaError),
+        });
+      }
       ports.log.warn("Group fetch failed; keeping last-known-good membership", {
         groupEmail: group.email,
         error: message,

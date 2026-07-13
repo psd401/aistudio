@@ -231,6 +231,49 @@ describe("runGroupSync fail-safety", () => {
     expect(result.deactivated).toBe(0);
   });
 
+  test("a markSynced failure after a successful membership write counts as synced, not failed", async () => {
+    const { ports, calls } = makePorts({
+      listActiveRules: async () => [{ ruleType: "pick", value: "g@psd401.net", isActive: true }],
+      listDirectoryGroups: async () => [{ email: "g@psd401.net", name: "G" }],
+      fetchTransitiveMembers: async () => ["m@psd401.net"],
+      markSynced: async () => {
+        throw new Error("DB blip on metadata write");
+      },
+    });
+    const result = await runGroupSync(ports);
+    // Membership IS fresh — the group must not be routed through markError
+    // (which would mislabel it failed in the admin UI / GroupsFailed metric).
+    expect(calls.replaceMembers).toEqual([{ groupId: "id-g@psd401.net", members: ["m@psd401.net"] }]);
+    expect(calls.markError).toEqual([]);
+    expect(result.synced).toBe(1);
+    expect(result.failed).toBe(0);
+  });
+
+  test("a markError failure never aborts the loop — remaining groups still sync", async () => {
+    const { ports, calls } = makePorts({
+      listActiveRules: async () => [
+        { ruleType: "pick", value: "bad@psd401.net", isActive: true },
+        { ruleType: "pick", value: "good@psd401.net", isActive: true },
+      ],
+      listDirectoryGroups: async () => [
+        { email: "bad@psd401.net", name: "Bad" },
+        { email: "good@psd401.net", name: "Good" },
+      ],
+      fetchTransitiveMembers: async (email) => {
+        if (email === "bad@psd401.net") throw new Error("fetch failed");
+        return ["m@psd401.net"];
+      },
+      markError: async () => {
+        throw new Error("metadata write also failed");
+      },
+    });
+    const result = await runGroupSync(ports);
+    // The bad group's double failure (fetch + markError) must not starve good.
+    expect(calls.markSynced).toEqual(["id-good@psd401.net"]);
+    expect(result.synced).toBe(1);
+    expect(result.failed).toBe(1);
+  });
+
   test("a whole-directory listing failure aborts before any deactivation or write", async () => {
     let deactivateCalled = false;
     const { ports } = makePorts({

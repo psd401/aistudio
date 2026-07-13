@@ -53,6 +53,9 @@ export default [
   {
     ignores: [
       ".next/**",
+      // e2e-local.sh builds into .next-e2e (E2E_PORT=3100 server, PR #1168) —
+      // generated output, same class as .next
+      ".next-e2e/**",
       "out/**",
       "build/**",
       "dist/**",

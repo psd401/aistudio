@@ -68,10 +68,13 @@ export async function getSql(): Promise<postgres.Sql> {
 }
 
 export async function closeSql(): Promise<void> {
-  if (_sql) {
-    await _sql.end({ timeout: 5 });
-    _sql = null;
-    _initPromise = null;
+  // Clear the singleton BEFORE awaiting end() — if teardown itself throws, a
+  // warm re-invocation must build a fresh connection, not reuse a defunct one.
+  const sql = _sql;
+  _sql = null;
+  _initPromise = null;
+  if (sql) {
+    await sql.end({ timeout: 5 });
   }
 }
 
@@ -119,9 +122,17 @@ export async function upsertGroup(
 }
 
 /**
+ * Rows per bulk-insert statement. 2 bind params per row against PostgreSQL's
+ * 65,535 wire-protocol parameter limit — 5,000 keeps a district-wide group
+ * (e.g. all-staff@) well clear of the cap while staying in one transaction.
+ */
+const MEMBER_INSERT_CHUNK_SIZE = 5000;
+
+/**
  * Full-replace a group's membership inside a transaction: delete every existing
- * row for the group, then bulk-insert the normalized set. Atomic — a reader
- * never sees a partially-rebuilt group.
+ * row for the group, then bulk-insert the normalized set (chunked — see
+ * MEMBER_INSERT_CHUNK_SIZE). Atomic — a reader never sees a partially-rebuilt
+ * group.
  */
 export async function replaceMembers(
   sql: postgres.Sql,
@@ -130,8 +141,10 @@ export async function replaceMembers(
 ): Promise<void> {
   await sql.begin(async (tx) => {
     await tx`DELETE FROM group_members WHERE group_id = ${groupId}`;
-    if (memberEmails.length > 0) {
-      const values = memberEmails.map((email) => ({ group_id: groupId, member_email: email }));
+    for (let i = 0; i < memberEmails.length; i += MEMBER_INSERT_CHUNK_SIZE) {
+      const values = memberEmails
+        .slice(i, i + MEMBER_INSERT_CHUNK_SIZE)
+        .map((email) => ({ group_id: groupId, member_email: email }));
       await tx`INSERT INTO group_members ${tx(values, "group_id", "member_email")}`;
     }
   });

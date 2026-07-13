@@ -222,15 +222,7 @@ export async function triggerGroupSyncAction(): Promise<ActionState<{ dispatched
     const userId = await requireAdminSession(log, "trigger group sync")
 
     const numericUserId = Number(userId)
-    const result = await triggerGroupSyncNow(Number.isFinite(numericUserId) ? numericUserId : null)
-
-    if (!result.dispatched) {
-      log.warn("Group sync not dispatched", { reason: result.reason })
-      throw ErrorFactories.externalServiceError(
-        "group-sync",
-        new Error(result.reason ?? "Group sync could not be dispatched")
-      )
-    }
+    await triggerGroupSyncNow(Number.isFinite(numericUserId) ? numericUserId : null)
 
     log.info("Group sync dispatched", { userId })
     timer({ status: "success" })

@@ -58,7 +58,11 @@ interface HandlerResult {
 
 export async function handler(event: GroupSyncEvent = {}): Promise<HandlerResult> {
   const isManual = event.trigger === "manual";
-  log.info("Group sync invoked", { trigger: isManual ? "manual" : "schedule" });
+  log.info("Group sync invoked", {
+    trigger: isManual ? "manual" : "schedule",
+    // Audit signal for manual runs — who pressed "Sync now".
+    requestedByUserId: event.requestedByUserId ?? null,
+  });
 
   const sql = await getSql();
   try {

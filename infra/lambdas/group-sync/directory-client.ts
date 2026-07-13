@@ -34,6 +34,8 @@ const ADMIN_SDK_SCOPES = [
 
 const LIST_PAGE_SIZE = 500;
 const MEMBER_PAGE_SIZE = 200;
+/** Admin SDK Directory groups.list caps maxResults at 200 (API-enforced). */
+const ADMIN_SDK_GROUPS_PAGE_SIZE = 200;
 
 /** The read surface the reconciler drives (see sync.ts GroupSyncPorts). */
 export interface DirectoryClient {
@@ -100,6 +102,18 @@ class CloudIdentityDirectoryClient implements DirectoryClient {
   }
 
   async fetchTransitiveMembers(groupEmail: string): Promise<string[]> {
+    // groupEmailSet is populated by listGroups(). Empty means the listing was
+    // never run OR came back empty/degraded (a non-throwing API glitch). Without
+    // it we cannot distinguish nested-group entities from people, so fail THIS
+    // group loudly — the reconciler's per-group catch keeps last-known-good
+    // membership — rather than silently write group addresses into
+    // group_members (an authorization join table) as if they were people.
+    if (this.groupEmailSet.size === 0) {
+      throw new Error(
+        "Directory group listing is empty — cannot classify nested groups; " +
+          "call listGroups() first / retry next run"
+      );
+    }
     const resourceName = await this.lookupResourceName(groupEmail);
     const emails = new Set<string>();
     let pageToken: string | undefined;
@@ -156,7 +170,7 @@ class AdminSdkDirectoryClient implements DirectoryClient {
     do {
       const res = await this.api.groups.list({
         customer: this.customer,
-        maxResults: MEMBER_PAGE_SIZE,
+        maxResults: ADMIN_SDK_GROUPS_PAGE_SIZE,
         pageToken,
       });
       for (const g of res.data.groups ?? []) {
@@ -191,9 +205,12 @@ class AdminSdkDirectoryClient implements DirectoryClient {
           members.push({ email: null, nestedGroupEmail: email });
         } else if (m.type === "USER" || m.type == null) {
           // USER (or an untyped entry we optimistically treat as a person).
-          // CUSTOMER (the whole org) is intentionally skipped — not an address.
           members.push({ email });
         }
+        // EXTERNAL (outside-domain invitee) and CUSTOMER (whole-org marker) are
+        // intentionally excluded, not an oversight: member_email is an
+        // authorization join key, and a non-district identity must never gain
+        // access through group membership.
       }
       pageToken = res.data.nextPageToken ?? undefined;
     } while (pageToken);

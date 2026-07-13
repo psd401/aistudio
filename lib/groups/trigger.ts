@@ -9,7 +9,6 @@
 
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { createLogger } from "@/lib/logger";
-import { getSetting } from "@/lib/settings-manager";
 
 const log = createLogger({ service: "group-sync-trigger" });
 
@@ -26,39 +25,24 @@ function getLambda(): LambdaClient {
 }
 
 /**
- * Resolve the group-sync Lambda function name. Settings table first (admin-
- * configurable, no redeploy), then the CDK-injected env var, then the
- * deterministic default `psd-group-sync-{env}`.
+ * Deterministic group-sync Lambda name — must match processing-stack.ts's
+ * `functionName` and the ECS task role's invoke grant (ecs-service.ts), both of
+ * which hard-code this same `psd-group-sync-{env}` shape. IAM scopes the invoke
+ * to exactly this ARN, so a configurable name could never widen anyway.
  */
-export async function getGroupSyncFunctionName(): Promise<string> {
-  return (
-    (await getSetting("GROUP_SYNC_LAMBDA_NAME")) ||
-    process.env.GROUP_SYNC_LAMBDA_NAME ||
-    `psd-group-sync-${ENVIRONMENT}`
-  );
-}
-
-export interface TriggerResult {
-  dispatched: boolean;
-  /** Present when not dispatched — a human-readable reason. */
-  reason?: string;
+export function getGroupSyncFunctionName(): string {
+  return `psd-group-sync-${ENVIRONMENT}`;
 }
 
 /**
  * Dispatch a manual sync. Async invoke — returns as soon as the Lambda accepts
- * the event (the sync itself runs in the Lambda with a 10-minute budget). Throws
- * on an actual invoke failure so the caller can surface it; returns a
- * non-dispatched result only when no function name resolves (never in a normal
- * deployment).
+ * the event (the sync itself runs in the Lambda with a 10-minute budget).
+ * Throws on an invoke failure so the caller can surface it.
  */
 export async function triggerGroupSyncNow(
   requestedByUserId: number | null
-): Promise<TriggerResult> {
-  const functionName = await getGroupSyncFunctionName();
-  if (!functionName) {
-    return { dispatched: false, reason: "Group-sync Lambda is not configured" };
-  }
-
+): Promise<void> {
+  const functionName = getGroupSyncFunctionName();
   const client = getLambda();
   await client.send(
     new InvokeCommand({
@@ -70,5 +54,4 @@ export async function triggerGroupSyncNow(
     })
   );
   log.info("Dispatched manual group sync", { functionName, requestedByUserId });
-  return { dispatched: true };
 }

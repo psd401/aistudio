@@ -155,7 +155,12 @@ export function GroupsAdmin({ initialData, initialError }: GroupsAdminProps) {
         </TabsContent>
 
         <TabsContent value="groups">
-          <GroupsTab groups={initialData.groups} isPending={isPending} startTransition={startTransition} />
+          <GroupsTab
+            groups={initialData.groups}
+            isPending={isPending}
+            toast={toast}
+            startTransition={startTransition}
+          />
         </TabsContent>
       </Tabs>
     </div>
@@ -328,10 +333,11 @@ function SelectionTab({ rules, isPending, toast, onChanged, startTransition }: S
 interface GroupsTabProps {
   groups: GroupWithCount[]
   isPending: boolean
+  toast: ToastFn
   startTransition: (cb: () => void) => void
 }
 
-function GroupsTab({ groups, isPending, startTransition }: GroupsTabProps) {
+function GroupsTab({ groups, isPending, toast, startTransition }: GroupsTabProps) {
   const [memberDialog, setMemberDialog] = useState<{
     groupEmail: string
     members: string[] | null
@@ -341,7 +347,16 @@ function GroupsTab({ groups, isPending, startTransition }: GroupsTabProps) {
     setMemberDialog({ groupEmail, members: null })
     startTransition(async () => {
       const result = await listGroupMembersAction(groupId)
-      setMemberDialog({ groupEmail, members: result.isSuccess ? result.data : [] })
+      // Guard against out-of-order responses: only apply if the dialog is still
+      // showing THIS group (the admin may have closed it or opened another).
+      if (!result.isSuccess) {
+        setMemberDialog((current) => (current?.groupEmail === groupEmail ? null : current))
+        toast({ title: "Error", description: result.message, variant: "destructive" })
+        return
+      }
+      setMemberDialog((current) =>
+        current?.groupEmail === groupEmail ? { groupEmail, members: result.data } : current
+      )
     })
   }
 

@@ -7,8 +7,9 @@
  * write via the shared normalize helpers.
  */
 
-import { and, asc, eq, sql } from "drizzle-orm";
-import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import { asc, eq, sql } from "drizzle-orm";
+import { executeQuery, toPgRows } from "@/lib/db/drizzle-client";
+import { ErrorFactories } from "@/lib/error-utils";
 import {
   groups,
   groupMembers,
@@ -64,7 +65,7 @@ export async function listGroupsWithCounts(): Promise<GroupWithCount[]> {
         .orderBy(sql`${groups.isActive} DESC`, asc(groups.groupEmail)),
     "listGroupsWithCounts"
   );
-  return rows as GroupWithCount[];
+  return rows;
 }
 
 /** Member emails for one group (alphabetical). */
@@ -135,10 +136,12 @@ export async function listActiveSelectionRules(): Promise<GroupSelectionRuleRow[
 }
 
 /**
- * Add a selection rule. Normalizes the value (lowercase + trim). If an identical
- * (type, value) rule already exists it is reactivated rather than duplicated —
- * mirrors the unique index on (rule_type, lower(value)). Runs in a transaction so
- * the exists-check and the write are atomic.
+ * Add a selection rule. Normalizes the value (lowercase + trim). A single atomic
+ * upsert on the (rule_type, lower(value)) expression index — an identical
+ * existing rule is reactivated rather than duplicated, and two concurrent
+ * identical adds cannot race the unique index (same pattern as the sync
+ * Lambda's upsertGroup). Raw SQL because Drizzle's onConflict builder cannot
+ * target an expression index.
  */
 export async function addSelectionRule(
   ruleType: GroupSelectionRuleType,
@@ -146,37 +149,36 @@ export async function addSelectionRule(
 ): Promise<GroupSelectionRuleRow> {
   const value = ruleType === "pick" ? normalizeEmail(rawValue) : normalizePrefix(rawValue);
   if (!value) {
-    throw new Error("Selection rule value cannot be empty");
+    throw ErrorFactories.invalidInput("value", rawValue, "must be a non-empty group email or prefix");
   }
 
-  return executeTransaction(async (tx) => {
-    const [existing] = await tx
-      .select()
-      .from(groupSelectionRules)
-      .where(
-        and(
-          eq(groupSelectionRules.ruleType, ruleType),
-          sql`lower(${groupSelectionRules.value}) = ${value}`
-        )
-      )
-      .limit(1);
-
-    if (existing) {
-      if (existing.isActive) return existing;
-      const [reactivated] = await tx
-        .update(groupSelectionRules)
-        .set({ isActive: true, updatedAt: new Date() })
-        .where(eq(groupSelectionRules.id, existing.id))
-        .returning();
-      return reactivated;
-    }
-
-    const [created] = await tx
-      .insert(groupSelectionRules)
-      .values({ ruleType, value, isActive: true })
-      .returning();
-    return created;
-  }, "addSelectionRule");
+  const result = await executeQuery(
+    (db) =>
+      db.execute(sql`
+        INSERT INTO group_selection_rules (rule_type, value, is_active)
+        VALUES (${ruleType}, ${value}, true)
+        ON CONFLICT (rule_type, lower(value)) DO UPDATE
+          SET is_active = true, updated_at = now()
+        RETURNING id, rule_type, value, is_active, created_at, updated_at
+      `),
+    "addSelectionRule"
+  );
+  const [row] = toPgRows<{
+    id: string;
+    rule_type: GroupSelectionRuleType;
+    value: string;
+    is_active: boolean;
+    created_at: Date;
+    updated_at: Date;
+  }>(result);
+  return {
+    id: row.id,
+    ruleType: row.rule_type,
+    value: row.value,
+    isActive: row.is_active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 /** Delete a selection rule by id. */

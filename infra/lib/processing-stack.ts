@@ -456,8 +456,11 @@ export class ProcessingStack extends cdk.Stack {
     const groupSyncSaSecretArnPattern =
       `arn:aws:secretsmanager:${this.region}:${this.account}:secret:aistudio-${props.environment}-google-directory-*`;
 
+    // functionName MUST match the Lambda's physical name below — the factory
+    // scopes the CloudWatch Logs grant to /aws/lambda/<functionName>, and a
+    // mismatch means AccessDenied on every log write (invisible failures).
     const groupSyncRole = ServiceRoleFactory.createLambdaRole(this, 'GroupSyncRole', {
-      functionName: 'psd-group-sync',
+      functionName: `psd-group-sync-${props.environment}`,
       environment: props.environment,
       region: this.region,
       account: this.account,
