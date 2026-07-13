@@ -84,6 +84,32 @@ function toIso(value: Date | string | null): string | null {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
+/**
+ * Shared action-runner for the tab components: wraps a server action in the
+ * page transition, toasts success (optional title) or failure, and refreshes
+ * the page data on success. One behavior to maintain across tabs.
+ */
+function makeActionRunner(
+  startTransition: (cb: () => void) => void,
+  toast: ToastFn,
+  onChanged: () => void
+) {
+  return (
+    fn: () => Promise<{ isSuccess: boolean; message: string }>,
+    okTitle?: string
+  ) => {
+    startTransition(async () => {
+      const result = await fn()
+      if (result.isSuccess) {
+        if (okTitle) toast({ title: okTitle, description: result.message })
+        onChanged()
+      } else {
+        toast({ title: "Error", description: result.message, variant: "destructive" })
+      }
+    })
+  }
+}
+
 interface GroupsAdminProps {
   initialData: GroupsAdminData | null
   initialError: string | null
@@ -108,25 +134,42 @@ export function GroupsAdmin({ initialData, initialError }: GroupsAdminProps) {
   const lastRunAt = initialData?.summary.lastRunAt ?? null
 
   const handleSyncNow = async () => {
+    // Set BEFORE the trigger round trip: a second click during the server-action
+    // await must not dispatch a second Lambda invocation (#1204 review).
+    if (isSyncing) return
+    setIsSyncing(true)
     // Snapshot the current last-run so we can detect when the async run advances it.
     const before = toMillis(lastRunAt)
 
     const trigger = await triggerGroupSyncAction()
+    if (!mountedRef.current) return
     if (!trigger.isSuccess) {
+      setIsSyncing(false)
       toast({ title: "Error", description: trigger.message, variant: "destructive" })
       return
     }
     toast({ title: "Sync started", description: "Running the directory sync…" })
-    setIsSyncing(true)
 
-    // Poll the summary until last-run advances (run finished) or the budget lapses.
+    // Poll until the run SETTLES, not merely starts: each group commits its
+    // last_synced_at independently mid-run, so "advanced past `before`" fires on
+    // the FIRST group of a multi-group run. Only report complete once an
+    // advanced last-run holds still for a full poll interval (no group finished
+    // in ~4s ⇒ the loop is done or effectively done).
     const deadline = Date.now() + 120_000
+    let lastSeen = before
+    let advanced = false
     while (mountedRef.current && Date.now() < deadline) {
       await sleep(4000)
       if (!mountedRef.current) return
       const poll = await getGroupSyncSummaryAction()
-      if (poll.isSuccess && toMillis(poll.data.lastRunAt) > before) {
-        if (!mountedRef.current) return
+      if (!poll.isSuccess) continue
+      const current = toMillis(poll.data.lastRunAt)
+      if (current > lastSeen) {
+        advanced = true
+        lastSeen = current
+        continue
+      }
+      if (advanced) {
         setIsSyncing(false)
         toast({ title: "Sync complete", description: "Membership refreshed." })
         router.refresh()
@@ -137,8 +180,11 @@ export function GroupsAdmin({ initialData, initialError }: GroupsAdminProps) {
       setIsSyncing(false)
       toast({
         title: "Sync still running",
-        description: "Taking longer than usual — use Refresh to check for results.",
+        description: "Taking longer than usual — showing what has finished so far.",
       })
+      // Refresh here too: covers the all-groups-fail run, where last_synced_at
+      // never advances but the failed-count banner has data worth surfacing.
+      router.refresh()
     }
   }
 
@@ -287,17 +333,7 @@ function SelectionTab({ rules, isPending, toast, onChanged, startTransition }: S
   const [ruleType, setRuleType] = useState<GroupSelectionRuleType>("pick")
   const [ruleValue, setRuleValue] = useState("")
 
-  const run = (fn: () => Promise<{ isSuccess: boolean; message: string }>, okTitle?: string) => {
-    startTransition(async () => {
-      const result = await fn()
-      if (result.isSuccess) {
-        if (okTitle) toast({ title: okTitle, description: result.message })
-        onChanged()
-      } else {
-        toast({ title: "Error", description: result.message, variant: "destructive" })
-      }
-    })
-  }
+  const run = makeActionRunner(startTransition, toast, onChanged)
 
   const handleAddRule = () => {
     const value = ruleValue.trim()
@@ -439,20 +475,7 @@ function MappingsTab({
   const hasGroups = groupOptions.length > 0
   const hasRoles = roles.length > 0
 
-  const run = (
-    fn: () => Promise<{ isSuccess: boolean; message: string }>,
-    okTitle?: string
-  ) => {
-    startTransition(async () => {
-      const result = await fn()
-      if (result.isSuccess) {
-        if (okTitle) toast({ title: okTitle, description: result.message })
-        onChanged()
-      } else {
-        toast({ title: "Error", description: result.message, variant: "destructive" })
-      }
-    })
-  }
+  const run = makeActionRunner(startTransition, toast, onChanged)
 
   const handleAdd = () => {
     if (!groupEmail) {

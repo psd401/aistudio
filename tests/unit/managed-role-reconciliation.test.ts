@@ -10,6 +10,7 @@
 
 import {
   computeManagedRoleDiff,
+  applyLastAdminGuard,
   type ExistingUserRole,
 } from "@/lib/db/drizzle/user-roles";
 
@@ -82,5 +83,36 @@ describe("computeManagedRoleDiff", () => {
   it("treats an empty computed set with no managed rows as a no-op", () => {
     const diff = computeManagedRoleDiff([], []);
     expect(diff).toEqual({ toAdd: [], toRemove: [], changed: false });
+  });
+});
+
+describe("applyLastAdminGuard (#1204 security review — lockout prevention)", () => {
+  const ADMIN = 1;
+
+  it("blocks removing the administrator role when no other admin rows survive", () => {
+    const result = applyLastAdminGuard([ADMIN, 7], ADMIN, 0);
+    expect(result.toRemove).toEqual([7]);
+    expect(result.adminProtected).toBe(true);
+  });
+
+  it("allows removing the administrator role while other admins remain", () => {
+    const result = applyLastAdminGuard([ADMIN, 7], ADMIN, 3);
+    expect(result).toEqual({ toRemove: [ADMIN, 7], adminProtected: false });
+  });
+
+  it("is a pass-through when the admin role is not being removed", () => {
+    const result = applyLastAdminGuard([7, 9], ADMIN, 0);
+    expect(result).toEqual({ toRemove: [7, 9], adminProtected: false });
+  });
+
+  it("is a pass-through when no administrator role exists", () => {
+    const result = applyLastAdminGuard([7], null, 0);
+    expect(result).toEqual({ toRemove: [7], adminProtected: false });
+  });
+
+  it("still removes non-admin roles in the same pass as a protected admin role", () => {
+    const result = applyLastAdminGuard([2, ADMIN, 9], ADMIN, 0);
+    expect(result.toRemove).toEqual([2, 9]);
+    expect(result.adminProtected).toBe(true);
   });
 });

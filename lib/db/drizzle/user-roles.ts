@@ -58,10 +58,16 @@ export async function getUserRoles(userId: number): Promise<string[]> {
  * @returns Success indicator
  *
  * **Empty Roles Behavior:**
- * - Passing empty array `[]` removes all roles from user
- * - This is intentional - users can have zero roles (effectively no access)
+ * - Passing empty array `[]` removes all MANUAL roles from user
+ * - This is intentional - users can have zero manual roles
  * - System-level checks should prevent removing the last admin role
  * - Role version is incremented to invalidate cached sessions
+ *
+ * **Managed (group-sync) rows are invisible to this editor (#1204):** they are
+ * neither deleted nor re-stamped 'manual'. Removing a group-managed role means
+ * removing the user from the mapped Google group (or deleting the mapping) —
+ * a manual delete here would silently reappear on the next reconciliation, and
+ * a blanket re-insert would permanently exempt it from auto-revocation.
  *
  * @throws {DatabaseError} If any role names don't exist in database
  */
@@ -104,27 +110,48 @@ export async function updateUserRoles(
             }
           }
 
-          // Delete existing roles
-          await tx.delete(userRoles).where(eq(userRoles.userId, userId));
+          const submittedIds = rolesData.map((r) => r.id);
 
-          // Insert new roles (only if we have roles to insert)
-          if (rolesData.length > 0) {
-            await tx.insert(userRoles).values(
-              rolesData.map((r) => ({
-                userId,
-                roleId: r.id,
-              }))
-            );
+          // Delete only MANUAL rows no longer in the submitted set — group-sync
+          // rows belong to reconciliation, not this editor.
+          const deleted = await tx
+            .delete(userRoles)
+            .where(
+              and(
+                eq(userRoles.userId, userId),
+                eq(userRoles.source, "manual"),
+                submittedIds.length > 0
+                  ? sql`${userRoles.roleId} NOT IN (${sql.join(
+                      submittedIds.map((id) => sql`${id}`),
+                      sql`, `
+                    )})`
+                  : sql`TRUE`
+              )
+            )
+            .returning({ roleId: userRoles.roleId });
+
+          // Insert submitted roles the user lacks entirely (source defaults to
+          // 'manual'). A role already held as group-sync is left as-is — the
+          // admin isn't granting anything new, the group already covers it.
+          let inserted: { roleId: number | null }[] = [];
+          if (submittedIds.length > 0) {
+            inserted = await tx
+              .insert(userRoles)
+              .values(submittedIds.map((roleId) => ({ userId, roleId })))
+              .onConflictDoNothing({ target: [userRoles.userId, userRoles.roleId] })
+              .returning({ roleId: userRoles.roleId });
           }
 
-          // Increment role_version atomically for session cache invalidation
-          await tx
-            .update(users)
-            .set({
-              roleVersion: sql`COALESCE(${users.roleVersion}, 0) + 1`,
-              updatedAt: new Date(),
-            })
-            .where(eq(users.id, userId));
+          // Bump role_version only when a row actually changed.
+          if (deleted.length > 0 || inserted.length > 0) {
+            await tx
+              .update(users)
+              .set({
+                roleVersion: sql`COALESCE(${users.roleVersion}, 0) + 1`,
+                updatedAt: new Date(),
+              })
+              .where(eq(users.id, userId));
+          }
         }),
       "updateUserRoles"
     );
@@ -309,12 +336,15 @@ export async function assignRoleToUser(userId: number, roleId: number) {
 // ============================================
 //
 // Group memberships (synced hourly in Phase 0) drive AI Studio roles. This is
-// the CANONICAL per-user reconciler, called at user-resolution time
-// (getCurrentUserAction + resolveUserId). The hourly sync Lambda implements the
-// SAME semantics as a set-based bulk SQL pass (infra/lambdas/group-sync/db.ts,
-// reconcileManagedRoles) — it is a separate deploy bundle that cannot import
-// @/lib, so the two paths share a documented contract rather than code (mirrors
-// how the sync core and normalize helpers are duplicated across that boundary).
+// the CANONICAL per-user reconciler, called at PROVISIONING time only
+// (getCurrentUserAction's session-establishment path and resolveUserId's
+// create/link paths — NOT the per-request fast path, which must stay a cheap
+// id lookup). Steady-state drift is owned by the hourly sync Lambda, which
+// implements the SAME semantics as a set-based bulk SQL pass
+// (infra/lambdas/group-sync/db.ts, reconcileManagedRoles) — it is a separate
+// deploy bundle that cannot import @/lib, so the two paths share a documented
+// contract rather than code (mirrors how the sync core and normalize helpers
+// are duplicated across that boundary).
 //
 // Invariants (identical in both paths):
 //   - computed = roles mapped from the user's CURRENT memberships of ACTIVE groups
@@ -322,7 +352,11 @@ export async function assignRoleToUser(userId: number, roleId: number) {
 //   - remove only source='group-sync' rows no longer computed
 //   - a manual (source='manual') grant of the same role is NEVER touched — it is
 //     neither duplicated (unique on user_id+role_id) nor downgraded nor removed
-//   - bump users.role_version ONLY when membership actually changed (no churn)
+//   - NEVER auto-revoke the system's last administrator grant (mirrors the
+//     manual-path guard in actions/admin/user-management.actions.ts)
+//   - bump users.role_version ONLY when rows were actually written (verified via
+//     RETURNING, not the pre-write snapshot — concurrent reconciles of the same
+//     user must not double-bump on a no-op)
 
 /** One existing user_roles row, reduced to what reconciliation reasons about. */
 export interface ExistingUserRole {
@@ -371,6 +405,30 @@ export function computeManagedRoleDiff(
 }
 
 /**
+ * Pure last-administrator guard decision — no I/O, unit-testable. Given the
+ * roles queued for removal, the administrator role id, and how many
+ * administrator rows OTHER users/rows would survive this removal, decide
+ * whether the admin role must be protected from this pass.
+ */
+export function applyLastAdminGuard(
+  toRemove: number[],
+  adminRoleId: number | null,
+  survivingAdminRows: number
+): { toRemove: number[]; adminProtected: boolean } {
+  if (
+    adminRoleId === null ||
+    !toRemove.includes(adminRoleId) ||
+    survivingAdminRows > 0
+  ) {
+    return { toRemove, adminProtected: false };
+  }
+  return {
+    toRemove: toRemove.filter((id) => id !== adminRoleId),
+    adminProtected: true,
+  };
+}
+
+/**
  * Reconcile a single user's managed (group-sync) roles against their current
  * group memberships, in one transaction. Adds/removes only group-sync rows and
  * bumps role_version exactly once when something changed (so live capability /
@@ -400,15 +458,19 @@ export async function reconcileUserManagedRoles(
       (db) =>
         db.transaction(async (tx) => {
           // Roles this user SHOULD hold: mappings whose (active) group the user
-          // is a member of. lower() on both sides is defense-in-depth — both
-          // columns are stored lowercase.
+          // is a member of. lower() on BOTH sides of every email comparison —
+          // storage is lowercase by convention (normalizeEmail at write time),
+          // but no constraint enforces it, so the join must not trust it.
           const computedRows = await tx
             .selectDistinct({ roleId: groupRoleMappings.roleId })
             .from(groupRoleMappings)
             .innerJoin(
               groups,
               and(
-                eq(sql`lower(${groups.groupEmail})`, groupRoleMappings.groupEmail),
+                eq(
+                  sql`lower(${groups.groupEmail})`,
+                  sql`lower(${groupRoleMappings.groupEmail})`
+                ),
                 eq(groups.isActive, true)
               )
             )
@@ -431,8 +493,45 @@ export async function reconcileUserManagedRoles(
 
           if (!diff.changed) return diff;
 
+          // Last-administrator lockout guard: an automated revocation must never
+          // zero out the system's administrators (there would be no in-app
+          // recovery — every admin surface, including the mapping UI itself, is
+          // admin-gated). Mirrors actions/admin/user-management.actions.ts.
+          let toRemove = diff.toRemove;
+          if (toRemove.length > 0) {
+            const [adminRole] = await tx
+              .select({ id: roles.id })
+              .from(roles)
+              .where(eq(roles.name, "administrator"))
+              .limit(1);
+            if (adminRole && toRemove.includes(adminRole.id)) {
+              const [remaining] = await tx
+                .select({ count: sql<number>`count(*)::int` })
+                .from(userRoles)
+                .where(
+                  and(
+                    eq(userRoles.roleId, adminRole.id),
+                    sql`${userRoles.userId} <> ${userId}`
+                  )
+                );
+              const guarded = applyLastAdminGuard(
+                toRemove,
+                adminRole.id,
+                remaining?.count ?? 0
+              );
+              toRemove = guarded.toRemove;
+              if (guarded.adminProtected) {
+                log.warn(
+                  "Refusing to auto-revoke the last administrator via group-sync",
+                  { userId }
+                );
+              }
+            }
+          }
+
+          let inserted: { roleId: number | null }[] = [];
           if (diff.toAdd.length > 0) {
-            await tx
+            inserted = await tx
               .insert(userRoles)
               .values(
                 diff.toAdd.map((roleId) => ({
@@ -443,11 +542,13 @@ export async function reconcileUserManagedRoles(
               )
               // Race with a concurrent grant of the same role: keep whatever is
               // already there rather than erroring on the unique constraint.
-              .onConflictDoNothing({ target: [userRoles.userId, userRoles.roleId] });
+              .onConflictDoNothing({ target: [userRoles.userId, userRoles.roleId] })
+              .returning({ roleId: userRoles.roleId });
           }
 
-          if (diff.toRemove.length > 0) {
-            await tx
+          let removed: { roleId: number | null }[] = [];
+          if (toRemove.length > 0) {
+            removed = await tx
               .delete(userRoles)
               .where(
                 and(
@@ -455,21 +556,31 @@ export async function reconcileUserManagedRoles(
                   // Belt-and-braces: only group-sync rows are ever removed, so a
                   // manual grant can never be deleted even if role_ids overlap.
                   eq(userRoles.source, "group-sync"),
-                  inArray(userRoles.roleId, diff.toRemove)
+                  inArray(userRoles.roleId, toRemove)
                 )
-              );
+              )
+              .returning({ roleId: userRoles.roleId });
           }
 
-          // Single version bump — only reached when diff.changed is true.
-          await tx
-            .update(users)
-            .set({
-              roleVersion: sql`COALESCE(${users.roleVersion}, 0) + 1`,
-              updatedAt: new Date(),
-            })
-            .where(eq(users.id, userId));
+          // Bump role_version only when a row was ACTUALLY written — a
+          // concurrent reconcile that lost every race (conflict-skipped insert,
+          // empty-match delete) must be a true no-op (no churn).
+          const applied = inserted.length > 0 || removed.length > 0;
+          if (applied) {
+            await tx
+              .update(users)
+              .set({
+                roleVersion: sql`COALESCE(${users.roleVersion}, 0) + 1`,
+                updatedAt: new Date(),
+              })
+              .where(eq(users.id, userId));
+          }
 
-          return diff;
+          return {
+            toAdd: inserted.map((r) => r.roleId).filter((id): id is number => id !== null),
+            toRemove: removed.map((r) => r.roleId).filter((id): id is number => id !== null),
+            changed: applied,
+          };
         }),
       "reconcileUserManagedRoles"
     );

@@ -49,10 +49,10 @@ export async function resolveUserId(
   // Fast path: user exists (returns null on miss, throws TypeError on malformed ID)
   const existingId = await getUserIdByCognitoSubAsNumber(session.sub)
   if (existingId !== null) {
-    // Parity with getCurrentUserAction: reconcile managed (group-sync) roles from
-    // the user's current Google group memberships so sync-driven grants/revokes
-    // apply on this GET path too (Epic #1202, Phase 1 / #1204). Non-fatal.
-    await reconcileManagedRolesNonFatal(existingId, session.email, log)
+    // Deliberately NO managed-role reconciliation on this path (#1204 review):
+    // it serves ~13 polling GET routes, so a reconcile transaction per request
+    // is pure load amplification. Steady-state drift is owned by the hourly
+    // sync Lambda; session establishment (getCurrentUserAction) reconciles too.
     return existingId
   }
 

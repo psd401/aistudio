@@ -107,30 +107,54 @@ export async function updateUserRoles(userId: number, roleNames: string[]): Prom
       throw new Error(`Roles not found: ${missingRoles.join(', ')}`);
     }
 
-    // Execute transaction to update user roles atomically
+    // Execute transaction to update user roles atomically.
+    // Managed (source='group-sync') rows are INVISIBLE to this editor (#1204):
+    // never deleted (reconciliation would re-add them next pass — a silent
+    // no-op revocation) and never re-inserted as 'manual' (which would exempt
+    // them from auto-revocation forever). This editor owns manual rows only.
     await executeTransaction(
       async (tx) => {
-        // Step 1: Delete existing role assignments
-        await tx.delete(userRoles).where(eq(userRoles.userId, userId));
+        const submittedIds = roleResult.map(role => role.id);
 
-        // Step 2: Insert new role assignments
-        if (roleResult.length > 0) {
-          await tx.insert(userRoles).values(
-            roleResult.map(role => ({
-              userId,
-              roleId: role.id,
-            }))
-          );
+        // Step 1: Delete MANUAL role assignments no longer in the submitted set
+        const deleted = await tx
+          .delete(userRoles)
+          .where(
+            and(
+              eq(userRoles.userId, userId),
+              eq(userRoles.source, 'manual'),
+              submittedIds.length > 0
+                ? sql`${userRoles.roleId} NOT IN (${sql.join(
+                    submittedIds.map(id => sql`${id}`),
+                    sql`, `
+                  )})`
+                : sql`TRUE`
+            )
+          )
+          .returning({ roleId: userRoles.roleId });
+
+        // Step 2: Insert submitted roles the user lacks entirely (defaults to
+        // source='manual'). Roles already held — manual OR group-sync — are
+        // conflict-skipped and keep their existing source.
+        let inserted: { roleId: number | null }[] = [];
+        if (submittedIds.length > 0) {
+          inserted = await tx
+            .insert(userRoles)
+            .values(submittedIds.map(roleId => ({ userId, roleId })))
+            .onConflictDoNothing({ target: [userRoles.userId, userRoles.roleId] })
+            .returning({ roleId: userRoles.roleId });
         }
 
-        // Step 3: Increment role_version for optimistic locking
-        await tx
-          .update(users)
-          .set({
-            roleVersion: sql`COALESCE(${users.roleVersion}, 0) + 1`,
-            updatedAt: new Date(),
-          })
-          .where(eq(users.id, userId));
+        // Step 3: Increment role_version only when a row actually changed
+        if (deleted.length > 0 || inserted.length > 0) {
+          await tx
+            .update(users)
+            .set({
+              roleVersion: sql`COALESCE(${users.roleVersion}, 0) + 1`,
+              updatedAt: new Date(),
+            })
+            .where(eq(users.id, userId));
+        }
 
         return true;
       },

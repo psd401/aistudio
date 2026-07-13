@@ -191,6 +191,8 @@ export interface RoleReconcileResult {
   removed: number;
   /** distinct users whose role_version was bumped. */
   usersChanged: number;
+  /** True when the last-administrator guard blocked admin-role removal. */
+  adminRoleProtected: boolean;
 }
 
 /**
@@ -221,11 +223,42 @@ export async function reconcileManagedRoles(
       SELECT DISTINCT u.id AS user_id, grm.role_id
         FROM group_role_mappings grm
         JOIN groups g
-          ON lower(g.group_email) = grm.group_email
+          ON lower(g.group_email) = lower(grm.group_email)
          AND g.is_active = true
         JOIN group_members gm ON gm.group_id = g.id
         JOIN users u ON lower(u.email) = lower(gm.member_email)
     `;
+    // Temp tables are invisible to autovacuum — give the planner real
+    // cardinality for the NOT EXISTS anti-joins below.
+    await tx`ANALYZE _computed_roles`;
+
+    // Last-administrator lockout guard: if this pass would delete every
+    // administrator grant system-wide (all admins are group-sync-sourced and
+    // fell out of the computed set), protect the administrator role from THIS
+    // delete entirely — there is no in-app recovery from zero admins. Mirrors
+    // the per-user reconciler and the manual-path guard.
+    const [adminGuard] = await tx<
+      { admin_role_id: number; surviving_admins: number }[]
+    >`
+      SELECT r.id AS admin_role_id,
+             (SELECT count(*)::int FROM user_roles ur
+               WHERE ur.role_id = r.id
+                 AND NOT (
+                   ur.source = 'group-sync'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM _computed_roles c
+                      WHERE c.user_id = ur.user_id AND c.role_id = ur.role_id
+                   )
+                 )
+             ) AS surviving_admins
+        FROM roles r
+       WHERE r.name = 'administrator'
+       LIMIT 1
+    `;
+    const protectAdminRoleId =
+      adminGuard && adminGuard.surviving_admins === 0
+        ? adminGuard.admin_role_id
+        : null;
 
     // Add computed roles the user does not already hold (any source). ON CONFLICT
     // DO NOTHING guards a race with the login-time reconciler on the unique
@@ -242,7 +275,8 @@ export async function reconcileManagedRoles(
       RETURNING user_id
     `;
 
-    // Remove group-sync rows no longer computed. Manual rows are never matched.
+    // Remove group-sync rows no longer computed. Manual rows are never matched;
+    // the administrator role is excluded entirely when the guard tripped.
     const removed = await tx<{ user_id: number }[]>`
       DELETE FROM user_roles ur
        WHERE ur.source = 'group-sync'
@@ -250,6 +284,7 @@ export async function reconcileManagedRoles(
            SELECT 1 FROM _computed_roles c
             WHERE c.user_id = ur.user_id AND c.role_id = ur.role_id
          )
+         AND ur.role_id IS DISTINCT FROM ${protectAdminRoleId}
       RETURNING ur.user_id
     `;
 
@@ -273,6 +308,7 @@ export async function reconcileManagedRoles(
       added: added.length,
       removed: removed.length,
       usersChanged: changedUserIds.length,
+      adminRoleProtected: protectAdminRoleId !== null,
     };
   });
 }

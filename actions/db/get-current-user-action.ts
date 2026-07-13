@@ -200,8 +200,12 @@ export async function getCurrentUserAction(): Promise<
     // a reconciliation failure must not break "who am I" — the user keeps their
     // last-known roles and the hourly sync will reconcile on its next run.
     try {
-      // user.email is typed nullable; reconciliation no-ops on an empty email.
-      await reconcileUserManagedRoles(user.id, user.email ?? "")
+      // MUST use the live session email, not user.email: users.email is set once
+      // at provisioning and never refreshed, while group_members tracks the
+      // directory's CURRENT address. Reconciling with the stale DB value would
+      // compute a different membership than the session-based JIT paths and flap
+      // roles (revoke/re-grant race) after a Workspace email change (#1204 P1).
+      await reconcileUserManagedRoles(user.id, userEmail ?? user.email ?? "")
     } catch (reconcileError) {
       log.warn("Managed-role reconciliation failed (non-fatal)", {
         userId: user.id,

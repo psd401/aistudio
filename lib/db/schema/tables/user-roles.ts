@@ -3,7 +3,8 @@
  * Many-to-many relationship between users and roles
  */
 
-import { integer, pgTable, serial, timestamp, unique, varchar } from "drizzle-orm/pg-core";
+import { check, integer, pgTable, serial, timestamp, unique, varchar } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { users } from "./users";
 import { roles } from "./roles";
 
@@ -28,4 +29,7 @@ export const userRoles = pgTable("user_roles", {
   // Composite unique constraint: prevent duplicate user-role assignments
   // Database constraint name: user_roles_user_id_role_id_key
   userRoleUnique: unique().on(table.userId, table.roleId),
+  // Mirrors the inline CHECK in migration 108 so the Drizzle schema stays the
+  // faithful source of truth (same convention as capabilities_source_check).
+  sourceCheck: check("user_roles_source_check", sql`${table.source} IN ('manual', 'group-sync')`),
 }));

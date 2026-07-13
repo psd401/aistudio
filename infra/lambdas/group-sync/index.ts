@@ -103,6 +103,11 @@ export async function handler(event: GroupSyncEvent = {}): Promise<HandlerResult
     try {
       roleReconcile = await reconcileManagedRoles(sql);
       log.info("Managed-role reconciliation completed", { ...roleReconcile });
+      if (roleReconcile.adminRoleProtected) {
+        log.error(
+          "Last-administrator guard tripped: refused to auto-revoke the final administrator grant(s) — check the administrator group mapping/membership"
+        );
+      }
     } catch (error) {
       log.error("Managed-role reconciliation failed (membership sync still succeeded)", {
         error: error instanceof Error ? error.message : String(error),

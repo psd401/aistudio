@@ -7,7 +7,7 @@
  * write via the shared normalize helpers.
  */
 
-import { and, asc, eq, sql } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import { executeQuery, toPgRows } from "@/lib/db/drizzle-client";
 import { ErrorFactories } from "@/lib/error-utils";
 import {
@@ -264,39 +264,38 @@ export async function addGroupRoleMapping(
     throw ErrorFactories.invalidInput("roleId", roleId, "must be a positive integer role id");
   }
 
-  await executeQuery(
+  // Single round trip: DO UPDATE (not DO NOTHING) so RETURNING always yields
+  // the canonical row — new or pre-existing — and the joined role name comes
+  // back in the same statement. No re-read, no "row vanished" race window.
+  const result = await executeQuery(
     (db) =>
       db.execute(sql`
-        INSERT INTO group_role_mappings (group_email, role_id)
-        VALUES (${groupEmail}, ${roleId})
-        ON CONFLICT (lower(group_email), role_id) DO NOTHING
+        WITH upserted AS (
+          INSERT INTO group_role_mappings (group_email, role_id)
+          VALUES (${groupEmail}, ${roleId})
+          ON CONFLICT (lower(group_email), role_id) DO UPDATE SET updated_at = now()
+          RETURNING id, group_email, role_id, created_at
+        )
+        SELECT u.id, u.group_email, u.role_id, r.name AS role_name, u.created_at
+          FROM upserted u
+          JOIN roles r ON r.id = u.role_id
       `),
     "addGroupRoleMapping"
   );
-
-  // Re-read the canonical row (newly inserted OR pre-existing) with its role name.
-  const [row] = await executeQuery(
-    (db) =>
-      db
-        .select(groupRoleMappingSelection)
-        .from(groupRoleMappings)
-        .innerJoin(roles, eq(roles.id, groupRoleMappings.roleId))
-        .where(
-          and(
-            eq(sql`lower(${groupRoleMappings.groupEmail})`, groupEmail),
-            eq(groupRoleMappings.roleId, roleId)
-          )
-        )
-        .limit(1),
-    "addGroupRoleMappingFetch"
-  );
-
-  if (!row) {
-    // The INSERT would have thrown on a bad role_id FK; a missing row here means
-    // the role vanished between insert and read — surface it clearly.
-    throw ErrorFactories.dbRecordNotFound("roles", String(roleId));
-  }
-  return row;
+  const [row] = toPgRows<{
+    id: string;
+    group_email: string;
+    role_id: number;
+    role_name: string;
+    created_at: Date;
+  }>(result);
+  return {
+    id: row.id,
+    groupEmail: row.group_email,
+    roleId: row.role_id,
+    roleName: row.role_name,
+    createdAt: row.created_at,
+  };
 }
 
 /** Delete a mapping by id. */
