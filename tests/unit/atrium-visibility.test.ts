@@ -15,6 +15,8 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 jest.mock("@/lib/db/schema", () => ({
   contentObjects: {},
   contentVisibilityGrants: {},
+  // listVisible LEFT JOINs users to project the owner display name (#1052).
+  users: { id: {}, firstName: {}, lastName: {}, email: {} },
 }));
 jest.mock("@/lib/db/drizzle-helpers", () => ({
   pgTimestampAsText: (c: unknown) => c,
@@ -481,7 +483,7 @@ describe("listVisible — limit/offset clamping", () => {
       offset: undefined,
     };
     const builder: Record<string, unknown> = {};
-    for (const m of ["select", "from", "where", "orderBy"]) {
+    for (const m of ["select", "from", "leftJoin", "where", "orderBy"]) {
       builder[m] = jest.fn(() => builder);
     }
     builder.limit = jest.fn((v: unknown) => {

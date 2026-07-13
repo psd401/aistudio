@@ -52,6 +52,12 @@ export interface ObjectRowAsText {
   title: string;
   slug: string;
   ownerUserId: number;
+  /**
+   * Owner display name — present ONLY on the `listVisible` projection (which
+   * LEFT JOINs `users`); absent on `objectSelectFields`-based single loads, hence
+   * optional. `rowToObjectDTO` coalesces a missing value to null.
+   */
+  ownerName?: string | null;
   createdByActor: string;
   createdByAgentId: string | null;
   collectionId: string | null;
@@ -78,6 +84,8 @@ export function rowToObjectDTO(row: ObjectRowAsText): ContentObjectDTO {
     title: row.title,
     slug: row.slug,
     ownerUserId: row.ownerUserId,
+    // Present only on the list projection; null everywhere else (see ObjectRowAsText).
+    ownerName: row.ownerName ?? null,
     createdByActor: row.createdByActor as "human" | "agent",
     createdByAgentId: row.createdByAgentId,
     collectionId: row.collectionId,

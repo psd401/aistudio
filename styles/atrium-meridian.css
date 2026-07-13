@@ -605,6 +605,16 @@
   color: var(--mer-agent);
   flex-shrink: 0;
 }
+/* Owner display name on a library card (#1052) — shown to all viewers, one line,
+ * truncated. Slightly stronger than the muted meta so "who owns this" reads at a
+ * glance without competing with the title. */
+.mer-lib-card-owner {
+  font-size: 12px;
+  color: var(--mer-ink-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .mer-lib-card-tags {
   font-size: 11.5px;
   color: var(--mer-ink-muted);

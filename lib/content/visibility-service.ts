@@ -21,6 +21,7 @@ import {
 import {
   contentObjects,
   contentVisibilityGrants,
+  users,
 } from "@/lib/db/schema";
 import {
   canPublishPublic,
@@ -700,11 +701,24 @@ export const visibilityService = {
       filters.push(ilike(o.title, `%${q}%`));
     }
 
+    // List-only projection: the shared `objectSelectFields` (single-object loads)
+    // stays untouched; here we additionally resolve the owner's DISPLAY NAME via a
+    // LEFT JOIN on `users` — full name, or email when the name is blank, else null.
+    // Presentation metadata only (the library cards show "who owns this"); owner
+    // permission is always keyed on `ownerUserId`, never this string.
+    const listSelectFields = {
+      ...objectSelectFields,
+      ownerName: sql<string | null>`coalesce(nullif(trim(concat_ws(' ', ${users.firstName}, ${users.lastName})), ''), ${users.email})`,
+    };
+
     const rows = await executeQuery(
       (db: DrizzleDB) =>
         db
-          .select(objectSelectFields)
+          .select(listSelectFields)
           .from(o)
+          // LEFT JOIN (not inner): a row whose owner is missing (e.g. a system
+          // user) must still list, just with a null ownerName.
+          .leftJoin(users, eq(users.id, o.ownerUserId))
           .where(and(...filters))
           // `id` is the deterministic tiebreaker: `updated_at` alone is not unique
           // (a bulk import stamps many rows at once), and Postgres gives no stable
