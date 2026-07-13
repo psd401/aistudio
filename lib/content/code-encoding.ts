@@ -74,7 +74,15 @@ export function decodeContentBody(
   encoding: ContentCodeEncoding | undefined
 ): string | undefined {
   if (encoding === undefined) return body;
-  // encoding === "base64" (the only member today).
+  // Defensive boundary check: only "base64" is supported today. A caller that
+  // bypasses the zod enum (e.g. via a cast, or a future untyped caller) with an
+  // unsupported value is REJECTED here rather than silently decoded as base64 —
+  // the repo pattern of validating enum-like input at the service boundary, not
+  // only at the API/action layer. `String(encoding)` keeps this a genuine runtime
+  // guard (the static type is already narrowed to the sole member).
+  if (String(encoding) !== "base64") {
+    throw new ValidationError(`Unsupported codeEncoding: ${String(encoding)}`);
+  }
   if (typeof body !== "string") {
     throw new ValidationError(
       "codeEncoding was set but no body was provided to decode"

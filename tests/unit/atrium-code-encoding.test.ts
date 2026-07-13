@@ -45,6 +45,13 @@ describe("decodeContentBody", () => {
     expect(() => decodeContentBody(undefined, "base64")).toThrow(ValidationError);
   });
 
+  it("rejects an unsupported encoding value that bypasses the schema (cast)", () => {
+    // A caller that slips a non-"base64" value past the zod enum via a cast must
+    // be rejected at the boundary, not silently decoded as base64.
+    const bad = "gzip" as unknown as Parameters<typeof decodeContentBody>[1];
+    expect(() => decodeContentBody("aGVsbG8=", bad)).toThrow(ValidationError);
+  });
+
   it("throws on a raw (non-base64) body that slipped past a mis-set flag", () => {
     // Contains `<`, spaces — not base64; would otherwise decode to garbage.
     expect(() => decodeContentBody("<script>not base64</script>", "base64")).toThrow(
