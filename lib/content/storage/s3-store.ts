@@ -18,7 +18,9 @@
  */
 
 import {
+  DeleteObjectsCommand,
   GetObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
@@ -155,6 +157,56 @@ export const s3Store = {
       throw ErrorFactories.sysInternalError("S3 object has no body", { key });
     }
     return readStreamToString(response.Body);
+  },
+
+  /**
+   * Delete EVERY object under a content object's `atrium/objects/{objectId}/`
+   * prefix — all versions (`v{n}/…`) and assets. Used by the hard-delete path
+   * AFTER the DB rows are removed (issue: Atrium hard delete). Paginates the
+   * listing and batches deletes at the S3 API limit (1000 keys/request).
+   *
+   * Returns the number of keys deleted. The caller runs this best-effort
+   * post-commit: an orphaned S3 key is acceptable (invisible once its DB rows are
+   * gone) and logged, so DB commit ordering — commit first, then this — is what
+   * guarantees a failure here can never orphan the DB state. This method itself
+   * lets a hard AWS error propagate; the caller catches and logs it.
+   */
+  async deleteObjectTree(objectId: string): Promise<number> {
+    assertSafeSegment(objectId, "objectId");
+    const client = await getClient();
+    const { bucket } = await getConfig();
+    const prefix = `${ATRIUM_PREFIX}/objects/${objectId}/`;
+
+    let deleted = 0;
+    let continuationToken: string | undefined;
+    do {
+      const listed = await client.send(
+        new ListObjectsV2Command({
+          Bucket: bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        })
+      );
+      const keys = (listed.Contents ?? [])
+        .map((o) => o.Key)
+        .filter((k): k is string => typeof k === "string");
+      // Batch delete in chunks of 1000 (the DeleteObjects hard limit).
+      for (let i = 0; i < keys.length; i += 1000) {
+        const chunk = keys.slice(i, i + 1000);
+        await client.send(
+          new DeleteObjectsCommand({
+            Bucket: bucket,
+            Delete: { Objects: chunk.map((Key) => ({ Key })), Quiet: true },
+          })
+        );
+        deleted += chunk.length;
+      }
+      continuationToken = listed.IsTruncated
+        ? listed.NextContinuationToken
+        : undefined;
+    } while (continuationToken);
+
+    return deleted;
   },
 
   /** Generate a presigned read URL for the given key (default 5 min TTL). */

@@ -670,6 +670,7 @@ session-cookie path for these endpoints. Every response carries `X-Request-Id` a
 | `content:read` | List content, get an object, list versions |
 | `content:create` | Create content objects (and their initial version) |
 | `content:update` | Update metadata, create versions, set visibility |
+| `content:delete` | Hard-delete a content object (owner/admin only — service-gated) |
 | `content:publish_internal` | Publish to / unpublish from a destination |
 | `content:publish_public` | Publish to a public-facing destination without approval |
 | `content:delegate` | Mint short-lived delegated tokens (`POST /api/v1/agents/delegated-token`) — agent-held authority, never present in a minted token |
@@ -908,6 +909,48 @@ curl -X PATCH -H "Authorization: Bearer sk-your-key" \
 
 **Response `200`** — returns the updated object metadata (no `version`/`url`).
 **Response `404`** — `CONTENT_NOT_FOUND`.
+
+#### `DELETE /api/v1/content/{id}`
+
+**Hard-delete** a content object — permanently removes it and every dependent row
+(all versions, publications, live-collab state, comments, embed links, visibility
+grants, publish-approval requests, retrieval-index entry) plus its S3 bodies.
+Irreversible — prefer `PATCH { "status": "archived" }` for reversible cleanup.
+Requires `content:delete`.
+
+Guards (in order — an unviewable object never reveals its existence):
+
+- `404 CONTENT_NOT_FOUND` — the object does not exist, or the caller may not view it.
+- `403 CONTENT_FORBIDDEN` — viewable but the caller is not the OWNER (nor an admin).
+  A `content:delete` key can only delete content its owner owns.
+- `409 CONTENT_CONFLICT` — the object is still **live** at a publish destination.
+  Delete never auto-unpublishes; unpublish from every destination first, then delete.
+
+Any other kind/status (draft, archived, private, internal) is deletable — the guards
+above are the protection, not the lifecycle status. A `delete` row is appended to the
+content audit trail (capturing the removed title/kind/owner) before the row vanishes.
+
+**Example request:**
+
+```bash
+curl -X DELETE -H "Authorization: Bearer sk-your-key" \
+  "https://your-domain/api/v1/content/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+```
+
+**Response `200`:**
+
+```json
+{
+  "data": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "slug": "field-trip-form",
+    "title": "Field Trip Form",
+    "kind": "document",
+    "versionsDeleted": 3
+  },
+  "meta": { "requestId": "req_..." }
+}
+```
 
 ---
 

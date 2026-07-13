@@ -1,7 +1,7 @@
 ---
 name: psd-atrium
-summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive documents and artifacts and publish them, version-based, over /api/v1/content. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
-description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), archive them, and publish/unpublish to a destination. Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it automatically so nothing is stripped or blocked (do NOT work around with legacy attributes like bgcolor/width). Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
+summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive/delete documents and artifacts and publish them, version-based, over /api/v1/content. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
+description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), archive them, hard-delete ones you own, and publish/unpublish to a destination. Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it automatically so nothing is stripped or blocked (do NOT work around with legacy attributes like bgcolor/width). Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
 allowed-tools: Bash(node:*)
 ---
 
@@ -111,17 +111,39 @@ body is returned inline (small content). For a large (externally stored) body, u
 `--mode replace` with the full text. Optional: `--body-format markdown|html|jsx`,
 `--summary <change note>`.
 
-### Archive (soft-remove — Phase 1 has no hard delete)
+### Archive (soft-remove — reversible)
 
 ```bash
 node run.js archive --id <id>
 ```
 
 Flips the object's status to `archived` (via the metadata PATCH; needs
-`content:update`, which the content key holds). Use it to clean up throwaway or
-superseded content you created — Atrium deliberately has no hard delete in Phase 1.
-Archiving also takes any live publication offline. An archived object still shows
-up under `find --status archived`.
+`content:update`, which the content key holds). Reversible, and the object still
+shows up under `find --status archived`. Archiving also takes any live publication
+offline. Prefer archive when you might want the content back; use `delete` (below)
+only when it should be gone for good.
+
+### Delete (HARD, permanent)
+
+```bash
+node run.js delete --id <id>
+```
+
+Permanently removes the object and **every** version, body, comment, and index
+entry. There is **no undo** — after this, `find`/`read` no longer return it and the
+reader/editor URLs 404. Needs `content:delete` (which the content key holds).
+
+Two guardrails the server enforces — relay either refusal verbatim:
+
+- **Owner-only.** You delete as the content key's owner, so you can only delete
+  content that owner owns. Deleting someone else's object returns a `403` error
+  (the object's existence is masked as `404` if you couldn't view it at all).
+- **Unpublish first.** A published object is refused with a clear `409` message
+  ("unpublish from … first"); delete NEVER auto-unpublishes. Run
+  `unpublish --id <id> --destination <d>` for each live destination, then `delete`.
+
+Use `archive` for reversible cleanup and `delete` only for permanent removal of
+throwaway/superseded content you own.
 
 ### Publish / unpublish (honor the approval gate)
 

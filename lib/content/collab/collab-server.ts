@@ -285,6 +285,22 @@ async function seedAuthorAndMarkdown(
   return { by, markdown };
 }
 
+/**
+ * Thrown by `getOrCreateDoc` when the content object no longer exists (hard-deleted,
+ * or never existed): there is neither persisted `atrium_doc_state` NOR an object to
+ * seed a fresh draft from. The connection handler catches this and rejects the
+ * socket, so the doc-load path FAILS CLOSED post-delete — a still-valid pre-minted
+ * collab token (≤ its short TTL) cannot open a deleted document's room and get an
+ * empty editable doc. (New connections already fail closed at token-mint time via
+ * the mint route's canView/loadByIdOrSlug 404; this closes the in-TTL window.)
+ */
+class CollabDocNotFoundError extends Error {
+  constructor(docName: string) {
+    super(`Collab document ${docName} no longer exists`);
+    this.name = "CollabDocNotFoundError";
+  }
+}
+
 async function getOrCreateDoc(docName: string): Promise<DocEntry> {
   const existing = docs.get(docName);
   if (existing) return existing;
@@ -318,6 +334,14 @@ async function getOrCreateDoc(docName: string): Promise<DocEntry> {
           Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(seeded), "init");
           entry.markdown = seed.markdown;
           await saveDocState(docName, Y.encodeStateAsUpdate(ydoc), seed.markdown);
+        } else {
+          // No persisted state AND no object to seed from ⇒ the content object does
+          // not exist (hard-deleted, or never existed). FAIL CLOSED rather than
+          // materialize an empty editable room for a non-existent object — a valid
+          // pre-minted token would otherwise open a just-deleted doc within its TTL.
+          // A brand-new document always has its content_objects row, so `seed` is
+          // non-null and this never fires for a legitimately empty new doc.
+          throw new CollabDocNotFoundError(docName);
         }
       }
 
@@ -495,6 +519,13 @@ export async function handleCollabConnection(
   try {
     entry = await getOrCreateDoc(docName);
   } catch (err) {
+    if (err instanceof CollabDocNotFoundError) {
+      // Expected post-delete (or a bad id): the object is gone. Fail closed with a
+      // "not found" close code, logged at info — this is not a server fault.
+      log.info("Collab doc no longer exists; rejecting connection", { docName });
+      rejectConn(4404, "Not found");
+      return;
+    }
     log.error("Failed to load collab doc, closing socket", {
       docName,
       error: err instanceof Error ? err.message : String(err),

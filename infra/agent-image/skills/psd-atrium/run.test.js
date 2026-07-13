@@ -379,6 +379,39 @@ test('archive requires --id (exit 1)', async () => {
   expect(code).toBe(1);
 });
 
+test('delete DELETEs /<id> and flags deleted', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: { id: 'obj-1', slug: 'doc', title: 'Doc', kind: 'document', versionsDeleted: 2 },
+  });
+
+  await run('delete', '--id', 'obj-1');
+
+  expect(restCalls).toHaveLength(1);
+  expect(restCalls[0]).toMatchObject({ method: 'DELETE', path: '/obj-1' });
+  // No request body for a delete.
+  expect(restCalls[0].opts.body).toBeUndefined();
+  expect(emitted[0].deleted).toBe(true);
+  expect(emitted[0].title).toBe('Doc');
+  expect(emitted[0].versionsDeleted).toBe(2);
+});
+
+test('delete requires --id (exit 1)', async () => {
+  let code;
+  try {
+    await run('delete');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+});
+
+test('delete url-encodes the id', async () => {
+  await run('delete', '--id', 'weird/id');
+  expect(restCalls[0].path).toBe('/weird%2Fid');
+});
+
 test('set-visibility PATCHes /<id>/visibility with level + grants', async () => {
   await run('set-visibility', '--id', 'obj-1', '--level', 'group', '--grants', 'role:staff');
   expect(restCalls[0]).toMatchObject({ method: 'PATCH', path: '/obj-1/visibility' });

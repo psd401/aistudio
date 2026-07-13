@@ -106,6 +106,12 @@ export const KEY_SCOPES: readonly string[] = [
   'content:read',
   'content:create',
   'content:update',
+  // The agent may clean up its OWN junk: delete is owner/admin-gated in the
+  // service, so this key can only remove content the service user owns. Staying
+  // tethered to ROLE_SCOPES.staff's content:* subset (minus publish_public) keeps
+  // the drift-guard unit test green; the deployed key self-heals to this scope set
+  // on the next deploy via the scope-drift re-mint.
+  'content:delete',
   'content:publish_internal',
 ];
 

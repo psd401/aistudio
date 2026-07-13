@@ -15,6 +15,7 @@
 
 import {
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -24,6 +25,24 @@ import {
 import { users } from "./users";
 import { agentIdentities } from "./agent-identities";
 import { actorKindEnum, publishDestinationEnum } from "../enums";
+
+/**
+ * Structured, action-specific context on an audit event. Nullable — most actions
+ * store nothing here. Populated for `delete` with the removed object's identity
+ * (title/kind/owner) captured BEFORE the row disappeared: `object_id` alone is a
+ * dangling UUID after a hard delete, so this is the only record of WHAT was
+ * removed. See migration 105.
+ */
+export interface ContentAuditDetails {
+  /** The deleted object's title, captured pre-delete. */
+  title?: string;
+  /** The deleted object's kind (document | artifact). */
+  kind?: string;
+  /** The user id that owned the deleted object. */
+  ownerUserId?: number;
+  /** How many immutable version rows cascaded away with the object. */
+  versionsDeleted?: number;
+}
 
 export const contentAuditLogs = pgTable("content_audit_logs", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -48,6 +67,8 @@ export const contentAuditLogs = pgTable("content_audit_logs", {
   /** ok | error | approval_required */
   outcome: varchar("outcome", { length: 24 }).notNull(),
   error: text("error"),
+  /** Structured per-action context; the `delete` trail's record of what was removed. */
+  details: jsonb("details").$type<ContentAuditDetails>(),
   requestId: varchar("request_id", { length: 255 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });

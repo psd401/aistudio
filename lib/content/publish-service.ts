@@ -929,6 +929,33 @@ export const publishService = {
   },
 
   /**
+   * The destinations at which an object is currently LIVE (status = 'live'), in no
+   * particular order. Empty when the object is published nowhere.
+   *
+   * Read-only, no lock — a fast pre-check for the hard-delete guard ("unpublish
+   * everywhere first") and the UI's disabled-Delete state. The AUTHORITATIVE
+   * delete guard re-checks the same condition on the FOR-UPDATE-locked object row
+   * inside the delete transaction, so this racy read is only an early rejection /
+   * a UI hint, never the security boundary.
+   */
+  async liveDestinations(objectId: string): Promise<PublishDestination[]> {
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select({ destination: contentPublications.destination })
+          .from(contentPublications)
+          .where(
+            and(
+              eq(contentPublications.objectId, objectId),
+              eq(contentPublications.status, "live")
+            )
+          ),
+      "publish.liveDestinations"
+    );
+    return rows.map((r) => r.destination as PublishDestination);
+  },
+
+  /**
    * Resolve a `live` publication by the object's slug at a destination — the
    * lookup the in-app reader (`/c/[slug]`) uses to find which version to serve.
    * Returns null when no object has that slug or it is not live at the
