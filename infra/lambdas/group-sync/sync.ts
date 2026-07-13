@@ -215,9 +215,20 @@ export async function runGroupSync(ports: GroupSyncPorts): Promise<GroupSyncResu
   const selected = resolveSelectedGroups(rules, directoryGroups);
   const selectedEmails = selected.map((s) => s.email);
 
-  const deactivated = await ports.deactivateGroupsNotIn(selectedEmails);
-  if (deactivated > 0) {
-    ports.log.info("Deactivated groups no longer selected", { count: deactivated });
+  // Deactivation guard (issue #1203: "partial sync must never mass-revoke").
+  // An admin removing rules still leaves a NON-EMPTY directory, so a genuinely
+  // empty listing is almost certainly a silent API failure — skip deactivation
+  // rather than flip every prefix-matched group inactive. Picks are unaffected
+  // either way (they are always selected). A non-empty listing lets legitimate
+  // de-selection proceed.
+  let deactivated = 0;
+  if (directoryGroups.length > 0) {
+    deactivated = await ports.deactivateGroupsNotIn(selectedEmails);
+    if (deactivated > 0) {
+      ports.log.info("Deactivated groups no longer selected", { count: deactivated });
+    }
+  } else {
+    ports.log.warn("Directory listing returned zero groups — skipping deactivation (fail-safe)");
   }
 
   let synced = 0;

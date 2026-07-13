@@ -208,6 +208,29 @@ describe("runGroupSync fail-safety", () => {
     expect(calls.deactivatedWith).toEqual([["keep@psd401.net"]]);
   });
 
+  test("an empty directory listing skips deactivation (never mass-revoke) but still syncs picks", async () => {
+    let deactivateCalled = false;
+    const { ports, calls } = makePorts({
+      listActiveRules: async () => [
+        { ruleType: "prefix", value: "staff-", isActive: true },
+        { ruleType: "pick", value: "keep@psd401.net", isActive: true },
+      ],
+      // Directory returns empty (simulated silent API glitch).
+      listDirectoryGroups: async () => [],
+      fetchTransitiveMembers: async () => ["u@psd401.net"],
+      deactivateGroupsNotIn: async () => {
+        deactivateCalled = true;
+        return 5;
+      },
+    });
+    const result = await runGroupSync(ports);
+    expect(deactivateCalled).toBe(false); // empty listing → no deactivation
+    // The pick is still selected and synced (picks are directory-independent).
+    expect(calls.markSynced).toEqual(["id-keep@psd401.net"]);
+    expect(result.selected).toBe(1);
+    expect(result.deactivated).toBe(0);
+  });
+
   test("a whole-directory listing failure aborts before any deactivation or write", async () => {
     let deactivateCalled = false;
     const { ports } = makePorts({
