@@ -46,21 +46,20 @@ test.describe('Admin groups page (#1203)', () => {
     const pickEmail = `e2e-pick-${stamp}@psd401.net`
     const prefixValue = `e2e-prefix-${stamp}-`
 
+    const ruleRow = (value: string) =>
+      page.locator('[data-testid^="rule-row-"]').filter({ hasText: value })
+
     // Add a hand-picked email rule.
     await page.getByTestId('rule-value-input').fill(pickEmail)
     await page.getByTestId('rule-add').click()
-    await expect(page.getByTestId('rules-table')).toContainText(pickEmail, {
-      timeout: 10000,
-    })
+    await expect(ruleRow(pickEmail)).toHaveCount(1, { timeout: 10000 })
 
     // Switch the rule type to prefix and add a prefix rule.
     await page.getByTestId('rule-type-select').click()
     await page.getByRole('option', { name: 'Email prefix' }).click()
     await page.getByTestId('rule-value-input').fill(prefixValue)
     await page.getByTestId('rule-add').click()
-    await expect(page.getByTestId('rules-table')).toContainText(prefixValue, {
-      timeout: 10000,
-    })
+    await expect(ruleRow(prefixValue)).toHaveCount(1, { timeout: 10000 })
 
     // Both modes are now visible in the rules table.
     await expect(page.getByText('Email', { exact: true }).first()).toBeVisible()
@@ -74,12 +73,11 @@ test.describe('Admin groups page (#1203)', () => {
     })
 
     // Clean up: delete the two rules we added so the shared DB stays tidy.
+    // Assert on the row locator (not the table, which is replaced by the empty
+    // state once the last rule is gone).
     for (const value of [pickEmail, prefixValue]) {
-      const row = page.locator('[data-testid^="rule-row-"]').filter({ hasText: value })
-      await row.getByRole('button', { name: 'Delete rule' }).click()
-      await expect(page.getByTestId('rules-table')).not.toContainText(value, {
-        timeout: 10000,
-      })
+      await ruleRow(value).getByRole('button', { name: 'Delete rule' }).click()
+      await expect(ruleRow(value)).toHaveCount(0, { timeout: 10000 })
     }
   })
 })

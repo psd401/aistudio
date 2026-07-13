@@ -509,6 +509,10 @@ export class ProcessingStack extends cdk.Stack {
 
     const groupSyncLambda = new lambda.Function(this, 'GroupSync', {
       functionName: `psd-group-sync-${props.environment}`,
+      // Singleton: a manual "Sync now" must not race the hourly schedule into
+      // two concurrent full-replaces of the same group (mirrors AgentHealthDaily
+      // / nonce-cleanup). A throttled scheduled invoke retries on its own.
+      reservedConcurrentExecutions: 1,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(

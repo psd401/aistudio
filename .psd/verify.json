@@ -2,7 +2,7 @@
   "commands": {
     "lint": "bunx eslint .",
     "typecheck": "bun run typecheck",
-    "test": "bunx jest --config=jest.config.ci.js --testPathPattern groups"
+    "test": "bunx jest --config=jest.config.ci.js groups"
   },
   "e2e_required": false,
   "e2e_flows": ["admin-groups"],
