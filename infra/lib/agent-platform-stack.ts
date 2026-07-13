@@ -798,6 +798,24 @@ export class AgentPlatformStack extends cdk.Stack {
       })],
     });
 
+    // The two key-bootstrap profiles (4g atrium, 4h mcp) MUST own DISTINCT service
+    // users: the bootstrap Lambda's replaceActiveKey revokes EVERY active key the
+    // service user owns before minting, so a shared user would make the two
+    // bootstraps revoke each other's key on every deploy. Extracted to named
+    // constants + guarded so a future copy-paste (or a "share a constant" refactor)
+    // can't silently collapse them — this fails synth instead of shipping the bug.
+    // Typed as `string` (not the narrowed literal) so the guard is a real runtime
+    // comparison, not one TypeScript prunes as provably-false.
+    const atriumServiceUserSub: string = 'service-account:psd-atrium-agent';
+    const aistudioMcpServiceUserSub: string = 'service-account:psd-aistudio-agent';
+    if (atriumServiceUserSub === aistudioMcpServiceUserSub) {
+      throw new Error(
+        'AgentPlatformStack: the atrium and aistudio-mcp key bootstraps must use ' +
+          'DISTINCT service users — replaceActiveKey revokes all of a service user’s ' +
+          'active keys, so a shared user would revoke each key on every deploy.',
+      );
+    }
+
     // =====================================================================
     // 4g. Atrium content API key — deploy-time zero-touch provisioning
     // =====================================================================
@@ -936,7 +954,7 @@ export class AgentPlatformStack extends cdk.Stack {
         DB_SECRET_ARN: props.databaseSecretArn,
         DB_NAME: props.databaseName ?? 'aistudio',
         CONTENT_KEY_SECRET_ID: atriumContentApiKeySecret.secretArn,
-        SERVICE_USER_COGNITO_SUB: 'service-account:psd-atrium-agent',
+        SERVICE_USER_COGNITO_SUB: atriumServiceUserSub,
         // `atrium` is the Lambda's default profile when KEY_PROFILE is unset, but
         // set it explicitly so the wiring is legible next to the mcp profile below.
         KEY_PROFILE: 'atrium',
@@ -1081,7 +1099,7 @@ export class AgentPlatformStack extends cdk.Stack {
         DB_SECRET_ARN: props.databaseSecretArn,
         DB_NAME: props.databaseName ?? 'aistudio',
         CONTENT_KEY_SECRET_ID: aistudioMcpApiKeySecret.secretArn,
-        SERVICE_USER_COGNITO_SUB: 'service-account:psd-aistudio-agent',
+        SERVICE_USER_COGNITO_SUB: aistudioMcpServiceUserSub,
         // Selects the platform:read profile (key name + scopes) — see index.ts
         // MCP_KEY_SCOPES, unit-tested against ROLE_SCOPES.staff.
         KEY_PROFILE: 'mcp',

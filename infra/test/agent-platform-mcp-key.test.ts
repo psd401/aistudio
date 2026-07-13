@@ -128,6 +128,63 @@ describe('AgentPlatformStack — AI Studio MCP key provisioning (#1100)', () => 
     expect(withNonce.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('serves the MCP provisioner from the MCP provider (guards against a serviceToken swap)', () => {
+    // A copy-paste that pointed AistudioMcpKeyProvisioner at the atrium provider
+    // would leave the MCP secret unpopulated (the atrium Lambda no-ops), silently
+    // reproducing #1100 with CI green. Pin the ServiceToken to the MCP provider.
+    const crs = template.findResources('AWS::CloudFormation::CustomResource');
+    const mcpEntry = Object.entries(crs).find(([logicalId]) =>
+      logicalId.startsWith('AistudioMcpKeyProvisioner')
+    );
+    expect(mcpEntry).toBeDefined();
+    const serviceToken = JSON.stringify(
+      (mcpEntry![1] as { Properties?: { ServiceToken?: unknown } }).Properties?.ServiceToken
+    );
+    expect(serviceToken).toContain('AistudioMcpKeyProvider');
+    expect(serviceToken).not.toContain('AtriumContentKeyProvider');
+  });
+
+  it('the two bootstrap Lambdas target DISTINCT service users (no cross-revocation)', () => {
+    // The core invariant: replaceActiveKey revokes ALL of a service user's active
+    // keys, so a shared user would make the two bootstraps revoke each other.
+    const fns = template.findResources('AWS::Lambda::Function');
+    const subFor = (fnName: string): unknown => {
+      const entry = Object.values(fns).find(
+        (f) =>
+          (f as { Properties?: { FunctionName?: string } }).Properties?.FunctionName === fnName
+      ) as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } } | undefined;
+      return entry?.Properties?.Environment?.Variables?.SERVICE_USER_COGNITO_SUB;
+    };
+    const atriumSub = subFor(`psd-agent-atrium-key-bootstrap-${ENV}`);
+    const mcpSub = subFor(`psd-agent-aistudio-mcp-key-bootstrap-${ENV}`);
+    expect(atriumSub).toBe('service-account:psd-atrium-agent');
+    expect(mcpSub).toBe('service-account:psd-aistudio-agent');
+    expect(atriumSub).not.toBe(mcpSub);
+  });
+
+  it('scopes the MCP bootstrap role secret access to the MCP secret, not the atrium one', () => {
+    // Guards against an IAM-ARN swap between the two near-identical roles.
+    interface Statement { Sid?: string; Resource?: unknown }
+    const statements: Statement[] = [];
+    for (const policy of Object.values(template.findResources('AWS::IAM::Policy'))) {
+      const doc = (policy as { Properties?: { PolicyDocument?: { Statement?: Statement[] } } })
+        .Properties?.PolicyDocument?.Statement;
+      if (Array.isArray(doc)) statements.push(...doc);
+    }
+    for (const role of Object.values(template.findResources('AWS::IAM::Role'))) {
+      const inline = (role as { Properties?: { Policies?: Array<{ PolicyDocument?: { Statement?: Statement[] } }> } })
+        .Properties?.Policies ?? [];
+      for (const p of inline) {
+        if (Array.isArray(p.PolicyDocument?.Statement)) statements.push(...p.PolicyDocument!.Statement!);
+      }
+    }
+    const mcpStmt = statements.find((s) => s.Sid === 'ReadWriteMcpKeySecret');
+    expect(mcpStmt).toBeDefined();
+    const resourceJson = JSON.stringify(mcpStmt!.Resource);
+    expect(resourceJson).toContain('AistudioMcpApiKeySecret');
+    expect(resourceJson).not.toContain('AtriumContentApiKeySecret');
+  });
+
   it('exposes AISTUDIO_MCP_API_KEY_SECRET_ID to the runtime pointing at the MCP secret', () => {
     const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
     expect(Object.keys(runtimes).length).toBe(1);

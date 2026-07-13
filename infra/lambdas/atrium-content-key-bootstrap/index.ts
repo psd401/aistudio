@@ -171,13 +171,16 @@ export const DEFAULT_KEY_PROFILE = 'atrium';
  */
 export function resolveKeyProfile(profileName: string | undefined): KeyProfile {
   const name = (profileName ?? DEFAULT_KEY_PROFILE).trim().toLowerCase() || DEFAULT_KEY_PROFILE;
-  const profile = KEY_PROFILES[name];
-  if (!profile) {
+  // hasOwnProperty guard: a bare `KEY_PROFILES[name]` would resolve inherited
+  // prototype members (`__proto__`, `constructor`, `toString`) to truthy values,
+  // silently bypassing the "unknown profile throws" contract with a confusing
+  // downstream `undefined` error instead of the loud message.
+  if (!Object.prototype.hasOwnProperty.call(KEY_PROFILES, name)) {
     throw new Error(
       `Unknown KEY_PROFILE '${profileName}' — expected one of: ${Object.keys(KEY_PROFILES).join(', ')}`
     );
   }
-  return profile;
+  return KEY_PROFILES[name];
 }
 
 // ---------------------------------------------------------------------------
@@ -286,12 +289,17 @@ export interface Logger {
  * set; otherwise mints a fresh key (revoke-old + insert-new in one transaction
  * via `ops.replaceActiveKey`) and returns `minted`.
  *
- * NEVER logs the raw key. A missing service user row (migration 104 not applied
- * to this cluster yet) returns `skipped-migration-pending` with an error log
- * instead of throwing: a throw here becomes a CFN FAILED that rolls back — and
- * can wedge — the entire shared AgentPlatformStack, whereas skipping degrades to
- * "key not provisioned yet" and self-heals on the next full deploy (the Nonce
- * re-fires this handler every deploy).
+ * NEVER logs the raw key. A missing service user row (the migration that seeds
+ * `cfg.serviceUserCognitoSub` not applied to this cluster yet — 104 for atrium,
+ * 108 for mcp) returns `skipped-migration-pending` with an error log instead of
+ * throwing: a throw here becomes a CFN FAILED that rolls back — and can wedge —
+ * the entire shared AgentPlatformStack, whereas skipping degrades to "key not
+ * provisioned yet" and self-heals on the next full deploy (the Nonce re-fires
+ * this handler every deploy).
+ *
+ * Log strings are profile-agnostic: they carry `cfg.keyName` +
+ * `cfg.serviceUserCognitoSub` so a CloudWatch reader can tell the atrium content
+ * key apart from the mcp key (both profiles run this same function body).
  */
 export async function ensureContentKey(
   ops: ContentKeyOps,
@@ -301,11 +309,13 @@ export async function ensureContentKey(
   const userId = await ops.resolveServiceUserId();
   if (userId == null) {
     log.error(
-      'Atrium service user not found — skipping key provisioning (self-heals on the next full deploy)',
+      'Service user not found — skipping key provisioning (self-heals on the next full deploy)',
       {
+        keyName: cfg.keyName,
         cognitoSub: cfg.serviceUserCognitoSub,
         remediation:
-          'Deploy AIStudio-DatabaseStack first (migration 104-atrium-agent-service-user.sql), then redeploy this stack — use the canonical full deploy, never a partial one.',
+          `Deploy AIStudio-DatabaseStack first (the migration that seeds ${cfg.serviceUserCognitoSub}), ` +
+          'then redeploy this stack — use the canonical full deploy, never a partial one.',
       }
     );
     return 'skipped-migration-pending';
@@ -319,17 +329,19 @@ export async function ensureContentKey(
       if (!row.isActive || row.revoked) continue;
       if (!scopesMatch(row.scopes, cfg.requiredScopes)) continue;
       if (await verifyKey(current, row.keyHash)) {
-        log.info('Atrium content key present and valid — no-op', {
+        log.info('Key present and valid — no-op', {
+          keyName: cfg.keyName,
           keyPrefix: `${KEY_PREFIX}${prefix}`,
         });
         return 'noop';
       }
     }
     log.warn('Secret holds a key with no matching active/exactly-scoped api_keys row — re-minting', {
+      keyName: cfg.keyName,
       keyPrefix: `${KEY_PREFIX}${prefix}`,
     });
   } else {
-    log.info('Secret empty or malformed — minting Atrium content key', {});
+    log.info('Secret empty or malformed — minting key', { keyName: cfg.keyName });
   }
 
   // Mint: revoke-old + insert-new atomically (exactly one active service key),
@@ -346,7 +358,8 @@ export async function ensureContentKey(
     scopes: cfg.requiredScopes,
   });
   await ops.writeSecret(rawKey);
-  log.info('Minted Atrium content key', {
+  log.info('Minted key', {
+    keyName: cfg.keyName,
     keyPrefix: `${KEY_PREFIX}${keyPrefix}`,
     scopes: cfg.requiredScopes,
   });
