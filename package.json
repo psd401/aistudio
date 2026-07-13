@@ -274,6 +274,8 @@
     "@ai-sdk/provider": "~3.0.10",
     "@ai-sdk/provider-utils": "~4.0.30",
     "@ai-sdk/react": "~3.0.210",
-    "@assistant-ui/core": "0.2.18"
+    "@assistant-ui/core": "0.2.18",
+    "@codemirror/state": "6.7.0",
+    "@codemirror/view": "6.43.4"
   }
 }
