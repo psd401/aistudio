@@ -53,8 +53,10 @@ async function main(): Promise<void> {
 
   try {
     // The (user_id, role_id) set group-sync WOULD compute — same join the
-    // reconcilers use (active group, lower(email) on both sides).
-    const computedCte = sql`
+    // reconcilers use (active group, lower(email) on both sides). A FUNCTION, not a
+    // stored fragment: postgres.js fragments carry per-use state, so build a fresh
+    // one at each interpolation (avoids reusing one fragment object across queries).
+    const computedCte = () => sql`
       computed AS (
         SELECT DISTINCT u.id AS user_id, grm.role_id
           FROM group_role_mappings grm
@@ -91,7 +93,7 @@ async function main(): Promise<void> {
         of_which_numeric_username: number;
       }[]
     >`
-      WITH ${computedCte}
+      WITH ${computedCte()}
       SELECT r.name AS role_name,
              count(*)::int AS manual_no_group_coverage,
              count(*) FILTER (
@@ -125,7 +127,7 @@ async function main(): Promise<void> {
     const [heuristicOnly] = await sql<
       { count: number; numeric_username: number }[]
     >`
-      WITH ${computedCte}
+      WITH ${computedCte()}
       SELECT count(*)::int AS count,
              count(*) FILTER (WHERE split_part(u.email, '@', 1) ~ '^\\d+$')::int
                AS numeric_username
