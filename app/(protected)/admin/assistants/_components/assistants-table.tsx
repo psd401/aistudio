@@ -48,13 +48,15 @@ import {
   ChevronUp,
   ChevronsUpDown,
   Download,
-  Upload
+  Upload,
+  Lock
 } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
 import { useToast } from "@/components/ui/use-toast"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { ExportDialog } from "./export-dialog"
 import { ImportDialog } from "./import-dialog"
+import { ResourceGrantsEditor } from "@/components/features/resource-grants"
 import {
   ColumnDef,
   flexRender,
@@ -97,6 +99,9 @@ export function AssistantsTable() {
   const [selectedAssistants, setSelectedAssistants] = useState<Set<string>>(new Set())
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false)
   const [isImportDialogOpen, setIsImportDialogOpen] = useState(false)
+  // Per-assistant access editor (#1206) — controlled at the table level so the
+  // dialog doesn't unmount with the row's action dropdown.
+  const [accessAssistant, setAccessAssistant] = useState<{ id: string; name: string } | null>(null)
   const { toast } = useToast()
 
   // Fetch assistants
@@ -415,6 +420,13 @@ export function AssistantsTable() {
                 )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
+                  onClick={() => setAccessAssistant({ id: row.original.id, name: row.original.name })}
+                >
+                  <Lock className="h-4 w-4 mr-2" />
+                  Manage access
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
                   onClick={() => handleDelete(row.original.id)}
                   className="text-red-600"
                 >
@@ -611,6 +623,30 @@ export function AssistantsTable() {
         onOpenChange={setIsImportDialogOpen}
         onImportComplete={fetchAssistants}
       />
+
+      <Dialog
+        open={!!accessAssistant}
+        onOpenChange={(open) => { if (!open) setAccessAssistant(null) }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Manage access</DialogTitle>
+            <DialogDescription>
+              {accessAssistant
+                ? `Control who can run "${accessAssistant.name}".`
+                : "Control who can run this assistant."}
+            </DialogDescription>
+          </DialogHeader>
+          {accessAssistant ? (
+            <ResourceGrantsEditor
+              resourceType="assistant"
+              resourceId={accessAssistant.id}
+              resourceLabel={accessAssistant.name}
+              onSaved={() => setAccessAssistant(null)}
+            />
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   )
-} 
+}

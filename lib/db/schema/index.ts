@@ -208,6 +208,9 @@ export * from "./tables/group-members";
 export * from "./tables/group-selection-rules";
 // Phase 1 (#1204): group→role mappings that drive managed roles.
 export * from "./tables/group-role-mappings";
+// Phase 3 (#1206): per-resource role/group access grants on models,
+// assistants, and agent skills.
+export * from "./tables/resource-access-grants";
 
 // ============================================
 // Relations

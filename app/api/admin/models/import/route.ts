@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin-check";
-import { bulkImportAIModels } from "@/lib/db/drizzle";
+import { bulkImportAIModels, getAIModelByModelId } from "@/lib/db/drizzle";
+import { syncModelAllowedRoleGrants } from "@/lib/db/drizzle/resource-access";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import { validateModel } from "@/lib/validators/model-import-validator";
 
@@ -188,6 +189,18 @@ export async function POST(request: Request) {
 
     // Execute bulk import
     const result = await bulkImportAIModels(modelsToImport);
+
+    // Bridge the legacy allowed_roles column into resource_access_grants
+    // (#1206 P1 follow-up) — without this, an imported model with allowedRoles
+    // set has zero grant rows and the new gate treats it as unrestricted.
+    // Reads back the persisted state so it reflects bulkImportAIModels' actual
+    // create-vs-preserve-existing merge, not just the raw request payload.
+    for (const modelId of modelIds) {
+      const persisted = await getAIModelByModelId(modelId);
+      if (persisted) {
+        await syncModelAllowedRoleGrants(persisted.id, persisted.allowedRoles, null);
+      }
+    }
 
     log.info("Bulk import completed", {
       created: result.created,

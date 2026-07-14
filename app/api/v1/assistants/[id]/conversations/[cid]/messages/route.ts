@@ -17,6 +17,7 @@ import {
   extractNumericParam,
   extractStringParam,
   verifyAssistantAccess,
+  verifyAssistantResourceGrants,
   parseRequestBody,
   isErrorResponse,
 } from "@/lib/api"
@@ -91,12 +92,19 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     }
 
     const architect = architectResult.data
+
     const prompts = (architect.prompts || []).sort((a, b) => a.position - b.position)
     // Use the last prompt's model and system context for follow-up messages
     const lastPrompt = prompts[prompts.length - 1]
     if (!lastPrompt?.modelId) {
       return createErrorResponse(requestId, 400, "CONFIGURATION_ERROR", "Assistant has no model configured")
     }
+
+    // Per-resource access enforcement (#1206) — reject a caller lacking a
+    // role/group grant on the assistant or the model it uses (owner/admin pass;
+    // zero grants = unrestricted). Before streaming so denial is a clean 403.
+    const accessDenied = await verifyAssistantResourceGrants({ auth, architectUserId: architect.userId, architectId: architect.id, modelDbIds: [lastPrompt.modelId], assistantId, requestId, log })
+    if (accessDenied) return accessDenied
 
     const modelData = await getAIModelById(lastPrompt.modelId)
     if (!modelData || !modelData.modelId || !modelData.provider) {

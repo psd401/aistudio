@@ -3,6 +3,7 @@ import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import { getModelConfig } from '@/lib/ai/model-config';
+import { filterAccessibleResourceIds } from '@/lib/db/drizzle/resource-access';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { UIMessage } from 'ai';
 
@@ -122,7 +123,31 @@ export async function POST(req: Request) {
       model1: { provider: model1Config.provider, modelId: model1Config.model_id },
       model2: { provider: model2Config.provider, modelId: model2Config.model_id }
     });
-    
+
+    // 4b. Per-resource access enforcement (#1206). Model ids are client-supplied,
+    // so reject any model the user has no role/group grant for (zero grants =
+    // unrestricted; admins always pass).
+    const accessibleModelIds = await filterAccessibleResourceIds(
+      currentUser.data.user.id,
+      'model',
+      [model1Config.id, model2Config.id]
+    );
+    // Checked independently (not accessibleModelIds.size !== 2) so comparing a
+    // model against itself doesn't false-deny on the Set dedup.
+    const model1Allowed = accessibleModelIds.has(String(model1Config.id));
+    const model2Allowed = accessibleModelIds.has(String(model2Config.id));
+    if (!model1Allowed || !model2Allowed) {
+      log.warn('Forbidden model in comparison', {
+        userId: currentUser.data.user.id,
+        model1Allowed,
+        model2Allowed,
+      });
+      return new Response(
+        JSON.stringify({ error: 'You do not have access to one or both selected models' }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
     // 5. Create messages for both models
     const messages: UIMessage[] = [
       {

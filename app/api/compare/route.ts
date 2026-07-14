@@ -9,6 +9,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { modelComparisons, aiModels } from '@/lib/db/schema';
 import { hasCapabilityAccess } from '@/utils/roles';
 import { createProviderModel } from '@/lib/ai/provider-factory';
+import { filterAccessibleResourceIds } from '@/lib/db/drizzle/resource-access';
 import { hasCapability } from '@/lib/ai/capability-utils';
 import { generateImageForNexus } from '@/lib/ai/image-generation-service';
 import type { ImageGenerationError } from '@/lib/ai/image-generation-service';
@@ -517,6 +518,31 @@ export async function POST(req: Request) {
       return modelsValidation.response;
     }
     const { model1Config, model2Config } = modelsValidation;
+
+    // 5b. Per-resource access enforcement (#1206). Model ids arrive in the
+    // request body, so a crafted call can name a restricted model even though the
+    // client dropdown hid it. Reject if the user lacks a role/group grant on
+    // either model (zero grants = unrestricted; admins always pass).
+    const accessibleModelIds = await filterAccessibleResourceIds(
+      userId,
+      'model',
+      [Number(model1Config.id), Number(model2Config.id)]
+    );
+    // Checked independently (not accessibleModelIds.size !== 2) so comparing a
+    // model against itself doesn't false-deny on the Set dedup.
+    const model1Allowed = accessibleModelIds.has(String(model1Config.id));
+    const model2Allowed = accessibleModelIds.has(String(model2Config.id));
+    if (!model1Allowed || !model2Allowed) {
+      log.warn('Forbidden model in comparison', {
+        userId,
+        model1Allowed,
+        model2Allowed,
+      });
+      return new Response(
+        JSON.stringify({ error: 'You do not have access to one or both selected models' }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
 
     // 6. Detect image generation models
     const isModel1Image = hasCapability(model1Config.capabilities, 'imageGeneration');

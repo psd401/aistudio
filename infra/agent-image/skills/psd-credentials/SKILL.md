@@ -53,10 +53,13 @@ Use this when a skill prompts the user for an API key and needs to persist it fo
 ```bash
 node /opt/psd-skills/psd-credentials/check_capability.js \
   --user <email> \
-  --capability "<capability-identifier>"
+  --capability "<capability-identifier>" \
+  [--skill-id "<psd_agent_skills-uuid>"]
 ```
 
-Returns `{"granted":true|false,"capability":"..."}` and exits `0` on grant, `3` on deny, `1` on internal error. Used by restricted skills (e.g. `psd-image-gen`) to enforce the AI Studio role-based capability model at invocation time. Fails closed on database errors — a restricted skill should refuse to act when the grant cannot be confirmed.
+Returns `{"granted":true|false,"capability":"...","skillId":"..."}` and exits `0` on grant, `3` on deny, `1` on internal error. Used by restricted skills (e.g. `psd-image-gen`) to enforce the AI Studio role-based capability model at invocation time. Fails closed on database errors — a restricted skill should refuse to act when the grant cannot be confirmed.
+
+Access is granted when the caller satisfies `--capability` **OR** (when `--skill-id` is supplied) matches an explicit per-skill access grant — a role or synced-group grant configured for that skill in `resource_access_grants` (Epic #1202 Phase 3, #1206; admins manage grants on the Skills admin page). `--skill-id` is **optional and additive**: omitting it reproduces the capability-only behavior exactly, so existing built-in skills are unaffected. At least one of `--capability` / `--skill-id` must be provided. A per-skill grant only ever *widens* the caller's own access (never another user's), so it adds no trust surface beyond the pre-existing `--user` boundary documented below.
 
 ### `request_new` — request provisioning of a new credential
 

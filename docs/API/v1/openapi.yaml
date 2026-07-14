@@ -739,6 +739,12 @@ paths:
         Execute an assistant with the given inputs.
         - `Accept: text/event-stream` (default) returns an SSE stream
         - `Accept: application/json` returns 202 with a jobId for async polling
+
+        Beyond the assistant scope check, the caller must have per-resource access
+        (Epic #1202 Phase 3) to BOTH the assistant and the model its last prompt
+        uses: a resource restricted to specific roles/Google groups returns 403 to
+        a caller who matches no grant (the assistant owner and administrators
+        always pass; a resource with no grants is unrestricted).
       security:
         - BearerAuth: []
         - SessionAuth: []
@@ -809,7 +815,14 @@ paths:
       operationId: startConversation
       tags: [Assistants]
       summary: Start a conversation with an assistant
-      description: Creates a new conversation, executes the assistant, and returns the SSE stream.
+      description: >-
+        Creates a new conversation, executes the assistant, and returns the SSE
+        stream. Beyond the assistant scope check, the caller must have
+        per-resource access (Epic #1202 Phase 3) to BOTH the assistant and the
+        model its last prompt uses: a resource restricted to specific
+        roles/Google groups returns 403 to a caller who matches no grant (the
+        assistant owner and administrators always pass; a resource with no
+        grants is unrestricted).
       security:
         - BearerAuth: []
         - SessionAuth: []
@@ -854,7 +867,13 @@ paths:
       operationId: sendMessage
       tags: [Assistants]
       summary: Send a follow-up message
-      description: Sends a message in an existing conversation. Preserves assistant context.
+      description: >-
+        Sends a message in an existing conversation. Preserves assistant context.
+        Beyond the assistant scope check, the caller must have per-resource access
+        (Epic #1202 Phase 3) to BOTH the assistant and the model it uses: a
+        resource restricted to specific roles/Google groups returns 403 to a
+        caller who matches no grant (the assistant owner and administrators always
+        pass; a resource with no grants is unrestricted).
       security:
         - BearerAuth: []
         - SessionAuth: []
