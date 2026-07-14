@@ -17,6 +17,7 @@ import {
   createErrorResponse,
   extractNumericParam,
   verifyAssistantAccess,
+  verifyAssistantResourceGrants,
   parseRequestBody,
   isErrorResponse,
   type ApiAuthContext,
@@ -27,6 +28,7 @@ import {
   validateExecutionInputs,
   isContentSafetyBlocked,
 } from "@/lib/api/assistant-execution-service"
+import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import { jobManagementService } from "@/lib/streaming/job-management-service"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { createLogger, startTimer } from "@/lib/logger"
@@ -114,6 +116,32 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   // 3. Verify assistant exists and user has access
   const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
   if (accessError) return accessError
+
+  // 3b. Per-resource grant enforcement (#1206) — beneath ownership/approval,
+  // covers the assistant AND the model its last prompt uses. Shared with the
+  // conversations and follow-up-message v1 entry points so a caller can't
+  // bypass a resource grant by picking a different entry point into the same
+  // assistant.
+  const architectResult = await getAssistantArchitectByIdAction(assistantId.toString())
+  if (!architectResult.isSuccess || !architectResult.data) {
+    return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
+  }
+  const architect = architectResult.data
+  const prompts = (architect.prompts || []).sort((a, b) => a.position - b.position)
+  const lastPrompt = prompts[prompts.length - 1]
+  if (!lastPrompt?.modelId) {
+    return createErrorResponse(requestId, 400, "CONFIGURATION_ERROR", "Assistant has no model configured")
+  }
+  const grantsError = await verifyAssistantResourceGrants({
+    auth,
+    architectUserId: architect.userId,
+    architectId: architect.id,
+    modelDbId: lastPrompt.modelId,
+    assistantId,
+    requestId,
+    log,
+  })
+  if (grantsError) return grantsError
 
   // 4. Parse and validate request body
   const result = await parseRequestBody(request, executeBodySchema, requestId)

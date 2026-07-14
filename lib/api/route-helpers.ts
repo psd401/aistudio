@@ -13,6 +13,8 @@ import {
   validateAssistantAccess,
 } from "./assistant-service"
 import { checkUserRole } from "@/lib/db/drizzle"
+import { userCanAccessResource } from "@/lib/db/drizzle/resource-access"
+import type { createLogger } from "@/lib/logger"
 
 // ============================================
 // URL Parameter Extraction
@@ -102,6 +104,44 @@ export async function verifyAssistantAccess(
     )
   }
 
+  return null
+}
+
+/**
+ * Per-resource access enforcement (#1206), BENEATH the scope + verifyAssistantAccess
+ * gates. Rejects a caller who lacks a role/group grant on the assistant OR the
+ * model it uses. The owner always passes the assistant check; admins pass inside
+ * userCanAccessResource; zero grants = unrestricted. Returns a 403 Response on
+ * denial, else null.
+ *
+ * Shared by every v1 assistant entry point (execute, start-conversation,
+ * send-message) so a caller can't bypass a resource grant by picking a
+ * different entry point into the same assistant/model.
+ */
+export async function verifyAssistantResourceGrants(args: {
+  auth: { userId: number }
+  architectUserId: number | null | undefined
+  architectId: number
+  modelDbId: number
+  assistantId: number
+  requestId: string
+  log: ReturnType<typeof createLogger>
+}): Promise<NextResponse | null> {
+  const { auth, architectUserId, architectId, modelDbId, assistantId, requestId, log } = args
+
+  if (architectUserId !== auth.userId) {
+    const canAccessAssistant = await userCanAccessResource(auth.userId, "assistant", architectId)
+    if (!canAccessAssistant) {
+      log.warn("Caller lacks per-resource grant for assistant", { assistantId, userId: auth.userId })
+      return createErrorResponse(requestId, 403, "FORBIDDEN", "You do not have access to this assistant")
+    }
+  }
+
+  const canAccessModel = await userCanAccessResource(auth.userId, "model", modelDbId)
+  if (!canAccessModel) {
+    log.warn("Caller lacks access to the assistant's model", { assistantId, modelDbId, userId: auth.userId })
+    return createErrorResponse(requestId, 403, "FORBIDDEN", "You do not have access to a model this assistant uses")
+  }
   return null
 }
 

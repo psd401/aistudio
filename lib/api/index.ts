@@ -42,6 +42,7 @@ export {
   truncateForError,
   isAdminByUserId,
   verifyAssistantAccess,
+  verifyAssistantResourceGrants,
   parseRequestBody,
   isErrorResponse,
 } from "./route-helpers";

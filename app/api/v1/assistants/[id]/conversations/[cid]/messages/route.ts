@@ -17,6 +17,7 @@ import {
   extractNumericParam,
   extractStringParam,
   verifyAssistantAccess,
+  verifyAssistantResourceGrants,
   parseRequestBody,
   isErrorResponse,
 } from "@/lib/api"
@@ -24,7 +25,6 @@ import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architec
 import { getConversationById } from "@/lib/db/drizzle/nexus-conversations"
 import { getMessagesByConversation, createMessageWithStats } from "@/lib/db/drizzle/nexus-messages"
 import { getAIModelById } from "@/lib/db/drizzle"
-import { userCanAccessResource } from "@/lib/db/drizzle/resource-access"
 import { unifiedStreamingService } from "@/lib/streaming/unified-streaming-service"
 import { createLogger } from "@/lib/logger"
 import type { UIMessage } from "ai"
@@ -39,40 +39,6 @@ export const maxDuration = 900
 const sendMessageSchema = z.object({
   message: z.string().min(1).max(100000),
 })
-
-/**
- * Per-resource access enforcement (#1206) for the API follow-up path, BENEATH the
- * scope + verifyAssistantAccess gates. Rejects a caller who lacks a role/group
- * grant on the assistant OR the model it uses. The owner always passes the
- * assistant check; admins pass inside userCanAccessResource; zero grants =
- * unrestricted. Returns a 403 Response on denial, else null.
- */
-async function enforceAssistantAndModelAccess(args: {
-  auth: { userId: number }
-  architectUserId: number | null | undefined
-  architectId: number
-  modelDbId: number
-  assistantId: number
-  requestId: string
-  log: ReturnType<typeof createLogger>
-}): Promise<NextResponse | null> {
-  const { auth, architectUserId, architectId, modelDbId, assistantId, requestId, log } = args
-
-  if (architectUserId !== auth.userId) {
-    const canAccessAssistant = await userCanAccessResource(auth.userId, "assistant", architectId)
-    if (!canAccessAssistant) {
-      log.warn("Caller lacks per-resource grant for assistant", { assistantId, userId: auth.userId })
-      return createErrorResponse(requestId, 403, "FORBIDDEN", "You do not have access to this assistant")
-    }
-  }
-
-  const canAccessModel = await userCanAccessResource(auth.userId, "model", modelDbId)
-  if (!canAccessModel) {
-    log.warn("Caller lacks access to the assistant's model", { assistantId, modelDbId, userId: auth.userId })
-    return createErrorResponse(requestId, 403, "FORBIDDEN", "You do not have access to a model this assistant uses")
-  }
-  return null
-}
 
 // Runtime validation for DB message rows
 const messageRowSchema = z.object({
@@ -137,7 +103,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     // Per-resource access enforcement (#1206) — reject a caller lacking a
     // role/group grant on the assistant or the model it uses (owner/admin pass;
     // zero grants = unrestricted). Before streaming so denial is a clean 403.
-    const accessDenied = await enforceAssistantAndModelAccess({ auth, architectUserId: architect.userId, architectId: architect.id, modelDbId: lastPrompt.modelId, assistantId, requestId, log })
+    const accessDenied = await verifyAssistantResourceGrants({ auth, architectUserId: architect.userId, architectId: architect.id, modelDbId: lastPrompt.modelId, assistantId, requestId, log })
     if (accessDenied) return accessDenied
 
     const modelData = await getAIModelById(lastPrompt.modelId)
