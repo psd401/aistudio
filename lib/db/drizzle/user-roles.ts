@@ -32,8 +32,12 @@ import { ErrorFactories } from "@/lib/error-utils";
  * and both revoke — zero admins despite the guard (#1222 review). Held only
  * around the admin-removal branch since that is the rare path; auto-released
  * at transaction end.
+ *
+ * Exported for the third admin-revoking path — the manual editor in
+ * actions/admin/user-management.actions.ts — which must serialize its
+ * last-admin count against both reconcilers too (#1222 round 4).
  */
-const LAST_ADMIN_GUARD_LOCK_KEY = 925_001;
+export const LAST_ADMIN_GUARD_LOCK_KEY = 925_001;
 
 export interface ManualRoleSyncResult {
   deletedRoleIds: number[];
@@ -483,6 +487,18 @@ export function applyLastAdminGuard(
  * @param email  - the user's email (lowercased internally to match group_members)
  * @returns the applied diff (changed=false means nothing was written)
  */
+/**
+ * Per-instance reconcile throttle (#1222 round 4): requireRole()/hasRole()
+ * funnel ~40 admin server actions through getCurrentUserAction on EVERY call,
+ * so the "login-time" hook actually runs far hotter than session establishment.
+ * Steady-state drift is owned by the hourly bulk pass; this hook exists for
+ * session-start freshness, so once per TTL per user per container is enough.
+ * TTL matches the settings-manager cache convention (5 min). Map size is
+ * bounded by the container's active-user count.
+ */
+const RECONCILE_THROTTLE_MS = 5 * 60_000;
+const lastReconcileAtByUser = new Map<number, number>();
+
 export async function reconcileUserManagedRoles(
   userId: number,
   email: string
@@ -493,6 +509,12 @@ export async function reconcileUserManagedRoles(
   if (!normalizedEmail) {
     return { toAdd: [], toRemove: [], changed: false };
   }
+
+  const lastRun = lastReconcileAtByUser.get(userId);
+  if (lastRun !== undefined && Date.now() - lastRun < RECONCILE_THROTTLE_MS) {
+    return { toAdd: [], toRemove: [], changed: false };
+  }
+  lastReconcileAtByUser.set(userId, Date.now());
 
   try {
     const diff = await executeQuery(

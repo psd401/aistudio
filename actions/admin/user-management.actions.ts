@@ -17,7 +17,7 @@ import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
 import { eq, sql, desc, count, inArray, ilike, or, and, type SQL } from "drizzle-orm"
 import { users, userRoles, roles } from "@/lib/db/schema"
-import { syncManualUserRoles } from "@/lib/db/drizzle/user-roles"
+import { syncManualUserRoles, LAST_ADMIN_GUARD_LOCK_KEY } from "@/lib/db/drizzle/user-roles"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { promptUsageEvents } from "@/lib/db/schema/tables/prompt-usage-events"
 import { getDateThreshold } from "@/lib/date-utils"
@@ -552,6 +552,14 @@ export async function updateUser(
           if (manualAdminRow) {
             // This edit WOULD delete the user's manual admin grant — refuse if
             // no other administrator grant (any source, any user) remains.
+            // Serialize the count with both reconcilers via the shared
+            // advisory lock (#1222 round 4): without it, this manual edit and
+            // a concurrent group-sync revocation of a DIFFERENT admin could
+            // each read the other's uncommitted delete as "surviving" and
+            // together reach zero administrators.
+            await tx.execute(
+              sql`SELECT pg_advisory_xact_lock(${LAST_ADMIN_GUARD_LOCK_KEY})`
+            )
             const adminCountResult = await tx
               .select({ count: count() })
               .from(userRoles)
