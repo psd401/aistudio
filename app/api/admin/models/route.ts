@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getAIModels, createAIModel, updateAIModel, deleteAIModel, getRoles } from '@/lib/db/drizzle';
+import { getAIModels, getAIModelById, createAIModel, updateAIModel, deleteAIModel, getRoles } from '@/lib/db/drizzle';
 import { syncModelAllowedRoleGrants } from '@/lib/db/drizzle/resource-access';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
@@ -66,6 +66,30 @@ async function validateAllowedRoles(
     });
     return null;
   }
+}
+
+/**
+ * Whether two allowedRoles values name the same role set. Order- and
+ * case-insensitive (grant matching lowercases role names); null/empty are
+ * equivalent ("unrestricted").
+ */
+function sameRoleSet(
+  a: string[] | null | undefined,
+  b: string[] | null | undefined
+): boolean {
+  const normalize = (v: string[] | null | undefined) =>
+    [...new Set((v ?? []).map((r) => r.toLowerCase()))].sort();
+  const na = normalize(a);
+  const nb = normalize(b);
+  return na.length === nb.length && na.every((r, i) => r === nb[i]);
+}
+
+/** Sync the allowed_roles → role-grants bridge only when the update actually changes the role set. */
+function shouldSyncAllowedRoles(
+  updates: { allowedRoles?: string[] | null },
+  prior: { allowedRoles: string[] | null } | null | undefined
+): boolean {
+  return 'allowedRoles' in updates && !sameRoleSet(prior?.allowedRoles, updates.allowedRoles);
 }
 
 /**
@@ -329,12 +353,20 @@ export async function PUT(request: Request) {
       updates.pricingUpdatedAt = updates.pricingUpdatedAt.toISOString();
     }
 
+    // Snapshot the persisted allowedRoles BEFORE the update so the grant
+    // bridge below can tell a deliberate change from an unchanged echo.
+    const priorModel = await getAIModelById(id);
+
     const model = await updateAIModel(id, updates);
 
     // Bridge the legacy allowed_roles column into resource_access_grants
     // (#1206 P1 follow-up) — without this, an update that sets/clears
     // allowedRoles drifts from the new gate, which reads grant rows only.
-    if ('allowedRoles' in updates) {
+    // Only sync on a REAL change: the admin modal renders allowedRoles as a
+    // read-only legacy field but still echoes it on every Save, while role
+    // grants are owned by the Access editor — an unconditional re-sync would
+    // clobber editor-set role grants back to the stale legacy value.
+    if (shouldSyncAllowedRoles(updates, priorModel)) {
       await syncModelAllowedRoleGrants(id, updates.allowedRoles, null);
     }
 

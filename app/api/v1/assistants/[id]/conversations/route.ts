@@ -64,9 +64,11 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   if (accessError) return accessError
 
   // 3b. Per-resource grant enforcement (#1206) — beneath ownership/approval,
-  // covers the assistant AND the model its last prompt uses. Shared with the
-  // execute and follow-up-message v1 entry points so a caller can't bypass a
-  // resource grant by picking a different entry point into the same assistant.
+  // covers the assistant AND every model in its prompt chain (starting a
+  // conversation runs ALL prompts, so a restricted model anywhere in the chain
+  // blocks the run). Shared with the execute and follow-up-message v1 entry
+  // points so a caller can't bypass a resource grant by picking a different
+  // entry point into the same assistant.
   const architectResult = await getAssistantArchitectByIdAction(assistantId.toString())
   if (!architectResult.isSuccess || !architectResult.data) {
     return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
@@ -81,7 +83,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     auth,
     architectUserId: architect.userId,
     architectId: architect.id,
-    modelDbId: lastArchitectPrompt.modelId,
+    modelDbIds: architectPrompts.map((p) => p.modelId).filter((m): m is number => typeof m === "number" && m > 0),
     assistantId,
     requestId,
     log,

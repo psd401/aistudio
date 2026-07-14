@@ -31,6 +31,8 @@ import {
   userCanAccessResource,
   filterAccessibleResourceIds,
   replaceResourceGrants,
+  syncModelAllowedRoleGrants,
+  listResourceGrants,
   deleteAllResourceGrants,
 } from "@/lib/db/drizzle/resource-access";
 
@@ -177,6 +179,33 @@ await check("batch: admin sees both (admin bypass)", async () => {
   ]);
   assert.equal(accessible.has(RES_ID), true);
   assert.equal(accessible.has(UNRESTRICTED_ID), true);
+});
+
+// ROLE-ONLY SYNC — syncModelAllowedRoleGrants (the legacy allowed_roles bridge,
+// #1206) must replace ONLY the role grants and PRESERVE group grants, so the
+// model create/update/import write paths never clobber admin-set group grants.
+await replaceResourceGrants(
+  RES_TYPE,
+  RES_ID,
+  [
+    { grantKind: "role", grantValue: "staff" },
+    { grantKind: "group", grantValue: ACTIVE_GROUP },
+  ],
+  adminId
+);
+await syncModelAllowedRoleGrants(Number(RES_ID), ["student", "teacher"], adminId);
+await check("role-only sync swaps roles but keeps the group grant", async () => {
+  const grants = await listResourceGrants(RES_TYPE, RES_ID);
+  const roles = grants.filter((g) => g.grantKind === "role").map((g) => g.grantValue).sort();
+  const groups = grants.filter((g) => g.grantKind === "group").map((g) => g.grantValue);
+  assert.deepEqual(roles, ["student", "teacher"]);
+  assert.deepEqual(groups, [ACTIVE_GROUP.toLowerCase()]);
+});
+await check("role-only sync with null clears roles, still keeps the group grant", async () => {
+  await syncModelAllowedRoleGrants(Number(RES_ID), null, adminId);
+  const grants = await listResourceGrants(RES_TYPE, RES_ID);
+  assert.equal(grants.filter((g) => g.grantKind === "role").length, 0);
+  assert.equal(grants.filter((g) => g.grantKind === "group").length, 1);
 });
 
 // Restore a clean slate BEFORE the backfill-equivalence assertion so the

@@ -103,7 +103,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     // Per-resource access enforcement (#1206) — reject a caller lacking a
     // role/group grant on the assistant or the model it uses (owner/admin pass;
     // zero grants = unrestricted). Before streaming so denial is a clean 403.
-    const accessDenied = await verifyAssistantResourceGrants({ auth, architectUserId: architect.userId, architectId: architect.id, modelDbId: lastPrompt.modelId, assistantId, requestId, log })
+    const accessDenied = await verifyAssistantResourceGrants({ auth, architectUserId: architect.userId, architectId: architect.id, modelDbIds: [lastPrompt.modelId], assistantId, requestId, log })
     if (accessDenied) return accessDenied
 
     const modelData = await getAIModelById(lastPrompt.modelId)

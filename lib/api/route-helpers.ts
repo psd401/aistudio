@@ -13,7 +13,7 @@ import {
   validateAssistantAccess,
 } from "./assistant-service"
 import { checkUserRole } from "@/lib/db/drizzle"
-import { userCanAccessResource } from "@/lib/db/drizzle/resource-access"
+import { userCanAccessResource, filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access"
 import type { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -109,25 +109,30 @@ export async function verifyAssistantAccess(
 
 /**
  * Per-resource access enforcement (#1206), BENEATH the scope + verifyAssistantAccess
- * gates. Rejects a caller who lacks a role/group grant on the assistant OR the
+ * gates. Rejects a caller who lacks a role/group grant on the assistant OR any
  * model it uses. The owner always passes the assistant check; admins pass inside
- * userCanAccessResource; zero grants = unrestricted. Returns a 403 Response on
+ * the grant lookups; zero grants = unrestricted. Returns a 403 Response on
  * denial, else null.
  *
  * Shared by every v1 assistant entry point (execute, start-conversation,
  * send-message) so a caller can't bypass a resource grant by picking a
  * different entry point into the same assistant/model.
+ *
+ * `modelDbIds` must contain EVERY model the call will run — the full prompt
+ * chain for execute/start-conversation (a restricted model anywhere in the
+ * chain blocks the run), just the last prompt's model for follow-up messages
+ * (the only one a follow-up executes).
  */
 export async function verifyAssistantResourceGrants(args: {
   auth: { userId: number }
   architectUserId: number | null | undefined
   architectId: number
-  modelDbId: number
+  modelDbIds: number[]
   assistantId: number
   requestId: string
   log: ReturnType<typeof createLogger>
 }): Promise<NextResponse | null> {
-  const { auth, architectUserId, architectId, modelDbId, assistantId, requestId, log } = args
+  const { auth, architectUserId, architectId, modelDbIds, assistantId, requestId, log } = args
 
   if (architectUserId !== auth.userId) {
     const canAccessAssistant = await userCanAccessResource(auth.userId, "assistant", architectId)
@@ -137,10 +142,14 @@ export async function verifyAssistantResourceGrants(args: {
     }
   }
 
-  const canAccessModel = await userCanAccessResource(auth.userId, "model", modelDbId)
-  if (!canAccessModel) {
-    log.warn("Caller lacks access to the assistant's model", { assistantId, modelDbId, userId: auth.userId })
-    return createErrorResponse(requestId, 403, "FORBIDDEN", "You do not have access to a model this assistant uses")
+  const distinctModelIds = [...new Set(modelDbIds)]
+  if (distinctModelIds.length > 0) {
+    const accessible = await filterAccessibleResourceIds(auth.userId, "model", distinctModelIds)
+    const deniedModelIds = distinctModelIds.filter((id) => !accessible.has(String(id)))
+    if (deniedModelIds.length > 0) {
+      log.warn("Caller lacks access to a model this assistant uses", { assistantId, deniedModelIds, userId: auth.userId })
+      return createErrorResponse(requestId, 403, "FORBIDDEN", "You do not have access to a model this assistant uses")
+    }
   }
   return null
 }
