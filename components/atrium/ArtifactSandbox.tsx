@@ -138,10 +138,11 @@ export function ArtifactSandbox({
   // bare sandbox origin from it (a pure, cheap computation — recomputing per
   // render also tracks a changed `src`, unlike a mount-frozen useState). This
   // origin is NOT used as the postMessage targetOrigin (the frame is opaque-origin
-  // — see postCode); it gates whether we post at all (fail closed when null) and
-  // is the strict allowlist for the inbound render-ack listener. normalizeOrigin
-  // strips the `/render` path back to the bare origin and returns null for a
-  // missing/invalid value (→ fail closed).
+  // — see postCode), and inbound acks arrive with event.origin "null" for the
+  // same reason (sender authentication is the event.source identity check in the
+  // ack listener); it gates whether we post/listen at all (fail closed when
+  // null). normalizeOrigin strips the `/render` path back to the bare origin and
+  // returns null for a missing/invalid value (→ fail closed).
   const origin = normalizeOrigin(src);
   // Track whether the iframe load succeeded or failed (e.g. CSP blocked or
   // sandbox origin returned 404) so we can show a meaningful error notice.
@@ -157,7 +158,8 @@ export function ArtifactSandbox({
 
   /**
    * Post the current code to the framed host. Reads `code` and `origin` via
-   * closure; invoked once by `handleLoad` after the frame's `onLoad` fires.
+   * closure; driven by the delivery effect (an immediate post plus a bounded
+   * retry interval until the host acks) and re-posted when `onLoad` fires.
    *
    * SECURITY — why targetOrigin is "*" here and not the sandbox origin:
    * The frame is `sandbox="allow-scripts"` WITHOUT `allow-same-origin`, so the
@@ -187,15 +189,24 @@ export function ArtifactSandbox({
   useEffect(() => {
     if (!origin) return;
     const onMessage = (event: MessageEvent) => {
-      if (event.origin !== origin) return; // strict origin check
-      // Per-INSTANCE correlation: every sandbox on the page shares the one
-      // configured origin (library thumbnails mount several at once; a document
-      // can hold many embeds), and the host replies to the shared top window —
-      // so origin alone would let the fastest sibling's ack mark EVERY instance
-      // "rendered" and kill their retry loops (blank frames, no error). Only the
-      // ack sent by OUR iframe's contentWindow counts; after unmount the ref is
-      // null and late acks are ignored. (WindowProxy identity comparison is
-      // legal cross-origin; no host/payload change needed.)
+      // The framed host runs in an OPAQUE origin (sandbox="allow-scripts" with
+      // no allow-same-origin — see the file header), so a legitimate ack arrives
+      // with event.origin === "null" (the opaque-origin serialization), NEVER the
+      // configured sandbox origin. Rejecting "null" here would drop every real
+      // ack and let the retry budget below misclassify perfectly rendered
+      // artifacts as errors ~12s in. The configured origin is still accepted
+      // defensively in case the host is ever served without the sandbox flags.
+      if (event.origin !== "null" && event.origin !== origin) return;
+      // Per-INSTANCE correlation AND the actual authentication: every sandbox on
+      // the page shares the one configured origin (library thumbnails mount
+      // several at once; a document can hold many embeds), and the host replies
+      // to the shared top window — so origin alone would let the fastest
+      // sibling's ack mark EVERY instance "rendered" and kill their retry loops
+      // (blank frames, no error). Only the ack sent by OUR iframe's
+      // contentWindow counts — event.source is browser-assigned and unforgeable,
+      // which is what makes accepting "null"-origin messages safe. After unmount
+      // the ref is null and late acks are ignored. (WindowProxy identity
+      // comparison is legal cross-origin; no host/payload change needed.)
       if (event.source !== iframeRef.current?.contentWindow) return;
       if (!isRenderAck(event.data)) return;
       if (event.data.ok) {

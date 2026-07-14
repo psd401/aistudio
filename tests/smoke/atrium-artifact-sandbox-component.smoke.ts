@@ -223,11 +223,32 @@ await check(
     await new Promise((r) => setTimeout(r, 400));
     assert.ok(postsB > 0, "instance B never attempted delivery");
 
-    // Ack ONLY instance A (source = A's contentWindow, correct origin).
+    // An ack from a DIFFERENT origin (neither "null" nor the sandbox origin)
+    // must be ignored even with a matching source — A keeps retrying.
     await act(async () => {
       dom.window.dispatchEvent(
         new dom.window.MessageEvent("message", {
-          origin: "https://sandbox.example.com",
+          origin: "https://evil.example.com",
+          source: frameA.contentWindow,
+          data: { type: "atrium-artifact-rendered", ok: true },
+        })
+      );
+    });
+    const postsAAfterForged = postsA;
+    await new Promise((r) => setTimeout(r, 400));
+    assert.ok(
+      postsA > postsAAfterForged,
+      "a wrong-origin ack was accepted — origin filter lost"
+    );
+
+    // Ack ONLY instance A. The REAL host frame is opaque-origin (allow-scripts,
+    // no allow-same-origin), so a legitimate ack arrives with origin "null" —
+    // this must be ACCEPTED (rejecting it would error-out every rendered
+    // artifact ~12s in) with authentication carried by the source identity.
+    await act(async () => {
+      dom.window.dispatchEvent(
+        new dom.window.MessageEvent("message", {
+          origin: "null",
           source: frameA.contentWindow,
           data: { type: "atrium-artifact-rendered", ok: true },
         })
