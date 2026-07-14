@@ -49,16 +49,6 @@ const { fail, emit, parseArgs, callMcp, callTool } = require('./common');
 const SECTIONS = ['actions', 'features', 'scopes', 'all'];
 const SURFACES = ['mcp', 'ai_sdk', 'rest', 'internal'];
 
-// MCP tool → the scope a caller's key must hold to invoke it. Used ONLY to make
-// the insufficient-scope hint specific — the server is the real enforcement point.
-const TOOL_SCOPE = {
-  list_assistants: 'mcp:list_assistants',
-  execute_assistant: 'mcp:execute_assistant',
-  search_decisions: 'mcp:search_decisions',
-  capture_decision: 'mcp:capture_decision',
-  get_decision_graph: 'mcp:get_decision_graph',
-};
-
 function usage() {
   process.stdout.write(
     [
@@ -80,9 +70,9 @@ function usage() {
       'psd-credentials put --name aistudio_personal_key):',
       '  list-assistants   [--user <email>] [--search <t>] [--status <s>] [--limit N] [--cursor C]',
       '  execute-assistant [--user <email>] --id <n> [--inputs \'{"field":"value"}\']',
-      '      Only APPROVED assistants execute over the API; a draft/pending id returns',
-      '      a clean not_executable result (exit 0). Needs mcp:execute_assistant',
-      '      (staff + admin).',
+      '      Non-owners can only execute APPROVED assistants; a draft/pending id you',
+      '      don\'t own (or a missing id) returns a clean not_executable result',
+      '      (exit 0). Needs mcp:execute_assistant (staff + admin).',
       '  search-decisions  [--user <email>] [--query <t>] [--node-type T] [--node-class C]',
       '                    [--limit N] [--cursor C]',
       '  capture-decision  [--user <email>] --decision "<t>" --decided-by "<t>"',
@@ -138,8 +128,7 @@ function parseList(value, label) {
 
 /** The remediation hint for an insufficient-scope failure — different when the
  *  caller is already on a personal key (re-mint) vs the shared key (store one). */
-function scopeHint(keySource, requiredScope) {
-  const scope = requiredScope || 'the required scope';
+function scopeHint(keySource, scope) {
   if (keySource === 'personal') {
     return (
       `Your stored AI Studio key lacks ${scope}. Mint a NEW key that includes ` +
@@ -165,12 +154,15 @@ function surfaceToolError(res, toolName) {
   if (res.jsonrpcError) {
     const msg = (res.jsonrpcError && res.jsonrpcError.message) || '';
     const insufficient = /insufficient scope/i.test(msg);
+    // Every MCP tool's required scope is `mcp:<toolName>` (see
+    // lib/tools/catalog/manifest.ts) — the server is the real enforcement point;
+    // this only makes the hint specific.
     emit({
       status: 'mcp-error',
       tool: toolName,
       http_status: res.httpStatus,
       jsonrpc_error: res.jsonrpcError,
-      ...(insufficient && { hint: scopeHint(res.keySource, TOOL_SCOPE[toolName]) }),
+      ...(insufficient && { hint: scopeHint(res.keySource, `mcp:${toolName}`) }),
     });
     process.exit(12);
   }
@@ -284,19 +276,20 @@ async function main() {
           typeof res.payload === 'string'
             ? res.payload
             : JSON.stringify(res.payload);
-        // A draft/pending (or missing) assistant is NOT executable via the API —
-        // the server returns a tool-level error "Record not found in
-        // assistant_architects with id: N". This is expected, not an upstream
-        // failure: report a clean structured result and EXIT 0. Steer to approved.
+        // A draft/pending assistant the caller doesn't own (or a missing id) is
+        // NOT executable via the API — the server masks it as a tool-level error
+        // "Record not found in assistant_architects with id: N" (owners and
+        // admins CAN execute their own drafts). This is expected, not an
+        // upstream failure: report a clean structured result and EXIT 0.
         if (/record not found in assistant_architects/i.test(text)) {
           emit({
             status: 'not_executable',
             assistantId,
             message:
-              `Assistant ${assistantId} is not executable via the API — it is a ` +
-              `draft/pending assistant (only approved assistants run over the API), ` +
-              `or the id does not exist. Run \`list-assistants --status approved\` ` +
-              `to find an executable assistant.`,
+              `Assistant ${assistantId} is not executable via the API — the id ` +
+              `does not exist, or it is a draft/pending assistant you don't own ` +
+              `(non-owners can only run approved assistants). Run ` +
+              `\`list-assistants --status approved\` to find an executable one.`,
           });
           return; // exit 0
         }

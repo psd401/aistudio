@@ -52,6 +52,12 @@ const AISTUDIO_MCP_API_KEY_SECRET_ID =
 // `psd-credentials put --user <email> --name aistudio_personal_key --value sk-…`).
 const PERSONAL_KEY_NAME = 'aistudio_personal_key';
 
+// Upper bound on a single /api/mcp call. execute_assistant runs a full LLM
+// completion server-side, so this is generous — but without an explicit signal a
+// hung upstream (ALB/proxy that never closes the response) would stall the agent
+// for undici's ~300s platform default with zero output.
+const MCP_FETCH_TIMEOUT_MS = 180_000;
+
 // Stderr notice emitted when the caller falls back to the shared discovery key.
 // Never contains a key value.
 const SHARED_KEY_NOTICE =
@@ -127,11 +133,13 @@ function readPersonalKey(callerEmail) {
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], timeout: 10_000 }
     );
   } catch (err) {
-    // get.js exited non-zero (bad env / Secrets Manager error / crash). Not
-    // fatal: the caller can still use the shared discovery key. Surface the
-    // reason (never a value) on stderr and degrade.
+    // get.js exited non-zero (bad env / Secrets Manager error / crash) or timed
+    // out. Not fatal: the caller can still use the shared discovery key. Report
+    // only the exit status/code — execFileSync's err.message echoes the full
+    // argv (including the caller's email), which doesn't belong on stderr.
     process.stderr.write(
-      `psd-aistudio: could not read your personal key (${err.message}); ` +
+      `psd-aistudio: could not read your personal key ` +
+        `(psd-credentials get failed: ${err.status ?? err.code ?? 'unknown'}); ` +
         'falling back to the shared key.\n'
     );
     return null;
@@ -148,8 +156,17 @@ function readPersonalKey(callerEmail) {
   } catch {
     return null;
   }
-  // get.js emits `{error:"not_found", …}` (exit 0) when nothing is stored.
-  if (parsed.error || !parsed.value) return null;
+  // get.js emits `{error:"not_found", …}` (exit 0) when nothing is stored, and
+  // `scope: 'user' | 'shared'` on a hit. Only a USER-scoped hit is a personal
+  // key: get.js falls back to the shared namespace for the same name, and a
+  // same-named shared secret (admin-provisioned out of band) must not be
+  // relabeled `personal` — that would mislabel stderr and give the wrong
+  // remediation hint. Treat it like not-found and use the platform:read
+  // fallback. The value must be a string: it becomes a Bearer header.
+  if (parsed.error || typeof parsed.value !== 'string' || !parsed.value) {
+    return null;
+  }
+  if (parsed.scope !== 'user') return null;
   return parsed.value;
 }
 
@@ -260,9 +277,17 @@ async function callMcpRaw(method, params, callerEmail) {
         'mcp-protocol-version': '2024-11-05',
       },
       body: JSON.stringify(rpcBody),
+      signal: AbortSignal.timeout(MCP_FETCH_TIMEOUT_MS),
     });
   } catch (err) {
-    fail(`Network error calling AI Studio MCP: ${err.message}`, 12);
+    const timedOut =
+      err && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    fail(
+      timedOut
+        ? `AI Studio MCP did not respond within ${MCP_FETCH_TIMEOUT_MS / 1000}s`
+        : `Network error calling AI Studio MCP: ${err.message}`,
+      12
+    );
   }
 
   if (resp.status === 401) {
@@ -307,6 +332,17 @@ async function callMcpRaw(method, params, callerEmail) {
   if (!resp.ok) {
     fail(
       `AI Studio MCP returned HTTP ${resp.status}: ` +
+        `${JSON.stringify(data).slice(0, 512)}`,
+      12
+    );
+  }
+
+  // HTTP 200 with NEITHER `result` NOR `error` is a malformed JSON-RPC envelope
+  // (proxy/gateway body corruption) — emitting `null` as a success would hide
+  // it. A present-but-null `result` is still a legitimate success.
+  if (typeof data !== 'object' || !('result' in data)) {
+    fail(
+      `AI Studio MCP returned HTTP 200 without a JSON-RPC result or error: ` +
         `${JSON.stringify(data).slice(0, 512)}`,
       12
     );

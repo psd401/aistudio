@@ -167,6 +167,45 @@ test('resolveApiKey degrades to the shared key when the per-user store is unreac
   expect(r.key).toBe(SHARED);
 });
 
+test('resolveApiKey ignores a SHARED-scope secret stored under the personal-key name', async () => {
+  // get.js falls back to the shared namespace for the same credential name; a
+  // same-named shared secret is NOT the caller's personal key and must not be
+  // labeled `personal` (wrong stderr + wrong re-mint hint downstream).
+  setExecFileSync(
+    () =>
+      JSON.stringify({
+        name: 'aistudio_personal_key',
+        value: 'SHAREDSCOPEVALUE',
+        scope: 'shared',
+      }) + '\n'
+  );
+  secretsStore[KEY_SECRET_ID] = SHARED;
+
+  const r = await common.resolveApiKey(EMAIL);
+
+  expect(r.source).toBe('shared');
+  expect(r.key).toBe(SHARED);
+  expect(stderrText()).not.toContain('SHAREDSCOPEVALUE');
+});
+
+test('resolveApiKey failure notice never echoes the caller email (argv echo)', async () => {
+  // execFileSync's default err.message is "Command failed: node get.js --user
+  // <email> ..." — the notice must report only the exit status, not the argv.
+  setExecFileSync(() => {
+    const e = new Error(
+      `Command failed: node get.js --user ${EMAIL} --name aistudio_personal_key`
+    );
+    e.status = 1;
+    throw e;
+  });
+  secretsStore[KEY_SECRET_ID] = SHARED;
+
+  const r = await common.resolveApiKey(EMAIL);
+
+  expect(r.source).toBe('shared');
+  expect(stderrText()).not.toContain(EMAIL);
+});
+
 test('resolveApiKey exits 11 when the shared secret is present but empty', async () => {
   secretsStore[KEY_SECRET_ID] = '';
   let code;
@@ -244,6 +283,40 @@ test('callMcpRaw returns a JSON-RPC error WITHOUT emitting or exiting', async ()
   expect(out.httpStatus).toBe(200);
   expect(out.keySource).toBe('shared');
   expect(stdoutText()).toBe(''); // nothing emitted
+});
+
+test('callMcpRaw fails (exit 12) on HTTP 200 without a result or error field', async () => {
+  // Malformed JSON-RPC envelope (proxy/gateway corruption) — must not be
+  // emitted as a successful `null` result.
+  secretsStore[KEY_SECRET_ID] = SHARED;
+  globalThis.fetch = mock(async () => jsonResponse({ jsonrpc: '2.0', id: 1 }));
+
+  let code;
+  try {
+    await common.callMcpRaw('tools/list', {}, undefined);
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(12);
+  expect(stdoutText()).toBe('');
+});
+
+test('callMcpRaw maps a fetch timeout to a clean exit 12', async () => {
+  secretsStore[KEY_SECRET_ID] = SHARED;
+  globalThis.fetch = mock(async () => {
+    const e = new Error('The operation timed out');
+    e.name = 'TimeoutError';
+    throw e;
+  });
+
+  let code;
+  try {
+    await common.callMcpRaw('tools/list', {}, undefined);
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(12);
+  expect(stderrText()).toContain('did not respond within');
 });
 
 // ── callMcp (back-compat wrapper for capabilities/list) ────────────────────────
