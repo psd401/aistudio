@@ -207,8 +207,15 @@ RUN mkdir -p /home/node/.openclaw/memory
 # openclaw.json tuning notes (keep here — JSON can't carry comments and
 # OpenClaw's config validator rejects "//" pseudo-keys):
 #
-#   providers.amazon-bedrock-mantle — DIRECT to Bedrock Mantle's
-#   anthropic-messages endpoint (https://bedrock-mantle.us-east-1.api.aws),
+#   providers.amazon-bedrock-mantle — DIRECT to bedrock-runtime's native
+#   anthropic-messages endpoint (https://bedrock-runtime.us-east-1.amazonaws.com/anthropic)
+#   with the us. inference-profile model id, since 2026-07-14: Mantle's
+#   anthropic route stopped serving anthropic.claude-sonnet-5 for this
+#   account (AWS-confirmed serving-plane defect, support case open; AWS
+#   suggested the runtime endpoint as the workaround). Same bearer token
+#   (bedrock:CallWithBearerToken), streaming + 1h prompt caching verified
+#   on this path. Revert baseUrl+model id to the Mantle form only after
+#   probing Mantle serves sonnet-5 again.
 #   NO local proxy in the path (#1138, 2026-07-08). History: our
 #   mantle_proxy added full-body logging overhead and a 300s upstream
 #   timeout that aborted a live background job; measured 17.7 tok/s median

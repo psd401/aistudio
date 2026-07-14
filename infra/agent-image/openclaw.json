@@ -2,15 +2,15 @@
   "models": {
     "providers": {
       "amazon-bedrock-mantle": {
-        "baseUrl": "https://bedrock-mantle.us-east-1.api.aws/anthropic",
+        "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic",
         "api": "anthropic-messages",
         "auth": "api-key",
         "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
         "timeoutSeconds": 300,
         "models": [
           {
-            "id": "anthropic.claude-sonnet-5",
-            "name": "Claude Sonnet 5 (Bedrock Mantle, direct)",
+            "id": "us.anthropic.claude-sonnet-5",
+            "name": "Claude Sonnet 5 (bedrock-runtime Anthropic API)",
             "reasoning": false,
             "input": ["text"],
             "contextWindow": 200000,
@@ -24,7 +24,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "amazon-bedrock-mantle/anthropic.claude-sonnet-5"
+        "primary": "amazon-bedrock-mantle/us.anthropic.claude-sonnet-5"
       },
       "bootstrapMaxChars": 32000,
       "bootstrapTotalMaxChars": 80000,
