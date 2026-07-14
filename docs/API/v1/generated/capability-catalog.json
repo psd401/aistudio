@@ -733,6 +733,7 @@
       "scope": "mcp:execute_assistant",
       "description": "Execute an assistant via MCP",
       "roles": [
+        "staff",
         "administrator"
       ]
     },
