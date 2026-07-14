@@ -64,7 +64,6 @@ export interface AIModelData {
   provider: string;
   description?: string | null;
   capabilities?: string | null;
-  allowedRoles?: string[] | null;
   maxTokens?: number | null;
   active?: boolean;
   nexusEnabled?: boolean;
@@ -88,7 +87,6 @@ export interface AIModelUpdateData {
   provider?: string;
   description?: string | null;
   capabilities?: string | null;
-  allowedRoles?: string[] | null;
   maxTokens?: number | null;
   active?: boolean;
   nexusEnabled?: boolean;
@@ -123,7 +121,6 @@ export async function getAIModels() {
           modelId: aiModels.modelId,
           description: aiModels.description,
           capabilities: aiModels.capabilities,
-          allowedRoles: aiModels.allowedRoles,
           maxTokens: aiModels.maxTokens,
           active: aiModels.active,
           nexusEnabled: aiModels.nexusEnabled,
@@ -321,7 +318,6 @@ export async function createAIModel(modelData: AIModelData) {
           provider: modelData.provider,
           description: modelData.description,
           capabilities: modelData.capabilities,
-          allowedRoles: modelData.allowedRoles,
           maxTokens: modelData.maxTokens,
           active: modelData.active ?? true,
           nexusEnabled: modelData.nexusEnabled ?? true,
@@ -749,7 +745,6 @@ export interface BulkModelImportData {
   active?: boolean;
   nexusEnabled?: boolean;
   architectEnabled?: boolean;
-  allowedRoles?: string[] | null;
   inputCostPer1kTokens?: string | null;
   outputCostPer1kTokens?: string | null;
   cachedInputCostPer1kTokens?: string | null;
@@ -823,7 +818,6 @@ export async function bulkImportAIModels(
                 active: "active" in model ? model.active : existing.active,
                 nexusEnabled: "nexusEnabled" in model ? model.nexusEnabled : existing.nexusEnabled,
                 architectEnabled: "architectEnabled" in model ? model.architectEnabled : existing.architectEnabled,
-                allowedRoles: "allowedRoles" in model ? model.allowedRoles : existing.allowedRoles,
                 inputCostPer1kTokens:
                   "inputCostPer1kTokens" in model ? model.inputCostPer1kTokens : existing.inputCostPer1kTokens,
                 outputCostPer1kTokens:
@@ -846,7 +840,6 @@ export async function bulkImportAIModels(
               active: model.active ?? true,
               nexusEnabled: model.nexusEnabled ?? true,
               architectEnabled: model.architectEnabled ?? true,
-              allowedRoles: model.allowedRoles,
               inputCostPer1kTokens: model.inputCostPer1kTokens,
               outputCostPer1kTokens: model.outputCostPer1kTokens,
               cachedInputCostPer1kTokens: model.cachedInputCostPer1kTokens,

@@ -59,13 +59,17 @@ export function useFilteredModels({
   models,
   requiredCapabilities = [],
   anyOfCapabilities = [],
-  allowedRoles = [],
-  userRoles = [],
   searchQuery = "",
-  hideRoleRestricted = false,
   hideCapabilityMissing = false
 }: UseFilteredModelsOptions): UseFilteredModelsResult {
 
+  // NOTE (#1207): per-model ROLE access is enforced entirely server-side now —
+  // /api/models filters the list through resource_access_grants before it ever
+  // reaches the client, so a model the user cannot access is simply absent. The
+  // old client-side role filter (model.allowedRoles vs the user's roles) was
+  // advisory, fail-open, and duplicated that server gate; it was removed along
+  // with the ai_models.allowed_roles column. Only CAPABILITY filtering (a UI
+  // concern — which models can do image/vision/etc.) remains here.
   const result = useMemo(() => {
     let filteredModels: FilteredModel[] = models.map(model => {
       // Safely parse capabilities
@@ -84,19 +88,7 @@ export function useFilteredModels({
 
       const matchesCapabilities = matchesRequiredCapabilities && matchesAnyOfCapabilities
 
-      // Safely parse allowed roles for the model
-      const modelAllowedRoles = safeParseJsonArray(model.allowedRoles, [])
-
-      // Check role-based access
-      // If modelAllowedRoles is empty or null, model is accessible to all
-      const hasRoleAccess = modelAllowedRoles.length === 0 || 
-        modelAllowedRoles.some(role => userRoles.includes(role))
-      
-      // Check if user's allowed roles match (for component-level filtering)
-      const meetsAllowedRoles = allowedRoles.length === 0 ||
-        allowedRoles.some(role => userRoles.includes(role))
-
-      const isAccessible = matchesCapabilities && hasRoleAccess && meetsAllowedRoles
+      const isAccessible = matchesCapabilities
 
       // Combine AND-missing and anyOf-missing capabilities for accurate UI feedback
       const allMissingCapabilities = [
@@ -116,10 +108,6 @@ export function useFilteredModels({
         } else {
           accessDeniedReason = `Missing required capabilities`
         }
-      } else if (!hasRoleAccess) {
-        accessDeniedReason = `Requires role: ${modelAllowedRoles.join(' or ')}`
-      } else if (!meetsAllowedRoles) {
-        accessDeniedReason = `Your role doesn't have access to this feature`
       }
 
       return {
@@ -127,16 +115,10 @@ export function useFilteredModels({
         isAccessible,
         accessDeniedReason,
         matchesCapabilities,
-        hasRoleAccess,
         missingCapabilities: allMissingCapabilities.length > 0 ? allMissingCapabilities : undefined
       } as FilteredModel
     })
 
-    // Filter out role-restricted models if hideRoleRestricted is true
-    if (hideRoleRestricted) {
-      filteredModels = filteredModels.filter(model => model.hasRoleAccess)
-    }
-    
     // Filter out models missing capabilities if hideCapabilityMissing is true
     if (hideCapabilityMissing) {
       filteredModels = filteredModels.filter(model => model.matchesCapabilities)
@@ -184,7 +166,7 @@ export function useFilteredModels({
       totalCount,
       accessibleCount
     }
-  }, [models, requiredCapabilities, anyOfCapabilities, allowedRoles, userRoles, searchQuery, hideRoleRestricted, hideCapabilityMissing])
+  }, [models, requiredCapabilities, anyOfCapabilities, searchQuery, hideCapabilityMissing])
 
   return result
 }

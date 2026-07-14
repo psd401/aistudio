@@ -1,9 +1,14 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin-check";
-import { bulkImportAIModels, getAIModelByModelId } from "@/lib/db/drizzle";
-import { syncModelAllowedRoleGrants } from "@/lib/db/drizzle/resource-access";
+import { bulkImportAIModels } from "@/lib/db/drizzle";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import { validateModel } from "@/lib/validators/model-import-validator";
+
+// NOTE (#1207): the legacy `allowedRoles` field was removed from the import format
+// along with the ai_models.allowed_roles column. Imported models start
+// unrestricted; per-model role/group access is set afterward via the
+// ResourceGrantsEditor (resource_access_grants). An `allowedRoles` key in an older
+// import file is accepted-but-ignored (validateModel no longer inspects it).
 
 // Maximum models per import
 const MAX_MODELS_PER_IMPORT = 100;
@@ -21,7 +26,6 @@ interface ModelJsonInput {
   active?: boolean;
   nexusEnabled?: boolean;
   architectEnabled?: boolean;
-  allowedRoles?: string[];
   inputCostPer1kTokens?: string;
   outputCostPer1kTokens?: string;
   cachedInputCostPer1kTokens?: string;
@@ -173,7 +177,6 @@ export async function POST(request: Request) {
       active: model.active,
       nexusEnabled: model.nexusEnabled,
       architectEnabled: model.architectEnabled,
-      allowedRoles: model.allowedRoles,
       inputCostPer1kTokens: model.inputCostPer1kTokens
         ? String(model.inputCostPer1kTokens)
         : undefined,
@@ -189,18 +192,6 @@ export async function POST(request: Request) {
 
     // Execute bulk import
     const result = await bulkImportAIModels(modelsToImport);
-
-    // Bridge the legacy allowed_roles column into resource_access_grants
-    // (#1206 P1 follow-up) — without this, an imported model with allowedRoles
-    // set has zero grant rows and the new gate treats it as unrestricted.
-    // Reads back the persisted state so it reflects bulkImportAIModels' actual
-    // create-vs-preserve-existing merge, not just the raw request payload.
-    for (const modelId of modelIds) {
-      const persisted = await getAIModelByModelId(modelId);
-      if (persisted) {
-        await syncModelAllowedRoleGrants(persisted.id, persisted.allowedRoles, null);
-      }
-    }
 
     log.info("Bulk import completed", {
       created: result.created,

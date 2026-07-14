@@ -20,7 +20,6 @@ interface ModelJsonInput {
   active?: boolean
   nexusEnabled?: boolean
   architectEnabled?: boolean
-  allowedRoles?: string[]
   inputCostPer1kTokens?: string
   outputCostPer1kTokens?: string
   cachedInputCostPer1kTokens?: string

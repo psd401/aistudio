@@ -315,33 +315,6 @@ export async function replaceResourceGrants(
 }
 
 /**
- * Sync a model's legacy `ai_models.allowed_roles` column into `role`-kind rows
- * in `resource_access_grants`, WITHOUT touching any `group`-kind grants the
- * admin grants editor may have set separately.
- *
- * Write-time bridge for the `allowed_roles` write paths (create/update/import,
- * #1206 P1 follow-up): the read gate (userCanAccessResource /
- * filterAccessibleResourceIds) is authoritative on resource_access_grants
- * alone, so a model created/imported/updated with allowedRoles set but no
- * synced grant rows would silently be UNRESTRICTED under the new gate — the
- * migration 111 backfill only ran once, at migration time. `allowedRoles`
- * null/empty clears all `role` grants (matches "no restriction"). Retired
- * along with the `allowed_roles` column in Phase 4 (#1207).
- */
-export async function syncModelAllowedRoleGrants(
-  modelId: number,
-  allowedRoles: string[] | null | undefined,
-  createdBy: number | null
-): Promise<void> {
-  const existing = await listResourceGrants("model", modelId);
-  const groupGrants = existing.filter((g) => g.grantKind === "group");
-  const roleGrants: ResourceGrant[] = (allowedRoles ?? [])
-    .filter((r): r is string => typeof r === "string" && r.trim().length > 0)
-    .map((r) => ({ grantKind: "role" as const, grantValue: r }));
-  await replaceResourceGrants("model", modelId, [...groupGrants, ...roleGrants], createdBy);
-}
-
-/**
  * Delete every grant for a resource (used when the resource itself is deleted, so
  * no orphan grants linger and get re-used if the serial id is recycled).
  */

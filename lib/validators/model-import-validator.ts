@@ -93,16 +93,10 @@ export function validateModel(
     }
   }
 
-  // Array fields
-  if (m.allowedRoles !== undefined) {
-    if (!Array.isArray(m.allowedRoles)) {
-      modelErrors.push(`${prefix}: 'allowedRoles' must be an array`);
-    } else if (
-      !(m.allowedRoles as unknown[]).every((r) => typeof r === "string")
-    ) {
-      modelErrors.push(`${prefix}: 'allowedRoles' must be an array of strings`);
-    }
-  }
+  // NOTE (#1207): 'allowedRoles' was removed from the import format (the
+  // ai_models.allowed_roles column is gone). It is no longer validated — an older
+  // import file that still carries it imports fine, with the field ignored;
+  // per-model access is set afterward via the ResourceGrantsEditor.
 
   // Pricing fields (string numbers)
   const pricingFields = [
