@@ -64,8 +64,9 @@ function isResourceGrantType(value: string): value is ResourceGrantType {
  */
 function coerceResourceId(
   resourceType: ResourceGrantType,
-  resourceId: number | string
+  resourceId: unknown
 ): number | string | null {
+  if (typeof resourceId !== "string" && typeof resourceId !== "number") return null;
   if (resourceType === "skill") {
     const id = String(resourceId).trim();
     return id.length > 0 ? id : null;
