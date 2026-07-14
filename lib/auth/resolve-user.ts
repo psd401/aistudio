@@ -22,6 +22,7 @@ import {
 import { createLogger, sanitizeForLogging } from "@/lib/logger"
 import { ErrorFactories } from "@/lib/error-utils"
 import { ErrorCode } from "@/types/error-types"
+import { defaultRoleForNewUser } from "./default-role"
 import type { CognitoSession } from "./server-session"
 
 /**
@@ -125,42 +126,46 @@ export async function resolveUserId(
     )
   }
 
-  // Assign default role using addUserRole, which runs in a transaction and
-  // increments role_version for session cache invalidation.
-  // Numeric username prefix → student (K-12 district convention: student IDs
-  // are all-digit numbers, e.g. 123456@psd401.net). Non-numeric → staff.
-  // Defaults to least-privilege (student) when username cannot be determined.
-  const isNumeric = /^\d+$/.test(username) // already false for empty strings
-  const defaultRole = isNumeric ? "student" : "staff"
+  // Assign the default role (legacy username heuristic — the single source of
+  // truth is lib/auth/default-role.ts; group-sync reconciliation below is the
+  // authoritative role source and runs immediately after). `null` means "assign no
+  // default role" once the heuristic is retired; today it never returns null.
+  const defaultRole = defaultRoleForNewUser(session.email)
 
-  try {
-    await addUserRole(userId, defaultRole)
-    log.info("User provisioned with default role", {
-      userId,
-      role: defaultRole,
-    })
-  } catch (error) {
-    // Role assignment failure is non-fatal — user can still access the app,
-    // and getCurrentUserAction will handle role assignment on next full login.
-    // Distinguish a missing role record (expected in misconfigured envs) from
-    // infrastructure failures (DB connectivity, deadlock) which warrant error-level.
-    const isRoleNotFound =
-      error !== null &&
-      typeof error === "object" &&
-      "code" in error &&
-      (error as { code: unknown }).code === ErrorCode.DB_RECORD_NOT_FOUND
-    if (isRoleNotFound) {
-      log.warn("Default role not found in database — user provisioned without role", {
+  if (defaultRole) {
+    try {
+      await addUserRole(userId, defaultRole)
+      log.info("User provisioned with default role", {
         userId,
-        attemptedRole: defaultRole,
+        role: defaultRole,
       })
-    } else {
-      log.error("Role assignment failed — infrastructure error; user provisioned without role", {
-        userId,
-        attemptedRole: defaultRole,
-        error: error instanceof Error ? error.message : "Unknown error",
-      })
+    } catch (error) {
+      // Role assignment failure is non-fatal — user can still access the app,
+      // and getCurrentUserAction will handle role assignment on next full login.
+      // Distinguish a missing role record (expected in misconfigured envs) from
+      // infrastructure failures (DB connectivity, deadlock) which warrant error-level.
+      const isRoleNotFound =
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        (error as { code: unknown }).code === ErrorCode.DB_RECORD_NOT_FOUND
+      if (isRoleNotFound) {
+        log.warn("Default role not found in database — user provisioned without role", {
+          userId,
+          attemptedRole: defaultRole,
+        })
+      } else {
+        log.error("Role assignment failed — infrastructure error; user provisioned without role", {
+          userId,
+          attemptedRole: defaultRole,
+          error: error instanceof Error ? error.message : "Unknown error",
+        })
+      }
     }
+  } else {
+    log.info("No default role assigned (heuristic retired) — relying on group-sync", {
+      userId,
+    })
   }
 
   // New user just provisioned with the default (manual) role — reconcile any
