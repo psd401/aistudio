@@ -72,7 +72,7 @@ describe("publishDocumentAction — grant.kind runtime validation", () => {
     expect(publishMock).not.toHaveBeenCalled();
   });
 
-  it.each(["role", "building", "department", "grade", "user"])(
+  it.each(["role", "building", "department", "grade", "user", "group"])(
     "accepts the valid grant kind %s and forwards it to the service",
     async (kind) => {
       const result = await publishDocumentAction("o1", {

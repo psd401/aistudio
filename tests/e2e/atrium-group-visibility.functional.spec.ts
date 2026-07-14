@@ -31,6 +31,8 @@ import { authenticateContext } from "./helpers/session-auth";
  */
 
 const SLUG = process.env.ATRIUM_GROUP_SLUG ?? "group-directory-playbook";
+const RETIRED_SLUG =
+  process.env.ATRIUM_RETIRED_GROUP_SLUG ?? "retired-group-playbook";
 const MEMBER_EMAIL =
   process.env.ATRIUM_GROUP_MEMBER_EMAIL ?? "group-member@example.com";
 const MEMBER_SUB = process.env.ATRIUM_GROUP_MEMBER_SUB ?? "e2e-group-member";
@@ -69,6 +71,24 @@ test.describe("Atrium group-directory visibility — reader (#1205)", () => {
       const res = await context.request.get(`/c/${SLUG}`);
       // A non-viewable published doc must 404, NOT 403: a 403 confirms the slug
       // exists, letting an out-of-audience user enumerate document slugs.
+      expect(res.status()).toBe(404);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("404s for a member of a DEACTIVATED group (is_active revokes the grant)", async ({
+    browser,
+  }) => {
+    // The member IS in retired-group@example.com per group_members, and the doc
+    // carries a live grant to that email — but the group row is is_active=false,
+    // so listUserGroupEmailsByUserId must exclude it from principal.groups. This
+    // is the revocation path for a de-selected/deleted directory group: the
+    // stale grant row remains, and the is_active join filter alone denies access.
+    const context = await browser.newContext();
+    await authenticateContext(context, MEMBER_EMAIL, MEMBER_SUB);
+    try {
+      const res = await context.request.get(`/c/${RETIRED_SLUG}`);
       expect(res.status()).toBe(404);
     } finally {
       await context.close();

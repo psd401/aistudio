@@ -103,7 +103,7 @@ const listActiveGroupsForPickerMock = jest.fn(async () => [
   { email: "hs-staff@psd401.net", name: "HS Staff" },
 ]);
 jest.mock("@/lib/groups/queries", () => ({
-  listActiveGroupsForPicker: (...a: unknown[]) => listActiveGroupsForPickerMock(...a),
+  listActiveGroupsForPicker: () => listActiveGroupsForPickerMock(),
 }));
 
 // ─── imports (after all jest.mock hoisting) ────────────────────────────────

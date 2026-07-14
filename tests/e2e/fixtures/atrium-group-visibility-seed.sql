@@ -3,8 +3,11 @@
 -- Seeds a document shared directly to a synced Google group and the two users the
 -- gated functional spec (tests/e2e/atrium-group-visibility.functional.spec.ts)
 -- asserts against: a MEMBER of the group (reads 200) and a NON-member (404,
--- existence-masked). Idempotent (ON CONFLICT upserts), safe to re-run. Apply to the
--- local dev DB:
+-- existence-masked). Also seeds a DEACTIVATED group (is_active = false) the member
+-- belongs to, plus a doc granted only to it, so the spec can prove deactivation
+-- revokes access (the `groups.is_active = true` join filter in
+-- listUserGroupEmailsByUserId). Idempotent (ON CONFLICT upserts), safe to re-run.
+-- Apply to the local dev DB:
 --
 --   docker exec -i aistudio-postgres psql -U postgres -d aistudio \
 --     < tests/e2e/fixtures/atrium-group-visibility-seed.sql
@@ -95,6 +98,70 @@ INSERT INTO content_publications (
 SELECT
   'a7100000-0000-4000-8000-000000005205', 'intranet',
   'a7100000-0000-4000-8000-0000000052a1', 'live',
+  (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user')
+ON CONFLICT (object_id, destination) DO UPDATE
+  SET published_version_id = EXCLUDED.published_version_id, status = 'live';
+
+-- 8. DEACTIVATED-group revocation case (#1205 review): the MEMBER also belongs to
+--    a group that has been deactivated (de-selected / dropped from the directory —
+--    the sync flips is_active to false but keeps the row and its memberships).
+--    A doc granted ONLY to that group must 404 for them: the
+--    `groups.is_active = true` filter in listUserGroupEmailsByUserId is the sole
+--    mechanism that revokes the grant, and this is its end-to-end proof.
+INSERT INTO groups (id, group_email, name, source, is_active)
+VALUES (
+  'b1050000-0000-4000-a000-000000001215',
+  'retired-group@example.com', 'Retired Group', 'manual', false
+)
+ON CONFLICT (lower(group_email)) DO UPDATE
+  SET is_active = false, name = EXCLUDED.name;
+
+INSERT INTO group_members (group_id, member_email)
+SELECT g.id, 'group-member@example.com'
+FROM groups g
+WHERE lower(g.group_email) = 'retired-group@example.com'
+ON CONFLICT (group_id, lower(member_email)) DO NOTHING;
+
+INSERT INTO content_objects (
+  id, kind, title, slug, owner_user_id, created_by_actor, created_by_agent_id,
+  visibility_level, status
+)
+SELECT
+  'a7100000-0000-4000-8000-000000005215', 'document', 'Retired Group Playbook',
+  'retired-group-playbook',
+  (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user'),
+  'agent',
+  (SELECT id FROM agent_identities WHERE name = 'ship-reporter' LIMIT 1),
+  'group', 'published'
+ON CONFLICT (slug) DO UPDATE
+  SET visibility_level = EXCLUDED.visibility_level, status = EXCLUDED.status;
+
+INSERT INTO content_versions (
+  id, object_id, version_number, author_actor, author_user_id, body_format,
+  body_location, summary
+)
+SELECT
+  'a7100000-0000-4000-8000-0000000052b1', 'a7100000-0000-4000-8000-000000005215',
+  1, 'human', (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user'),
+  'markdown', 'proof', 'Playbook shared only to a deactivated group'
+ON CONFLICT (object_id, version_number) DO NOTHING;
+
+UPDATE content_objects
+  SET current_version_id = 'a7100000-0000-4000-8000-0000000052b1'
+  WHERE id = 'a7100000-0000-4000-8000-000000005215';
+
+INSERT INTO content_visibility_grants (object_id, grant_kind, grant_value)
+VALUES (
+  'a7100000-0000-4000-8000-000000005215', 'group', 'retired-group@example.com'
+)
+ON CONFLICT (object_id, grant_kind, grant_value) DO NOTHING;
+
+INSERT INTO content_publications (
+  object_id, destination, published_version_id, status, published_by
+)
+SELECT
+  'a7100000-0000-4000-8000-000000005215', 'intranet',
+  'a7100000-0000-4000-8000-0000000052b1', 'live',
   (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user')
 ON CONFLICT (object_id, destination) DO UPDATE
   SET published_version_id = EXCLUDED.published_version_id, status = 'live';
