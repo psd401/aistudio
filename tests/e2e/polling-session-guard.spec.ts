@@ -203,6 +203,9 @@ test.describe('Polling Backoff Behavior', () => {
     // Route handler updates requestTimestamps when the request is fulfilled.
     // poll() gives a clear failure message if the second request never arrives,
     // rather than a silent timeout via .catch(() => {}).
-    await expect.poll(() => requestTimestamps.length, { timeout: 5000 }).toBeGreaterThanOrEqual(2)
+    // 15s wall-clock budget: the fake clock controls WHEN the app schedules the
+    // request, but delivering it needs real browser cycles — under full-suite
+    // CPU load 5s repeatedly failed all retries while passing in isolation.
+    await expect.poll(() => requestTimestamps.length, { timeout: 15000 }).toBeGreaterThanOrEqual(2)
   })
 })
