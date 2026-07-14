@@ -20,6 +20,7 @@
     "test:smoke:atrium-html-sanitize": "bun run tests/smoke/atrium-html-sanitize.smoke.ts",
     "test:smoke:atrium-agent-bridge": "bun run tests/smoke/atrium-agent-bridge.smoke.ts",
     "test:smoke:atrium-agent-read": "bun run tests/smoke/atrium-agent-read.smoke.ts",
+    "test:smoke:atrium-group-visibility-list": "bun run tests/smoke/atrium-group-visibility-list.smoke.ts",
     "test:smoke:atrium-provenance-rail": "bun run tests/smoke/atrium-provenance-rail.smoke.ts",
     "test:smoke:atrium-collab-schema": "bun run tests/smoke/atrium-collab-schema.smoke.ts",
     "test:smoke:atrium-suggestions-resolve": "bun run tests/smoke/atrium-suggestions-resolve.smoke.ts",

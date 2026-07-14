@@ -225,6 +225,15 @@ describe("canView — group grant is gated on group VISIBILITY (guard mirror #12
       await visibilityService.canView(groupMemberUser, obj("private"))
     ).toBe(false);
   });
+  it("a group-kind grant on an INTERNAL object grants an unauthenticated viewer nothing extra", async () => {
+    // Internal admits any authenticated principal WITHOUT consulting grants, and
+    // denies guests. A stray `group` grant must not widen that: the grant sweep
+    // only runs inside the `visibility_level = 'group'` branch in both predicates.
+    withGrants([{ kind: "group", value: "hs-staff@psd401.net" }]);
+    expect(await visibilityService.canView(anonymous, obj("internal"))).toBe(
+      false
+    );
+  });
 });
 
 describe("canView — unauthenticated", () => {
