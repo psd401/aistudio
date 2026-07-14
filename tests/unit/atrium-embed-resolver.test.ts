@@ -45,13 +45,24 @@ jest.mock("@/lib/content/visibility-service", () => ({
 let currentVersion: unknown = { id: "v1" };
 let publishedVersion: unknown = { id: "pv1" };
 let artifactCode = "<h1>live</h1>";
-jest.mock("@/lib/content/version-service", () => ({
-  versionService: {
+jest.mock("@/lib/content/version-service", () => {
+  const svc = {
     current: jest.fn(async () => currentVersion),
     getById: jest.fn(async () => publishedVersion),
     loadArtifactCode: jest.fn(async () => artifactCode),
-  },
-}));
+    // Mirror the real safe-wrapper contract (degrade to "" on failure) while
+    // delegating to loadArtifactCode so per-test mockRejectedValueOnce overrides
+    // still drive the fallback path.
+    loadArtifactCodeSafe: jest.fn(async (_v: unknown): Promise<string> => {
+      try {
+        return (await svc.loadArtifactCode()) as string;
+      } catch {
+        return "";
+      }
+    }),
+  };
+  return { versionService: svc };
+});
 jest.mock("@/lib/content/artifact-sandbox-config", () => ({
   getArtifactSandboxRenderUrl: () => "https://sandbox.example",
 }));

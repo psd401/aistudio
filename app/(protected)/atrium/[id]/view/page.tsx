@@ -36,7 +36,6 @@ import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { versionService } from "@/lib/content/version-service";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
-import { createLogger } from "@/lib/logger";
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
 import "@/styles/atrium-content.css";
 
@@ -48,7 +47,6 @@ export default async function AtriumArtifactViewPage({
   params: Promise<{ id: string }>;
 }): Promise<React.JSX.Element> {
   const { id } = await params;
-  const log = createLogger({ action: "atrium.artifactViewPage" });
 
   // getUserRequester throws when unauthenticated; the (protected) layout already
   // guarantees a session, so this resolves to a `user` requester.
@@ -73,20 +71,8 @@ export default async function AtriumArtifactViewPage({
   // artifact still renders here (the whole reason this route exists alongside the
   // publication-gated readers).
   const version = await versionService.current(obj.id);
-  let code = "";
-  if (version) {
-    try {
-      code = await versionService.loadArtifactCode(version);
-    } catch (error) {
-      // Missing/unreadable body degrades to an empty preview rather than
-      // surfacing the raw S3 error.
-      log.warn("artifact body unavailable; rendering empty preview", {
-        objectId: obj.id,
-        versionNumber: version.versionNumber,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
+  // Missing/unreadable body degrades to an empty preview (never the raw S3 error).
+  const code = version ? await versionService.loadArtifactCodeSafe(version) : "";
 
   // A fixed, full-viewport overlay covers the inherited Meridian shell chrome so
   // only the sandbox is visible. No transformed ancestor sits in this subtree, so

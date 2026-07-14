@@ -703,12 +703,14 @@ export const visibilityService = {
 
     // List-only projection: the shared `objectSelectFields` (single-object loads)
     // stays untouched; here we additionally resolve the owner's DISPLAY NAME via a
-    // LEFT JOIN on `users` — full name, or email when the name is blank, else null.
+    // LEFT JOIN on `users` — full name, or the email LOCAL PART when the name is
+    // blank (never the full address: cards render to every viewer who can see the
+    // object, so the domain-qualified email stays un-broadcast), else null.
     // Presentation metadata only (the library cards show "who owns this"); owner
     // permission is always keyed on `ownerUserId`, never this string.
     const listSelectFields = {
       ...objectSelectFields,
-      ownerName: sql<string | null>`coalesce(nullif(trim(concat_ws(' ', ${users.firstName}, ${users.lastName})), ''), ${users.email})`,
+      ownerName: sql<string | null>`coalesce(nullif(trim(concat_ws(' ', ${users.firstName}, ${users.lastName})), ''), split_part(${users.email}, '@', 1))`,
     };
 
     const rows = await executeQuery(
@@ -716,8 +718,10 @@ export const visibilityService = {
         db
           .select(listSelectFields)
           .from(o)
-          // LEFT JOIN (not inner): a row whose owner is missing (e.g. a system
-          // user) must still list, just with a null ownerName.
+          // LEFT JOIN (not inner), defensively: today the NOT NULL FK to
+          // users(id) (no ON DELETE action) means every row has a matching
+          // owner, but a future FK relaxation must degrade to a null ownerName,
+          // never drop the row from the library.
           .leftJoin(users, eq(users.id, o.ownerUserId))
           .where(and(...filters))
           // `id` is the deterministic tiebreaker: `updated_at` alone is not unique

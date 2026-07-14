@@ -51,10 +51,11 @@ import { normalizeOrigin } from "@/lib/content/artifact-sandbox-config";
 type FrameLoadStatus = "loading" | "loaded" | "error";
 /**
  * Whether the framed host has acknowledged the render:
- *  - "pending"  : code posted (or being retried); no ack yet.
+ *  - "pending"  : code posted (or being retried); no successful ack yet.
  *  - "rendered" : the host acked `{ ok: true }` — the artifact is live.
- *  - "error"    : the host acked `{ ok: false }`, OR no ack ever arrived within
- *                 the retry budget (the "waiting forever" guard).
+ *  - "error"    : no successful ack within the retry budget (the "waiting
+ *                 forever" guard). An `{ ok: false }` ack is treated as a
+ *                 transient failure — retries continue until the budget runs out.
  */
 type RenderStatus = "pending" | "rendered" | "error";
 
@@ -112,6 +113,20 @@ function isRenderAck(data: unknown): data is RenderAck {
   );
 }
 
+/** Shared look for the two non-executable notices (unavailable / frame error). */
+const sandboxNoticeStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  minHeight: 160,
+  border: "1px dashed var(--border, #d4d4d8)",
+  borderRadius: 8,
+  color: "#71717a",
+  fontSize: 13,
+  padding: 16,
+  textAlign: "center",
+};
+
 export function ArtifactSandbox({
   code,
   src = null,
@@ -120,13 +135,14 @@ export function ArtifactSandbox({
 }: ArtifactSandboxProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   // The render URL is resolved server-side and arrives via `src`. Derive the
-  // bare sandbox origin from it once on mount (stable for the frame's life). This
+  // bare sandbox origin from it (a pure, cheap computation — recomputing per
+  // render also tracks a changed `src`, unlike a mount-frozen useState). This
   // origin is NOT used as the postMessage targetOrigin (the frame is opaque-origin
   // — see postCode); it gates whether we post at all (fail closed when null) and
   // is the strict allowlist for the inbound render-ack listener. normalizeOrigin
   // strips the `/render` path back to the bare origin and returns null for a
   // missing/invalid value (→ fail closed).
-  const [origin] = useState(() => normalizeOrigin(src));
+  const origin = normalizeOrigin(src);
   // Track whether the iframe load succeeded or failed (e.g. CSP blocked or
   // sandbox origin returned 404) so we can show a meaningful error notice.
   const [frameStatus, setFrameStatus] = useState<FrameLoadStatus>("loading");
@@ -167,20 +183,33 @@ export function ArtifactSandbox({
   // Listen for the host's render acknowledgement. We validate the event origin
   // strictly and ignore anything else. The ack carries only a boolean outcome
   // (never artifact data), so acting on it cannot be influenced by frame content
-  // beyond "did the render succeed" — an `ok: false` (a throw inside the host's
-  // render) flips us to the error notice; an `ok: true` marks the artifact live
-  // and stops the retry loop below.
+  // beyond "did the render succeed".
   useEffect(() => {
     if (!origin) return;
     const onMessage = (event: MessageEvent) => {
       if (event.origin !== origin) return; // strict origin check
+      // Per-INSTANCE correlation: every sandbox on the page shares the one
+      // configured origin (library thumbnails mount several at once; a document
+      // can hold many embeds), and the host replies to the shared top window —
+      // so origin alone would let the fastest sibling's ack mark EVERY instance
+      // "rendered" and kill their retry loops (blank frames, no error). Only the
+      // ack sent by OUR iframe's contentWindow counts; after unmount the ref is
+      // null and late acks are ignored. (WindowProxy identity comparison is
+      // legal cross-origin; no host/payload change needed.)
+      if (event.source !== iframeRef.current?.contentWindow) return;
       if (!isRenderAck(event.data)) return;
       if (event.data.ok) {
         renderedRef.current = true;
-        setRenderStatus("rendered");
-      } else {
-        setRenderStatus("error");
+        // Monotonic pending→rendered: never resurrect an already-errored frame
+        // (the error branch has unmounted the iframe; a stale flip to "rendered"
+        // would strand a fresh, never-posted frame as permanently blank).
+        setRenderStatus((prev) => (prev === "pending" ? "rendered" : prev));
       }
+      // `ok: false` is NOT terminal: the host documents a transient failure mode
+      // (an artifact script mutating the DOM out from under executeScripts), and
+      // the very next re-post can succeed. Keep the retry loop running; a
+      // persistently failing artifact exhausts RENDER_MAX_ATTEMPTS and surfaces
+      // the explicit error notice below (bounded, ~12s).
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
@@ -235,18 +264,7 @@ export function ArtifactSandbox({
         className={className}
         role="status"
         data-testid="artifact-sandbox-unavailable"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          minHeight: 160,
-          border: "1px dashed var(--border, #d4d4d8)",
-          borderRadius: 8,
-          color: "#71717a",
-          fontSize: 13,
-          padding: 16,
-          textAlign: "center",
-        }}
+        style={sandboxNoticeStyle}
       >
         Artifact preview is unavailable: the sandbox origin
         (<code>ATRIUM_SANDBOX_ORIGIN</code>) is not configured for this
@@ -265,18 +283,7 @@ export function ArtifactSandbox({
         className={className}
         role="status"
         data-testid="artifact-sandbox-frame-error"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          minHeight: 160,
-          border: "1px dashed var(--border, #d4d4d8)",
-          borderRadius: 8,
-          color: "#71717a",
-          fontSize: 13,
-          padding: 16,
-          textAlign: "center",
-        }}
+        style={sandboxNoticeStyle}
       >
         Artifact preview could not load. The sandbox host may be unreachable,
         blocked by the browser&apos;s content security policy, or the artifact

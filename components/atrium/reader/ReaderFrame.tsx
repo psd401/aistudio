@@ -108,9 +108,11 @@ function ReaderCover({
 }
 
 /**
- * The header-bar actions shared by the full-bleed variant: the view-only notice
- * (when the viewer can't edit) OR the comment chip + Edit link. Extracted so the
- * variant frame stays under the complexity lint. Preserves the reader testids.
+ * The reader actions shared by BOTH variants: the view-only notice (when the
+ * viewer can't edit) OR the comment chip + Edit link. The full-bleed bar renders
+ * it directly; the sheet variant renders the non-view-only branch inside its
+ * `.mer-reader-actions` wrapper (its view-only notice lives in the TOC rail
+ * instead). Preserves the reader testids.
  */
 function ReaderBarActions({
   viewOnly,
@@ -275,22 +277,12 @@ export function ReaderFrame({
               <h1 className="mer-reader-title">{title}</h1>
               {editHref && (
                 <div className="mer-reader-actions">
-                  {commentHref && commentCount > 0 && (
-                    <Link
-                      href={commentHref}
-                      className="mer-reader-comment-chip"
-                      data-testid="reader-comment-chip"
-                    >
-                      {commentCount} comment{commentCount === 1 ? "" : "s"}
-                    </Link>
-                  )}
-                  <Link
-                    href={editHref}
-                    className="mer-reader-edit"
-                    data-testid="reader-edit-link"
-                  >
-                    Edit
-                  </Link>
+                  <ReaderBarActions
+                    viewOnly={false}
+                    commentHref={commentHref}
+                    commentCount={commentCount}
+                    editHref={editHref}
+                  />
                 </div>
               )}
             </div>
