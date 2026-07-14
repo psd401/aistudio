@@ -433,6 +433,89 @@ async function userHasCapability(userEmail, capabilityIdentifier) {
 }
 
 /**
+ * Whether a user email matches an EXPLICIT per-resource access grant on a
+ * resource (Epic #1202 Phase 3, #1206). Mirrors the app-side
+ * `userCanAccessResource` role/group predicates (lib/db/drizzle/resource-access.ts)
+ * but keyed by EMAIL (the skill only has the caller's email, not a numeric id) and
+ * WITHOUT the "zero grants = unrestricted" / admin-bypass branches: for a skill the
+ * grant is PURELY ADDITIVE — it is OR-ed with the capability gate by the caller, so
+ * "no grant rows" here must mean "no grant match" (false), never "everyone".
+ *
+ *   - a `role` grant matches when the user holds that role (by NAME,
+ *     case-insensitively — users→user_roles→roles joined on lower(email)), OR
+ *   - a `group` grant matches when the user is a member of that ACTIVE synced group
+ *     (groups→group_members joined on lower(member_email)).
+ *
+ * Returns false when the DB is unconfigured or on any error (fail-closed, matching
+ * `userHasCapability`). `resourceId` is passed as text (the storage form); a
+ * numeric skill id is stringified by the caller — skills use a uuid string.
+ */
+async function userMatchesResourceGrant(userEmail, resourceType, resourceId) {
+  if (!rdsClient || !DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
+    return false;
+  }
+  if (!userEmail || !resourceType || resourceId === undefined || resourceId === null) {
+    return false;
+  }
+  try {
+    const resp = await rdsClient.send(new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: 'aistudio',
+      sql: `SELECT 1
+              FROM resource_access_grants g
+             WHERE g.resource_type = :rtype
+               AND g.resource_id = :rid
+               AND (
+                 (g.grant_kind = 'role' AND EXISTS (
+                    SELECT 1 FROM users u
+                      JOIN user_roles ur ON ur.user_id = u.id
+                      JOIN roles r ON r.id = ur.role_id
+                     WHERE lower(u.email) = lower(:email)
+                       AND lower(r.name) = lower(g.grant_value)
+                 ))
+                 OR
+                 (g.grant_kind = 'group' AND EXISTS (
+                    SELECT 1 FROM groups grp
+                      JOIN group_members gm ON gm.group_id = grp.id
+                     WHERE grp.is_active = true
+                       AND lower(grp.group_email) = lower(g.grant_value)
+                       AND lower(gm.member_email) = lower(:email)
+                 ))
+               )
+             LIMIT 1`,
+      parameters: [
+        { name: 'email', value: { stringValue: userEmail } },
+        { name: 'rtype', value: { stringValue: String(resourceType) } },
+        { name: 'rid', value: { stringValue: String(resourceId) } },
+      ],
+    }));
+    return Array.isArray(resp.records) && resp.records.length > 0;
+  } catch (err) {
+    console.error(`Resource-grant check failed (treating as denied): ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Fail-closed skill access gate (#1206): a caller may use a restricted skill when
+ * they satisfy its `required_capability` OR match an explicit per-skill
+ * resource_access_grant (role/group). Either alone suffices; both are checked
+ * fail-closed. `capabilityIdentifier` and/or `skillId` may be omitted — omitting
+ * capability leaves the grant as the sole gate; omitting skillId reproduces the
+ * pre-#1206 capability-only behavior. With BOTH omitted this returns false.
+ */
+async function userCanAccessSkill(userEmail, capabilityIdentifier, skillId) {
+  if (capabilityIdentifier && (await userHasCapability(userEmail, capabilityIdentifier))) {
+    return true;
+  }
+  if (skillId && (await userMatchesResourceGrant(userEmail, 'skill', skillId))) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Insert a credential request into the database.
  */
 async function insertCredentialRequest(credentialName, reason, skillContext, userEmail) {
@@ -481,4 +564,6 @@ module.exports = {
   putUserCredential,
   logCredentialPut,
   userHasCapability,
+  userMatchesResourceGrant,
+  userCanAccessSkill,
 };
