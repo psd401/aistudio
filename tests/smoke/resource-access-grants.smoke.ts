@@ -24,7 +24,7 @@
  */
 
 import assert from "node:assert/strict";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { executeQuery, toPgRows } from "@/lib/db/drizzle-client";
 import { users } from "@/lib/db/schema";
 import {
@@ -179,8 +179,46 @@ await check("batch: admin sees both (admin bypass)", async () => {
   assert.equal(accessible.has(UNRESTRICTED_ID), true);
 });
 
-// Restore a clean slate.
+// Restore a clean slate BEFORE the backfill-equivalence assertion so the
+// synthetic test grants on RES_ID (a non-existent model id) don't register as
+// "extra" model grant rows the real allowed_roles can't explain.
 await deleteAllResourceGrants(RES_TYPE, RES_ID);
+
+// BACKFILL EQUIVALENCE — migration 111 copied ai_models.allowed_roles into
+// resource_access_grants(kind='role'); the model-access matrix must be identical
+// pre/post (issue AC#6). Assert the set of (model, role) grants derived from
+// allowed_roles EXACTLY equals the backfilled 'model'/'role' grant rows — no
+// missing rows, no extras. Uses the same predicate the migration's INSERT used.
+await check("backfill: model role grants exactly reproduce allowed_roles", async () => {
+  const rows = toPgRows(
+    await executeQuery(
+      (db) =>
+        db.execute(sql`
+          WITH expected AS (
+            SELECT m.id::text AS resource_id, trim(role_name) AS role_name
+              FROM ai_models m,
+                   LATERAL jsonb_array_elements_text(m.allowed_roles) AS role_name
+             WHERE m.allowed_roles IS NOT NULL
+               AND jsonb_typeof(m.allowed_roles) = 'array'
+               AND jsonb_array_length(m.allowed_roles) > 0
+               AND length(trim(role_name)) > 0
+          ),
+          actual AS (
+            SELECT resource_id, grant_value AS role_name
+              FROM resource_access_grants
+             WHERE resource_type = 'model' AND grant_kind = 'role'
+          )
+          SELECT count(*)::int AS mismatches FROM (
+            (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+            UNION ALL
+            (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+          ) diff
+        `),
+      "smoke.backfillEquivalence"
+    )
+  ) as { mismatches: number }[];
+  assert.equal(rows[0]?.mismatches, 0, "allowed_roles <-> grant rows differ");
+});
 
 console.log(`resource-access-grants smoke: ${passed} checks passed`);
 process.exit(0);
