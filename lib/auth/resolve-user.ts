@@ -17,6 +17,7 @@ import {
   updateUser,
   createUser,
   addUserRole,
+  reconcileUserManagedRoles,
 } from "@/lib/db/drizzle"
 import { createLogger, sanitizeForLogging } from "@/lib/logger"
 import { ErrorFactories } from "@/lib/error-utils"
@@ -48,6 +49,10 @@ export async function resolveUserId(
   // Fast path: user exists (returns null on miss, throws TypeError on malformed ID)
   const existingId = await getUserIdByCognitoSubAsNumber(session.sub)
   if (existingId !== null) {
+    // Deliberately NO managed-role reconciliation on this path (#1204 review):
+    // it serves ~13 polling GET routes, so a reconcile transaction per request
+    // is pure load amplification. Steady-state drift is owned by the hourly
+    // sync Lambda; session establishment (getCurrentUserAction) reconciles too.
     return existingId
   }
 
@@ -70,6 +75,7 @@ export async function resolveUserId(
         // cognitoSub, not email. Without this call a duplicate row is inserted.
         // Mirrors getCurrentUserAction.ts:100
         await updateUser(byEmail.id, { cognitoSub: session.sub })
+        await reconcileManagedRolesNonFatal(byEmail.id, session.email, log)
         return byEmail.id
       }
     } catch (error) {
@@ -157,5 +163,31 @@ export async function resolveUserId(
     }
   }
 
+  // New user just provisioned with the default (manual) role — reconcile any
+  // group-sync roles on top from their current memberships (#1204). Non-fatal.
+  await reconcileManagedRolesNonFatal(userId, session.email, log)
+
   return userId
+}
+
+/**
+ * Reconcile a user's managed (group-sync) roles without ever failing the caller.
+ * Auth resolution must never break because group-role reconciliation hit a DB
+ * hiccup — the user keeps their last-known roles and the hourly sync (or the next
+ * request) will reconcile. A no-op when the session carries no email.
+ */
+async function reconcileManagedRolesNonFatal(
+  userId: number,
+  email: string | undefined,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  if (!email) return
+  try {
+    await reconcileUserManagedRoles(userId, email)
+  } catch (error) {
+    log.warn("Managed-role reconciliation failed (non-fatal)", {
+      userId,
+      error: error instanceof Error ? error.message : "Unknown error",
+    })
+  }
 }

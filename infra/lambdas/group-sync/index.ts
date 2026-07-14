@@ -23,7 +23,7 @@ import {
   PutMetricDataCommand,
   type MetricDatum,
 } from "@aws-sdk/client-cloudwatch";
-import { getSql, closeSql, listActiveRules, upsertGroup, replaceMembers, markSynced, markError, deactivateGroupsNotIn } from "./db";
+import { getSql, closeSql, listActiveRules, upsertGroup, replaceMembers, markSynced, markError, deactivateGroupsNotIn, reconcileManagedRoles, type RoleReconcileResult } from "./db";
 import { resolveConfig, parseServiceAccountKey } from "./config";
 import { createDirectoryClient } from "./directory-client";
 import { runGroupSync, type GroupSyncPorts, type GroupSyncResult } from "./sync";
@@ -94,12 +94,32 @@ export async function handler(event: GroupSyncEvent = {}): Promise<HandlerResult
 
     const result = await runGroupSync(ports);
     log.info("Group sync completed", { ...result });
-    await emitMetrics(result);
+
+    // Drive managed roles from the freshly-synced memberships (Phase 1 / #1204).
+    // Best-effort: membership is already committed and the login-time reconciler
+    // is the backstop, so a role-reconcile failure must NOT fail the whole run
+    // (which would also skip the success metrics for a good membership sync).
+    let roleReconcile: RoleReconcileResult | null = null;
+    try {
+      roleReconcile = await reconcileManagedRoles(sql);
+      log.info("Managed-role reconciliation completed", { ...roleReconcile });
+      if (roleReconcile.adminRoleProtected) {
+        log.error(
+          "Last-administrator guard tripped: refused to auto-revoke the final administrator grant(s) — check the administrator group mapping/membership"
+        );
+      }
+    } catch (error) {
+      log.error("Managed-role reconciliation failed (membership sync still succeeded)", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    await emitMetrics(result, roleReconcile);
     return { status: "ok", result };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log.error("Group sync failed", { error: message });
-    await emitMetrics(null).catch(() => {});
+    await emitMetrics(null, null).catch(() => {});
     throw error;
   } finally {
     await closeSql().catch(() => {});
@@ -114,8 +134,15 @@ async function loadSecret(secretArn: string): Promise<string> {
   return res.SecretString;
 }
 
-/** Publish per-run metrics. A null result records a run-level failure. */
-async function emitMetrics(result: GroupSyncResult | null): Promise<void> {
+/**
+ * Publish per-run metrics. A null result records a run-level failure. Role
+ * reconciliation metrics ride along when the reconcile pass ran (null when it
+ * was skipped or threw — the membership sync can still have succeeded).
+ */
+async function emitMetrics(
+  result: GroupSyncResult | null,
+  roleReconcile: RoleReconcileResult | null
+): Promise<void> {
   const dims = [{ Name: "Environment", Value: ENVIRONMENT }];
   const metrics: MetricDatum[] = result
     ? [
@@ -127,6 +154,14 @@ async function emitMetrics(result: GroupSyncResult | null): Promise<void> {
         { MetricName: "SyncRunFailed", Value: 0, Unit: "Count", Dimensions: dims },
       ]
     : [{ MetricName: "SyncRunFailed", Value: 1, Unit: "Count", Dimensions: dims }];
+
+  if (roleReconcile) {
+    metrics.push(
+      { MetricName: "RolesGranted", Value: roleReconcile.added, Unit: "Count", Dimensions: dims },
+      { MetricName: "RolesRevoked", Value: roleReconcile.removed, Unit: "Count", Dimensions: dims },
+      { MetricName: "RoleUsersChanged", Value: roleReconcile.usersChanged, Unit: "Count", Dimensions: dims }
+    );
+  }
 
   try {
     await cloudwatch.send(

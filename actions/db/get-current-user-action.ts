@@ -7,7 +7,8 @@ import {
   updateUser,
   getRoleByName,
   addUserRole,
-  getUserRolesByCognitoSub
+  getUserRolesByCognitoSub,
+  reconcileUserManagedRoles
 } from "@/lib/db/drizzle"
 import { getServerSession } from "@/lib/auth/server-session"
 import { ActionState } from "@/types"
@@ -183,14 +184,47 @@ export async function getCurrentUserAction(): Promise<
     }
 
     // Build update payload conditionally
-    const updatePayload: { firstName?: string; lastName?: string; lastSignInAt: Date } = {
+    const updatePayload: { firstName?: string; lastName?: string; email?: string; lastSignInAt: Date } = {
       lastSignInAt: new Date()
     }
     if (userGivenName) updatePayload.firstName = userGivenName
     if (userFamilyName) updatePayload.lastName = userFamilyName
+    // Refresh users.email from the session when it changed (Workspace rename):
+    // group_members and the hourly BULK reconciler join on users.email, so a
+    // stale value makes the bulk pass compute zero mapped roles and revoke what
+    // the login-time reconciler grants — hourly flapping until the email is
+    // fresh again (#1222 review). Session establishment is the earliest point
+    // the new address is known; between the rename and this next sign-in the
+    // bulk pass may drop managed roles once (documented residual).
+    if (userEmail && userEmail.toLowerCase() !== (user.email ?? "").toLowerCase()) {
+      log.info("Refreshing user email from session (directory rename)", {
+        userId: user.id
+      })
+      updatePayload.email = userEmail
+    }
 
     const updatedUser = await updateUser(user.id, updatePayload)
     user = updatedUser as unknown as SelectUser
+
+    // Reconcile managed (group-sync) roles from the user's current Google group
+    // memberships BEFORE reading roles back, so the response reflects any
+    // sync-driven grant/revoke. Manual role assignments are never touched. This
+    // is the canonical login-time hook (Epic #1202, Phase 1 / #1204). Non-fatal:
+    // a reconciliation failure must not break "who am I" — the user keeps their
+    // last-known roles and the hourly sync will reconcile on its next run.
+    try {
+      // MUST use the live session email, not user.email: users.email is set once
+      // at provisioning and never refreshed, while group_members tracks the
+      // directory's CURRENT address. Reconciling with the stale DB value would
+      // compute a different membership than the session-based JIT paths and flap
+      // roles (revoke/re-grant race) after a Workspace email change (#1204 P1).
+      await reconcileUserManagedRoles(user.id, userEmail ?? user.email ?? "")
+    } catch (reconcileError) {
+      log.warn("Managed-role reconciliation failed (non-fatal)", {
+        userId: user.id,
+        error: reconcileError instanceof Error ? reconcileError.message : "Unknown error"
+      })
+    }
 
     // Get user's roles
     log.debug("Fetching user roles")
