@@ -145,6 +145,10 @@ export function principalOf(req: Requester): Principal {
         building: req.building,
         department: req.department,
         gradeLevels: req.gradeLevels,
+        // `?? []` so a requester whose resolver did not populate memberships (a
+        // guest, or a test double) yields no group access rather than undefined —
+        // group grants then match no one, failing closed (#1205).
+        groups: req.groups ?? [],
         isAdmin: req.isAdmin,
       };
     case "agent-delegated":
@@ -154,6 +158,8 @@ export function principalOf(req: Requester): Principal {
         building: req.building,
         department: req.department,
         gradeLevels: req.gradeLevels,
+        // A delegated agent inherits the human's group memberships (#1205).
+        groups: req.groups ?? [],
         // A delegated agent never exceeds the human; admin is not inferred here.
         isAdmin: false,
       };
@@ -164,6 +170,8 @@ export function principalOf(req: Requester): Principal {
         building: null,
         department: null,
         gradeLevels: null,
+        // Autonomous agents have no human identity and thus no group memberships.
+        groups: [],
         isAdmin: false,
       };
   }

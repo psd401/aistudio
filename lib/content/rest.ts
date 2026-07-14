@@ -101,7 +101,7 @@ export function respondApprovalRequired(
 }
 
 export const restGrantSchema = z.object({
-  kind: z.enum(["role", "building", "department", "grade", "user"]),
+  kind: z.enum(["role", "building", "department", "grade", "user", "group"]),
   value: z.string(),
 });
 

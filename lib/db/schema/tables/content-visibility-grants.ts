@@ -10,13 +10,18 @@
  *
  * ## Columns of note
  * - `grant_kind` — the dimension the grant keys on (role / building / department /
- *   grade / user).
+ *   grade / user / group).
  * - `grant_value` — the value to match.
  *   - `role` grants: the role **NAME** (e.g. `"staff"`) — matched against
  *     `principal.roles` from `getUserRoles()` which returns names, not ids.
  *   - `user` grants: the numeric user id serialised as text (e.g. `"42"`).
  *   - `building` / `department` / `grade` grants: the attribute string
  *     (e.g. `"High School"`, `"Math"`, `"9"`).
+ *   - `group` grants (Epic #1202 Phase 2, #1205): the synced Google group
+ *     **EMAIL**, lowercased (e.g. `"hs-staff@psd401.net"`) — matched against
+ *     `principal.groups` (the viewer's memberships, from `group_members` joined on
+ *     the user's lowercased email). Stored lowercase (emails are case-insensitive)
+ *     so the exact-match read predicates hit the `idx_cvg_lookup` index.
  *
  *   ⚠️  DO NOT store a numeric id for `role` grants — the in-memory `canView`
  *   and the SQL `buildVisibilitySql` both match by name, so an id-valued role

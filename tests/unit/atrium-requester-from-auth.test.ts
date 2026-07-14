@@ -31,6 +31,9 @@ let userRows: Array<{
   gradeLevels: string[] | null;
 }> = [];
 let roleRows: Array<{ name: string }> = [];
+// The synced group memberships loadUserContext resolves for #1205 (rows shaped as
+// listUserGroupEmailsByUserId's `{ groupEmail }` projection).
+let groupRows: Array<{ groupEmail: string }> = [];
 
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: jest.fn(async (_fn: unknown, label: string) => {
@@ -38,6 +41,7 @@ jest.mock("@/lib/db/drizzle-client", () => ({
     if (label === "atrium.requesterFromAuth.findAgentById") return agentByIdRows;
     if (label === "atrium.requesterFromAuth.loadUser") return userRows;
     if (label === "getUserRoles") return roleRows;
+    if (label === "listUserGroupEmailsByUserId") return groupRows;
     return [];
   }),
 }));
@@ -52,8 +56,26 @@ jest.mock("@/lib/db/schema", () => ({
     scopes: "scopes",
   },
   roles: { id: "id", name: "name" },
-  users: { id: "id", building: "building", department: "department", gradeLevels: "gradeLevels" },
+  users: {
+    id: "id",
+    email: "email",
+    building: "building",
+    department: "department",
+    gradeLevels: "gradeLevels",
+  },
   userRoles: { userId: "userId", roleId: "roleId" },
+  // lib/groups/queries (imported by requester-from-auth for
+  // listUserGroupEmailsByUserId) builds a module-level select object from these,
+  // so they must be defined objects even though the query callbacks never run here.
+  groups: { id: "id", groupEmail: "groupEmail", name: "name", isActive: "isActive" },
+  groupMembers: { groupId: "groupId", memberEmail: "memberEmail" },
+  groupSelectionRules: {},
+  groupRoleMappings: {
+    id: "id",
+    groupEmail: "groupEmail",
+    roleId: "roleId",
+    createdAt: "createdAt",
+  },
 }));
 
 jest.mock("drizzle-orm", () => ({
@@ -88,6 +110,7 @@ beforeEach(() => {
   agentByIdRows = [];
   userRows = [{ building: "High School", department: null, gradeLevels: null }];
   roleRows = [{ name: "staff" }];
+  groupRows = [];
   jest.clearAllMocks();
 });
 
@@ -106,6 +129,51 @@ describe("requesterFromApiAuth", () => {
     expect(req.building).toBe("High School");
     expect(req.scopes).toContain("content:create");
     expect(req.agentLabel).toBe("client-abc");
+  });
+
+  it("populates a user requester's group memberships from loadUserContext (#1205)", async () => {
+    groupRows = [
+      { groupEmail: "hs-staff@psd401.net" },
+      { groupEmail: "all-staff@psd401.net" },
+    ];
+    const req = await requesterFromApiAuth({ userId: 7, scopes: ["content:read"] });
+    if (req.kind !== "user") throw new Error("wrong kind");
+    expect(req.groups).toEqual([
+      "hs-staff@psd401.net",
+      "all-staff@psd401.net",
+    ]);
+    // principalOf surfaces the same set as the canView/list match set.
+    expect(principalOf(req).groups).toEqual([
+      "hs-staff@psd401.net",
+      "all-staff@psd401.net",
+    ]);
+  });
+
+  it("a delegated agent INHERITS the human's group memberships (#1205)", async () => {
+    groupRows = [{ groupEmail: "hs-staff@psd401.net" }];
+    const req = await requesterFromApiAuth({
+      userId: 50,
+      scopes: ["content:read"],
+      oauthClientId: "client-abc",
+      delegatedForUserId: 7,
+    });
+    if (req.kind !== "agent-delegated") throw new Error("wrong kind");
+    expect(req.groups).toEqual(["hs-staff@psd401.net"]);
+    expect(principalOf(req).groups).toEqual(["hs-staff@psd401.net"]);
+  });
+
+  it("an autonomous agent has NO group memberships (#1205)", async () => {
+    agentRows = [
+      { id: "agent-1", name: "ship-reporter", roleId: 3, roleName: "staff" },
+    ];
+    const req = await requesterFromApiAuth({
+      userId: 0,
+      scopes: ["content:create"],
+      oauthClientId: "client-ship",
+    });
+    if (req.kind !== "agent-autonomous") throw new Error("wrong kind");
+    // Autonomous agents have no human identity → principalOf yields an empty set.
+    expect(principalOf(req).groups).toEqual([]);
   });
 
   it("builds an agent-autonomous requester when the OIDC client maps to an identity", async () => {

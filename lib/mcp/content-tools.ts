@@ -17,9 +17,9 @@ import type { McpToolDefinition } from "./types";
 import type { ApiScope } from "@/lib/api-keys/scopes";
 
 const VISIBILITY_DESC =
-  "Visibility object: { level: 'private'|'group'|'internal'|'public', grants?: [{ kind: 'role'|'building'|'department'|'grade'|'user', value: string }] }";
+  "Visibility object: { level: 'private'|'group'|'internal'|'public', grants?: [{ kind: 'role'|'building'|'department'|'grade'|'user'|'group', value: string }] }";
 const GRANTS_DESC =
-  "Group grants: [{ kind: 'role'|'building'|'department'|'grade'|'user', value: string }]";
+  "Group grants: [{ kind: 'role'|'building'|'department'|'grade'|'user'|'group', value: string }]";
 const CODE_ENCODING_DESC =
   "Transit encoding for the body. Set 'base64' when the body/code contains HTML/JS/CSS (<script>, <style>, style=\"…\") — the edge WAF blocks that markup in a raw request body, so send the body base64-encoded and the server decodes it before screening. Omit for plain text/markdown.";
 

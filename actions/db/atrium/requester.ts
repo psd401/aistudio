@@ -23,6 +23,7 @@ import { executeQuery } from "@/lib/db/drizzle-client";
 import { users } from "@/lib/db/schema";
 import { getServerSession, type CognitoSession } from "@/lib/auth/server-session";
 import { getUserRoles } from "@/lib/db/user-roles";
+import { listUserGroupEmailsByUserId } from "@/lib/groups/queries";
 import { ErrorFactories } from "@/lib/error-utils";
 import { createLogger, generateRequestId } from "@/lib/logger";
 import type { Requester } from "@/lib/content";
@@ -47,6 +48,9 @@ const GUEST_REQUESTER: Requester = Object.freeze({
   building: null,
   department: null,
   gradeLevels: null,
+  // A guest belongs to no synced group (no user identity) — empty match set for
+  // `group`-kind grants (#1205).
+  groups: [],
   isAdmin: false,
 });
 
@@ -101,8 +105,18 @@ async function resolveAuthenticatedRequester(
     return null;
   }
 
-  const roles = await getUserRoles(user.id);
-  log.debug("Resolved Atrium requester", { userId: user.id, roleCount: roles.length });
+  // Roles and group memberships are independent lookups — run them concurrently.
+  // `groups` (the user's synced group emails) powers `group`-kind visibility
+  // grants (#1205); it is `[]` for a user with no memberships.
+  const [roles, groups] = await Promise.all([
+    getUserRoles(user.id),
+    listUserGroupEmailsByUserId(user.id),
+  ]);
+  log.debug("Resolved Atrium requester", {
+    userId: user.id,
+    roleCount: roles.length,
+    groupCount: groups.length,
+  });
 
   return {
     kind: "user",
@@ -111,6 +125,7 @@ async function resolveAuthenticatedRequester(
     building: user.building,
     department: user.department,
     gradeLevels: user.gradeLevels,
+    groups,
     isAdmin: roles.includes(ADMIN_ROLE),
   };
 }

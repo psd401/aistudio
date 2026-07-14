@@ -173,6 +173,15 @@ const studentUser: Requester = {
   roles: ["student"],
   isAdmin: false,
 };
+// A user who belongs to a synced Google group — for the `group`-kind grant path
+// (#1205). `staffUser` carries no `groups`, so a group grant matches ONLY this one.
+const groupMemberUser: Requester = {
+  kind: "user",
+  userId: 30,
+  roles: ["staff"],
+  groups: ["hs-staff@psd401.net"],
+  isAdmin: false,
+};
 
 // A published, GROUP-visibility doc owned by someone else, granted to role
 // "staff" only. `canView` allows the staff requester (role matches the grant)
@@ -232,6 +241,22 @@ describe("§16.2 permission-aware search — the safety boundary", () => {
 
   it("EXCLUDES the same doc from a STUDENT requester (role grant does NOT match)", async () => {
     const hits = await retrievalService.search(studentUser, "playbook");
+    expect(hits).toHaveLength(0);
+  });
+
+  it("RETURNS a group-directory-scoped doc to a GROUP MEMBER (group grant matches, #1205)", async () => {
+    // The doc is granted to a Google group; retrieval re-checks canView per hit, so
+    // group visibility flows into search/RAG with no retrieval-side change.
+    grantsForResult = [{ kind: "group", value: "hs-staff@psd401.net" }];
+    const hits = await retrievalService.search(groupMemberUser, "playbook");
+    expect(hits).toHaveLength(1);
+    expect(hits[0].objectId).toBe("obj-1");
+  });
+
+  it("EXCLUDES the same group-scoped doc from a NON-member (#1205)", async () => {
+    // staffUser has no `groups`, so the group grant authorizes no one but a member.
+    grantsForResult = [{ kind: "group", value: "hs-staff@psd401.net" }];
+    const hits = await retrievalService.search(staffUser, "playbook");
     expect(hits).toHaveLength(0);
   });
 

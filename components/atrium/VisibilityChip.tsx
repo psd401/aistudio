@@ -5,16 +5,18 @@
  *
  * The shared panel-header control that shows an object's current visibility level
  * and opens the visibility editor: a level picker (private / group / internal /
- * public) plus a group-grant builder (role / building / department / grade / user
- * grants). It reads the current state via `getVisibilityAction` and persists via
- * `setVisibilityAction` — both of which run the `canView` + `assertCanEdit` gates
- * server-side, so this UI is presentation only (no authorization logic here).
+ * public) plus a group-grant builder (role / building / department / grade / user /
+ * group grants). It reads the current state via `getVisibilityAction` and persists
+ * via `setVisibilityAction` — both of which run the `canView` + `assertCanEdit`
+ * gates server-side, so this UI is presentation only (no authorization logic here).
  *
  * Grant value semantics (mirror visibility-service §12.2):
  * - role        — a role NAME (selected from the role list), matched against the
  *                 viewer's roles.
  * - building / department / grade — a free-form `users` attribute string.
  * - user        — a numeric `users.id`.
+ * - group       — a synced Google group EMAIL (selected from the group list),
+ *                 matched against the viewer's group memberships (#1205).
  *
  * For a viewer who cannot edit (not owner/admin), the chip renders read-only:
  * the badge shows the level, the dialog's controls are disabled, and Save is
@@ -52,7 +54,7 @@ import { POSITIVE_INT_RE } from "@/lib/content/validators";
 /** The visibility levels, in widening order, with their picker labels. */
 const LEVELS = [
   { value: "private", label: "Private", help: "Only you (and admins)." },
-  { value: "group", label: "Group", help: "Specific roles, buildings, departments, grades, or people." },
+  { value: "group", label: "Group", help: "Specific roles, buildings, departments, grades, people, or Google groups." },
   { value: "internal", label: "Internal", help: "Any signed-in user." },
   { value: "public", label: "Public", help: "Anyone, including signed-out visitors." },
 ] as const;
@@ -64,12 +66,19 @@ const GRANT_KINDS = [
   { value: "department", label: "Department" },
   { value: "grade", label: "Grade" },
   { value: "user", label: "User ID" },
+  { value: "group", label: "Google group" },
 ] as const;
 type GrantKind = (typeof GRANT_KINDS)[number]["value"];
 
 interface Grant {
   kind: GrantKind;
   value: string;
+}
+
+/** A selectable synced group (email is stored; name is display-only). */
+interface GroupOption {
+  email: string;
+  name: string | null;
 }
 
 /** Badge variant + icon + label for a level (the at-a-glance chip). */
@@ -145,58 +154,63 @@ export interface VisibilityChipProps {
 }
 
 /**
- * Lazily load the role options the role-grant dropdown needs (only an editor with
- * the GROUP level open needs them). A boolean ref guards against a re-fetch after a
- * SUCCESSFUL load — but it is set ONLY on success, so a transient failure leaves it
- * `false` and the next time the load condition becomes true again the effect retries.
+ * Lazily load the grant options the role/group-grant dropdowns need (only an editor
+ * with the GROUP level open needs them). One fetch resolves both the role names and
+ * the synced group list. A boolean ref guards against a re-fetch after a SUCCESSFUL
+ * load — but it is set ONLY on success, so a transient failure leaves it `false` and
+ * the next time the load condition becomes true again the effect retries.
  *
  * `groupActive` (level === "group") is a dep precisely so that retry path works: a
- * failed load while on `group` leaves the dropdown empty, and switching the level
+ * failed load while on `group` leaves the dropdowns empty, and switching the level
  * picker away from `group` and back re-runs this effect (groupActive flips
- * false→true) to retry — otherwise a one-time network blip would strand the dropdown
+ * false→true) to retry — otherwise a one-time network blip would strand the dropdowns
  * empty for the entire dialog session with no escape but closing and reopening.
- * `roleOptions.length` is intentionally NOT a dep (depending on it would re-run on
+ * `options` length is intentionally NOT a dep (depending on it would re-run on
  * every option-list change).
  *
  * NOTE: a boolean ref is correct HERE (unlike the parameterized-route anti-pattern
- * in CLAUDE.md) because the role list is GLOBAL — it does not depend on `idOrSlug`
- * or any other prop, so it never needs to reset for a different id. The parent
- * additionally keys `VisibilityChip` on `obj.id`, so the whole component (and this
- * ref) remounts on navigation regardless. Extracted from the component to keep its
- * body under the max-lines lint cap and to isolate the fetch lifecycle.
+ * in CLAUDE.md) because the option lists are GLOBAL — they do not depend on
+ * `idOrSlug` or any other prop, so they never need to reset for a different id. The
+ * parent additionally keys `VisibilityChip` on `obj.id`, so the whole component (and
+ * this ref) remounts on navigation regardless. Extracted from the component to keep
+ * its body under the max-lines lint cap and to isolate the fetch lifecycle.
  */
-function useRoleOptions(
+function useGrantOptions(
   open: boolean,
   canEdit: boolean,
   groupActive: boolean,
   onError: (message: string) => void
-): string[] {
+): { roles: string[]; groups: GroupOption[] } {
   const [roleOptions, setRoleOptions] = useState<string[]>([]);
-  const roleOptionsLoaded = useRef(false);
+  const [groupOptions, setGroupOptions] = useState<GroupOption[]>([]);
+  const optionsLoaded = useRef(false);
   useEffect(() => {
-    if (!open || !canEdit || !groupActive || roleOptionsLoaded.current) return;
+    if (!open || !canEdit || !groupActive || optionsLoaded.current) return;
     let cancelled = false;
     void (async () => {
       // try/catch so a THROWN fetch (network error) still surfaces an error
-      // rather than silently leaving the role dropdown empty with no explanation.
+      // rather than silently leaving the dropdowns empty with no explanation.
       try {
         const result = await listGrantOptionsAction();
         if (cancelled) return;
         if (result.isSuccess) {
-          roleOptionsLoaded.current = true;
+          optionsLoaded.current = true;
           setRoleOptions(result.data.roles);
+          // `?? []` defends against an older action shape (or a partial test mock)
+          // that omits `groups` — an undefined would break the picker's `.map`.
+          setGroupOptions(result.data.groups ?? []);
         } else {
-          // Surface the failure so the user knows why the role dropdown is empty.
-          // `roleOptionsLoaded` stays false, so returning to the group editor
+          // Surface the failure so the user knows why the dropdowns are empty.
+          // `optionsLoaded` stays false, so returning to the group editor
           // (groupActive false→true) retries this load.
           onError(result.message);
         }
       } catch {
         if (!cancelled) {
           // Same retry-on-return semantics as the !isSuccess branch above:
-          // `roleOptionsLoaded` is untouched, so the load reattempts when the
+          // `optionsLoaded` is untouched, so the load reattempts when the
           // user switches the level picker back to `group`.
-          onError("Failed to load role options — switch the level away and back to retry.");
+          onError("Failed to load grant options — switch the level away and back to retry.");
         }
       }
     })();
@@ -204,16 +218,17 @@ function useRoleOptions(
       cancelled = true;
     };
   }, [open, canEdit, groupActive, onError]);
-  return roleOptions;
+  return { roles: roleOptions, groups: groupOptions };
 }
 
 /**
  * Mirror the server's grant reconciliation so the chip's local `savedGrants` never
  * diverges from what was actually persisted: group keeps all supplied grants,
  * private PRESERVES `user`-kind grants (both read paths honor them), internal/public
- * clear everything. Values are trimmed and (kind,value)-deduped to match the
- * server's `applyGrantsInTx` normalization — otherwise a later Cancel would restore
- * un-trimmed draft values as the "last persisted" state.
+ * clear everything. Values are trimmed, `group` emails lowercased, and
+ * (kind,value)-deduped to match the server's `applyGrantsInTx` normalization —
+ * otherwise a later Cancel would restore un-normalized draft values as the "last
+ * persisted" state.
  */
 function reconcileSavedGrants(level: Level, grants: Grant[]): Grant[] {
   const kept =
@@ -225,7 +240,10 @@ function reconcileSavedGrants(level: Level, grants: Grant[]): Grant[] {
   const seen = new Set<string>();
   const normalized: Grant[] = [];
   for (const g of kept) {
-    const value = g.value.trim();
+    // `group` values are lowercased (emails are case-insensitive); other kinds
+    // keep their case — mirrors the server's `normalizeGrantValue`.
+    const trimmed = g.value.trim();
+    const value = g.kind === "group" ? trimmed.toLowerCase() : trimmed;
     const key = `${g.kind}:${value}`;
     if (value.length === 0 || seen.has(key)) continue;
     seen.add(key);
@@ -366,10 +384,15 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
     };
   }, [idOrSlug]);
 
-  // Role options for the group-grant builder, loaded lazily when the GROUP editor
-  // is open. Passing `level === "group"` lets a failed load retry when the user
-  // switches the level picker away from group and back (see useRoleOptions).
-  const roleOptions = useRoleOptions(open, canEdit, level === "group", setError);
+  // Role + group options for the group-grant builder, loaded lazily when the GROUP
+  // editor is open. Passing `level === "group"` lets a failed load retry when the
+  // user switches the level picker away from group and back (see useGrantOptions).
+  const { roles: roleOptions, groups: groupOptions } = useGrantOptions(
+    open,
+    canEdit,
+    level === "group",
+    setError
+  );
 
   // Changing the level clears any stale error: a transient `useRoleOptions`
   // failure (or a prior save/validation error) is no longer actionable once the
@@ -465,6 +488,7 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
               canEdit={canEdit}
               saving={saving}
               roleOptions={roleOptions}
+              groupOptions={groupOptions}
               onAdd={addGrant}
               onRemove={removeGrant}
             />
@@ -535,6 +559,7 @@ interface GroupGrantEditorProps {
   canEdit: boolean;
   saving: boolean;
   roleOptions: string[];
+  groupOptions: GroupOption[];
   onAdd: (grant: Grant) => void;
   onRemove: (index: number) => void;
 }
@@ -549,6 +574,7 @@ function GroupGrantEditor({
   canEdit,
   saving,
   roleOptions,
+  groupOptions,
   onAdd,
   onRemove,
 }: GroupGrantEditorProps) {
@@ -556,7 +582,10 @@ function GroupGrantEditor({
   const [draftValue, setDraftValue] = useState("");
 
   const submit = useCallback(() => {
-    const value = draftValue.trim();
+    // `group` values are emails (lowercased server-side and here so the local chip
+    // matches what is persisted); other kinds keep their case.
+    const trimmed = draftValue.trim();
+    const value = draftKind === "group" ? trimmed.toLowerCase() : trimmed;
     if (!value) return;
     onAdd({ kind: draftKind, value });
     setDraftValue("");
@@ -636,6 +665,29 @@ function GroupGrantEditor({
                   {roleOptions.map((r) => (
                     <SelectItem key={r} value={r}>
                       {r}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : draftKind === "group" ? (
+              <Select
+                value={draftValue}
+                onValueChange={setDraftValue}
+                disabled={saving}
+              >
+                <SelectTrigger id="grant-value">
+                  <SelectValue
+                    placeholder={
+                      groupOptions.length === 0
+                        ? "No synced groups"
+                        : "Select a group"
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent className={meridianPortalClassName}>
+                  {groupOptions.map((g) => (
+                    <SelectItem key={g.email} value={g.email}>
+                      {g.name ? `${g.name} (${g.email})` : g.email}
                     </SelectItem>
                   ))}
                 </SelectContent>

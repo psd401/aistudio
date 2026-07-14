@@ -135,6 +135,12 @@ export const visibilityLevelEnum = pgEnum("visibility_level", [
 /**
  * Grant kind — the dimension a group visibility grant keys on.
  * Used in: content_visibility_grants.grant_kind
+ *
+ * `group` (Epic #1202 Phase 2, #1205) shares content directly to a synced Google
+ * Directory group — its `grant_value` is the group EMAIL (lowercased), matched
+ * against the viewer's group memberships. Added via migration 110
+ * (`ALTER TYPE grant_kind ADD VALUE 'group'`); the enum is master-owned (created
+ * in the 085 Atrium migration), so `ADD VALUE` succeeds under the migration role.
  */
 export const grantKindEnum = pgEnum("grant_kind", [
   "role",
@@ -142,6 +148,7 @@ export const grantKindEnum = pgEnum("grant_kind", [
   "department",
   "grade",
   "user",
+  "group",
 ]);
 
 /**

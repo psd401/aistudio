@@ -221,7 +221,10 @@ beforeEach(() => {
   mockListOptions.mockResolvedValue({
     isSuccess: true,
     message: "ok",
-    data: { roles: ["staff", "administrator"] },
+    data: {
+      roles: ["staff", "administrator"],
+      groups: [{ email: "hs-staff@psd401.net", name: "HS Staff" }],
+    },
   } as Awaited<ReturnType<typeof listGrantOptionsAction>>);
 });
 
@@ -454,7 +457,7 @@ describe("VisibilityChip", () => {
     await waitFor(() => {
       expect(
         screen.getByText(
-          "Failed to load role options — switch the level away and back to retry."
+          "Failed to load grant options — switch the level away and back to retry."
         )
       ).toBeTruthy();
     });
@@ -480,7 +483,10 @@ describe("VisibilityChip", () => {
       } as Awaited<ReturnType<typeof listGrantOptionsAction>>)
       .mockResolvedValueOnce({
         isSuccess: true,
-        data: { roles: ["staff", "administrator"] },
+        data: {
+          roles: ["staff", "administrator"],
+          groups: [{ email: "hs-staff@psd401.net", name: "HS Staff" }],
+        },
       } as Awaited<ReturnType<typeof listGrantOptionsAction>>);
 
     await act(async () => {

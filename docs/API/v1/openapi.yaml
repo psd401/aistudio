@@ -2648,7 +2648,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [role, building, department, grade, user]
+          enum: [role, building, department, grade, user, group]
         value:
           type: string
 
