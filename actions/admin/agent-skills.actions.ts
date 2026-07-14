@@ -5,9 +5,10 @@ import { handleError, createSuccess, ErrorFactories } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
-import { desc, eq, sql } from "drizzle-orm"
+import { and, desc, eq, sql } from "drizzle-orm"
 import { psdAgentSkills } from "@/lib/db/schema/tables/agent-skills"
 import { psdAgentSkillAudit } from "@/lib/db/schema/tables/agent-skill-audit"
+import { resourceAccessGrants } from "@/lib/db/schema/tables/resource-access-grants"
 import type { SkillScanFindings } from "@/lib/db/schema/tables/agent-skills"
 import {
   registerSkillCatalogTool,
@@ -450,6 +451,17 @@ export async function deleteSkill(
         if (skill?.name) {
           await deactivateSkillCatalogTool(tx, skill.name)
         }
+
+        // Remove any per-resource access grants keyed to this skill (#1206) in
+        // the same transaction so no orphan grant lingers after deletion.
+        await tx
+          .delete(resourceAccessGrants)
+          .where(
+            and(
+              eq(resourceAccessGrants.resourceType, "skill"),
+              eq(resourceAccessGrants.resourceId, skillId)
+            )
+          )
 
         await tx.delete(psdAgentSkills).where(eq(psdAgentSkills.id, skillId))
       },

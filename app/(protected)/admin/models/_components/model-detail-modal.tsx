@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
+import { ResourceGrantsEditor } from "@/components/features/resource-grants"
 import {
   Select,
   SelectContent,
@@ -449,10 +450,10 @@ export function ModelDetailModal({
                     />
                   </div>
 
-                  {/* Allowed Roles */}
+                  {/* Allowed Roles (legacy — superseded by per-resource grants, #1206) */}
                   <div className="space-y-2">
                     <Label>
-                      Allowed Roles
+                      Allowed Roles (legacy)
                       {roleLoading && (
                         <span className="ml-2 text-xs text-muted-foreground">(Loading...)</span>
                       )}
@@ -461,13 +462,32 @@ export function ModelDetailModal({
                       options={roleOptions}
                       value={formData.allowedRoles}
                       onChange={(v) => updateField("allowedRoles", v)}
-                      placeholder={roleLoading ? "Loading roles..." : "All roles (unrestricted)"}
-                      disabled={roleLoading}
+                      placeholder="All roles (unrestricted)"
+                      disabled
                       className="w-full"
                     />
                     <p className="text-xs text-muted-foreground">
-                      Leave empty to allow access for all roles
+                      Read-only. Access is now enforced by the <span className="font-medium">Access</span>{" "}
+                      editor below (roles + Google groups). This field was migrated into it and is
+                      retained only until it is removed in a later migration.
                     </p>
+                  </div>
+
+                  {/* Access — authoritative per-resource grants (roles + groups), #1206 */}
+                  <div className="space-y-2">
+                    <Label>Access</Label>
+                    {isNew || !model ? (
+                      <p className="text-xs text-muted-foreground">
+                        New models are available to everyone. Save the model first, then reopen it to
+                        restrict access to specific roles or Google groups.
+                      </p>
+                    ) : (
+                      <ResourceGrantsEditor
+                        resourceType="model"
+                        resourceId={model.id}
+                        resourceLabel={model.name}
+                      />
+                    )}
                   </div>
                 </div>
               </div>

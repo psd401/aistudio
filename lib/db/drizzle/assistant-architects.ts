@@ -42,7 +42,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, desc, sql, inArray } from "drizzle-orm";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   assistantArchitects,
@@ -58,6 +58,7 @@ import {
   userNotifications,
   navigationItems,
   navigationItemRoles,
+  resourceAccessGrants,
 } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
 import { CAPABILITY_MANIFEST } from "@/lib/capabilities/manifest";
@@ -584,6 +585,17 @@ export async function deleteAssistantArchitect(id: number) {
       await tx
         .delete(scheduledExecutions)
         .where(eq(scheduledExecutions.assistantArchitectId, id));
+
+      // 6b. Delete per-resource access grants for this assistant (#1206) so no
+      // orphan grant lingers and matches a recycled serial id.
+      await tx
+        .delete(resourceAccessGrants)
+        .where(
+          and(
+            eq(resourceAccessGrants.resourceType, "assistant"),
+            eq(resourceAccessGrants.resourceId, String(id))
+          )
+        );
 
       // 7. Finally delete the assistant architect itself
       const result = await tx

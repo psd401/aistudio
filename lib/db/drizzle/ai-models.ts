@@ -45,6 +45,7 @@ import {
   modelComparisons,
   modelReplacementAudit,
   promptLibrary,
+  resourceAccessGrants,
 } from "@/lib/db/schema";
 import { createLogger, generateRequestId } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
@@ -361,14 +362,26 @@ export async function updateAIModel(id: number, updates: AIModelUpdateData) {
 }
 
 /**
- * Delete an AI model
+ * Delete an AI model. Also removes any per-resource access grants on the model
+ * (#1206) in the SAME transaction, so a recycled serial id can never inherit a
+ * departed model's grants.
  */
 export async function deleteAIModel(id: number) {
-  const result = await executeQuery(
-    (db) => db.delete(aiModels).where(eq(aiModels.id, id)).returning(),
+  return executeTransaction(
+    async (tx) => {
+      await tx
+        .delete(resourceAccessGrants)
+        .where(
+          and(
+            eq(resourceAccessGrants.resourceType, "model"),
+            eq(resourceAccessGrants.resourceId, String(id))
+          )
+        );
+      const result = await tx.delete(aiModels).where(eq(aiModels.id, id)).returning();
+      return result[0];
+    },
     "deleteAIModel"
   );
-  return result[0];
 }
 
 /**
