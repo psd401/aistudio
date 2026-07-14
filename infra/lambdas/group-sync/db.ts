@@ -26,6 +26,14 @@ function requireEnv(name: string): string {
   return value;
 }
 
+/**
+ * Must match LAST_ADMIN_GUARD_LOCK_KEY in lib/db/drizzle/user-roles.ts — the
+ * two reconcilers (this bulk pass, the app's per-user path) share one
+ * Postgres advisory lock so their admin-guard read-then-delete sections
+ * serialize against each other, not just against themselves (#1222 review).
+ */
+const LAST_ADMIN_GUARD_LOCK_KEY = 925_001;
+
 let _sql: postgres.Sql | null = null;
 let _initPromise: Promise<postgres.Sql> | null = null;
 
@@ -237,6 +245,11 @@ export async function reconcileManagedRoles(
     // fell out of the computed set), protect the administrator role from THIS
     // delete entirely — there is no in-app recovery from zero admins. Mirrors
     // the per-user reconciler and the manual-path guard.
+    //
+    // Serialize against the per-user reconciler's own guard (same lock key)
+    // so a concurrent login-time revocation and this hourly pass can't each
+    // read the other's uncommitted admin row as "surviving" and both revoke.
+    await tx`SELECT pg_advisory_xact_lock(${LAST_ADMIN_GUARD_LOCK_KEY})`;
     const [adminGuard] = await tx<
       { admin_role_id: number; surviving_admins: number }[]
     >`

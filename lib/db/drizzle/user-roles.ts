@@ -11,7 +11,7 @@
  */
 
 import { eq, ne, inArray, notInArray, and, sql } from "drizzle-orm";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { executeQuery, type DbTransaction } from "@/lib/db/drizzle-client";
 import {
   users,
   userRoles,
@@ -23,6 +23,75 @@ import {
 } from "@/lib/db/schema";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
+
+/**
+ * Serializes the last-administrator guard's read-then-delete across BOTH
+ * reconcilers (this per-user path and the bulk Lambda's `db.ts`, which must
+ * use the same key). Without it, concurrent transactions can each read the
+ * other's still-uncommitted admin row as "surviving" under READ COMMITTED
+ * and both revoke — zero admins despite the guard (#1222 review). Held only
+ * around the admin-removal branch since that is the rare path; auto-released
+ * at transaction end.
+ */
+const LAST_ADMIN_GUARD_LOCK_KEY = 925_001;
+
+export interface ManualRoleSyncResult {
+  deletedRoleIds: number[];
+  insertedRoleIds: number[];
+  changed: boolean;
+}
+
+/**
+ * Shared delete+insert body for the three source-aware "replace a user's
+ * MANUAL roles" writers (this file's `updateUserRoles`, the legacy
+ * `lib/db/user-roles.ts#updateUserRoles`, and the admin `updateUser` action).
+ * Managed (source='group-sync') rows are invisible: never deleted
+ * (reconciliation would silently re-add them next pass) and never
+ * re-inserted as manual (would exempt them from auto-revocation forever).
+ * This editor owns manual rows only. Callers keep their own role_version
+ * bump / last-admin-removal checks — this only performs the write (#1222
+ * review: the logic was copy-pasted three times, drifting once already).
+ */
+export async function syncManualUserRoles(
+  tx: DbTransaction,
+  userId: number,
+  submittedRoleIds: number[]
+): Promise<ManualRoleSyncResult> {
+  const deleted = await tx
+    .delete(userRoles)
+    .where(
+      and(
+        eq(userRoles.userId, userId),
+        eq(userRoles.source, "manual"),
+        submittedRoleIds.length > 0
+          ? notInArray(userRoles.roleId, submittedRoleIds)
+          : sql`TRUE`
+      )
+    )
+    .returning({ roleId: userRoles.roleId });
+
+  let inserted: { roleId: number | null }[] = [];
+  if (submittedRoleIds.length > 0) {
+    inserted = await tx
+      .insert(userRoles)
+      .values(submittedRoleIds.map((roleId) => ({ userId, roleId })))
+      .onConflictDoNothing({ target: [userRoles.userId, userRoles.roleId] })
+      .returning({ roleId: userRoles.roleId });
+  }
+
+  const deletedRoleIds = deleted
+    .map((r) => r.roleId)
+    .filter((id): id is number => id !== null);
+  const insertedRoleIds = inserted
+    .map((r) => r.roleId)
+    .filter((id): id is number => id !== null);
+
+  return {
+    deletedRoleIds,
+    insertedRoleIds,
+    changed: deletedRoleIds.length > 0 || insertedRoleIds.length > 0,
+  };
+}
 
 // ============================================
 // User Role Query Operations
@@ -112,35 +181,10 @@ export async function updateUserRoles(
 
           const submittedIds = rolesData.map((r) => r.id);
 
-          // Delete only MANUAL rows no longer in the submitted set — group-sync
-          // rows belong to reconciliation, not this editor.
-          const deleted = await tx
-            .delete(userRoles)
-            .where(
-              and(
-                eq(userRoles.userId, userId),
-                eq(userRoles.source, "manual"),
-                submittedIds.length > 0
-                  ? notInArray(userRoles.roleId, submittedIds)
-                  : sql`TRUE`
-              )
-            )
-            .returning({ roleId: userRoles.roleId });
-
-          // Insert submitted roles the user lacks entirely (source defaults to
-          // 'manual'). A role already held as group-sync is left as-is — the
-          // admin isn't granting anything new, the group already covers it.
-          let inserted: { roleId: number | null }[] = [];
-          if (submittedIds.length > 0) {
-            inserted = await tx
-              .insert(userRoles)
-              .values(submittedIds.map((roleId) => ({ userId, roleId })))
-              .onConflictDoNothing({ target: [userRoles.userId, userRoles.roleId] })
-              .returning({ roleId: userRoles.roleId });
-          }
+          const { changed } = await syncManualUserRoles(tx, userId, submittedIds);
 
           // Bump role_version only when a row actually changed.
-          if (deleted.length > 0 || inserted.length > 0) {
+          if (changed) {
             await tx
               .update(users)
               .set({
@@ -502,6 +546,9 @@ export async function reconcileUserManagedRoles(
               .where(eq(roles.name, "administrator"))
               .limit(1);
             if (adminRole && toRemove.includes(adminRole.id)) {
+              await tx.execute(
+                sql`SELECT pg_advisory_xact_lock(${LAST_ADMIN_GUARD_LOCK_KEY})`
+              );
               const [remaining] = await tx
                 .select({ count: sql<number>`count(*)::int` })
                 .from(userRoles)

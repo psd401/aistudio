@@ -1,7 +1,8 @@
 import { executeQuery, executeTransaction } from './drizzle-client';
 import { users, userRoles, roles } from './schema';
-import { eq, inArray, notInArray, sql, and } from 'drizzle-orm';
+import { eq, inArray, sql, and } from 'drizzle-orm';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { syncManualUserRoles } from '@/lib/db/drizzle/user-roles';
 
 /**
  * Helper: Convert Error to plain object for safe logging
@@ -116,34 +117,13 @@ export async function updateUserRoles(userId: number, roleNames: string[]): Prom
       async (tx) => {
         const submittedIds = roleResult.map(role => role.id);
 
-        // Step 1: Delete MANUAL role assignments no longer in the submitted set
-        const deleted = await tx
-          .delete(userRoles)
-          .where(
-            and(
-              eq(userRoles.userId, userId),
-              eq(userRoles.source, 'manual'),
-              submittedIds.length > 0
-                ? notInArray(userRoles.roleId, submittedIds)
-                : sql`TRUE`
-            )
-          )
-          .returning({ roleId: userRoles.roleId });
-
-        // Step 2: Insert submitted roles the user lacks entirely (defaults to
-        // source='manual'). Roles already held — manual OR group-sync — are
-        // conflict-skipped and keep their existing source.
-        let inserted: { roleId: number | null }[] = [];
-        if (submittedIds.length > 0) {
-          inserted = await tx
-            .insert(userRoles)
-            .values(submittedIds.map(roleId => ({ userId, roleId })))
-            .onConflictDoNothing({ target: [userRoles.userId, userRoles.roleId] })
-            .returning({ roleId: userRoles.roleId });
-        }
+        // Steps 1-2 (delete stale manual rows, insert new ones) live in the
+        // shared helper — this logic was copy-pasted across three call sites
+        // and drifted once already (#1222 review).
+        const { changed } = await syncManualUserRoles(tx, userId, submittedIds);
 
         // Step 3: Increment role_version only when a row actually changed
-        if (deleted.length > 0 || inserted.length > 0) {
+        if (changed) {
           await tx
             .update(users)
             .set({
