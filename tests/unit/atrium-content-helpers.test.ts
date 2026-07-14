@@ -147,18 +147,36 @@ describe("principalOf", () => {
       building: "High School",
       department: "Math",
       gradeLevels: ["9", "10"],
+      // `groups` defaults to [] when the requester carries none (#1205).
+      groups: [],
       isAdmin: false,
     });
+  });
+  it("carries the user's synced group memberships (#1205)", () => {
+    const withGroups: Requester = {
+      ...userReq,
+      groups: ["hs-staff@psd401.net"],
+    };
+    expect(principalOf(withGroups).groups).toEqual(["hs-staff@psd401.net"]);
   });
   it("never infers admin for a delegated agent", () => {
     expect(principalOf(delegatedReq).isAdmin).toBe(false);
     expect(principalOf(delegatedReq).userId).toBe(42);
+  });
+  it("inherits the human's groups for a delegated agent (#1205)", () => {
+    const withGroups: Requester = {
+      ...delegatedReq,
+      groups: ["hs-staff@psd401.net"],
+    };
+    expect(principalOf(withGroups).groups).toEqual(["hs-staff@psd401.net"]);
   });
   it("gives an autonomous agent no user id and no org attributes", () => {
     const p = principalOf(autonomousReq);
     expect(p.userId).toBeUndefined();
     expect(p.building).toBeNull();
     expect(p.roles).toEqual(["staff"]);
+    // Autonomous agents have no human identity → no group memberships.
+    expect(p.groups).toEqual([]);
   });
 });
 

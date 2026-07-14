@@ -96,6 +96,16 @@ jest.mock("@/lib/auth/server-session", () => ({
   getServerSession: () => getServerSessionMock(),
 }));
 
+// listGrantOptionsAction also loads the synced group picker options (#1205). Mock
+// the query helper so the action test stays isolated from the groups query internals
+// (the roles query still runs through executeQueryMock).
+const listActiveGroupsForPickerMock = jest.fn(async () => [
+  { email: "hs-staff@psd401.net", name: "HS Staff" },
+]);
+jest.mock("@/lib/groups/queries", () => ({
+  listActiveGroupsForPicker: (...a: unknown[]) => listActiveGroupsForPickerMock(...a),
+}));
+
 // ─── imports (after all jest.mock hoisting) ────────────────────────────────
 
 import { getVisibilityAction } from "@/actions/db/atrium/get-visibility";
@@ -248,5 +258,14 @@ describe("listGrantOptionsAction — auth gates", () => {
     expect(result.isSuccess).toBe(true);
     if (!result.isSuccess) return;
     expect(result.data.roles).toEqual(["staff", "teacher"]);
+  });
+
+  it("returns the active synced groups for the group picker (#1205)", async () => {
+    const result = await listGrantOptionsAction();
+    expect(result.isSuccess).toBe(true);
+    if (!result.isSuccess) return;
+    expect(result.data.groups).toEqual([
+      { email: "hs-staff@psd401.net", name: "HS Staff" },
+    ]);
   });
 });

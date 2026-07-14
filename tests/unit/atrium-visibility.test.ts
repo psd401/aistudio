@@ -62,6 +62,14 @@ const staffUser: Requester = {
   gradeLevels: ["9"],
   isAdmin: false,
 };
+// A user who belongs to a synced Google group (lowercased email in `groups`),
+// for the `group`-kind grant tests (#1205). Distinct from `staffUser` (no groups)
+// so a group grant matches ONLY the member.
+const groupMemberUser: Requester = {
+  ...staffUser,
+  userId: 101,
+  groups: ["hs-staff@psd401.net"],
+};
 const admin: Requester = { ...staffUser, userId: 1, isAdmin: true };
 const owner: Requester = { ...staffUser, userId: OWNER_ID };
 const anonymous: Requester = {
@@ -183,6 +191,40 @@ describe("canView — group grants", () => {
     withGrants([{ kind: "role", value: "staff" }]);
     expect(await visibilityService.canView(roledAgent, obj("group"))).toBe(true);
   });
+
+  it("group grant matches a member of the granted Google group (#1205)", async () => {
+    withGrants([{ kind: "group", value: "hs-staff@psd401.net" }]);
+    expect(await visibilityService.canView(groupMemberUser, obj("group"))).toBe(
+      true
+    );
+  });
+  it("group grant fails for a non-member (no matching membership)", async () => {
+    // staffUser carries no `groups`, so a group grant matches no one but a member.
+    withGrants([{ kind: "group", value: "hs-staff@psd401.net" }]);
+    expect(await visibilityService.canView(staffUser, obj("group"))).toBe(false);
+  });
+  it("group grant fails when the member belongs to a DIFFERENT group", async () => {
+    withGrants([{ kind: "group", value: "elsewhere@psd401.net" }]);
+    expect(await visibilityService.canView(groupMemberUser, obj("group"))).toBe(
+      false
+    );
+  });
+  it("an autonomous agent (no human identity) never matches a group grant", async () => {
+    withGrants([{ kind: "group", value: "hs-staff@psd401.net" }]);
+    expect(await visibilityService.canView(roledAgent, obj("group"))).toBe(false);
+  });
+});
+
+describe("canView — group grant is gated on group VISIBILITY (guard mirror #1205)", () => {
+  it("a group-kind grant on a PRIVATE object grants a member nothing extra", async () => {
+    // The private branch consults ONLY `user` grants — a stray `group` grant on a
+    // non-group object must NOT authorize a member, mirroring buildVisibilitySql's
+    // `visibility_level = 'group'` gate on the whole grant-sweep EXISTS clause.
+    withGrants([{ kind: "group", value: "hs-staff@psd401.net" }]);
+    expect(
+      await visibilityService.canView(groupMemberUser, obj("private"))
+    ).toBe(false);
+  });
 });
 
 describe("canView — unauthenticated", () => {
@@ -288,6 +330,28 @@ describe("applyGrantsForLevel — grant value validation (group level)", () => {
     ]);
     expect(inserted).toHaveLength(1);
     expect((inserted[0] as unknown[]).length).toBe(2);
+  });
+
+  it("accepts a group-email grant value and lowercases it before storing (#1205)", async () => {
+    // Emails are case-insensitive; the stored value must be lowercase so it matches
+    // the lowercased principal.groups. A mixed-case input is normalized on write.
+    const { tx, inserted } = fakeTx();
+    await apply(tx, [{ kind: "group", value: "HS-Staff@PSD401.net" }]);
+    expect(inserted).toHaveLength(1);
+    const rows = inserted[0] as Array<{ grantKind: string; grantValue: string }>;
+    expect(rows[0]).toMatchObject({
+      grantKind: "group",
+      grantValue: "hs-staff@psd401.net",
+    });
+  });
+
+  it("rejects a group grant value that is not an email (defense-in-depth #1205)", async () => {
+    // A group grant value must look like an email — a role name or bare id could
+    // never equal a synced group email, so reject it rather than store an inert grant.
+    const { tx } = fakeTx();
+    await expect(
+      apply(tx, [{ kind: "group", value: "not-an-email" }])
+    ).rejects.toThrow(/group email/i);
   });
 
   it("rejects a whitespace-only grant value (trims to empty → required)", async () => {
