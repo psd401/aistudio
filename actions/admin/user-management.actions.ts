@@ -459,7 +459,10 @@ export async function getUserActivity(
 }
 
 /**
- * Update user information (name and roles)
+ * Update user information (name and roles). Returns the user's ACTUAL
+ * post-write role names — a submission that "removes" a group-managed role is
+ * a correct no-op (the reconciler owns those rows), so callers must not trust
+ * the submitted list for optimistic UI state (#1222 round 3).
  */
 export async function updateUser(
   userId: number,
@@ -468,7 +471,7 @@ export async function updateUser(
     lastName: string
     roles: string[]
   }
-): Promise<ActionState<void>> {
+): Promise<ActionState<{ roles: string[] }>> {
   const requestId = generateRequestId()
   const timer = startTimer("updateUser")
   const log = createLogger({ requestId, action: "updateUser" })
@@ -494,7 +497,7 @@ export async function updateUser(
 
     // Update user and role assignments in a transaction
     // All validation happens inside transaction to prevent race conditions
-    await executeTransaction(
+    const updatedRoleNames = await executeTransaction(
       async (tx) => {
         // Update user basic info - verify user exists
         const result = await tx
@@ -525,20 +528,30 @@ export async function updateUser(
           )
         }
 
-        // Prevent removing admin role from last administrator (would lock everyone out)
+        // Prevent removing admin role from last administrator (would lock
+        // everyone out). Source-aware (#1222 round 3): this editor can only
+        // delete MANUAL rows, so the guard applies only when the user's
+        // administrator grant is manual — a group-sync admin grant is
+        // untouchable here, and blocking an unrelated edit on its account
+        // would be a false positive.
         const isRemovingAdmin = !data.roles.includes("administrator")
         if (isRemovingAdmin) {
-          // Check if user currently has admin role
-          const currentUserRoles = await tx
-            .select({ roleName: roles.name })
+          const [manualAdminRow] = await tx
+            .select({ id: userRoles.id })
             .from(userRoles)
             .innerJoin(roles, eq(userRoles.roleId, roles.id))
-            .where(eq(userRoles.userId, userId))
+            .where(
+              and(
+                eq(userRoles.userId, userId),
+                eq(roles.name, "administrator"),
+                eq(userRoles.source, "manual")
+              )
+            )
+            .limit(1)
 
-          const isCurrentlyAdmin = currentUserRoles.some((r) => r.roleName === "administrator")
-
-          if (isCurrentlyAdmin) {
-            // User is currently an admin and we're removing it - check if they're the last one
+          if (manualAdminRow) {
+            // This edit WOULD delete the user's manual admin grant — refuse if
+            // no other administrator grant (any source, any user) remains.
             const adminCountResult = await tx
               .select({ count: count() })
               .from(userRoles)
@@ -562,6 +575,16 @@ export async function updateUser(
         // to this editor: never deleted, never re-inserted as 'manual'.
         const submittedRoleIds = roleList.map((role) => role.id)
         await syncManualUserRoles(tx, userId, submittedRoleIds)
+
+        // Read back the ACTUAL post-write role set — it can differ from the
+        // submission when a group-managed role was "unchecked" (correct no-op).
+        const postRoles = await tx
+          .select({ name: roles.name })
+          .from(userRoles)
+          .innerJoin(roles, eq(userRoles.roleId, roles.id))
+          .where(eq(userRoles.userId, userId))
+          .orderBy(roles.name)
+        return postRoles.map((r) => r.name)
       },
       "updateUser-transaction"
     )
@@ -569,7 +592,7 @@ export async function updateUser(
     timer({ status: "success" })
     log.info("User updated successfully", { userId })
 
-    return createSuccess(undefined, "User updated successfully")
+    return createSuccess({ roles: updatedRoleNames }, "User updated successfully")
   } catch (error) {
     timer({ status: "error" })
     return handleError(error, "Failed to update user", {

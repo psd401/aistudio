@@ -246,32 +246,56 @@ export async function reconcileManagedRoles(
     // delete entirely — there is no in-app recovery from zero admins. Mirrors
     // the per-user reconciler and the manual-path guard.
     //
-    // Serialize against the per-user reconciler's own guard (same lock key)
-    // so a concurrent login-time revocation and this hourly pass can't each
-    // read the other's uncommitted admin row as "surviving" and both revoke.
-    await tx`SELECT pg_advisory_xact_lock(${LAST_ADMIN_GUARD_LOCK_KEY})`;
-    const [adminGuard] = await tx<
-      { admin_role_id: number; surviving_admins: number }[]
-    >`
-      SELECT r.id AS admin_role_id,
-             (SELECT count(*)::int FROM user_roles ur
-               WHERE ur.role_id = r.id
-                 AND NOT (
-                   ur.source = 'group-sync'
-                   AND NOT EXISTS (
-                     SELECT 1 FROM _computed_roles c
-                      WHERE c.user_id = ur.user_id AND c.role_id = ur.role_id
-                   )
-                 )
-             ) AS surviving_admins
+    // Cheap unlocked precheck first (#1222 round 3): the advisory lock is only
+    // needed when THIS pass actually has an admin-row deletion candidate —
+    // taking it unconditionally would serialize every login-time admin
+    // reconcile against the full duration of the hourly bulk pass.
+    const [adminDeletionCandidate] = await tx<{ role_id: number }[]>`
+      SELECT r.id AS role_id
         FROM roles r
        WHERE r.name = 'administrator'
+         AND EXISTS (
+           SELECT 1 FROM user_roles ur
+            WHERE ur.role_id = r.id
+              AND ur.source = 'group-sync'
+              AND NOT EXISTS (
+                SELECT 1 FROM _computed_roles c
+                 WHERE c.user_id = ur.user_id AND c.role_id = ur.role_id
+              )
+         )
        LIMIT 1
     `;
-    const protectAdminRoleId =
-      adminGuard && adminGuard.surviving_admins === 0
-        ? adminGuard.admin_role_id
-        : null;
+    let protectAdminRoleId: number | null = null;
+    if (adminDeletionCandidate) {
+      // Serialize against the per-user reconciler's own guard (same lock key)
+      // so a concurrent login-time revocation and this hourly pass can't each
+      // read the other's uncommitted admin row as "surviving" and both revoke.
+      // The guard count re-runs UNDER the lock — the precheck above is only a
+      // gate, never the decision.
+      await tx`SELECT pg_advisory_xact_lock(${LAST_ADMIN_GUARD_LOCK_KEY})`;
+      const [adminGuard] = await tx<
+        { admin_role_id: number; surviving_admins: number }[]
+      >`
+        SELECT r.id AS admin_role_id,
+               (SELECT count(*)::int FROM user_roles ur
+                 WHERE ur.role_id = r.id
+                   AND NOT (
+                     ur.source = 'group-sync'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM _computed_roles c
+                        WHERE c.user_id = ur.user_id AND c.role_id = ur.role_id
+                     )
+                   )
+               ) AS surviving_admins
+          FROM roles r
+         WHERE r.name = 'administrator'
+         LIMIT 1
+      `;
+      protectAdminRoleId =
+        adminGuard && adminGuard.surviving_admins === 0
+          ? adminGuard.admin_role_id
+          : null;
+    }
 
     // Add computed roles the user does not already hold (any source). ON CONFLICT
     // DO NOTHING guards a race with the login-time reconciler on the unique
