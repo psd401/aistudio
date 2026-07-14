@@ -7,7 +7,7 @@
  * write via the shared normalize helpers.
  */
 
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { executeQuery, toPgRows } from "@/lib/db/drizzle-client";
 import { ErrorFactories } from "@/lib/error-utils";
 import {
@@ -16,6 +16,7 @@ import {
   groupSelectionRules,
   groupRoleMappings,
   roles,
+  users,
   type GroupSelectionRuleRow,
   type GroupSelectionRuleType,
   type GroupSource,
@@ -68,6 +69,70 @@ export async function listGroupsWithCounts(): Promise<GroupWithCount[]> {
     "listGroupsWithCounts"
   );
   return rows;
+}
+
+/**
+ * The lowercased emails of the ACTIVE synced groups a user belongs to — the
+ * `principal.groups` match set for `group`-kind Atrium visibility grants (Epic
+ * #1202 Phase 2, #1205).
+ *
+ * Joins the user to `group_members` on their LOWERCASED email (membership is keyed
+ * by email, not a users FK; `idx_group_members_email` is on lower(email)), then to
+ * `groups` restricted to `is_active` so a de-selected group grants nothing.
+ * `lower()` on BOTH sides of every email comparison: storage is lowercase by
+ * convention (normalizeEmail at write time) but no constraint enforces it, so the
+ * join must not trust it (mirrors `reconcileUserManagedRoles`). A user with a null
+ * email, no memberships, or only inactive groups yields `[]` (fails closed). The
+ * result is DISTINCT and lowercased, matching the lowercased `group` grant_value.
+ */
+export async function listUserGroupEmailsByUserId(
+  userId: number
+): Promise<string[]> {
+  // Defensive: a malformed/NaN id skips the query and yields no memberships.
+  if (!Number.isInteger(userId) || userId <= 0) return [];
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .selectDistinct({ groupEmail: sql<string>`lower(${groups.groupEmail})` })
+        .from(users)
+        .innerJoin(
+          groupMembers,
+          eq(sql`lower(${groupMembers.memberEmail})`, sql`lower(${users.email})`)
+        )
+        .innerJoin(
+          groups,
+          and(eq(groups.id, groupMembers.groupId), eq(groups.isActive, true))
+        )
+        .where(eq(users.id, userId)),
+    "listUserGroupEmailsByUserId"
+  );
+  return rows.map((r) => r.groupEmail);
+}
+
+/** A synced group reduced to what a grant picker shows/stores (#1205). */
+export interface GroupPickerOption {
+  /** The lowercased group email — the value stored as a `group` grant. */
+  email: string;
+  /** Display name (null until the first successful fetch); falls back to email in the UI. */
+  name: string | null;
+}
+
+/**
+ * Active synced groups for the Atrium grant editor's group picker (#1205), by
+ * display name then email. Only `is_active` groups are offered — a de-selected
+ * group grants nothing (mirrors `listUserGroupEmailsByUserId`'s active filter), so
+ * offering it would let an author pick a grant that authorizes no one.
+ */
+export async function listActiveGroupsForPicker(): Promise<GroupPickerOption[]> {
+  return executeQuery(
+    (db) =>
+      db
+        .select({ email: groups.groupEmail, name: groups.name })
+        .from(groups)
+        .where(eq(groups.isActive, true))
+        .orderBy(asc(groups.name), asc(groups.groupEmail)),
+    "listActiveGroupsForPicker"
+  );
 }
 
 /** Member emails for one group (alphabetical). */

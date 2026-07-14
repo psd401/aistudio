@@ -18,8 +18,18 @@
 
 import type { SourceRef } from "@/lib/db/schema";
 
-/** A grant value to widen `group` visibility along one dimension. */
-export type GrantKind = "role" | "building" | "department" | "grade" | "user";
+/**
+ * A grant value to widen `group` visibility along one dimension. `group` (Epic
+ * #1202 Phase 2, #1205) keys on a synced Google Directory group email — see
+ * `content-visibility-grants.ts` for the per-kind `grant_value` semantics.
+ */
+export type GrantKind =
+  | "role"
+  | "building"
+  | "department"
+  | "grade"
+  | "user"
+  | "group";
 
 export interface VisibilityGrant {
   kind: GrantKind;
@@ -49,6 +59,14 @@ export interface Principal {
   building?: string | null;
   department?: string | null;
   gradeLevels?: string[] | null;
+  /**
+   * The synced Google Directory group EMAILS (lowercased) the principal belongs
+   * to — the match set for a `group`-kind visibility grant (Epic #1202 Phase 2,
+   * #1205). Populated by `principalOf` from the requester's `groups`; always a
+   * concrete array (empty for guests / autonomous agents, so a missing membership
+   * fails closed rather than throwing).
+   */
+  groups: string[];
   isAdmin: boolean;
 }
 
@@ -67,6 +85,14 @@ export type Requester =
       building?: string | null;
       department?: string | null;
       gradeLevels?: string[] | null;
+      /**
+       * Synced Google group emails (lowercased) the user belongs to — the match
+       * set for `group`-kind grants (#1205). Optional: a resolver that omits it
+       * (or a test double) yields no group access via `principalOf`'s `?? []`
+       * default, so a missing lookup fails closed. The two production resolvers
+       * (`resolveAuthenticatedRequester`, `loadUserContext`) always populate it.
+       */
+      groups?: string[];
       isAdmin: boolean;
     }
   | {
@@ -76,6 +102,8 @@ export type Requester =
       building?: string | null;
       department?: string | null;
       gradeLevels?: string[] | null;
+      /** The human's synced group emails — a delegated agent inherits them (#1205). */
+      groups?: string[];
       scopes: string[];
       agentLabel: string;
     }

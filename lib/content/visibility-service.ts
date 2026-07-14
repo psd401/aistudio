@@ -30,7 +30,12 @@ import {
 } from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
 import { NotFoundError, ValidationError } from "./errors";
-import { GRANT_KIND_SET, POSITIVE_INT_RE, VISIBILITY_LEVEL_SET } from "./validators";
+import {
+  GRANT_KIND_SET,
+  GROUP_EMAIL_RE,
+  POSITIVE_INT_RE,
+  VISIBILITY_LEVEL_SET,
+} from "./validators";
 import type {
   ContentObjectDTO,
   ListFilter,
@@ -62,20 +67,36 @@ function escapeLikePattern(text: string): string {
 const MAX_GRANT_VALUE_LENGTH = 255;
 
 /**
+ * Normalize a grant value for storage: trim surrounding whitespace for every kind
+ * and additionally LOWERCASE `group` (email) values (#1205) so they match the
+ * lowercased `principal.groups` / `groups.group_email`. Non-string values pass
+ * through untouched so `assertValidGrant` surfaces the type problem, not this.
+ * Deliberately does NOT lowercase role/building/department/grade — those match the
+ * stored attribute case-sensitively.
+ */
+function normalizeGrantValue(kind: string, value: string): string {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  return kind === "group" ? trimmed.toLowerCase() : trimmed;
+}
+
+/**
  * Validate a grant before it is persisted. Only a `user` grant carries a numeric
  * id (the `users.id`, matched as `String(userId)` in §12.2). A `role` grant
  * carries the role *name* (e.g. "staff"), because `canView` matches it against
  * `principal.roles` — which are role NAMES (`getUserRoles` returns
- * `roles.name`), never role ids. The remaining kinds (building / department /
- * grade) carry the user-attribute string verbatim. Rejecting an empty or
- * over-long value here prevents, e.g., an empty-string role grant from matching
- * unintended principals once the `g.grant_value = ''` comparison runs.
+ * `roles.name`), never role ids. A `group` grant carries a synced Google group
+ * EMAIL (#1205), matched against `principal.groups`. The remaining kinds
+ * (building / department / grade) carry the user-attribute string verbatim.
+ * Rejecting an empty or over-long value here prevents, e.g., an empty-string role
+ * grant from matching unintended principals once the `g.grant_value = ''`
+ * comparison runs.
  *
  * NOTE: a `role` grant value MUST NOT be validated as a numeric id. Doing so
  * (the Phase 0 behaviour) made role-based group grants unmatchable end-to-end:
  * any value that passed validation (a number) could never equal a role name, so
- * the grant silently granted access to no one. role=name / user=id is the §12.2
- * contract and what `canView` / `buildVisibilitySql` both match on.
+ * the grant silently granted access to no one. role=name / user=id / group=email
+ * is the §12.2 contract and what `canView` / `buildVisibilitySql` both match on.
  */
 function assertValidGrant(grant: VisibilityGrant): void {
   if (!GRANT_KIND_SET.has(grant.kind)) {
@@ -94,6 +115,16 @@ function assertValidGrant(grant: VisibilityGrant): void {
   if (grant.kind === "user" && !POSITIVE_INT_RE.test(value)) {
     throw new ValidationError(
       `Grant value for 'user' must be a positive-integer id`,
+      { kind: grant.kind, value }
+    );
+  }
+  // A `group` grant value must look like a group EMAIL — reject a role name or a
+  // bare id that could never equal a synced group email (defense-in-depth for the
+  // REST/MCP/agent write paths; the UI picker always supplies a real group email).
+  // The value is already lowercased by `applyGrantsInTx`'s normalization.
+  if (grant.kind === "group" && !GROUP_EMAIL_RE.test(value)) {
+    throw new ValidationError(
+      `Grant value for 'group' must be a group email`,
       { kind: grant.kind, value }
     );
   }
@@ -117,6 +148,10 @@ function buildVisibilitySql(principal: Principal): SQL {
   const userIdText = principal.userId != null ? String(principal.userId) : null;
   const roleList = principal.roles;
   const gradeList = principal.gradeLevels ?? [];
+  // Synced Google group emails (lowercased) the principal belongs to (#1205).
+  // Stored group grant_values are lowercased on write, so this is an exact-match
+  // IN (index-friendly), mirroring the role/grade lists.
+  const groupList = principal.groups ?? [];
 
   const authenticated = userIdText != null || roleList.length > 0;
   // INVARIANT: owners always see their own content regardless of visibility level
@@ -142,6 +177,7 @@ function buildVisibilitySql(principal: Principal): SQL {
       : sql`false`;
   const roleMatch = inList(roleList);
   const gradeMatch = inList(gradeList);
+  const groupMatch = inList(groupList);
   const buildingMatch =
     principal.building != null
       ? sql`g.grant_value = ${principal.building}`
@@ -174,6 +210,7 @@ function buildVisibilitySql(principal: Principal): SQL {
         OR (g.grant_kind = 'department' AND ${departmentMatch})
         OR (g.grant_kind = 'grade'      AND ${gradeMatch})
         OR (g.grant_kind = 'user'       AND ${userGrantMatch})
+        OR (g.grant_kind = 'group'      AND ${groupMatch})
       )
     ))
     OR (${o.visibilityLevel} = 'private' AND ${privateUserGrant})
@@ -203,9 +240,16 @@ async function applyGrantsInTx(
   // check yet can never equal the un-padded users.building attribute it is meant to
   // match — a silently inert grant that authorizes no one. Trimming also collapses a
   // whitespace-only value to "" so assertValidGrant rejects it as missing.
+  //
+  // `group` values are additionally LOWERCASED: emails are case-insensitive and
+  // both `principal.groups` and the synced `groups.group_email` are stored
+  // lowercase, so a mixed-case grant value would never match a member (#1205). The
+  // other kinds keep their case — role/building/department/grade are matched
+  // case-sensitively against the stored attribute, so lowercasing them would break
+  // an existing "High School"/"Math" grant.
   const normalized = grants.map((g) => ({
     kind: g.kind,
-    value: typeof g.value === "string" ? g.value.trim() : g.value,
+    value: normalizeGrantValue(g.kind, g.value),
   }));
   for (const grant of normalized) assertValidGrant(grant);
   // Deduplicate on (kind, value) before INSERT — the uq_cvg constraint enforces
@@ -464,7 +508,12 @@ export const visibilityService = {
             (principal.gradeLevels ?? []).includes(g.value)) ||
           (g.kind === "user" &&
             principal.userId != null &&
-            String(principal.userId) === g.value)
+            String(principal.userId) === g.value) ||
+          // `group` grant: the viewer is a member of the granted Google group
+          // (#1205). Both `principal.groups` and the stored grant value are
+          // lowercased, so this exact match mirrors buildVisibilitySql's
+          // `g.grant_kind = 'group' AND g.grant_value IN (groupList)`.
+          (g.kind === "group" && (principal.groups ?? []).includes(g.value))
       );
     }
 

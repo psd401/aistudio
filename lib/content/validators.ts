@@ -24,6 +24,7 @@ const VALID_GRANT_KINDS: readonly GrantKind[] = [
   "department",
   "grade",
   "user",
+  "group",
 ];
 /**
  * The single membership-test source for grant kinds. Exported so the
@@ -73,6 +74,19 @@ export const VISIBILITY_LEVEL_SET: ReadonlySet<string> = new Set<string>(
  * would surface a confusing 400 on save with no prior warning.
  */
 export const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
+
+/**
+ * A `group`-grant value: a group EMAIL (`local@domain.tld`). Deliberately a
+ * simple, backtracking-safe shape (`no-space`@`no-space`.`no-space`) rather than a
+ * full RFC 5322 grammar — it exists to reject obvious non-emails (a role name, a
+ * bare id) that could never match a real synced group email, not to be an
+ * authoritative address validator (the group value is chosen from the synced
+ * `groups` table in the normal UI path). Shared by the service's last-line guard
+ * (`assertValidGrant`) so the write path and any future client check stay aligned.
+ * Values are lowercased before this test (emails are case-insensitive), so the
+ * pattern only needs to admit lowercase.
+ */
+export const GROUP_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
  * Narrow a widened `string` visibility level to `VisibilityLevel`, throwing a

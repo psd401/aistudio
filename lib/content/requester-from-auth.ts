@@ -23,6 +23,7 @@ import { and, eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { agentIdentities, roles, users } from "@/lib/db/schema";
 import { getUserRoles } from "@/lib/db/user-roles";
+import { listUserGroupEmailsByUserId } from "@/lib/groups/queries";
 import { createLogger } from "@/lib/logger";
 import { ForbiddenError } from "./errors";
 import { systemUserIdOrNull } from "./helpers";
@@ -48,16 +49,18 @@ async function loadUserContext(userId: number): Promise<{
   building: string | null;
   department: string | null;
   gradeLevels: string[] | null;
+  groups: string[];
 } | null> {
   // Defensive: a malformed token sub could yield a non-positive / NaN id; skip
   // the query and let the caller surface a clean auth error.
   if (!Number.isInteger(userId) || userId <= 0) return null;
-  // The user-attributes SELECT and the roles lookup are independent, so run them
-  // concurrently — this is on the hot path of every authenticated content REST/MCP
-  // call. A not-found user makes the roles query wasted work, but that path is
-  // rare (a deleted/invalid token sub) and the common found-user path saves a
-  // round trip.
-  const [rows, roleNames] = await Promise.all([
+  // The user-attributes SELECT, the roles lookup, and the group-membership lookup
+  // are independent, so run them concurrently — this is on the hot path of every
+  // authenticated content REST/MCP call. A not-found user makes the roles/groups
+  // queries wasted work, but that path is rare (a deleted/invalid token sub) and
+  // the common found-user path saves a round trip. `groups` powers `group`-kind
+  // visibility grants (#1205); it is `[]` for a user with no memberships.
+  const [rows, roleNames, groupEmails] = await Promise.all([
     executeQuery(
       (db) =>
         db
@@ -72,6 +75,7 @@ async function loadUserContext(userId: number): Promise<{
       "atrium.requesterFromAuth.loadUser"
     ),
     getUserRoles(userId),
+    listUserGroupEmailsByUserId(userId),
   ]);
   const row = rows[0];
   if (!row) return null;
@@ -80,6 +84,7 @@ async function loadUserContext(userId: number): Promise<{
     building: row.building,
     department: row.department,
     gradeLevels: row.gradeLevels,
+    groups: groupEmails,
   };
 }
 
@@ -202,6 +207,8 @@ export function buildDelegatedRequester(input: {
   building: string | null;
   department: string | null;
   gradeLevels: string[] | null;
+  /** The human's synced group emails — inherited by the delegated agent (#1205). */
+  groups?: string[];
   scopes: string[];
   agentLabel: string;
 }): Requester {
@@ -212,6 +219,7 @@ export function buildDelegatedRequester(input: {
     building: input.building,
     department: input.department,
     gradeLevels: input.gradeLevels,
+    groups: input.groups ?? [],
     scopes: input.scopes,
     agentLabel: input.agentLabel,
   };
@@ -243,6 +251,7 @@ export async function requesterForUserId(
       building: ctx.building,
       department: ctx.department,
       gradeLevels: ctx.gradeLevels,
+      groups: ctx.groups,
       isAdmin: ctx.roles.includes(ADMIN_ROLE),
     };
   } catch (error) {
@@ -279,6 +288,7 @@ export async function requesterFromApiAuth(
         building: ctx.building,
         department: ctx.department,
         gradeLevels: ctx.gradeLevels,
+        groups: ctx.groups,
         scopes: auth.scopes,
         agentLabel: auth.oauthClientId ?? "delegated-agent",
       });
@@ -361,6 +371,7 @@ export async function requesterFromApiAuth(
     building: ctx.building,
     department: ctx.department,
     gradeLevels: ctx.gradeLevels,
+    groups: ctx.groups,
     isAdmin: ctx.roles.includes(ADMIN_ROLE),
   };
 }
