@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getAIModels, createAIModel, updateAIModel, deleteAIModel, getRoles } from '@/lib/db/drizzle';
+import { syncModelAllowedRoleGrants } from '@/lib/db/drizzle/resource-access';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { normalizeBoolean } from '@/lib/validations/api-schemas';
@@ -244,6 +245,13 @@ export async function POST(request: Request) {
 
     const model = await createAIModel(modelData);
 
+    // Bridge the legacy allowed_roles column into resource_access_grants
+    // (#1206 P1 follow-up) — without this, a model created with allowedRoles
+    // set has zero grant rows and the new gate treats it as unrestricted.
+    if ('allowedRoles' in body) {
+      await syncModelAllowedRoleGrants(model.id, validatedAllowedRoles, null);
+    }
+
     log.info("Model created successfully", { modelId: model.id });
     timer({ status: "success" });
     
@@ -322,6 +330,13 @@ export async function PUT(request: Request) {
     }
 
     const model = await updateAIModel(id, updates);
+
+    // Bridge the legacy allowed_roles column into resource_access_grants
+    // (#1206 P1 follow-up) — without this, an update that sets/clears
+    // allowedRoles drifts from the new gate, which reads grant rows only.
+    if ('allowedRoles' in updates) {
+      await syncModelAllowedRoleGrants(id, updates.allowedRoles, null);
+    }
 
     log.info("Model updated successfully", { modelId: id });
     timer({ status: "success" });
