@@ -500,6 +500,10 @@ export class AgentPlatformStack extends cdk.Stack {
               `arn:aws:bedrock:us-east-2::foundation-model/*`,
               `arn:aws:bedrock:us-west-2::foundation-model/*`,
               `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
+              // Cross-region inference profiles use region-less format (us, eu, ap)
+              // — required for the us.anthropic.claude-sonnet-5 request id (#1227).
+              // See: https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html
+              `arn:aws:bedrock:us:${this.account}:inference-profile/*`,
             ],
           }),
           new iam.PolicyStatement({
