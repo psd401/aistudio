@@ -104,6 +104,7 @@
     "107-groups-nav-entry.sql",
     "108-aistudio-mcp-service-user.sql",
     "109-group-role-mappings.sql",
-    "110-atrium-group-grant-kind.sql"
+    "110-atrium-group-grant-kind.sql",
+    "111-resource-access-grants.sql"
   ]
 }
