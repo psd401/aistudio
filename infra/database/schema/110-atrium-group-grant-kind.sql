@@ -1,0 +1,25 @@
+-- Migration 110: Atrium group-directory grant kind (Epic #1202 Phase 2 / #1205)
+-- Adds the `group` value to the `grant_kind` enum so Atrium content can be shared
+-- directly to a synced Google Directory group (Epic #1202): a `group`-visibility
+-- object grows a `content_visibility_grants` row of kind `group` whose
+-- `grant_value` is the group EMAIL (lowercased). `canView` / `buildVisibilitySql`
+-- match it against the viewer's group memberships (group_members joined on the
+-- user's lowercased email), so a member reads and a non-member is existence-masked
+-- (404) — no role required.
+--
+-- NOTES for the RDS Data API migration runner's statement splitter:
+--   * No PL/pgSQL `DO $$` blocks and no inner `CREATE TYPE` — the splitter only
+--     enters block mode on CREATE TYPE/FUNCTION/DROP TYPE, so the ALTER TYPE below
+--     is treated as an ordinary single statement (mirrors migration 095's
+--     `ALTER TYPE publish_destination ADD VALUE 'okf'`).
+--   * `ALTER TYPE ... ADD VALUE` runs as its own auto-committed statement (the
+--     runner does not wrap the file in one transaction), so the "ADD VALUE cannot
+--     run in a transaction block" pitfall does not apply. The new value is NOT used
+--     elsewhere in this file, so there is no same-transaction-use problem either.
+--   * `grant_kind` is master-owned (created in the 085 Atrium migration, NOT an
+--     immutable 001-005 postgres-owned type), so ADD VALUE succeeds under the
+--     migration role on Aurora — the 42501 owner-privilege failure from
+--     migration 085's postgres-owned enums does not apply here.
+
+-- The directory-group grant kind. Idempotent (IF NOT EXISTS) so a re-run is a no-op.
+ALTER TYPE grant_kind ADD VALUE IF NOT EXISTS 'group';
