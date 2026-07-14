@@ -282,6 +282,22 @@ test('parseGrants parses kind:value pairs', () => {
   expect(common.parseGrants(undefined)).toBeUndefined();
 });
 
+test('parseGrants accepts the group kind (#1205, value = group email)', () => {
+  expect(common.parseGrants('group:hs-staff-group@example.com')).toEqual([
+    { kind: 'group', value: 'hs-staff-group@example.com' },
+  ]);
+});
+
+test('parseGrants rejects an unknown kind (exit 1)', () => {
+  let code;
+  try {
+    common.parseGrants('__evil__:x');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+});
+
 test('parseGrants rejects a malformed entry (exit 1)', () => {
   let code;
   try {

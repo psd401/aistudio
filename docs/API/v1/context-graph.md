@@ -1029,7 +1029,7 @@ Requires `content:update`.
 | `level` | `private` \| `group` \| `internal` \| `public` | yes | — |
 | `grants` | `{ kind, value }[]` | no | Only meaningful when `level` is `group` |
 
-`grants[].kind` is one of `role`, `building`, `department`, `grade`, `user`; `value` is the matching identifier.
+`grants[].kind` is one of `role`, `building`, `department`, `grade`, `user`, `group`; `value` is the matching identifier (for `group`, the synced Google group's lowercase email).
 
 **Example request:**
 
@@ -1381,6 +1381,6 @@ Create / get responses additionally include a `version` object (the current
 |-------|------|-------------|
 | `level` | `private` \| `group` \| `internal` \| `public` | Base visibility |
 | `grants` | `{ kind, value }[]` | Group widening; only meaningful when `level` is `group` |
-| `grants[].kind` | `role` \| `building` \| `department` \| `grade` \| `user` | Dimension to widen along |
+| `grants[].kind` | `role` \| `building` \| `department` \| `grade` \| `user` \| `group` | Dimension to widen along (`group` = synced Google group email) |
 | `grants[].value` | string | Matching identifier for that dimension |
 

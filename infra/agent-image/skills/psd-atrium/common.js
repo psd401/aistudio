@@ -338,7 +338,7 @@ function parseList(value, label = 'tags') {
 function parseGrants(value, label = 'grants') {
   if (value === undefined) return undefined;
   if (value === true) fail(`--${label} requires a value`);
-  const VALID = ['role', 'building', 'department', 'grade', 'user'];
+  const VALID = ['role', 'building', 'department', 'grade', 'user', 'group'];
   const grants = [];
   for (const raw of String(value).split(',')) {
     const entry = raw.trim();
