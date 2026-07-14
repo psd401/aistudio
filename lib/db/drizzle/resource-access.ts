@@ -315,6 +315,29 @@ export async function replaceResourceGrants(
 }
 
 /**
+ * Translate a list of role NAMES into `role`-kind grants on a model, preserving any
+ * `group`-kind grants already set. Used only by the JSON import path (#1207): an
+ * import file may still carry the legacy `allowedRoles` field, and dropping it
+ * silently would leave the model with zero grants — i.e. UNRESTRICTED (visible to
+ * everyone) — since zero grant rows means "no restriction". Translating it into role
+ * grants keeps the import file's access intent. `allowedRoles` null/empty clears all
+ * `role` grants (matches "no restriction"). This takes role names directly and has
+ * NO dependency on the dropped `ai_models.allowed_roles` column.
+ */
+export async function setModelRoleGrantsFromNames(
+  modelId: number,
+  roleNames: string[] | null | undefined,
+  createdBy: number | null
+): Promise<void> {
+  const existing = await listResourceGrants("model", modelId);
+  const groupGrants = existing.filter((g) => g.grantKind === "group");
+  const roleGrants: ResourceGrant[] = (roleNames ?? [])
+    .filter((r): r is string => typeof r === "string" && r.trim().length > 0)
+    .map((r) => ({ grantKind: "role" as const, grantValue: r.trim() }));
+  await replaceResourceGrants("model", modelId, [...groupGrants, ...roleGrants], createdBy);
+}
+
+/**
  * Delete every grant for a resource (used when the resource itself is deleted, so
  * no orphan grants linger and get re-used if the serial id is recycled).
  */

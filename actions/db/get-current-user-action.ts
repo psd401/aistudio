@@ -210,8 +210,29 @@ export async function getCurrentUserAction(): Promise<
       updatePayload.email = userEmail
     }
 
-    const updatedUser = await updateUser(user.id, updatePayload)
-    user = updatedUser as unknown as SelectUser
+    // The email refresh can violate uq_users_email_lower (migration 112, #1207) when
+    // the session's new address already belongs to a DIFFERENT user row (an aliased
+    // Workspace address, or a stale duplicate that predates the index). That must NOT
+    // hard-fail the whole "who am I" lookup and lock the user out — retry WITHOUT the
+    // email so last-sign-in/name still persist, keep the last-known email, and let an
+    // admin resolve the collision (report-duplicate-emails.ts). Consistent with the
+    // non-fatal treatment of the other authz-constraint writes in this PR.
+    try {
+      const updatedUser = await updateUser(user.id, updatePayload)
+      user = updatedUser as unknown as SelectUser
+    } catch (updateError) {
+      if ("email" in updatePayload) {
+        log.warn("Email refresh hit a uniqueness conflict — keeping last-known email", {
+          userId: user.id,
+          error: updateError instanceof Error ? updateError.message : "Unknown error"
+        })
+        const { email: _droppedEmail, ...withoutEmail } = updatePayload
+        const updatedUser = await updateUser(user.id, withoutEmail)
+        user = updatedUser as unknown as SelectUser
+      } else {
+        throw updateError
+      }
+    }
 
     // Reconcile managed (group-sync) roles from the user's current Google group
     // memberships BEFORE reading roles back, so the response reflects any

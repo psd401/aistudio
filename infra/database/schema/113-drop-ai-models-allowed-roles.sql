@@ -15,13 +15,25 @@
 -- and the admin "Allowed Roles (legacy)" field are removed too — per-model
 -- role/group access is edited solely via the ResourceGrantsEditor.
 --
--- DEPLOY ORDERING. This migration ships in the SAME release as the code that stops
--- referencing the column. Follow the repo precedent (migrations 045/046/084 dropped
--- columns/tables the same way): during an ECS rolling deploy there is a brief window
--- where an old task might still SELECT allowed_roles; those queries are read-only and
--- their only caller (nexus model listing) already catches errors and returns [], so
--- the worst case is a momentarily-empty model list, never a crash or an access
--- escalation (execution stays gated by resource_access_grants throughout).
+-- DEPLOY ORDERING (read before deploying). This migration ships in the SAME release
+-- as the code that stops referencing the column, following the repo precedent for
+-- column/table drops (migrations 045 remove-chat-enabled-column, 046
+-- remove-nexus-capabilities-column, 084 drop-legacy-tools-tables). CDK runs the
+-- db-init custom resource during the stack update and the DatabaseStack deploys
+-- before the frontend (the frontend stacks depend on it), so during the ECS rolling
+-- replacement there is a brief window where OLD tasks still run the previous release,
+-- whose Drizzle `.select()` on ai_models includes `allowed_roles`. Reads from those
+-- old tasks fail while the window lasts:
+--   * nexus model listing (getModelsFromDatabase) catches the error and returns [],
+--   * but the admin model list and GET /api/models (getAIModels / getNexusEnabledModels)
+--     surface a 500 until the old task is replaced.
+-- This never escalates access (execution stays gated by resource_access_grants) and
+-- clears as soon as ECS finishes rolling. Impact is a transient error on model-list
+-- reads, not data loss. To make the drop zero-downtime, deploy during a low-traffic
+-- window, OR run this as an expand/contract two-step: cut a release that only removes
+-- the code references (keep the column), let ECS fully drain the old tasks, then apply
+-- this drop in the next deploy. The single-release path here matches existing repo
+-- practice; choose the two-step if a momentary model-list 500 is unacceptable.
 --
 -- ADDITIVE-SAFE and idempotent: DROP ... IF EXISTS on both the GIN index (024) and
 -- the column. A plain single-statement drop — no PL/pgSQL DO $$ block (the migration

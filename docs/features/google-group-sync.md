@@ -113,6 +113,15 @@ CDK-context address when set):
 | `psd-group-sync-failure-<env>` | the Lambda's `Errors` metric ≥ 1 in an hour | a run executed but errored (directory outage, DB failure, crash/timeout). The handler re-throws on failure, so `Errors` captures both crashes and handled-then-rethrown failures. |
 | `psd-group-sync-staleness-<env>` | `SyncRunSucceeded` sum < 1 across 3 consecutive hours, **treat-missing-as-breaching** | no successful sync recently — including the case where the schedule stopped firing entirely (a dead Lambda emits nothing, so a self-emitted "seconds since last sync" gauge could not detect it). |
 
+> **New-environment note:** when group sync is intentionally not configured
+> (`GOOGLE_DIRECTORY_SA_SECRET_ARN` unset), the Lambda returns `skipped` before
+> emitting `SyncRunSucceeded`, so the metric is permanently absent and
+> `psd-group-sync-staleness-<env>` sits in **ALARM** by design (`treatMissingData:
+> BREACHING`). This is expected onboarding noise, not an incident — notifications are
+> gated on `alertEmail`, so no page fires. It clears on the first successful sync once
+> the service account is configured. If an environment will never use group sync,
+> disable the alarm rather than leaving it red.
+
 Per-group failures are surfaced in **Admin → Groups**: each group shows a "Failed"
 badge (with the `last_sync_error` as tooltip) and `last_synced_at`; the header shows
 an aggregate "Failed syncs" count (`groups.last_sync_error IS NOT NULL AND is_active`).
