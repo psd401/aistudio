@@ -3,6 +3,7 @@ import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import { getModelConfig } from '@/lib/ai/model-config';
+import { userCanAccessResource } from '@/lib/db/drizzle/resource-access';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { UIMessage } from 'ai';
 
@@ -122,7 +123,26 @@ export async function POST(req: Request) {
       model1: { provider: model1Config.provider, modelId: model1Config.model_id },
       model2: { provider: model2Config.provider, modelId: model2Config.model_id }
     });
-    
+
+    // 4b. Per-resource access enforcement (#1206). Model ids are client-supplied,
+    // so reject any model the user has no role/group grant for (zero grants =
+    // unrestricted; admins always pass).
+    const [canModel1, canModel2] = await Promise.all([
+      userCanAccessResource(currentUser.data.user.id, 'model', model1Config.id),
+      userCanAccessResource(currentUser.data.user.id, 'model', model2Config.id),
+    ]);
+    if (!canModel1 || !canModel2) {
+      log.warn('Forbidden model in comparison', {
+        userId: currentUser.data.user.id,
+        model1Allowed: canModel1,
+        model2Allowed: canModel2,
+      });
+      return new Response(
+        JSON.stringify({ error: 'You do not have access to one or both selected models' }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
     // 5. Create messages for both models
     const messages: UIMessage[] = [
       {

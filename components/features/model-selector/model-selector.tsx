@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/command"
 import { IconRobot, IconChevronDown } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
+import { createLogger } from "@/lib/client-logger"
 import { useFilteredModels } from "./use-filtered-models"
 import { ModelSelectorItem } from "./model-selector-item"
 import type { ModelSelectorProps } from "./model-selector-types"
@@ -63,17 +64,31 @@ export function ModelSelector({
     }
   }, [search])
 
-  // Fetch user roles on mount
+  // Fetch user roles on mount. This drives ONLY the advisory in-dropdown
+  // labeling; server-side access is authoritative (#1206): GET /api/models
+  // already returns only the models this user may access, so an inaccessible
+  // model never reaches the client. On a roles-fetch failure we keep userRoles
+  // empty, which makes any still-listed role-restricted model render as
+  // INaccessible — a fail-CLOSED default, never fail-open. The former silent
+  // catch (which claimed to "show all models without role filtering") is
+  // replaced with an observable warning.
   useEffect(() => {
+    const log = createLogger({ component: "ModelSelector" })
     async function fetchUserRoles() {
       try {
         const response = await fetch('/api/user/roles')
         if (response.ok) {
           const data = await response.json()
           setUserRoles(data.roles || [])
+        } else {
+          log.warn("Failed to fetch user roles for model selector; failing closed", {
+            status: response.status,
+          })
         }
-      } catch {
-        // Silently fail - will just show all models without role filtering
+      } catch (error) {
+        log.warn("Error fetching user roles for model selector; failing closed", {
+          error: error instanceof Error ? error.message : String(error),
+        })
       }
     }
     fetchUserRoles()

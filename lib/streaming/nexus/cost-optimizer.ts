@@ -376,14 +376,15 @@ export class CostOptimizer {
           return false;
         }
       }
-      
-      // Check role access
-      if (model.allowedRoles && model.allowedRoles.length > 0) {
-        // Would need to check user roles here
-        // For now, skip restricted models
-        return false;
-      }
-      
+
+      // NOTE: per-resource access (roles/groups) is NOT enforced here. This
+      // optimizer only ranks/filters among models the caller is ALREADY entitled
+      // to; the authoritative access gate is userCanAccessResource at model
+      // resolution (#1206). The prior stub here unconditionally dropped EVERY
+      // restricted model for EVERYONE (a "would need to check user roles"
+      // placeholder that never was) — removed so a legitimately-granted model is
+      // not silently excluded from cost optimization.
+
       // Filter based on priority
       if (request.priority === 'speed' && (model.averageLatencyMs || 0) > 2000) {
         return false;

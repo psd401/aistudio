@@ -11,6 +11,7 @@ import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { getContentSafetyService } from '@/lib/safety';
 import type { TokenMapping } from '@/lib/safety/types';
 import { getModelConfig } from '@/lib/ai/model-config';
+import { userCanAccessResource } from '@/lib/db/drizzle/resource-access';
 import { getConnectorTools } from '@/lib/mcp/connector-service';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
@@ -1276,6 +1277,20 @@ export async function POST(req: Request) {
       isImageGeneration: isImageGenerationModel,
       isDeepResearch: isDeepResearchModel,
     }));
+
+    // 4b. Per-resource access enforcement (#1206). The model selector is
+    // client-side and bypassable (a crafted request can name any model id), so
+    // the server must reject a model the user has no role/group grant for. A
+    // model with zero grants is unrestricted; administrators always pass. This
+    // gates ALL downstream paths (special routes AND standard streaming).
+    if (!(await userCanAccessResource(userId, 'model', dbModelId))) {
+      log.warn('Forbidden model for user', { userId, dbModelId, modelId: modelConfig.model_id });
+      timer({ status: 'error', reason: 'forbidden_model' });
+      return new Response(
+        JSON.stringify({ success: false, message: 'You do not have access to this model' }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
 
     // 5. Capability-based routing — image gen and Deep Research bypass
     // the standard streaming pipeline.

@@ -6,6 +6,7 @@ import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getAssistantArchitectByIdAction } from '@/actions/db/assistant-architect-actions';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
 import { getAIModelById, getUserById } from '@/lib/db/drizzle';
+import { userCanAccessResource } from '@/lib/db/drizzle/resource-access';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { sql } from 'drizzle-orm';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
@@ -376,6 +377,33 @@ async function authorizeAndLoadArchitect(
     };
   }
 
+  // SECURITY (#1206): per-resource grant filter, BENEATH the capability +
+  // owner/admin/approved gate above. An assistant may be restricted to specific
+  // roles/groups (resource_access_grants). The owner always reaches their own
+  // assistant; everyone else (admins pass inside userCanAccessResource) must
+  // match a grant. Zero grants = unrestricted (preserves today's behavior).
+  if (!isOwner) {
+    const canAccessAssistant = await userCanAccessResource(userId, 'assistant', architect.id);
+    if (!canAccessAssistant) {
+      log.warn('User lacks per-resource grant for assistant architect', {
+        userId,
+        toolId,
+        architectId: architect.id,
+      });
+      return {
+        ok: false,
+        response: new Response(
+          JSON.stringify({
+            error: 'Access denied',
+            message: 'You do not have access to this assistant',
+            requestId,
+          }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } }
+        ),
+      };
+    }
+  }
+
   // Log successful authorization for audit trail
   log.info('Authorization granted for assistant architect execution', {
     userId,
@@ -415,6 +443,41 @@ async function authorizeAndLoadArchitect(
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       )
     };
+  }
+
+  // SECURITY (#1206): per-resource MODEL enforcement on the assistant execution
+  // path. Each prompt names a model chosen by the author; the EXECUTING user
+  // must be able to access every one. Checked up-front (before any streaming)
+  // so a forbidden model yields a clean typed 403 rather than a mid-stream
+  // error. Admins pass inside userCanAccessResource; a model with zero grants is
+  // unrestricted. Distinct ids only, to avoid redundant checks in a chain that
+  // reuses a model.
+  const distinctModelIds = [
+    ...new Set(
+      prompts
+        .map((p) => p.modelId)
+        .filter((id): id is number => typeof id === 'number')
+    ),
+  ];
+  for (const modelDbId of distinctModelIds) {
+    if (!(await userCanAccessResource(userId, 'model', modelDbId))) {
+      log.warn('User lacks access to a model used by this assistant', {
+        userId,
+        toolId,
+        modelDbId,
+      });
+      return {
+        ok: false,
+        response: new Response(
+          JSON.stringify({
+            error: 'Access denied',
+            message: 'You do not have access to a model this assistant uses',
+            requestId,
+          }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } }
+        ),
+      };
+    }
   }
 
   log.info('Assistant architect loaded', sanitizeForLogging({
