@@ -28,6 +28,7 @@ import {
 import { getServerSession } from "@/lib/auth/server-session";
 import { hasCapabilityAccess, hasRole } from "@/utils/roles";
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action";
+import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access";
 import {
   getAssistantArchitects as drizzleGetAssistantArchitects,
   getAssistantArchitectById as drizzleGetAssistantArchitectById,
@@ -458,9 +459,30 @@ export async function getAssistantArchitectsAction(): Promise<
       const currentUser = await getCurrentUserAction();
       callerId = currentUser.isSuccess ? currentUser.data?.user?.id : undefined;
     }
-    const architects = isAdmin
-      ? allArchitects
-      : allArchitects.filter((architect) => architect.status === "approved" || architect.userId === callerId);
+    let architects: typeof allArchitects;
+    if (isAdmin) {
+      architects = allArchitects;
+    } else {
+      // Per-resource grant filter (#1206): an approved assistant NOT owned by the
+      // caller is additionally gated by resource_access_grants — a restricted
+      // assistant only appears in the gallery for a user who matches a role/group
+      // grant (zero grants = unrestricted). The caller always sees their own (any
+      // status). Batch lookup to avoid an N+1 over the gallery.
+      const approvedNotOwnedIds = allArchitects
+        .filter((a) => a.status === "approved" && a.userId !== callerId)
+        .map((a) => a.id);
+      const accessibleIds = await filterAccessibleResourceIds(
+        callerId ?? -1,
+        "assistant",
+        approvedNotOwnedIds
+      );
+      architects = allArchitects.filter(
+        (architect) =>
+          architect.userId === callerId ||
+          (architect.status === "approved" &&
+            accessibleIds.has(String(architect.id)))
+      );
+    }
 
     // For each architect, get input fields and prompts in parallel
     const architectsWithRelations = await Promise.all(
