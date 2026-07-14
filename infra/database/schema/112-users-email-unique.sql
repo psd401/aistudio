@@ -1,0 +1,51 @@
+-- Migration 112: unique index on lower(users.email) (Epic #1202, Phase 4 / #1207)
+--
+-- WHY. Since Phase 1 (#1204) group membership → role/resource authorization joins
+-- on the user's email, always as lower(users.email) = lower(gm.member_email) (see
+-- lib/db/drizzle/user-roles.ts#reconcileUserManagedRoles and
+-- lib/db/drizzle/resource-access.ts). Email is therefore an AUTHORIZATION JOIN KEY,
+-- but users.email carried NO uniqueness constraint — two rows sharing a
+-- case-insensitive email would each match the same group membership and could be
+-- granted/revoked inconsistently (and getUserByEmail would resolve
+-- non-deterministically). This index makes the join key single-valued.
+--
+-- SEMANTICS. Unique on lower(email), matching every read/write site (all of which
+-- already lowercase both sides). NULL emails are permitted and do NOT collide: a
+-- unique index treats each NULL as distinct, so the pre-provisioning /
+-- synthetic-fallback rows (get-current-user-action.ts writes
+-- `${cognitoSub}@cognito.local` only when a session truly has no email, and
+-- cognito_sub is itself UNIQUE) are unaffected. This is intentionally NOT a partial
+-- index over a subset of rows — see the anti-pattern note below.
+--
+-- FAIL-LOUD ON DUPLICATES (by design). If the target database already contains two
+-- rows with the same lower(email), CREATE UNIQUE INDEX raises
+--   ERROR: could not create unique index "uq_users_email_lower"
+--   DETAIL: Key (lower(email))=(...) is duplicated.
+-- That message matches neither the "already exists" nor the CREATE TYPE / ALTER
+-- TABLE special-cases in the migration runners (scripts/db/run-migrations.ts and
+-- infra/database/lambda/db-init-handler.ts), so the migration FAILS the deploy
+-- rather than silently skipping. This is deliberate: per #1207 we must never ship a
+-- partial index that quietly excludes the duplicate rows and leaves the authz join
+-- key ambiguous. If the deploy fails here, prod has duplicates that MUST be
+-- remediated first.
+--
+-- OPERATIONAL PRE-CHECK (run before deploying this migration to a populated DB):
+--   SELECT lower(email) AS email, count(*)
+--     FROM users
+--    WHERE email IS NOT NULL
+--    GROUP BY 1
+--   HAVING count(*) > 1;
+-- `bun run scripts/db/report-duplicate-emails.ts` prints exactly this, plus the
+-- offending row ids. Zero rows → this migration applies cleanly. Any rows → follow
+-- the dedupe runbook in docs/features/google-group-sync.md before deploying (merge
+-- the duplicate user rows / their FKs; do NOT drop this migration to a partial
+-- index to dodge them).
+--
+-- ADDITIVE and idempotent (IF NOT EXISTS). A plain (non-CONCURRENT) CREATE UNIQUE
+-- INDEX — CONCURRENTLY is incompatible with the RDS Data API and is rejected by the
+-- db-init validator; the users table is small and written infrequently, so the
+-- brief write lock is acceptable. Single statement, no PL/pgSQL DO $$ block (the
+-- runner's splitter only enters block mode on CREATE TYPE/FUNCTION/DROP TYPE).
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower
+  ON users (lower(email));
