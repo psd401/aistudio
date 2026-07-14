@@ -6,7 +6,7 @@ import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getAssistantArchitectByIdAction } from '@/actions/db/assistant-architect-actions';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
 import { getAIModelById, getUserById } from '@/lib/db/drizzle';
-import { userCanAccessResource } from '@/lib/db/drizzle/resource-access';
+import { userCanAccessResource, filterAccessibleResourceIds } from '@/lib/db/drizzle/resource-access';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { sql } from 'drizzle-orm';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
@@ -459,12 +459,14 @@ async function authorizeAndLoadArchitect(
         .filter((id): id is number => typeof id === 'number')
     ),
   ];
-  for (const modelDbId of distinctModelIds) {
-    if (!(await userCanAccessResource(userId, 'model', modelDbId))) {
+  if (distinctModelIds.length > 0) {
+    const accessibleModelIds = await filterAccessibleResourceIds(userId, 'model', distinctModelIds);
+    if (accessibleModelIds.size !== distinctModelIds.length) {
       log.warn('User lacks access to a model used by this assistant', {
         userId,
         toolId,
-        modelDbId,
+        distinctModelIds,
+        accessibleModelIds: Array.from(accessibleModelIds),
       });
       return {
         ok: false,
