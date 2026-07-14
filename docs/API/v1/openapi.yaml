@@ -854,7 +854,13 @@ paths:
       operationId: sendMessage
       tags: [Assistants]
       summary: Send a follow-up message
-      description: Sends a message in an existing conversation. Preserves assistant context.
+      description: >-
+        Sends a message in an existing conversation. Preserves assistant context.
+        Beyond the assistant scope check, the caller must have per-resource access
+        (Epic #1202 Phase 3) to BOTH the assistant and the model it uses: a
+        resource restricted to specific roles/Google groups returns 403 to a
+        caller who matches no grant (the assistant owner and administrators always
+        pass; a resource with no grants is unrestricted).
       security:
         - BearerAuth: []
         - SessionAuth: []
