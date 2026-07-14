@@ -80,6 +80,11 @@ function DocCard({ it }: { it: ContentObjectDTO }): React.JSX.Element {
         )}
         {cardMeta(it)}
       </p>
+      {it.ownerName && (
+        <p className="mer-lib-card-owner" data-testid="card-owner">
+          {it.ownerName}
+        </p>
+      )}
       {it.tags.length > 0 && (
         <p className="mer-lib-card-tags">{it.tags.slice(0, 3).join(" · ")}</p>
       )}
@@ -118,6 +123,11 @@ function ArtifactCard({
         )}
       </div>
       <p className="mer-lib-card-title">{it.title}</p>
+      {it.ownerName && (
+        <p className="mer-lib-card-owner" data-testid="card-owner">
+          {it.ownerName}
+        </p>
+      )}
       <div className="mer-lib-card-foot">
         <span className="mer-lib-card-meta">
           {isAgent ? "Agent-maintained" : "Interactive"}

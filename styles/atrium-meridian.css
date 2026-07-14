@@ -605,6 +605,16 @@
   color: var(--mer-agent);
   flex-shrink: 0;
 }
+/* Owner display name on a library card (#1052) — shown to all viewers, one line,
+ * truncated. Slightly stronger than the muted meta so "who owns this" reads at a
+ * glance without competing with the title. */
+.mer-lib-card-owner {
+  font-size: 12px;
+  color: var(--mer-ink-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .mer-lib-card-tags {
   font-size: 11.5px;
   color: var(--mer-ink-muted);
@@ -2145,6 +2155,62 @@
 .mer-reader-viewonly-strong {
   font-weight: 600;
   color: var(--mer-ink-secondary);
+}
+
+/* ---- Full-bleed artifact reader (#1052) ----
+ * An artifact on a shared-link reader (/c, /p) must NOT be boxed into the 720px
+ * reading sheet — it renders edge-to-edge under a slim header bar, filling the
+ * remaining viewport height. The document reader keeps the sheet (default); only
+ * the artifact branch opts into this variant via ReaderFrame's `fullBleed` prop. */
+.mer-reader-artifact-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 24px;
+  background: var(--mer-surface);
+  border-bottom: 1px solid var(--mer-border);
+}
+.mer-reader-artifact-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: var(--mer-ink);
+  margin: 0 0 5px;
+}
+.mer-reader-artifact-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--mer-ink-muted);
+}
+.mer-reader-artifact-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.mer-reader-viewonly-inline {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mer-ink-secondary);
+  white-space: nowrap;
+}
+/* The stage consumes all remaining column height (.mer-reader is a flex column
+ * with min-height:100dvh), so the artifact frame inside grows to fill it. */
+.mer-reader-artifact-stage {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+.mer-reader-artifact-stage > .atrium-artifact-reader-frame {
+  flex: 1 1 auto;
+}
+.mer-reader-artifact-foot {
+  padding: 14px 24px 24px;
 }
 
 /* ---- Reading sheet ---- */

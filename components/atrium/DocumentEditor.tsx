@@ -37,6 +37,7 @@ import type { Node as TiptapNode, Extensions } from "@tiptap/core";
 import { getSchemaExtensions } from "@/lib/content/collab/editor-extensions";
 import { ARTIFACT_EMBED_NODE_NAME } from "@/lib/content/collab/artifact-embed-node";
 import { ArtifactEmbedNodeView } from "./ArtifactEmbedNodeView";
+import { ArtifactEmbedPaste } from "./artifact-embed-paste";
 import { makeAuthorTag } from "@/lib/content/collab/provenance";
 import { useUser } from "@/components/auth/user-provider";
 import { EditorToolbar } from "./EditorToolbar";
@@ -478,6 +479,9 @@ export function DocumentEditor({
         // Client editor: the shared schema + the live embed NodeView attached to
         // the (schema-only) atriumArtifactEmbed node.
         ...withEmbedNodeView(getSchemaExtensions()),
+        // Client-only: pasting a bare `::atrium-artifact{id="…"}` directive becomes
+        // the live embed node (no schema change → client/server parity holds).
+        ArtifactEmbedPaste,
         Markdown,
         Collaboration.configure({ document: ydoc }),
         AuthoredTracker.configure({ by: makeAuthorTag("human", userId) }),

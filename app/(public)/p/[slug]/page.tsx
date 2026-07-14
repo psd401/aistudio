@@ -248,18 +248,9 @@ export default async function PublicReaderPage({
   // ARTIFACT reader: load the untrusted code server-side and render it ONLY in
   // the cross-origin sandbox. The code is never placed in app-origin HTML.
   if (published.kind === "artifact") {
-    let code = "";
-    try {
-      code = await versionService.loadArtifactCode(version);
-    } catch (error) {
-      // Missing/unreadable artifact body degrades to an empty preview rather than
-      // surfacing the raw S3 error to the reader.
-      log.warn("artifact body unavailable; rendering empty preview", {
-        objectId: version.objectId,
-        versionNumber: version.versionNumber,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    // Missing/unreadable body degrades to an empty preview (never the raw S3
+    // error) — the shared loadArtifactCodeSafe contract.
+    const code = await versionService.loadArtifactCodeSafe(version);
     return (
       <ReaderFrame
         title={published.title}
@@ -273,6 +264,9 @@ export default async function PublicReaderPage({
         collectionName={published.collectionName}
         // Artifact readers skip the TOC (no document headings to walk).
         headings={[]}
+        // Full-bleed: the interactive artifact fills the viewport instead of the
+        // 720px reading sheet (#1052).
+        fullBleed
         footer={
           <ProvenanceFooter
             objectId={published.id}
@@ -283,7 +277,7 @@ export default async function PublicReaderPage({
         <ArtifactSandbox
           code={code}
           src={getArtifactSandboxRenderUrl()}
-          className="atrium-artifact-preview"
+          className="atrium-artifact-reader-frame"
         />
       </ReaderFrame>
     );

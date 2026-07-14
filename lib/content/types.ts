@@ -145,6 +145,16 @@ export interface ContentObjectDTO {
   title: string;
   slug: string;
   ownerUserId: number;
+  /**
+   * The owner's display name (full name, or email fallback), for surfaces that
+   * show "who owns this" — e.g. the library cards, visible to all viewers.
+   *
+   * LIST-ONLY PROJECTION: only `visibilityService.listVisible` populates this (via
+   * a LEFT JOIN on `users`). Single-object loads (`content-service`) and every
+   * other DTO path leave it `null` — it is presentation metadata, never an
+   * authorization input (owner permission is always keyed on `ownerUserId`).
+   */
+  ownerName: string | null;
   createdByActor: "human" | "agent";
   createdByAgentId: string | null;
   collectionId: string | null;

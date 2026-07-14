@@ -476,7 +476,9 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
         // render, clearing the sandbox host's placeholder to a blank frame before
         // the real key/code arrives. A stable-height placeholder avoids that
         // empty-code mount and prevents layout shift when the real body lands.
-        <div style={{ minHeight: 360 }} aria-busy="true" />
+        // minHeight 75vh matches the loaded preview (.atrium-artifact-preview) so
+        // the canvas does not jump when the artifact body arrives.
+        <div style={{ minHeight: "75vh" }} aria-busy="true" />
       ) : tab === "preview" ? (
         // `key={selectedVersionId}` is the intentional version-switch mechanism:
         // it remounts <ArtifactSandbox> on every version change so each version

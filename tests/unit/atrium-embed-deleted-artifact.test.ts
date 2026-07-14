@@ -38,13 +38,23 @@ const canViewMock = jest.fn(async (..._a: unknown[]) => true);
 jest.mock("@/lib/content/visibility-service", () => ({
   visibilityService: { canView: (...a: unknown[]) => canViewMock(...a) },
 }));
-jest.mock("@/lib/content/version-service", () => ({
-  versionService: {
+jest.mock("@/lib/content/version-service", () => {
+  const svc = {
     current: jest.fn(async () => ({ versionNumber: 1 })),
     getById: jest.fn(async () => ({ versionNumber: 1 })),
     loadArtifactCode: jest.fn(async () => "<html>live</html>"),
-  },
-}));
+    // Mirror the real safe-wrapper contract (degrade to "" on failure) while
+    // delegating to loadArtifactCode so per-test overrides drive the fallback.
+    loadArtifactCodeSafe: jest.fn(async (_v: unknown): Promise<string> => {
+      try {
+        return (await svc.loadArtifactCode()) as string;
+      } catch {
+        return "";
+      }
+    }),
+  };
+  return { versionService: svc };
+});
 jest.mock("@/lib/content/artifact-sandbox-config", () => ({
   getArtifactSandboxRenderUrl: () => "https://sandbox.example/render",
 }));

@@ -378,6 +378,47 @@
 .atrium-embed-frame {
   display: block;
   width: 100%;
+  /* Doc embeds get a comfortable reading height (#1052 sizing fix). The sandbox
+     iframe no longer carries an inline min-height, so this class is the sole
+     height source for an embedded artifact block. */
+  min-height: 480px;
+  border: 0;
+  background: #fff;
+}
+
+/* ----------------------------------------------------------------------------
+ * Artifact preview surfaces (#1052 sizing fix). `<ArtifactSandbox>` deliberately
+ * sets NO inline height (an inline min-height would beat every rule below — the
+ * bug that pinned each surface to a tiny 360px box). Each surface therefore owns
+ * its own height via the class it passes to the sandbox. The library thumbnail
+ * keeps its fixed `.mer-artifact-thumb-frame` height (styles/atrium-meridian.css)
+ * and is intentionally NOT touched here.
+ * -------------------------------------------------------------------------- */
+.atrium-artifact-preview {
+  display: block;
+  width: 100%;
+  /* Authoring canvas (/atrium/[id]/edit): a large working surface. */
+  min-height: 75vh;
+  min-height: 75dvh;
+  border: 0;
+  background: #fff;
+}
+.atrium-artifact-reader-frame {
+  display: block;
+  width: 100%;
+  /* Shared-link readers (/c, /p): full-bleed stage — grows to fill the reader
+     body (see .mer-reader-artifact-stage) with a tall floor for short viewports. */
+  min-height: 82vh;
+  min-height: 82dvh;
+  border: 0;
+  background: #fff;
+}
+.atrium-artifact-viewport {
+  display: block;
+  width: 100%;
+  /* Chrome-free full-screen viewer (/atrium/[id]/view): fills the whole viewport. */
+  height: 100vh;
+  height: 100dvh;
   border: 0;
   background: #fff;
 }

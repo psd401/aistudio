@@ -31,6 +31,13 @@ jest.mock("@/lib/db/schema", () => ({
     updatedAt: "COL_updated_at",
   },
   contentVisibilityGrants: {},
+  // listVisible LEFT JOINs users to project the owner display name.
+  users: {
+    id: "U_id",
+    firstName: "U_first",
+    lastName: "U_last",
+    email: "U_email",
+  },
 }));
 jest.mock("@/lib/db/drizzle-helpers", () => ({
   pgTimestampAsText: (c: unknown) => c,
@@ -88,7 +95,7 @@ async function captureFilters(
 ): Promise<unknown[]> {
   let captured: unknown[] = [];
   const builder: Record<string, unknown> = {};
-  for (const m of ["select", "from", "orderBy", "limit"]) {
+  for (const m of ["select", "from", "leftJoin", "orderBy", "limit"]) {
     builder[m] = jest.fn(() => builder);
   }
   builder.where = jest.fn((arg: unknown) => {
@@ -207,5 +214,65 @@ describe("listVisible status filter (archived visibility)", () => {
       expect(statusEq(filters)!.a).toEqual(["COL_status", status]);
       expect(archivedGuard(filters)).toBeUndefined();
     }
+  });
+});
+
+describe("listVisible owner-name projection (#1052)", () => {
+  /**
+   * Capture the `.select()` projection and the `.leftJoin()` args so we can assert
+   * the owner display name rides on a LEFT JOIN of `users` — WITHOUT mutating the
+   * shared `objectSelectFields` (single-object loads must stay join-free).
+   */
+  async function captureSelectAndJoin(): Promise<{
+    select: Record<string, unknown>;
+    joinArgs: unknown[];
+  }> {
+    let select: Record<string, unknown> = {};
+    let joinArgs: unknown[] = [];
+    const builder: Record<string, unknown> = {};
+    for (const m of ["from", "where", "orderBy", "limit"]) {
+      builder[m] = jest.fn(() => builder);
+    }
+    builder.select = jest.fn((arg: unknown) => {
+      select = arg as Record<string, unknown>;
+      return builder;
+    });
+    builder.leftJoin = jest.fn((...args: unknown[]) => {
+      joinArgs = args;
+      return builder;
+    });
+    builder.offset = jest.fn(() => Promise.resolve([]));
+    executeQueryMock.mockImplementationOnce((cb: (db: unknown) => unknown) =>
+      cb(builder)
+    );
+    await visibilityService.listVisible(staffUser, {});
+    return { select, joinArgs };
+  }
+
+  it("projects `ownerName` as an sql expression and LEFT JOINs users", async () => {
+    const { select, joinArgs } = await captureSelectAndJoin();
+    // ownerName is added to the LIST projection (an sql expression), on top of the
+    // shared object fields — never a plain column, so the JOIN backs it.
+    expect(isSql(select.ownerName)).toBe(true);
+    const ownerSql = select.ownerName as CapturedSql;
+    // The display-name expression references the joined users columns + email
+    // fallback (bound values, not string-concatenated).
+    expect(ownerSql.values).toEqual(
+      expect.arrayContaining(["U_first", "U_last", "U_email"])
+    );
+    // The shared object columns still ride along (projection was extended, not
+    // replaced) — guards the "do not change objectSelectFields" contract.
+    expect(select.id).toBe("COL_id");
+    expect(select.title).toBe("COL_title");
+    // LEFT JOIN users ON users.id = contentObjects.ownerUserId.
+    expect(joinArgs[0]).toEqual({
+      id: "U_id",
+      firstName: "U_first",
+      lastName: "U_last",
+      email: "U_email",
+    });
+    const on = joinArgs[1] as CapturedEq;
+    expect(on.op).toBe("eq");
+    expect(on.a).toEqual(["U_id", "COL_owner"]);
   });
 });

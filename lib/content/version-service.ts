@@ -559,6 +559,27 @@ export const versionService = {
   },
 
   /**
+   * `loadArtifactCode` with the readers' shared degrade-to-empty contract: a
+   * missing/unreadable body (e.g. S3 NoSuchKey) logs a warning and returns ""
+   * so the surface renders an empty preview instead of surfacing the raw error.
+   * Used by every render path (readers, full-screen viewer, embed resolver);
+   * callers that need the failure itself use `loadArtifactCode` directly.
+   */
+  async loadArtifactCodeSafe(version: ContentVersionDTO): Promise<string> {
+    try {
+      return await this.loadArtifactCode(version);
+    } catch (error) {
+      const log = createLogger({ action: "content.loadArtifactCodeSafe" });
+      log.warn("artifact body unavailable; rendering empty preview", {
+        objectId: version.objectId,
+        versionNumber: version.versionNumber,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return "";
+    }
+  },
+
+  /**
    * Point the object's working head at an earlier version, enforcing edit
    * permission. Validates the target version belongs to the object.
    * Re-publishing the rolled-back version is an explicit, separate step

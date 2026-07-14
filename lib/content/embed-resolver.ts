@@ -145,15 +145,16 @@ export async function resolveEmbedForReader(
   }
 
   // Viewable: load the code (published version for public, live head otherwise).
-  // Best-effort — a missing body degrades to an empty live preview.
+  // Best-effort — a failed version lookup or missing body degrades to an empty
+  // live preview (the body-load fallback is loadArtifactCodeSafe's contract).
   let code = "";
   try {
     const version = publishedVersionId
       ? await versionService.getById(obj.id, publishedVersionId)
       : await versionService.current(obj.id);
-    if (version) code = await versionService.loadArtifactCode(version);
+    if (version) code = await versionService.loadArtifactCodeSafe(version);
   } catch (error) {
-    log.warn("embedded artifact body unavailable; rendering empty live preview", {
+    log.warn("embedded artifact version unavailable; rendering empty live preview", {
       artifactId: obj.id,
       error: error instanceof Error ? error.message : String(error),
     });

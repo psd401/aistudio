@@ -173,4 +173,105 @@ await check(
   }
 );
 
+await check(
+  "a sibling sandbox's render-ack does not stop this instance's delivery retries",
+  async () => {
+    // Regression: every sandbox on a page shares the ONE configured origin, and
+    // the host acks to the shared top window — so an origin-only filter let the
+    // fastest sibling's ack mark EVERY instance "rendered" and kill their retry
+    // loops (permanently blank frames). The listener must additionally match
+    // `event.source` against its OWN iframe's contentWindow.
+    const container4 = dom.window.document.createElement("div");
+    dom.window.document.body.appendChild(container4);
+    const root4 = ReactDOM.createRoot(container4 as unknown as Element);
+
+    const { act } = await import("react");
+    await act(async () => {
+      root4.render(
+        React.createElement(
+          "div",
+          null,
+          React.createElement(ArtifactSandbox, {
+            code: "<h1>a</h1>",
+            src: "https://sandbox.example.com/render",
+            title: "A",
+          }),
+          React.createElement(ArtifactSandbox, {
+            code: "<h1>b</h1>",
+            src: "https://sandbox.example.com/render",
+            title: "B",
+          })
+        )
+      );
+    });
+
+    const frames = container4.querySelectorAll('[data-testid="artifact-sandbox-frame"]');
+    assert.equal(frames.length, 2, "expected two mounted sandboxes");
+    const [frameA, frameB] = Array.from(frames) as HTMLIFrameElement[];
+
+    // Count deliveries per frame by patching each contentWindow's postMessage.
+    let postsA = 0;
+    let postsB = 0;
+    (frameA.contentWindow as unknown as { postMessage: () => void }).postMessage = () => {
+      postsA += 1;
+    };
+    (frameB.contentWindow as unknown as { postMessage: () => void }).postMessage = () => {
+      postsB += 1;
+    };
+
+    // Let at least one retry tick land on both instances (interval is 300ms).
+    await new Promise((r) => setTimeout(r, 400));
+    assert.ok(postsB > 0, "instance B never attempted delivery");
+
+    // An ack from a DIFFERENT origin (neither "null" nor the sandbox origin)
+    // must be ignored even with a matching source — A keeps retrying.
+    await act(async () => {
+      dom.window.dispatchEvent(
+        new dom.window.MessageEvent("message", {
+          origin: "https://evil.example.com",
+          source: frameA.contentWindow,
+          data: { type: "atrium-artifact-rendered", ok: true },
+        })
+      );
+    });
+    const postsAAfterForged = postsA;
+    await new Promise((r) => setTimeout(r, 400));
+    assert.ok(
+      postsA > postsAAfterForged,
+      "a wrong-origin ack was accepted — origin filter lost"
+    );
+
+    // Ack ONLY instance A. The REAL host frame is opaque-origin (allow-scripts,
+    // no allow-same-origin), so a legitimate ack arrives with origin "null" —
+    // this must be ACCEPTED (rejecting it would error-out every rendered
+    // artifact ~12s in) with authentication carried by the source identity.
+    await act(async () => {
+      dom.window.dispatchEvent(
+        new dom.window.MessageEvent("message", {
+          origin: "null",
+          source: frameA.contentWindow,
+          data: { type: "atrium-artifact-rendered", ok: true },
+        })
+      );
+    });
+
+    const postsAAfterAck = postsA;
+    const postsBAfterAck = postsB;
+    await new Promise((r) => setTimeout(r, 700));
+
+    // B (never acked) must KEEP retrying; A's loop stops after its own ack.
+    assert.ok(
+      postsB > postsBAfterAck,
+      "sibling ack stopped instance B's retries — cross-instance ack pollution"
+    );
+    assert.ok(
+      postsA - postsAAfterAck <= 1,
+      "instance A kept retrying after its own successful ack"
+    );
+
+    root4.unmount();
+    container4.remove();
+  }
+);
+
 console.log(`\nartifact-sandbox-component smoke: ${passed} checks passed`);
