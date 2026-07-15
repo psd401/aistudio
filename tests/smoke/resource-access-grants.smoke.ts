@@ -24,15 +24,13 @@
  */
 
 import assert from "node:assert/strict";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { executeQuery, toPgRows } from "@/lib/db/drizzle-client";
 import { users } from "@/lib/db/schema";
 import {
   userCanAccessResource,
   filterAccessibleResourceIds,
   replaceResourceGrants,
-  syncModelAllowedRoleGrants,
-  listResourceGrants,
   deleteAllResourceGrants,
 } from "@/lib/db/drizzle/resource-access";
 
@@ -181,73 +179,15 @@ await check("batch: admin sees both (admin bypass)", async () => {
   assert.equal(accessible.has(UNRESTRICTED_ID), true);
 });
 
-// ROLE-ONLY SYNC — syncModelAllowedRoleGrants (the legacy allowed_roles bridge,
-// #1206) must replace ONLY the role grants and PRESERVE group grants, so the
-// model create/update/import write paths never clobber admin-set group grants.
-await replaceResourceGrants(
-  RES_TYPE,
-  RES_ID,
-  [
-    { grantKind: "role", grantValue: "staff" },
-    { grantKind: "group", grantValue: ACTIVE_GROUP },
-  ],
-  adminId
-);
-await syncModelAllowedRoleGrants(Number(RES_ID), ["student", "teacher"], adminId);
-await check("role-only sync swaps roles but keeps the group grant", async () => {
-  const grants = await listResourceGrants(RES_TYPE, RES_ID);
-  const roles = grants.filter((g) => g.grantKind === "role").map((g) => g.grantValue).sort();
-  const groups = grants.filter((g) => g.grantKind === "group").map((g) => g.grantValue);
-  assert.deepEqual(roles, ["student", "teacher"]);
-  assert.deepEqual(groups, [ACTIVE_GROUP.toLowerCase()]);
-});
-await check("role-only sync with null clears roles, still keeps the group grant", async () => {
-  await syncModelAllowedRoleGrants(Number(RES_ID), null, adminId);
-  const grants = await listResourceGrants(RES_TYPE, RES_ID);
-  assert.equal(grants.filter((g) => g.grantKind === "role").length, 0);
-  assert.equal(grants.filter((g) => g.grantKind === "group").length, 1);
-});
+// NOTE (#1207): the ROLE-ONLY SYNC checks (for the removed
+// syncModelAllowedRoleGrants bridge) and the BACKFILL-EQUIVALENCE check (which
+// queried the now-dropped ai_models.allowed_roles column) were removed here when
+// the column was retired in Phase 4. Model access is edited solely through the
+// resource_access_grants writers exercised above; the migration-111 backfill was a
+// one-time, already-completed step.
 
-// Restore a clean slate BEFORE the backfill-equivalence assertion so the
-// synthetic test grants on RES_ID (a non-existent model id) don't register as
-// "extra" model grant rows the real allowed_roles can't explain.
+// Restore a clean slate (idempotent, re-runnable) — clear the synthetic grants.
 await deleteAllResourceGrants(RES_TYPE, RES_ID);
-
-// BACKFILL EQUIVALENCE — migration 111 copied ai_models.allowed_roles into
-// resource_access_grants(kind='role'); the model-access matrix must be identical
-// pre/post (issue AC#6). Assert the set of (model, role) grants derived from
-// allowed_roles EXACTLY equals the backfilled 'model'/'role' grant rows — no
-// missing rows, no extras. Uses the same predicate the migration's INSERT used.
-await check("backfill: model role grants exactly reproduce allowed_roles", async () => {
-  const rows = toPgRows(
-    await executeQuery(
-      (db) =>
-        db.execute(sql`
-          WITH expected AS (
-            SELECT m.id::text AS resource_id, trim(role_name) AS role_name
-              FROM ai_models m,
-                   LATERAL jsonb_array_elements_text(m.allowed_roles) AS role_name
-             WHERE m.allowed_roles IS NOT NULL
-               AND jsonb_typeof(m.allowed_roles) = 'array'
-               AND jsonb_array_length(m.allowed_roles) > 0
-               AND length(trim(role_name)) > 0
-          ),
-          actual AS (
-            SELECT resource_id, grant_value AS role_name
-              FROM resource_access_grants
-             WHERE resource_type = 'model' AND grant_kind = 'role'
-          )
-          SELECT count(*)::int AS mismatches FROM (
-            (SELECT * FROM expected EXCEPT SELECT * FROM actual)
-            UNION ALL
-            (SELECT * FROM actual EXCEPT SELECT * FROM expected)
-          ) diff
-        `),
-      "smoke.backfillEquivalence"
-    )
-  ) as { mismatches: number }[];
-  assert.equal(rows[0]?.mismatches, 0, "allowed_roles <-> grant rows differ");
-});
 
 console.log(`resource-access-grants smoke: ${passed} checks passed`);
 process.exit(0);

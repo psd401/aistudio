@@ -44,7 +44,6 @@ export interface ModelFormData {
   active: boolean
   nexusEnabled: boolean
   architectEnabled: boolean
-  allowedRoles: string[]
   // Pricing
   inputCostPer1kTokens: string | null
   outputCostPer1kTokens: string | null
@@ -71,7 +70,6 @@ const emptyFormData: ModelFormData = {
   active: true,
   nexusEnabled: true,
   architectEnabled: true,
-  allowedRoles: [],
   inputCostPer1kTokens: null,
   outputCostPer1kTokens: null,
   cachedInputCostPer1kTokens: null,
@@ -102,8 +100,6 @@ interface ModelDetailModalProps {
   onOpenChange: (open: boolean) => void
   onSave: (data: ModelFormData) => Promise<void>
   onDelete?: (model: SelectAiModel) => void
-  roleOptions: MultiSelectOption[]
-  roleLoading?: boolean
 }
 
 export function ModelDetailModal({
@@ -113,8 +109,6 @@ export function ModelDetailModal({
   onOpenChange,
   onSave,
   onDelete,
-  roleOptions,
-  roleLoading = false,
 }: ModelDetailModalProps) {
   const { toast } = useToast()
   const [formData, setFormData] = useState<ModelFormData>(emptyFormData)
@@ -155,12 +149,6 @@ export function ModelDetailModal({
         }
       }
 
-      // Parse allowed roles
-      let allowedRoles: string[] = []
-      if (model.allowedRoles && Array.isArray(model.allowedRoles)) {
-        allowedRoles = model.allowedRoles
-      }
-
       setFormData({
         id: model.id,
         name: model.name,
@@ -173,7 +161,6 @@ export function ModelDetailModal({
         active: model.active,
         nexusEnabled: model.nexusEnabled ?? true,
         architectEnabled: model.architectEnabled ?? true,
-        allowedRoles,
         inputCostPer1kTokens: model.inputCostPer1kTokens || null,
         outputCostPer1kTokens: model.outputCostPer1kTokens || null,
         cachedInputCostPer1kTokens: model.cachedInputCostPer1kTokens || null,
@@ -448,29 +435,6 @@ export function ModelDetailModal({
                       customPlaceholder="Add custom capability..."
                       className="w-full"
                     />
-                  </div>
-
-                  {/* Allowed Roles (legacy — superseded by per-resource grants, #1206) */}
-                  <div className="space-y-2">
-                    <Label>
-                      Allowed Roles (legacy)
-                      {roleLoading && (
-                        <span className="ml-2 text-xs text-muted-foreground">(Loading...)</span>
-                      )}
-                    </Label>
-                    <MultiSelect
-                      options={roleOptions}
-                      value={formData.allowedRoles}
-                      onChange={(v) => updateField("allowedRoles", v)}
-                      placeholder="All roles (unrestricted)"
-                      disabled
-                      className="w-full"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Read-only. Access is now enforced by the <span className="font-medium">Access</span>{" "}
-                      editor below (roles + Google groups). This field was migrated into it and is
-                      retained only until it is removed in a later migration.
-                    </p>
                   </div>
 
                   {/* Access — authoritative per-resource grants (roles + groups), #1206 */}

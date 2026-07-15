@@ -213,7 +213,7 @@ ALTER SEQUENCE ai_models_id_seq RESTART WITH 1;
 -- Insert current models
 INSERT INTO ai_models (
     name, model_id, provider, description, capabilities, max_tokens, active,
-    nexus_enabled, architect_enabled, allowed_roles,
+    nexus_enabled, architect_enabled,
     input_cost_per_1k_tokens, output_cost_per_1k_tokens, cached_input_cost_per_1k_tokens
 ) VALUES
 -- Google Gemini 3 Models
@@ -227,7 +227,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    NULL,
     0.002000,
     0.012000,
     0.000500
@@ -242,7 +241,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    NULL,
     0.000500,
     0.003000,
     0.000125
@@ -257,7 +255,6 @@ INSERT INTO ai_models (
     true,
     true,
     false,
-    NULL,
     0.002000,
     0.120000,
     NULL
@@ -272,7 +269,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    NULL,
     0.002000,
     0.012000,
     0.000200
@@ -287,7 +283,6 @@ INSERT INTO ai_models (
     true,
     true,
     false,
-    NULL,
     0.000250,
     0.001500,
     NULL
@@ -304,7 +299,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    NULL,
     0.001750,
     0.014000,
     0.000175
@@ -319,7 +313,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    '["administrator", "staff"]',
     0.001750,
     0.014000,
     0.000175
@@ -334,7 +327,6 @@ INSERT INTO ai_models (
     true,
     true,
     false,
-    NULL,
     0.010000,
     0.040000,
     NULL
@@ -351,7 +343,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    '["administrator", "staff"]',
     0.005000,
     0.025000,
     0.000500
@@ -366,7 +357,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    NULL,
     0.003000,
     0.015000,
     0.000300

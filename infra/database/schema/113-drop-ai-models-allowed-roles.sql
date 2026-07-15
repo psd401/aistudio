@@ -1,0 +1,47 @@
+-- Migration 113: drop ai_models.allowed_roles (Epic #1202, Phase 4 / #1207)
+--
+-- The legacy per-model role allow-list column (added in migration 024) is retired.
+-- Its role semantics were migrated to the generic resource_access_grants table in
+-- Phase 3 (migration 111 backfilled every allowed_roles entry into a ('model',
+-- resource_id, 'role', role_name) grant row), and ALL read paths now resolve model
+-- access exclusively through resource_access_grants:
+--   * lib/db/drizzle/resource-access.ts (userCanAccessResource /
+--     filterAccessibleResourceIds) — the authoritative execution gate,
+--   * GET /api/models — server-side filters the model list before it reaches the
+--     model-selector (the client role filter was removed in this release).
+-- The nexus provider factory / cost optimizer selected allowed_roles into a typed
+-- field but never USED it for any decision (verified in #1207); those dead selects
+-- are removed in the same release. The write-time bridge (syncModelAllowedRoleGrants)
+-- and the admin "Allowed Roles (legacy)" field are removed too — per-model
+-- role/group access is edited solely via the ResourceGrantsEditor.
+--
+-- DEPLOY ORDERING (read before deploying). This migration ships in the SAME release
+-- as the code that stops referencing the column, following the repo precedent for
+-- column/table drops (migrations 045 remove-chat-enabled-column, 046
+-- remove-nexus-capabilities-column, 084 drop-legacy-tools-tables). CDK runs the
+-- db-init custom resource during the stack update and the DatabaseStack deploys
+-- before the frontend (the frontend stacks depend on it), so during the ECS rolling
+-- replacement there is a brief window where OLD tasks still run the previous release,
+-- whose Drizzle `.select()` on ai_models includes `allowed_roles`. Reads from those
+-- old tasks fail while the window lasts:
+--   * nexus model listing (getModelsFromDatabase) catches the error and returns [],
+--   * but the admin model list and GET /api/models (getAIModels / getNexusEnabledModels)
+--     surface a 500 until the old task is replaced.
+-- This never escalates access (execution stays gated by resource_access_grants) and
+-- clears as soon as ECS finishes rolling. Impact is a transient error on model-list
+-- reads, not data loss. To make the drop zero-downtime, deploy during a low-traffic
+-- window, OR run this as an expand/contract two-step: cut a release that only removes
+-- the code references (keep the column), let ECS fully drain the old tasks, then apply
+-- this drop in the next deploy. The single-release path here matches existing repo
+-- practice; choose the two-step if a momentary model-list 500 is unacceptable.
+--
+-- ADDITIVE-SAFE and idempotent: DROP ... IF EXISTS on both the GIN index (024) and
+-- the column. A plain single-statement drop — no PL/pgSQL DO $$ block (the migration
+-- runner's splitter only enters block mode on CREATE TYPE/FUNCTION/DROP TYPE), and no
+-- CONCURRENTLY (rejected by the RDS Data API validator). DROP COLUMN also drops any
+-- remaining dependent objects (the GIN index) automatically; dropping the index first
+-- is explicit and keeps the intent auditable.
+
+DROP INDEX IF EXISTS idx_ai_models_allowed_roles;
+
+ALTER TABLE ai_models DROP COLUMN IF EXISTS allowed_roles;

@@ -226,6 +226,7 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAgentPlatf
 
 const devProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Dev', {
   environment: 'dev',
+  alertEmail,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devProcessingStack).add('Environment', 'Dev');
@@ -389,6 +390,7 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAgentPlat
 
 const prodProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Prod', {
   environment: 'prod',
+  alertEmail,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(prodProcessingStack).add('Environment', 'Prod');

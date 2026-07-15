@@ -90,7 +90,15 @@ export async function getUserById(userId: number) {
 }
 
 /**
- * Get user by email address
+ * Get user by email address.
+ *
+ * Case-INSENSITIVE (`lower(email) = lower(:email)`) — email is an authorization join
+ * key and migration 112 (#1207) enforces uniqueness on `lower(email)`. A
+ * case-sensitive `=` here would miss an existing row when Cognito sends a
+ * differently-cased address, and the caller's fall-through insert/link would then
+ * violate `uq_users_email_lower` and lock the user out of provisioning. Lowercasing
+ * both sides also lets the query use that functional unique index.
+ *
  * @throws {DatabaseError} If user not found
  */
 export async function getUserByEmail(email: string) {
@@ -108,7 +116,7 @@ export async function getUserByEmail(email: string) {
           updatedAt: users.updatedAt,
         })
         .from(users)
-        .where(eq(users.email, email))
+        .where(eq(sql`lower(${users.email})`, email.toLowerCase()))
         .limit(1),
     "getUserByEmail"
   );

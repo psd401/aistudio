@@ -10,6 +10,8 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as path from 'path';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as events from 'aws-cdk-lib/aws-events';
@@ -24,6 +26,11 @@ export interface ProcessingStackProps extends cdk.StackProps {
   documentsBucketName?: string; // Optional for backward compatibility
   databaseResourceArn?: string; // Optional for backward compatibility
   databaseSecretArn?: string; // Optional for backward compatibility
+  // Email subscribed to the group-sync failure / staleness alarms (#1207).
+  // Sourced from the `alertEmail` CDK context, same as the other stacks. When
+  // absent the alarms are still created (and visible in CloudWatch) but have no
+  // notification target.
+  alertEmail?: string;
 }
 
 export class ProcessingStack extends cdk.Stack {
@@ -577,6 +584,81 @@ export class ProcessingStack extends cdk.Stack {
       schedule: events.Schedule.rate(cdk.Duration.hours(1)),
       targets: [new eventsTargets.LambdaFunction(groupSyncLambda)],
     });
+
+    // -----------------------------------------------------------------------
+    // Group-sync observability (Epic #1202, Phase 4 / #1207)
+    // -----------------------------------------------------------------------
+    // Group sync is an AUTHORIZATION source (membership drives roles + resource
+    // grants), so a silently-dead or persistently-failing sync degrades access
+    // control. Two alarms cover the two distinct failure shapes:
+    //   1. Failure alarm  — a run executed but errored (directory outage, DB
+    //      failure, crash/timeout). The handler re-throws on failure, so the
+    //      Lambda's built-in Errors metric captures BOTH unhandled crashes and
+    //      handled-then-rethrown sync failures in one signal.
+    //   2. Staleness alarm — no SUCCESSFUL run within the staleness window,
+    //      which also catches "the schedule stopped firing entirely" (the custom
+    //      SyncRunSucceeded metric goes absent → treatMissingData=BREACHING).
+    // Alarm actions are wired only when an alert email is configured; the alarms
+    // themselves always exist so their state is visible in CloudWatch.
+    let groupSyncAlarmTopic: sns.Topic | undefined;
+    if (props.alertEmail) {
+      groupSyncAlarmTopic = new sns.Topic(this, 'GroupSyncAlarmTopic', {
+        topicName: `psd-group-sync-alarms-${props.environment}`,
+        displayName: `PSD Group Sync Alarms (${props.environment})`,
+      });
+      groupSyncAlarmTopic.addSubscription(
+        new snsSubscriptions.EmailSubscription(props.alertEmail),
+      );
+      cdk.Tags.of(groupSyncAlarmTopic).add('Environment', props.environment);
+      cdk.Tags.of(groupSyncAlarmTopic).add('ManagedBy', 'cdk');
+    }
+
+    // 1. Failure alarm — any errored invocation in the last hour. Missing data
+    //    (no invocations) is NOT breaching here; the staleness alarm owns the
+    //    "not running at all" case.
+    const groupSyncFailureAlarm = new cloudwatch.Alarm(this, 'GroupSyncFailureAlarm', {
+      alarmName: `psd-group-sync-failure-${props.environment}`,
+      alarmDescription:
+        'Google Directory group-sync Lambda errored — membership/roles may be stale. ' +
+        'Check /aws/lambda/psd-group-sync logs; last-known-good membership is preserved per group.',
+      metric: groupSyncLambda.metricErrors({
+        period: cdk.Duration.hours(1),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // 2. Staleness alarm — fewer than one successful sync across three
+    //    consecutive hourly windows (the hourly schedule should produce one
+    //    SyncRunSucceeded=1 per hour). BREACHING on missing data so a Lambda that
+    //    stops running (disabled schedule, throttle, broken deploy) trips it too.
+    const groupSyncStalenessAlarm = new cloudwatch.Alarm(this, 'GroupSyncStalenessAlarm', {
+      alarmName: `psd-group-sync-staleness-${props.environment}`,
+      alarmDescription:
+        'No successful Google Directory group sync in ~3 hours (time since last success exceeded threshold). ' +
+        'Group-driven roles/resource grants are frozen at their last-known-good state until sync recovers.',
+      metric: new cloudwatch.Metric({
+        namespace: 'AIStudio/GroupSync',
+        metricName: 'SyncRunSucceeded',
+        dimensionsMap: { Environment: props.environment },
+        period: cdk.Duration.hours(1),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 3,
+      datapointsToAlarm: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    });
+
+    if (groupSyncAlarmTopic) {
+      const alarmAction = new cloudwatchActions.SnsAction(groupSyncAlarmTopic);
+      groupSyncFailureAlarm.addAlarmAction(alarmAction);
+      groupSyncStalenessAlarm.addAlarmAction(alarmAction);
+    }
 
     // Outputs
     new cdk.CfnOutput(this, 'GroupSyncFunctionName', {

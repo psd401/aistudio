@@ -11,6 +11,7 @@ import {
   reconcileUserManagedRoles
 } from "@/lib/db/drizzle"
 import { getServerSession } from "@/lib/auth/server-session"
+import { defaultRoleForNewUser } from "@/lib/auth/default-role"
 import { ActionState } from "@/types"
 import { SelectUser } from "@/types/db-types"
 import { 
@@ -142,31 +143,37 @@ export async function getCurrentUserAction(): Promise<
         lastName: user.lastName
       })
 
-      // Assign default role using UPSERT pattern (ON CONFLICT DO NOTHING)
-      // Concurrent requests will safely skip if role already assigned
-      const isNumericUsername = /^\d+$/.test(username)
-      const defaultRole = isNumericUsername ? "student" : "staff"
+      // Assign the default role (legacy username heuristic — single source of
+      // truth in lib/auth/default-role.ts; group-sync reconciliation below is
+      // authoritative). `null` means "assign no default role" once the heuristic
+      // is retired (coverage-gated, #1207); today it never returns null.
+      const defaultRole = defaultRoleForNewUser(userEmail)
 
-      log.info("Assigning default role based on username (UPSERT)", {
-        username,
-        isNumeric: isNumericUsername,
-        assignedRole: defaultRole
-      })
-
-      // addUserRole runs in a transaction, handles role lookup, and increments
-      // role_version for session cache invalidation — consistent with resolveUserId
-      try {
-        await addUserRole(user!.id, defaultRole)
-        log.info(`${defaultRole} role assigned to user`, {
-          userId: user.id,
-          roleName: defaultRole
+      if (defaultRole) {
+        log.info("Assigning default role based on username (UPSERT)", {
+          username,
+          assignedRole: defaultRole
         })
-      } catch (roleError) {
-        // Non-fatal: user is provisioned but may lack a role until next login
-        log.warn("Default role assignment failed", {
-          userId: user.id,
-          attemptedRole: defaultRole,
-          error: roleError instanceof Error ? roleError.message : "Unknown error"
+
+        // addUserRole runs in a transaction, handles role lookup, and increments
+        // role_version for session cache invalidation — consistent with resolveUserId
+        try {
+          await addUserRole(user!.id, defaultRole)
+          log.info(`${defaultRole} role assigned to user`, {
+            userId: user.id,
+            roleName: defaultRole
+          })
+        } catch (roleError) {
+          // Non-fatal: user is provisioned but may lack a role until next login
+          log.warn("Default role assignment failed", {
+            userId: user.id,
+            attemptedRole: defaultRole,
+            error: roleError instanceof Error ? roleError.message : "Unknown error"
+          })
+        }
+      } else {
+        log.info("No default role assigned (heuristic retired) — relying on group-sync", {
+          userId: user.id
         })
       }
     }
@@ -203,8 +210,29 @@ export async function getCurrentUserAction(): Promise<
       updatePayload.email = userEmail
     }
 
-    const updatedUser = await updateUser(user.id, updatePayload)
-    user = updatedUser as unknown as SelectUser
+    // The email refresh can violate uq_users_email_lower (migration 112, #1207) when
+    // the session's new address already belongs to a DIFFERENT user row (an aliased
+    // Workspace address, or a stale duplicate that predates the index). That must NOT
+    // hard-fail the whole "who am I" lookup and lock the user out — retry WITHOUT the
+    // email so last-sign-in/name still persist, keep the last-known email, and let an
+    // admin resolve the collision (report-duplicate-emails.ts). Consistent with the
+    // non-fatal treatment of the other authz-constraint writes in this PR.
+    try {
+      const updatedUser = await updateUser(user.id, updatePayload)
+      user = updatedUser as unknown as SelectUser
+    } catch (updateError) {
+      if ("email" in updatePayload) {
+        log.warn("Email refresh hit a uniqueness conflict — keeping last-known email", {
+          userId: user.id,
+          error: updateError instanceof Error ? updateError.message : "Unknown error"
+        })
+        const { email: _droppedEmail, ...withoutEmail } = updatePayload
+        const updatedUser = await updateUser(user.id, withoutEmail)
+        user = updatedUser as unknown as SelectUser
+      } else {
+        throw updateError
+      }
+    }
 
     // Reconcile managed (group-sync) roles from the user's current Google group
     // memberships BEFORE reading roles back, so the response reflects any

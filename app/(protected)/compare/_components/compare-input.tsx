@@ -76,7 +76,6 @@ export function CompareInput({
             placeholder="Select first model"
             showDescription={false}
             groupByProvider={true}
-            hideRoleRestricted={true}
             hideCapabilityMissing={true}
             aria-label="Select first model"
           />
@@ -93,7 +92,6 @@ export function CompareInput({
             placeholder="Select second model"
             showDescription={false}
             groupByProvider={true}
-            hideRoleRestricted={true}
             hideCapabilityMissing={true}
             aria-label="Select second model"
           />

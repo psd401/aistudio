@@ -32,7 +32,9 @@ export const aiModels = pgTable("ai_models", {
   updatedAt: timestamp("updated_at"),
   nexusEnabled: boolean("nexus_enabled").default(true).notNull(),
   architectEnabled: boolean("architect_enabled").default(true).notNull(),
-  allowedRoles: jsonb("allowed_roles").$type<string[]>(),
+  // NOTE: the legacy allowed_roles column was dropped in migration 113 (#1207).
+  // Per-model role/group access now lives solely in resource_access_grants
+  // (migration 111) — see lib/db/drizzle/resource-access.ts.
   inputCostPer1kTokens: numeric("input_cost_per_1k_tokens", {
     precision: 10,
     scale: 6,

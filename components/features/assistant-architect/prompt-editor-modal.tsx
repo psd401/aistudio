@@ -500,7 +500,6 @@ function SettingsColumn({
             placeholder="Select an AI model"
             className="bg-muted"
             requiredCapabilities={CHAT_CAPABILITIES}
-            hideRoleRestricted={true}
             hideCapabilityMissing={true}
           />
         </div>

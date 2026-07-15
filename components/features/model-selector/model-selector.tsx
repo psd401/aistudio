@@ -13,7 +13,6 @@ import {
 } from "@/components/ui/command"
 import { IconRobot, IconChevronDown } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
-import { createLogger } from "@/lib/client-logger"
 import { useFilteredModels } from "./use-filtered-models"
 import { ModelSelectorItem } from "./model-selector-item"
 import type { ModelSelectorProps } from "./model-selector-types"
@@ -28,14 +27,12 @@ export function ModelSelector({
   placeholder = "Select a model",
   disabled = false,
   className,
-  allowedRoles = [],
   groupByProvider = true,
   showDescription = true,
   virtualizeThreshold = 50,
   searchable = true,
   loading = false,
   error,
-  hideRoleRestricted = false,
   hideCapabilityMissing = false,
   "aria-label": ariaLabel = "Select AI model",
   "aria-describedby": ariaDescribedBy
@@ -43,7 +40,6 @@ export function ModelSelector({
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState("")
   const [debouncedSearch, setDebouncedSearch] = useState("")
-  const [userRoles, setUserRoles] = useState<string[]>([])
   const commandListRef = useRef<HTMLDivElement>(null)
   const debounceTimerRef = useRef<NodeJS.Timeout | undefined>(undefined)
 
@@ -64,35 +60,11 @@ export function ModelSelector({
     }
   }, [search])
 
-  // Fetch user roles on mount. This drives ONLY the advisory in-dropdown
-  // labeling; server-side access is authoritative (#1206): GET /api/models
-  // already returns only the models this user may access, so an inaccessible
-  // model never reaches the client. On a roles-fetch failure we keep userRoles
-  // empty, which makes any still-listed role-restricted model render as
-  // INaccessible — a fail-CLOSED default, never fail-open. The former silent
-  // catch (which claimed to "show all models without role filtering") is
-  // replaced with an observable warning.
-  useEffect(() => {
-    const log = createLogger({ component: "ModelSelector" })
-    async function fetchUserRoles() {
-      try {
-        const response = await fetch('/api/user/roles')
-        if (response.ok) {
-          const data = await response.json()
-          setUserRoles(data.roles || [])
-        } else {
-          log.warn("Failed to fetch user roles for model selector; failing closed", {
-            status: response.status,
-          })
-        }
-      } catch (error) {
-        log.warn("Error fetching user roles for model selector; failing closed", {
-          error: error instanceof Error ? error.message : String(error),
-        })
-      }
-    }
-    fetchUserRoles()
-  }, [])
+  // NOTE (#1207): the ModelSelector no longer fetches the user's roles. Per-model
+  // role/group access is enforced server-side — GET /api/models filters the list
+  // through resource_access_grants (#1206), so an inaccessible model never reaches
+  // this component. The former /api/user/roles fetch existed only to drive the
+  // now-removed client-side role filter. Only capability filtering remains.
 
   const {
     filteredModels,
@@ -103,10 +75,7 @@ export function ModelSelector({
     models,
     requiredCapabilities,
     anyOfCapabilities,
-    allowedRoles,
-    userRoles,
     searchQuery: debouncedSearch,
-    hideRoleRestricted,
     hideCapabilityMissing
   })
 

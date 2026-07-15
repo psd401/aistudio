@@ -42,7 +42,6 @@ interface TransformedModel extends DatabaseRow {
   supportsBatching?: boolean;
   capabilities?: string | string[] | null;
   providerMetadata?: Record<string, unknown>;
-  allowedRoles?: string[];
 }
 
 export interface CostOptimizationRequest {
@@ -302,8 +301,7 @@ export class CostOptimizer {
           max_concurrency as "maxConcurrency",
           supports_batching as "supportsBatching",
           capabilities,
-          provider_metadata as "providerMetadata",
-          allowed_roles as "allowedRoles"
+          provider_metadata as "providerMetadata"
         FROM ai_models
         WHERE active = true AND nexus_enabled = true
         ORDER BY provider, name

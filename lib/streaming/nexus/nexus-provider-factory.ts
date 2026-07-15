@@ -22,7 +22,6 @@ interface DatabaseModelInfo extends DatabaseRow {
   supportsBatching?: boolean;
   capabilities?: string | string[] | null;
   providerMetadata?: Record<string, unknown>;
-  allowedRoles?: string[];
 }
 
 export interface NexusModelOptions {
@@ -464,8 +463,7 @@ export class NexusProviderFactory {
           max_concurrency as "maxConcurrency",
           supports_batching as "supportsBatching",
           capabilities,
-          provider_metadata as "providerMetadata",
-          allowed_roles as "allowedRoles"
+          provider_metadata as "providerMetadata"
         FROM ai_models
         WHERE enabled = true
         ORDER BY provider, model_id
@@ -497,8 +495,7 @@ export class NexusProviderFactory {
           max_concurrency as "maxConcurrency",
           supports_batching as "supportsBatching",
           capabilities,
-          provider_metadata as "providerMetadata",
-          allowed_roles as "allowedRoles"
+          provider_metadata as "providerMetadata"
         FROM ai_models
         WHERE provider = $1 AND model_id = $2 AND active = true
         LIMIT 1

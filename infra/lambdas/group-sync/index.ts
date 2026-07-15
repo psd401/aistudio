@@ -152,8 +152,18 @@ async function emitMetrics(
         { MetricName: "GroupsDeactivated", Value: result.deactivated, Unit: "Count", Dimensions: dims },
         { MetricName: "MembersTotal", Value: result.totalMembers, Unit: "Count", Dimensions: dims },
         { MetricName: "SyncRunFailed", Value: 0, Unit: "Count", Dimensions: dims },
+        // Staleness signal (#1207): 1 on every successful run. The CDK
+        // GroupSyncStalenessAlarm alarms when the SUM of this metric over the
+        // staleness window is < 1 with treatMissingData=BREACHING, so it fires for
+        // BOTH "ran but failed" (0 here) AND "did not run at all" (metric absent) —
+        // a self-emitted "seconds since last sync" gauge could not detect the
+        // latter because a dead Lambda emits nothing.
+        { MetricName: "SyncRunSucceeded", Value: 1, Unit: "Count", Dimensions: dims },
       ]
-    : [{ MetricName: "SyncRunFailed", Value: 1, Unit: "Count", Dimensions: dims }];
+    : [
+        { MetricName: "SyncRunFailed", Value: 1, Unit: "Count", Dimensions: dims },
+        { MetricName: "SyncRunSucceeded", Value: 0, Unit: "Count", Dimensions: dims },
+      ];
 
   if (roleReconcile) {
     metrics.push(

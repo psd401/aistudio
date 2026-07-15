@@ -1,9 +1,16 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin-check";
 import { bulkImportAIModels, getAIModelByModelId } from "@/lib/db/drizzle";
-import { syncModelAllowedRoleGrants } from "@/lib/db/drizzle/resource-access";
+import { setModelRoleGrantsFromNames } from "@/lib/db/drizzle/resource-access";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import { validateModel } from "@/lib/validators/model-import-validator";
+
+// NOTE (#1207): the ai_models.allowed_roles COLUMN is gone, but the import format
+// still accepts the legacy `allowedRoles` field so older import files keep working.
+// It is now TRANSLATED into `role`-kind resource_access_grants after import (see the
+// bridge below) rather than written to a column. This is deliberate: dropping it
+// silently would leave a previously-restricted model with zero grant rows — i.e.
+// UNRESTRICTED (visible to everyone), since zero grants means "no restriction".
 
 // Maximum models per import
 const MAX_MODELS_PER_IMPORT = 100;
@@ -21,6 +28,7 @@ interface ModelJsonInput {
   active?: boolean;
   nexusEnabled?: boolean;
   architectEnabled?: boolean;
+  // Legacy access field — translated into role grants post-import (see header).
   allowedRoles?: string[];
   inputCostPer1kTokens?: string;
   outputCostPer1kTokens?: string;
@@ -173,7 +181,6 @@ export async function POST(request: Request) {
       active: model.active,
       nexusEnabled: model.nexusEnabled,
       architectEnabled: model.architectEnabled,
-      allowedRoles: model.allowedRoles,
       inputCostPer1kTokens: model.inputCostPer1kTokens
         ? String(model.inputCostPer1kTokens)
         : undefined,
@@ -190,21 +197,27 @@ export async function POST(request: Request) {
     // Execute bulk import
     const result = await bulkImportAIModels(modelsToImport);
 
-    // Bridge the legacy allowed_roles column into resource_access_grants
-    // (#1206 P1 follow-up) — without this, an imported model with allowedRoles
-    // set has zero grant rows and the new gate treats it as unrestricted.
-    // Reads back the persisted state so it reflects bulkImportAIModels' actual
-    // create-vs-preserve-existing merge, not just the raw request payload.
-    for (const modelId of modelIds) {
-      const persisted = await getAIModelByModelId(modelId);
+    // Translate any legacy `allowedRoles` into `role`-kind resource_access_grants
+    // (#1207). Without this, an import that specified a role restriction would land
+    // as zero grant rows = UNRESTRICTED (visible to everyone). Only touches models
+    // that actually carry the field; preserves any group grants already set.
+    const byModelId = new Map<string, string[]>();
+    for (const model of models as ModelJsonInput[]) {
+      if (Array.isArray(model.allowedRoles)) {
+        byModelId.set(model.modelId, model.allowedRoles);
+      }
+    }
+    for (const [modelIdStr, roleNames] of byModelId) {
+      const persisted = await getAIModelByModelId(modelIdStr);
       if (persisted) {
-        await syncModelAllowedRoleGrants(persisted.id, persisted.allowedRoles, null);
+        await setModelRoleGrantsFromNames(persisted.id, roleNames, null);
       }
     }
 
     log.info("Bulk import completed", {
       created: result.created,
       updated: result.updated,
+      roleGrantsTranslated: byModelId.size,
     });
     timer({ status: "success", created: result.created, updated: result.updated });
 

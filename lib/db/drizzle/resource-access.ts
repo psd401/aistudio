@@ -315,29 +315,25 @@ export async function replaceResourceGrants(
 }
 
 /**
- * Sync a model's legacy `ai_models.allowed_roles` column into `role`-kind rows
- * in `resource_access_grants`, WITHOUT touching any `group`-kind grants the
- * admin grants editor may have set separately.
- *
- * Write-time bridge for the `allowed_roles` write paths (create/update/import,
- * #1206 P1 follow-up): the read gate (userCanAccessResource /
- * filterAccessibleResourceIds) is authoritative on resource_access_grants
- * alone, so a model created/imported/updated with allowedRoles set but no
- * synced grant rows would silently be UNRESTRICTED under the new gate — the
- * migration 111 backfill only ran once, at migration time. `allowedRoles`
- * null/empty clears all `role` grants (matches "no restriction"). Retired
- * along with the `allowed_roles` column in Phase 4 (#1207).
+ * Translate a list of role NAMES into `role`-kind grants on a model, preserving any
+ * `group`-kind grants already set. Used only by the JSON import path (#1207): an
+ * import file may still carry the legacy `allowedRoles` field, and dropping it
+ * silently would leave the model with zero grants — i.e. UNRESTRICTED (visible to
+ * everyone) — since zero grant rows means "no restriction". Translating it into role
+ * grants keeps the import file's access intent. `allowedRoles` null/empty clears all
+ * `role` grants (matches "no restriction"). This takes role names directly and has
+ * NO dependency on the dropped `ai_models.allowed_roles` column.
  */
-export async function syncModelAllowedRoleGrants(
+export async function setModelRoleGrantsFromNames(
   modelId: number,
-  allowedRoles: string[] | null | undefined,
+  roleNames: string[] | null | undefined,
   createdBy: number | null
 ): Promise<void> {
   const existing = await listResourceGrants("model", modelId);
   const groupGrants = existing.filter((g) => g.grantKind === "group");
-  const roleGrants: ResourceGrant[] = (allowedRoles ?? [])
+  const roleGrants: ResourceGrant[] = (roleNames ?? [])
     .filter((r): r is string => typeof r === "string" && r.trim().length > 0)
-    .map((r) => ({ grantKind: "role" as const, grantValue: r }));
+    .map((r) => ({ grantKind: "role" as const, grantValue: r.trim() }));
   await replaceResourceGrants("model", modelId, [...groupGrants, ...roleGrants], createdBy);
 }
 
