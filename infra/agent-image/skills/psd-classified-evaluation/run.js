@@ -39,8 +39,18 @@ const {
 } = require('./gateway');
 
 // Loose email shape check — the gateway re-derives and verifies people
-// authoritatively; this only catches obviously malformed --user values early.
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// authoritatively; this only catches obviously malformed values early. Written
+// as linear index/scan logic (NOT a regex) to avoid polynomial-backtracking
+// ReDoS on the `[^\s@]+@[^\s@]+\.[^\s@]+` shape (CodeQL js/redos).
+function isEmailish(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 254) return false;
+  if (/\s/.test(value)) return false; // single char class, no quantifier — linear
+  const at = value.indexOf('@');
+  if (at <= 0 || at !== value.lastIndexOf('@')) return false; // exactly one @, not leading
+  const domain = value.slice(at + 1);
+  const dot = domain.indexOf('.');
+  return dot > 0 && dot < domain.length - 1; // a dot with chars on both sides
+}
 
 function fail(message, code = 2, extra = {}) {
   process.stdout.write(JSON.stringify({ status: statusForCode(code), message, ...extra }) + '\n');
@@ -76,7 +86,7 @@ function parseArgs(argv) {
 
 function requireUser(args) {
   const user = typeof args.user === 'string' ? args.user.trim() : '';
-  if (!user || !EMAIL_RE.test(user)) {
+  if (!user || !isEmailish(user)) {
     fail('--user <evaluator-email> is required (the signed-in supervisor, verbatim from the caller header).');
   }
   return user;
@@ -117,7 +127,7 @@ function loadSubmitArgs(args) {
  */
 function buildSubmitArgs(evaluatorEmail, payload) {
   const employeeEmail = typeof payload.employee_email === 'string' ? payload.employee_email.trim() : '';
-  if (!employeeEmail || !EMAIL_RE.test(employeeEmail)) {
+  if (!employeeEmail || !isEmailish(employeeEmail)) {
     fail('The payload must include a valid employee_email (the person being evaluated).');
   }
 
