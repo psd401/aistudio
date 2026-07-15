@@ -84,6 +84,9 @@ describe('AgentPlatformStack — HyperFrames render Lambda (#1175)', () => {
       Timeout: 900,
       EphemeralStorage: { Size: 4096 },
       Architectures: ['x86_64'],
+      // Cap parallel renders so an agent-render burst can't drain the account's
+      // shared Lambda concurrency pool (each render is a 4 GB Chromium container).
+      ReservedConcurrentExecutions: 5,
     });
   });
 

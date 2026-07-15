@@ -41,6 +41,13 @@ export interface HyperframesRenderFunctionProps {
   timeout?: cdk.Duration
   /** /tmp size in MB for frame + MP4 scratch. Default 4096. */
   ephemeralStorageMiB?: number
+  /**
+   * Cap on parallel renders (reservedConcurrentExecutions). Each render is an
+   * expensive 4 GB / multi-minute Chromium+FFmpeg container, so cap it so an
+   * agent-render burst can't drain the account's shared Lambda concurrency
+   * pool. Default 5.
+   */
+  reservedConcurrency?: number
 }
 
 export class HyperframesRenderFunction extends Construct {
@@ -59,6 +66,7 @@ export class HyperframesRenderFunction extends Construct {
       memorySize = 4096,
       timeout = cdk.Duration.seconds(900),
       ephemeralStorageMiB = 4096,
+      reservedConcurrency = 5,
     } = props
 
     // Least-privilege S3 write, scoped to the public-images/ prefix only — the
@@ -112,14 +120,17 @@ export class HyperframesRenderFunction extends Construct {
       role,
       memorySize,
       timeout,
+      reservedConcurrentExecutions: reservedConcurrency,
       ephemeralStorageSize: cdk.Size.mebibytes(ephemeralStorageMiB),
       logGroup: this.logGroup,
       environment: {
         WORKSPACE_BUCKET: workspaceBucket.bucketName,
-        // Give the in-handler render timeout ~60 s of headroom under the
-        // Lambda timeout so a stuck render returns a clean `render_timeout`.
+        // Give the in-handler render timeout 180 s of headroom under the Lambda
+        // timeout so a stuck render returns a clean `render_timeout` well before
+        // the enclosing agent-turn transport budget (~840 s, whose clock starts
+        // earlier) aborts the call and orphans the render.
         HYPERFRAMES_RENDER_TIMEOUT_MS: String(
-          Math.max(timeout.toMilliseconds() - 60_000, 60_000),
+          Math.max(timeout.toMilliseconds() - 180_000, 60_000),
         ),
       },
     })

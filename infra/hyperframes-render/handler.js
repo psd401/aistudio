@@ -66,14 +66,37 @@ const MAX_HTML_BYTES = 4 * 1024 * 1024;
 const PUBLIC_PREFIX = 'public-images';
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const HYPERFRAMES_BIN = process.env.HYPERFRAMES_BIN || 'hyperframes';
-// Slightly under the Lambda timeout so a stuck render surfaces a clean
-// `render_timeout` instead of an opaque Lambda `Task timed out` kill.
-const RENDER_TIMEOUT_MS = Number(process.env.HYPERFRAMES_RENDER_TIMEOUT_MS) || 840_000;
+// Under the Lambda timeout so a stuck render surfaces a clean `render_timeout`
+// instead of an opaque Lambda `Task timed out` kill. The CDK construct injects
+// this with 180 s of headroom (720 s for a 900 s Lambda) so the clean timeout
+// also fires before the enclosing ~840 s agent-turn transport budget aborts.
+const RENDER_TIMEOUT_MS = Number(process.env.HYPERFRAMES_RENDER_TIMEOUT_MS) || 720_000;
 // Each worker launches a separate Chrome (~256 MB). Keep conservative so the
 // render fits the Lambda memory budget; overridable per deployment.
 const RENDER_WORKERS = process.env.HYPERFRAMES_WORKERS || '2';
 // hyperframes render can be chatty on stdout/stderr; give execFile room.
 const RENDER_MAX_BUFFER = 32 * 1024 * 1024;
+
+// AWS Lambda injects live temporary credentials (access key / secret / session
+// token) into the function process env. The render subprocess (hyperframes ->
+// headless Chromium) executes untrusted, model-authored HTML/CSS/JS and never
+// makes AWS calls itself — the S3 upload runs in THIS Node process, not the
+// child — so those credentials must not be handed to it. Everything else the
+// renderer needs (PATH, HOME, PUPPETEER_*, PRODUCER_HEADLESS_SHELL_PATH,
+// CONTAINER, locale, …) passes through untouched.
+const CREDENTIAL_ENV_KEYS = [
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'AWS_SECURITY_TOKEN',
+];
+
+/** Clone `env` with the AWS credential keys removed, for the render subprocess. */
+function childEnvWithoutCredentials(env = process.env) {
+  const clone = { ...env };
+  for (const key of CREDENTIAL_ENV_KEYS) delete clone[key];
+  return clone;
+}
 
 /**
  * Typed error carrying a machine-readable `code`. The handler catches these
@@ -136,10 +159,6 @@ function validateRequest(event) {
   if (typeof html !== 'string' || html.trim().length === 0) {
     throw new RenderError('bad_request', '`html` is required and must be a non-empty composition string.');
   }
-  const htmlBytes = Buffer.byteLength(html, 'utf8');
-  if (htmlBytes > MAX_HTML_BYTES) {
-    throw new RenderError('bad_request', `\`html\` is ${htmlBytes} bytes; maximum is ${MAX_HTML_BYTES}.`);
-  }
 
   const css = event.css;
   if (css !== undefined && typeof css !== 'string') {
@@ -148,6 +167,22 @@ function validateRequest(event) {
   const js = event.js;
   if (js !== undefined && typeof js !== 'string') {
     throw new RenderError('bad_request', '`js` must be a string when provided.');
+  }
+
+  // Size cap covers the whole composition (html + inline css + js), not html
+  // alone: the doc contract is a combined 4 MB budget, and the summed payload
+  // must also fit the Lambda 6 MB synchronous-invoke ceiling. Measuring only
+  // html let a tiny html + multi-MB css/js slip past validation and fail
+  // opaquely at the AWS invoke layer instead of returning a clean bad_request.
+  const compositionBytes =
+    Buffer.byteLength(html, 'utf8') +
+    (typeof css === 'string' ? Buffer.byteLength(css, 'utf8') : 0) +
+    (typeof js === 'string' ? Buffer.byteLength(js, 'utf8') : 0);
+  if (compositionBytes > MAX_HTML_BYTES) {
+    throw new RenderError(
+      'bad_request',
+      `Composition (html+css+js) is ${compositionBytes} bytes; maximum is ${MAX_HTML_BYTES}.`,
+    );
   }
 
   const durationSeconds = Number(event.durationSeconds);
@@ -261,7 +296,7 @@ async function renderToMp4(compositionHtml, { fps, workDir, outPath }) {
 
   try {
     await execFileAsync(HYPERFRAMES_BIN, args, {
-      env: process.env,
+      env: childEnvWithoutCredentials(),
       timeout: RENDER_TIMEOUT_MS,
       maxBuffer: RENDER_MAX_BUFFER,
       cwd: workDir,
@@ -323,11 +358,13 @@ async function handler(event, deps = {}) {
     const composition = buildComposition(req);
     const uuid = randomUUID();
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hf-render-'));
-    // In dryRun the MP4 must survive workDir cleanup so the offline docker/RIE
-    // smoke can read it; write it to a stable output dir outside workDir.
-    const outputDir = process.env.HYPERFRAMES_OUTPUT_DIR || os.tmpdir();
+    // dryRun output lives inside workDir by default, so the finally block below
+    // removes it and a production dry-run leaves nothing behind in /tmp. Only
+    // the offline docker/RIE smoke sets HYPERFRAMES_OUTPUT_DIR, which redirects
+    // the MP4 to a stable dir so it survives cleanup for inspection.
+    const dryRunDir = process.env.HYPERFRAMES_OUTPUT_DIR || workDir;
     const outPath = req.dryRun
-      ? path.join(outputDir, `hyperframes-${uuid}.mp4`)
+      ? path.join(dryRunDir, `hyperframes-${uuid}.mp4`)
       : path.join(workDir, `${uuid}.mp4`);
 
     try {
@@ -367,7 +404,10 @@ async function handler(event, deps = {}) {
     return {
       status: 'error',
       error: 'internal_error',
-      message: err instanceof Error ? err.message : String(err),
+      // Truncate to match the RenderError path (renderToMp4 slices stderr to
+      // 800) so an unexpected error can't surface an unbounded message to the
+      // caller / chat reply.
+      message: (err instanceof Error ? err.message : String(err)).slice(0, 800),
     };
   }
 }
@@ -380,6 +420,7 @@ module.exports = {
   injectBefore,
   renderToMp4,
   uploadMp4,
+  childEnvWithoutCredentials,
   RenderError,
   MAX_DURATION_SECONDS,
   DEFAULT_FPS,

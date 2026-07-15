@@ -116,6 +116,36 @@ test('buildPayload rejects fps and dimensions out of range', () => {
   expect(() => buildPayload(parseArgs(argv(...base, '--width', '9')))).toThrow(ExitError);
 });
 
+test('buildPayload fails on a valueless --css-file / --js-file instead of silently dropping it', () => {
+  const base = ['--user', 'p@psd401.net', '--html', HTML, '--duration', '3'];
+  // --css-file as the last token parses to boolean true — must be a hard error.
+  expect(() => buildPayload(parseArgs(argv(...base, '--css-file')))).toThrow(ExitError);
+  expect(lastJson().error).toBe('bad_args');
+  stdout = ''; // reset so lastJson() reads only the second fail's JSON
+  expect(() => buildPayload(parseArgs(argv(...base, '--js-file')))).toThrow(ExitError);
+  expect(lastJson().error).toBe('bad_args');
+});
+
+test('buildPayload rejects a --dry-run given a value', () => {
+  const base = ['--user', 'p@psd401.net', '--html', HTML, '--duration', '3'];
+  expect(() => buildPayload(parseArgs(argv(...base, '--dry-run', 'true')))).toThrow(ExitError);
+  expect(lastJson().error).toBe('bad_args');
+});
+
+test('buildPayload caps the combined html+css+js size', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hf-skill-big-'));
+  const cssPath = path.join(dir, 'big.css');
+  fs.writeFileSync(cssPath, 'a'.repeat(5 * 1024 * 1024));
+  try {
+    expect(() => buildPayload(parseArgs(argv(
+      '--user', 'p@psd401.net', '--html', HTML, '--duration', '3', '--css-file', cssPath,
+    )))).toThrow(ExitError);
+    expect(lastJson().error).toBe('bad_args');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('buildPayload reads css/js from files and carries dryRun', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hf-skill-'));
   const cssPath = path.join(dir, 'a.css');

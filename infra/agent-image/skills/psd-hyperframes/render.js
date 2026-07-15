@@ -35,6 +35,10 @@ const DEFAULT_WIDTH = 1920;
 const DEFAULT_HEIGHT = 1080;
 const MIN_DIMENSION = 16;
 const MAX_DIMENSION = 3840;
+// Combined html + css + js budget. Mirrors the render Lambda's MAX_HTML_BYTES
+// and keeps the JSON invoke payload under Lambda's 6 MB synchronous ceiling —
+// fail fast here with an actionable message rather than an opaque invoke error.
+const MAX_COMPOSITION_BYTES = 4 * 1024 * 1024;
 
 function fail(message, code = 'error') {
   process.stderr.write(`Error: ${message}\n`);
@@ -126,13 +130,31 @@ function buildPayload(args) {
     fail('Composition HTML is empty', 'bad_args');
   }
 
+  // A value-bearing flag given with no value (last token, or immediately
+  // followed by another --flag) parses to boolean `true`. Fail loudly instead
+  // of silently dropping the intended CSS/JS (the --file path already does).
   let css;
-  if (args.css_file && args.css_file !== true) css = readFileOrFail(String(args.css_file), '--css-file');
-  else if (args.css && args.css !== true) css = String(args.css);
+  if (args.css_file === true) fail('--css-file requires a file path', 'bad_args');
+  else if (args.css_file) css = readFileOrFail(String(args.css_file), '--css-file');
+  else if (args.css === true) fail('--css requires a value', 'bad_args');
+  else if (args.css) css = String(args.css);
 
   let js;
-  if (args.js_file && args.js_file !== true) js = readFileOrFail(String(args.js_file), '--js-file');
-  else if (args.js && args.js !== true) js = String(args.js);
+  if (args.js_file === true) fail('--js-file requires a file path', 'bad_args');
+  else if (args.js_file) js = readFileOrFail(String(args.js_file), '--js-file');
+  else if (args.js === true) fail('--js requires a value', 'bad_args');
+  else if (args.js) js = String(args.js);
+
+  const compositionBytes =
+    Buffer.byteLength(html, 'utf8') +
+    (css ? Buffer.byteLength(css, 'utf8') : 0) +
+    (js ? Buffer.byteLength(js, 'utf8') : 0);
+  if (compositionBytes > MAX_COMPOSITION_BYTES) {
+    fail(
+      `Composition (html+css+js) is ${compositionBytes} bytes; the ${MAX_COMPOSITION_BYTES}-byte cap keeps the invoke under the Lambda payload limit. Trim the scene.`,
+      'bad_args',
+    );
+  }
 
   if (args.duration === undefined || args.duration === true) {
     fail('--duration <seconds> is required', 'bad_args');
@@ -145,17 +167,26 @@ function buildPayload(args) {
     fail(`--duration must be ${MAX_DURATION_SECONDS}s or fewer (v1 cap). Split longer scenes.`, 'bad_args');
   }
 
-  const fps = args.fps && args.fps !== true ? coerceInt(args.fps, '--fps') : DEFAULT_FPS;
+  if (args.fps === true) fail('--fps requires a value', 'bad_args');
+  const fps = args.fps ? coerceInt(args.fps, '--fps') : DEFAULT_FPS;
   if (fps < MIN_FPS || fps > MAX_FPS) {
     fail(`--fps must be between ${MIN_FPS} and ${MAX_FPS}`, 'bad_args');
   }
 
-  const width = args.width && args.width !== true ? coerceInt(args.width, '--width') : DEFAULT_WIDTH;
-  const height = args.height && args.height !== true ? coerceInt(args.height, '--height') : DEFAULT_HEIGHT;
+  if (args.width === true) fail('--width requires a value', 'bad_args');
+  if (args.height === true) fail('--height requires a value', 'bad_args');
+  const width = args.width ? coerceInt(args.width, '--width') : DEFAULT_WIDTH;
+  const height = args.height ? coerceInt(args.height, '--height') : DEFAULT_HEIGHT;
   for (const [name, dim] of [['--width', width], ['--height', height]]) {
     if (dim < MIN_DIMENSION || dim > MAX_DIMENSION) {
       fail(`${name} must be between ${MIN_DIMENSION} and ${MAX_DIMENSION}`, 'bad_args');
     }
+  }
+
+  // --dry-run is a bare flag; a value after it is a mistake (e.g. `--dry-run
+  // true` would otherwise silently disable it). Reject rather than mis-parse.
+  if (args.dry_run !== undefined && args.dry_run !== true) {
+    fail('--dry-run is a flag and takes no value', 'bad_args');
   }
 
   const payload = { html, durationSeconds, fps, width, height, userEmail: args.user };

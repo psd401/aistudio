@@ -19,6 +19,7 @@ const {
   validateRequest,
   buildComposition,
   injectBefore,
+  childEnvWithoutCredentials,
   RenderError,
   MAX_DURATION_SECONDS,
   DEFAULT_FPS,
@@ -107,6 +108,38 @@ test('validateRequest rejects non-string css/js', () => {
   expect(() => validateRequest(validEvent({ js: {} }))).toThrow(/js/);
 });
 
+test('validateRequest caps the combined html+css+js size, not html alone', () => {
+  // A small html + oversized css must be rejected (the cap is the whole
+  // composition, and the summed payload has to fit the Lambda invoke ceiling).
+  const bigCss = 'a'.repeat(5 * 1024 * 1024);
+  expect(() => validateRequest(validEvent({ css: bigCss }))).toThrow(/bytes/);
+  const bigJs = 'b'.repeat(5 * 1024 * 1024);
+  expect(() => validateRequest(validEvent({ js: bigJs }))).toThrow(/bytes/);
+});
+
+// ── childEnvWithoutCredentials ───────────────────────────────────────────────
+
+test('childEnvWithoutCredentials strips AWS creds but keeps render env', () => {
+  const child = childEnvWithoutCredentials({
+    AWS_ACCESS_KEY_ID: 'AKIA_SECRET',
+    AWS_SECRET_ACCESS_KEY: 'shhh',
+    AWS_SESSION_TOKEN: 'token',
+    AWS_SECURITY_TOKEN: 'legacy',
+    PATH: '/usr/bin',
+    HOME: '/tmp',
+    PUPPETEER_EXECUTABLE_PATH: '/usr/bin/chromium',
+    PRODUCER_HEADLESS_SHELL_PATH: '/opt/x',
+  });
+  expect(child.AWS_ACCESS_KEY_ID).toBeUndefined();
+  expect(child.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+  expect(child.AWS_SESSION_TOKEN).toBeUndefined();
+  expect(child.AWS_SECURITY_TOKEN).toBeUndefined();
+  expect(child.PATH).toBe('/usr/bin');
+  expect(child.HOME).toBe('/tmp');
+  expect(child.PUPPETEER_EXECUTABLE_PATH).toBe('/usr/bin/chromium');
+  expect(child.PRODUCER_HEADLESS_SHELL_PATH).toBe('/opt/x');
+});
+
 // ── buildComposition / injectBefore ──────────────────────────────────────────
 
 test('injectBefore inserts before the marker, appends when absent', () => {
@@ -151,6 +184,20 @@ test('handler dryRun renders and returns a local path without uploading', async 
   expect(res.bytes).toBe(3);
   expect(fs.existsSync(res.localPath)).toBe(true);
   expect(uploaded).toBe(false);
+});
+
+test('handler dryRun without HYPERFRAMES_OUTPUT_DIR leaves no file behind', async () => {
+  // Production has no HYPERFRAMES_OUTPUT_DIR, so a dry-run MP4 is written inside
+  // workDir and removed by the finally cleanup — it must not accumulate in /tmp.
+  delete process.env.HYPERFRAMES_OUTPUT_DIR;
+  const res = await handler(validEvent({ dryRun: true }), {
+    s3: { send: async () => {} },
+    render: fakeRender('DRY'),
+  });
+  expect(res.status).toBe('ok');
+  expect(res.dryRun).toBe(true);
+  expect(res.bytes).toBe(3);
+  expect(fs.existsSync(res.localPath)).toBe(false);
 });
 
 test('handler uploads to S3 and returns a public-by-link url', async () => {

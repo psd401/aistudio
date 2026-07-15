@@ -67,8 +67,11 @@ RUN chmod +x /entrypoint.sh
 
 # Runtime Interface Emulator — used only for local `docker run` smoke testing.
 # Real Lambda sets AWS_LAMBDA_RUNTIME_API, so the entrypoint bypasses the RIE in
-# production; it is inert there.
-ADD https://github.com/aws/aws-lambda-runtime-interface-emulator/releases/latest/download/aws-lambda-rie /usr/local/bin/aws-lambda-rie
+# production; it is inert there. Pinned to a specific release (not `latest`) so
+# rebuilds are reproducible and don't silently bake in a different binary; the
+# x86_64 asset matches the Architecture.X86_64 image.
+ARG AWS_LAMBDA_RIE_VERSION=v1.35
+ADD https://github.com/aws/aws-lambda-runtime-interface-emulator/releases/download/${AWS_LAMBDA_RIE_VERSION}/aws-lambda-rie-x86_64 /usr/local/bin/aws-lambda-rie
 RUN chmod +x /usr/local/bin/aws-lambda-rie
 
 ENTRYPOINT ["/entrypoint.sh"]
