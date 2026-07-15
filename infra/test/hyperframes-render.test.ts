@@ -118,6 +118,11 @@ describe('AgentPlatformStack — HyperFrames render Lambda (#1175)', () => {
                     Match.arrayWith([Match.stringLikeRegexp('/public-images/\\*')]),
                   ]),
                 }),
+                // Must NOT carry an aws:ResourceTag condition: object-level
+                // PutObject provides no resource tags at auth time, so such a
+                // condition is never satisfiable and denies every upload
+                // (agent-platform-stack.ts WorkspaceAttachmentWrite, #1138).
+                Condition: Match.absent(),
               }),
             ]),
           },

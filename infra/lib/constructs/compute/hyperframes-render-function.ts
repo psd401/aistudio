@@ -71,8 +71,18 @@ export class HyperframesRenderFunction extends Construct {
 
     // Least-privilege S3 write, scoped to the public-images/ prefix only — the
     // render service never reads, lists, or deletes, and never touches other
-    // prefixes. Tag conditions mirror ServiceRoleFactory.buildS3AccessPolicy so
-    // a dev function can only write a dev-tagged bucket.
+    // prefixes. The specific bucket ARN + prefix IS the boundary (a dev function
+    // is handed the dev bucket), so a dev role cannot reach a prod bucket.
+    //
+    // Deliberately NO aws:ResourceTag/Environment|ManagedBy condition: an
+    // object-level s3:PutObject provides NO resource tags at authorization time
+    // (the target object doesn't exist yet; the bucket's tags do not satisfy an
+    // object-ARN aws:ResourceTag key), so such a condition is never satisfiable
+    // and every write is denied. This is documented, and was observed live, in
+    // agent-platform-stack.ts (WorkspaceAttachmentWrite, #1138 follow-up
+    // 2026-07-07: AccessDenied) — the working psd-image-gen / psd-tts writes to
+    // this same prefix use an unconditioned, resource-scoped grant for exactly
+    // this reason.
     const s3WritePolicy = new iam.PolicyDocument({
       statements: [
         new iam.PolicyStatement({
@@ -80,12 +90,6 @@ export class HyperframesRenderFunction extends Construct {
           effect: iam.Effect.ALLOW,
           actions: ["s3:PutObject"],
           resources: [`${workspaceBucket.bucketArn}/public-images/*`],
-          conditions: {
-            StringEquals: {
-              "aws:ResourceTag/Environment": environment,
-              "aws:ResourceTag/ManagedBy": "cdk",
-            },
-          },
         }),
       ],
     })
