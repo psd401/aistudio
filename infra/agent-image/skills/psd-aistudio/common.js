@@ -140,10 +140,14 @@ function requireSecretsManager() {
 function readPersonalKey(callerEmail) {
   let stdout;
   try {
+    // stderr is CAPTURED (not inherited): get.js error text can echo the
+    // --user value or the user-scoped secret path, which must not reach this
+    // process's stderr raw. It is captured onto err.stderr and never printed —
+    // the catch below emits only the sanitized exit-status notice.
     stdout = _internals.execFileSync(
       'node',
       [CREDENTIALS_GET, '--user', callerEmail, '--name', PERSONAL_KEY_NAME],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], timeout: 10_000 }
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }
     );
   } catch (err) {
     // get.js exited non-zero (bad env / Secrets Manager error / crash) or timed
