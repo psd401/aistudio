@@ -121,7 +121,8 @@ After the skill returns a result with a `url`, your **next chat message MUST con
 
 - **`bad_args`** — missing/invalid `--user`, no composition, bad `--duration`/`--fps`/dimensions,
   a valueless `--css-file`/`--js-file`, a combined html+css+js payload over the 4 MB cap, or a
-  composition whose declared `data-duration` exceeds the 60 s cap. Fix and retry.
+  composition whose declared `data-duration` exceeds the 60 s cap or whose root
+  `data-width`/`data-height` exceeds the 3840 px cap. Fix and retry.
 - **`misconfigured`** — the render function name (`HYPERFRAMES_RENDER_FUNCTION`) is not injected.
   Ask an administrator to redeploy the agent platform.
 - **`invoke_failed`** — the render Lambda could not be invoked (permissions/throttling). Retry

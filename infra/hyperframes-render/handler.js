@@ -236,6 +236,24 @@ function validateRequest(event) {
     }
   }
 
+  // Same defense-in-depth for the root canvas size. hyperframes sizes the
+  // canvas from the composition's own data-width/data-height, NOT the request's
+  // width/height fields, so the numeric cap above does not bound the actual
+  // render — an oversized composition (e.g. data-width="10000") would sail past
+  // the 3840 cap and can exhaust /tmp or memory. Reject any declared dimension
+  // over the cap before spending the render. Bounded quantifiers keep it linear.
+  const dimensionRegex = /data-(width|height)\s{0,20}=\s{0,20}["']?\s{0,20}([\d.]{1,15})/gi;
+  let dimMatch;
+  while ((dimMatch = dimensionRegex.exec(html)) !== null) {
+    const dimValue = Number(dimMatch[2]);
+    if (Number.isFinite(dimValue) && dimValue > MAX_DIMENSION) {
+      throw new RenderError(
+        'bad_request',
+        `Composition declares data-${dimMatch[1].toLowerCase()}=${dimValue}px, above the ${MAX_DIMENSION}px cap.`,
+      );
+    }
+  }
+
   return {
     html,
     css: css || null,

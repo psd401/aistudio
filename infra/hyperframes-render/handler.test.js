@@ -103,6 +103,21 @@ test('validateRequest rejects a smuggled long data-duration in the composition',
   expect(() => validateRequest(validEvent({ html: sneaky, durationSeconds: 5 }))).toThrow(/cap/);
 });
 
+test('validateRequest rejects an over-cap root data-width/data-height in the composition', () => {
+  // The canvas size comes from the composition's data-* attrs, not the request
+  // width/height, so an oversized composition must be rejected before render.
+  const bigW =
+    '<div data-composition-id="x" data-duration="3" data-width="10000" data-height="1080">x</div>';
+  expect(() => validateRequest(validEvent({ html: bigW }))).toThrow(/data-width=10000px.*cap/);
+  const bigH =
+    '<div data-composition-id="x" data-duration="3" data-width="1920" data-height="9000">x</div>';
+  expect(() => validateRequest(validEvent({ html: bigH }))).toThrow(/data-height=9000px.*cap/);
+  // A composition within the cap passes.
+  const ok =
+    '<div data-composition-id="x" data-duration="3" data-width="1920" data-height="1080">x</div>';
+  expect(() => validateRequest(validEvent({ html: ok }))).not.toThrow();
+});
+
 test('validateRequest rejects non-string css/js', () => {
   expect(() => validateRequest(validEvent({ css: 123 }))).toThrow(/css/);
   expect(() => validateRequest(validEvent({ js: {} }))).toThrow(/js/);
