@@ -33,7 +33,7 @@ jest.mock("@/lib/agent-workspace/dwd-token-broker", () => {
 })
 
 const ensureRowMock = jest.fn()
-const createGatewayMock = jest.fn(() => ({ gateway: true }))
+const createGatewayMock = jest.fn((..._a: unknown[]) => ({ gateway: true }))
 jest.mock("@/lib/agent-workspace/agent-provisioning-sheet", () => {
   class ProvisioningNotConfiguredError extends Error {}
   return {

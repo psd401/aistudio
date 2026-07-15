@@ -69,7 +69,14 @@ async function invokeMintLambda(functionName: string, payload: MintLambdaRequest
   }
   const text = res.Payload ? Buffer.from(res.Payload).toString("utf8") : ""
   if (!text) throw new Error("mint lambda returned an empty payload")
-  return JSON.parse(text) as unknown
+  // Guard the parsed value: JSON.parse("null") / a bare scalar would otherwise
+  // reach the isMint* narrowing helpers, which access properties and would throw
+  // an opaque TypeError instead of a clear boundary error (gemini review).
+  const parsed: unknown = JSON.parse(text)
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("mint lambda returned a non-object JSON payload")
+  }
+  return parsed
 }
 
 /**
