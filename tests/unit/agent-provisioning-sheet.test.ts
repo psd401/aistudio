@@ -13,6 +13,11 @@ jest.mock("@/lib/logger", () => ({
 // the gateway can be constructed without WIF (we inject getAccessToken anyway).
 jest.mock("@/lib/agent-workspace/dwd-token-broker", () => ({ loadBrokerConfig: jest.fn() }))
 jest.mock("@/lib/agent-workspace/gcp-wif", () => ({ getImpersonatedAccessToken: jest.fn() }))
+// getProvisioningSheetId prefers AGENT_PROVISIONING_SHEET_ID (set below) and only
+// falls back to this secret; stub it to null so it never reaches AWS.
+jest.mock("@/lib/agent-workspace/gcp-dwd-config", () => ({
+  loadGcpDwdConfigSecret: jest.fn(async () => null),
+}))
 
 import {
   usernameAlreadyPresent,

@@ -25,14 +25,17 @@
  * mailbox) and only for the calling owner.
  *
  * The WIF service account is provisioned by IT (Reese): GCP project number, WIF
- * pool + provider IDs, and the SA email are configuration (env/SSM), supplied
- * per environment. Until they are set, loadBrokerConfig() throws
- * BrokerNotConfiguredError and the broker fails closed.
+ * pool + provider IDs, and the SA email are configuration read from the
+ * consolidated `psd-agent/{env}/gcp-dwd-config` Secrets Manager secret (5-min
+ * cached), with per-field env-var overrides for local dev/tests. Until they are
+ * set, loadBrokerConfig() throws BrokerNotConfiguredError and the broker fails
+ * closed.
  */
 
 import { createLogger, sanitizeForLogging } from "@/lib/logger"
 import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
 import { getImpersonatedAccessToken } from "@/lib/agent-workspace/gcp-wif"
+import { loadGcpDwdConfigSecret, firstNonEmpty } from "@/lib/agent-workspace/gcp-dwd-config"
 
 const log = createLogger({ module: "dwd-token-broker" })
 
@@ -90,30 +93,50 @@ export interface DwdBrokerConfig {
 }
 
 /**
- * Load broker config from the environment. All four GCP identifiers are
- * required; a missing one means IT hasn't finished the Google-side setup, so
- * the broker fails closed with BrokerNotConfiguredError.
+ * Load broker config. All four GCP identifiers are required; a missing one means
+ * IT hasn't finished the Google-side setup, so the broker fails closed with
+ * BrokerNotConfiguredError.
+ *
+ * Resolution order: per-field env-var override (local dev/tests) first, then the
+ * consolidated `psd-agent/{env}/gcp-dwd-config` secret (5-min cached). The secret
+ * is fetched only when at least one env override is absent, so a fully
+ * env-configured process — and every unit test that sets the four GCP env vars —
+ * never touches Secrets Manager.
  */
-export function loadBrokerConfig(): DwdBrokerConfig {
-  const projectNumber = process.env.GCP_PROJECT_NUMBER?.trim() ?? ""
-  const poolId = process.env.GCP_WIF_POOL_ID?.trim() ?? ""
-  const providerId = process.env.GCP_WIF_PROVIDER_ID?.trim() ?? ""
-  const serviceAccountEmail = process.env.GCP_DWD_SERVICE_ACCOUNT_EMAIL?.trim() ?? ""
-  const allowedDomain = (process.env.AGENT_WORKSPACE_ALLOWED_DOMAIN?.trim() || "psd401.net").toLowerCase()
+export async function loadBrokerConfig(): Promise<DwdBrokerConfig> {
+  const envProjectNumber = process.env.GCP_PROJECT_NUMBER
+  const envPoolId = process.env.GCP_WIF_POOL_ID
+  const envProviderId = process.env.GCP_WIF_PROVIDER_ID
+  const envServiceAccountEmail = process.env.GCP_DWD_SERVICE_ACCOUNT_EMAIL
+  const allowedDomain = firstNonEmpty(process.env.AGENT_WORKSPACE_ALLOWED_DOMAIN, "psd401.net").toLowerCase()
 
-  const missing = [
-    ["GCP_PROJECT_NUMBER", projectNumber],
-    ["GCP_WIF_POOL_ID", poolId],
-    ["GCP_WIF_PROVIDER_ID", providerId],
-    ["GCP_DWD_SERVICE_ACCOUNT_EMAIL", serviceAccountEmail],
-  ].filter(([, v]) => !v).map(([k]) => k)
+  // Fetch the secret only when at least one env override is missing, so a
+  // fully-env-configured process (and every unit test) never touches AWS. `?? {}`
+  // keeps the field reads below `?.`-free (lower cyclomatic complexity).
+  const envComplete = envProjectNumber && envPoolId && envProviderId && envServiceAccountEmail
+  const secret = (envComplete ? null : await loadGcpDwdConfigSecret()) ?? {}
+
+  const cfg = {
+    projectNumber: firstNonEmpty(envProjectNumber, secret.projectNumber),
+    poolId: firstNonEmpty(envPoolId, secret.wifPoolId),
+    providerId: firstNonEmpty(envProviderId, secret.wifProviderId),
+    serviceAccountEmail: firstNonEmpty(envServiceAccountEmail, secret.serviceAccountEmail),
+  }
+
+  const missing = ([
+    ["GCP_PROJECT_NUMBER", cfg.projectNumber],
+    ["GCP_WIF_POOL_ID", cfg.poolId],
+    ["GCP_WIF_PROVIDER_ID", cfg.providerId],
+    ["GCP_DWD_SERVICE_ACCOUNT_EMAIL", cfg.serviceAccountEmail],
+  ] as const).filter((entry) => !entry[1]).map((entry) => entry[0])
 
   if (missing.length > 0) {
     throw new BrokerNotConfiguredError(
-      `DWD token broker is not configured — missing: ${missing.join(", ")}. IT provides these per environment.`
+      `DWD token broker is not configured — missing: ${missing.join(", ")}. ` +
+        `IT provides these via the psd-agent/{env}/gcp-dwd-config secret (or the matching env vars).`
     )
   }
-  return { projectNumber, poolId, providerId, serviceAccountEmail, allowedDomain }
+  return { ...cfg, allowedDomain }
 }
 
 /**
@@ -274,7 +297,7 @@ async function exchangeAssertion(
  * @throws Error                      any other WIF/signJwt/exchange failure.
  */
 export async function mintAgentWorkspaceToken(ownerEmail: string, deps: MintDeps = {}): Promise<MintedToken> {
-  const cfg = loadBrokerConfig()
+  const cfg = await loadBrokerConfig()
   const agentEmail = deriveAgentEmail(ownerEmail, cfg.allowedDomain)
 
   const fetchImpl = deps.fetchImpl ?? fetch

@@ -25,7 +25,7 @@ jest.mock("@/lib/agent-workspace/dwd-token-broker", () => {
   return {
     mintAgentWorkspaceToken: (...a: unknown[]) => mintMock(...a),
     deriveAgentEmail: jest.fn(() => "agnt_hagelk@psd401.net"),
-    loadBrokerConfig: jest.fn(() => ({ allowedDomain: "psd401.net" })),
+    loadBrokerConfig: jest.fn(async () => ({ allowedDomain: "psd401.net" })),
     AccountNotProvisionedError,
     BrokerNotConfiguredError,
     InvalidOwnerError,

@@ -107,6 +107,17 @@ permit(
 )
 when { resource.url like "https://*.google.com/*" };
 
+// PSD Agent Gateway — psd-classified-evaluation skill (#1230). The n8n MCP
+// Server Trigger that runs the classified-evaluation pipeline server-side. Only
+// the hostname + generic /mcp prefix are named here; the full gateway path lives
+// solely in the psd-agent/{env}/agent-gateway secret (this is a public repo).
+permit(
+  principal,
+  action == Action::"http.request",
+  resource
+)
+when { resource.url like "https://n8n.psd401.net/mcp/*" };
+
 // =========================================================================
 // BLOCKED — REQUIRE CONFIRMATION FLOW AT APP LAYER
 // Cedar only has permit/forbid — there is no native "confirm" tier.
@@ -344,5 +355,9 @@ unless {
   resource.url like "https://*.psd401.ai/api/agent/workspace-token" ||
   resource.url like "https://psd401.ai/api/agent/workspace-token" ||
   resource.url like "https://*.psd401.ai/api/agent/account-request" ||
-  resource.url like "https://psd401.ai/api/agent/account-request"
+  resource.url like "https://psd401.ai/api/agent/account-request" ||
+  // PSD Agent Gateway (#1230): n8n MCP Server Trigger for psd-classified-evaluation.
+  // Hostname + generic /mcp prefix only — the full gateway path stays out of this
+  // public repo and lives only in the psd-agent/{env}/agent-gateway secret.
+  resource.url like "https://n8n.psd401.net/mcp/*"
 };

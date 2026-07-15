@@ -15,8 +15,8 @@
  *
  * Zero npm dependencies: native fetch streaming only (Node 20+), mirroring the
  * dependency-free pattern of psd-aistudio/psd-data. @aws-sdk/client-secrets-manager
- * (secret-id fallback only) is resolved at runtime from psd-workspace's
- * node_modules so this skill adds no image dependency of its own.
+ * (used to read the {url, token} config secret) is resolved at runtime from
+ * psd-workspace's node_modules so this skill adds no image dependency of its own.
  *
  * Designed for extension: this client is form-agnostic (connect + callTool over
  * whatever tools the gateway advertises), so transfer/timesheet tool families
@@ -35,12 +35,15 @@ const RATING_VALUES = ['Requires Improvement', 'Fair', 'Satisfactory', 'Good', '
 // --- Config resolution ------------------------------------------------------
 
 // Env contract (wired by infra/lib/agent-platform-stack.ts + deploy):
-//   AGENT_GATEWAY_SSE_URL           — the n8n MCP Server Trigger /sse endpoint.
-//   AGENT_GATEWAY_TOKEN             — Bearer token (direct; local/dev).
-//   AGENT_GATEWAY_TOKEN_SECRET_ID   — Secrets Manager id holding the Bearer token
-//                                     (ECS/AgentCore). Used when the direct env
-//                                     var is absent. Stored at
-//                                     psd-agent/{env}/agent-gateway-token.
+//   AGENT_GATEWAY_CONFIG_SECRET_ID  — Secrets Manager id of ONE JSON secret
+//                                     shaped {"url":"…","token":"…"} holding the
+//                                     n8n MCP Server Trigger /sse endpoint AND the
+//                                     Bearer token (ECS/AgentCore). Defaults to
+//                                     psd-agent/{env}/agent-gateway. Both live in
+//                                     this secret (NOT in the public repo / not a
+//                                     CDK context flag).
+//   AGENT_GATEWAY_SSE_URL           — direct URL override (local dev / tests).
+//   AGENT_GATEWAY_TOKEN             — direct Bearer token override (local/dev).
 // Read at call time (not module load) so behavior tracks the live environment
 // and is unit-testable.
 
@@ -57,45 +60,89 @@ const _internals = {
   fetch: (...args) => fetch(...args),
 };
 
+/** Default config secret id: psd-agent/{env}/agent-gateway (env = ENVIRONMENT). */
+function defaultConfigSecretId() {
+  const env = process.env.ENVIRONMENT || process.env.DEPLOY_ENVIRONMENT || 'dev';
+  return `psd-agent/${env}/agent-gateway`;
+}
+
 /**
- * Resolve the gateway URL + Bearer token. The token prefers the direct env var
- * (local dev) and falls back to Secrets Manager. Returns `{ url, token }` or
- * throws a `GatewayConfigError` (mapped to a config exit code by run.js) when
- * the URL or token is not configured — the endpoint/token are provided by Kris
- * Hagel and wired per environment; until then the skill fails closed with an
+ * Read the consolidated `{url, token}` config secret. Returns the parsed object,
+ * or null when the secret is absent / empty (treated as "not configured" so the
+ * caller fails closed with exit 11 rather than a transport error). Throws a
+ * `GatewayConfigError` when the secret exists but is not valid JSON.
+ */
+async function readConfigSecret(secretId) {
+  const { SecretsManagerClient, GetSecretValueCommand } = _internals.requireSecretsManager();
+  const client = new SecretsManagerClient({ region: process.env.AWS_REGION || 'us-east-1' });
+  let resp;
+  try {
+    resp = await client.send(new GetSecretValueCommand({ SecretId: secretId }));
+  } catch (err) {
+    // A missing secret means the gateway isn't wired in this environment yet —
+    // fail closed (exit 11) rather than surfacing an SM error as transport (12).
+    if (err && (err.name === 'ResourceNotFoundException' || err.__type === 'ResourceNotFoundException')) {
+      return null;
+    }
+    throw err;
+  }
+  const raw = (resp.SecretString || '').trim();
+  if (!raw) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new GatewayConfigError(
+      `Secret ${secretId} is not valid JSON (expected {"url":"…","token":"…"}).`
+    );
+  }
+  return {
+    url: typeof parsed.url === 'string' ? parsed.url.trim() : '',
+    token: typeof parsed.token === 'string' ? parsed.token.trim() : '',
+  };
+}
+
+/**
+ * Resolve the gateway URL + Bearer token. Direct env vars
+ * (AGENT_GATEWAY_SSE_URL / AGENT_GATEWAY_TOKEN) win per-field for local dev; both
+ * otherwise come from the consolidated `{url, token}` config secret. Returns
+ * `{ url, token }` or throws a `GatewayConfigError` (mapped to exit 11 by run.js)
+ * when the URL or token is not configured — the values are owned by the n8n side
+ * and wired per environment; until then the skill fails closed with an
  * actionable message rather than silently.
  */
 async function resolveConfig() {
-  const url = process.env.AGENT_GATEWAY_SSE_URL || '';
-  const directToken = process.env.AGENT_GATEWAY_TOKEN || '';
-  const secretId = process.env.AGENT_GATEWAY_TOKEN_SECRET_ID || '';
+  const envUrl = (process.env.AGENT_GATEWAY_SSE_URL || '').trim();
+  const envToken = (process.env.AGENT_GATEWAY_TOKEN || '').trim();
+
+  // Fast path: both provided directly (local dev / tests) — skip Secrets Manager.
+  if (envUrl && envToken) {
+    return { url: envUrl, token: envToken };
+  }
+
+  let url = envUrl;
+  let token = envToken;
+  const secretId = (process.env.AGENT_GATEWAY_CONFIG_SECRET_ID || '').trim() || defaultConfigSecretId();
+  const cfg = await readConfigSecret(secretId);
+  if (cfg) {
+    url = url || cfg.url;
+    token = token || cfg.token;
+  }
 
   if (!url) {
     throw new GatewayConfigError(
-      'AGENT_GATEWAY_SSE_URL is not set. The PSD Agent Gateway SSE endpoint must be ' +
-        'configured (per environment) before classified evaluations can run.'
+      `The PSD Agent Gateway is not configured (no URL in AGENT_GATEWAY_SSE_URL ` +
+        `or the ${secretId} secret). It must be wired per environment before ` +
+        `classified evaluations can run.`
     );
   }
-
-  if (directToken) {
-    return { url, token: directToken };
+  if (!token) {
+    throw new GatewayConfigError(
+      `The PSD Agent Gateway bearer token is not configured (no token in ` +
+        `AGENT_GATEWAY_TOKEN or the ${secretId} secret).`
+    );
   }
-
-  if (secretId) {
-    const { SecretsManagerClient, GetSecretValueCommand } = _internals.requireSecretsManager();
-    const client = new SecretsManagerClient({ region: process.env.AWS_REGION || 'us-east-1' });
-    const resp = await client.send(new GetSecretValueCommand({ SecretId: secretId }));
-    const value = (resp.SecretString || '').trim();
-    if (!value) {
-      throw new GatewayConfigError(`Secret ${secretId} has no SecretString value.`);
-    }
-    return { url, token: value };
-  }
-
-  throw new GatewayConfigError(
-    'No gateway bearer token configured. Set AGENT_GATEWAY_TOKEN or ' +
-      'AGENT_GATEWAY_TOKEN_SECRET_ID (Secrets Manager id).'
-  );
+  return { url, token };
 }
 
 class GatewayConfigError extends Error {}

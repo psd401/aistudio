@@ -18,6 +18,7 @@
 import { createLogger, sanitizeForLogging } from "@/lib/logger"
 import { loadBrokerConfig } from "@/lib/agent-workspace/dwd-token-broker"
 import { getImpersonatedAccessToken } from "@/lib/agent-workspace/gcp-wif"
+import { loadGcpDwdConfigSecret } from "@/lib/agent-workspace/gcp-dwd-config"
 
 const log = createLogger({ module: "agent-provisioning-sheet" })
 
@@ -32,11 +33,24 @@ export class ProvisioningNotConfiguredError extends Error {
   }
 }
 
-export function getProvisioningSheetId(): string {
-  const id = process.env.AGENT_PROVISIONING_SHEET_ID?.trim() ?? ""
+/**
+ * Resolve the OneSync provisioning sheet id. Env-var override
+ * (AGENT_PROVISIONING_SHEET_ID) first for local dev/tests, then the
+ * `provisioningSheetId` field of the consolidated psd-agent/{env}/gcp-dwd-config
+ * secret (5-min cached). Throws ProvisioningNotConfiguredError when neither is
+ * set so provisioning fails closed.
+ */
+export async function getProvisioningSheetId(): Promise<string> {
+  const envId = process.env.AGENT_PROVISIONING_SHEET_ID?.trim()
+  if (envId) return envId
+
+  const secret = await loadGcpDwdConfigSecret()
+  const id = secret?.provisioningSheetId?.trim() ?? ""
   if (!id) {
     throw new ProvisioningNotConfiguredError(
-      "AGENT_PROVISIONING_SHEET_ID is not set — cannot request agnt_ account provisioning."
+      "Provisioning sheet id is not set (AGENT_PROVISIONING_SHEET_ID env or " +
+        "provisioningSheetId in the psd-agent/{env}/gcp-dwd-config secret) — " +
+        "cannot request agnt_ account provisioning."
     )
   }
   return id
@@ -106,15 +120,24 @@ export function createSheetsGateway(deps: SheetsGatewayDeps = {}): SheetsGateway
   const fetchImpl = deps.fetchImpl ?? fetch
   const getToken =
     deps.getAccessToken ??
-    (async () => getImpersonatedAccessToken(loadBrokerConfig(), [SPREADSHEETS_SCOPE]))
-  const sheetId = getProvisioningSheetId()
-  const base = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetId)}`
+    (async () => getImpersonatedAccessToken(await loadBrokerConfig(), [SPREADSHEETS_SCOPE]))
   const range = `${PROVISIONING_SHEET_TAB}!A:A`
+
+  // The sheet id is read lazily (getProvisioningSheetId is async — env override
+  // or the gcp-dwd-config secret), so construction stays synchronous. Memoized
+  // for the second call within one gateway instance.
+  let _base: string | null = null
+  const base = async (): Promise<string> => {
+    if (_base) return _base
+    const sheetId = await getProvisioningSheetId()
+    _base = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetId)}`
+    return _base
+  }
 
   return {
     async readColumnA(): Promise<string[]> {
-      const token = await getToken()
-      const res = await fetchImpl(`${base}/values/${encodeURIComponent(range)}`, {
+      const [token, baseUrl] = await Promise.all([getToken(), base()])
+      const res = await fetchImpl(`${baseUrl}/values/${encodeURIComponent(range)}`, {
         method: "GET",
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -127,9 +150,9 @@ export function createSheetsGateway(deps: SheetsGatewayDeps = {}): SheetsGateway
     },
 
     async appendUsername(username: string): Promise<void> {
-      const token = await getToken()
+      const [token, baseUrl] = await Promise.all([getToken(), base()])
       const url =
-        `${base}/values/${encodeURIComponent(range)}:append` +
+        `${baseUrl}/values/${encodeURIComponent(range)}:append` +
         `?valueInputOption=RAW&insertDataOption=INSERT_ROWS`
       const res = await fetchImpl(url, {
         method: "POST",

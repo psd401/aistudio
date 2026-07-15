@@ -31,9 +31,9 @@ tokens for two slots:
 | Upstream skills | `gws-gmail`, `gws-calendar`, `gws-sheets`, … (cloned at image build, same tag as the binary) | Per-API guidance for the agent |
 | Rules | `infra/agent-image/skills/psd-rules/SKILL.md` | Tier 1 progressive-disclosure rules (think silently, never fabricate URLs/memory, no empty promises, Chat formatting) |
 | Formatter | `infra/agent-image/chat_format.py` | Markdown → Google Chat transform applied at the harness boundary |
-| Secrets | `psd-agent/{env}/google-oauth-client`, `psd-agent/{env}/internal-api-key`, `psd-agent-creds/{env}/user/{email}/google-workspace-user` (user slot) | OAuth client, PSK, per-user refresh tokens. The agent slot no longer stores a refresh token (#1232). |
-| DWD config | `GCP_PROJECT_NUMBER`, `GCP_WIF_POOL_ID`, `GCP_WIF_PROVIDER_ID`, `GCP_DWD_SERVICE_ACCOUNT_EMAIL` (env, IT-supplied) | Keyless WIF → service-account impersonation for the broker |
-| Cedar | `psd-agent-governance.cedar` | Allowlists for oauth2.googleapis.com + consent-link + workspace-token + account-request, secret.read on `psd-agent/*` |
+| Secrets | `psd-agent/{env}/google-oauth-client`, `psd-agent/{env}/internal-api-key`, `psd-agent/{env}/gcp-dwd-config` (#1232/#1233), `psd-agent/{env}/agent-gateway` (#1230), `psd-agent-creds/{env}/user/{email}/google-workspace-user` (user slot) | OAuth client, PSK, GCP DWD config JSON, gateway URL+token JSON, per-user refresh tokens. The agent slot no longer stores a refresh token (#1232). |
+| DWD config | `psd-agent/{env}/gcp-dwd-config` JSON: `{projectNumber, wifPoolId, wifProviderId, serviceAccountEmail, provisioningSheetId}` (Secrets Manager, IT-supplied; env-var overrides for local dev) | Keyless WIF → service-account impersonation for the broker + OneSync provisioning-sheet id. Read lazily (5-min cached); broker fails closed until populated. |
+| Cedar | `psd-agent-governance.cedar` | Allowlists for oauth2.googleapis.com + n8n gateway (`n8n.psd401.net/mcp/*`, #1230) + consent-link + workspace-token + account-request, secret.read on `psd-agent/*` |
 
 ## Bootstrap flow — user slot (consent)
 
@@ -96,14 +96,31 @@ paste it verbatim into Chat and stop the turn. Exit 14 carries **no** URL.
    incoming skill requests.
 4. Set `GOOGLE_WORKSPACE_CLIENT_ID` / `GOOGLE_WORKSPACE_CLIENT_SECRET` in the
    Next.js environment (same values as step 2).
-5. **DWD broker (#1232)** — IT provisions a Google service account with
-   domain-wide delegation + a workload-identity-federation trust for the app's
-   AWS role, then supply, via CDK context on the FrontendStack:
-   `-c gcpProjectNumber=… -c gcpWifPoolId=… -c gcpWifProviderId=… -c gcpDwdServiceAccountEmail=…`.
-   Until set, the broker fails closed (503 / `not-configured`).
-6. **Agent gateway (#1230)** — `-c agentGatewaySseUrl=…` and populate the secret
-   `psd-agent/{env}/agent-gateway-token` with the n8n bearer token.
-7. Deploy infra (AgentPlatformStack + FrontendStack) and the new agent image.
+5. **DWD broker + provisioning (#1232/#1233)** — IT provisions a Google service
+   account with domain-wide delegation + a workload-identity-federation trust for
+   the app's AWS role, then populate ONE Secrets Manager secret (no CDK context
+   flags — aistudio is a public repo):
+   ```bash
+   aws secretsmanager create-secret \
+     --name psd-agent/dev/gcp-dwd-config \
+     --tags Key=Environment,Value=dev Key=ManagedBy,Value=aistudio \
+     --secret-string '{"projectNumber":"…","wifPoolId":"…","wifProviderId":"…","serviceAccountEmail":"…@….iam.gserviceaccount.com","provisioningSheetId":"…"}'
+   ```
+   The app reads it lazily (5-min cached); until it exists the broker fails closed
+   (503 / `not-configured`) and provisioning is skipped. (Local dev may instead set
+   the `GCP_*` / `AGENT_PROVISIONING_SHEET_ID` env vars.)
+6. **Agent gateway (#1230)** — populate ONE JSON secret with both the n8n MCP
+   Server Trigger URL and its bearer token (again, no CDK context flag):
+   ```bash
+   aws secretsmanager create-secret \
+     --name psd-agent/dev/agent-gateway \
+     --tags Key=Environment,Value=dev Key=ManagedBy,Value=aistudio \
+     --secret-string '{"url":"https://n8n.psd401.net/mcp/…/sse","token":"…"}'
+   ```
+   The psd-classified-evaluation skill reads it lazily; an absent/incomplete
+   secret → exit 11 `not-configured`.
+7. Deploy infra (AgentPlatformStack + FrontendStack) and the new agent image. No
+   `-c` context flags are needed for the gateway or DWD config.
 8. **Remediation (one-off, run manually):**
    - `scripts/agent-workspace/purge-agent-slot-tokens.ts` — delete all
      agent-slot refresh tokens (retired by the broker; one is known to hold a

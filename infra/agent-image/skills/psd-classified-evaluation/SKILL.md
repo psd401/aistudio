@@ -121,7 +121,8 @@ the `error` and correct the input — do not retry blindly.
 - **exit 2 (`bad-args`)** — you called the skill wrong (missing `--user`, bad
   payload, invalid rating). Fix the invocation.
 - **exit 11 (`not-configured`)** — the gateway endpoint/token isn't set up in
-  this environment yet. Tell the user the classified-evaluation gateway isn't
+  this environment yet (the `psd-agent/{env}/agent-gateway` config secret is
+  missing or incomplete). Tell the user the classified-evaluation gateway isn't
   configured here and to contact IT. Do not retry.
 - **exit 12 (`transport-error`)** — the gateway couldn't be reached or didn't
   answer. Tell the user it's temporarily unavailable; they can try again.

@@ -12,6 +12,16 @@ jest.mock("@/lib/logger", () => ({
   createLogger: () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }),
   sanitizeForLogging: (x: unknown) => x,
 }))
+// Stub the consolidated gcp-dwd-config secret reader so loadBrokerConfig never
+// touches AWS. Env-var overrides win in most tests (the secret isn't read); the
+// secret-backed test flips this mock to return a full config.
+const loadGcpDwdConfigSecretMock = jest.fn(async (): Promise<unknown> => null)
+jest.mock("@/lib/agent-workspace/gcp-dwd-config", () => ({
+  // Keep the real pure helpers (firstNonEmpty, gcpDwdConfigSecretId); only the
+  // AWS-touching secret reader is stubbed.
+  ...jest.requireActual("@/lib/agent-workspace/gcp-dwd-config"),
+  loadGcpDwdConfigSecret: () => loadGcpDwdConfigSecretMock(),
+}))
 
 import {
   deriveAgentEmail,
@@ -46,30 +56,54 @@ describe("deriveAgentEmail — the containment guard", () => {
 
 describe("loadBrokerConfig", () => {
   const KEYS = ["GCP_PROJECT_NUMBER", "GCP_WIF_POOL_ID", "GCP_WIF_PROVIDER_ID", "GCP_DWD_SERVICE_ACCOUNT_EMAIL"]
-  beforeEach(() => KEYS.forEach((k) => delete process.env[k]))
+  beforeEach(() => {
+    KEYS.forEach((k) => delete process.env[k])
+    loadGcpDwdConfigSecretMock.mockReset()
+    loadGcpDwdConfigSecretMock.mockResolvedValue(null)
+  })
 
-  it("throws BrokerNotConfiguredError listing every missing key", () => {
-    expect(() => loadBrokerConfig()).toThrow(BrokerNotConfiguredError)
+  it("throws BrokerNotConfiguredError listing every missing key (no env, empty secret)", async () => {
+    await expect(loadBrokerConfig()).rejects.toBeInstanceOf(BrokerNotConfiguredError)
     try {
-      loadBrokerConfig()
+      await loadBrokerConfig()
     } catch (e) {
       expect((e as Error).message).toMatch(/GCP_PROJECT_NUMBER/)
       expect((e as Error).message).toMatch(/GCP_DWD_SERVICE_ACCOUNT_EMAIL/)
     }
   })
 
-  it("returns config with the default allowed domain when all keys are set", () => {
+  it("returns config with the default allowed domain when all keys are set via env", async () => {
     process.env.GCP_PROJECT_NUMBER = "123456789"
     process.env.GCP_WIF_POOL_ID = "psd-agents"
     process.env.GCP_WIF_PROVIDER_ID = "aws-provider"
     process.env.GCP_DWD_SERVICE_ACCOUNT_EMAIL = "dwd@proj.iam.gserviceaccount.com"
-    expect(loadBrokerConfig()).toEqual({
+    expect(await loadBrokerConfig()).toEqual({
       projectNumber: "123456789",
       poolId: "psd-agents",
       providerId: "aws-provider",
       serviceAccountEmail: "dwd@proj.iam.gserviceaccount.com",
       allowedDomain: "psd401.net",
     })
+    // Every field came from env → the secret is never fetched.
+    expect(loadGcpDwdConfigSecretMock).not.toHaveBeenCalled()
+  })
+
+  it("falls back to the gcp-dwd-config secret when the env vars are absent", async () => {
+    loadGcpDwdConfigSecretMock.mockResolvedValue({
+      projectNumber: "987654321",
+      wifPoolId: "psd-agents",
+      wifProviderId: "aws-provider",
+      serviceAccountEmail: "dwd@proj.iam.gserviceaccount.com",
+      provisioningSheetId: "sheet-xyz",
+    })
+    expect(await loadBrokerConfig()).toEqual({
+      projectNumber: "987654321",
+      poolId: "psd-agents",
+      providerId: "aws-provider",
+      serviceAccountEmail: "dwd@proj.iam.gserviceaccount.com",
+      allowedDomain: "psd401.net",
+    })
+    expect(loadGcpDwdConfigSecretMock).toHaveBeenCalledTimes(1)
   })
 })
 

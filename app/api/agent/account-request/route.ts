@@ -74,7 +74,7 @@ function mapBrokerError(err: unknown, requestId: string): NextResponse | null {
  */
 async function probeAgentAccount(ownerEmail: string, requestId: string): Promise<NextResponse | null> {
   try {
-    const cfg = loadBrokerConfig()
+    const cfg = await loadBrokerConfig()
     deriveAgentEmail(ownerEmail, cfg.allowedDomain)
   } catch (err) {
     const mapped = mapBrokerError(err, requestId)

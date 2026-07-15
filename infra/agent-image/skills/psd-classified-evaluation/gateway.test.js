@@ -76,38 +76,89 @@ test('unwrapToolResult parses the JSON text envelope + isError', () => {
 function clearGatewayEnv() {
   delete process.env.AGENT_GATEWAY_SSE_URL;
   delete process.env.AGENT_GATEWAY_TOKEN;
-  delete process.env.AGENT_GATEWAY_TOKEN_SECRET_ID;
+  delete process.env.AGENT_GATEWAY_CONFIG_SECRET_ID;
+  delete process.env.ENVIRONMENT;
+  delete process.env.DEPLOY_ENVIRONMENT;
 }
 
 beforeEach(clearGatewayEnv);
 
-test('resolveConfig throws when the SSE URL is unset', async () => {
-  await assert.rejects(() => resolveConfig(), /AGENT_GATEWAY_SSE_URL is not set/);
-});
-
-test('resolveConfig throws when no token source is configured', async () => {
-  process.env.AGENT_GATEWAY_SSE_URL = 'https://gw.example/sse';
-  await assert.rejects(() => resolveConfig(), /No gateway bearer token configured/);
-});
-
-test('resolveConfig prefers the direct token env var', async () => {
-  process.env.AGENT_GATEWAY_SSE_URL = 'https://gw.example/sse';
-  process.env.AGENT_GATEWAY_TOKEN = 'direct-tok';
-  assert.deepStrictEqual(await resolveConfig(), { url: 'https://gw.example/sse', token: 'direct-tok' });
-});
-
-test('resolveConfig falls back to Secrets Manager', async () => {
-  process.env.AGENT_GATEWAY_SSE_URL = 'https://gw.example/sse';
-  process.env.AGENT_GATEWAY_TOKEN_SECRET_ID = 'psd-agent/dev/agent-gateway-token';
+// Stub the Secrets Manager seam. `payload` is the JSON object stored as the
+// SecretString; pass { notFound: true } to simulate a missing secret. Returns a
+// restore function.
+function stubConfigSecret(payload, { notFound = false } = {}) {
   const orig = _internals.requireSecretsManager;
   _internals.requireSecretsManager = () => ({
-    SecretsManagerClient: class { async send() { return { SecretString: '  secret-tok  ' }; } },
+    SecretsManagerClient: class {
+      async send() {
+        if (notFound) {
+          const e = new Error('Secrets Manager can\'t find the specified secret.');
+          e.name = 'ResourceNotFoundException';
+          throw e;
+        }
+        return { SecretString: typeof payload === 'string' ? payload : JSON.stringify(payload) };
+      }
+    },
     GetSecretValueCommand: class { constructor(a) { this.a = a; } },
   });
+  return () => { _internals.requireSecretsManager = orig; };
+}
+
+test('resolveConfig returns direct env url+token without touching Secrets Manager', async () => {
+  process.env.AGENT_GATEWAY_SSE_URL = 'https://gw.example/sse';
+  process.env.AGENT_GATEWAY_TOKEN = 'direct-tok';
+  const orig = _internals.requireSecretsManager;
+  _internals.requireSecretsManager = () => { throw new Error('secret must not be read on the fast path'); };
+  try {
+    assert.deepStrictEqual(await resolveConfig(), { url: 'https://gw.example/sse', token: 'direct-tok' });
+  } finally {
+    _internals.requireSecretsManager = orig;
+  }
+});
+
+test('resolveConfig reads {url,token} from the config secret', async () => {
+  const restore = stubConfigSecret({ url: 'https://gw.example/sse', token: '  secret-tok  ' });
   try {
     assert.deepStrictEqual(await resolveConfig(), { url: 'https://gw.example/sse', token: 'secret-tok' });
   } finally {
-    _internals.requireSecretsManager = orig;
+    restore();
+  }
+});
+
+test('resolveConfig lets a direct env url override the secret while token comes from the secret', async () => {
+  process.env.AGENT_GATEWAY_SSE_URL = 'https://override.example/sse';
+  const restore = stubConfigSecret({ url: 'https://gw.example/sse', token: 'secret-tok' });
+  try {
+    assert.deepStrictEqual(await resolveConfig(), { url: 'https://override.example/sse', token: 'secret-tok' });
+  } finally {
+    restore();
+  }
+});
+
+test('resolveConfig fails closed when the config secret is missing', async () => {
+  const restore = stubConfigSecret(null, { notFound: true });
+  try {
+    await assert.rejects(() => resolveConfig(), /not configured/i);
+  } finally {
+    restore();
+  }
+});
+
+test('resolveConfig throws when the secret has a url but no token', async () => {
+  const restore = stubConfigSecret({ url: 'https://gw.example/sse' });
+  try {
+    await assert.rejects(() => resolveConfig(), /token/i);
+  } finally {
+    restore();
+  }
+});
+
+test('resolveConfig throws when the config secret is not valid JSON', async () => {
+  const restore = stubConfigSecret('not-json');
+  try {
+    await assert.rejects(() => resolveConfig(), /not valid JSON/i);
+  } finally {
+    restore();
   }
 });
 
