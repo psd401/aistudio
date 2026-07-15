@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- REQUIRED: viewport must match the composition dimensions. -->
+    <meta name="viewport" content="width=1920, height=1080" />
+    <title>PSD HyperFrames Smoke</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #0b1f3a;
+        font-family: "Inter", system-ui, sans-serif;
+      }
+      /* Root #stage carries data-composition-id + data-duration (total). */
+      #stage {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: linear-gradient(135deg, #0b1f3a 0%, #123a6b 60%, #1d5aa8 100%);
+      }
+      /* REQUIRED: timed clips start hidden; the framework toggles visibility
+         from data-start/data-duration. Never toggle visibility in script. */
+      .clip {
+        position: absolute;
+        inset: 0;
+        visibility: hidden;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+      }
+      #title {
+        color: #ffd34d;
+        font-size: 132px;
+        font-weight: 800;
+        letter-spacing: 2px;
+        /* Pure-CSS keyframes — driven deterministically by HyperFrames'
+           CSS runtime adapter (WAAPI currentTime seeking). No GSAP/CDN. */
+        animation: rise 3s ease-out both;
+      }
+      #subtitle {
+        margin-top: 32px;
+        color: #e8f0ff;
+        font-size: 52px;
+        font-weight: 500;
+        opacity: 0;
+        animation: fade 3s ease-out 0.4s both;
+      }
+      @keyframes rise {
+        0% {
+          opacity: 0;
+          transform: translateY(90px) scale(0.9);
+        }
+        35% {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+        100% {
+          opacity: 1;
+          transform: translateY(0) scale(1.04);
+        }
+      }
+      @keyframes fade {
+        0% {
+          opacity: 0;
+          transform: translateY(30px);
+        }
+        100% {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage" data-composition-id="demo" data-duration="3" data-width="1920" data-height="1080">
+      <div id="title" class="clip" data-start="0" data-duration="3">
+        Peninsula School District
+        <span id="subtitle">HyperFrames render smoke</span>
+      </div>
+    </div>
+  </body>
+</html>

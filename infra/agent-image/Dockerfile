@@ -402,6 +402,7 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     cd /opt/psd-skills/psd-html-artifact && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund && \
+    cd /opt/psd-skills/psd-hyperframes && npm install --omit=dev --no-audit --no-fund && \
     mkdir -p /opt/openclaw-plugins && cd /opt/openclaw-plugins && \
     npm pack @openclaw/amazon-bedrock-provider@2026.6.11 && \
     tar -xzf openclaw-amazon-bedrock-provider-2026.6.11.tgz && \
@@ -424,6 +425,13 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
 # psd-freshservice has zero npm dependencies (native fetch + child_process only).
 # psd-brand-guidelines has zero npm dependencies (config + static assets only).
 # psd-github has zero npm dependencies (wraps /usr/local/bin/gh).
+# psd-hyperframes (#1175) has ONE pure-JS dep (@aws-sdk/client-lambda) and NO
+# native renderer deps: Chromium/FFmpeg/Puppeteer live ONLY in the separate
+# hyperframes-render Lambda (infra/hyperframes-render/), never in this image —
+# the AgentCore Firecracker overlay-mount snapshotter cannot carry that native
+# stack (same reason matplotlib/pymupdf4llm were removed). The skill just shells
+# an InvokeFunction call. Its npm install joins the SINGLE RUN above, adding NO
+# new Docker layer (stays under the Firecracker 54-layer ceiling).
 # psd-last30days (#1174) is pure Python (stdlib urllib + xml.etree only) with an
 # optional boto3 S3 upload — boto3 is already in /opt/agentcore-venv, so it needs
 # NO new pip dependency and NO npm install. It is installed solely by the

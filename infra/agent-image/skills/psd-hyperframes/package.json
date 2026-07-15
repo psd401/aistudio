@@ -1,0 +1,13 @@
+{
+  "name": "psd-hyperframes",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenClaw skill: compose a short video from HTML/CSS/JS and render it to a shareable MP4 via the hyperframes-render Lambda; returns an unsigned public-images/ URL (#1175). Pure JS — the native Chromium/FFmpeg render stack lives in the Lambda, never in the agent image.",
+  "main": "render.js",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-lambda": "^3.658.0"
+  }
+}
