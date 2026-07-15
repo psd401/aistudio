@@ -78,14 +78,18 @@ describe("createSheetsGateway (Sheets REST)", () => {
     expect(call[1].headers.Authorization).toBe("Bearer sa-token")
   })
 
-  it("appendUsername POSTs values.append with INSERT_ROWS and the username", async () => {
+  it("appendUsername fills column A via values.append with OVERWRITE (never INSERT_ROWS) — #1237", async () => {
     const fetchImpl = jest.fn(async () => ({ ok: true, json: async () => ({}) })) as unknown as typeof fetch
     const gw = createSheetsGateway({ fetchImpl, getAccessToken: async () => "sa-token" })
     await gw.appendUsername("pratzm")
     const [url, init] = (fetchImpl as jest.Mock).mock.calls[0]
     expect(url).toContain(":append")
-    expect(url).toContain("insertDataOption=INSERT_ROWS")
+    // OVERWRITE fills the first empty column-A cell of a pre-formatted formula
+    // row; INSERT_ROWS inserted a formula-less row and broke provisioning (#1237).
+    expect(url).toContain("insertDataOption=OVERWRITE")
+    expect(url).not.toContain("INSERT_ROWS")
     expect(init.method).toBe("POST")
+    // Only column A is written, so adjacent formula columns (B+) are untouched.
     expect(JSON.parse(init.body).values).toEqual([["pratzm"]])
   })
 

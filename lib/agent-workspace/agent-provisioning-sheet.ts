@@ -70,15 +70,16 @@ export function usernameAlreadyPresent(columnA: readonly string[], username: str
 export interface SheetsGateway {
   /** Read the values in column A of the agents tab (top-to-bottom, incl. header). */
   readColumnA(): Promise<string[]>
-  /** Append `username` as a new row at the bottom of column A. */
+  /** Fill `username` into the first empty cell of column A (no row inserted). */
   appendUsername(username: string): Promise<void>
 }
 
 /**
- * Ensure exactly one row for `username` exists in the sheet. Returns whether a
- * new row was written (false = a prior request already queued it). Safe under
- * two simultaneous requests for DIFFERENT users because append inserts a new
- * row rather than targeting a computed index.
+ * Ensure exactly one row for `username` exists in the sheet. Returns whether the
+ * cell was written (false = a prior request already queued it). Safe under two
+ * simultaneous requests for DIFFERENT users: append resolves the target cell
+ * server-side atomically, so concurrent writes land in distinct rows — it fills
+ * the first empty column-A cell rather than inserting a row (#1237).
  */
 export async function ensureAgentUsernameRow(
   username: string,
@@ -110,11 +111,12 @@ export interface SheetsGatewayDeps {
  * The production Sheets gateway. Reads/writes column A of the agents tab via the
  * Sheets REST API using a spreadsheets-scoped, WIF-impersonated SA token.
  *
- * append uses values.append on range `<tab>!A:A` with INSERT_ROWS. Column A is
- * plain data (the formulas live in other columns), so append targets the bottom
- * of that column. NOTE: verify append's table detection against the real sheet
- * once it exists (adjacent formula columns can occasionally confuse append); if
- * it misbehaves, switch to read-A -> update first-empty-cell -> read-back-verify.
+ * append uses values.append on range `<tab>!A:A` with insertDataOption=OVERWRITE.
+ * The `agents` tab has pre-formatted rows (formulas dragged down in columns B+;
+ * column A blank until used), so append's table detection lands on the first
+ * empty column-A cell and OVERWRITE FILLS it. INSERT_ROWS was wrong — it inserted
+ * a fresh, formula-less row, so OneSync saw a username with every other column
+ * blank (#1237). Only column A is written, so the B+ formulas are untouched.
  */
 export function createSheetsGateway(deps: SheetsGatewayDeps = {}): SheetsGateway {
   const fetchImpl = deps.fetchImpl ?? fetch
@@ -153,7 +155,7 @@ export function createSheetsGateway(deps: SheetsGatewayDeps = {}): SheetsGateway
       const [token, baseUrl] = await Promise.all([getToken(), base()])
       const url =
         `${baseUrl}/values/${encodeURIComponent(range)}:append` +
-        `?valueInputOption=RAW&insertDataOption=INSERT_ROWS`
+        `?valueInputOption=RAW&insertDataOption=OVERWRITE`
       const res = await fetchImpl(url, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
