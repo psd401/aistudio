@@ -177,6 +177,80 @@ async function safeText(res: Response): Promise<string> {
   }
 }
 
+/** Sign a JWT assertion AS the service account via IAM Credentials signJwt. */
+async function signAssertion(
+  cfg: DwdBrokerConfig,
+  saAccessToken: string,
+  claims: Record<string, unknown>,
+  fetchImpl: typeof fetch
+): Promise<string> {
+  const signUrl =
+    `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(cfg.serviceAccountEmail)}:signJwt`
+  const signResp = await fetchImpl(signUrl, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${saAccessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ payload: JSON.stringify(claims) }),
+  })
+  if (!signResp.ok) {
+    throw new Error(`IAM Credentials signJwt failed (HTTP ${signResp.status}): ${(await safeText(signResp)).slice(0, 300)}`)
+  }
+  const signBody = (await signResp.json()) as { signedJwt?: string }
+  if (!signBody.signedJwt) {
+    throw new Error("IAM Credentials signJwt returned no signedJwt")
+  }
+  return signBody.signedJwt
+}
+
+interface TokenExchangeResponse {
+  access_token?: string
+  expires_in?: number
+  error?: string
+  error_description?: string
+}
+
+/** True when Google's token error means the agnt_ account doesn't exist yet. */
+function isNotProvisioned(data: TokenExchangeResponse | null): boolean {
+  const err = data?.error ?? ""
+  const desc = data?.error_description ?? ""
+  return err === "invalid_grant" || /not\s*found|does not exist|unauthorized_client/i.test(`${err} ${desc}`)
+}
+
+/** Leg 3: exchange the signed assertion for the agnt_ account's access token. */
+async function exchangeAssertion(
+  signedJwt: string,
+  agentEmail: string,
+  ownerEmail: string,
+  now: () => number,
+  fetchImpl: typeof fetch
+): Promise<MintedToken> {
+  const tokenResp = await fetchImpl("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: signedJwt,
+    }),
+  })
+  const tokenData = (await tokenResp.json().catch(() => null)) as TokenExchangeResponse | null
+
+  if (!tokenResp.ok || !tokenData?.access_token) {
+    // invalid_grant / "account not found" means the agnt_ account hasn't been
+    // created yet — a distinct, expected outcome (the provisioning flow uses
+    // this as its existence probe).
+    if (isNotProvisioned(tokenData)) {
+      log.info("DWD token exchange: agent account not provisioned", sanitizeForLogging({ ownerEmail, agentEmail }))
+      throw new AccountNotProvisionedError(agentEmail)
+    }
+    throw new Error(
+      `DWD token exchange failed (HTTP ${tokenResp.status}): ${tokenData?.error || "unknown"} ${tokenData?.error_description || ""}`.trim()
+    )
+  }
+
+  const expiresInSec = typeof tokenData.expires_in === "number" ? tokenData.expires_in : 3600
+  const expiresAt = new Date(now() + expiresInSec * 1000).toISOString()
+  return { accessToken: tokenData.access_token, expiresAt, agentEmail }
+}
+
 /**
  * Mint a ~1h access token for the owner's agnt_ account via DWD.
  *
@@ -198,61 +272,20 @@ export async function mintAgentWorkspaceToken(ownerEmail: string, deps: MintDeps
 
   // Leg 2: sign a JWT assertion AS the SA, subject = the agnt_ account.
   const iat = Math.floor(now() / 1000)
-  const exp = iat + 3600
-  const claims = {
+  const signedJwt = await signAssertion(cfg, saAccessToken, {
     iss: cfg.serviceAccountEmail,
     sub: agentEmail,
     scope: AGENT_DWD_SCOPES.join(" "),
     aud: "https://oauth2.googleapis.com/token",
     iat,
-    exp,
-  }
-  const signUrl =
-    `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(cfg.serviceAccountEmail)}:signJwt`
-  const signResp = await fetchImpl(signUrl, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${saAccessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ payload: JSON.stringify(claims) }),
-  })
-  if (!signResp.ok) {
-    throw new Error(`IAM Credentials signJwt failed (HTTP ${signResp.status}): ${(await safeText(signResp)).slice(0, 300)}`)
-  }
-  const signBody = (await signResp.json()) as { signedJwt?: string }
-  if (!signBody.signedJwt) {
-    throw new Error("IAM Credentials signJwt returned no signedJwt")
-  }
+    exp: iat + 3600,
+  }, fetchImpl)
 
   // Leg 3: exchange the assertion for the agnt_ account's access token.
-  const tokenResp = await fetchImpl("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: signBody.signedJwt,
-    }),
-  })
-  const tokenData = (await tokenResp.json().catch(() => null)) as
-    | { access_token?: string; expires_in?: number; error?: string; error_description?: string }
-    | null
+  const minted = await exchangeAssertion(signedJwt, agentEmail, ownerEmail, now, fetchImpl)
 
-  if (!tokenResp.ok || !tokenData?.access_token) {
-    // invalid_grant (or an "account not found" description) means the agnt_
-    // account hasn't been created yet — a distinct, expected outcome (the
-    // provisioning flow uses this as its existence probe).
-    const err = tokenData?.error ?? ""
-    const desc = tokenData?.error_description ?? ""
-    if (err === "invalid_grant" || /not\s*found|does not exist|unauthorized_client/i.test(`${err} ${desc}`)) {
-      log.info("DWD token exchange: agent account not provisioned", sanitizeForLogging({ ownerEmail, agentEmail }))
-      throw new AccountNotProvisionedError(agentEmail)
-    }
-    throw new Error(`DWD token exchange failed (HTTP ${tokenResp.status}): ${err || "unknown"} ${desc}`.trim())
-  }
-
-  const expiresInSec = typeof tokenData.expires_in === "number" ? tokenData.expires_in : 3600
-  const expiresAt = new Date(now() + expiresInSec * 1000).toISOString()
-
-  log.info("Minted DWD workspace token", sanitizeForLogging({ ownerEmail, agentEmail, expiresAt }))
-  return { accessToken: tokenData.access_token, expiresAt, agentEmail }
+  log.info("Minted DWD workspace token", sanitizeForLogging({ ownerEmail, agentEmail, expiresAt: minted.expiresAt }))
+  return minted
 }
 
 /** Test-only: reset the cached WIF client between tests. */

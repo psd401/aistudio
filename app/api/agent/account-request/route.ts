@@ -51,6 +51,56 @@ function isStudentUsername(localPart: string): boolean {
   return /^\d/.test(localPart)
 }
 
+/**
+ * Map a broker error to its HTTP response, or null if it isn't one of the
+ * broker's typed errors (caller decides). Shared by the derive-guard and the
+ * probe so the instanceof branching lives in one place.
+ */
+function mapBrokerError(err: unknown, requestId: string): NextResponse | null {
+  if (err instanceof InvalidOwnerError) {
+    return NextResponse.json({ error: err.message }, { status: 400 })
+  }
+  if (err instanceof BrokerNotConfiguredError) {
+    log.error("account-request: broker not configured", sanitizeForLogging({ requestId, reason: err.message }))
+    return NextResponse.json({ error: "Provisioning is not configured. Contact IT." }, { status: 503 })
+  }
+  return null
+}
+
+/**
+ * Derive + domain-guard the agnt_ target, then probe the broker for existence.
+ * Returns a TERMINAL response (active / 400 / 503 / 502), or null to signal the
+ * caller should proceed to the sheet write (account not provisioned yet).
+ */
+async function probeAgentAccount(ownerEmail: string, requestId: string): Promise<NextResponse | null> {
+  try {
+    const cfg = loadBrokerConfig()
+    deriveAgentEmail(ownerEmail, cfg.allowedDomain)
+  } catch (err) {
+    const mapped = mapBrokerError(err, requestId)
+    if (mapped) return mapped
+    throw err
+  }
+
+  try {
+    await mintAgentWorkspaceToken(ownerEmail)
+    log.info("account-request: agnt_ account already active", sanitizeForLogging({ ownerEmail, requestId }))
+    return NextResponse.json({ status: "active" })
+  } catch (err) {
+    if (err instanceof AccountNotProvisionedError) {
+      return null // proceed to the sheet write
+    }
+    const mapped = mapBrokerError(err, requestId)
+    if (mapped) return mapped
+    log.error("account-request: probe failed", sanitizeForLogging({
+      ownerEmail,
+      requestId,
+      error: err instanceof Error ? err.message : String(err),
+    }))
+    return NextResponse.json({ error: "Provisioning probe failed. Try again." }, { status: 502 })
+  }
+}
+
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
 
@@ -79,44 +129,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Student accounts are not provisioned." }, { status: 400 })
   }
 
-  // Derive + domain-guard the agnt_ target (throws InvalidOwnerError on a bad domain).
-  let cfg
-  try {
-    cfg = loadBrokerConfig()
-    deriveAgentEmail(ownerEmail, cfg.allowedDomain)
-  } catch (err) {
-    if (err instanceof InvalidOwnerError) {
-      return NextResponse.json({ error: err.message }, { status: 400 })
-    }
-    if (err instanceof BrokerNotConfiguredError) {
-      log.error("account-request: broker not configured", sanitizeForLogging({ requestId, reason: (err as Error).message }))
-      return NextResponse.json({ error: "Provisioning is not configured. Contact IT." }, { status: 503 })
-    }
-    throw err
-  }
-
-  // 1. Existence probe via the broker.
-  try {
-    await mintAgentWorkspaceToken(ownerEmail)
-    // A token minted → the account already exists.
-    log.info("account-request: agnt_ account already active", sanitizeForLogging({ ownerEmail, requestId }))
-    return NextResponse.json({ status: "active" })
-  } catch (err) {
-    if (err instanceof AccountNotProvisionedError) {
-      // Expected — fall through to the sheet write.
-    } else if (err instanceof BrokerNotConfiguredError) {
-      return NextResponse.json({ error: "Provisioning is not configured. Contact IT." }, { status: 503 })
-    } else if (err instanceof InvalidOwnerError) {
-      return NextResponse.json({ error: err.message }, { status: 400 })
-    } else {
-      log.error("account-request: probe failed", sanitizeForLogging({
-        ownerEmail,
-        requestId,
-        error: err instanceof Error ? err.message : String(err),
-      }))
-      return NextResponse.json({ error: "Provisioning probe failed. Try again." }, { status: 502 })
-    }
-  }
+  // 1. Domain-guard + existence probe via the broker. A terminal response
+  // (active / 400 / 503 / 502) short-circuits; null means "not provisioned yet".
+  const probeResult = await probeAgentAccount(ownerEmail, requestId)
+  if (probeResult) return probeResult
 
   // 2. Dedupe + append the bare username to the OneSync sheet.
   try {

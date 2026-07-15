@@ -343,6 +343,61 @@ async function provisionAgentUser(
   return { id: userId }
 }
 
+/**
+ * Verify the token-exchange response's granting identity (#1234, via the
+ * id_token) and that it carries the load-bearing user_account scopes. Extracted
+ * from exchangeAndStore to keep that function within size/complexity limits.
+ * Returns the granted scope list on success, or a user-facing error string.
+ */
+async function validateGrantedToken(
+  tokenData: { id_token?: string; scope?: string },
+  clientId: string,
+  expectedEmail: string,
+  log: ReturnType<typeof createLogger>
+): Promise<{ ok: true; grantedScopes: string[] } | { ok: false; error: string }> {
+  // login_hint/hd are only hints — the account chooser lets the user pick any
+  // @psd401.net account, so without this check a human's refresh token could
+  // land in a slot it doesn't own (silent attribution corruption).
+  const identity = await verifyGrantedIdentity(tokenData.id_token, clientId, expectedEmail, log)
+  if (!identity.ok) {
+    return {
+      ok: false,
+      error:
+        identity.reason === "mismatch"
+          ? `You authorized with the wrong Google account. This connection must be granted while signed in as ${expectedEmail}. Reopen the same link, choose "Use another account", and sign in as ${expectedEmail}.`
+          : `We could not verify which Google account authorized this connection. Please reopen the same link and sign in as ${expectedEmail}.`,
+    }
+  }
+
+  const grantedScopes = tokenData.scope?.split(" ") ?? []
+  if (grantedScopes.length === 0) {
+    log.error("Google returned an empty scope list", sanitizeForLogging({ ownerEmail: expectedEmail }))
+    return { ok: false, error: "Google returned no permissions. The OAuth client may be misconfigured. Contact IT." }
+  }
+
+  // Minimum load-bearing scopes for the user_account slot — openid/email/profile
+  // are nice-to-have, not required.
+  const REQUIRED_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/tasks",
+  ]
+  const missingScopes = REQUIRED_SCOPES.filter((s) => !grantedScopes.includes(s))
+  if (missingScopes.length > 0) {
+    log.error("Google granted insufficient scopes", sanitizeForLogging({
+      ownerEmail: expectedEmail,
+      missing: missingScopes,
+      granted: grantedScopes,
+    }))
+    return {
+      ok: false,
+      error: `Google did not grant all required permissions. Missing: ${missingScopes.join(", ")}. Please try again and accept all requested permissions.`,
+    }
+  }
+
+  return { ok: true, grantedScopes }
+}
+
 async function exchangeAndStore(
   code: string,
   payload: { sub: string; agent: string; kind: "user_account" },
@@ -398,61 +453,16 @@ async function exchangeAndStore(
     return { success: false, error: "Google did not return a refresh token. Ensure the OAuth client is configured as Internal + In Production." }
   }
 
-  // #1234: verify WHICH Google account authorized this grant before storing
-  // anything. login_hint/hd are only hints — the account chooser lets the user
-  // pick any @psd401.net account, so without this check a human can complete an
-  // agent-slot link signed in as themselves (their personal refresh token then
-  // lands in the agent's credential slot — silent attribution corruption).
-  //
-  // Only user_account consent remains (#1232), so the expected identity is the
-  // human owner. A mismatch/verification failure returns success:false WITHOUT
-  // storing the token; handleOAuthCallback only consumes the nonce on success,
-  // so the user can immediately retry the SAME link with the correct account.
-  const expectedEmail = payload.sub
-  const identity = await verifyGrantedIdentity(tokenData.id_token, clientId, expectedEmail, log)
-  if (!identity.ok) {
-    if (identity.reason === "mismatch") {
-      return {
-        success: false,
-        error: `You authorized with the wrong Google account. This connection must be granted while signed in as ${expectedEmail}. Reopen the same link, choose "Use another account", and sign in as ${expectedEmail}.`,
-      }
-    }
-    return {
-      success: false,
-      error: `We could not verify which Google account authorized this connection. Please reopen the same link and sign in as ${expectedEmail}.`,
-    }
+  // Verify the granting identity (#1234) and that Google granted the required
+  // scopes. Only user_account consent remains (#1232), so the expected identity
+  // is the human owner. A failure returns success:false WITHOUT storing the
+  // token; handleOAuthCallback only consumes the nonce on success, so the user
+  // can immediately retry the SAME link with the correct account.
+  const validated = await validateGrantedToken(tokenData, clientId, payload.sub, log)
+  if (!validated.ok) {
+    return { success: false, error: validated.error }
   }
-
-  const grantedScopes = tokenData.scope?.split(" ") ?? []
-
-  // Guard: reject if Google returned an empty scope list (misconfigured OAuth client)
-  if (grantedScopes.length === 0) {
-    log.error("Google returned an empty scope list", sanitizeForLogging({ ownerEmail: payload.sub }))
-    return {
-      success: false,
-      error: "Google returned no permissions. The OAuth client may be misconfigured. Contact IT.",
-    }
-  }
-
-  // Validate that Google granted the minimum load-bearing scopes for the
-  // user_account slot — openid/email/profile are nice-to-have, not required.
-  const REQUIRED_SCOPES = [
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/tasks",
-  ]
-  const missingScopes = REQUIRED_SCOPES.filter((s) => !grantedScopes.includes(s))
-  if (missingScopes.length > 0) {
-    log.error("Google granted insufficient scopes", sanitizeForLogging({
-      ownerEmail: payload.sub,
-      missing: missingScopes,
-      granted: grantedScopes,
-    }))
-    return {
-      success: false,
-      error: `Google did not grant all required permissions. Missing: ${missingScopes.join(", ")}. Please try again and accept all requested permissions.`,
-    }
-  }
+  const grantedScopes = validated.grantedScopes
 
   const [existing] = await executeQuery(
     (db) => db.select({ id: users.id }).from(users).where(eq(users.email, payload.sub)).limit(1),
