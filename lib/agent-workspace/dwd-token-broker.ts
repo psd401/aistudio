@@ -139,7 +139,10 @@ export function deriveAgentEmail(ownerEmail: string, allowedDomain: string): str
   if (localPart.toLowerCase().startsWith("agnt_")) {
     throw new InvalidOwnerError("ownerEmail is already an agent account")
   }
-  return `agnt_${localPart}@${allowedDomain}`
+  // Lowercase the local part so callers that pass case-varied owner emails
+  // (router vs. skill vs. admin action) always derive the same agnt_ target
+  // instead of spurious AccountNotProvisionedError (claude review).
+  return `agnt_${localPart.toLowerCase()}@${allowedDomain}`
 }
 
 export interface MintedToken {

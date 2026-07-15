@@ -108,4 +108,16 @@ describe("POST /api/agent/workspace-token", () => {
     }
     expect(last!.status).toBe(429)
   })
+
+  it("cannot bypass the rate limit by case-shuffling the same owner email", async () => {
+    mintMock.mockResolvedValue({ accessToken: "t", expiresAt: "x", agentEmail: "agnt_h@psd401.net" })
+    let last: Response | undefined
+    for (let i = 0; i < 121; i++) {
+      const shuffled = i % 2 === 0 ? "Heavy@psd401.net" : "heavy@PSD401.net"
+      last = await POST(req({ ownerEmail: shuffled }))
+    }
+    expect(last!.status).toBe(429)
+    // Normalized to a single rate-limit key + broker call, regardless of input casing.
+    expect(mintMock).toHaveBeenCalledWith("heavy@psd401.net")
+  })
 })

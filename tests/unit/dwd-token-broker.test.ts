@@ -30,6 +30,9 @@ describe("deriveAgentEmail — the containment guard", () => {
   it("forces the agent domain to the allowed domain and is case-insensitive on domain", () => {
     expect(deriveAgentEmail("hagelk@PSD401.NET", "psd401.net")).toBe("agnt_hagelk@psd401.net")
   })
+  it("normalizes local-part case so callers deriving from differently-cased owner emails agree", () => {
+    expect(deriveAgentEmail("Hagelk@psd401.net", "psd401.net")).toBe("agnt_hagelk@psd401.net")
+  })
   it("rejects an owner outside the allowed domain", () => {
     expect(() => deriveAgentEmail("someone@gmail.com", "psd401.net")).toThrow(InvalidOwnerError)
   })

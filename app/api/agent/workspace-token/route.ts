@@ -88,13 +88,18 @@ export async function POST(request: NextRequest) {
 
   // request.json() can return a bare `null` / non-object literal — guard before
   // destructuring so a null body is a 400, not a 500 (gemini review).
-  const ownerEmail = body && typeof body === "object" ? (body as { ownerEmail?: unknown }).ownerEmail : undefined
-  if (!ownerEmail || typeof ownerEmail !== "string" || !SAFE_EMAIL_RE.test(ownerEmail)) {
+  const rawOwnerEmail = body && typeof body === "object" ? (body as { ownerEmail?: unknown }).ownerEmail : undefined
+  if (!rawOwnerEmail || typeof rawOwnerEmail !== "string" || !SAFE_EMAIL_RE.test(rawOwnerEmail)) {
     return NextResponse.json(
       { error: "ownerEmail is required and must be a valid email" },
       { status: 400 }
     )
   }
+
+  // Normalize BEFORE both the rate-limit key and deriveAgentEmail — otherwise
+  // case-shuffling the same address (e.g. Hagelk@ vs hagelk@) bypasses the
+  // rate limit, since Google treats both as the same mailbox (claude review).
+  const ownerEmail = rawOwnerEmail.toLowerCase()
 
   if (!checkRateLimit(ownerEmail)) {
     log.warn("Workspace-token rate limit exceeded", sanitizeForLogging({ ownerEmail, requestId }))
