@@ -12,6 +12,7 @@ import { verifyConsentToken } from "@/lib/agent-workspace/consent-token"
 import { storeRefreshToken, getSecretJson } from "@/lib/agent-workspace/secrets-manager"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { addUserRole } from "@/lib/db/drizzle/user-roles"
+import { verifyGrantedIdentity } from "@/lib/agent-workspace/identity-verification"
 
 /**
  * OAuth scopes requested per token kind (#912 Phase 1).
@@ -222,6 +223,10 @@ export async function verifyConsentAndGetOAuthUrl(
       prompt: "consent",
       state: payload.nonce,
       login_hint: loginHint,
+      // Restrict Google's account chooser to the psd401.net hosted domain
+      // (#1234). This is a second hint — NOT relied upon for security; the
+      // callback enforces the exact account via id_token verification.
+      hd: "psd401.net",
     })
 
     timer({ status: "success" })
@@ -400,6 +405,7 @@ async function exchangeAndStore(
   const tokenData = (await tokenResponse.json()) as {
     access_token: string
     refresh_token?: string
+    id_token?: string
     scope?: string
     token_type: string
     expires_in: number
@@ -408,6 +414,34 @@ async function exchangeAndStore(
   if (!tokenData.refresh_token) {
     log.error("Google did not return a refresh token", sanitizeForLogging({ ownerEmail: payload.sub }))
     return { success: false, error: "Google did not return a refresh token. Ensure the OAuth client is configured as Internal + In Production." }
+  }
+
+  // #1234: verify WHICH Google account authorized this grant before storing
+  // anything. login_hint/hd are only hints — the account chooser lets the user
+  // pick any @psd401.net account, so without this check a human can complete an
+  // agent-slot link signed in as themselves (their personal refresh token then
+  // lands in the agent's credential slot — silent attribution corruption).
+  //
+  // Expected identity is kind-specific:
+  //   agent_account → the agnt_<uniqname> address (payload.agent)
+  //   user_account  → the human owner (payload.sub)
+  //
+  // A mismatch/verification failure returns success:false WITHOUT storing the
+  // token; handleOAuthCallback only consumes the nonce on success, so the user
+  // can immediately retry the SAME link with the correct account.
+  const expectedEmail = payload.kind === "agent_account" ? payload.agent : payload.sub
+  const identity = await verifyGrantedIdentity(tokenData.id_token, clientId, expectedEmail, log)
+  if (!identity.ok) {
+    if (identity.reason === "mismatch") {
+      return {
+        success: false,
+        error: `You authorized with the wrong Google account. This connection must be granted while signed in as ${expectedEmail}. Reopen the same link, choose "Use another account", and sign in as ${expectedEmail}.`,
+      }
+    }
+    return {
+      success: false,
+      error: `We could not verify which Google account authorized this connection. Please reopen the same link and sign in as ${expectedEmail}.`,
+    }
   }
 
   const grantedScopes = tokenData.scope?.split(" ") ?? []
