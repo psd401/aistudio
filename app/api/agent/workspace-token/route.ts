@@ -19,16 +19,28 @@
  * body has no such field — which keeps the domain-wide credential usable only
  * for `agnt_` accounts (never a human mailbox).
  *
+ * CONFUSED-DEPUTY ISOLATION (#1232 hardening): this route is a THIN PROXY. The
+ * WIF/signJwt work runs in the dedicated `psd-agent-mint-{env}` Lambda (the sole
+ * AWS principal the Google WIF provider trusts), reached here via an IAM-authed
+ * `lambda:InvokeFunction` (mintAgentWorkspaceTokenViaBoundary). The Next.js
+ * frontend NO LONGER holds the WIF credential, so a frontend RCE/SSRF can at most
+ * invoke the mint Lambda — which ALWAYS derives `agnt_<owner>` server-side and
+ * can never `signJwt(sub=<arbitrary human>)`. Auth + validation + rate limiting +
+ * error→HTTP mapping below are unchanged; only the broker call moved behind the
+ * Lambda boundary. (When AGENT_MINT_LAMBDA_NAME is unset — local dev/tests — the
+ * boundary runs the broker in-process, where there is no real WIF anyway.)
+ *
  * SECURITY / KNOWN LIMITATION (codex review P1, #1232 open item): the caller is
  * authenticated ONLY by the shared internal secret, then `ownerEmail` is trusted
  * from the body. The agent runtime can read that secret, so a prompt-driven
- * agent could request a token for a DIFFERENT owner's `agnt_` account. Current
- * containment: the derivation guard confines the blast radius to `agnt_`
- * accounts (agent-generated content, never a human's mailbox), and the secret is
- * a container-only credential. Binding the token to a *verified* caller identity
- * (a signed owner assertion injected by the OpenClaw runtime, not a body field)
- * is the documented follow-up in #1232 ("If OpenClaw can inject the signed-in
- * user's verified email…") and requires runtime support that does not exist yet.
+ * agent could request a token for a DIFFERENT owner's `agnt_` account. Post-
+ * isolation blast radius: a frontend or secret compromise can obtain tokens for
+ * `agnt_` accounts (agent-generated content, never a human's mailbox) — it can
+ * NOT reach an arbitrary psd401.net mailbox, because the WIF credential lives
+ * only in the mint Lambda's role and the derivation guard runs INSIDE that
+ * boundary. Binding the token to a *verified* caller identity (a signed owner
+ * assertion injected by the OpenClaw runtime, not a body field) is the documented
+ * follow-up in #1232 and requires runtime support that does not exist yet.
  *
  * Part of #1232.
  */
@@ -37,8 +49,8 @@ import { NextRequest, NextResponse } from "next/server"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
 import { validateInternalSecret } from "@/lib/agent-workspace/internal-auth"
+import { mintAgentWorkspaceTokenViaBoundary } from "@/lib/agent-workspace/mint-client"
 import {
-  mintAgentWorkspaceToken,
   AccountNotProvisionedError,
   BrokerNotConfiguredError,
   InvalidOwnerError,
@@ -110,7 +122,9 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { accessToken, expiresAt, agentEmail } = await mintAgentWorkspaceToken(ownerEmail)
+    // Delegates to the isolated mint Lambda when AGENT_MINT_LAMBDA_NAME is set
+    // (every deployed env); runs the broker in-process only for local dev/tests.
+    const { accessToken, expiresAt, agentEmail } = await mintAgentWorkspaceTokenViaBoundary(ownerEmail)
     // Audit trail for a domain-wide credential — owner, agent, requestId. Never
     // the token value.
     log.info("Workspace token minted", sanitizeForLogging({ ownerEmail, agentEmail, expiresAt, requestId }))
