@@ -88,6 +88,11 @@ export const ROLE_SCOPES: Record<string, ApiScope[]> = {
     "mcp:search_decisions",
     "mcp:list_assistants",
     "mcp:get_decision_graph",
+    // Staff may execute assistants over MCP so an agent acting with a staff
+    // member's own API key can do what that staff member can already do in the UI
+    // and via REST (`assistants:execute` is staff+admin). Issue #1223 §5 (Option B).
+    // `mcp:capture_decision` stays admin-only, consistent with `graph:write`.
+    "mcp:execute_assistant",
     // Atrium content (Phase 5, Issue #1055). Staff may mint API keys that
     // author and publish content INTERNALLY — "agents do what people can".
     // `content:publish_public` is human-/admin-held and deliberately withheld.

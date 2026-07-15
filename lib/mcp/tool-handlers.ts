@@ -21,9 +21,13 @@ import {
   createDecisionSchema,
 } from "@/lib/graph/decision-capture-service"
 import { isValidationError } from "@/types/error-types"
-import { executeAssistantForJobCompletion } from "@/lib/api/assistant-execution-service"
+import {
+  executeAssistantForJobCompletion,
+  validateExecutionInputs,
+} from "@/lib/api/assistant-execution-service"
 import { listAccessibleAssistants } from "@/lib/api/assistant-service"
-import { isAdminByUserId } from "@/lib/api/route-helpers"
+import { isAdminByUserId, checkAssistantResourceGrants } from "@/lib/api/route-helpers"
+import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import { AGENT_TOOL_HANDLERS } from "@/lib/agents/agent-tools"
 import { CONTENT_TOOL_HANDLERS } from "./content-tool-handlers"
 import {
@@ -225,6 +229,68 @@ async function handleExecuteAssistant(
     return {
       content: [{ type: "text", text: "Missing or invalid required field: assistantId (number)" }],
       isError: true,
+    }
+  }
+
+  // Same input limits REST enforces (100 KB, 50 fields, object shape) — the v1
+  // execute route runs validateExecutionInputs before the service, so the MCP
+  // surface must too or a key could create oversized execution records here
+  // that the identical REST call rejects.
+  const inputErrors = validateExecutionInputs(inputs)
+  if (inputErrors) {
+    log.warn("execute_assistant inputs failed validation", {
+      assistantId,
+      issueCount: inputErrors.length,
+    })
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Invalid inputs: ${inputErrors.map((i) => i.message).join("; ")}`,
+        },
+      ],
+      isError: true,
+    }
+  }
+
+  // Per-resource grant enforcement (#1206): REST execution verifies assistant +
+  // model grants at the route (app/api/v1/assistants/[id]/execute), and MCP must
+  // enforce the SAME gate — otherwise a staff key holding mcp:execute_assistant
+  // could run a restricted assistant the identical REST call would 403. A failed
+  // architect load is deliberately NOT handled here: executeAssistantForJobCompletion
+  // produces the canonical "Record not found in assistant_architects" error that
+  // agent clients (psd-aistudio) map to a clean not_executable result, and that
+  // wire contract must not change.
+  const architectResult = await getAssistantArchitectByIdAction(String(assistantId))
+  if (architectResult.isSuccess && architectResult.data) {
+    const architect = architectResult.data
+    const check = await checkAssistantResourceGrants({
+      userId: context.userId,
+      architectUserId: architect.userId,
+      architectId: architect.id,
+      modelDbIds: (architect.prompts || [])
+        .map((p) => p.modelId)
+        .filter((m): m is number => typeof m === "number" && m > 0),
+    })
+    if (!check.granted) {
+      log.warn("execute_assistant denied by per-resource grant", {
+        assistantId,
+        userId: context.userId,
+        reason: check.reason,
+        ...(check.deniedModelIds && { deniedModelIds: check.deniedModelIds }),
+      })
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              check.reason === "assistant"
+                ? "You do not have access to this assistant"
+                : "You do not have access to a model this assistant uses",
+          },
+        ],
+        isError: true,
+      }
     }
   }
 
