@@ -21,9 +21,11 @@ ARG HYPERFRAMES_VERSION=0.7.59
 
 # Runtime deps (ffmpeg + chromium + its shared libs + fonts, from upstream
 # Dockerfile.render) AND build deps for aws-lambda-ric's native addon
-# (g++/make/cmake/libcurl/python3). unzip is required by @puppeteer/browsers.
+# (g++/make/cmake/libcurl/python3). unzip is required by @puppeteer/browsers;
+# xz-utils by aws-lambda-ric's preinstall, which extracts a .tar.xz (curl) and
+# fails on the slim base with "tar (child): xz: Cannot exec" without it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl unzip ffmpeg chromium \
+    ca-certificates curl unzip xz-utils ffmpeg chromium \
     libgbm1 libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 \
     libxdamage1 libxrandr2 libcups2 libasound2 libpangocairo-1.0-0 \
     libxshmfence1 libgtk-3-0 \
