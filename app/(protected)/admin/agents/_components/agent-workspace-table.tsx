@@ -123,7 +123,11 @@ export function AgentWorkspaceTable() {
       <Card>
         <CardHeader>
           <CardTitle>Workspace Connections</CardTitle>
-          <CardDescription>Google Workspace OAuth token status per user</CardDescription>
+          <CardDescription>
+            Google Workspace OAuth token status per user. User-mailbox slots use
+            per-user consent; agent-account slots are minted on demand by the DWD
+            token broker (no stored token) and show &ldquo;Auto (DWD)&rdquo;.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {data.tokens.length === 0 ? (
@@ -156,7 +160,21 @@ export function AgentWorkspaceTable() {
                     <TableCell className="text-sm font-mono">
                       {token.tokenKind === "user_account" ? token.ownerEmail : token.agentEmail}
                     </TableCell>
-                    <TableCell><StatusBadge status={token.status} /></TableCell>
+                    <TableCell>
+                      {/* #1232: the agent slot no longer has a per-user token
+                          lifecycle — access is minted on demand by the DWD
+                          broker, so its stored manifest status is vestigial.
+                          Show a fixed "Auto (DWD)" marker instead of a
+                          pending/active/stale token status that no longer
+                          reflects reality. The user slot keeps its lifecycle. */}
+                      {token.tokenKind === "agent_account" ? (
+                        <Badge variant="outline" title="Provisioned automatically via domain-wide delegation — no stored token">
+                          Auto (DWD)
+                        </Badge>
+                      ) : (
+                        <StatusBadge status={token.status} />
+                      )}
+                    </TableCell>
                     <TableCell className="text-sm">{token.grantedScopes.length} scope{token.grantedScopes.length !== 1 ? "s" : ""}</TableCell>
                     <TableCell className="text-sm">{formatDate(token.lastVerifiedAt)}</TableCell>
                     <TableCell className="text-sm">{formatDate(token.createdAt)}</TableCell>

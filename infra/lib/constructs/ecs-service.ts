@@ -723,6 +723,25 @@ export class EcsServiceConstruct extends Construct {
         // shape is honest.
         GOOGLE_WORKSPACE_OAUTH_SECRET_ID: `psd-agent/${environment}/google-oauth-client`,
         AGENT_INTERNAL_API_KEY_SECRET_ID: `psd-agent/${environment}/internal-api-key`,
+        // DWD token broker (#1232) + agnt_ auto-provisioning (#1233) config.
+        // These are plain GCP identifiers (NOT secrets) that IT (Reese) supplies
+        // per environment via CDK context. Empty defaults keep the broker /
+        // provisioning failing CLOSED (BrokerNotConfiguredError / not-configured)
+        // until the Google side is wired — the same deploy-cleanly-before-values
+        // pattern as the OAuth secret IDs above. Read lazily at request time
+        // (loadBrokerConfig). No new AWS IAM: WIF via ExternalAccountClient uses
+        // sts:GetCallerIdentity (implicit); signJwt/DWD is GCP-side.
+        GCP_PROJECT_NUMBER: (this.node.tryGetContext('gcpProjectNumber') as string) ?? '',
+        GCP_WIF_POOL_ID: (this.node.tryGetContext('gcpWifPoolId') as string) ?? '',
+        GCP_WIF_PROVIDER_ID: (this.node.tryGetContext('gcpWifProviderId') as string) ?? '',
+        GCP_DWD_SERVICE_ACCOUNT_EMAIL: (this.node.tryGetContext('gcpDwdServiceAccountEmail') as string) ?? '',
+        // OneSync "agents" sheet the app appends usernames to for auto-provisioning
+        // (#1233). Overridable per environment via context; defaults to the
+        // shared sheet from the issue. Access is gated by Google file-sharing
+        // with the service account, so the ID itself is not a credential.
+        AGENT_PROVISIONING_SHEET_ID:
+          (this.node.tryGetContext('agentProvisioningSheetId') as string)
+          ?? '1_zCWZToafVntu8Sb1te1zRuIcrbcj677s-hZFwfbBN4',
         // Memory optimization - 70% of container memory
         NODE_OPTIONS: `--max-old-space-size=${Math.floor(memory * 0.7)}`,
         // Application configuration
