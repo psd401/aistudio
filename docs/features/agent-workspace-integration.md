@@ -15,6 +15,18 @@ tokens for two slots:
   broker** (`POST /api/agent/workspace-token`). Agent accounts are created
   automatically via the OneSync sheet (**#1233**); interactive sign-in on
   `agnt_*` accounts is blocked at the Google layer.
+  - **Confused-deputy isolation (#1232 hardening):** the DWD broker and the
+    OneSync sheet writer do **not** run in the Next.js app. They run in a
+    dedicated **mint Lambda** (`psd-agent-mint-{env}`) with its own least-
+    privilege role, which is the **sole AWS principal the Google WIF provider
+    trusts**. The `/api/agent/workspace-token` and `/api/agent/account-request`
+    routes are thin proxies that reach the mint Lambda via an IAM-authed
+    `lambda:InvokeFunction`. So a frontend RCE/SSRF can at most *invoke* the mint
+    Lambda — which always derives `agnt_<owner>` server-side — and can never
+    reach the WIF credential to `signJwt(sub=<arbitrary human>)`. Blast radius of
+    a frontend compromise: **any `agnt_` account** (agent-generated content), not
+    any psd401.net mailbox. (When `AGENT_MINT_LAMBDA_NAME` is unset — local dev —
+    the routes run the broker in-process; there is no real WIF locally.)
 
 ## Components
 
@@ -22,8 +34,9 @@ tokens for two slots:
 |---|---|---|
 | DB | `psd_agent_workspace_tokens`, `psd_agent_workspace_consent_nonces` (migration 071) | Token manifest (user slot lifecycle; agent slot shows "Auto (DWD)") + one-time consent nonces |
 | API | `POST /api/agent/consent-link` | Agent→app, mints signed consent URLs (**user slot only** — agent_account is rejected, #1232) |
-| API | `POST /api/agent/workspace-token` | Agent→app DWD broker; mints a ~1h agent-slot access token (#1232). 404 `account-not-provisioned` when the agnt_ account isn't made yet |
-| API | `POST /api/agent/account-request` | Router→app; appends the username to the OneSync `agents` sheet to auto-provision the agnt_ account (#1233) |
+| API | `POST /api/agent/workspace-token` | Agent→app; **thin proxy** to the mint Lambda; mints a ~1h agent-slot access token (#1232). 404 `account-not-provisioned` when the agnt_ account isn't made yet |
+| API | `POST /api/agent/account-request` | Router→app; **thin proxy** to the mint Lambda (probe + OneSync `agents` sheet append) to auto-provision the agnt_ account (#1233) |
+| Lambda | `psd-agent-mint-{env}` (AgentPlatformStack, role `psd-agent-mint-execution-role-{env}`) | **#1232 isolation** — the sole WIF principal. Houses the DWD broker + provisioning-sheet writer; derives `agnt_<owner>` server-side. Role grants only `secretsmanager:GetSecretValue` on `psd-agent/{env}/*` + logs; the frontend holds only `lambda:InvokeFunction` on it. |
 | UI | `/agent-connect`, `/agent-connect/callback` | Public OAuth bootstrap (off-nav) |
 | Admin | "Workspace" tab in `/admin/agents` | Per-user status dashboard |
 | Skill | `infra/agent-image/skills/psd-workspace/` | Agent-side `gws` wrapper |
@@ -57,9 +70,11 @@ tokens for two slots:
 
 1. User asks the agent to act AS itself (`--scope agent`).
 2. Skill POSTs `/api/agent/workspace-token` (`{ownerEmail}`, PSK Bearer).
-3. Broker derives `agnt_<owner-localpart>@psd401.net` server-side and mints a
-   ~1h access token via WIF → service-account signJwt → jwt-bearer exchange.
-4. If the agnt_ account doesn't exist yet, the broker returns 404
+3. The route (thin proxy) invokes the **mint Lambda**, which derives
+   `agnt_<owner-localpart>@psd401.net` server-side and mints a ~1h access token
+   via WIF → service-account signJwt → jwt-bearer exchange. Only the mint
+   Lambda's role can perform the WIF leg (the frontend cannot).
+4. If the agnt_ account doesn't exist yet, the mint Lambda returns 404
    `account-not-provisioned`; the skill emits `{status:"account-provisioning"}`
    exit 14 (the router has already kicked off auto-provisioning, #1233). No
    consent link — the user just retries in ~30 min.
@@ -97,18 +112,38 @@ paste it verbatim into Chat and stop the turn. Exit 14 carries **no** URL.
 4. Set `GOOGLE_WORKSPACE_CLIENT_ID` / `GOOGLE_WORKSPACE_CLIENT_SECRET` in the
    Next.js environment (same values as step 2).
 5. **DWD broker + provisioning (#1232/#1233)** — IT provisions a Google service
-   account with domain-wide delegation + a workload-identity-federation trust for
-   the app's AWS role, then populate ONE Secrets Manager secret (no CDK context
-   flags — aistudio is a public repo):
+   account with domain-wide delegation + a workload-identity-federation trust,
+   then populate ONE Secrets Manager secret (no CDK context flags — aistudio is a
+   public repo):
    ```bash
    aws secretsmanager create-secret \
      --name psd-agent/dev/gcp-dwd-config \
      --tags Key=Environment,Value=dev Key=ManagedBy,Value=aistudio \
      --secret-string '{"projectNumber":"…","wifPoolId":"…","wifProviderId":"…","serviceAccountEmail":"…@….iam.gserviceaccount.com","provisioningSheetId":"…"}'
    ```
-   The app reads it lazily (5-min cached); until it exists the broker fails closed
-   (503 / `not-configured`) and provisioning is skipped. (Local dev may instead set
-   the `GCP_*` / `AGENT_PROVISIONING_SHEET_ID` env vars.)
+   The mint Lambda reads it lazily (5-min cached); until it exists the broker
+   fails closed (503 / `not-configured`) and provisioning is skipped. (Local dev
+   may instead set the `GCP_*` / `AGENT_PROVISIONING_SHEET_ID` env vars.)
+
+   **WIF trusts the mint role, NOT the frontend role (#1232 hardening).** The WIF
+   provider condition and the SA `principalSet` bindings must reference the mint
+   Lambda's role, whose ARN is stable and deterministic:
+   - Role ARN: `arn:aws:iam::<account>:role/psd-agent-mint-execution-role-{env}`
+   - Assumed-role principal (what Google's STS sees): `arn:aws:sts::<account>:assumed-role/psd-agent-mint-execution-role-{env}/*`
+
+   Reese, when wiring (or re-pointing off the old frontend-role trust) the
+   Google side against the mint role:
+   1. Set the WIF provider (`mint-service`) attribute condition to accept the
+      mint role's assumed-role ARN above (replacing the frontend ECS task role).
+   2. Move the `roles/iam.workloadIdentityUser` **and**
+      `roles/iam.serviceAccountTokenCreator` `principalSet` bindings on the DWD
+      service account to the mint role's WIF principal.
+
+   The mint Lambda authenticates keylessly (google-auth-library `AwsClient`
+   resolves the Lambda role's ambient credentials via the Fargate/Lambda
+   container-credentials endpoint the same way it did for the ECS task role — see
+   the `credential_source` note in `lib/agent-workspace/gcp-wif.ts`); no
+   service-account key is downloaded.
 6. **Agent gateway (#1230)** — populate ONE JSON secret with both the n8n MCP
    Server Trigger URL and its bearer token (again, no CDK context flag):
    ```bash
