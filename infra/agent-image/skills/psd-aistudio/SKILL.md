@@ -124,11 +124,14 @@ node /opt/psd-skills/psd-aistudio/run.js execute-assistant --user <email> \
 Executes an **approved** assistant and returns `{ executionId, text, usage }`.
 
 - `--inputs` must be a JSON object (default `{}`).
-- **Draft vs approved gotcha:** non-owners can only execute APPROVED assistants
-  (owners and admins can also run their own drafts). A draft/pending id the
-  caller doesn't own — or a non-existent id — returns a clean
-  `{ "status": "not_executable", "assistantId", "message" }` and **exits 0** —
-  it is **not** an error. Steer to `list-assistants --status approved`.
+- **Draft vs approved gotcha:** API-key execution runs only **APPROVED**
+  assistants. The owner/admin exception for drafts is **session-only** (it reads
+  the web-UI login), so it never applies to this skill's key-authenticated calls
+  — even the draft's own author gets `not_executable` here and should use the
+  Assistant Architect UI for drafts. A draft/pending or non-existent id returns
+  a clean `{ "status": "not_executable", "assistantId", "message" }` and
+  **exits 0** — it is **not** an error. Steer to
+  `list-assistants --status approved`.
 
 ### `search-decisions`
 

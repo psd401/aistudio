@@ -70,9 +70,10 @@ function usage() {
       'psd-credentials put --user <email> --name aistudio_personal_key):',
       '  list-assistants   [--user <email>] [--search <t>] [--status <s>] [--limit N] [--cursor C]',
       '  execute-assistant [--user <email>] --id <n> [--inputs \'{"field":"value"}\']',
-      '      Non-owners can only execute APPROVED assistants; a draft/pending id you',
-      '      don\'t own (or a missing id) returns a clean not_executable result',
-      '      (exit 0). Needs mcp:execute_assistant (staff + admin).',
+      '      API-key execution runs only APPROVED assistants (the owner/admin draft',
+      '      exception is session-only, i.e. web UI); a draft/pending or missing id',
+      '      returns a clean not_executable result (exit 0). Needs',
+      '      mcp:execute_assistant (staff + admin).',
       '  search-decisions  [--user <email>] [--query <t>] [--node-type T] [--node-class C]',
       '                    [--limit N] [--cursor C]',
       '  capture-decision  [--user <email>] --decision "<t>" --decided-by "<t>"',
@@ -276,19 +277,23 @@ async function main() {
           typeof res.payload === 'string'
             ? res.payload
             : JSON.stringify(res.payload);
-        // A draft/pending assistant the caller doesn't own (or a missing id) is
-        // NOT executable via the API — the server masks it as a tool-level error
-        // "Record not found in assistant_architects with id: N" (owners and
-        // admins CAN execute their own drafts). This is expected, not an
-        // upstream failure: report a clean structured result and EXIT 0.
+        // A draft/pending (or missing) assistant is NOT executable on this
+        // path — the server masks it as a tool-level error "Record not found in
+        // assistant_architects with id: N". The owner/admin draft exception is
+        // SESSION-based (getAssistantArchitectByIdAction reads the NextAuth
+        // session), and API-key calls carry no session, so it never applies
+        // here — even the draft's owner gets not-found over MCP. This is
+        // expected, not an upstream failure: report a clean structured result
+        // and EXIT 0.
         if (/record not found in assistant_architects/i.test(text)) {
           emit({
             status: 'not_executable',
             assistantId,
             message:
               `Assistant ${assistantId} is not executable via the API — the id ` +
-              `does not exist, or it is a draft/pending assistant you don't own ` +
-              `(non-owners can only run approved assistants). Run ` +
+              `does not exist, or it is a draft/pending assistant (API-key ` +
+              `execution runs only APPROVED assistants; owners can run their ` +
+              `drafts in the Assistant Architect UI instead). Run ` +
               `\`list-assistants --status approved\` to find an executable one.`,
           });
           return; // exit 0
