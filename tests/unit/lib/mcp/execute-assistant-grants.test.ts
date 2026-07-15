@@ -35,6 +35,7 @@ jest.mock("@/lib/graph/decision-capture-service", () => ({
 
 jest.mock("@/lib/api/assistant-execution-service", () => ({
   executeAssistantForJobCompletion: jest.fn(),
+  validateExecutionInputs: jest.fn(() => null),
 }))
 
 jest.mock("@/lib/api/assistant-service", () => ({
@@ -57,7 +58,10 @@ jest.mock("@/lib/capabilities/capability-catalog", () => ({
 }))
 
 import { TOOL_HANDLERS } from "@/lib/mcp/tool-handlers"
-import { executeAssistantForJobCompletion } from "@/lib/api/assistant-execution-service"
+import {
+  executeAssistantForJobCompletion,
+  validateExecutionInputs,
+} from "@/lib/api/assistant-execution-service"
 import { checkAssistantResourceGrants } from "@/lib/api/route-helpers"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 
@@ -66,6 +70,9 @@ const mockExecute = executeAssistantForJobCompletion as jest.MockedFunction<
 >
 const mockCheckGrants = checkAssistantResourceGrants as jest.MockedFunction<
   typeof checkAssistantResourceGrants
+>
+const mockValidateInputs = validateExecutionInputs as jest.MockedFunction<
+  typeof validateExecutionInputs
 >
 const mockGetArchitect = getAssistantArchitectByIdAction as jest.MockedFunction<
   typeof getAssistantArchitectByIdAction
@@ -96,6 +103,7 @@ function executeHandler(args: Record<string, unknown> = { assistantId: 7 }) {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  mockValidateInputs.mockReturnValue(null)
   mockGetArchitect.mockResolvedValue({
     isSuccess: true,
     message: "ok",
@@ -159,6 +167,21 @@ describe("MCP execute_assistant — per-resource grant gate (#1206/#1223)", () =
       text: "done",
       usage: null,
     })
+  })
+
+  it("rejects inputs that fail the shared REST validation limits (no service call)", async () => {
+    // Same validateExecutionInputs REST runs (100 KB / 50 fields / object
+    // shape) — the MCP surface must reject what the identical REST call would.
+    mockValidateInputs.mockReturnValue([
+      { message: "Inputs exceed the 100KB limit" },
+    ] as never)
+
+    const result = await executeHandler({ assistantId: 7, inputs: { big: "..." } })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("Invalid inputs")
+    expect(result.content[0].text).toContain("Inputs exceed the 100KB limit")
+    expect(mockExecute).not.toHaveBeenCalled()
   })
 
   it("skips the gate on a failed architect load so the service emits the canonical not-found error", async () => {

@@ -21,7 +21,10 @@ import {
   createDecisionSchema,
 } from "@/lib/graph/decision-capture-service"
 import { isValidationError } from "@/types/error-types"
-import { executeAssistantForJobCompletion } from "@/lib/api/assistant-execution-service"
+import {
+  executeAssistantForJobCompletion,
+  validateExecutionInputs,
+} from "@/lib/api/assistant-execution-service"
 import { listAccessibleAssistants } from "@/lib/api/assistant-service"
 import { isAdminByUserId, checkAssistantResourceGrants } from "@/lib/api/route-helpers"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
@@ -225,6 +228,27 @@ async function handleExecuteAssistant(
   if (!assistantId || typeof assistantId !== "number") {
     return {
       content: [{ type: "text", text: "Missing or invalid required field: assistantId (number)" }],
+      isError: true,
+    }
+  }
+
+  // Same input limits REST enforces (100 KB, 50 fields, object shape) — the v1
+  // execute route runs validateExecutionInputs before the service, so the MCP
+  // surface must too or a key could create oversized execution records here
+  // that the identical REST call rejects.
+  const inputErrors = validateExecutionInputs(inputs)
+  if (inputErrors) {
+    log.warn("execute_assistant inputs failed validation", {
+      assistantId,
+      issueCount: inputErrors.length,
+    })
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Invalid inputs: ${inputErrors.map((i) => i.message).join("; ")}`,
+        },
+      ],
       isError: true,
     }
   }
