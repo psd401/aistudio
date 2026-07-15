@@ -642,6 +642,21 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(agentInternalApiKeySecret).add('Environment', environment);
     cdk.Tags.of(agentInternalApiKeySecret).add('ManagedBy', 'cdk');
 
+    // 4f-b. Bearer token for the PSD Agent Gateway (#1230). The psd-classified-
+    // evaluation skill sends this as the Bearer token when opening the n8n MCP
+    // Server Trigger SSE stream. Created EMPTY — Kris Hagel populates the value
+    // (and the SSE URL is supplied via `-c agentGatewaySseUrl=…`), since both are
+    // owned by the n8n side and must not live in this public repo. Read (not
+    // written) by the AgentCore runtime, which already holds GetSecretValue on
+    // psd-agent/${environment}/* — no new IAM grant required. The value is the
+    // RAW bearer token string, NOT JSON (the skill reads SecretString verbatim).
+    const agentGatewayTokenSecret = new secretsmanager.Secret(this, 'AgentGatewayTokenSecret', {
+      secretName: `psd-agent/${environment}/agent-gateway-token`,
+      description: `Bearer token for the PSD Agent Gateway (n8n MCP Server Trigger) used by the psd-classified-evaluation skill. Populate manually with the gateway token — do NOT auto-generate. Issue #1230.`,
+    });
+    cdk.Tags.of(agentGatewayTokenSecret).add('Environment', environment);
+    cdk.Tags.of(agentGatewayTokenSecret).add('ManagedBy', 'cdk');
+
     // Alarm topic used by the watchdog — reuses the same alarm topic we
     // create for Router DLQ alerts further down. But we need it early here,
     // so we create it right now if alertEmail is configured; the DLQ block
@@ -1718,6 +1733,14 @@ export class AgentPlatformStack extends cdk.Stack {
       // AISTUDIO_MCP_URL. Auto-provisioned each deploy by AistudioMcpKeyBootstrap
       // (§4h). Without this the skill's resolveApiKey() exits 11. Issue #1100.
       AISTUDIO_MCP_API_KEY_SECRET_ID: aistudioMcpApiKeySecret.secretName,
+      // PSD Agent Gateway (#1230) for the psd-classified-evaluation skill. The
+      // SSE endpoint is owned by the n8n side and supplied per-deploy via
+      // `-c agentGatewaySseUrl=…` (empty default → the skill fails closed with
+      // its exit-11 "not-configured" contract). The bearer token is read from
+      // the agent-gateway-token secret above.
+      AGENT_GATEWAY_SSE_URL:
+        (this.node.tryGetContext('agentGatewaySseUrl') as string | undefined) ?? '',
+      AGENT_GATEWAY_TOKEN_SECRET_ID: agentGatewayTokenSecret.secretName,
       AUTH_COGNITO_USER_POOL_ID: cdk.Fn.importValue(
         `${environment}-CognitoUserPoolId`,
       ),
