@@ -92,7 +92,7 @@ jest.mock("@/lib/db/drizzle-client", () => ({
   executeTransaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb({})),
 }))
 
-const storeRefreshTokenMock = jest.fn(async () => "arn:aws:secretsmanager:us-east-1:1:secret:x-abc123")
+const storeRefreshTokenMock = jest.fn(async (..._a: unknown[]) => "arn:aws:secretsmanager:us-east-1:1:secret:x-abc123")
 jest.mock("@/lib/agent-workspace/secrets-manager", () => ({
   storeRefreshToken: (...a: unknown[]) => storeRefreshTokenMock(...a),
   getSecretJson: jest.fn(async () => null),
@@ -143,7 +143,7 @@ describe("handleOAuthCallback identity enforcement (#1234)", () => {
   it("stores + consumes the nonce when the correct account authorized", async () => {
     const res = await handleOAuthCallback("code", HEX_NONCE)
     expect(res.isSuccess).toBe(true)
-    expect(res.data.success).toBe(true)
+    expect(res.data!.success).toBe(true)
     expect(storeRefreshTokenMock).toHaveBeenCalledTimes(1)
     expect(executedLabels).toContain("consumeConsentNonce")
   })
@@ -151,8 +151,8 @@ describe("handleOAuthCallback identity enforcement (#1234)", () => {
   it("stores NOTHING and leaves the nonce unconsumed on a wrong-account grant", async () => {
     mockVerifyImpl = async () => ({ getPayload: () => ({ email: "someoneelse@psd401.net", email_verified: true }) })
     const res = await handleOAuthCallback("code", HEX_NONCE)
-    expect(res.data.success).toBe(false)
-    expect(res.data.error).toContain("hagelk@psd401.net") // names the required account
+    expect(res.data!.success).toBe(false)
+    expect(res.data!.error).toContain("hagelk@psd401.net") // names the required account
     expect(storeRefreshTokenMock).not.toHaveBeenCalled()
     expect(executedLabels).not.toContain("consumeConsentNonce") // retryable with the same link
   })
@@ -160,7 +160,7 @@ describe("handleOAuthCallback identity enforcement (#1234)", () => {
   it("rejects a missing id_token without storing or consuming", async () => {
     delete tokenBody.id_token
     const res = await handleOAuthCallback("code", HEX_NONCE)
-    expect(res.data.success).toBe(false)
+    expect(res.data!.success).toBe(false)
     expect(storeRefreshTokenMock).not.toHaveBeenCalled()
     expect(executedLabels).not.toContain("consumeConsentNonce")
   })
@@ -168,7 +168,7 @@ describe("handleOAuthCallback identity enforcement (#1234)", () => {
   it("rejects an invalid id_token (verify throws) without storing", async () => {
     mockVerifyImpl = async () => { throw new Error("Invalid token signature") }
     const res = await handleOAuthCallback("code", HEX_NONCE)
-    expect(res.data.success).toBe(false)
+    expect(res.data!.success).toBe(false)
     expect(storeRefreshTokenMock).not.toHaveBeenCalled()
     expect(executedLabels).not.toContain("consumeConsentNonce")
   })
@@ -176,7 +176,7 @@ describe("handleOAuthCallback identity enforcement (#1234)", () => {
   it("rejects an unverified email without storing", async () => {
     mockVerifyImpl = async () => ({ getPayload: () => ({ email: "hagelk@psd401.net", email_verified: false }) })
     const res = await handleOAuthCallback("code", HEX_NONCE)
-    expect(res.data.success).toBe(false)
+    expect(res.data!.success).toBe(false)
     expect(storeRefreshTokenMock).not.toHaveBeenCalled()
     expect(executedLabels).not.toContain("consumeConsentNonce")
   })
