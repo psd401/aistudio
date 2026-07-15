@@ -2728,6 +2728,12 @@ export class AgentPlatformStack extends cdk.Stack {
         GUARDRAIL_FAIL_OPEN: 'false',
         // Only allow messages from configured domain emails
         ALLOWED_DOMAINS: props.allowedDomains || 'psd401.net',
+        // #1233 agnt_ auto-provisioning: the router calls the Next.js app's
+        // account-request endpoint (Bearer shared secret) to ensure each staff
+        // member's agnt_ Workspace account is provisioned via the OneSync sheet.
+        // Empty APP_BASE_URL → the router hook is a no-op (fails closed).
+        APP_BASE_URL: props.appBaseUrl ?? '',
+        AGENT_INTERNAL_API_KEY_SECRET_ID: agentInternalApiKeySecret.secretName,
         // Account ID needed to construct AgentCore Runtime ARN from the runtime ID
         AWS_ACCOUNT_ID: this.account,
         NODE_ENV: 'production',
@@ -2752,6 +2758,11 @@ export class AgentPlatformStack extends cdk.Stack {
 
     cdk.Tags.of(this.routerLambda).add('Environment', environment);
     cdk.Tags.of(this.routerLambda).add('ManagedBy', 'cdk');
+
+    // #1233: the router reads the internal API key to authenticate its
+    // account-request call to the Next.js app. (The router role's `secrets: []`
+    // means this explicit grant is required.)
+    agentInternalApiKeySecret.grantRead(this.routerLambdaRole);
 
     // -------------------------------------------------------------------------
     // Async job-runner (issue #1138 — "the 14-minute wall")

@@ -32,6 +32,7 @@
 
 import { createLogger, sanitizeForLogging } from "@/lib/logger"
 import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
+import { getImpersonatedAccessToken } from "@/lib/agent-workspace/gcp-wif"
 
 const log = createLogger({ module: "dwd-token-broker" })
 
@@ -161,51 +162,11 @@ export interface MintDeps {
   now?: () => number
 }
 
-// The WIF/STS leg is cacheable across calls; the impersonated client refreshes
-// its own token internally. Per-user minted tokens are NOT cached beyond their
-// lifetime (they are returned straight to the caller).
-let _cachedAuthClient: import("google-auth-library").BaseExternalAccountClient | null = null
-
-async function getAuthClient(cfg: DwdBrokerConfig): Promise<import("google-auth-library").BaseExternalAccountClient> {
-  if (_cachedAuthClient) return _cachedAuthClient
-  const { ExternalAccountClient } = await import("google-auth-library")
-  const client = ExternalAccountClient.fromJSON({
-    type: "external_account",
-    audience: `//iam.googleapis.com/projects/${cfg.projectNumber}/locations/global/workloadIdentityPools/${cfg.poolId}/providers/${cfg.providerId}`,
-    subject_token_type: "urn:ietf:params:aws:token-type:aws4_request",
-    token_url: "https://sts.googleapis.com/v1/token",
-    // AWS credential source. google-auth-library's AwsClient resolves the app's
-    // AWS role credentials from the standard AWS credential chain (on ECS
-    // Fargate this is AWS_CONTAINER_CREDENTIALS_RELATIVE_URI). The regional
-    // GetCallerIdentity URL is required; {region} is filled from AWS_REGION.
-    // NOTE: verify this credential_source against the real WIF trust once IT
-    // (Reese) delivers the pool/provider — ECS container creds vs IMDS is the
-    // one thing that can differ from this default and it cannot be validated
-    // until the Google side exists.
-    credential_source: {
-      environment_id: "aws1",
-      regional_cred_verification_url:
-        "https://sts.{region}.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15",
-    },
-    service_account_impersonation_url:
-      `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${cfg.serviceAccountEmail}:generateAccessToken`,
-  })
-  if (!client) {
-    throw new BrokerNotConfiguredError("ExternalAccountClient.fromJSON returned null — check WIF config")
-  }
-  // Needed to call IAM Credentials signJwt as the impersonated SA.
-  client.scopes = ["https://www.googleapis.com/auth/cloud-platform"]
-  _cachedAuthClient = client
-  return client
-}
-
+// cloud-platform is the scope needed to call IAM Credentials signJwt as the
+// impersonated SA. The WIF client (and its STS/impersonation refresh) is cached
+// inside gcp-wif per scope-set.
 async function defaultGetServiceAccountToken(cfg: DwdBrokerConfig): Promise<string> {
-  const client = await getAuthClient(cfg)
-  const at = await client.getAccessToken()
-  if (!at?.token) {
-    throw new Error("WIF impersonation returned no access token")
-  }
-  return at.token
+  return getImpersonatedAccessToken(cfg, ["https://www.googleapis.com/auth/cloud-platform"])
 }
 
 async function safeText(res: Response): Promise<string> {
@@ -295,6 +256,7 @@ export async function mintAgentWorkspaceToken(ownerEmail: string, deps: MintDeps
 }
 
 /** Test-only: reset the cached WIF client between tests. */
-export function __resetBrokerCacheForTests(): void {
-  _cachedAuthClient = null
+export async function __resetBrokerCacheForTests(): Promise<void> {
+  const { __resetWifCacheForTests } = await import("@/lib/agent-workspace/gcp-wif")
+  __resetWifCacheForTests()
 }
