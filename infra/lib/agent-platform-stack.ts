@@ -39,6 +39,7 @@ import {
 } from './constructs';
 import { ServiceRoleFactory, usGuardrailProfileArns } from './constructs/security';
 import { AGENT_LAMBDA_RUNTIME } from './constructs/compute/lambda-construct';
+import { HyperframesRenderFunction } from './constructs/compute/hyperframes-render-function';
 
 export interface AgentPlatformStackProps extends cdk.StackProps {
   environment: 'dev' | 'staging' | 'prod';
@@ -92,6 +93,8 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly ecrRepository: ecr.Repository;
   /** S3 bucket for agent workspaces */
   public readonly workspaceBucket: s3.Bucket;
+  /** Container-image Lambda that renders HyperFrames compositions to MP4 (#1175) */
+  public readonly hyperframesRenderFunction: HyperframesRenderFunction;
   /** DynamoDB table for user identity mapping */
   public readonly usersTable: dynamodb.Table;
   /** DynamoDB table for organizational signals (Nervous System) */
@@ -244,6 +247,25 @@ export class AgentPlatformStack extends cdk.Stack {
       actions: ['s3:GetObject'],
       resources: [`${this.workspaceBucket.bucketArn}/public-images/*`],
     }));
+
+    // =====================================================================
+    // 3b. HyperFrames render Lambda (#1175)
+    // =====================================================================
+    // Container-image Lambda bundling headless Chromium + FFmpeg + the upstream
+    // `hyperframes` CLI. The psd-hyperframes agent skill invokes it synchronously
+    // to turn an HTML/CSS/JS composition into an MP4, delivered via the same
+    // public-images/ prefix as psd-image-gen / psd-tts. The native render stack
+    // lives here, NEVER in the agent image (AgentCore's overlay-mount
+    // snapshotter cannot carry Chromium/FFmpeg). The InvokeFunction grant +
+    // HYPERFRAMES_RENDER_FUNCTION runtime env var are wired into the AgentCore
+    // execution role and runtimeEnvVars blocks below.
+    this.hyperframesRenderFunction = new HyperframesRenderFunction(this, 'HyperframesRender', {
+      environment,
+      functionName: `psd-hyperframes-render-${environment}`,
+      workspaceBucket: this.workspaceBucket,
+      region: this.region,
+      account: this.account,
+    });
 
     // =====================================================================
     // 4. DynamoDB Tables
@@ -1240,6 +1262,18 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: ['*'],
     }));
 
+    // HyperFrames render invocation (psd-hyperframes skill, #1175). Scoped to
+    // the single render function ARN — same least-privilege pattern as the S3
+    // and Polly grants above (the skill invokes it synchronously via the AWS
+    // SDK using these execution-role credentials; the rendered MP4 lands in the
+    // public-images/ prefix the S3WorkspaceAccess grant already covers).
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'HyperframesRenderInvoke',
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [this.hyperframesRenderFunction.function.functionArn],
+    }));
+
     // Read the Bedrock API key secret at container startup so the wrapper
     // can expose it to OpenClaw as AWS_BEARER_TOKEN_BEDROCK.
     this.bedrockApiKeySecret.grantRead(this.agentCoreExecutionRole);
@@ -1700,6 +1734,10 @@ export class AgentPlatformStack extends cdk.Stack {
       AWS_REGION: this.region,
       AWS_DEFAULT_REGION: this.region,
       WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
+      // Render function the psd-hyperframes skill invokes (#1175). The skill
+      // reads this to target the InvokeFunction call; the grant is the
+      // HyperframesRenderInvoke statement on the AgentCore execution role.
+      HYPERFRAMES_RENDER_FUNCTION: this.hyperframesRenderFunction.function.functionName,
       USERS_TABLE: this.usersTable.tableName,
       SIGNALS_TABLE: this.signalsTable.tableName,
       SCHEDULES_TABLE: schedulesTable.tableName,
