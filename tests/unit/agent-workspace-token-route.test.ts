@@ -66,6 +66,12 @@ describe("POST /api/agent/workspace-token", () => {
     expect(mintMock).not.toHaveBeenCalled()
   })
 
+  it("400s (not 500) a null JSON body", async () => {
+    const res = await POST(req(null))
+    expect(res.status).toBe(400)
+    expect(mintMock).not.toHaveBeenCalled()
+  })
+
   it("returns accessToken + expiresAt on success", async () => {
     mintMock.mockResolvedValue({ accessToken: "ya29.at", expiresAt: "2026-07-14T01:00:00.000Z", agentEmail: "agnt_hagelk@psd401.net" })
     const res = await POST(req({ ownerEmail: "hagelk@psd401.net" }))

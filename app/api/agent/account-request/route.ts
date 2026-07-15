@@ -109,14 +109,16 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  let body: { ownerEmail?: string }
+  let body: unknown
   try {
     body = await request.json()
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  const { ownerEmail } = body
+  // request.json() can return a bare `null` / non-object literal — guard before
+  // destructuring so a null body is a 400, not a 500 (gemini review).
+  const ownerEmail = body && typeof body === "object" ? (body as { ownerEmail?: unknown }).ownerEmail : undefined
   if (!ownerEmail || typeof ownerEmail !== "string" || !SAFE_EMAIL_RE.test(ownerEmail)) {
     return NextResponse.json({ error: "ownerEmail is required and must be a valid email" }, { status: 400 })
   }

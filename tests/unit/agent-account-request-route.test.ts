@@ -67,6 +67,10 @@ describe("POST /api/agent/account-request", () => {
     expect((await POST(req({ ownerEmail: "nope" }))).status).toBe(400)
   })
 
+  it("400s (not 500) a null JSON body", async () => {
+    expect((await POST(req(null))).status).toBe(400)
+  })
+
   it("400s a numeric-prefix (student) username and never touches the sheet", async () => {
     const res = await POST(req({ ownerEmail: "1234567@psd401.net" }))
     expect(res.status).toBe(400)

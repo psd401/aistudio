@@ -208,11 +208,22 @@ interface TokenExchangeResponse {
   error_description?: string
 }
 
-/** True when Google's token error means the agnt_ account doesn't exist yet. */
+/**
+ * True when Google's token error means the agnt_ account doesn't exist yet
+ * (vs. the DWD grant being misconfigured).
+ *
+ * `invalid_grant` is Google's signal that the subject account can't be
+ * impersonated — i.e. it doesn't exist. `unauthorized_client` / `access_denied`
+ * instead mean the service account isn't authorized for the requested scopes
+ * (a DWD/config failure during rollout); those MUST surface as a hard error, not
+ * an account-not-provisioned gap, or the provisioning flow would keep appending
+ * sheet rows while the real problem is the broker setup (codex review P2).
+ */
 function isNotProvisioned(data: TokenExchangeResponse | null): boolean {
   const err = data?.error ?? ""
   const desc = data?.error_description ?? ""
-  return err === "invalid_grant" || /not\s*found|does not exist|unauthorized_client/i.test(`${err} ${desc}`)
+  if (err === "unauthorized_client" || err === "access_denied") return false
+  return err === "invalid_grant" || /\bnot\s*found\b|does not exist/i.test(desc)
 }
 
 /** Leg 3: exchange the signed assertion for the agnt_ account's access token. */
