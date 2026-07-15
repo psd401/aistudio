@@ -48,13 +48,19 @@ export async function getImpersonatedAccessToken(
       subject_token_type: "urn:ietf:params:aws:token-type:aws4_request",
       token_url: "https://sts.googleapis.com/v1/token",
       // AWS credential source. google-auth-library's AwsClient resolves the
-      // app's AWS role credentials from the standard AWS credential chain (on
-      // ECS Fargate this is AWS_CONTAINER_CREDENTIALS_RELATIVE_URI). The regional
-      // GetCallerIdentity URL is required; {region} is filled from AWS_REGION.
-      // NOTE: verify this credential_source against the real WIF trust once IT
-      // (Reese) delivers the pool/provider — ECS container creds vs IMDS is the
-      // one thing that can differ from this default and cannot be validated
-      // until the Google side exists.
+      // ambient AWS role credentials from the standard AWS credential chain. As
+      // of #1232 this code runs in the isolated mint Lambda (psd-agent-mint-{env}),
+      // where those creds come from the Lambda container-credentials endpoint
+      // (AWS_CONTAINER_CREDENTIALS_FULL_URI) — the same keyless resolution that
+      // worked for the ECS task role (AWS_CONTAINER_CREDENTIALS_RELATIVE_URI); no
+      // service-account key is downloaded. The regional GetCallerIdentity URL is
+      // required; {region} is filled from AWS_REGION (set by the Lambda runtime).
+      // NOTE: the Google-side WIF provider condition + SA principalSet must trust
+      // the MINT LAMBDA's role assumed-role ARN
+      // (arn:aws:sts::<account>:assumed-role/psd-agent-mint-execution-role-{env}/*),
+      // NOT the frontend ECS task role — see docs/features/agent-workspace-
+      // integration.md (Reese coordination). Verify container-creds vs IMDS
+      // against the real trust once IT delivers the pool/provider.
       credential_source: {
         environment_id: "aws1",
         regional_cred_verification_url:

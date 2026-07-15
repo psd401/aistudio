@@ -23,6 +23,16 @@
  * The endpoint is idempotent — any number of calls for the same user result in
  * at most one sheet row.
  *
+ * CONFUSED-DEPUTY ISOLATION (#1232 hardening): this route is a THIN PROXY. Both
+ * WIF-backed steps — the existence probe (mint) and the OneSync sheet write —
+ * run in the dedicated `psd-agent-mint-{env}` Lambda (the sole AWS principal the
+ * Google WIF provider trusts), reached via IAM-authed `lambda:InvokeFunction`.
+ * The frontend passes only ownerEmail/username; the `agnt_` derivation happens
+ * INSIDE the Lambda, so a frontend compromise can never `signJwt(sub=<human>)`.
+ * Auth + validation + student guard + error→HTTP mapping are unchanged. (When
+ * AGENT_MINT_LAMBDA_NAME is unset — local dev/tests — the boundary runs the
+ * broker/sheet in-process, where there is no real WIF anyway.)
+ *
  * Part of #1233.
  */
 
@@ -31,18 +41,15 @@ import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logge
 import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
 import { validateInternalSecret } from "@/lib/agent-workspace/internal-auth"
 import {
-  mintAgentWorkspaceToken,
-  deriveAgentEmail,
-  loadBrokerConfig,
   AccountNotProvisionedError,
   BrokerNotConfiguredError,
   InvalidOwnerError,
 } from "@/lib/agent-workspace/dwd-token-broker"
+import { ProvisioningNotConfiguredError } from "@/lib/agent-workspace/agent-provisioning-sheet"
 import {
-  createSheetsGateway,
-  ensureAgentUsernameRow,
-  ProvisioningNotConfiguredError,
-} from "@/lib/agent-workspace/agent-provisioning-sheet"
+  mintAgentWorkspaceTokenViaBoundary,
+  provisionAgentAccountViaBoundary,
+} from "@/lib/agent-workspace/mint-client"
 
 const log = createLogger({ module: "agent-account-request" })
 
@@ -52,9 +59,9 @@ function isStudentUsername(localPart: string): boolean {
 }
 
 /**
- * Map a broker error to its HTTP response, or null if it isn't one of the
- * broker's typed errors (caller decides). Shared by the derive-guard and the
- * probe so the instanceof branching lives in one place.
+ * Map a broker error (thrown by the mint boundary — Lambda or in-process) to its
+ * HTTP response, or null if it isn't one of the broker's typed errors (caller
+ * decides). Keeps the instanceof branching in one place.
  */
 function mapBrokerError(err: unknown, requestId: string): NextResponse | null {
   if (err instanceof InvalidOwnerError) {
@@ -68,22 +75,18 @@ function mapBrokerError(err: unknown, requestId: string): NextResponse | null {
 }
 
 /**
- * Derive + domain-guard the agnt_ target, then probe the broker for existence.
- * Returns a TERMINAL response (active / 400 / 503 / 502), or null to signal the
- * caller should proceed to the sheet write (account not provisioned yet).
+ * Probe the mint boundary for the agnt_ account's existence (the boundary derives
+ * agnt_<owner> and domain-guards internally). Returns a TERMINAL response
+ * (active / 400 / 503 / 502), or null to signal the caller should proceed to the
+ * sheet write (account not provisioned yet).
  */
 async function probeAgentAccount(ownerEmail: string, requestId: string): Promise<NextResponse | null> {
   try {
-    const cfg = await loadBrokerConfig()
-    deriveAgentEmail(ownerEmail, cfg.allowedDomain)
-  } catch (err) {
-    const mapped = mapBrokerError(err, requestId)
-    if (mapped) return mapped
-    throw err
-  }
-
-  try {
-    await mintAgentWorkspaceToken(ownerEmail)
+    // The mint boundary derives `agnt_<owner>` and enforces the domain guard
+    // INSIDE the mint Lambda (or in-process for local dev); a successful mint
+    // proves the account exists. InvalidOwner / not-configured surface as the
+    // same typed errors, mapped to 400 / 503 by mapBrokerError below.
+    await mintAgentWorkspaceTokenViaBoundary(ownerEmail)
     log.info("account-request: agnt_ account already active", sanitizeForLogging({ ownerEmail, requestId }))
     return NextResponse.json({ status: "active" })
   } catch (err) {
@@ -136,9 +139,10 @@ export async function POST(request: NextRequest) {
   const probeResult = await probeAgentAccount(ownerEmail, requestId)
   if (probeResult) return probeResult
 
-  // 2. Dedupe + append the bare username to the OneSync sheet.
+  // 2. Dedupe + append the bare username to the OneSync sheet (via the mint
+  // Lambda boundary, or in-process for local dev/tests).
   try {
-    const { written } = await ensureAgentUsernameRow(localPart, createSheetsGateway())
+    const { written } = await provisionAgentAccountViaBoundary(localPart)
     log.info("account-request: agnt_ account queued via sheet", sanitizeForLogging({ ownerEmail, requestId, written }))
     return NextResponse.json({ status: "requested" })
   } catch (err) {

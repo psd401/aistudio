@@ -443,6 +443,15 @@ export class EcsServiceConstruct extends Construct {
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
                 // #1203: admin "Sync now" async-invokes the hourly group-sync Lambda
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-group-sync-${environment}`,
+                // #1232 confused-deputy isolation: the /api/agent/workspace-token
+                // and /api/agent/account-request routes invoke the isolated mint
+                // Lambda instead of running WIF/signJwt in-process. INVOKE-ONLY —
+                // the frontend never holds the WIF credential; the mint Lambda's
+                // own role is the sole principal the Google WIF provider trusts.
+                // Constructed ARN (deterministic function name) to avoid a
+                // FrontendStack ↔ AgentPlatformStack circular dependency — the
+                // Lambda object is intentionally NOT imported cross-stack.
+                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-mint-${environment}`,
               ],
             }),
             // Issue #925: write SKILL.md draft folders to the agent workspace
@@ -735,6 +744,14 @@ export class EcsServiceConstruct extends Construct {
         // above. The ECS task role already holds GetSecretValue on
         // psd-agent/${environment}/* (below), so no new IAM grant is required.
         GCP_DWD_CONFIG_SECRET_ID: `psd-agent/${environment}/gcp-dwd-config`,
+        // #1232 confused-deputy isolation: the DWD workspace-token + account-
+        // request routes proxy to this dedicated mint Lambda (IAM-authed
+        // InvokeFunction) instead of performing WIF/signJwt in-process. Setting
+        // this env var switches the routes into Lambda mode; when it is UNSET
+        // (local dev) they fall back to running the broker in-process (no real
+        // WIF locally). The task role's lambda:InvokeFunction grant above is
+        // scoped to exactly this function.
+        AGENT_MINT_LAMBDA_NAME: `psd-agent-mint-${environment}`,
         // Memory optimization - 70% of container memory
         NODE_OPTIONS: `--max-old-space-size=${Math.floor(memory * 0.7)}`,
         // Application configuration

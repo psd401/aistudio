@@ -117,6 +117,14 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly cronLambdaRole: iam.Role;
   /** Router Lambda function */
   public readonly routerLambda: lambda.Function;
+  /**
+   * Isolated mint Lambda (#1232) — the SOLE AWS principal the GCP WIF provider
+   * trusts. Houses the DWD token broker + provisioning-sheet writer so a frontend
+   * compromise can never reach the WIF credential / signJwt an arbitrary sub.
+   */
+  public readonly mintLambda: lambda.Function;
+  /** Mint Lambda IAM role — the intended WIF principal (stable, deterministic ARN). */
+  public readonly mintLambdaRole: iam.Role;
   /** SQS queue for Google Chat Pub/Sub messages */
   public readonly routerQueue: sqs.Queue;
   /** Google service account credentials secret */
@@ -2761,6 +2769,154 @@ export class AgentPlatformStack extends cdk.Stack {
     // account-request call to the Next.js app. (The router role's `secrets: []`
     // means this explicit grant is required.)
     agentInternalApiKeySecret.grantRead(this.routerLambdaRole);
+
+    // =====================================================================
+    // 9b. Agent Mint Lambda — confused-deputy isolation (#1232 hardening)
+    // =====================================================================
+    // SECURITY BOUNDARY: this Lambda is the ONLY AWS principal the Google
+    // Workload-Identity-Federation provider `mint-service` trusts. It houses
+    // BOTH WIF consumers — the DWD token broker (mintAgentWorkspaceToken) and
+    // the OneSync provisioning-sheet writer — so the Next.js frontend NO LONGER
+    // holds the WIF credential. A frontend RCE/SSRF can at most
+    // `lambda:InvokeFunction` this function, whose handler ALWAYS derives
+    // `agnt_<owner>` server-side (deriveAgentEmail) and can never
+    // `signJwt(sub=<arbitrary human>)`. Blast radius shrinks from "any
+    // psd401.net mailbox (incl. staff gmail/drive)" to "any agnt_ account".
+    //
+    // The role name is STABLE + DETERMINISTIC (`psd-agent-mint-execution-role-
+    // ${environment}` via ServiceRoleFactory) so its ARN is known pre-deploy and
+    // survives redeploys — IT (Reese) points the Google-side WIF provider
+    // condition + SA principalSet bindings at this exact ARN.
+    //
+    // Least privilege: the role gets ONLY Secrets Manager read on
+    // `psd-agent/${environment}/*` (the gcp-dwd-config secret) + CloudWatch Logs
+    // + VPC ENI (AWSLambdaVPCAccessExecutionRole). WIF itself needs NO extra AWS
+    // grant — it uses the role's ambient credentials via an implicit
+    // GetCallerIdentity that Google's STS verifies.
+    const mintSecretsArn = `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent/${environment}/*`;
+    this.mintLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'AgentMintLambdaRole', {
+      functionName: 'psd-agent-mint',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      // Grant the one secret read directly (exact scoped ARN) rather than via the
+      // factory `secrets` array, whose startsWith("arn:") token heuristic
+      // double-wraps constructed ARNs (same reason the router does this).
+      secrets: [],
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              sid: 'ReadGcpDwdConfigSecret',
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [mintSecretsArn],
+            }),
+          ],
+        }),
+      ],
+    });
+    // ENI operations (VPC) + CloudWatch Logs via the AWS managed policy — the
+    // same pattern the router uses (the ServiceRoleFactory policy validator
+    // rejects the ENI wildcard resources, so they come from the managed policy).
+    this.mintLambdaRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
+
+    const mintLogGroup = new logs.LogGroup(this, 'AgentMintLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-mint-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(mintLogGroup).add('Environment', environment);
+    cdk.Tags.of(mintLogGroup).add('ManagedBy', 'cdk');
+
+    // The handler lives in the APP tree (lib/agent-workspace/mint-lambda-handler.ts)
+    // so it shares the exact broker/sheet modules + their unit tests. esbuild
+    // bundles it at synth: `@/*` resolved via the repo tsconfig, `@aws-sdk/*`
+    // left external (present in the Node 22 runtime), google-auth-library/winston
+    // bundled inline.
+    //
+    // assetHashType=SOURCE over `lib/agent-workspace` (repo convention — every
+    // other agent Lambda hashes its own source dir): any change to the broker,
+    // sheet writer, WIF, config, contract, or handler re-hashes and redeploys the
+    // function. (A change to `lib/logger` alone — the one dependency outside this
+    // dir — won't retrigger; it's stable and behaviourally inert here.) SOURCE
+    // also keeps the CDK assertion tests synthesizable with bundling disabled
+    // (`aws:cdk:bundling-stacks: []`) — the dir stages as-is without esbuild.
+    this.mintLambda = new lambda.Function(this, 'AgentMintLambda', {
+      functionName: `psd-agent-mint-${environment}`,
+      runtime: AGENT_LAMBDA_RUNTIME,
+      handler: 'index.handler',
+      role: this.mintLambdaRole,
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', '..', 'lib', 'agent-workspace'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: AGENT_LAMBDA_RUNTIME.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const repoRoot = path.join(__dirname, '..', '..');
+                  const esbuildBin = path.join(repoRoot, 'node_modules', '.bin', 'esbuild');
+                  const entry = path.join(repoRoot, 'lib', 'agent-workspace', 'mint-lambda-handler.ts');
+                  const tsconfig = path.join(repoRoot, 'tsconfig.json');
+                  const outfile = path.join(outputDir, 'index.js');
+                  execSync(
+                    `'${esbuildBin}' '${entry}' --bundle --platform=node ` +
+                    `--target=node22 --format=cjs '--outfile=${outfile}' ` +
+                    `'--tsconfig=${tsconfig}' '--external:@aws-sdk/*' --log-level=warning`,
+                    { cwd: repoRoot, stdio: 'inherit' },
+                  );
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('psd-agent-mint esbuild bundling failed:', e);
+                  return false;
+                }
+              },
+            },
+            // The app handler + esbuild are NOT in this small asset dir, so the
+            // Docker fallback cannot produce a correct bundle. Fail LOUD rather
+            // than ship an empty asset — local esbuild bundling is the primary
+            // (and required) path, consistent with the other agent Lambdas.
+            command: [
+              'bash', '-c',
+              'echo "psd-agent-mint requires local esbuild bundling from the repo root." >&2; exit 1',
+            ],
+          },
+        },
+      ),
+      // Lightweight: a few sequential Google HTTPS calls (STS → impersonation →
+      // signJwt → token exchange) + google-auth-library crypto. 512 MB / 30 s is
+      // generous for that path.
+      memorySize: 512,
+      timeout: cdk.Duration.seconds(30),
+      architecture: lambda.Architecture.ARM_64,
+      logGroup: mintLogGroup,
+      tracing: config.monitoring.tracingEnabled
+        ? lambda.Tracing.ACTIVE
+        : lambda.Tracing.DISABLED,
+      environment: {
+        ENVIRONMENT: environment,
+        NODE_ENV: 'production',
+        // The broker + sheet writer read the consolidated GCP DWD config secret
+        // lazily (5-min cached) and fail CLOSED until IT populates it — same
+        // deploy-cleanly-before-values pattern as the ECS task.
+        GCP_DWD_CONFIG_SECRET_ID: `psd-agent/${environment}/gcp-dwd-config`,
+      },
+      vpc,
+      // Private-with-egress so the Lambda can reach Google's public endpoints
+      // (sts / iamcredentials / oauth2 / sheets.googleapis.com) via NAT and
+      // Secrets Manager via its VPC interface endpoint — matches the router.
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+    });
+    cdk.Tags.of(this.mintLambda).add('Environment', environment);
+    cdk.Tags.of(this.mintLambda).add('ManagedBy', 'cdk');
 
     // -------------------------------------------------------------------------
     // Async job-runner (issue #1138 — "the 14-minute wall")
