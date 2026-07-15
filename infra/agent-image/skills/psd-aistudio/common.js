@@ -75,8 +75,8 @@ function timeoutForTool(toolName) {
 // Never contains a key value.
 const SHARED_KEY_NOTICE =
   'psd-aistudio: using the shared platform:read key (discovery only). Store your ' +
-  'own AI Studio API key (psd-credentials put --name aistudio_personal_key) to act ' +
-  'as yourself and unlock execute/capture.\n';
+  'own AI Studio API key (psd-credentials put --user <your-email> --name ' +
+  'aistudio_personal_key) to act as yourself and unlock execute/capture.\n';
 
 function fail(message, code = 1) {
   process.stderr.write(`psd-aistudio: ${message}\n`);
@@ -246,7 +246,7 @@ async function resolveApiKey(callerEmail) {
   fail(
     'No API key configured. Set AISTUDIO_MCP_API_KEY (a scoped sk- key holding ' +
       'platform:read) or AISTUDIO_MCP_API_KEY_SECRET_ID, or store your own key ' +
-      'with psd-credentials put --name aistudio_personal_key.',
+      'with psd-credentials put --user <your-email> --name aistudio_personal_key.',
     11
   );
   return { key: '', source: 'shared' }; // unreachable
@@ -312,7 +312,7 @@ async function callMcpRaw(method, params, callerEmail, timeoutMs = MCP_FETCH_TIM
         'AI Studio MCP rejected the API key (401). ' +
         (keySource === 'personal'
           ? 'Your stored AI Studio key is invalid or revoked — re-store a current ' +
-            'key with psd-credentials put --name aistudio_personal_key.'
+            'key with psd-credentials put --user <your-email> --name aistudio_personal_key.'
           : 'The shared key must be a valid sk- key holding at least platform:read.'),
       detail: text.slice(0, 512),
     });

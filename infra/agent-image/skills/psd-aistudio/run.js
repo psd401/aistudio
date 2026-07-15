@@ -14,8 +14,8 @@
  *
  * KEY MODEL (#1223): every subcommand accepts an optional `--user <caller-email>`
  * (from the harness `[caller: Name <email>]` line). When that caller has stored
- * their OWN AI Studio API key (`psd-credentials put --name aistudio_personal_key`)
- * it OVERRIDES the shared key, so the agent can do exactly what that key is scoped
+ * their OWN AI Studio API key (`psd-credentials put --user <email> --name
+ * aistudio_personal_key`) it OVERRIDES the shared key, so the agent can do exactly what that key is scoped
  * for — enforced server-side. With no `--user` / no stored key, the shared,
  * read-only platform:read key is used (discovery works; action subcommands come
  * back insufficient-scope with a hint to store a personal key). Scope is NEVER
@@ -67,7 +67,7 @@ function usage() {
       '      resolved key can see.',
       '',
       'Actions (need the caller\'s own scoped key — store it with',
-      'psd-credentials put --name aistudio_personal_key):',
+      'psd-credentials put --user <email> --name aistudio_personal_key):',
       '  list-assistants   [--user <email>] [--search <t>] [--status <s>] [--limit N] [--cursor C]',
       '  execute-assistant [--user <email>] --id <n> [--inputs \'{"field":"value"}\']',
       '      Non-owners can only execute APPROVED assistants; a draft/pending id you',
@@ -133,13 +133,13 @@ function scopeHint(keySource, scope) {
     return (
       `Your stored AI Studio key lacks ${scope}. Mint a NEW key that includes ` +
       `${scope} in AI Studio (Settings → API Keys) and re-store it: ` +
-      `psd-credentials put --name aistudio_personal_key --value sk-...`
+      `psd-credentials put --user <your-email> --name aistudio_personal_key --value sk-...`
     );
   }
   return (
     `You are on the shared, read-only platform:read key, which lacks ${scope}. ` +
     `Store your own AI Studio API key to use this: ` +
-    `psd-credentials put --name aistudio_personal_key --value sk-... ` +
+    `psd-credentials put --user <your-email> --name aistudio_personal_key --value sk-... ` +
     `(the key must include ${scope}).`
   );
 }

@@ -138,6 +138,9 @@ test('resolveApiKey falls back to the SHARED key when no personal key is stored'
   expect(r.source).toBe('shared');
   expect(r.key).toBe(SHARED);
   expect(stderrText()).toContain('platform:read');
+  // The store-your-own-key remediation must be runnable as written — put.js
+  // rejects calls without --user.
+  expect(stderrText()).toContain('--user');
 });
 
 test('resolveApiKey uses the shared key when no caller email is given (no subprocess)', async () => {
