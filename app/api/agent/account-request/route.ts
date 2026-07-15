@@ -59,9 +59,9 @@ function isStudentUsername(localPart: string): boolean {
 }
 
 /**
- * Map a broker error to its HTTP response, or null if it isn't one of the
- * broker's typed errors (caller decides). Shared by the derive-guard and the
- * probe so the instanceof branching lives in one place.
+ * Map a broker error (thrown by the mint boundary — Lambda or in-process) to its
+ * HTTP response, or null if it isn't one of the broker's typed errors (caller
+ * decides). Keeps the instanceof branching in one place.
  */
 function mapBrokerError(err: unknown, requestId: string): NextResponse | null {
   if (err instanceof InvalidOwnerError) {
@@ -75,9 +75,10 @@ function mapBrokerError(err: unknown, requestId: string): NextResponse | null {
 }
 
 /**
- * Derive + domain-guard the agnt_ target, then probe the broker for existence.
- * Returns a TERMINAL response (active / 400 / 503 / 502), or null to signal the
- * caller should proceed to the sheet write (account not provisioned yet).
+ * Probe the mint boundary for the agnt_ account's existence (the boundary derives
+ * agnt_<owner> and domain-guards internally). Returns a TERMINAL response
+ * (active / 400 / 503 / 502), or null to signal the caller should proceed to the
+ * sheet write (account not provisioned yet).
  */
 async function probeAgentAccount(ownerEmail: string, requestId: string): Promise<NextResponse | null> {
   try {
