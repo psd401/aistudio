@@ -52,11 +52,24 @@ const AISTUDIO_MCP_API_KEY_SECRET_ID =
 // `psd-credentials put --user <email> --name aistudio_personal_key --value sk-…`).
 const PERSONAL_KEY_NAME = 'aistudio_personal_key';
 
-// Upper bound on a single /api/mcp call. execute_assistant runs a full LLM
-// completion server-side, so this is generous — but without an explicit signal a
-// hung upstream (ALB/proxy that never closes the response) would stall the agent
-// for undici's ~300s platform default with zero output.
+// Upper bound on a single /api/mcp call. Without an explicit signal a hung
+// upstream (ALB/proxy that never closes the response) would stall the agent for
+// undici's ~300s platform default with zero output.
 const MCP_FETCH_TIMEOUT_MS = 180_000;
+
+// execute_assistant runs a full server-side assistant execution inside the MCP
+// request: /api/mcp and the v1 execute route both declare `maxDuration = 900`,
+// and a single reasoning prompt can legitimately take 300s before multi-prompt
+// chains. Wait slightly PAST the server ceiling so the server's own timeout
+// error surfaces (attributable) instead of a local abort (ambiguous).
+const MCP_EXECUTE_TIMEOUT_MS = 910_000;
+
+/** Per-tool call timeout — execute_assistant is the only long-running tool. */
+function timeoutForTool(toolName) {
+  return toolName === 'execute_assistant'
+    ? MCP_EXECUTE_TIMEOUT_MS
+    : MCP_FETCH_TIMEOUT_MS;
+}
 
 // Stderr notice emitted when the caller falls back to the shared discovery key.
 // Never contains a key value.
@@ -253,7 +266,7 @@ async function resolveApiKey(callerEmail) {
  * tool-level errors (insufficient scope, unknown tool). Only auth/rate-limit/
  * parse failures use HTTP status codes; both are handled.
  */
-async function callMcpRaw(method, params, callerEmail) {
+async function callMcpRaw(method, params, callerEmail, timeoutMs = MCP_FETCH_TIMEOUT_MS) {
   if (!AISTUDIO_MCP_URL) {
     fail('AISTUDIO_MCP_URL is not set');
   }
@@ -278,14 +291,14 @@ async function callMcpRaw(method, params, callerEmail) {
         'mcp-protocol-version': '2024-11-05',
       },
       body: JSON.stringify(rpcBody),
-      signal: AbortSignal.timeout(MCP_FETCH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     const timedOut =
       err && (err.name === 'TimeoutError' || err.name === 'AbortError');
     fail(
       timedOut
-        ? `AI Studio MCP did not respond within ${MCP_FETCH_TIMEOUT_MS / 1000}s`
+        ? `AI Studio MCP did not respond within ${timeoutMs / 1000}s`
         : `Network error calling AI Studio MCP: ${err.message}`,
       12
     );
@@ -411,7 +424,8 @@ async function callTool(toolName, toolArgs, callerEmail) {
   const out = await callMcpRaw(
     'tools/call',
     { name: toolName, arguments: toolArgs || {} },
-    callerEmail
+    callerEmail,
+    timeoutForTool(toolName)
   );
   if (out.jsonrpcError) {
     return {
@@ -433,6 +447,9 @@ module.exports = {
   callMcp,
   callTool,
   unwrapResult,
+  timeoutForTool,
+  MCP_FETCH_TIMEOUT_MS,
+  MCP_EXECUTE_TIMEOUT_MS,
   AISTUDIO_MCP_URL,
   PERSONAL_KEY_NAME,
   _internals,

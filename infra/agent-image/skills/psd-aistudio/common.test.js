@@ -301,6 +301,15 @@ test('callMcpRaw fails (exit 12) on HTTP 200 without a result or error field', a
   expect(stdoutText()).toBe('');
 });
 
+test('execute_assistant waits past the 900s server ceiling; other tools use the default', () => {
+  // /api/mcp and the v1 execute route declare maxDuration = 900 — a shorter
+  // client timeout would abort legitimate long assistant executions locally.
+  expect(common.timeoutForTool('execute_assistant')).toBe(common.MCP_EXECUTE_TIMEOUT_MS);
+  expect(common.MCP_EXECUTE_TIMEOUT_MS).toBeGreaterThan(900_000);
+  expect(common.timeoutForTool('list_assistants')).toBe(common.MCP_FETCH_TIMEOUT_MS);
+  expect(common.timeoutForTool('capture_decision')).toBe(common.MCP_FETCH_TIMEOUT_MS);
+});
+
 test('callMcpRaw maps a fetch timeout to a clean exit 12', async () => {
   secretsStore[KEY_SECRET_ID] = SHARED;
   globalThis.fetch = mock(async () => {
