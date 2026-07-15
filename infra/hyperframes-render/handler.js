@@ -100,9 +100,19 @@ function getS3Client() {
  * `/` would create an unexpected key prefix — reject it explicitly.
  */
 function validateEmail(email) {
-  const RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (typeof email !== 'string' || !RE.test(email)) return false;
-  if (email.includes('/')) return false;
+  // Linear, non-backtracking validation. A regex with overlapping `[^\s@]+`
+  // groups around the dot trips CodeQL's js/polynomial-redos (ReDoS). The email
+  // is interpolated into the S3 key (`public-images/<email>/<uuid>.mp4`), so a
+  // `/` (or any whitespace) is rejected explicitly.
+  if (typeof email !== 'string' || email.length === 0 || email.length > 320) return false;
+  if (email.includes('/') || /\s/.test(email)) return false;
+  const at = email.indexOf('@');
+  // exactly one '@', with a non-empty local part
+  if (at <= 0 || email.indexOf('@', at + 1) !== -1) return false;
+  const domain = email.slice(at + 1);
+  const dot = domain.lastIndexOf('.');
+  // a dot in the domain that is neither the first nor the last character
+  if (dot <= 0 || dot === domain.length - 1) return false;
   return true;
 }
 
@@ -177,9 +187,12 @@ function validateRequest(event) {
   // timeline past the `durationSeconds` field (which we can't cross-check
   // against the HTML without a full parse). The root composition's total and
   // every clip's data-duration must each be <= the cap.
-  const declared = html.match(/data-duration\s*=\s*["']?\s*([\d.]+)/gi) || [];
-  for (const match of declared) {
-    const value = Number(match.replace(/^.*?([\d.]+)\s*$/, '$1'));
+  // Bounded quantifiers keep this linear (CodeQL js/polynomial-redos): real
+  // attribute whitespace + numeric values are short, so caps of 20/15 are ample.
+  const durationRegex = /data-duration\s{0,20}=\s{0,20}["']?\s{0,20}([\d.]{1,15})/gi;
+  let match;
+  while ((match = durationRegex.exec(html)) !== null) {
+    const value = Number(match[1]);
     if (Number.isFinite(value) && value > MAX_DURATION_SECONDS + 0.5) {
       throw new RenderError(
         'bad_request',
@@ -301,6 +314,12 @@ async function handler(event, deps = {}) {
 
   try {
     const req = validateRequest(event);
+    // Fail fast: a missing upload target must not cost a multi-minute render.
+    // dryRun never uploads, so it is exempt. (Mirrors psd-image-gen validating
+    // WORKSPACE_BUCKET before spending the upstream call.)
+    if (!req.dryRun && !process.env.WORKSPACE_BUCKET) {
+      throw new RenderError('misconfigured', 'WORKSPACE_BUCKET env var not set — cannot upload rendered video.');
+    }
     const composition = buildComposition(req);
     const uuid = randomUUID();
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hf-render-'));
@@ -334,10 +353,8 @@ async function handler(event, deps = {}) {
         return { ...base, dryRun: true, localPath: outPath };
       }
 
+      // Guaranteed set for the non-dryRun path by the fail-fast check above.
       const bucket = process.env.WORKSPACE_BUCKET;
-      if (!bucket) {
-        throw new RenderError('misconfigured', 'WORKSPACE_BUCKET env var not set — cannot upload rendered video.');
-      }
       const { url, key } = await uploadMp4(s3, { outPath, userEmail: req.userEmail, bucket, uuid });
       return { ...base, url, s3Key: key, sharing: 'public-by-link' };
     } finally {

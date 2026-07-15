@@ -74,11 +74,17 @@ function parseArgs(argv) {
 }
 
 function validateEmail(email) {
-  const RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (typeof email !== 'string' || !RE.test(email)) return false;
-  // The email is interpolated into the S3 key by the render Lambda; a `/`
-  // would create an unexpected key prefix.
-  if (email.includes('/')) return false;
+  // Linear, non-backtracking validation. A regex with overlapping `[^\s@]+`
+  // groups around the dot trips CodeQL's js/polynomial-redos (ReDoS). The email
+  // is interpolated into the S3 key by the render Lambda, so a `/` (or any
+  // whitespace) is rejected explicitly.
+  if (typeof email !== 'string' || email.length === 0 || email.length > 320) return false;
+  if (email.includes('/') || /\s/.test(email)) return false;
+  const at = email.indexOf('@');
+  if (at <= 0 || email.indexOf('@', at + 1) !== -1) return false;
+  const domain = email.slice(at + 1);
+  const dot = domain.lastIndexOf('.');
+  if (dot <= 0 || dot === domain.length - 1) return false;
   return true;
 }
 
