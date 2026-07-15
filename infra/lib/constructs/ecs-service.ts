@@ -723,6 +723,18 @@ export class EcsServiceConstruct extends Construct {
         // shape is honest.
         GOOGLE_WORKSPACE_OAUTH_SECRET_ID: `psd-agent/${environment}/google-oauth-client`,
         AGENT_INTERNAL_API_KEY_SECRET_ID: `psd-agent/${environment}/internal-api-key`,
+        // DWD token broker (#1232) + agnt_ auto-provisioning (#1233) config —
+        // the GCP project number, WIF pool/provider ids, DWD service-account
+        // email, and the OneSync provisioning sheet id all live in ONE JSON
+        // secret `psd-agent/{env}/gcp-dwd-config`, populated out-of-band by IT
+        // (Reese). aistudio is a PUBLIC repo, so these values must not land in
+        // cdk.json / CDK context. The app reads the secret lazily at request time
+        // (loadBrokerConfig / getProvisioningSheetId, 5-min cached) and fails
+        // CLOSED (BrokerNotConfiguredError / not-configured) until it's populated
+        // — the same deploy-cleanly-before-values pattern as the OAuth secret IDs
+        // above. The ECS task role already holds GetSecretValue on
+        // psd-agent/${environment}/* (below), so no new IAM grant is required.
+        GCP_DWD_CONFIG_SECRET_ID: `psd-agent/${environment}/gcp-dwd-config`,
         // Memory optimization - 70% of container memory
         NODE_OPTIONS: `--max-old-space-size=${Math.floor(memory * 0.7)}`,
         // Application configuration

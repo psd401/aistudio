@@ -107,6 +107,17 @@ permit(
 )
 when { resource.url like "https://*.google.com/*" };
 
+// PSD Agent Gateway — psd-classified-evaluation skill (#1230). The n8n MCP
+// Server Trigger that runs the classified-evaluation pipeline server-side. Only
+// the hostname + generic /mcp prefix are named here; the full gateway path lives
+// solely in the psd-agent/{env}/agent-gateway secret (this is a public repo).
+permit(
+  principal,
+  action == Action::"http.request",
+  resource
+)
+when { resource.url like "https://n8n.psd401.net/mcp/*" };
+
 // =========================================================================
 // BLOCKED — REQUIRE CONFIRMATION FLOW AT APP LAYER
 // Cedar only has permit/forbid — there is no native "confirm" tier.
@@ -286,6 +297,23 @@ when {
   resource.url like "https://psd401.ai/api/agent/consent-link"
 };
 
+// Allow the DWD workspace-token broker (#1232) and the agnt_ account-request
+// provisioning endpoint (#1233) on the Next.js app. The psd-workspace skill
+// calls workspace-token (Bearer shared-secret) to mint a short-lived agent
+// access token; the router calls account-request to auto-provision agnt_
+// accounts. Same host + auth as consent-link.
+permit(
+  principal,
+  action == Action::"http.request",
+  resource
+)
+when {
+  resource.url like "https://*.psd401.ai/api/agent/workspace-token" ||
+  resource.url like "https://psd401.ai/api/agent/workspace-token" ||
+  resource.url like "https://*.psd401.ai/api/agent/account-request" ||
+  resource.url like "https://psd401.ai/api/agent/account-request"
+};
+
 // Allow the Google OAuth token endpoint (refresh_token → access_token).
 permit(
   principal,
@@ -322,5 +350,14 @@ unless {
   resource.url like "https://*.google.com/*" ||
   // psd-workspace skill (#912): consent-link endpoint on the Next.js app
   resource.url like "https://*.psd401.ai/api/agent/consent-link" ||
-  resource.url like "https://psd401.ai/api/agent/consent-link"
+  resource.url like "https://psd401.ai/api/agent/consent-link" ||
+  // DWD workspace-token broker (#1232) + agnt_ account-request (#1233)
+  resource.url like "https://*.psd401.ai/api/agent/workspace-token" ||
+  resource.url like "https://psd401.ai/api/agent/workspace-token" ||
+  resource.url like "https://*.psd401.ai/api/agent/account-request" ||
+  resource.url like "https://psd401.ai/api/agent/account-request" ||
+  // PSD Agent Gateway (#1230): n8n MCP Server Trigger for psd-classified-evaluation.
+  // Hostname + generic /mcp prefix only — the full gateway path stays out of this
+  // public repo and lives only in the psd-agent/{env}/agent-gateway secret.
+  resource.url like "https://n8n.psd401.net/mcp/*"
 };

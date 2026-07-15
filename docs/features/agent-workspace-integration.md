@@ -4,14 +4,26 @@ Per-user agents operate as their own Google Workspace identity
 (`agnt_<uniqname>@psd401.net`). Humans delegate to the agent the same way
 they would delegate to a real executive assistant. The agent's
 `psd-workspace` skill wraps the `gws` CLI and obtains per-session access
-tokens from AWS Secrets Manager.
+tokens for two slots:
+
+- **User slot (`--scope user`)** — the human's own identity. Still uses a
+  per-user OAuth **consent** flow; the refresh token lives in Secrets Manager
+  and is exchanged for an access token at runtime.
+- **Agent slot (`--scope agent`)** — the `agnt_*` identity. As of **#1232**
+  there is **no consent flow and no stored refresh token**: a short-lived
+  access token is minted on demand by a **domain-wide-delegation (DWD) token
+  broker** (`POST /api/agent/workspace-token`). Agent accounts are created
+  automatically via the OneSync sheet (**#1233**); interactive sign-in on
+  `agnt_*` accounts is blocked at the Google layer.
 
 ## Components
 
 | Layer | Where | Purpose |
 |---|---|---|
-| DB | `psd_agent_workspace_tokens`, `psd_agent_workspace_consent_nonces` (migration 071) | Token manifest + one-time consent nonces |
-| API | `POST /api/agent/consent-link` | Agent→app, mints signed consent URLs |
+| DB | `psd_agent_workspace_tokens`, `psd_agent_workspace_consent_nonces` (migration 071) | Token manifest (user slot lifecycle; agent slot shows "Auto (DWD)") + one-time consent nonces |
+| API | `POST /api/agent/consent-link` | Agent→app, mints signed consent URLs (**user slot only** — agent_account is rejected, #1232) |
+| API | `POST /api/agent/workspace-token` | Agent→app DWD broker; mints a ~1h agent-slot access token (#1232). 404 `account-not-provisioned` when the agnt_ account isn't made yet |
+| API | `POST /api/agent/account-request` | Router→app; appends the username to the OneSync `agents` sheet to auto-provision the agnt_ account (#1233) |
 | UI | `/agent-connect`, `/agent-connect/callback` | Public OAuth bootstrap (off-nav) |
 | Admin | "Workspace" tab in `/admin/agents` | Per-user status dashboard |
 | Skill | `infra/agent-image/skills/psd-workspace/` | Agent-side `gws` wrapper |
@@ -19,40 +31,54 @@ tokens from AWS Secrets Manager.
 | Upstream skills | `gws-gmail`, `gws-calendar`, `gws-sheets`, … (cloned at image build, same tag as the binary) | Per-API guidance for the agent |
 | Rules | `infra/agent-image/skills/psd-rules/SKILL.md` | Tier 1 progressive-disclosure rules (think silently, never fabricate URLs/memory, no empty promises, Chat formatting) |
 | Formatter | `infra/agent-image/chat_format.py` | Markdown → Google Chat transform applied at the harness boundary |
-| Secrets | `psd-agent/{env}/google-oauth-client`, `psd-agent/{env}/internal-api-key`, `psd-agent-creds/{env}/user/{email}/google-workspace` | OAuth client, PSK, per-user refresh tokens |
-| Cedar | `psd-agent-governance.cedar` | Allowlists for oauth2.googleapis.com + consent-link, secret.read on `psd-agent/*` |
+| Secrets | `psd-agent/{env}/google-oauth-client`, `psd-agent/{env}/internal-api-key`, `psd-agent/{env}/gcp-dwd-config` (#1232/#1233), `psd-agent/{env}/agent-gateway` (#1230), `psd-agent-creds/{env}/user/{email}/google-workspace-user` (user slot) | OAuth client, PSK, GCP DWD config JSON, gateway URL+token JSON, per-user refresh tokens. The agent slot no longer stores a refresh token (#1232). |
+| DWD config | `psd-agent/{env}/gcp-dwd-config` JSON: `{projectNumber, wifPoolId, wifProviderId, serviceAccountEmail, provisioningSheetId}` (Secrets Manager, IT-supplied; env-var overrides for local dev) | Keyless WIF → service-account impersonation for the broker + OneSync provisioning-sheet id. Read lazily (5-min cached); broker fails closed until populated. |
+| Cedar | `psd-agent-governance.cedar` | Allowlists for oauth2.googleapis.com + n8n gateway (`n8n.psd401.net/mcp/*`, #1230) + consent-link + workspace-token + account-request, secret.read on `psd-agent/*` |
 
-## Bootstrap flow
+## Bootstrap flow — user slot (consent)
 
-1. User DMs agent with a Workspace-requiring request.
+1. User DMs agent with a request needing THEIR mailbox/calendar (`--scope user`).
 2. Skill checks Secrets Manager for a per-user refresh token; finds none.
-3. Skill POSTs `/api/agent/consent-link` with a shared-secret Bearer.
-4. App signs a JWT (`NEXTAUTH_SECRET`, 24h exp, single-use nonce) and returns
-   a URL.
+3. Skill POSTs `/api/agent/consent-link` (`kind:"user_account"`) with a
+   shared-secret Bearer.
+4. App signs a JWT (`AUTH_SECRET`, 24h exp, single-use nonce) and returns a URL.
 5. Skill emits `{status:"needs-auth",consent_url,...}` and exits 10.
-6. Agent pastes the URL verbatim into Chat.
-7. User clicks; `/agent-connect` verifies the JWT and redirects to Google.
-8. Google redirects back to `/agent-connect/callback?code=...&state=<jwt>`.
-9. Callback re-verifies state, exchanges the code for a refresh token via
-   `googleapis`, writes the refresh token to
-   `psd-agent-creds/{env}/user/{email}/google-workspace`, upserts the
-   manifest row with `status='active'`, and marks the nonce consumed.
-10. User returns to Chat and retries. Skill fetches the token, refreshes it
-    to an access token, and execs `gws`.
+6. Agent pastes the URL verbatim into Chat; user clicks; `/agent-connect`
+   verifies the JWT and redirects to Google (with `hd=psd401.net`).
+7. Google redirects back to `/agent-connect/callback?code=...&state=<nonce>`.
+8. Callback re-verifies the nonce, exchanges the code, **verifies the granted
+   id_token's email matches the owner** (#1234 — a wrong-account grant stores
+   nothing and is retryable), writes the refresh token to
+   `psd-agent-creds/{env}/user/{email}/google-workspace-user`, upserts the
+   manifest row `active`, and consumes the nonce.
+9. User retries. Skill fetches the token, refreshes it, and execs `gws`.
+
+## Agent-slot flow — DWD broker (no consent)
+
+1. User asks the agent to act AS itself (`--scope agent`).
+2. Skill POSTs `/api/agent/workspace-token` (`{ownerEmail}`, PSK Bearer).
+3. Broker derives `agnt_<owner-localpart>@psd401.net` server-side and mints a
+   ~1h access token via WIF → service-account signJwt → jwt-bearer exchange.
+4. If the agnt_ account doesn't exist yet, the broker returns 404
+   `account-not-provisioned`; the skill emits `{status:"account-provisioning"}`
+   exit 14 (the router has already kicked off auto-provisioning, #1233). No
+   consent link — the user just retries in ~30 min.
 
 ## Runtime error contract
 
-The skill emits a single JSON line on stdout and a non-zero exit code when
-auth isn't ready:
+The skill emits a single JSON line on stdout (or a stderr message for exit 12)
+and a non-zero exit code when auth isn't ready:
 
-| Exit | Status | Meaning |
-|---|---|---|
-| 10 | `needs-auth` | No token provisioned yet |
-| 11 | `token-revoked` | `invalid_grant` from Google (user revoked) |
-| 12 | `missing-scope` | Reserved for future per-scope handling |
+| Exit | Status | Slot | Meaning |
+|---|---|---|---|
+| 10 | `needs-auth` | user | No refresh token yet — consent URL in payload |
+| 11 | `token-revoked` | user | `invalid_grant` from Google — consent URL in payload |
+| 12 | (stderr) | agent | Transport error reaching the broker/Google (transient) |
+| 13 | `phase1-forbidden` | both | A Phase-1 hard gate refused the command |
+| 14 | `account-provisioning` | agent | agnt_ account being auto-created — retry later, nothing to click |
 
-The payload always carries `consent_url`. `SOUL.md` instructs the agent to
-paste the URL verbatim into Chat and stop the turn.
+User-slot 10/11 payloads carry `consent_url`; `SOUL.md` instructs the agent to
+paste it verbatim into Chat and stop the turn. Exit 14 carries **no** URL.
 
 ## Deployment checklist
 
@@ -70,7 +96,37 @@ paste the URL verbatim into Chat and stop the turn.
    incoming skill requests.
 4. Set `GOOGLE_WORKSPACE_CLIENT_ID` / `GOOGLE_WORKSPACE_CLIENT_SECRET` in the
    Next.js environment (same values as step 2).
-5. Deploy infra (AgentPlatformStack + FrontendStack) and the new agent image.
+5. **DWD broker + provisioning (#1232/#1233)** — IT provisions a Google service
+   account with domain-wide delegation + a workload-identity-federation trust for
+   the app's AWS role, then populate ONE Secrets Manager secret (no CDK context
+   flags — aistudio is a public repo):
+   ```bash
+   aws secretsmanager create-secret \
+     --name psd-agent/dev/gcp-dwd-config \
+     --tags Key=Environment,Value=dev Key=ManagedBy,Value=aistudio \
+     --secret-string '{"projectNumber":"…","wifPoolId":"…","wifProviderId":"…","serviceAccountEmail":"…@….iam.gserviceaccount.com","provisioningSheetId":"…"}'
+   ```
+   The app reads it lazily (5-min cached); until it exists the broker fails closed
+   (503 / `not-configured`) and provisioning is skipped. (Local dev may instead set
+   the `GCP_*` / `AGENT_PROVISIONING_SHEET_ID` env vars.)
+6. **Agent gateway (#1230)** — populate ONE JSON secret with both the n8n MCP
+   Server Trigger URL and its bearer token (again, no CDK context flag):
+   ```bash
+   aws secretsmanager create-secret \
+     --name psd-agent/dev/agent-gateway \
+     --tags Key=Environment,Value=dev Key=ManagedBy,Value=aistudio \
+     --secret-string '{"url":"https://n8n.psd401.net/mcp/…/sse","token":"…"}'
+   ```
+   The psd-classified-evaluation skill reads it lazily; an absent/incomplete
+   secret → exit 11 `not-configured`.
+7. Deploy infra (AgentPlatformStack + FrontendStack) and the new agent image. No
+   `-c` context flags are needed for the gateway or DWD config.
+8. **Remediation (one-off, run manually):**
+   - `scripts/agent-workspace/purge-agent-slot-tokens.ts` — delete all
+     agent-slot refresh tokens (retired by the broker; one is known to hold a
+     human's token). Dry-run by default; `--apply` to execute.
+   - `scripts/agent-workspace/audit-user-slot-token-identity.ts` — audit
+     user-slot tokens for identity mismatch (#1234) and purge the bad ones.
 
 ## Delegation (user-side)
 

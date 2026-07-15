@@ -206,6 +206,17 @@ const SIGNALS_TABLE = process.env.SIGNALS_TABLE || '';
 // rolling 4-week comparison plus headroom for backfills / investigations.
 const SIGNAL_TTL_DAYS = 90;
 
+// Agent Workspace account auto-provisioning (#1233). When APP_BASE_URL + the
+// internal API key are set, the router deterministically ensures each staff
+// member's agnt_ Workspace account is provisioned via the app's
+// account-request endpoint (which writes to the OneSync sheet). Unset → no-op.
+const APP_BASE_URL = process.env.APP_BASE_URL || '';
+const AGENT_INTERNAL_API_KEY_SECRET_ID =
+  process.env.AGENT_INTERNAL_API_KEY_SECRET_ID || '';
+// Once an account isn't active, don't re-check more than hourly per user (the
+// OneSync sync cadence is ~10–30 min, so hourly is ample).
+const AGENT_ACCOUNT_RECHECK_MS = 60 * 60 * 1000;
+
 // Cold-start diagnostic: log if AGENTCORE_RUNTIME_ID is not set at module load.
 // When the env var is absent, every invocation pays an SSM GetParameter call.
 // This makes the operational issue visible immediately in CloudWatch.
@@ -409,6 +420,14 @@ interface AgentUser {
   createdAt: string;
   lastActiveAt: string;
   sessionCount: number;
+  // Agent Workspace account provisioning state (#1233). Records without these
+  // fields (created before #1233) are treated as 'none'.
+  //   none      — not yet checked / no request made
+  //   requested — a username row is queued on the OneSync sheet; awaiting sync
+  //   active    — the agnt_ account exists (broker probe succeeded)
+  //   excluded  — a student (numeric-prefix) username; never provisioned
+  agentAccountStatus?: 'none' | 'requested' | 'active' | 'excluded';
+  agentAccountCheckedAt?: string;
 }
 
 /**
@@ -777,6 +796,150 @@ async function getGoogleCredentials(): Promise<string> {
   return cachedGoogleCredentials;
 }
 
+// Internal API key for calling the Next.js app's /api/agent/* endpoints
+// (#1233 account-request). Prefers the direct env var (local/dev), else the
+// Secrets Manager value; TTL-cached like getGoogleCredentials. Returns null if
+// unconfigured so callers can no-op fail-closed.
+let cachedInternalApiKey: string | null = null;
+let internalApiKeyCachedAt: number | null = null;
+async function getInternalApiKey(): Promise<string | null> {
+  if (process.env.AGENT_INTERNAL_API_KEY) return process.env.AGENT_INTERNAL_API_KEY;
+  if (
+    cachedInternalApiKey &&
+    internalApiKeyCachedAt &&
+    Date.now() - internalApiKeyCachedAt < CREDENTIALS_TTL_MS
+  ) {
+    return cachedInternalApiKey;
+  }
+  if (!AGENT_INTERNAL_API_KEY_SECRET_ID) return null;
+  const result = await secretsClient.send(
+    new GetSecretValueCommand({ SecretId: AGENT_INTERNAL_API_KEY_SECRET_ID })
+  );
+  cachedInternalApiKey = result.SecretString || '';
+  internalApiKeyCachedAt = Date.now();
+  return cachedInternalApiKey;
+}
+
+/**
+ * Deterministically ensure the caller's agnt_ Workspace account is provisioned
+ * (#1233). Fire-and-forget (`void`): must NOT add latency to the user reply, so
+ * it runs off the hot path with a short network timeout and swallows all
+ * errors — a failure just retries on a later message.
+ *
+ * Dedupe/throttle: a conditional UpdateCommand on agentAccountCheckedAt is the
+ * gate — only one caller per hour (and only one of N concurrent Lambdas for the
+ * same user) proceeds to call the app. Students (numeric-prefix usernames) are
+ * marked 'excluded' once and never re-checked.
+ */
+async function maybeProvisionAgentAccount(
+  user: AgentUser,
+  senderEmail: string,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  // Not configured (endpoint/key/table) — no-op until the stack wires them.
+  if (!USERS_TABLE || !APP_BASE_URL) return;
+  if (!AGENT_INTERNAL_API_KEY_SECRET_ID && !process.env.AGENT_INTERNAL_API_KEY) return;
+
+  // Already provisioned or permanently excluded — nothing to do.
+  if (user.agentAccountStatus === 'active' || user.agentAccountStatus === 'excluded') return;
+
+  const localPart = (senderEmail.split('@')[0] || '').toLowerCase();
+
+  // Students (numeric-prefix usernames) are never provisioned. Mark once so we
+  // don't re-check them on every message. The conditional avoids a redundant
+  // write when already excluded.
+  if (/^\d/.test(localPart)) {
+    try {
+      await dynamoClient.send(
+        new UpdateCommand({
+          TableName: USERS_TABLE,
+          Key: { googleIdentity: user.googleIdentity },
+          UpdateExpression: 'SET agentAccountStatus = :excluded, agentAccountCheckedAt = :now',
+          ConditionExpression:
+            'attribute_exists(googleIdentity) AND (attribute_not_exists(agentAccountStatus) OR agentAccountStatus <> :excluded)',
+          ExpressionAttributeValues: { ':excluded': 'excluded', ':now': new Date().toISOString() },
+        })
+      );
+    } catch (err) {
+      if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') {
+        log.error('Failed to mark student username provisioning-excluded', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return;
+  }
+
+  // Throttle + dedupe gate: claim the check with a conditional update. Only one
+  // caller wins per hour; concurrent Lambdas for the same user get
+  // ConditionalCheckFailedException and skip. Stamping BEFORE the network call
+  // prevents a thundering herd; a failure simply retries after the window.
+  const cutoff = new Date(Date.now() - AGENT_ACCOUNT_RECHECK_MS).toISOString();
+  try {
+    await dynamoClient.send(
+      new UpdateCommand({
+        TableName: USERS_TABLE,
+        Key: { googleIdentity: user.googleIdentity },
+        UpdateExpression: 'SET agentAccountCheckedAt = :now',
+        ConditionExpression:
+          'attribute_exists(googleIdentity) AND (attribute_not_exists(agentAccountCheckedAt) OR agentAccountCheckedAt < :cutoff)',
+        ExpressionAttributeValues: { ':now': new Date().toISOString(), ':cutoff': cutoff },
+      })
+    );
+  } catch (err) {
+    // Recently checked, or another invocation is handling it — skip silently.
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return;
+    log.error('Failed to claim agent-account provisioning check', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  // Call the app's account-request endpoint with a short timeout.
+  let status: string | undefined;
+  try {
+    const apiKey = await getInternalApiKey();
+    if (!apiKey) return;
+    const resp = await fetch(`${APP_BASE_URL.replace(/\/+$/, '')}/api/agent/account-request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ ownerEmail: senderEmail }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) {
+      log.warn('account-request returned non-OK', { httpStatus: resp.status });
+      return;
+    }
+    const respBody = (await resp.json().catch(() => ({}))) as { status?: string };
+    status = respBody.status;
+  } catch (err) {
+    // Sheet/API outage degrades silently for the user — retries on a later message.
+    log.warn('account-request call failed (will retry on a later message)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  // Advance the stored status to the endpoint's verdict ('active' | 'requested').
+  if (status === 'active' || status === 'requested') {
+    try {
+      await dynamoClient.send(
+        new UpdateCommand({
+          TableName: USERS_TABLE,
+          Key: { googleIdentity: user.googleIdentity },
+          UpdateExpression: 'SET agentAccountStatus = :s',
+          ConditionExpression: 'attribute_exists(googleIdentity)',
+          ExpressionAttributeValues: { ':s': status },
+        })
+      );
+    } catch (err) {
+      log.error('Failed to persist agent-account status', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // User management
 // ---------------------------------------------------------------------------
@@ -826,6 +989,7 @@ async function getOrCreateUser(
     createdAt: new Date().toISOString(),
     lastActiveAt: new Date().toISOString(),
     sessionCount: 0,
+    agentAccountStatus: 'none', // #1233 — provisioned automatically on first messages
   };
 
   // Conditional put prevents race condition: if two messages arrive simultaneously
@@ -2791,6 +2955,12 @@ async function processRecord(
     senderDisplayName,
     log
   );
+
+  // Step 1b: Ensure the user's agnt_ Workspace account is provisioned (#1233).
+  // Deterministic framework trigger (no AI in the loop). Fire-and-forget so it
+  // NEVER adds latency to the reply; it self-throttles (hourly, deduped) and
+  // swallows all errors — a failure just retries on a later message.
+  void maybeProvisionAgentAccount(user, senderEmail, log);
 
   // Step 2: Guardrails — telemetry only. Never refuse a user message.
   // `wouldHaveBlocked` is recorded in agent_messages for later analysis

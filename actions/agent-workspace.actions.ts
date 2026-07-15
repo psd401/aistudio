@@ -12,13 +12,15 @@ import { verifyConsentToken } from "@/lib/agent-workspace/consent-token"
 import { storeRefreshToken, getSecretJson } from "@/lib/agent-workspace/secrets-manager"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { addUserRole } from "@/lib/db/drizzle/user-roles"
+import { verifyGrantedIdentity } from "@/lib/agent-workspace/identity-verification"
 
 /**
- * OAuth scopes requested per token kind (#912 Phase 1).
+ * OAuth scopes requested per token kind.
  *
- * agent_account: the agnt_<uniqname>@psd401.net identity. Broad scopes
- * because the agent owns its own Calendar/Drive/Chat presence and may need
- * write access to shared resources.
+ * Only `user_account` remains: the agent slot's OAuth consent flow is RETIRED
+ * (#1232) — agent access tokens are now minted on demand by the DWD token
+ * broker (lib/agent-workspace/dwd-token-broker.ts, AGENT_DWD_SCOPES), so no
+ * user ever consents for the agent identity.
  *
  * user_account: the human's own identity. Mail is gmail.modify so the
  * agent can read, draft, send, archive, and label on the user's behalf
@@ -29,23 +31,7 @@ import { addUserRole } from "@/lib/db/drizzle/user-roles"
  * rules (psd-rules) still gate sending on explicit user confirmation.
  * Calendar / Tasks / Drive.file remain narrow.
  */
-const SCOPES_BY_KIND: Record<"agent_account" | "user_account", string[]> = {
-  agent_account: [
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/documents",
-    "https://www.googleapis.com/auth/meetings.space.created",
-    "https://www.googleapis.com/auth/chat.messages",
-    "https://www.googleapis.com/auth/chat.spaces",
-    // People API directory scope — enables resolving user IDs to names
-    // for Chat senders and calendar attendees (listDirectoryPeople,
-    // searchDirectoryPeople, getBatchGet).
-    "https://www.googleapis.com/auth/directory.readonly",
-    "openid",
-    "email",
-    "profile",
-  ],
+const SCOPES_BY_KIND: Record<"user_account", string[]> = {
   user_account: [
     // gmail.modify supersedes readonly + compose and adds archive/label/
     // mark-read/trash + send. No permanent-delete bypass. Granting this
@@ -111,12 +97,10 @@ export interface VerifyConsentResult {
   ownerEmail?: string
   agentEmail?: string
   /**
-   * Which OAuth slot this consent is for (#912 Phase 1):
-   *   'agent_account' — user logs in as agnt_<uniqname>, broad scopes
-   *   'user_account'  — user logs in as themself, narrow Phase 1 scopes
-   * The consent UI renders different copy based on this field.
+   * Which OAuth slot this consent is for. Only `user_account` remains — the
+   * agent slot's consent flow was retired (#1232) in favour of the DWD broker.
    */
-  kind?: "agent_account" | "user_account"
+  kind?: "user_account"
   googleOAuthUrl?: string
   error?: string
 }
@@ -193,26 +177,25 @@ export async function verifyConsentAndGetOAuthUrl(
     // and the table validates one-time-use + age via UPDATE ... WHERE
     // consumed_at IS NULL plus a 24h window.
     //
-    // Scopes and login_hint are kind-dependent:
-    //   agent_account → log in as agnt_<uniqname>, broad agent scopes
-    //   user_account  → log in as the user themself, narrow Phase 1 scopes
-    //
-    // cognito_data tokens belong to a different consent flow
-    // (/agent-connect-data) and must not flow through this Workspace path —
-    // reject them here so a misrouted token doesn't accidentally trigger
-    // a Google OAuth redirect.
-    const payloadKind = payload.kind ?? "agent_account"
-    if (payloadKind !== "agent_account" && payloadKind !== "user_account") {
+    // Only `user_account` remains a Google-Workspace consent flow — the agent
+    // slot was retired (#1232, now DWD-brokered). Reject anything else: a stale
+    // agent_account token, or a cognito_data/plaud/canva token that belongs to a
+    // different consent page and must not trigger a Google OAuth redirect.
+    const payloadKind = payload.kind ?? "user_account"
+    if (payloadKind !== "user_account") {
       timer({ status: "error" })
-      log.warn("Consent token has non-Workspace kind", { kind: payloadKind })
+      log.warn("Consent token is not a user_account Workspace flow", { kind: payloadKind })
       return createSuccess({
         valid: false,
-        error: "This consent link is for a different flow.",
+        error:
+          payloadKind === "agent_account"
+            ? "The agent account no longer uses a consent link — its Workspace access is provisioned automatically."
+            : "This consent link is for a different flow.",
       })
     }
-    const kind: "agent_account" | "user_account" = payloadKind
+    const kind: "user_account" = payloadKind
     const scopes = SCOPES_BY_KIND[kind]
-    const loginHint = kind === "user_account" ? payload.sub : payload.agent
+    const loginHint = payload.sub
     const params = new URLSearchParams({
       client_id: oauthClient.client_id,
       redirect_uri: redirectUri,
@@ -222,6 +205,10 @@ export async function verifyConsentAndGetOAuthUrl(
       prompt: "consent",
       state: payload.nonce,
       login_hint: loginHint,
+      // Restrict Google's account chooser to the psd401.net hosted domain
+      // (#1234). This is a second hint — NOT relied upon for security; the
+      // callback enforces the exact account via id_token verification.
+      hd: "psd401.net",
     })
 
     timer({ status: "success" })
@@ -356,9 +343,64 @@ async function provisionAgentUser(
   return { id: userId }
 }
 
+/**
+ * Verify the token-exchange response's granting identity (#1234, via the
+ * id_token) and that it carries the load-bearing user_account scopes. Extracted
+ * from exchangeAndStore to keep that function within size/complexity limits.
+ * Returns the granted scope list on success, or a user-facing error string.
+ */
+async function validateGrantedToken(
+  tokenData: { id_token?: string; scope?: string },
+  clientId: string,
+  expectedEmail: string,
+  log: ReturnType<typeof createLogger>
+): Promise<{ ok: true; grantedScopes: string[] } | { ok: false; error: string }> {
+  // login_hint/hd are only hints — the account chooser lets the user pick any
+  // @psd401.net account, so without this check a human's refresh token could
+  // land in a slot it doesn't own (silent attribution corruption).
+  const identity = await verifyGrantedIdentity(tokenData.id_token, clientId, expectedEmail, log)
+  if (!identity.ok) {
+    return {
+      ok: false,
+      error:
+        identity.reason === "mismatch"
+          ? `You authorized with the wrong Google account. This connection must be granted while signed in as ${expectedEmail}. Reopen the same link, choose "Use another account", and sign in as ${expectedEmail}.`
+          : `We could not verify which Google account authorized this connection. Please reopen the same link and sign in as ${expectedEmail}.`,
+    }
+  }
+
+  const grantedScopes = tokenData.scope?.split(" ") ?? []
+  if (grantedScopes.length === 0) {
+    log.error("Google returned an empty scope list", sanitizeForLogging({ ownerEmail: expectedEmail }))
+    return { ok: false, error: "Google returned no permissions. The OAuth client may be misconfigured. Contact IT." }
+  }
+
+  // Minimum load-bearing scopes for the user_account slot — openid/email/profile
+  // are nice-to-have, not required.
+  const REQUIRED_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/tasks",
+  ]
+  const missingScopes = REQUIRED_SCOPES.filter((s) => !grantedScopes.includes(s))
+  if (missingScopes.length > 0) {
+    log.error("Google granted insufficient scopes", sanitizeForLogging({
+      ownerEmail: expectedEmail,
+      missing: missingScopes,
+      granted: grantedScopes,
+    }))
+    return {
+      ok: false,
+      error: `Google did not grant all required permissions. Missing: ${missingScopes.join(", ")}. Please try again and accept all requested permissions.`,
+    }
+  }
+
+  return { ok: true, grantedScopes }
+}
+
 async function exchangeAndStore(
   code: string,
-  payload: { sub: string; agent: string; kind: "agent_account" | "user_account" },
+  payload: { sub: string; agent: string; kind: "user_account" },
   log: ReturnType<typeof createLogger>
 ): Promise<OAuthCallbackResult> {
   const oauthClient = await getOAuthClientCredentials()
@@ -400,6 +442,7 @@ async function exchangeAndStore(
   const tokenData = (await tokenResponse.json()) as {
     access_token: string
     refresh_token?: string
+    id_token?: string
     scope?: string
     token_type: string
     expires_in: number
@@ -410,45 +453,16 @@ async function exchangeAndStore(
     return { success: false, error: "Google did not return a refresh token. Ensure the OAuth client is configured as Internal + In Production." }
   }
 
-  const grantedScopes = tokenData.scope?.split(" ") ?? []
-
-  // Guard: reject if Google returned an empty scope list (misconfigured OAuth client)
-  if (grantedScopes.length === 0) {
-    log.error("Google returned an empty scope list", sanitizeForLogging({ ownerEmail: payload.sub }))
-    return {
-      success: false,
-      error: "Google returned no permissions. The OAuth client may be misconfigured. Contact IT.",
-    }
+  // Verify the granting identity (#1234) and that Google granted the required
+  // scopes. Only user_account consent remains (#1232), so the expected identity
+  // is the human owner. A failure returns success:false WITHOUT storing the
+  // token; handleOAuthCallback only consumes the nonce on success, so the user
+  // can immediately retry the SAME link with the correct account.
+  const validated = await validateGrantedToken(tokenData, clientId, payload.sub, log)
+  if (!validated.ok) {
+    return { success: false, error: validated.error }
   }
-
-  // Validate that Google granted the minimum required scopes for this kind.
-  // Per-kind required set is the subset of SCOPES_BY_KIND that's truly
-  // load-bearing — openid/email/profile are nice-to-have, not required.
-  const REQUIRED_BY_KIND: Record<"agent_account" | "user_account", string[]> = {
-    agent_account: [
-      "https://www.googleapis.com/auth/gmail.modify",
-      "https://www.googleapis.com/auth/calendar",
-      "https://www.googleapis.com/auth/drive",
-    ],
-    user_account: [
-      "https://www.googleapis.com/auth/gmail.modify",
-      "https://www.googleapis.com/auth/calendar",
-      "https://www.googleapis.com/auth/tasks",
-    ],
-  }
-  const REQUIRED_SCOPES = REQUIRED_BY_KIND[payload.kind]
-  const missingScopes = REQUIRED_SCOPES.filter((s) => !grantedScopes.includes(s))
-  if (missingScopes.length > 0) {
-    log.error("Google granted insufficient scopes", sanitizeForLogging({
-      ownerEmail: payload.sub,
-      missing: missingScopes,
-      granted: grantedScopes,
-    }))
-    return {
-      success: false,
-      error: `Google did not grant all required permissions. Missing: ${missingScopes.join(", ")}. Please try again and accept all requested permissions.`,
-    }
-  }
+  const grantedScopes = validated.grantedScopes
 
   const [existing] = await executeQuery(
     (db) => db.select({ id: users.id }).from(users).where(eq(users.email, payload.sub)).limit(1),
@@ -625,24 +639,28 @@ export async function handleOAuthCallback(
       })
     }
 
-    // cognito_data nonces belong to the /agent-connect-data flow and must
-    // never enter the Google OAuth callback — the page consumes them
-    // directly. Reject here as defence-in-depth.
-    if (nonceRow.tokenKind !== "agent_account" && nonceRow.tokenKind !== "user_account") {
+    // Only user_account nonces run the Google OAuth callback now (#1232 retired
+    // agent_account). cognito_data/plaud/canva belong to their own pages, and a
+    // stale agent_account nonce must not mint a token — reject all non-user_account
+    // kinds as defence-in-depth.
+    if (nonceRow.tokenKind !== "user_account") {
       timer({ status: "error" })
-      log.warn("Consent nonce has non-Workspace kind in OAuth callback", {
+      log.warn("Consent nonce is not a user_account Workspace flow in OAuth callback", {
         kind: nonceRow.tokenKind,
       })
       return createSuccess({
         success: false,
-        error: "This consent link is for a different flow.",
+        error:
+          nonceRow.tokenKind === "agent_account"
+            ? "The agent account no longer uses a consent link — its Workspace access is provisioned automatically."
+            : "This consent link is for a different flow.",
       })
     }
 
     const payload = {
       sub: nonceRow.ownerEmail,
       agent: nonceRow.agentEmail,
-      kind: nonceRow.tokenKind,
+      kind: "user_account" as const,
     }
     const result = await exchangeAndStore(code, payload, log)
 

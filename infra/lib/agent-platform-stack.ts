@@ -642,6 +642,19 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(agentInternalApiKeySecret).add('Environment', environment);
     cdk.Tags.of(agentInternalApiKeySecret).add('ManagedBy', 'cdk');
 
+    // 4f-b. PSD Agent Gateway config (#1230). The psd-classified-evaluation skill
+    // reads ONE JSON secret `psd-agent/{env}/agent-gateway` shaped
+    // {"url":"…","token":"…"} — the n8n MCP Server Trigger /sse endpoint AND its
+    // Bearer token. Both are owned by the n8n side and must NOT live in this
+    // PUBLIC repo, so there is deliberately NO CDK Secret resource and NO CDK
+    // context flag: the secret is created + populated out-of-band with the AWS
+    // CLI (see docs/features/agent-workspace-integration.md), and the skill reads
+    // it lazily at call time via AGENT_GATEWAY_CONFIG_SECRET_ID (wired below).
+    // Read (not written) by the AgentCore runtime, which already holds
+    // GetSecretValue on psd-agent/${environment}/* (see the execution-role policy
+    // below) — no new IAM grant required, and no CFN create-conflict with the
+    // hand-created secret.
+
     // Alarm topic used by the watchdog — reuses the same alarm topic we
     // create for Router DLQ alerts further down. But we need it early here,
     // so we create it right now if alertEmail is configured; the DLQ block
@@ -1718,6 +1731,14 @@ export class AgentPlatformStack extends cdk.Stack {
       // AISTUDIO_MCP_URL. Auto-provisioned each deploy by AistudioMcpKeyBootstrap
       // (§4h). Without this the skill's resolveApiKey() exits 11. Issue #1100.
       AISTUDIO_MCP_API_KEY_SECRET_ID: aistudioMcpApiKeySecret.secretName,
+      // PSD Agent Gateway (#1230) for the psd-classified-evaluation skill. Both
+      // the SSE endpoint URL and the bearer token live in ONE JSON secret
+      // `psd-agent/{env}/agent-gateway` ({"url":"…","token":"…"}), created +
+      // populated out-of-band (see the note by AgentGatewayTokenSecret's removal
+      // above). The skill reads it lazily at call time; an absent/incomplete
+      // secret → the skill fails closed with its exit-11 "not-configured"
+      // contract. No CDK context flag, no value in this public repo.
+      AGENT_GATEWAY_CONFIG_SECRET_ID: `psd-agent/${environment}/agent-gateway`,
       AUTH_COGNITO_USER_POOL_ID: cdk.Fn.importValue(
         `${environment}-CognitoUserPoolId`,
       ),
@@ -2705,6 +2726,12 @@ export class AgentPlatformStack extends cdk.Stack {
         GUARDRAIL_FAIL_OPEN: 'false',
         // Only allow messages from configured domain emails
         ALLOWED_DOMAINS: props.allowedDomains || 'psd401.net',
+        // #1233 agnt_ auto-provisioning: the router calls the Next.js app's
+        // account-request endpoint (Bearer shared secret) to ensure each staff
+        // member's agnt_ Workspace account is provisioned via the OneSync sheet.
+        // Empty APP_BASE_URL → the router hook is a no-op (fails closed).
+        APP_BASE_URL: props.appBaseUrl ?? '',
+        AGENT_INTERNAL_API_KEY_SECRET_ID: agentInternalApiKeySecret.secretName,
         // Account ID needed to construct AgentCore Runtime ARN from the runtime ID
         AWS_ACCOUNT_ID: this.account,
         NODE_ENV: 'production',
@@ -2729,6 +2756,11 @@ export class AgentPlatformStack extends cdk.Stack {
 
     cdk.Tags.of(this.routerLambda).add('Environment', environment);
     cdk.Tags.of(this.routerLambda).add('ManagedBy', 'cdk');
+
+    // #1233: the router reads the internal API key to authenticate its
+    // account-request call to the Next.js app. (The router role's `secrets: []`
+    // means this explicit grant is required.)
+    agentInternalApiKeySecret.grantRead(this.routerLambdaRole);
 
     // -------------------------------------------------------------------------
     // Async job-runner (issue #1138 — "the 14-minute wall")

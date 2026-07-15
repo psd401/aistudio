@@ -14,7 +14,7 @@ Google Workspace access for the user's data, gated by Phase 1 boundaries (#912).
 Phase 1 introduces two parallel OAuth identities per user. The `--scope` flag selects which:
 
 - `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Scopes: `gmail.modify` (read + draft + send + archive/label, no permanent delete), `calendar`, `tasks`, `drive.file`. Use this for reading the user's mail, managing their tasks, writing to their calendar. **NEVER for creating Drive files/Docs/Sheets/Slides** — a file created on this slot is OWNED BY THE USER, which is impersonation (hard-blocked at the skill layer, 2026-07-07). Every document you produce is created with `--scope agent` and shared explicitly. Sending is gated by behavioral rules — always confirm before actually sending.
-- `--scope agent` — OAuth on the agent identity (e.g. `agnt_hagelk@psd401.net`). Broad scopes. Use this for actions the agent takes *as itself* (the agent's own calendar, drafts owned by the agent, agent-owned Drive folder).
+- `--scope agent` — the agent identity (e.g. `agnt_hagelk@psd401.net`). Broad scopes. Use this for actions the agent takes *as itself* (the agent's own calendar, drafts owned by the agent, agent-owned Drive folder). **There is no consent step for this slot** (as of #1232): the skill mints a short-lived access token automatically from the token broker. If your agent account hasn't been created yet you'll get `status: "account-provisioning"` (exit 14) — it's being set up automatically; just tell the user to retry in ~30 minutes. **Never** show a consent link for the agent slot.
 
 If you omit `--scope`, the skill defaults to `user`. Phase 1 work is overwhelmingly on user data.
 
@@ -202,24 +202,29 @@ You don't need to remember to add markers — the skill does it. **Do not** stri
 
 ## Where the token comes from
 
-The skill reads the user's refresh token directly from AWS Secrets Manager at
-`psd-agent-creds/{env}/user/{email}/google-workspace`. **It does not read the
-`psd_agent_workspace_tokens` DB manifest.** That manifest exists for the
-admin dashboard — its `pending` / `active` / `stale` states indicate
-operator-visible connection health, not runtime availability.
+- **User slot (`--scope user`):** the skill reads the user's refresh token
+  directly from AWS Secrets Manager at
+  `psd-agent-creds/{env}/user/{email}/google-workspace-user` and exchanges it
+  for an access token. First-time / revoked → consent flow (exit 10/11).
+- **Agent slot (`--scope agent`):** as of #1232 there is **no refresh token and
+  no consent**. The skill POSTs to the app's DWD token broker
+  (`/api/agent/workspace-token`) which mints a short-lived access token for
+  `agnt_<you>@psd401.net` via domain-wide delegation. If the agnt_ account
+  doesn't exist yet the broker returns "not provisioned" and the skill emits
+  exit 14 (the router creates the account automatically).
 
-This separation matters during the consent callback: the manifest goes
-`pending` → SM write → manifest `active`. If the deploy crashes between SM
-write and manifest promotion, the agent still works (token is in SM) but
-the dashboard shows `pending` until reconciled.
+Neither slot reads the `psd_agent_workspace_tokens` DB manifest at runtime —
+that manifest exists for the admin dashboard (operator-visible connection
+health), not runtime availability.
 
 ## Output contract
 
 - **Success (exit 0):** stdout is whatever `gws` produced (usually JSON). Pass through.
 - **Needs auth (exit 10):** stdout is a single JSON line `{"status":"needs-auth","consent_url":"...","consent_chat_hyperlink":"<url|label>","kind":"user_account|agent_account","message":"..."}`. **Paste `consent_chat_hyperlink` exactly, on a line by itself** — no `**`, no `[]()`, no parentheses, no period, no surrounding text on the same line. Then on a *separate* line explain what it is (use the `kind` field — "I need permission to read your inbox" vs "I need to connect my agent account"). Do not retry. **Why this matters:** wrapping the URL in markdown breaks Google Chat's URL parsing and corrupts the JWT signature in transit (incident 2026-04-27). The `<url|label>` form is Chat's native hyperlink syntax — Chat renders it as a clickable link without ambiguity.
 - **Token revoked (exit 11):** stdout is `{"status":"token-revoked","consent_url":"...","consent_chat_hyperlink":"<url|label>","kind":"...","message":"..."}`. Same rule: paste `consent_chat_hyperlink` on its own line, no surrounding markdown, then ask the user to re-authorize on a separate line.
-- **Missing scope (exit 12):** stdout is `{"status":"missing-scope","scope":"<scope>","consent_url":"https://...","message":"..."}`. Paste the URL on its own line and note that additional access is needed.
+- **Transport error (exit 12):** `gws`-style stderr message — the skill couldn't reach the token broker or Google (network/5xx). This is transient: tell the user Workspace access is temporarily unavailable and to try again shortly. Do not paste a consent link (there isn't one).
 - **Phase 1 forbidden (exit 13):** stdout is `{"status":"phase1-forbidden","reason":"<short>","message":"<longer>"}`. The user asked you to do something Phase 1 disallows (send mail, delete, etc.). Tell them what you can do instead — usually "I'll draft it; reply 'send' if it's right." Do **not** retry with a workaround.
+- **Account provisioning (exit 14):** stdout is `{"status":"account-provisioning","kind":"agent_account","message":"..."}`. Only the **agent slot** produces this: your `agnt_` Workspace account is being created automatically. Tell the user their agent account is being set up and to try again in about 30 minutes. There is **NOTHING to click** — do not show a consent link, do not retry in the same turn.
 - **gws failure (exit 2+):** `gws` stderr is surfaced. Report the error to the user; do not invent workarounds.
 
 ## My inbox vs your inbox

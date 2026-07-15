@@ -180,6 +180,44 @@ async function mintConsentUrl(ownerEmail, kind = 'agent_account') {
 }
 
 /**
+ * Fetch a short-lived Google access token for the caller's AGENT account from
+ * the DWD token broker (#1232). Replaces the agent-slot refresh-token read +
+ * refresh: no consent, no stored token — the broker mints on demand.
+ *
+ * Returns one of:
+ *   { accessToken, expiresAt }   — a ~1h token for agnt_<owner>@psd401.net
+ *   { notProvisioned: true }     — the agnt_ account doesn't exist yet (the
+ *                                  router auto-provisions it; the user waits)
+ * Throws on any other transport/auth failure.
+ */
+async function fetchBrokerToken(ownerEmail) {
+  if (!APP_BASE_URL) {
+    throw new Error('APP_BASE_URL env var not set — cannot fetch agent workspace token');
+  }
+  const apiKey = await getSecretString(AGENT_INTERNAL_API_KEY_SECRET_ID);
+  const resp = await fetch(`${APP_BASE_URL.replace(/\/$/, '')}/api/agent/workspace-token`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ ownerEmail }),
+  });
+  if (resp.status === 404) {
+    const body = await resp.json().catch(() => ({}));
+    if (body && body.status === 'account-not-provisioned') {
+      return { notProvisioned: true };
+    }
+    throw new Error(`workspace-token endpoint 404: ${JSON.stringify(body).slice(0, 200)}`);
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || !data.accessToken) {
+    throw new Error(`workspace-token endpoint failed: ${resp.status} ${data.error || ''}`);
+  }
+  return { accessToken: data.accessToken, expiresAt: data.expiresAt };
+}
+
+/**
  * Parse --command into argv-style tokens. Supports single-quoted segments so
  * users can pass flags like `--query 'is:unread'`. Not a full shell parser.
  */
@@ -865,6 +903,7 @@ module.exports = {
   getUserWorkspaceToken,
   refreshAccessToken,
   mintConsentUrl,
+  fetchBrokerToken,
   splitCommand,
   execGws,
   enforcePhase1Gates,
