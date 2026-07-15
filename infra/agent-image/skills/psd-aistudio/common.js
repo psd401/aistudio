@@ -162,10 +162,11 @@ function readPersonalKey(callerEmail) {
   // same-named shared secret (admin-provisioned out of band) must not be
   // relabeled `personal` — that would mislabel stderr and give the wrong
   // remediation hint. Treat it like not-found and use the platform:read
-  // fallback. The value must be a string: it becomes a Bearer header.
-  if (parsed.error || typeof parsed.value !== 'string' || !parsed.value) {
-    return null;
-  }
+  // fallback. Guard the parse result too: `JSON.parse('null')` yields null
+  // (property access would throw), and the value must be a string because it
+  // becomes a Bearer header.
+  if (!parsed || typeof parsed !== 'object' || parsed.error) return null;
+  if (typeof parsed.value !== 'string' || !parsed.value) return null;
   if (parsed.scope !== 'user') return null;
   return parsed.value;
 }

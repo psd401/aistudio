@@ -123,6 +123,43 @@ export async function verifyAssistantAccess(
  * chain blocks the run), just the last prompt's model for follow-up messages
  * (the only one a follow-up executes).
  */
+/**
+ * Core per-resource grant check (#1206), shared by the v1 REST entry points
+ * (via {@link verifyAssistantResourceGrants}) and the MCP `execute_assistant`
+ * handler — every execution surface must enforce the SAME assistant/model
+ * grants or a scope-holding key could run a restricted assistant through the
+ * surface that forgot to check. Admin bypass and zero-grants-unrestricted
+ * semantics live inside the SQL primitives. The assistant check is skipped for
+ * the owner; model grants are checked for everyone (execution runs ALL prompts).
+ */
+export async function checkAssistantResourceGrants(args: {
+  userId: number
+  architectUserId: number | null | undefined
+  architectId: number
+  modelDbIds: number[]
+}): Promise<
+  { granted: true } | { granted: false; reason: "assistant" | "model"; deniedModelIds?: number[] }
+> {
+  const { userId, architectUserId, architectId, modelDbIds } = args
+
+  if (architectUserId !== userId) {
+    const canAccessAssistant = await userCanAccessResource(userId, "assistant", architectId)
+    if (!canAccessAssistant) {
+      return { granted: false, reason: "assistant" }
+    }
+  }
+
+  const distinctModelIds = [...new Set(modelDbIds)]
+  if (distinctModelIds.length > 0) {
+    const accessible = await filterAccessibleResourceIds(userId, "model", distinctModelIds)
+    const deniedModelIds = distinctModelIds.filter((id) => !accessible.has(String(id)))
+    if (deniedModelIds.length > 0) {
+      return { granted: false, reason: "model", deniedModelIds }
+    }
+  }
+  return { granted: true }
+}
+
 export async function verifyAssistantResourceGrants(args: {
   auth: { userId: number }
   architectUserId: number | null | undefined
@@ -134,24 +171,20 @@ export async function verifyAssistantResourceGrants(args: {
 }): Promise<NextResponse | null> {
   const { auth, architectUserId, architectId, modelDbIds, assistantId, requestId, log } = args
 
-  if (architectUserId !== auth.userId) {
-    const canAccessAssistant = await userCanAccessResource(auth.userId, "assistant", architectId)
-    if (!canAccessAssistant) {
-      log.warn("Caller lacks per-resource grant for assistant", { assistantId, userId: auth.userId })
-      return createErrorResponse(requestId, 403, "FORBIDDEN", "You do not have access to this assistant")
-    }
-  }
+  const check = await checkAssistantResourceGrants({
+    userId: auth.userId,
+    architectUserId,
+    architectId,
+    modelDbIds,
+  })
+  if (check.granted) return null
 
-  const distinctModelIds = [...new Set(modelDbIds)]
-  if (distinctModelIds.length > 0) {
-    const accessible = await filterAccessibleResourceIds(auth.userId, "model", distinctModelIds)
-    const deniedModelIds = distinctModelIds.filter((id) => !accessible.has(String(id)))
-    if (deniedModelIds.length > 0) {
-      log.warn("Caller lacks access to a model this assistant uses", { assistantId, deniedModelIds, userId: auth.userId })
-      return createErrorResponse(requestId, 403, "FORBIDDEN", "You do not have access to a model this assistant uses")
-    }
+  if (check.reason === "assistant") {
+    log.warn("Caller lacks per-resource grant for assistant", { assistantId, userId: auth.userId })
+    return createErrorResponse(requestId, 403, "FORBIDDEN", "You do not have access to this assistant")
   }
-  return null
+  log.warn("Caller lacks access to a model this assistant uses", { assistantId, deniedModelIds: check.deniedModelIds, userId: auth.userId })
+  return createErrorResponse(requestId, 403, "FORBIDDEN", "You do not have access to a model this assistant uses")
 }
 
 // ============================================

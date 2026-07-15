@@ -37,9 +37,8 @@ const originalCallMcp = common.callMcp;
 const originalEmit = common.emit;
 
 common.callTool = async (toolName, toolArgs, callerEmail) => {
-  const call = { toolName, toolArgs: toolArgs || {}, callerEmail };
-  toolCalls.push(call);
-  return toolResponder(call);
+  toolCalls.push({ toolName, toolArgs: toolArgs || {}, callerEmail });
+  return toolResponder();
 };
 common.callMcp = async (method, params, callerEmail) => {
   mcpCalls.push({ method, params: params || {}, callerEmail });

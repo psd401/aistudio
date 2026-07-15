@@ -170,6 +170,11 @@ Returns the node plus its edges.
   `platform:read`, which every key holds, so this effectively never fires). The
   skill never retries or falls back to another key.
 - **Draft assistant** — `{ "status": "not_executable" }`, exit 0 (see above).
+- **Restricted assistant or model (resource grants)** — executing an assistant
+  the caller has no per-resource grant for (or one whose prompt chain uses a
+  restricted model) returns a tool-level error ("You do not have access to this
+  assistant" / "…a model this assistant uses"), exit 12. Same enforcement the
+  web UI and REST API apply — a scope alone is not enough.
 - **Low completeness** — `completenessScore` + `warnings` on a successful capture.
 
 ## Exit codes
