@@ -572,6 +572,48 @@ test('main publishes to Atrium (create + publish intranet) and returns the artif
   }
 });
 
+test('main REFUSES to report "published" when Atrium silently downgrades visibility (§26.4)', async () => {
+  const src = tmpPath(`lp-src3b-${Date.now()}.md`);
+  fs.writeFileSync(src, SAMPLE_MD);
+  const calls = [];
+  const runSkill = (spec) => {
+    calls.push(spec);
+    if (spec.args[0] === 'create-artifact') {
+      // psd-atrium's emitCreated(): requested "internal", not authorized, so it
+      // was silently created "private" with approvalRequired: true (exit 0).
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          id: 'art-77',
+          slug: 'oops',
+          visibilityLevel: 'private',
+          requestedVisibilityLevel: 'internal',
+          approvalRequired: true,
+          visibilityNote: 'Requested visibility "internal" was not applied — the object was created "private".',
+        }),
+        stderr: '',
+      };
+    }
+    return { code: 1, stdout: '', stderr: 'unexpected: publish should never be called' };
+  };
+  try {
+    await expect(
+      R.main(argv('--user', 'a@b.net', '--source-file', src, '--title', 'T', '--video-url', 'https://x/v.mp4', '--audio-url', 'https://x/a.mp3'), {
+        runSkill,
+        auditHtml: PASS_AUDIT,
+      })
+    ).rejects.toThrow(ExitError);
+    const out = JSON.parse(stdout.trim());
+    expect(out.error).toBe('visibility_denied');
+    expect(out.message).toContain('art-77');
+    expect(out.message).toContain('private');
+    // Must never call publish on top of a silently-downgraded (still private) draft.
+    expect(calls.some((c) => c.args[0] === 'publish')).toBe(false);
+  } finally {
+    fs.rmSync(src, { force: true });
+  }
+});
+
 test('publish failure surfaces the orphaned draft id for a targeted retry (no re-run)', async () => {
   const src = tmpPath(`lp-src4-${Date.now()}.md`);
   fs.writeFileSync(src, SAMPLE_MD);

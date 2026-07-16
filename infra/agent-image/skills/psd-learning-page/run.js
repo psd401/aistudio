@@ -1117,6 +1117,22 @@ function publishToAtrium(html, title, deps) {
       2
     );
   }
+  // psd-atrium's own §26.4 signal: an unauthorized "internal" create is silently
+  // created PRIVATE with approvalRequired: true (exit 0, real id — see emitCreated
+  // in psd-atrium/run.js). Publishing on top of that would still leave the page
+  // private, invisible to the staff/student audience it's for. Surface this
+  // instead of reporting unconditional success.
+  if (created.approvalRequired) {
+    fail(
+      `Atrium created artifact ${created.id}${created.slug ? ` (slug ${created.slug})` : ''} as ` +
+        `"${created.visibilityLevel}" instead of the requested "internal" — ${
+          created.visibilityNote || 'a visibility widen-to-internal request is pending admin approval'
+        }. The page is NOT visible to its intended audience yet; do not report it as published. ` +
+        `Retry after the widen is approved: psd-atrium publish --id ${created.id} --destination intranet.`,
+      'visibility_denied',
+      2
+    );
+  }
   const pubRes = run({
     skill: 'atrium',
     args: ['publish', '--id', String(created.id), '--destination', 'intranet'],
