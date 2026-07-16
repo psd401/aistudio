@@ -19,6 +19,13 @@ const path = require('node:path');
 
 const R = require('./run');
 
+// A single private (0700) temp dir for the whole file — avoids the insecure
+// os.tmpdir()+predictable-name pattern (CodeQL js/insecure-temporary-file).
+const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'lp-test-'));
+function tmpPath(name) {
+  return path.join(TMP_DIR, name);
+}
+
 const SAMPLE_MD = [
   '# Procedure 3520P: Student Technology',
   '',
@@ -345,9 +352,9 @@ test('resolveVideo degrades gracefully when psd-hyperframes fails', async () => 
 });
 
 test('main --dry-run --generate-media still emits a valid page (with notes) when BOTH media steps fail', async () => {
-  const src = path.join(os.tmpdir(), `lp-src-${Date.now()}.md`);
+  const src = tmpPath(`lp-src-${Date.now()}.md`);
   fs.writeFileSync(src, SAMPLE_MD);
-  const out = path.join(os.tmpdir(), `lp-out-${Date.now()}.html`);
+  const out = tmpPath(`lp-out-${Date.now()}.html`);
   const runSkill = () => ({ code: 1, stdout: JSON.stringify({ error: 'boom' }), stderr: '' });
   try {
     await R.main(argv('--user', 'a@b.net', '--source-file', src, '--title', 'T', '--dry-run', '--out', out, '--generate-media'), {
@@ -395,7 +402,7 @@ test('assemblePage wires a change listener that clears stale quiz feedback + res
 });
 
 test('main reports fullSource:false for a whitespace-only source', async () => {
-  const out = path.join(os.tmpdir(), `lp-blank-${Date.now()}.html`);
+  const out = tmpPath(`lp-blank-${Date.now()}.html`);
   try {
     await R.main(argv('--user', 'a@b.net', '--text', '   \n\n  ', '--title', 'T', '--dry-run', '--out', out), {
       auditHtml: PASS_AUDIT,
@@ -485,7 +492,7 @@ test('ingestSource routes --gdoc-url through psd-workspace export', async () => 
 // ── pre-publish a11y gate ───────────────────────────────────────────────────────
 
 test('main REFUSES to publish when the assembled page fails the shared a11y gate', async () => {
-  const src = path.join(os.tmpdir(), `lp-src2-${Date.now()}.md`);
+  const src = tmpPath(`lp-src2-${Date.now()}.md`);
   fs.writeFileSync(src, SAMPLE_MD);
   const failingAudit = async () => ({
     pass: false,
@@ -517,7 +524,7 @@ test('main REFUSES to publish when the assembled page fails the shared a11y gate
 });
 
 test('main publishes to Atrium (create + publish intranet) and returns the artifact + reader URL', async () => {
-  const src = path.join(os.tmpdir(), `lp-src3-${Date.now()}.md`);
+  const src = tmpPath(`lp-src3-${Date.now()}.md`);
   fs.writeFileSync(src, SAMPLE_MD);
   const calls = [];
   const runSkill = (spec) => {
@@ -556,7 +563,7 @@ test('main publishes to Atrium (create + publish intranet) and returns the artif
 });
 
 test('publish failure surfaces the orphaned draft id for a targeted retry (no re-run)', async () => {
-  const src = path.join(os.tmpdir(), `lp-src4-${Date.now()}.md`);
+  const src = tmpPath(`lp-src4-${Date.now()}.md`);
   fs.writeFileSync(src, SAMPLE_MD);
   const runSkill = (spec) => {
     if (spec.args[0] === 'create-artifact') return { code: 0, stdout: JSON.stringify({ id: 'art-99', slug: 'oops' }), stderr: '' };
@@ -582,9 +589,9 @@ test('publish failure surfaces the orphaned draft id for a targeted retry (no re
 // ── integration: real gate, real assembly, no network (placeholders) ─────────────
 
 test('main --dry-run with only a source file produces an accessible five-modality page offline', async () => {
-  const src = path.join(os.tmpdir(), `lp-int-${Date.now()}.md`);
+  const src = tmpPath(`lp-int-${Date.now()}.md`);
   fs.writeFileSync(src, SAMPLE_MD);
-  const out = path.join(os.tmpdir(), `lp-int-${Date.now()}.html`);
+  const out = tmpPath(`lp-int-${Date.now()}.html`);
   try {
     // deps={} → the REAL shared a11y gate (sibling psd-html-artifact) runs, and
     // dry-run placeholders mean NO psd-tts/psd-hyperframes/Atrium calls.

@@ -84,12 +84,16 @@ function parseArgs(argv) {
 
 // Duplicated from psd-image-gen/generate.js — skills are standalone packages
 // with no cross-skill require(). Source of truth: psd-credentials/common.js.
-// Reject `/` because the email is interpolated into the S3 key path.
+// Reject `/` because the email is interpolated into the S3 key path. Validated
+// with linear string ops rather than a backtracking-prone email regex (ReDoS).
 function validateEmail(email) {
-  const RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (typeof email !== 'string' || !RE.test(email)) return false;
-  if (email.includes('/')) return false;
-  return true;
+  if (typeof email !== 'string' || email.length === 0 || email.length > 254) return false;
+  if (email.includes('/') || /\s/.test(email)) return false;
+  const at = email.indexOf('@');
+  if (at <= 0 || at !== email.lastIndexOf('@')) return false;
+  const domain = email.slice(at + 1);
+  if (domain.length === 0 || domain.startsWith('.') || domain.endsWith('.')) return false;
+  return domain.includes('.');
 }
 
 async function uploadAndShare(bytes, userEmail) {

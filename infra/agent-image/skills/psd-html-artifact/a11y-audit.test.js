@@ -12,9 +12,18 @@
  */
 
 const { test, expect } = require('bun:test');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { auditHtml } = require('./a11y-audit');
+
+// A single private (0700) temp dir for the whole file — avoids the insecure
+// os.tmpdir()+predictable-name pattern (CodeQL js/insecure-temporary-file).
+const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'a11y-test-'));
+function tmpPath(name) {
+  return path.join(TMP_DIR, name);
+}
 
 // Missing lang, no <main>, unlabeled image, empty button, unlabeled input —
 // each is a WCAG A/AA failure axe scores critical or serious.
@@ -80,8 +89,8 @@ function runDeliver(...argv) {
 }
 
 test('deliver.js --audit-only exits 0 and reports ok for an accessible file', () => {
-  const file = path.join(require('node:os').tmpdir(), `a11y-good-${Date.now()}.html`);
-  require('node:fs').writeFileSync(file, ACCESSIBLE);
+  const file = tmpPath(`a11y-good-${Date.now()}.html`);
+  fs.writeFileSync(file, ACCESSIBLE);
   try {
     const res = runDeliver('--audit-only', '--file', file);
     expect(res.status).toBe(0);
@@ -94,8 +103,8 @@ test('deliver.js --audit-only exits 0 and reports ok for an accessible file', ()
 });
 
 test('deliver.js --audit-only exits 3 with a11y_violations for an inaccessible file', () => {
-  const file = path.join(require('node:os').tmpdir(), `a11y-bad-${Date.now()}.html`);
-  require('node:fs').writeFileSync(file, INACCESSIBLE);
+  const file = tmpPath(`a11y-bad-${Date.now()}.html`);
+  fs.writeFileSync(file, INACCESSIBLE);
   try {
     const res = runDeliver('--audit-only', '--file', file);
     expect(res.status).toBe(3);

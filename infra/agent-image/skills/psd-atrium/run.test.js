@@ -299,7 +299,9 @@ test('create-artifact reads code from --code-file (avoids the argv-size limit)',
   const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
-  const file = path.join(os.tmpdir(), `atrium-code-${Date.now()}.html`);
+  // Private, unpredictable temp dir (not os.tmpdir()+predictable name).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atrium-test-'));
+  const file = path.join(dir, 'code.html');
   const code = '<html><body><h1>From file</h1><script>x()</script></body></html>';
   fs.writeFileSync(file, code);
   try {
@@ -308,7 +310,7 @@ test('create-artifact reads code from --code-file (avoids the argv-size limit)',
     expect(body).toMatchObject({ kind: 'artifact', title: 'Big', bodyFormat: 'html', codeEncoding: 'base64' });
     expect(Buffer.from(body.body, 'base64').toString('utf8')).toBe(code);
   } finally {
-    fs.rmSync(file, { force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

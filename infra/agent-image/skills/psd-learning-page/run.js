@@ -88,12 +88,18 @@ function parseArgs(argv) {
   return args;
 }
 
-// Reject `/` because the email is interpolated into skill S3 key paths.
+// Reject `/` because the email is interpolated into skill S3 key paths. Validated
+// with linear string ops (indexOf/slice/includes) rather than a single regex —
+// the classic `[^\s@]+@[^\s@]+\.[^\s@]+` pattern backtracks polynomially on
+// adversarial input (ReDoS).
 function validateEmail(email) {
-  const RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (typeof email !== 'string' || !RE.test(email)) return false;
-  if (email.includes('/')) return false;
-  return true;
+  if (typeof email !== 'string' || email.length === 0 || email.length > 254) return false;
+  if (email.includes('/') || /\s/.test(email)) return false;
+  const at = email.indexOf('@');
+  if (at <= 0 || at !== email.lastIndexOf('@')) return false; // exactly one '@', not leading
+  const domain = email.slice(at + 1);
+  if (domain.length === 0 || domain.startsWith('.') || domain.endsWith('.')) return false;
+  return domain.includes('.'); // domain needs a dot (e.g. psd401.net)
 }
 
 // ── escaping (defense-in-depth: NOTHING from the document reaches the DOM raw) ─
@@ -105,6 +111,14 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// Create a private (mode 0700), unpredictable scratch directory. A predictable
+// os.tmpdir()+Date.now() filename is an insecure-temp-file pattern (a local
+// actor can pre-create a symlink at the known path, or two same-millisecond runs
+// can collide); mkdtempSync gives an exclusive, random-suffixed directory.
+function makeScratchDir(prefix) {
+  return fs.mkdtempSync(path.join(require('node:os').tmpdir(), prefix));
 }
 
 // ── shared WCAG 2.2 AA gate (the SAME module psd-html-artifact/deliver.js runs) ─
@@ -375,10 +389,15 @@ function splitSentences(text) {
 
 function extractHeadings(markdown) {
   const out = [];
-  const re = /^(#{1,3})\s+(.+?)\s*#*$/gm;
+  // Match the level + the rest of the line greedily (`.` excludes newline, so
+  // `.+` is linear per line). The old `(.+?)\s*#*$` had overlapping quantifiers
+  // over `\s`/`.`/`#` that backtrack polynomially (ReDoS). The optional ATX
+  // closing `###` is stripped afterward with an anchored, disjoint-class regex.
+  const re = /^(#{1,3})[ \t]+(.+)$/gm;
   let m;
   while ((m = re.exec(markdown))) {
-    const text = stripMarkdown(m[2]);
+    const raw = m[2].replace(/[ \t]+#+[ \t]*$/, ''); // drop trailing ` ###` closing run
+    const text = stripMarkdown(raw);
     if (text) out.push({ level: m[1].length, text });
   }
   return out;
@@ -986,11 +1005,16 @@ async function resolveVideo(args, audioUrl, title, points, narration, deps, dryR
   }
   const duration = estimateNarrationSeconds(narration);
   const composition = buildComposition(title, points, duration);
+  let sceneDir;
   let scenePath;
   try {
-    scenePath = path.join(require('node:os').tmpdir(), `lp-scene-${Date.now()}.html`);
+    sceneDir = makeScratchDir('lp-scene-');
+    scenePath = path.join(sceneDir, 'scene.html');
     fs.writeFileSync(scenePath, composition);
   } catch (err) {
+    if (sceneDir) {
+      try { fs.rmSync(sceneDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
     return { media: null, omission: `could not write composition: ${err.message}` };
   }
   const vArgs = ['--user', String(args.user), '--file', scenePath, '--duration', String(duration), '--width', '1280', '--height', '720'];
@@ -1000,7 +1024,7 @@ async function resolveVideo(args, audioUrl, title, points, narration, deps, dryR
   }
   const res = run({ skill: 'hyperframes', args: vArgs });
   try {
-    fs.rmSync(scenePath, { force: true });
+    fs.rmSync(sceneDir, { recursive: true, force: true });
   } catch {
     /* best-effort cleanup */
   }
@@ -1042,10 +1066,12 @@ function publishToAtrium(html, title, deps) {
   // policy rendered with the full source inlined can exceed Linux's per-arg
   // MAX_ARG_STRLEN (128 KB) and fail spawn with an opaque E2BIG. --code-file
   // sidesteps the argv limit entirely.
-  const codePath = path.join(require('node:os').tmpdir(), `lp-artifact-${Date.now()}.html`);
+  const codeDir = makeScratchDir('lp-artifact-');
+  const codePath = path.join(codeDir, 'artifact.html');
   try {
     fs.writeFileSync(codePath, html);
   } catch (err) {
+    try { fs.rmSync(codeDir, { recursive: true, force: true }); } catch { /* best-effort */ }
     fail(`could not stage the artifact for publish: ${err.message}`, 'publish_failed', 2);
   }
 
@@ -1061,7 +1087,7 @@ function publishToAtrium(html, title, deps) {
     });
   } finally {
     try {
-      fs.rmSync(codePath, { force: true });
+      fs.rmSync(codeDir, { recursive: true, force: true });
     } catch {
       /* best-effort cleanup */
     }
