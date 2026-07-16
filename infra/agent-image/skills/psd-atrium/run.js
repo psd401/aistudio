@@ -17,8 +17,8 @@
  *   node run.js create-document --title <t> [--markdown <md>] [--collection <slug|id>]
  *                    [--tags a,b,c] [--visibility private|group|internal|public]
  *                    [--grants role:staff,building:GHS]
- *   node run.js create-artifact --title <t> --code <src> --body-format html|jsx
- *                    [--collection <slug|id>] [--tags a,b,c]
+ *   node run.js create-artifact --title <t> (--code <src> | --code-file <path>)
+ *                    --body-format html|jsx [--collection <slug|id>] [--tags a,b,c]
  *                    [--visibility <level>] [--grants ...]
  *   node run.js edit --id <id> --body <text> [--mode replace|append]
  *                    [--body-format markdown|html|jsx] [--summary <s>]
@@ -44,6 +44,8 @@
  */
 
 'use strict';
+
+const fs = require('node:fs');
 
 const {
   fail,
@@ -76,8 +78,8 @@ function usage() {
       'Write (creates a new version; content starts private + draft):',
       '  create-document --title <t> [--markdown <md>] [--collection <slug|id>]',
       '                  [--tags a,b,c] [--visibility <level>] [--grants k:v,...]',
-      '  create-artifact --title <t> --code <src> --body-format html|jsx',
-      '                  [--collection <slug|id>] [--tags a,b,c]',
+      '  create-artifact --title <t> (--code <src> | --code-file <path>)',
+      '                  --body-format html|jsx [--collection <slug|id>] [--tags a,b,c]',
       '                  [--visibility <level>] [--grants k:v,...]',
       '  edit --id <id> --body <text> [--mode replace|append]',
       '       [--body-format markdown|html|jsx] [--summary <s>]',
@@ -245,7 +247,27 @@ async function main() {
 
     case 'create-artifact': {
       const title = requireStr(args, 'title', 'title');
-      const code = requireStr(args, 'code', 'code');
+      // Accept the artifact code either inline (--code) or from a file
+      // (--code-file). A large artifact (e.g. a full document rendered into an
+      // HTML page) can exceed the OS per-argument limit (Linux MAX_ARG_STRLEN,
+      // 128 KB) when passed as a single --code argv, failing spawn with E2BIG;
+      // --code-file sidesteps that entirely.
+      const codeFile = optStr(args, 'code_file', 'code-file');
+      // Reject the ambiguous combination rather than silently preferring one.
+      if (codeFile !== undefined && args.code !== undefined) {
+        fail('pass either --code or --code-file, not both');
+      }
+      let code;
+      if (codeFile !== undefined) {
+        try {
+          code = fs.readFileSync(codeFile, 'utf8');
+        } catch (err) {
+          fail(`--code-file not readable: ${err.message}`);
+        }
+        if (!code) fail('--code-file is empty');
+      } else {
+        code = requireStr(args, 'code', 'code');
+      }
       const bodyFormat = optEnum(args, 'body_format', 'body-format', ARTIFACT_FORMATS);
       if (!bodyFormat) fail('--body-format html|jsx is required for create-artifact');
       const visibility = buildVisibility(args);

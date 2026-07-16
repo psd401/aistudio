@@ -6,6 +6,47 @@ pre-flight comment block from the scaffold and report a one-line pass summary.
 
 A failure here is broken work, not a style preference.
 
+## Conformance target: WCAG 2.2 Level AA (enforced)
+
+Every artifact this skill delivers is **district web content**, so accessibility is a
+**legal** requirement, not a nicety. The DOJ's 2024 ADA Title II web rule (28 CFR Part 35)
+requires state/local government web content — **which includes public school districts** —
+to meet **WCAG 2.1 Level AA** (compliance dates April 26, 2027 / 2028 after the April 2026
+extension). We target **WCAG 2.2 Level AA**, the current W3C Recommendation and a
+backward-compatible superset of 2.1 AA.
+
+**This is enforced by a machine, not just this checklist.** Before upload, `deliver.js`
+runs the shared **axe-core** gate (`a11y-audit.js`) and **REFUSES to deliver** any artifact
+with **critical or serious** violations (exit 3, `a11y_violations`). You cannot skip it.
+Run it yourself first:
+
+```bash
+node /opt/psd-skills/psd-html-artifact/deliver.js --audit-only --file /tmp/<name>.html
+```
+
+The axe gate runs over jsdom, so it covers **structure / ARIA / labels / lang / roles /
+names** with no browser. It **cannot** check **color contrast** or **reflow/200%-zoom**
+(no layout engine) — those two you verify by eye against the rules in the Color and
+Layout sections below, or in a real browser. The structural WCAG 2.2 AA rules the gate
+enforces are also listed here so you build them in from the start:
+
+## Structure & semantics (WCAG 2.2 AA — the axe gate blocks on these)
+- [ ] **`<html lang="…">`** is present and correct (WCAG 3.1.1).
+- [ ] Exactly **one `<h1>`**, and headings descend in order (no h2 → h4 skips) (1.3.1).
+- [ ] **Landmark regions**: content lives inside `<main>` (+ `<header>`/`<nav>`/`<footer>`
+      as needed); no meaningful content orphaned outside a landmark (1.3.1).
+- [ ] **Every control has an accessible name/label**: `<button>` has text or `aria-label`;
+      every input has an associated `<label>` (or `aria-label`/`aria-labelledby`) (4.1.2).
+- [ ] **Every `<img>` has `alt`** (empty `alt=""` only for purely decorative images) (1.1.1).
+- [ ] **Real semantic controls**: `<button>`/`<a>` for actions/links, never a `<div onclick>`;
+      keyboard operable with visible `:focus-visible` (2.1.1, 2.4.7).
+- [ ] **`<video>` has captions** (`<track kind="captions">`) and **`<audio>` has a visible
+      transcript** (1.2.2 / 1.2.1).
+- [ ] **Status is conveyed by more than color** and, when it updates live, announced via an
+      `aria-live` region (1.4.1, 4.1.3).
+- [ ] The page **reflows at 200% zoom / 320px** with no loss of content or horizontal
+      scroll (1.4.10) — verify in a browser; jsdom can't.
+
 ## Typography
 - [ ] **No banned fonts** as the chosen face. Grep: `Inter`, `Roboto`, `Fraunces`, `Instrument`,
       `Space Grotesk`, `DM Sans`. Any hit must be brief-justified (e.g. PSD brand, public-sector).

@@ -22,8 +22,10 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
  *  - A CloudFront distribution (Origin Access Control; no public bucket ACLs)
  *    serving the host page with a STRICT Content-Security-Policy response header
  *    (`default-src 'none'; connect-src 'none'; script-src 'unsafe-inline'
- *    <allowlisted CDNs>; ...`). connect-src 'none' blocks network exfiltration;
- *    the CSP is widened ONLY for explicitly permitted CDN origins.
+ *    <allowlisted CDNs>; media-src data: <allowlisted media origins>; ...`).
+ *    connect-src 'none' blocks network exfiltration; the CSP is widened ONLY for
+ *    explicitly permitted CDN origins (script/style/img) and media origins
+ *    (video/audio) — never a wildcard.
  *  - The host page is rendered at deploy time with the app origins allowed to
  *    post render messages baked in (parent-origin allowlist) and the same CSP as
  *    a <meta> fallback.
@@ -46,6 +48,17 @@ export interface AtriumSandboxStackProps extends cdk.StackProps {
    * ['https://cdnjs.cloudflare.com']). Empty = inline-only artifacts.
    */
   allowedArtifactCdns?: string[];
+  /**
+   * Origins the sandbox CSP permits for `media-src` (`<video>`/`<audio>`/`<track>`),
+   * in addition to `data:` (always allowed, for inline captions/placeholder clips).
+   * Scope this to the workspace media bucket that agent-generated MP3/MP4 URLs come
+   * from (e.g. ['https://<workspace-bucket>.s3.<region>.amazonaws.com']) so a
+   * psd-learning-page artifact can play its explainer video + narration in the
+   * reader. NOT a wildcard — `connect-src` stays 'none', so this does not add a
+   * general exfiltration channel. Empty = data: only (media from external hosts
+   * stays blocked).
+   */
+  allowedMediaOrigins?: string[];
 }
 
 export class AtriumSandboxStack extends cdk.Stack {
@@ -102,6 +115,9 @@ export class AtriumSandboxStack extends cdk.Stack {
     // origin guard) so a non-http(s) cdk.json entry (e.g. "file://…", "ftp://…")
     // fails synth loudly instead of silently widening the CSP with a bogus source.
     const normalizedCdns = (props.allowedArtifactCdns ?? []).map(normalizeOriginStr);
+    // media-src origins (workspace media bucket for agent-generated MP3/MP4).
+    // Same normalizer so a bogus cdk.json entry fails synth loudly.
+    const normalizedMediaOrigins = (props.allowedMediaOrigins ?? []).map(normalizeOriginStr);
 
     // Fail-closed is correct (an empty allowlist → frame-ancestors 'none' + the
     // host accepts no render messages), but a SILENT empty allowlist almost always
@@ -123,6 +139,10 @@ export class AtriumSandboxStack extends cdk.Stack {
     // prevent artifact code from using pixel-tracker images for data exfiltration
     // to arbitrary HTTPS hosts. Artifacts that need to display images must embed
     // them inline (data URLs) or load from an explicitly allowlisted CDN.
+    // media-src likewise stays data: + explicitly allowlisted media origins (the
+    // workspace media bucket for agent-generated MP3/MP4) — never a wildcard, and
+    // connect-src stays 'none', so a single trusted media origin is not a general
+    // exfiltration channel.
     // frame-ancestors restricts who can embed the host to the allowed parent origins.
     const scriptSrc = ["'unsafe-inline'", ...normalizedCdns].join(' ');
     // style-src mirrors script-src: an allowlisted CDN (e.g. a Bootstrap/Tailwind
@@ -135,6 +155,11 @@ export class AtriumSandboxStack extends cdk.Stack {
     const imgSrc = normalizedCdns.length > 0
       ? `data: ${normalizedCdns.join(' ')}`  // allowlisted CDN images + data URLs
       : "data:";                             // data URIs only when no CDNs configured
+    // media-src: always allow data: (inline VTT captions + dry-run placeholder
+    // clips) plus any configured workspace media origin(s) for real MP3/MP4 URLs.
+    const mediaSrc = normalizedMediaOrigins.length > 0
+      ? `data: ${normalizedMediaOrigins.join(' ')}`
+      : "data:";
     const frameAncestors =
       normalizedParentOrigins.length > 0
         ? normalizedParentOrigins.join(' ')
@@ -144,6 +169,7 @@ export class AtriumSandboxStack extends cdk.Stack {
       `script-src ${scriptSrc}`,
       `style-src ${styleSrc}`,
       `img-src ${imgSrc}`,
+      `media-src ${mediaSrc}`,
       'font-src data:',
       "connect-src 'none'",
       `frame-ancestors ${frameAncestors}`,

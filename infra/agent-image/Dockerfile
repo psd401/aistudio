@@ -438,6 +438,18 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
 # `COPY skills /opt/psd-skills` above (same pattern as the Python psd-pdf-to-markdown
 # and psd-tts skills), adding NO Docker layer — keeping the image well under the
 # Firecracker overlay-mount layer ceiling that constrains this stage.
+# psd-html-artifact (#1245) now ALSO carries axe-core + jsdom (regular deps in its
+# package.json) for the shared WCAG 2.2 AA accessibility gate (a11y-audit.js).
+# They install via its EXISTING `npm install --omit=dev` line in the single RUN
+# above — NO new RUN, NO new Docker layer (jsdom's transitive tree adds file count
+# and size, not a layer; the Firecracker ceiling is on layers). The renderer stack
+# (Chromium/FFmpeg) is unaffected — the gate runs headless-free over jsdom.
+# psd-learning-page (#1245) is pure JS with ZERO npm deps of its own: it composes
+# psd-pdf-to-markdown / psd-workspace / psd-tts / psd-hyperframes / psd-atrium via
+# child_process, and require()s the shared /opt/psd-skills/psd-html-artifact/
+# a11y-audit.js (whose jsdom + axe-core resolve from psd-html-artifact's OWN
+# node_modules, installed by line ~402). Installed solely by `COPY skills` above —
+# NO npm install, NO new Docker layer.
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
 # Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.
