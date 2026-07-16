@@ -151,24 +151,33 @@ function runSkill(spec) {
   return { code: res.status == null ? 1 : res.status, stdout: res.stdout || '', stderr: res.stderr || '' };
 }
 
-// Last JSON object printed on stdout by a composed skill.
+// The JSON object a composed skill printed on stdout, or null when stdout is not
+// JSON (e.g. psd-workspace passing through a raw exported document body).
+// Composed skills emit either single-line JSON (atrium/pdf) or pretty multi-line
+// JSON (tts/hyperframes) as the ONLY thing on stdout, so the whole-string parse
+// is the normal path; the suffix scan tolerates an accidental log line printed
+// before the JSON block (single- or multi-line).
 function lastJson(stdout) {
   const text = String(stdout || '').trim();
   if (!text) return null;
-  // Skills emit a single JSON object; try whole-string first, then last line.
   try {
     return JSON.parse(text);
   } catch {
-    const lines = text.split('\n').filter(Boolean);
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        return JSON.parse(lines[i]);
-      } catch {
-        /* keep scanning up */
-      }
-    }
-    return null;
+    /* fall through to suffix scan */
   }
+  const lines = text.split('\n');
+  // Earliest start index whose suffix (to end) parses = the trailing JSON block,
+  // even when it spans multiple pretty-printed lines after some preamble.
+  for (let i = 0; i < lines.length; i++) {
+    const candidate = lines.slice(i).join('\n').trim();
+    if (!candidate || (candidate[0] !== '{' && candidate[0] !== '[')) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      /* keep scanning down */
+    }
+  }
+  return null;
 }
 
 // ── ingest ─────────────────────────────────────────────────────────────────────
