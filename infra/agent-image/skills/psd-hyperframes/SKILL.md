@@ -90,6 +90,7 @@ node /opt/psd-skills/psd-hyperframes/render.js \
   --file scene.html \
   --duration 3 \
   [--css-file extra.css] [--js-file extra.js] \
+  [--audio-url <https-mp3-url>] \
   [--fps 30] [--width 1920] [--height 1080]
 ```
 
@@ -97,30 +98,57 @@ node /opt/psd-skills/psd-hyperframes/render.js \
 - `--css-file` / `--js-file` — optional extra CSS/JS injected into the composition
   (`<style>` before `</head>`, `<script>` before `</body>`). Prefer inlining directly in the
   HTML; these exist for convenience.
+- `--audio-url <https-url>` — optional narration/music track (see **Audio** below).
 - `--duration <seconds>` — **required**; must match the composition's `data-duration` and be ≤ 60.
 
 Returns JSON: `{ "url": "…", "s3Key": "public-images/<email>/<uuid>.mp4", "bytes": N, "fps": 30, "durationSeconds": 3, "width": 1920, "height": 1080, "sharing": "public-by-link" }`.
 
 ## Required Reply Format
 
-After the skill returns a result with a `url`, your **next chat message MUST contain the bare
-`url` on a line by itself** (Google Chat renders it as a downloadable/playable link):
+**This is the single most important step — do not skip it.** After the skill returns a `url`, your
+**very next chat message MUST paste the bare `url` on a line by itself** so the user gets a
+clickable/playable link. If the HTTPS `url` is not in your reply, the user got nothing.
 
 - ✅ Correct:
   ```
   Here's your video:
   https://psd-agents-dev-…​.s3.us-east-1.amazonaws.com/public-images/<email>/<uuid>.mp4
   ```
-- ❌ Wrong: describing the video without pasting the URL — the user cannot see the tool result.
+- ❌ Wrong: telling the user where it's saved (an `s3://…` path, "it's in S3", the container path)
+  instead of pasting the HTTPS `url` — that is NOT a clickable link, and the user cannot see the
+  tool result. Paste the `url`, don't describe it.
 - ❌ Wrong: wrapping the URL in `[label](url)` or `**bold**` — Google Chat corrupts these for
   long S3 URLs. Bare URL only.
 - ❌ Wrong: re-rendering or presigning the returned URL. It is already public-by-link with
   HTTP 200; do not touch it.
 
+## Audio (narration / music)
+
+hyperframes has **no separate audio input** — audio comes from an `<audio>` element in the
+composition, which hyperframes muxes into the MP4. Easiest path:
+
+1. Write the narration script, then call **psd-tts** to synthesize it — it returns a public HTTPS
+   MP3 `url`. Pick a voice/engine that fits the piece:
+   - `--engine long-form` (en-US: Danielle, Gregory, Patrick, Ruth) — best for narrating a script.
+   - `--engine generative` (default; **Ruth** = warm female, **Matthew** = clear male; also
+     Danielle, Joanna, Salli, Stephen, Tiffany, en-GB Amy/Brian) — most natural/expressive.
+   - `--engine neural` for the widest voice/language coverage.
+   - Full list: psd-tts `references/voices.md`.
+2. Pass that MP3 URL here as `--audio-url <url>`. The skill injects
+   `<audio src="…" data-start="0" data-duration="<your --duration>" data-track-index="0"
+   data-volume="1">` into the composition root; hyperframes pads/trims the clip to the video length.
+
+Notes:
+- `--audio-url` must be an `https://` URL (or a `data:audio/…` URI); the render Lambda fetches it.
+- For music instead of narration, pass any hosted MP3/WAV URL the same way.
+- Advanced: you can hand-author the `<audio>` element in the composition yourself instead of
+  `--audio-url` — the element contract is identical (`data-start`/`data-duration`/`data-track-index`/`data-volume`).
+
 ## Errors
 
 - **`bad_args`** — missing/invalid `--user`, no composition, bad `--duration`/`--fps`/dimensions,
-  a valueless `--css-file`/`--js-file`, a combined html+css+js payload over the 4 MB cap, or a
+  a valueless `--css-file`/`--js-file`, an `--audio-url` that isn't `https://` / `data:audio/`,
+  a combined html+css+js payload over the 4 MB cap, or a
   composition whose declared `data-duration` exceeds the 60 s cap or whose root
   `data-width`/`data-height` exceeds the 3840 px cap. Fix and retry.
 - **`misconfigured`** — the render function name (`HYPERFRAMES_RENDER_FUNCTION`) is not injected.

@@ -162,6 +162,27 @@ test('buildPayload reads css/js from files and carries dryRun', () => {
   }
 });
 
+test('buildPayload injects an <audio> track from --audio-url into the composition root', () => {
+  const url = 'https://psd-agents-dev.s3.us-east-1.amazonaws.com/public-images/p@psd401.net/n.mp3';
+  const p = buildPayload(parseArgs(argv(
+    '--user', 'p@psd401.net', '--html', HTML, '--duration', '3', '--audio-url', url,
+  )));
+  expect(p.html).toContain(`<audio src="${url}"`);
+  expect(p.html).toContain('data-duration="3"');
+  expect(p.html).toContain('data-track-index="0"');
+  // Injected as the first child of the data-composition-id root element.
+  expect(p.html).toMatch(/data-composition-id="demo"[^>]*>\s*<audio /);
+});
+
+test('buildPayload rejects an unsafe / non-https --audio-url', () => {
+  const base = ['--user', 'p@psd401.net', '--html', HTML, '--duration', '3'];
+  expect(() => buildPayload(parseArgs(argv(...base, '--audio-url', 'http://insecure.example/n.mp3')))).toThrow(ExitError);
+  expect(lastJson().error).toBe('bad_args');
+  stdout = ''; // reset so lastJson() reads only the second failure
+  expect(() => buildPayload(parseArgs(argv(...base, '--audio-url', 'https://x/a" onerror=1')))).toThrow(ExitError);
+  expect(lastJson().error).toBe('bad_args');
+});
+
 // ── invokeRender (mocked LambdaClient) ───────────────────────────────────────
 
 function fakeClient(responder) {

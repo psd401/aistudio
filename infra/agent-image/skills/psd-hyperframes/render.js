@@ -110,6 +110,27 @@ function coerceInt(value, flag) {
 }
 
 /**
+ * Insert an <audio> track as the first child of the composition root (the
+ * element carrying data-composition-id) so hyperframes treats it as a timeline
+ * audio clip and muxes it into the MP4. `url` is pre-validated (https/data:audio,
+ * no quotes) by the caller. Falls back to before </body>, then appending, if the
+ * root element cannot be located.
+ */
+function injectAudioElement(html, url, durationSeconds) {
+  const audio =
+    `<audio src="${url}" data-start="0" data-duration="${durationSeconds}" ` +
+    `data-track-index="0" data-volume="1"></audio>`;
+  const rootOpen = html.match(/<[a-zA-Z][^>]*\bdata-composition-id\b[^>]*>/);
+  if (rootOpen) {
+    const at = rootOpen.index + rootOpen[0].length;
+    return `${html.slice(0, at)}\n${audio}${html.slice(at)}`;
+  }
+  const bodyAt = html.toLowerCase().lastIndexOf('</body>');
+  if (bodyAt !== -1) return `${html.slice(0, bodyAt)}${audio}\n${html.slice(bodyAt)}`;
+  return `${html}\n${audio}`;
+}
+
+/**
  * Validate the CLI args and assemble the render Lambda invoke payload.
  * Every invalid input fails fast with an actionable message.
  */
@@ -144,6 +165,20 @@ function buildPayload(args) {
   else if (args.js_file) js = readFileOrFail(String(args.js_file), '--js-file');
   else if (args.js === true) fail('--js requires a value', 'bad_args');
   else if (args.js) js = String(args.js);
+
+  // Optional audio track (narration / music). hyperframes has no separate audio
+  // input — it muxes audio from an <audio> element in the composition. --audio-url
+  // points at a hosted clip (e.g. a psd-tts MP3 URL); we inject the <audio> below.
+  // Restricted to https:// / data:audio so the value is safe to interpolate into
+  // the src attribute (no quotes/spaces/angle brackets).
+  let audioUrl;
+  if (args.audio_url === true) fail('--audio-url requires a URL', 'bad_args');
+  else if (args.audio_url) {
+    audioUrl = String(args.audio_url);
+    if (!/^https:\/\/[^\s"'<>]+$/.test(audioUrl) && !/^data:audio\/[^\s"'<>]+$/i.test(audioUrl)) {
+      fail('--audio-url must be an https:// URL or a data:audio/ URI (no spaces or quotes)', 'bad_args');
+    }
+  }
 
   const compositionBytes =
     Buffer.byteLength(html, 'utf8') +
@@ -188,6 +223,12 @@ function buildPayload(args) {
   if (args.dry_run !== undefined && args.dry_run !== true) {
     fail('--dry-run is a flag and takes no value', 'bad_args');
   }
+
+  // Bake the audio track into the composition root now that the duration is
+  // known: data-duration spans the whole video so hyperframes pads/trims the
+  // source clip to fit. Done here (not in the Lambda) so the render service
+  // needs no change — it just renders whatever composition it receives.
+  if (audioUrl) html = injectAudioElement(html, audioUrl, durationSeconds);
 
   const payload = { html, durationSeconds, fps, width, height, userEmail: args.user };
   if (css) payload.css = css;
@@ -250,6 +291,7 @@ async function main(argv = process.argv, deps = {}) {
     process.stdout.write(
       'Usage: render.js --user <email> --file <composition.html> --duration <sec> ' +
         '[--html "<inline>"] [--css-file <path>] [--js-file <path>] ' +
+        '[--audio-url <https-mp3-url>] ' +
         '[--fps 30] [--width 1920] [--height 1080] [--dry-run]\n',
     );
     process.exit(0);
@@ -281,6 +323,7 @@ module.exports = {
   main,
   parseArgs,
   buildPayload,
+  injectAudioElement,
   invokeRender,
   validateEmail,
   MAX_DURATION_SECONDS,
