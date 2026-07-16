@@ -20,6 +20,8 @@ const log = createLogger({ module: "nexus-model-router" })
 
 type NexusModelRow = Awaited<ReturnType<typeof getNexusEnabledModels>>[number]
 type ConcreteFamily = Exclude<NexusModelFamily, "auto">
+// Latimer is intentionally executable only through provider-neutral Standard/Auto
+// candidates; it is not exposed as one of the three Advanced model families.
 const EXECUTABLE_PROVIDERS = new Set(["openai", "google", "amazon-bedrock", "azure", "latimer"])
 
 function isSpecialistOnlyModel(model: NexusModelRow): boolean {
@@ -212,6 +214,7 @@ export async function routeNexusRequest(args: {
   enabledConnectorIds: string[]
   userId: number
   hasImageInput?: boolean
+  hasPreviousGeneratedImage?: boolean
 }): Promise<NexusRouteResult> {
   const { config, mode } = await getNexusRouterConfig()
   const models = await getNexusEnabledModels()
@@ -237,7 +240,10 @@ export async function routeNexusRequest(args: {
     }
   }
 
-  const decision = await classifyNexusRequest(args.text, config, { hasImageInput: args.hasImageInput })
+  const decision = await classifyNexusRequest(args.text, config, {
+    hasImageInput: args.hasImageInput,
+    hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
+  })
   const selection = selectModelForRuntime({
     models, config, family: args.requestedFamily, tier: decision.tier,
     intent: decision.intent, fallbackModelId: args.fallbackModelId, accessibleIds,

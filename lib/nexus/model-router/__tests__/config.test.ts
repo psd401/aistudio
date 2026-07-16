@@ -12,10 +12,10 @@ import { getNexusRouterConfig } from "../config"
 describe("Nexus router configuration", () => {
   beforeEach(() => jest.clearAllMocks())
 
-  it("defaults to active Nova Micro routing with Nano Banana image candidates", async () => {
+  it("defaults to shadow Nova Micro routing with Nano Banana image candidates", async () => {
     mockGetSettings.mockResolvedValue({ NEXUS_ROUTER_CONFIG_V1: null, NEXUS_ROUTER_MODE: null })
     const result = await getNexusRouterConfig()
-    expect(result.mode).toBe("active")
+    expect(result.mode).toBe("shadow")
     expect(result.config.classifier.modelId).toBe("us.amazon.nova-micro-v1:0")
     expect(result.config.specialists.imageModels[0]).toBe("gemini-3.1-flash-image-preview")
   })

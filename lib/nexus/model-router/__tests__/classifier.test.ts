@@ -39,6 +39,14 @@ describe("Nexus request classifier", () => {
     expect(mockCreateProviderModel).not.toHaveBeenCalled()
   })
 
+  it("recognizes an elliptical edit when a previous generated image is available", async () => {
+    const decision = await classifyNexusRequest("Make it brighter", config, {
+      hasPreviousGeneratedImage: true,
+    })
+    expect(decision).toMatchObject({ intent: "image", source: "deterministic" })
+    expect(mockCreateProviderModel).not.toHaveBeenCalled()
+  })
+
   it("uses Nova Micro for ambiguous requests", async () => {
     mockCreateProviderModel.mockResolvedValue({ modelId: "nova" })
     mockGenerateText.mockResolvedValue({

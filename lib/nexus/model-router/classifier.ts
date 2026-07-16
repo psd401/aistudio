@@ -81,9 +81,10 @@ function parseClassifierToolCall(toolCalls: unknown): NexusClassifierDecision | 
 export async function classifyNexusRequest(
   text: string,
   config: NexusRouterConfig,
-  context: { hasImageInput?: boolean } = {}
+  context: { hasImageInput?: boolean; hasPreviousGeneratedImage?: boolean } = {}
 ): Promise<NexusClassifierDecision> {
-  const deterministic = deterministicClassify(text, context.hasImageInput)
+  const hasImageContext = context.hasImageInput || context.hasPreviousGeneratedImage
+  const deterministic = deterministicClassify(text, hasImageContext)
   if (deterministic) return deterministic
 
   const controller = new AbortController()
@@ -96,7 +97,7 @@ export async function classifyNexusRequest(
       maxOutputTokens: 120,
       temperature: 0,
       system: "You are a fast request router. Use the route_request tool. If tool use is unavailable, return JSON only with no markdown.",
-      prompt: `Classify the request for an education-focused assistant.\n\nIntent must be one of general, instruction, psd-data, image. Use instruction for pedagogy, lesson planning, rubrics, curriculum, differentiation, or teaching strategy. Use psd-data when answering requires district student-information-system records such as rosters, schedules, grades, attendance, enrollment, or student demographics; do not use it for generic advice about students. Use image when the user wants to generate or edit an image${context.hasImageInput ? "; an image is attached to this request" : ""}. Tier must be light for short/simple transformations and factual questions, medium for normal synthesis and planning, high only for complex multi-stage reasoning, architecture, difficult coding, or deep analysis.\n\nReturn exactly: {"intent":"general","tier":"medium","confidence":0.8,"reasonCodes":["short_reason"]}\n\nRequest:\n${text.slice(0, 8_000)}`,
+      prompt: `Classify the request for an education-focused assistant.\n\nIntent must be one of general, instruction, psd-data, image. Use instruction for pedagogy, lesson planning, rubrics, curriculum, differentiation, or teaching strategy. Use psd-data when answering requires district student-information-system records such as rosters, schedules, grades, attendance, enrollment, or student demographics; do not use it for generic advice about students. Use image when the user wants to generate or edit an image${context.hasImageInput ? "; an image is attached to this request" : ""}${context.hasPreviousGeneratedImage ? "; a previously generated image is available for follow-up edits, but use image intent only when the request refers to editing or transforming it" : ""}. Tier must be light for short/simple transformations and factual questions, medium for normal synthesis and planning, high only for complex multi-stage reasoning, architecture, difficult coding, or deep analysis.\n\nReturn exactly: {"intent":"general","tier":"medium","confidence":0.8,"reasonCodes":["short_reason"]}\n\nRequest:\n${text.slice(0, 8_000)}`,
       tools: {
         route_request: tool({
           description: "Return the routing decision for this request",

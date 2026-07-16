@@ -21,6 +21,7 @@ import {
   extractImagePrompt,
   validateImagePrompt,
   extractReferenceImages,
+  getImageRoutingContext,
   persistImageExchange,
   handleImageGenerationError
 } from '@/app/api/nexus/chat/image-generation-handler';
@@ -211,6 +212,64 @@ describe('extractReferenceImages', () => {
     }, CONVO);
     expect(result.length).toBe(1);
     expect(result[0].url).toBe('https://example.com/cat.png');
+  });
+});
+
+describe('getImageRoutingContext', () => {
+  beforeEach(() => {
+    mockExecuteQuery.mockReset();
+  });
+
+  it('uses an image attached to the current user turn without querying history', async () => {
+    const result = await getImageRoutingContext({
+      messages: [{
+        id: '1',
+        role: 'user',
+        parts: [{ type: 'file', mediaType: 'image/png' }],
+      }],
+      conversationId: CONVO,
+      userId: 42,
+    });
+
+    expect(result).toEqual({ hasImageInput: true, hasPreviousGeneratedImage: false });
+    expect(mockExecuteQuery).not.toHaveBeenCalled();
+  });
+
+  it('preserves persisted generated-image context for an elliptical follow-up edit', async () => {
+    mockExecuteQuery.mockResolvedValue([{
+      parts: [{ type: 'image', s3Key: `v2/generated-images/${CONVO}/latest.png` }],
+    }]);
+
+    const result = await getImageRoutingContext({
+      messages: [{ id: '2', role: 'user', parts: [{ type: 'text', text: 'Make it brighter' }] }],
+      conversationId: CONVO,
+      userId: 42,
+    });
+
+    expect(result).toEqual({ hasImageInput: false, hasPreviousGeneratedImage: true });
+    expect(mockExecuteQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not invent previous image context when owned persisted history has none', async () => {
+    mockExecuteQuery.mockResolvedValue([{ parts: [{ type: 'text', text: 'No image here' }] }]);
+
+    const result = await getImageRoutingContext({
+      messages: [{ id: '3', role: 'user', parts: [{ type: 'text', text: 'Make it brighter' }] }],
+      conversationId: CONVO,
+      userId: 42,
+    });
+
+    expect(result).toEqual({ hasImageInput: false, hasPreviousGeneratedImage: false });
+  });
+
+  it('degrades to no prior image context when the optional history lookup fails', async () => {
+    mockExecuteQuery.mockRejectedValue(new Error('database unavailable'));
+
+    await expect(getImageRoutingContext({
+      messages: [{ id: '4', role: 'user', parts: [{ type: 'text', text: 'Make it brighter' }] }],
+      conversationId: CONVO,
+      userId: 42,
+    })).resolves.toEqual({ hasImageInput: false, hasPreviousGeneratedImage: false });
   });
 });
 

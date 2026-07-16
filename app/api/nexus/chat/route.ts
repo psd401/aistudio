@@ -22,6 +22,7 @@ import {
   getOrCreateImageConversation,
   extractReferenceImages,
   getPreviousGeneratedImages,
+  getImageRoutingContext,
   persistImageExchange,
   createImageStreamResponse,
   handleImageGenerationError,
@@ -399,7 +400,7 @@ async function handleImageGeneration(params: {
 
     // If no reference images and existing conversation, check previous messages
     if (existingConversationId && referenceImages.length === 0) {
-      referenceImages = await getPreviousGeneratedImages(existingConversationId);
+      referenceImages = await getPreviousGeneratedImages(existingConversationId, userId);
     }
 
     log.info('Image generation - extracted reference images', {
@@ -762,17 +763,6 @@ function validateConversationId(id: string | undefined, requestId: string, log: 
   return null;
 }
 
-function requestHasImageInput(messages: z.infer<typeof ChatRequestSchema>['messages']): boolean {
-  const lastUserMessage = [...messages].reverse().find(message => message.role === 'user');
-  return lastUserMessage?.parts?.some(part => {
-    if (!part || typeof part !== 'object') return false;
-    const value = part as Record<string, unknown>;
-    const mimeType = value.mimeType ?? value.mediaType;
-    return value.type === 'image'
-      || (value.type === 'file' && typeof mimeType === 'string' && mimeType.startsWith('image/'));
-  }) ?? false;
-}
-
 function withProtectedLastUserText(
   messages: z.infer<typeof ChatRequestSchema>['messages'],
   protectedText: string
@@ -847,12 +837,18 @@ async function resolveRequestRouting(args: {
   manuallyEnabledConnectors: string[];
   userId: number;
   sessionId: string;
+  existingConversationId?: string;
 }): Promise<{
   routing: Awaited<ReturnType<typeof routeNexusRequest>>;
   specialRouteMessages: z.infer<typeof ChatRequestSchema>['messages'];
 }> {
   const rawRoutingText = extractImagePrompt(args.messages);
   const protectedRoutingInput = await prepareRoutingText(rawRoutingText, args.sessionId);
+  const imageContext = await getImageRoutingContext({
+    messages: args.messages,
+    conversationId: args.existingConversationId,
+    userId: args.userId,
+  });
   const routing = await routeNexusRequest({
     text: protectedRoutingInput.text,
     fallbackModelId: args.fallbackModelId,
@@ -860,7 +856,8 @@ async function resolveRequestRouting(args: {
     requestedFamily: args.nexusMode === 'advanced' ? args.modelFamily : 'auto',
     enabledConnectorIds: args.manuallyEnabledConnectors,
     userId: args.userId,
-    hasImageInput: requestHasImageInput(args.messages),
+    hasImageInput: imageContext.hasImageInput,
+    hasPreviousGeneratedImage: imageContext.hasPreviousGeneratedImage,
   });
   return {
     routing,
@@ -1404,6 +1401,7 @@ export async function POST(req: Request) {
       manuallyEnabledConnectors,
       userId,
       sessionId: session.sub,
+      existingConversationId: conversationIdValue,
     });
     const modelId = routing.modelId;
     const enabledConnectors = routing.connectorIds;

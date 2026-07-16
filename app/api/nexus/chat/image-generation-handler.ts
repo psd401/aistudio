@@ -479,7 +479,8 @@ async function handleFilePart(
  * Get previous generated images from conversation
  */
 export async function getPreviousGeneratedImages(
-  conversationId: string
+  conversationId: string,
+  userId: number
 ): Promise<ReferenceImage[]> {
   const referenceImages: ReferenceImage[] = [];
 
@@ -487,10 +488,15 @@ export async function getPreviousGeneratedImages(
     (db) => db
       .select({ parts: nexusMessages.parts })
       .from(nexusMessages)
+      .innerJoin(
+        nexusConversations,
+        eq(nexusMessages.conversationId, nexusConversations.id)
+      )
       .where(
         and(
           eq(nexusMessages.conversationId, conversationId),
-          eq(nexusMessages.role, 'assistant')
+          eq(nexusMessages.role, 'assistant'),
+          eq(nexusConversations.userId, userId)
         )
       )
       .orderBy(desc(nexusMessages.createdAt))
@@ -519,6 +525,45 @@ export async function getPreviousGeneratedImages(
   }
 
   return referenceImages;
+}
+
+/**
+ * Determine whether routing can safely treat the current request as having image
+ * context. Persisted history is scoped to the authenticated owner because routing
+ * runs before the normal conversation ownership check.
+ */
+export async function getImageRoutingContext(params: {
+  messages: ImageGenerationParams['messages'];
+  conversationId?: string;
+  userId: number;
+}): Promise<{ hasImageInput: boolean; hasPreviousGeneratedImage: boolean }> {
+  const lastUserMessage = [...params.messages].reverse().find(message => message.role === 'user');
+  const hasImageInput = lastUserMessage?.parts?.some(part => {
+    const mimeType = part.mimeType ?? part.mediaType;
+    return part.type === 'image'
+      || (part.type === 'file' && typeof mimeType === 'string' && mimeType.startsWith('image/'));
+  }) ?? false;
+
+  if (hasImageInput || !params.conversationId) {
+    return { hasImageInput, hasPreviousGeneratedImage: false };
+  }
+
+  try {
+    const previousImages = await getPreviousGeneratedImages(params.conversationId, params.userId);
+    return {
+      hasImageInput: false,
+      hasPreviousGeneratedImage: previousImages.length > 0,
+    };
+  } catch (error) {
+    // Prior-image context improves routing but is not required for an ordinary
+    // chat request. Degrade to no context instead of turning a lookup failure
+    // into a pre-stream 500.
+    log.warn('Could not load previous image context for routing', {
+      conversationId: params.conversationId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { hasImageInput: false, hasPreviousGeneratedImage: false };
+  }
 }
 
 /**

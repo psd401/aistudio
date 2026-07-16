@@ -18,11 +18,11 @@ The deterministic rules run before the model classifier because capability requi
 
 Set `NEXUS_ROUTER_MODE` in the settings table or environment:
 
-- `active` (default): execute the routed model and automatic connector selection.
-- `shadow`: classify and resolve, record `proposedModelId`, but execute the existing fallback model and connector list.
+- `active`: execute the routed model and automatic connector selection.
+- `shadow` (default): classify and resolve, record `proposedModelId`, but execute the existing fallback model and connector list.
 - `off`: use the legacy fallback model and manually enabled connectors.
 
-Use shadow mode to compare proposed routes against production traffic before changing execution. Stored routing metadata includes the config version, experience/runtime mode, requested and selected family, intent, tier, confidence, reason codes, decision source, selected/proposed model, fallback status, and PSD-data attachment status.
+The user-facing experience still defaults to Standard; the independent runtime default is shadow so an existing deployment cannot change live model execution without an explicit administrator promotion. Use shadow mode to compare proposed routes against production traffic before changing execution. Stored routing metadata includes the config version, experience/runtime mode, requested and selected family, intent, tier, confidence, reason codes, decision source, selected/proposed model, fallback status, and PSD-data attachment status.
 An explicitly invalid runtime mode, or malformed router JSON while active, fails safely to shadow mode. A missing config is valid: the built-in specialist defaults and model metadata/name inference are used.
 
 ## Configuration
@@ -78,6 +78,8 @@ For PSD-data, prefer `specialists.psdDataConnectorId` when the server UUID is st
 The user preference is stored in `nexus_user_preferences.settings` as `nexusMode` and `preferredModelFamily`. Standard is the default for users with no preference. The composer’s routing control does not remount the assistant runtime; current values are read from refs by the stable transport. In Standard, manual model/tool/MCP controls are hidden. In Advanced, the family chooser and existing optional tool controls are available.
 
 Image routing intentionally overrides a family constraint because it requires a generation capability. PSD-data augments the selected response model with its data source, so its response model still honors the family constraint. General and instructional response models also honor Advanced family selection; Auto can use the configured instructional specialist. Specialist-only image and Deep Research models are excluded from ordinary response routing.
+
+For follow-up image edits, the router checks the authenticated user's recent persisted assistant messages for the same conversation. This keeps elliptical requests such as “make it brighter” on the image path even when the image is not reattached, while preventing another user's conversation history from influencing routing.
 
 ## Verification and rollout
 

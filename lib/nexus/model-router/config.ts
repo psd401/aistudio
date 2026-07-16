@@ -18,7 +18,9 @@ export async function getNexusRouterConfig(): Promise<{
 }> {
   const settings = await getSettings([NEXUS_ROUTER_CONFIG_KEY, NEXUS_ROUTER_MODE_KEY])
   const rawMode = settings[NEXUS_ROUTER_MODE_KEY]
-  const modeResult = nexusRouterRuntimeModeSchema.safeParse(rawMode ?? "active")
+  // Existing deployments must explicitly promote the router after evaluating
+  // shadow metadata; a missing setting must never switch live traffic by itself.
+  const modeResult = nexusRouterRuntimeModeSchema.safeParse(rawMode ?? "shadow")
   const mode = modeResult.success ? modeResult.data : "shadow"
   if (!modeResult.success) {
     log.warn("Invalid Nexus router runtime mode; failing safely to shadow mode")
