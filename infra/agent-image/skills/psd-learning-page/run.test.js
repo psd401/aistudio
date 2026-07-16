@@ -192,6 +192,16 @@ test('authored narration with a script but no segments still gets caption cues',
   expect(c.narration.transcript).toContain('First sentence');
 });
 
+test('authored narration with a blank script falls back to deterministic narration', () => {
+  // `typeof "" === "string"` — a blank authored script must NOT ship empty
+  // captions/transcript; it falls back like an absent narration key.
+  for (const blank of ['', '   \n\t ']) {
+    const c = R.deriveContent(SAMPLE_MD, 'Student Technology', { narration: { script: blank } });
+    expect(c.narration.script.trim().length).toBeGreaterThan(0);
+    expect(c.narration.segments.length).toBeGreaterThan(0);
+  }
+});
+
 test('resolveAudio/resolveVideo reject an unsafe supplied media URL scheme (noted omission)', async () => {
   const noRun = () => { throw new Error('should not run'); };
   const a = await R.resolveAudio(

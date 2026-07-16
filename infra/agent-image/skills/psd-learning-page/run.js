@@ -207,6 +207,10 @@ function parseGdocId(input) {
 }
 
 function readStdin() {
+  // Only read piped/redirected stdin. On an interactive terminal, fs.readFileSync(0)
+  // blocks waiting for EOF — return empty so the "no source provided" error fires
+  // immediately instead of hanging.
+  if (process.stdin.isTTY) return '';
   try {
     return fs.readFileSync(0, 'utf8');
   } catch {
@@ -481,7 +485,11 @@ function deriveContent(markdown, title, overrides) {
     buildDeterministicQuiz(summaryBullets, learningTargets, title);
 
   const narration =
+    // Require a NON-BLANK script — `typeof "" === "string"` is true, so a blank
+    // authored script would otherwise ship empty captions/transcript instead of
+    // falling back to the deterministic narration the way an absent key does.
     (overrides && overrides.narration && typeof overrides.narration.script === 'string' &&
+      overrides.narration.script.trim() &&
       normalizeAuthoredNarration(overrides.narration)) ||
     buildNarration(title, learningTargets, summaryBullets);
 
@@ -1018,16 +1026,21 @@ async function resolveVideo(args, audioUrl, title, points, narration, deps, dryR
     }
     return { media: null, omission: `could not write composition: ${err.message}` };
   }
-  const vArgs = ['--user', String(args.user), '--file', scenePath, '--duration', String(duration), '--width', '1280', '--height', '720'];
-  // psd-hyperframes accepts https:// or data:audio/ for the muxed narration track.
-  if (audioUrl && (/^https:\/\//i.test(audioUrl) || /^data:audio\//i.test(audioUrl))) {
-    vArgs.push('--audio-url', audioUrl);
-  }
-  const res = run({ skill: 'hyperframes', args: vArgs });
+  let res;
   try {
-    fs.rmSync(sceneDir, { recursive: true, force: true });
-  } catch {
-    /* best-effort cleanup */
+    const vArgs = ['--user', String(args.user), '--file', scenePath, '--duration', String(duration), '--width', '1280', '--height', '720'];
+    // psd-hyperframes accepts https:// or data:audio/ for the muxed narration track.
+    if (audioUrl && (/^https:\/\//i.test(audioUrl) || /^data:audio\//i.test(audioUrl))) {
+      vArgs.push('--audio-url', audioUrl);
+    }
+    res = run({ skill: 'hyperframes', args: vArgs });
+  } finally {
+    // Always clean up the staged composition dir, even if run() throws.
+    try {
+      fs.rmSync(sceneDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
   }
   const out = lastJson(res.stdout);
   if (res.code !== 0 || !out || !out.url) {
