@@ -59,6 +59,33 @@ RUN SHELL_PATH=$(find /opt/chrome-cache -name chrome-headless-shell -type f 2>/d
 # The upstream renderer, pinned.
 RUN npm install -g hyperframes@${HYPERFRAMES_VERSION} && hyperframes --version
 
+# Self-contained ffmpeg/ffprobe. The Debian `ffmpeg` package installed above is a
+# valid amd64 binary that runs fine under local emulation, but its hyperframes
+# preflight FAILS inside the AWS Lambda sandbox — "FFmpeg cannot start / Failed to
+# run /usr/bin/ffmpeg -version" (confirmed live on psd-hyperframes-render-dev,
+# #1175 follow-up). The Debian build dynamically loads 40+ shared libraries
+# (libplacebo, libvulkan, sdl2, GPU/desktop libs, …); that lib-loading is the one
+# thing that differs between working emulation and the failing Lambda. This BtbN
+# build statically bundles all codec libs into the binary (only glibc is dynamic,
+# which the base image provides and Node itself uses here), so it starts cleanly.
+# hyperframes uses it via HYPERFRAMES_FFMPEG_PATH / HYPERFRAMES_FFPROBE_PATH below.
+# Pinned to an immutable BtbN autobuild tag + verified against BtbN's published
+# SHA256 (matches the bun/uv/gh pin+checksum pattern above). xz-utils extracts it.
+ARG FFMPEG_BUILD=autobuild-2026-07-15-14-01
+ARG FFMPEG_ASSET=ffmpeg-n7.1.5-2-g998de74adf-linux64-gpl-7.1
+ARG FFMPEG_SHA256=ccd7b81376598a8730ee4ef1e78716f73308ede970e2e9234f790f799c1d6bf5
+RUN mkdir -p /opt/ffmpeg && cd /tmp && \
+    curl -fsSL -o ffmpeg.tar.xz \
+      "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD}/${FFMPEG_ASSET}.tar.xz" && \
+    echo "${FFMPEG_SHA256}  ffmpeg.tar.xz" | sha256sum -c - && \
+    tar -xJf ffmpeg.tar.xz -C /opt/ffmpeg --strip-components=2 \
+      "${FFMPEG_ASSET}/bin/ffmpeg" "${FFMPEG_ASSET}/bin/ffprobe" && \
+    rm -f ffmpeg.tar.xz && \
+    chmod +x /opt/ffmpeg/ffmpeg /opt/ffmpeg/ffprobe && \
+    /opt/ffmpeg/ffmpeg -version | head -1 && /opt/ffmpeg/ffprobe -version | head -1
+ENV HYPERFRAMES_FFMPEG_PATH=/opt/ffmpeg/ffmpeg
+ENV HYPERFRAMES_FFPROBE_PATH=/opt/ffmpeg/ffprobe
+
 # Lambda handler + its runtime deps (aws-lambda-ric + @aws-sdk/client-s3).
 WORKDIR /var/task
 COPY package.json ./
