@@ -3,6 +3,7 @@
  * deliver.js — psd-html-artifact.deliver
  * Usage:
  *   node deliver.js --user <email> --file <path-to-.html>
+ *   node deliver.js --audit-only --file <path-to-.html>   # a11y gate, no upload
  *
  * Uploads a finished, self-contained HTML artifact to the agent workspace S3
  * bucket under the public `public-images/` prefix and returns an unsigned
@@ -13,6 +14,14 @@
  * in agent-platform-stack.ts), same unguessable-UUID key, same unsigned
  * path-style URL. No OpenAI/credentials/capability machinery — this skill only
  * moves bytes the agent already produced, so it spends no external quota.
+ *
+ * Accessibility gate (Issue #1245): EVERY delivery runs the shared WCAG 2.2 AA
+ * axe-core audit (a11y-audit.js) FIRST and REFUSES to upload any artifact with
+ * critical/serious violations (exit 3, error `a11y_violations`). This is the
+ * same gate psd-learning-page runs before publishing to Atrium, so "all HTML
+ * artifacts are accessible" is enforced centrally rather than per-skill.
+ * `--audit-only` runs just that check (no S3, no `--user` needed) so any caller
+ * can pre-validate a file with the identical gate.
  */
 
 'use strict';
@@ -22,6 +31,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+
+// Shared WCAG 2.2 AA gate — the single audit both this skill and
+// psd-learning-page run (Issue #1245).
+const { auditHtml } = require('./a11y-audit');
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET || '';
@@ -104,20 +117,36 @@ async function uploadAndShare(bytes, userEmail) {
   return { url, key };
 }
 
-async function main() {
-  const args = parseArgs(process.argv);
-  if (args.help) {
-    console.log('Usage: deliver.js --user <email> --file <path-to-.html>');
-    process.exit(0);
-  }
-  if (!validateEmail(args.user)) {
-    fail('--user is required and must be a valid email', 'bad_args');
-  }
+// Refuse an inaccessible artifact. Exit 3 (distinct from bad_args=1) so callers
+// and CI can tell "you gave me bad flags" apart from "the page is inaccessible".
+function failA11y(report) {
+  const ids = report.blocking.map((v) => `${v.id} (${v.impact})`);
+  process.stderr.write(
+    `Error: refusing to deliver — ${report.blocking.length} critical/serious ` +
+      `accessibility violation(s): ${ids.join(', ')}\n`
+  );
+  process.stdout.write(
+    JSON.stringify(
+      {
+        error: 'a11y_violations',
+        message:
+          'Artifact has critical/serious WCAG 2.2 AA violations; fix them and ' +
+          're-run. Contrast/reflow are not checked here — verify those in a browser.',
+        ...report,
+      },
+      null,
+      2
+    ) + '\n'
+  );
+  process.exit(3);
+}
+
+// Read a --file argument, validating it is a non-empty .html under the size cap.
+function readHtmlFile(args) {
   const file = args.file && args.file !== true ? String(args.file) : null;
   if (!file) {
     fail('--file is required (path to the .html artifact)', 'bad_args');
   }
-
   let stat;
   try {
     stat = fs.statSync(file);
@@ -136,22 +165,53 @@ async function main() {
   if (path.extname(file).toLowerCase() !== '.html') {
     fail(`--file must be a .html file (got ${path.extname(file) || '(none)'})`, 'bad_args');
   }
-  // Validate bucket before reading the file so we fail fast on misconfig.
+  return { file, size: stat.size, text: fs.readFileSync(file, 'utf8') };
+}
+
+async function main() {
+  const args = parseArgs(process.argv);
+  if (args.help) {
+    console.log(
+      'Usage: deliver.js --user <email> --file <path-to-.html>\n' +
+        '       deliver.js --audit-only --file <path-to-.html>'
+    );
+    process.exit(0);
+  }
+
+  // --audit-only: run just the shared WCAG 2.2 AA gate and report. No upload,
+  // no --user, no bucket — this is the pre-flight check any skill can call.
+  if (args.audit_only) {
+    const { text } = readHtmlFile(args);
+    const report = await auditHtml(text);
+    if (!report.pass) failA11y(report);
+    emit({ status: 'ok', audit: report });
+    return;
+  }
+
+  if (!validateEmail(args.user)) {
+    fail('--user is required and must be a valid email', 'bad_args');
+  }
+  const { size, text } = readHtmlFile(args);
+  // Validate bucket before the (potentially slow) audit so we fail fast on misconfig.
   if (!WORKSPACE_BUCKET) {
     fail('WORKSPACE_BUCKET env var not set — cannot upload HTML artifact', 'misconfigured');
   }
 
-  const bytes = fs.readFileSync(file);
-  const { url, key } = await uploadAndShare(bytes, args.user);
+  // HARD GATE: never upload an artifact that fails the accessibility floor.
+  const report = await auditHtml(text);
+  if (!report.pass) failA11y(report);
+
+  const { url, key } = await uploadAndShare(Buffer.from(text, 'utf8'), args.user);
 
   emit({
     url,
     s3Key: key,
-    bytes: stat.size,
+    bytes: size,
     contentType: 'text/html; charset=utf-8',
     // Unsigned and non-expiring — anyone with the link can fetch until the
     // object is deleted (manual lifecycle policy may be added later).
     sharing: 'public-by-link',
+    a11y: { pass: true, standard: report.standard, counts: report.counts },
   });
 }
 

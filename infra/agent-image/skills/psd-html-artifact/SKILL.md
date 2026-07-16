@@ -112,12 +112,27 @@ the agent.
 **Write the file to `/tmp/`** with a short, descriptive, kebab-case filename, e.g.
 `/tmp/onboarding-plan.html`. `/tmp` is writable; the skills directory is read-only.
 
-### 7. Run the pre-flight self-audit gate
+### 7. Run the pre-flight self-audit gate (incl. the enforced WCAG 2.2 AA a11y gate)
 
 Before delivering, run every check in `references/preflight-audit.md` against the file
 you just wrote (grep it). Fix every failure. Then delete the pre-flight comment block
 from the scaffold. Report a one-line pass summary, e.g.:
 `Audit: 1 accent locked · 2 eyebrows / 7 sections · all buttons one-line · contrast ok · reduced-motion present.`
+
+**Accessibility is enforced, not advisory.** These pages are district web content, so
+they must meet **WCAG 2.2 Level AA** (the DOJ ADA Title II legal floor is 2.1 AA; 2.2 AA
+is a backward-compatible superset). `deliver.js` runs the shared **axe-core** gate
+automatically and **refuses to upload** any artifact with critical/serious violations.
+Run it yourself before delivering and fix anything it flags:
+
+```bash
+node /opt/psd-skills/psd-html-artifact/deliver.js --audit-only --file /tmp/<name>.html
+```
+
+The gate (jsdom-based) covers structure / ARIA / labels / `lang` / names. **Contrast**
+and **200%-zoom reflow** it cannot compute — verify those by eye (or in a browser). This
+same gate is what `psd-learning-page` runs before publishing to Atrium, so accessibility
+is a property of this shared generator that every artifact-producing skill inherits.
 
 ### 8. Deliver and hand off
 
@@ -169,4 +184,8 @@ Markdown, so artifacts are disposable — regenerate rather than version them.
 
 - **`bad_args`** — missing/invalid `--user` or `--file`, non-`.html` file, empty file, or
   file over 25 MB. Fix the argument and retry.
+- **`a11y_violations`** (exit 3) — the artifact has critical/serious WCAG 2.2 AA violations
+  and was **not** uploaded. The JSON lists each blocking rule (`id`, `impact`, `helpUrl`).
+  Fix them in the HTML and re-deliver — do not work around the gate. (Contrast/reflow are
+  not in this check; verify those in a browser.)
 - **`misconfigured`** — `WORKSPACE_BUCKET` env var not set. Surface to the user; do not retry.
