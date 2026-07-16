@@ -28,8 +28,9 @@ import {
 } from "@/lib/db/drizzle"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq, sql } from "drizzle-orm"
-import { users } from "@/lib/db/schema"
-import type { UserProfile } from "@/lib/db/types/jsonb"
+import { nexusUserPreferences, users } from "@/lib/db/schema"
+import type { NexusUserSettings, UserProfile } from "@/lib/db/types/jsonb"
+import { z } from "zod"
 import {
   generateApiKey,
   revokeApiKey,
@@ -71,6 +72,101 @@ export interface CreateApiKeyInput {
   name: string
   scopes: string[]
   expiresAt?: Date
+}
+
+export interface NexusChatPreferences {
+  mode: "standard" | "advanced"
+  family: "auto" | "openai" | "anthropic" | "google"
+}
+
+const NexusChatPreferencesSchema = z.object({
+  mode: z.enum(["standard", "advanced"]),
+  family: z.enum(["auto", "openai", "anthropic", "google"]),
+})
+
+const DEFAULT_NEXUS_CHAT_PREFERENCES: NexusChatPreferences = {
+  mode: "standard",
+  family: "auto",
+}
+
+export async function getNexusChatPreferences(): Promise<ActionState<NexusChatPreferences>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getNexusChatPreferences")
+  try {
+    const session = await getServerSession()
+    if (!session) throw ErrorFactories.authNoSession()
+    const userId = await getUserIdByCognitoSubAsNumber(session.sub)
+    if (!userId) throw ErrorFactories.dbRecordNotFound("users", session.sub)
+
+    const [preference] = await executeQuery(
+      db => db.select({ settings: nexusUserPreferences.settings })
+        .from(nexusUserPreferences)
+        .where(eq(nexusUserPreferences.userId, userId))
+        .limit(1),
+      "getNexusChatPreferences"
+    )
+    const parsed = NexusChatPreferencesSchema.safeParse({
+      mode: preference?.settings?.nexusMode ?? DEFAULT_NEXUS_CHAT_PREFERENCES.mode,
+      family: preference?.settings?.preferredModelFamily ?? DEFAULT_NEXUS_CHAT_PREFERENCES.family,
+    })
+    timer({ status: "success" })
+    return createSuccess(parsed.success ? parsed.data : DEFAULT_NEXUS_CHAT_PREFERENCES)
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to load Nexus preferences", {
+      context: "getNexusChatPreferences", requestId, operation: "getNexusChatPreferences",
+    })
+  }
+}
+
+export async function updateNexusChatPreferences(
+  input: NexusChatPreferences
+): Promise<ActionState<NexusChatPreferences>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("updateNexusChatPreferences")
+  const log = createLogger({ requestId, action: "updateNexusChatPreferences" })
+  try {
+    const parsed = NexusChatPreferencesSchema.safeParse(input)
+    if (!parsed.success) {
+      throw ErrorFactories.validationFailed(parsed.error.issues.map(issue => ({
+        field: issue.path.join("."), message: issue.message,
+      })))
+    }
+    const session = await getServerSession()
+    if (!session) throw ErrorFactories.authNoSession()
+    const userId = await getUserIdByCognitoSubAsNumber(session.sub)
+    if (!userId) throw ErrorFactories.dbRecordNotFound("users", session.sub)
+
+    const [existing] = await executeQuery(
+      db => db.select({ settings: nexusUserPreferences.settings })
+        .from(nexusUserPreferences)
+        .where(eq(nexusUserPreferences.userId, userId))
+        .limit(1),
+      "getNexusChatPreferencesForUpdate"
+    )
+    const settings: NexusUserSettings = {
+      ...(existing?.settings ?? {}),
+      nexusMode: parsed.data.mode,
+      preferredModelFamily: parsed.data.family,
+    }
+    await executeQuery(
+      db => db.insert(nexusUserPreferences)
+        .values({ userId, settings, updatedAt: new Date() })
+        .onConflictDoUpdate({
+          target: nexusUserPreferences.userId,
+          set: { settings, updatedAt: new Date() },
+        }),
+      "updateNexusChatPreferences"
+    )
+    timer({ status: "success" })
+    log.info("Nexus chat preferences updated", { userId, ...parsed.data })
+    return createSuccess(parsed.data)
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to update Nexus preferences", {
+      context: "updateNexusChatPreferences", requestId, operation: "updateNexusChatPreferences",
+    })
+  }
 }
 
 // ============================================

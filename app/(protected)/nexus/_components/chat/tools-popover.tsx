@@ -159,6 +159,7 @@ export function ToolsPopover({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
+          data-testid="nexus-tools-control"
           variant="ghost"
           size="sm"
           className={cn(

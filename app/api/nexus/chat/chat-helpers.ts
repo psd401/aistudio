@@ -368,8 +368,9 @@ export async function saveAssistantMessage(params: {
   finishReason?: string;
   toolCalls?: ToolCallData[];
   dbModelId: number;
+  metadata?: Record<string, unknown>;
 }): Promise<void> {
-  const { conversationId, text, usage, finishReason, toolCalls, dbModelId } = params;
+  const { conversationId, text, usage, finishReason, toolCalls, dbModelId, metadata = {} } = params;
 
   if (!hasMessageContent(text, toolCalls)) {
     log.warn('No text or tool calls to save for assistant message');
@@ -402,7 +403,7 @@ export async function saveAssistantMessage(params: {
         modelId: dbModelId,
         tokenUsage: sql`${safeJsonbStringify(tokenUsage)}::jsonb`,
         finishReason: finishReason || 'stop',
-        metadata: sql`${safeJsonbStringify({})}::jsonb`,
+        metadata: sql`${safeJsonbStringify(metadata)}::jsonb`,
         createdAt: now,
         updatedAt: now
       });
@@ -442,8 +443,9 @@ export async function saveConversationSteps(params: {
   dbModelId: number;
   usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
   finishReason?: string;
+  metadata?: Record<string, unknown>;
 }): Promise<void> {
-  const { conversationId, steps, dbModelId, usage, finishReason } = params;
+  const { conversationId, steps, dbModelId, usage, finishReason, metadata = {} } = params;
 
   // Build all row data before opening a transaction (pure computation)
   type RowData = {
@@ -499,7 +501,7 @@ export async function saveConversationSteps(params: {
         // conversation level in the stats update below.
         tokenUsage: sql`${safeJsonbStringify({ promptTokens: 0, completionTokens: 0, totalTokens: 0 })}::jsonb`,
         finishReason: row.stepFinishReason,
-        metadata: sql`${safeJsonbStringify({})}::jsonb`,
+        metadata: sql`${safeJsonbStringify({ ...metadata, routerStepIndex: row.stepIndex })}::jsonb`,
         createdAt,
         updatedAt: baseTime,
       });

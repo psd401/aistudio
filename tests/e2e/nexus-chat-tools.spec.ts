@@ -24,7 +24,7 @@ import { test, expect } from './fixtures'
 
 function chatBody(enabledTools: string[]) {
   return {
-    messages: [{ role: 'user', content: 'hello' }],
+    messages: [{ id: 'tool-gate-message', role: 'user', content: 'hello' }],
     modelId: 'gpt-4o',
     provider: 'openai',
     enabledTools,

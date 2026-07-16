@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState, startTransition } from "react"
-import { useForm } from "react-hook-form"
+import { useForm, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import {
@@ -69,6 +69,8 @@ const commonSettings = [
   { key: "GOOGLE_API_KEY", category: "ai_providers", description: "Google AI API key for Gemini models", isSecret: true },
   { key: "OPENAI_API_KEY", category: "ai_providers", description: "OpenAI API key for GPT models", isSecret: true },
   { key: "LATIMER_API_KEY", category: "ai_providers", description: "Latimer.ai API key", isSecret: true },
+  { key: "NEXUS_ROUTER_MODE", category: "ai", description: "Nexus model router mode: active, shadow, or off", isSecret: false },
+  { key: "NEXUS_ROUTER_CONFIG_V1", category: "ai", description: "JSON configuration for Nexus classifier, family/tier candidates, and image/PSD-data specialists", isSecret: false },
   { key: "S3_BUCKET", category: "storage", description: "AWS S3 bucket name for document storage", isSecret: false },
   { key: "AWS_REGION", category: "storage", description: "AWS region for S3 operations", isSecret: false },
   { key: "GITHUB_ISSUE_TOKEN", category: "external_services", description: "GitHub personal access token for creating issues", isSecret: true },
@@ -97,6 +99,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
       isSecret: false
     }
   })
+  const selectedKey = useWatch({ control: form.control, name: "key" })
 
   useEffect(() => {
     if (!open) {
@@ -233,8 +236,8 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
                           ? "Enter new value (leave empty to keep current value)" 
                           : "Enter the setting value"
                       }
-                      className="font-mono resize-none"
-                      rows={3}
+                      className="font-mono resize-y"
+                      rows={selectedKey === "NEXUS_ROUTER_CONFIG_V1" ? 14 : 3}
                     />
                   </FormControl>
                   <FormDescription>

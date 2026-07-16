@@ -1,17 +1,19 @@
 'use client'
 
-import { ModelSelectorCompact } from './model-selector-compact'
+import { ModelFamilySelector } from './model-family-selector'
 import { ToolsPopover } from './tools-popover'
 import { SkillsPopover } from './skills-popover'
 import { MCPPopover } from './mcp-popover'
 import type { SelectAiModel } from '@/types'
+import type { NexusExperienceMode, NexusModelFamily } from '@/lib/nexus/model-router/types'
 
 interface ComposerControlsProps {
   // Model selection
-  models: SelectAiModel[]
   selectedModel: SelectAiModel | null
-  onModelChange: (model: SelectAiModel) => void
-  isLoadingModels?: boolean
+  routingMode: NexusExperienceMode
+  modelFamily: NexusModelFamily
+  onRoutingModeChange: (mode: NexusExperienceMode) => void
+  onModelFamilyChange: (family: NexusModelFamily) => void
   // Tool selection
   enabledTools: string[]
   onToolsChange: (tools: string[]) => void
@@ -27,10 +29,11 @@ interface ComposerControlsProps {
  * Positioned above the input area like Claude.ai.
  */
 export function ComposerControls({
-  models,
   selectedModel,
-  onModelChange,
-  isLoadingModels = false,
+  routingMode,
+  modelFamily,
+  onRoutingModeChange,
+  onModelFamilyChange,
   enabledTools,
   onToolsChange,
   enabledConnectors = [],
@@ -39,34 +42,26 @@ export function ComposerControls({
 }: ComposerControlsProps) {
   return (
     <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border/50">
-      {/* Model Selector */}
-      <ModelSelectorCompact
-        models={models}
-        selectedModel={selectedModel}
-        onModelChange={onModelChange}
-        isLoading={isLoadingModels}
+      <ModelFamilySelector
+        mode={routingMode}
+        family={modelFamily}
+        onModeChange={onRoutingModeChange}
+        onFamilyChange={onModelFamilyChange}
       />
 
-      {/* Separator */}
-      <div className="h-4 w-px bg-border mx-1" />
-
-      {/* Tools */}
-      <ToolsPopover
-        selectedModel={selectedModel}
-        enabledTools={enabledTools}
-        onToolsChange={onToolsChange}
-      />
-
-      {/* Skills (placeholder) */}
-      <SkillsPopover disabled />
-
-      {/* MCP Connections */}
-      <MCPPopover
-        enabledConnectors={enabledConnectors}
-        onConnectorsChange={onConnectorsChange ?? (() => undefined)}
-        disabled={!onConnectorsChange || !selectedModel}
-        onReconnectSuccess={onReconnectSuccess}
-      />
+      {routingMode === 'advanced' && (
+        <>
+          <div className="h-4 w-px bg-border mx-1" />
+          <ToolsPopover selectedModel={selectedModel} enabledTools={enabledTools} onToolsChange={onToolsChange} />
+          <SkillsPopover disabled />
+          <MCPPopover
+            enabledConnectors={enabledConnectors}
+            onConnectorsChange={onConnectorsChange ?? (() => undefined)}
+            disabled={!onConnectorsChange || !selectedModel}
+            onReconnectSuccess={onReconnectSuccess}
+          />
+        </>
+      )}
     </div>
   )
 }

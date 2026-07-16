@@ -222,8 +222,9 @@ export async function persistImageExchange(params: {
     estimatedCost?: number;
   };
   dbModelId: number;
+  routingMetadata?: Record<string, unknown>;
 }): Promise<void> {
-  const { conversationId, imagePrompt, imageResult, dbModelId } = params;
+  const { conversationId, imagePrompt, imageResult, dbModelId, routingMetadata = {} } = params;
 
   // Build assistant parts/content outside the transaction (pure computation).
   const messageParts: Array<{
@@ -275,7 +276,8 @@ export async function persistImageExchange(params: {
       modelId: dbModelId,
       metadata: sql`${safeJsonbStringify({
         generationType: 'image',
-        estimatedCost: imageResult.estimatedCost
+        estimatedCost: imageResult.estimatedCost,
+        routing: routingMetadata,
       })}::jsonb`,
       createdAt: new Date()
     });
@@ -528,8 +530,9 @@ export function createImageStreamResponse(params: {
   conversationTitle: string;
   isNewConversation: boolean;
   requestId: string;
+  routingMetadata?: Record<string, unknown>;
 }): Response {
-  const { imageResult, conversationId, conversationTitle, isNewConversation, requestId } = params;
+  const { imageResult, conversationId, conversationTitle, isNewConversation, requestId, routingMetadata } = params;
 
   let responseContent = '';
   if (imageResult.altText && imageResult.altText.trim()) {
@@ -547,6 +550,10 @@ export function createImageStreamResponse(params: {
 
   if (isNewConversation) {
     responseHeaders['X-Conversation-Title'] = encodeURIComponent(conversationTitle);
+  }
+  if (routingMetadata) {
+    const encodedRouting = encodeURIComponent(JSON.stringify(routingMetadata));
+    if (encodedRouting.length <= 4096) responseHeaders['X-Nexus-Routing'] = encodedRouting;
   }
 
   return createUIMessageStreamResponse({

@@ -51,6 +51,12 @@ import {
 } from '@/lib/skills/skill-tool-enforcement';
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
+import { routeNexusRequest } from '@/lib/nexus/model-router/router';
+import {
+  nexusExperienceModeSchema,
+  nexusModelFamilySchema,
+  type NexusRoutingMetadata,
+} from '@/lib/nexus/model-router/types';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -81,8 +87,9 @@ function createOnFinishCallback(params: {
   connectorToolResults: McpConnectorToolsResult[];
   log: ReturnType<typeof createLogger>;
   timer: (data: Record<string, unknown>) => void;
+  routingMetadata: NexusRoutingMetadata;
 }) {
-  const { conversationId, dbModelId, connectorToolResults, log, timer } = params;
+  const { conversationId, dbModelId, connectorToolResults, log, timer, routingMetadata } = params;
 
   return async ({
     text,
@@ -116,9 +123,15 @@ function createOnFinishCallback(params: {
         // assistant message to preserve the correct turn structure for replay.
         // Consolidating into one message breaks convertToModelMessages — it cannot
         // reconstruct multi-turn tool_use/tool_result pairs. (Issue #977)
-        await saveConversationSteps({ conversationId, steps, dbModelId, usage, finishReason });
+        await saveConversationSteps({
+          conversationId, steps, dbModelId, usage, finishReason,
+          metadata: { routing: routingMetadata },
+        });
       } else {
-        await saveAssistantMessage({ conversationId, text, usage, finishReason, toolCalls, dbModelId });
+        await saveAssistantMessage({
+          conversationId, text, usage, finishReason, toolCalls, dbModelId,
+          metadata: { routing: routingMetadata },
+        });
       }
     } catch (saveError) {
       log.error('Failed to save assistant message', { error: saveError, conversationId });
@@ -188,6 +201,7 @@ async function executeStreaming(params: {
   log: ReturnType<typeof createLogger>;
   timer: (data: Record<string, unknown>) => void;
   precomputedInputTokenMappings?: TokenMapping[];
+  routingMetadata: NexusRoutingMetadata;
 }): Promise<Response> {
   const {
     messages, modelConfig, userId, sessionId, conversationId,
@@ -195,7 +209,7 @@ async function executeStreaming(params: {
     connectorToolResults, failedConnectorIds, skillInstructions, skillName,
     workspaceTools, workspacePromptFragment,
     reasoningEffort, responseMode,
-    requestId, dbModelId, log, timer, precomputedInputTokenMappings
+    requestId, dbModelId, log, timer, precomputedInputTokenMappings, routingMetadata
   } = params;
 
   const systemPrompt = buildNexusSystemPrompt(skillInstructions, skillName, workspacePromptFragment);
@@ -235,7 +249,9 @@ async function executeStreaming(params: {
     options: { reasoningEffort, responseMode },
     precomputedInputTokenMappings,
     callbacks: {
-      onFinish: createOnFinishCallback({ conversationId, dbModelId, connectorToolResults, log, timer }),
+      onFinish: createOnFinishCallback({
+        conversationId, dbModelId, connectorToolResults, log, timer, routingMetadata,
+      }),
       onError: async (error: Error) => {
         log.warn('Stream error — closing MCP clients', { conversationId, error: error.message });
         await closeMcpClients(connectorToolResults, log, 'onError');
@@ -261,6 +277,9 @@ async function executeStreaming(params: {
     'X-Unified-Streaming': 'true',
     'X-Supports-Reasoning': streamResponse.capabilities.supportsReasoning.toString()
   };
+
+  const encodedRouting = encodeURIComponent(JSON.stringify(routingMetadata));
+  if (encodedRouting.length <= 4096) responseHeaders['X-Nexus-Routing'] = encodedRouting;
 
   if (!conversationIdValue && conversationId) {
     responseHeaders['X-Conversation-Id'] = conversationId;
@@ -321,7 +340,9 @@ const ChatRequestSchema = z.object({
   // only — the tool builder canView/canEdit-gates server-side; cap length like other params.
   workspaceId: z.string().min(1).max(200).optional(),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
-  responseMode: z.enum(['standard', 'priority', 'flex']).optional()
+  responseMode: z.enum(['standard', 'priority', 'flex']).optional(),
+  nexusMode: nexusExperienceModeSchema.default('standard'),
+  modelFamily: nexusModelFamilySchema.default('auto'),
 });
 
 /**
@@ -337,10 +358,11 @@ async function handleImageGeneration(params: {
   requestId: string;
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
+  routingMetadata: NexusRoutingMetadata;
 }): Promise<Response> {
   const {
     messages, modelConfig, modelId, dbModelId, userId,
-    existingConversationId, requestId, timer, log
+    existingConversationId, requestId, timer, log, routingMetadata
   } = params;
 
   log.info('Image generation model detected - using direct API call');
@@ -408,7 +430,10 @@ async function handleImageGeneration(params: {
     // Persist the user prompt + assistant image + stats atomically (REV-DB-047 /
     // REV-COR-220). Kept after generation (a side effect) so a generation failure
     // leaves no partial rows and no desynced message_count.
-    await persistImageExchange({ conversationId, imagePrompt, imageResult, dbModelId });
+    await persistImageExchange({
+      conversationId, imagePrompt, imageResult, dbModelId,
+      routingMetadata: { ...routingMetadata },
+    });
 
     timer({ status: 'success', conversationId });
 
@@ -417,7 +442,8 @@ async function handleImageGeneration(params: {
       conversationId,
       conversationTitle,
       isNewConversation: !existingConversationId,
-      requestId
+      requestId,
+      routingMetadata: { ...routingMetadata },
     });
 
   } catch (imageError) {
@@ -470,10 +496,11 @@ async function handleDeepResearch(params: {
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
   abortSignal: AbortSignal;
+  routingMetadata: NexusRoutingMetadata;
 }): Promise<Response> {
   const {
     messages, modelConfig, modelId, dbModelId, userId,
-    existingConversationId, requestId, timer, log, abortSignal,
+    existingConversationId, requestId, timer, log, abortSignal, routingMetadata,
   } = params;
 
   log.info('Deep Research model detected — using Interactions API', {
@@ -524,6 +551,7 @@ async function handleDeepResearch(params: {
     'X-Request-Id': requestId,
     'X-Conversation-Id': conversationId,
     'X-Deep-Research': 'true',
+    'X-Nexus-Routing': encodeURIComponent(JSON.stringify(routingMetadata)),
   };
   if (isNewConversation) {
     responseHeaders['X-Conversation-Title'] = encodeURIComponent(conversationTitle);
@@ -590,6 +618,7 @@ async function handleDeepResearch(params: {
               text: persisted,
               finishReason: 'stop',
               dbModelId,
+              metadata: { routing: routingMetadata },
             });
           } catch (persistErr) {
             log.error('Failed to persist Deep Research message', {
@@ -647,6 +676,7 @@ async function routeSpecialModel(params: {
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
   abortSignal: AbortSignal;
+  routingMetadata: NexusRoutingMetadata;
 }): Promise<Response | null> {
   if (params.isImageGenerationModel) {
     // Note: abortSignal is intentionally not forwarded to handleImageGeneration.
@@ -663,6 +693,7 @@ async function routeSpecialModel(params: {
       requestId: params.requestId,
       timer: params.timer,
       log: params.log,
+      routingMetadata: params.routingMetadata,
     });
   }
   if (params.isDeepResearchModel) {
@@ -677,6 +708,7 @@ async function routeSpecialModel(params: {
       timer: params.timer,
       log: params.log,
       abortSignal: params.abortSignal,
+      routingMetadata: params.routingMetadata,
     });
   }
   return null;
@@ -730,6 +762,37 @@ function validateConversationId(id: string | undefined, requestId: string, log: 
   return null;
 }
 
+function requestHasImageInput(messages: z.infer<typeof ChatRequestSchema>['messages']): boolean {
+  const lastUserMessage = [...messages].reverse().find(message => message.role === 'user');
+  return lastUserMessage?.parts?.some(part => {
+    if (!part || typeof part !== 'object') return false;
+    const value = part as Record<string, unknown>;
+    const mimeType = value.mimeType ?? value.mediaType;
+    return value.type === 'image'
+      || (value.type === 'file' && typeof mimeType === 'string' && mimeType.startsWith('image/'));
+  }) ?? false;
+}
+
+function withProtectedLastUserText(
+  messages: z.infer<typeof ChatRequestSchema>['messages'],
+  protectedText: string
+): z.infer<typeof ChatRequestSchema>['messages'] {
+  const lastUserIndex = messages.findLastIndex(message => message.role === 'user');
+  if (lastUserIndex < 0) return messages;
+  return messages.map((message, index) => {
+    if (index !== lastUserIndex) return message;
+    const nonTextParts = (message.parts ?? []).filter(part => {
+      if (!part || typeof part !== 'object') return true;
+      return (part as Record<string, unknown>).type !== 'text';
+    });
+    return {
+      ...message,
+      content: protectedText,
+      parts: [{ type: 'text', text: protectedText }, ...nonTextParts],
+    };
+  });
+}
+
 /**
  * Authenticate user and return user ID or error response
  */
@@ -752,6 +815,59 @@ async function authenticateUser(
 
   const userRoleNames = currentUser.data.roles.map(r => r.name);
   return { userId: currentUser.data.user.id, userRoleNames, session };
+}
+
+/**
+ * Protect classifier traffic with the same K-12 guardrail and PII tokenization
+ * boundary as response-model traffic. The main stream performs its own pass so
+ * it can retain token mappings for output detokenization; this preflight exists
+ * specifically to ensure the internal router never receives raw PII.
+ */
+async function prepareRoutingText(text: string, sessionId: string): Promise<{
+  text: string;
+  contentModified: boolean;
+}> {
+  if (!text.trim()) return { text, contentModified: false };
+  const result = await getContentSafetyService().processInput(text, sessionId);
+  if (!result.allowed) {
+    throw new ContentSafetyBlockedError(
+      result.blockedMessage || 'Content blocked by safety guardrails',
+      result.blockedCategories || [],
+      'input'
+    );
+  }
+  return { text: result.processedContent, contentModified: result.contentModified };
+}
+
+async function resolveRequestRouting(args: {
+  messages: z.infer<typeof ChatRequestSchema>['messages'];
+  fallbackModelId: string;
+  nexusMode: z.infer<typeof nexusExperienceModeSchema>;
+  modelFamily: z.infer<typeof nexusModelFamilySchema>;
+  manuallyEnabledConnectors: string[];
+  userId: number;
+  sessionId: string;
+}): Promise<{
+  routing: Awaited<ReturnType<typeof routeNexusRequest>>;
+  specialRouteMessages: z.infer<typeof ChatRequestSchema>['messages'];
+}> {
+  const rawRoutingText = extractImagePrompt(args.messages);
+  const protectedRoutingInput = await prepareRoutingText(rawRoutingText, args.sessionId);
+  const routing = await routeNexusRequest({
+    text: protectedRoutingInput.text,
+    fallbackModelId: args.fallbackModelId,
+    experienceMode: args.nexusMode,
+    requestedFamily: args.nexusMode === 'advanced' ? args.modelFamily : 'auto',
+    enabledConnectorIds: args.manuallyEnabledConnectors,
+    userId: args.userId,
+    hasImageInput: requestHasImageInput(args.messages),
+  });
+  return {
+    routing,
+    specialRouteMessages: protectedRoutingInput.contentModified
+      ? withProtectedLastUserText(args.messages, protectedRoutingInput.text)
+      : args.messages,
+  };
 }
 
 /**
@@ -1251,21 +1367,48 @@ export async function POST(req: Request) {
     const validation = validateRequest(body, requestId, log);
     if (!validation.valid) return validation.error;
 
-    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [], enabledConnectors = [], skillId, workspaceId } = validation.data;
+    const {
+      messages,
+      modelId: fallbackModelId,
+      conversationId: existingConversationId,
+      enabledTools = [],
+      enabledConnectors: manuallyEnabledConnectors = [],
+      skillId,
+      workspaceId,
+      nexusMode,
+      modelFamily,
+    } = validation.data;
     const conversationIdValue = existingConversationId || undefined;
 
     // 2. Validate conversation ID format
     const convIdError = validateConversationId(conversationIdValue, requestId, log);
     if (convIdError) return convIdError;
 
-    log.info('Request parsed', sanitizeForLogging({ messageCount: messages.length, modelId, provider, hasConversationId: !!conversationIdValue, enabledTools }));
+    log.info('Request parsed', sanitizeForLogging({
+      messageCount: messages.length, fallbackModelId, nexusMode, modelFamily,
+      hasConversationId: !!conversationIdValue, enabledTools,
+    }));
 
     // 3. Authenticate user
     const authResult = await authenticateUser(log, timer);
     if ('error' in authResult) return authResult.error;
     const { userId, userRoleNames, session } = authResult;
 
-    // 4. Get model configuration
+    // 4. Classify and resolve the model. In shadow mode this records the proposed
+    // route while continuing to execute the client's existing safe fallback.
+    const { routing, specialRouteMessages } = await resolveRequestRouting({
+      messages,
+      fallbackModelId,
+      nexusMode,
+      modelFamily,
+      manuallyEnabledConnectors,
+      userId,
+      sessionId: session.sub,
+    });
+    const modelId = routing.modelId;
+    const enabledConnectors = routing.connectorIds;
+
+    // 4a. Get selected model configuration
     const modelResult = await getValidatedModelConfig(modelId, log);
     if ('error' in modelResult) return modelResult.error;
     const { modelConfig, dbModelId, isImageGenerationModel, isDeepResearchModel } = modelResult;
@@ -1296,16 +1439,18 @@ export async function POST(req: Request) {
     // the standard streaming pipeline.
     const specialRoute = await routeSpecialModel({
       isImageGenerationModel, isDeepResearchModel,
-      messages, modelConfig, modelId, dbModelId, userId,
+      messages: specialRouteMessages, modelConfig, modelId, dbModelId, userId,
       existingConversationId: conversationIdValue,
       requestId, timer, log,
       abortSignal: req.signal,
+      routingMetadata: routing.metadata,
     });
     if (specialRoute) return specialRoute;
 
     // 6. Setup conversation and save user message
     const convSetup = await setupConversation({
-      conversationIdValue, messages, userId, provider, modelId, dbModelId, requestId, log
+      conversationIdValue, messages, userId, provider: modelConfig.provider,
+      modelId, dbModelId, requestId, log
     });
     if ('error' in convSetup) return convSetup.error;
     const { conversationId, conversationTitle } = convSetup;
@@ -1381,6 +1526,7 @@ export async function POST(req: Request) {
       log,
       timer,
       precomputedInputTokenMappings,
+      routingMetadata: routing.metadata,
     });
 
   } catch (error) {

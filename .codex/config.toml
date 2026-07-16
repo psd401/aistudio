@@ -1,0 +1,24 @@
+[mcp_servers.awslabs-postgres-mcp-server]
+command = "uvx"
+args = [
+    "awslabs.postgres-mcp-server@1.0.9",
+    "--resource_arn",
+    "arn:aws:rds:us-east-1:390844780692:cluster:aistudio-dev-cluster",
+    "--secret_arn",
+    "arn:aws:secretsmanager:us-east-1:390844780692:secret:DbSecret685A0FA5-Tby3OSNjVCjb-i3YrMv",
+    "--database",
+    "aistudio",
+    "--region",
+    "us-east-1",
+    "--readonly",
+    "True",
+]
+
+[mcp_servers.awslabs-postgres-mcp-server.env]
+AWS_PROFILE = "default"
+AWS_REGION = "us-east-1"
+FASTMCP_LOG_LEVEL = "ERROR"
+
+[mcp_servers.playwright]
+command = "bunx"
+args = ["@playwright/mcp@latest"]

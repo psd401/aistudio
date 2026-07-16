@@ -1,0 +1,278 @@
+import { eq } from "drizzle-orm"
+import { getNexusEnabledModels } from "@/lib/db/drizzle"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { nexusMcpServers } from "@/lib/db/schema"
+import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access"
+import { createLogger } from "@/lib/logger"
+import { hasCapability } from "@/lib/ai/capability-utils"
+import { classifyNexusRequest } from "./classifier"
+import { getNexusRouterConfig } from "./config"
+import type {
+  NexusExperienceMode,
+  NexusModelFamily,
+  NexusRouteResult,
+  NexusRouterConfig,
+  NexusRouterIntent,
+  NexusRouterTier,
+} from "./types"
+
+const log = createLogger({ module: "nexus-model-router" })
+
+type NexusModelRow = Awaited<ReturnType<typeof getNexusEnabledModels>>[number]
+type ConcreteFamily = Exclude<NexusModelFamily, "auto">
+const EXECUTABLE_PROVIDERS = new Set(["openai", "google", "amazon-bedrock", "azure", "latimer"])
+
+function isSpecialistOnlyModel(model: NexusModelRow): boolean {
+  return hasCapability(model.capabilities, "imageGeneration")
+    || hasCapability(model.capabilities, "deepResearch")
+}
+
+export function inferFamily(model: NexusModelRow): ConcreteFamily | null {
+  const value = `${model.provider} ${model.modelId}`.toLowerCase()
+  if (value.includes("google") || value.includes("gemini")) return "google"
+  if (value.includes("anthropic") || value.includes("claude")) return "anthropic"
+  if (value.includes("openai") || value.includes("gpt-") || value.includes("azure")) return "openai"
+  return null
+}
+
+export function inferTier(model: NexusModelRow): NexusRouterTier {
+  const configured = model.providerMetadata?.nexusRouterTier
+  if (configured === "light" || configured === "medium" || configured === "high") return configured
+  const value = `${model.name} ${model.modelId}`.toLowerCase()
+  if (/haiku|flash-lite|flash lite|nano|mini|luna|micro/.test(value)) return "light"
+  if (/opus|fable|pro|sol|o3|o1|high/.test(value)) return "high"
+  return "medium"
+}
+
+function configuredCandidates(
+  config: NexusRouterConfig,
+  family: NexusModelFamily,
+  tier: NexusRouterTier,
+  intent: NexusRouterIntent
+): string[] {
+  if (intent === "image") return config.specialists.imageModels
+  if (intent === "instruction" && family === "auto" && config.specialists.instructionModels.length > 0) {
+    return config.specialists.instructionModels
+  }
+  if (family === "auto") return config.auto[tier]
+  return config.families[family][tier]
+}
+
+function firstAccessibleModel(
+  candidates: NexusModelRow[],
+  accessibleIds: Set<string>
+): NexusModelRow | null {
+  for (const candidate of candidates) {
+    if (!EXECUTABLE_PROVIDERS.has(candidate.provider.toLowerCase())) continue
+    if (accessibleIds.has(String(candidate.id))) return candidate
+  }
+  return null
+}
+
+function selectModel(args: {
+  models: NexusModelRow[]
+  config: NexusRouterConfig
+  family: NexusModelFamily
+  tier: NexusRouterTier
+  intent: NexusRouterIntent
+  fallbackModelId: string
+  accessibleIds: Set<string>
+}): { model: NexusModelRow; fallbackUsed: boolean } {
+  const configuredIds = configuredCandidates(args.config, args.family, args.tier, args.intent)
+  const configured = configuredIds
+    .map(id => args.models.find(model => model.modelId === id || String(model.id) === id))
+    .filter((model): model is NexusModelRow => {
+      if (!model) return false
+      if (args.intent === "image") {
+        return (model.provider === "google" || model.provider === "openai")
+          && hasCapability(model.capabilities, "imageGeneration")
+      }
+      if (isSpecialistOnlyModel(model)) return false
+      if (args.family !== "auto") return inferFamily(model) === args.family
+      if (args.intent === "instruction") return inferFamily(model) === "google"
+      // Standard/Auto is deliberately provider-neutral. Explicit candidates can
+      // therefore prefer Bedrock-native Nova or open-weight models even though
+      // they are not one of the three user-facing Advanced families.
+      return true
+    })
+  const configuredSelection = firstAccessibleModel(configured, args.accessibleIds)
+  if (configuredSelection) return { model: configuredSelection, fallbackUsed: false }
+
+  let inferred = args.models.filter(model => inferTier(model) === args.tier)
+  if (args.intent === "image") {
+    inferred = args.models.filter(model =>
+      (model.provider === "google" || model.provider === "openai")
+      && hasCapability(model.capabilities, "imageGeneration")
+    )
+  } else if (args.family === "auto" && args.intent === "instruction") {
+    inferred = inferred.filter(model => inferFamily(model) === "google" && !isSpecialistOnlyModel(model))
+  } else if (args.family !== "auto") {
+    inferred = inferred.filter(model => inferFamily(model) === args.family && !isSpecialistOnlyModel(model))
+  } else {
+    inferred = inferred.filter(model => !isSpecialistOnlyModel(model))
+  }
+  const inferredSelection = firstAccessibleModel(inferred, args.accessibleIds)
+  if (inferredSelection) return { model: inferredSelection, fallbackUsed: configuredIds.length > 0 }
+
+  if (args.intent !== "image") {
+    const tierPreference = [args.tier, "medium", "light", "high"] as const
+    const tierRank = new Map([...new Set(tierPreference)].map((tier, index) => [tier, index]))
+    const adjacentTierCandidates = args.models
+      .filter(model => {
+        const family = inferFamily(model)
+        if (isSpecialistOnlyModel(model)) return false
+        if (args.family !== "auto") return family === args.family
+        if (args.intent === "instruction") return family === "google"
+        return true
+      })
+      .sort((left, right) =>
+        (tierRank.get(inferTier(left)) ?? 99) - (tierRank.get(inferTier(right)) ?? 99)
+      )
+    const adjacentSelection = firstAccessibleModel(adjacentTierCandidates, args.accessibleIds)
+    if (adjacentSelection) return { model: adjacentSelection, fallbackUsed: true }
+  }
+
+  if (args.intent === "image") {
+    throw new Error("No accessible Nexus image-generation model is available")
+  }
+  if (args.family !== "auto") {
+    throw new Error(`No accessible Nexus model is available in the ${args.family} family`)
+  }
+
+  const fallback = args.models.find(model => model.modelId === args.fallbackModelId || String(model.id) === args.fallbackModelId)
+  if (fallback && !isSpecialistOnlyModel(fallback) && args.accessibleIds.has(String(fallback.id))) {
+    return { model: fallback, fallbackUsed: true }
+  }
+  const anyAccessible = firstAccessibleModel(
+    args.models.filter(model => !isSpecialistOnlyModel(model)),
+    args.accessibleIds
+  )
+  if (!anyAccessible) throw new Error("No accessible Nexus model is available")
+  return { model: anyAccessible, fallbackUsed: true }
+}
+
+async function resolvePsdDataConnector(config: NexusRouterConfig): Promise<string | null> {
+  if (config.specialists.psdDataConnectorId) {
+    const [row] = await executeQuery(
+      db => db.select({ id: nexusMcpServers.id }).from(nexusMcpServers)
+        .where(eq(nexusMcpServers.id, config.specialists.psdDataConnectorId!)).limit(1),
+      "resolvePsdDataConnectorById"
+    )
+    return row?.id ?? null
+  }
+  const rows = await executeQuery(
+    db => db.select({ id: nexusMcpServers.id, name: nexusMcpServers.name }).from(nexusMcpServers),
+    "resolvePsdDataConnectorByName"
+  )
+  const normalize = (value: string) => value.toLowerCase().replaceAll(/[^a-z0-9]/g, "")
+  const configuredName = normalize(config.specialists.psdDataConnectorName)
+  return rows.find(row => normalize(row.name) === configuredName)?.id ?? null
+}
+
+async function resolveAutomaticPsdConnector(
+  intent: NexusRouterIntent,
+  config: NexusRouterConfig
+): Promise<string | null> {
+  if (intent !== "psd-data") return null
+  try {
+    const connectorId = await resolvePsdDataConnector(config)
+    if (!connectorId) {
+      log.warn("PSD-data route requested but the configured database MCP server was not found")
+    }
+    return connectorId
+  } catch (error) {
+    log.warn("PSD-data MCP lookup failed; continuing with the routed model", {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
+}
+
+function selectModelForRuntime(
+  args: Parameters<typeof selectModel>[0],
+  mode: NexusRouteResult["metadata"]["runtimeMode"],
+  fallback: NexusModelRow
+): { model: NexusModelRow; fallbackUsed: boolean } {
+  try {
+    return selectModel(args)
+  } catch (error) {
+    if (mode !== "shadow") throw error
+    log.warn("Proposed route could not be resolved; shadow mode is retaining the legacy model", {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return { model: fallback, fallbackUsed: true }
+  }
+}
+
+export async function routeNexusRequest(args: {
+  text: string
+  fallbackModelId: string
+  experienceMode: NexusExperienceMode
+  requestedFamily: NexusModelFamily
+  enabledConnectorIds: string[]
+  userId: number
+  hasImageInput?: boolean
+}): Promise<NexusRouteResult> {
+  const { config, mode } = await getNexusRouterConfig()
+  const models = await getNexusEnabledModels()
+  const accessibleIds = new Set(await filterAccessibleResourceIds(
+    args.userId,
+    "model",
+    models.map(model => model.id)
+  ))
+  const fallback = models.find(model => model.modelId === args.fallbackModelId || String(model.id) === args.fallbackModelId)
+  if (!fallback) throw new Error("The fallback Nexus model is unavailable")
+
+  if (mode === "off") {
+    return {
+      modelId: fallback.modelId,
+      connectorIds: args.enabledConnectorIds,
+      metadata: {
+        version: config.version, runtimeMode: mode, experienceMode: args.experienceMode,
+        requestedFamily: args.requestedFamily, selectedFamily: inferFamily(fallback) ?? "fallback",
+        intent: "general", tier: inferTier(fallback), confidence: 1,
+        reasonCodes: ["router_off"], decisionSource: "fallback", selectedModelId: fallback.modelId,
+        fallbackUsed: false, autoAttachedPsdData: false,
+      },
+    }
+  }
+
+  const decision = await classifyNexusRequest(args.text, config, { hasImageInput: args.hasImageInput })
+  const selection = selectModelForRuntime({
+    models, config, family: args.requestedFamily, tier: decision.tier,
+    intent: decision.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
+  }, mode, fallback)
+  const psdConnectorId = await resolveAutomaticPsdConnector(decision.intent, config)
+  const proposedConnectors = psdConnectorId
+    ? [...new Set([...args.enabledConnectorIds, psdConnectorId])]
+    : args.enabledConnectorIds
+  const selected = mode === "shadow" ? fallback : selection.model
+  const connectorIds = mode === "shadow" ? args.enabledConnectorIds : proposedConnectors
+
+  log.info("Nexus request routed", {
+    mode, intent: decision.intent, tier: decision.tier, requestedFamily: args.requestedFamily,
+    selectedModelId: selected.modelId, proposedModelId: selection.model.modelId,
+    fallbackUsed: selection.fallbackUsed, autoAttachedPsdData: !!psdConnectorId,
+  })
+
+  return {
+    modelId: selected.modelId,
+    connectorIds,
+    metadata: {
+      version: config.version,
+      runtimeMode: mode,
+      experienceMode: args.experienceMode,
+      requestedFamily: args.requestedFamily,
+      selectedFamily: inferFamily(selected) ?? "fallback",
+      intent: decision.intent,
+      tier: decision.tier,
+      confidence: decision.confidence,
+      reasonCodes: decision.reasonCodes,
+      decisionSource: decision.source,
+      selectedModelId: selected.modelId,
+      proposedModelId: mode === "shadow" ? selection.model.modelId : undefined,
+      fallbackUsed: selection.fallbackUsed || (mode === "shadow" && selection.model.modelId !== fallback.modelId),
+      autoAttachedPsdData: mode === "active" && !!psdConnectorId,
+    },
+  }
+}

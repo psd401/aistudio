@@ -152,6 +152,10 @@ export interface NexusUserSettings {
   theme?: "light" | "dark" | "system";
   notifications?: boolean;
   shortcuts?: Record<string, string>;
+  /** Standard hides model/tool routing controls; Advanced exposes a family constraint. */
+  nexusMode?: "standard" | "advanced";
+  /** Optional provider-family constraint used only in Advanced mode. */
+  preferredModelFamily?: "auto" | "openai" | "anthropic" | "google";
   [key: string]: unknown;
 }
 

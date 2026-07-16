@@ -32,6 +32,8 @@ import { VoiceModeOverlay } from './_components/voice-mode/voice-mode-overlay'
 import { VoiceButton, DisabledVoiceButton } from './_components/voice-mode/voice-button'
 import { useVoiceAvailability } from './_components/voice-mode/use-voice-availability'
 import { useVoiceSession } from './_components/voice-mode/use-voice-session'
+import { getNexusChatPreferences, updateNexusChatPreferences } from '@/actions/settings/user-settings.actions'
+import type { NexusExperienceMode, NexusModelFamily } from '@/lib/nexus/model-router/types'
 
 const log = createLogger({ moduleName: 'nexus-page' })
 const uuidSchema = z.string().uuid()
@@ -67,6 +69,8 @@ interface ConversationRuntimeProviderProps {
   selectedModel: SelectAiModel | null
   enabledTools: string[]
   enabledConnectors: string[]
+  routingMode: NexusExperienceMode
+  modelFamily: NexusModelFamily
   skillId?: string
   /** The open workspace object id/slug (`?workspace=`); binds §1087 content tools server-side. */
   workspaceId?: string
@@ -89,6 +93,8 @@ function ConversationRuntimeProvider({
   selectedModel,
   enabledTools,
   enabledConnectors,
+  routingMode,
+  modelFamily,
   skillId,
   workspaceId,
   attachmentAdapter,
@@ -123,6 +129,11 @@ function ConversationRuntimeProvider({
   // Guards against the transient null state while models are loading from localStorage.
   const selectedModelRef = useRef(selectedModel)
   selectedModelRef.current = selectedModel
+
+  const routingModeRef = useRef(routingMode)
+  routingModeRef.current = routingMode
+  const modelFamilyRef = useRef(modelFamily)
+  modelFamilyRef.current = modelFamily
 
   // Prevents the "Model not ready" toast from firing multiple times if body()
   // is called in rapid succession before models finish loading.
@@ -335,7 +346,9 @@ function ConversationRuntimeProvider({
           skillId,
           // Bind the open workspace object so the server offers §1087 read/edit tools.
           workspaceId: workspaceIdRef.current || undefined,
-          conversationId: conversationIdRef.current || undefined
+          conversationId: conversationIdRef.current || undefined,
+          nexusMode: routingModeRef.current,
+          modelFamily: routingModeRef.current === 'standard' ? 'auto' : modelFamilyRef.current,
         }
       }
     }),
@@ -364,6 +377,10 @@ interface NexusRuntimeWrapperProps {
   selectedModel: SelectAiModel | null
   enabledTools: string[]
   enabledConnectors: string[]
+  routingMode: NexusExperienceMode
+  modelFamily: NexusModelFamily
+  onRoutingModeChange: (mode: NexusExperienceMode) => void
+  onModelFamilyChange: (family: NexusModelFamily) => void
   skillId?: string
   /** Open workspace object id/slug (`?workspace=`); passed to the runtime for §1087 tools. */
   workspaceId?: string
@@ -373,9 +390,7 @@ interface NexusRuntimeWrapperProps {
   initialMessages: UIMessage[]
   onConversationIdChange: (id: string) => void
   processingAttachments: Set<string>
-  models: SelectAiModel[]
   onModelChange: (model: SelectAiModel) => void
-  isLoadingModels: boolean
   onToolsChange: (tools: string[]) => void
   onConnectorsChange: (connectors: string[]) => void
 }
@@ -385,6 +400,10 @@ function NexusRuntimeWrapper({
   selectedModel,
   enabledTools,
   enabledConnectors,
+  routingMode,
+  modelFamily,
+  onRoutingModeChange,
+  onModelFamilyChange,
   skillId,
   workspaceId,
   attachmentAdapter,
@@ -393,9 +412,7 @@ function NexusRuntimeWrapper({
   initialMessages,
   onConversationIdChange,
   processingAttachments,
-  models,
   onModelChange,
-  isLoadingModels,
   onToolsChange,
   onConnectorsChange,
 }: NexusRuntimeWrapperProps) {
@@ -466,6 +483,8 @@ function NexusRuntimeWrapper({
       selectedModel={selectedModel}
       enabledTools={enabledTools}
       enabledConnectors={enabledConnectors}
+      routingMode={routingMode}
+      modelFamily={modelFamily}
       skillId={skillId}
       workspaceId={workspaceId}
       attachmentAdapter={attachmentAdapter}
@@ -495,15 +514,17 @@ function NexusRuntimeWrapper({
         <Thread
           processingAttachments={processingAttachments}
           conversationId={conversationId}
-          models={models}
           selectedModel={selectedModel}
           onModelChange={onModelChange}
-          isLoadingModels={isLoadingModels}
           enabledTools={enabledTools}
           onToolsChange={onToolsChange}
           enabledConnectors={enabledConnectors}
           onConnectorsChange={onConnectorsChange}
           onReconnectSuccess={removeFailedServerId}
+          routingMode={routingMode}
+          modelFamily={modelFamily}
+          onRoutingModeChange={onRoutingModeChange}
+          onModelFamilyChange={onModelFamilyChange}
           toolFallback={ConnectorToolFallback}
           composerExtraActions={composerExtraActions}
         />
@@ -592,7 +613,6 @@ function NexusPageContent() {
     models,
     selectedModel,
     setSelectedModel: originalSetSelectedModel,
-    isLoading: isLoadingModels
   } = useModelsWithPersistence('nexus-model', ['chat'], preferredModelId)
 
   // Tool management state — single source of truth from urlTools
@@ -600,6 +620,56 @@ function NexusPageContent() {
 
   // Connector management state — single source of truth from urlConnectors
   const [enabledConnectors, setEnabledConnectors] = useState<string[]>(() => urlConnectors)
+
+  const [routingMode, setRoutingMode] = useState<NexusExperienceMode>('standard')
+  const [modelFamily, setModelFamily] = useState<NexusModelFamily>('auto')
+  const routingPreferenceTouchedRef = useRef(false)
+  const routerPreferenceSaveQueueRef = useRef<Promise<void>>(Promise.resolve())
+
+  useEffect(() => {
+    let cancelled = false
+    getNexusChatPreferences().then(result => {
+      if (cancelled || routingPreferenceTouchedRef.current || !result.isSuccess) return
+      setRoutingMode(result.data.mode)
+      setModelFamily(result.data.family)
+    }).catch(error => {
+      log.warn('Failed to load Nexus router preferences', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  const persistRouterPreferences = useCallback((mode: NexusExperienceMode, family: NexusModelFamily) => {
+    routerPreferenceSaveQueueRef.current = routerPreferenceSaveQueueRef.current.then(async () => {
+      try {
+        const result = await updateNexusChatPreferences({ mode, family })
+        if (!result.isSuccess) toast.error('Could not save Nexus routing preference')
+      } catch (error) {
+        log.warn('Failed to save Nexus router preferences', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+        toast.error('Could not save Nexus routing preference')
+      }
+    })
+  }, [])
+
+  const handleRoutingModeChange = useCallback((mode: NexusExperienceMode) => {
+    routingPreferenceTouchedRef.current = true
+    setRoutingMode(mode)
+    if (mode === 'standard') {
+      setEnabledTools([])
+      setEnabledConnectors([])
+    }
+    persistRouterPreferences(mode, modelFamily)
+  }, [modelFamily, persistRouterPreferences])
+
+  const handleModelFamilyChange = useCallback((family: NexusModelFamily) => {
+    routingPreferenceTouchedRef.current = true
+    setRoutingMode('advanced')
+    setModelFamily(family)
+    persistRouterPreferences('advanced', family)
+  }, [persistRouterPreferences])
 
   // Load prompt settings when promptId is present (lower priority than URL params)
   // Uses getPromptSettings to avoid incrementing view count (PromptAutoLoader handles the full view)
@@ -858,6 +928,10 @@ function NexusPageContent() {
                           selectedModel={selectedModel}
                           enabledTools={enabledTools}
                           enabledConnectors={enabledConnectors}
+                          routingMode={routingMode}
+                          modelFamily={modelFamily}
+                          onRoutingModeChange={handleRoutingModeChange}
+                          onModelFamilyChange={handleModelFamilyChange}
                           skillId={urlSkillId}
                           workspaceId={urlWorkspaceId ?? undefined}
                           attachmentAdapter={attachmentAdapter}
@@ -866,9 +940,7 @@ function NexusPageContent() {
                           initialMessages={initialMessages}
                           onConversationIdChange={handleConversationIdChange}
                           processingAttachments={processingAttachments}
-                          models={models}
                           onModelChange={setSelectedModel}
-                          isLoadingModels={isLoadingModels}
                           onToolsChange={onToolsChange}
                           onConnectorsChange={onConnectorsChange}
                         />
