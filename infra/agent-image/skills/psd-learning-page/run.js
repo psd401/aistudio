@@ -342,7 +342,7 @@ function extractHeadings(markdown) {
   let m;
   while ((m = re.exec(markdown))) {
     const text = stripMarkdown(m[2]);
-    if (text) out.push(text);
+    if (text) out.push({ level: m[1].length, text });
   }
   return out;
 }
@@ -383,10 +383,17 @@ function deriveContent(markdown, title, overrides) {
     summaryBullets.push(`Key points from ${title}.`);
   }
 
+  // Prefer section headings (## / ###) for targets — these are the topics, not
+  // the doc title (already shown as the <h1>). Fall back to any non-title
+  // heading, then to title-derived defaults.
+  const titleLc = String(title).toLowerCase().trim();
+  const level2 = headings.filter((h) => h.level >= 2).map((h) => h.text);
+  const nonTitle = headings.filter((h) => h.text.toLowerCase().trim() !== titleLc).map((h) => h.text);
+  const headingTargets = level2.length >= 2 ? level2 : nonTitle;
   const learningTargets =
     (overrides && Array.isArray(overrides.learningTargets) && overrides.learningTargets.length && overrides.learningTargets) ||
-    (headings.length >= 2
-      ? headings.slice(0, 4).map((h) => `Understand ${h.charAt(0).toLowerCase() + h.slice(1)}.`)
+    (headingTargets.length >= 2
+      ? headingTargets.slice(0, 4).map((h) => `Understand ${h}.`)
       : [`Understand the key points of ${title}.`, `Explain why ${title} matters and when it applies.`]);
 
   const quizItems =
