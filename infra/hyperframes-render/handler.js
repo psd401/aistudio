@@ -324,6 +324,9 @@ async function renderToMp4(compositionHtml, { fps, workDir, outPath }) {
       throw new RenderError('render_timeout', `Render exceeded ${RENDER_TIMEOUT_MS} ms. Shorten the scene or lower fps.`);
     }
     const detail = String((err && (err.stderr || err.message)) || err).slice(0, 800);
+    // Log to CloudWatch: the handler returns errors as data (never throws to the
+    // platform), so without this a render failure leaves no server-side trace.
+    console.error(`[render] hyperframes failed: code=${err && err.code} signal=${err && err.signal} detail=${detail}`);
     throw new RenderError('render_failed', `hyperframes render failed: ${detail}`);
   }
 
@@ -429,6 +432,30 @@ async function handler(event, deps = {}) {
     };
   }
 }
+
+/**
+ * One-time cold-start FFmpeg self-check, logged to CloudWatch. The full Debian
+ * ffmpeg failed its hyperframes preflight inside the Lambda sandbox (#1175
+ * follow-up); this records whether the configured binary actually runs on this
+ * environment, so a regression is diagnosable from logs rather than only the
+ * caller's error string. Non-blocking (async execFile) — never affects a render.
+ */
+function logFfmpegSelfCheck() {
+  const bin = process.env.HYPERFRAMES_FFMPEG_PATH || 'ffmpeg';
+  const started = Date.now();
+  execFile(bin, ['-version'], { timeout: 8000 }, (err, stdout) => {
+    const ms = Date.now() - started;
+    if (err) {
+      console.error(
+        `[ffmpeg-selfcheck] FAILED bin=${bin} code=${err.code} signal=${err.signal} killed=${err.killed} after=${ms}ms: ${String(err.message).slice(0, 200)}`,
+      );
+    } else {
+      console.log(`[ffmpeg-selfcheck] OK bin=${bin} after=${ms}ms — ${String(stdout).split('\n')[0]}`);
+    }
+  });
+}
+// Only in the real Lambda (AWS_LAMBDA_FUNCTION_NAME is set there, unset in tests).
+if (process.env.AWS_LAMBDA_FUNCTION_NAME) logFfmpegSelfCheck();
 
 module.exports = {
   handler,
