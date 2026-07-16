@@ -1227,10 +1227,15 @@ async function main(argv, deps = {}) {
   };
 
   // 5. Captions from the narration script (present whenever we have narration).
-  // Cap the cues to the (clamped) video duration so the track never lists
-  // captions past the video's real end when the narration is trimmed to fit.
+  // Only cap the cues to the 60s clamp when the video is HYPERFRAMES-GENERATED
+  // (its muxed narration is trimmed to fit MAX_VIDEO_SECONDS). A caller-supplied
+  // --video-url has an unknown, possibly-longer duration and its own audio track,
+  // so capping the captions there would silently drop them past 60s. Use the full
+  // (uncapped) segments for a supplied video.
+  const captionMaxSeconds =
+    typeof args.video_url === 'string' ? Infinity : estimateNarrationSeconds(content.narration);
   const vttDataUri = toVttDataUri(
-    buildVtt(capSegments(content.narration.segments || [], estimateNarrationSeconds(content.narration)))
+    buildVtt(capSegments(content.narration.segments || [], captionMaxSeconds))
   );
 
   // 6. Assemble the self-contained page.

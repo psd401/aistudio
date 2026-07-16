@@ -324,6 +324,16 @@ test('create-artifact with an unreadable --code-file fails with a clear config e
   expect(code).toBe(1);
 });
 
+test('create-artifact rejects passing both --code and --code-file (exit 1)', async () => {
+  let code;
+  try {
+    await run('create-artifact', '--title', 'X', '--code', '<html></html>', '--code-file', '/tmp/x.html', '--body-format', 'html');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+});
+
 test('edit (replace) POSTs a new version with the given body', async () => {
   restResponder = () => ({ approvalRequired: false, status: 201, payload: { id: 'obj-1', versionId: 'v3' } });
 

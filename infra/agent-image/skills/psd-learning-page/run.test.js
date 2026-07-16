@@ -405,6 +405,63 @@ test('resolveVideo notes the 60s cap when the narration is longer than the video
   expect(v.media.note).toMatch(/60 seconds|capped/i);
 });
 
+test('a supplied --video-url does NOT truncate the caption track at 60s', async () => {
+  // A long narration (>60s) + a caller-supplied pre-rendered video: the 60s clamp
+  // (for hyperframes-trimmed video) must not apply, or captions vanish past 60s.
+  const out = tmpPath(`lp-vurl-${Date.now()}.html`);
+  const longScript = Array.from({ length: 40 }, (_, i) => `Sentence number ${i + 1} in the narration.`).join(' ');
+  const contentJson = tmpPath(`cj-${Date.now()}.json`);
+  fs.writeFileSync(contentJson, JSON.stringify({ narration: { script: longScript } }));
+  try {
+    await R.main(
+      argv('--user', 'a@b.net', '--text', 'Body text for the page.', '--title', 'T',
+           '--video-url', 'https://x/v.mp4', '--audio-url', 'https://x/a.mp3',
+           '--content-json', contentJson, '--dry-run', '--out', out),
+      { auditHtml: PASS_AUDIT }
+    );
+    const html = fs.readFileSync(out, 'utf8');
+    // Decode the inlined VTT data URI and confirm it has cues ending past 60s.
+    const m = html.match(/data:text\/vtt;base64,([A-Za-z0-9+/=]+)/);
+    expect(m).toBeTruthy();
+    const vtt = Buffer.from(m[1], 'base64').toString('utf8');
+    const lastEnd = [...vtt.matchAll(/--> (\d\d):(\d\d):(\d\d)/g)]
+      .map(([, h, mm, s]) => Number(h) * 3600 + Number(mm) * 60 + Number(s))
+      .reduce((a, b) => Math.max(a, b), 0);
+    expect(lastEnd).toBeGreaterThan(60);
+  } finally {
+    fs.rmSync(out, { force: true });
+    fs.rmSync(contentJson, { force: true });
+  }
+});
+
+test('generated/placeholder video still caps captions at 60s', async () => {
+  // No --video-url → hyperframes-trimmed (or dry-run placeholder) → captions
+  // capped at 60s even though the full narration runs longer.
+  const out = tmpPath(`lp-gen-${Date.now()}.html`);
+  const longScript = Array.from({ length: 40 }, (_, i) => `Sentence number ${i + 1} in the narration.`).join(' ');
+  const contentJson = tmpPath(`cjg-${Date.now()}.json`);
+  fs.writeFileSync(contentJson, JSON.stringify({ narration: { script: longScript } }));
+  // Sanity: the full narration exceeds the cap, so a cap is observable.
+  expect(R.deriveContent('Body.', 'T', { narration: { script: longScript } }).narration.segments.slice(-1)[0].end)
+    .toBeGreaterThan(60);
+  try {
+    await R.main(
+      argv('--user', 'a@b.net', '--text', 'Body text.', '--title', 'T', '--content-json', contentJson, '--dry-run', '--out', out),
+      { auditHtml: PASS_AUDIT }
+    );
+    const html = fs.readFileSync(out, 'utf8');
+    const m = html.match(/data:text\/vtt;base64,([A-Za-z0-9+/=]+)/);
+    const vtt = Buffer.from(m[1], 'base64').toString('utf8');
+    const lastEnd = [...vtt.matchAll(/--> (\d\d):(\d\d):(\d\d)/g)]
+      .map(([, h, mm, s]) => Number(h) * 3600 + Number(mm) * 60 + Number(s))
+      .reduce((a, b) => Math.max(a, b), 0);
+    expect(lastEnd).toBeLessThanOrEqual(60);
+  } finally {
+    fs.rmSync(out, { force: true });
+    fs.rmSync(contentJson, { force: true });
+  }
+});
+
 test('assemblePage wires a change listener that clears stale quiz feedback + result', () => {
   const html = assembleWith(SAMPLE_MD);
   expect(html).toContain("addEventListener('change'");

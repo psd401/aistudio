@@ -253,6 +253,10 @@ async function main() {
       // 128 KB) when passed as a single --code argv, failing spawn with E2BIG;
       // --code-file sidesteps that entirely.
       const codeFile = optStr(args, 'code_file', 'code-file');
+      // Reject the ambiguous combination rather than silently preferring one.
+      if (codeFile !== undefined && args.code !== undefined) {
+        fail('pass either --code or --code-file, not both');
+      }
       let code;
       if (codeFile !== undefined) {
         try {
