@@ -55,11 +55,12 @@ type ApiRouteHandler = (
 /**
  * The route context Next.js passes as the SECOND argument to a route handler.
  * `params` is a Promise in the App Router (Next 15+); the wrapper awaits it before
- * handing a plain object to the handler. Optional so a non-dynamic route (no
- * `[param]` segment) still type-checks — its handler receives `{}`.
+ * handing a plain object to the handler. Both the context and its `params`
+ * promise are required by Next's route contract; non-dynamic routes receive a
+ * promise that resolves to `{}`.
  */
 interface RouteContext {
-  params?: Promise<RouteParams>;
+  params: Promise<RouteParams>;
 }
 
 /**
@@ -67,10 +68,10 @@ interface RouteContext {
  */
 export function withApiAuth(
   handler: ApiRouteHandler
-): (request: NextRequest, context?: RouteContext) => Promise<NextResponse> {
+): (request: NextRequest, context: RouteContext) => Promise<NextResponse> {
   return async (
     request: NextRequest,
-    context?: RouteContext
+    context: RouteContext
   ): Promise<NextResponse> => {
     const requestId = generateRequestId();
     const timer = startTimer("apiRequest");
@@ -105,8 +106,9 @@ export function withApiAuth(
 
     try {
       // Resolve Next's dynamic route params (a Promise in the App Router) once and
-      // hand the handler a plain object. A non-dynamic route has no `params`, so
-      // default to `{}` — the handler simply ignores the argument.
+      // hand the handler a plain object. For a non-dynamic route, Next resolves
+      // the promise to `{}` and the handler simply ignores the argument. Keep a
+      // runtime fallback for direct test/legacy calls made outside Next.
       const params = context?.params ? await context.params : {};
       response = await handler(request, auth, requestId, params);
       statusCode = response.status;
