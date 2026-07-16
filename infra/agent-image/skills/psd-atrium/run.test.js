@@ -295,6 +295,33 @@ test('create-artifact requires --body-format (exit 1)', async () => {
   expect(code).toBe(1);
 });
 
+test('create-artifact reads code from --code-file (avoids the argv-size limit)', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const file = path.join(os.tmpdir(), `atrium-code-${Date.now()}.html`);
+  const code = '<html><body><h1>From file</h1><script>x()</script></body></html>';
+  fs.writeFileSync(file, code);
+  try {
+    await run('create-artifact', '--title', 'Big', '--code-file', file, '--body-format', 'html');
+    const body = restCalls[0].opts.body;
+    expect(body).toMatchObject({ kind: 'artifact', title: 'Big', bodyFormat: 'html', codeEncoding: 'base64' });
+    expect(Buffer.from(body.body, 'base64').toString('utf8')).toBe(code);
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+});
+
+test('create-artifact with an unreadable --code-file fails with a clear config error (exit 1)', async () => {
+  let code;
+  try {
+    await run('create-artifact', '--title', 'X', '--code-file', '/nonexistent/nope.html', '--body-format', 'html');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+});
+
 test('edit (replace) POSTs a new version with the given body', async () => {
   restResponder = () => ({ approvalRequired: false, status: 201, payload: { id: 'obj-1', versionId: 'v3' } });
 

@@ -165,7 +165,12 @@ function readHtmlFile(args) {
   if (path.extname(file).toLowerCase() !== '.html') {
     fail(`--file must be a .html file (got ${path.extname(file) || '(none)'})`, 'bad_args');
   }
-  return { file, size: stat.size, text: fs.readFileSync(file, 'utf8') };
+  // Read the RAW bytes. Decoding as 'utf8' here would replace any invalid byte
+  // with U+FFFD and re-encoding would upload DIFFERENT bytes than the file held
+  // (and the reported size would be stale). The audit gets a utf8 view; the
+  // upload uses the exact original bytes.
+  const buffer = fs.readFileSync(file);
+  return { file, size: buffer.length, buffer };
 }
 
 async function main() {
@@ -181,8 +186,8 @@ async function main() {
   // --audit-only: run just the shared WCAG 2.2 AA gate and report. No upload,
   // no --user, no bucket — this is the pre-flight check any skill can call.
   if (args.audit_only) {
-    const { text } = readHtmlFile(args);
-    const report = await auditHtml(text);
+    const { buffer } = readHtmlFile(args);
+    const report = await auditHtml(buffer.toString('utf8'));
     if (!report.pass) failA11y(report);
     emit({ status: 'ok', audit: report });
     return;
@@ -191,17 +196,18 @@ async function main() {
   if (!validateEmail(args.user)) {
     fail('--user is required and must be a valid email', 'bad_args');
   }
-  const { size, text } = readHtmlFile(args);
+  const { size, buffer } = readHtmlFile(args);
   // Validate bucket before the (potentially slow) audit so we fail fast on misconfig.
   if (!WORKSPACE_BUCKET) {
     fail('WORKSPACE_BUCKET env var not set — cannot upload HTML artifact', 'misconfigured');
   }
 
   // HARD GATE: never upload an artifact that fails the accessibility floor.
-  const report = await auditHtml(text);
+  const report = await auditHtml(buffer.toString('utf8'));
   if (!report.pass) failA11y(report);
 
-  const { url, key } = await uploadAndShare(Buffer.from(text, 'utf8'), args.user);
+  // Upload the exact original bytes (not a utf8 round-trip).
+  const { url, key } = await uploadAndShare(buffer, args.user);
 
   emit({
     url,

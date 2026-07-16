@@ -287,22 +287,50 @@ function exportGoogleDoc(fileId, userEmail, run) {
 
   let res = tryExport('text/markdown');
   if (res.code !== 0) {
-    // A denied export (drive.file 404 / consent) must surface psd-workspace's
-    // "share it with my agent account" guidance verbatim — never crash, and
-    // never tell the user to share it with their own address.
     const out = lastJson(res.stdout);
-    const denied =
-      res.code === 12 ||
-      res.code === 14 ||
-      (out && (out.status === 'account-provisioning' || /40[34]|consent|share/i.test(out.message || '')));
-    if (denied) {
-      const guidance =
-        (out && (out.message || out.guidance)) ||
-        `Couldn't read that Google Doc. Share it with your agent account ` +
-          `(agnt_<your-uniqname>@psd401.net, Reader is enough) and try again.`;
-      fail(guidance, 'gdoc_denied', 2);
+    // Classify the failure by psd-workspace's documented exit codes (run.js:45-54)
+    // — NOT everything non-zero is a sharing problem, and telling the user to
+    // re-share a doc that is already shared (or whose account is still being
+    // provisioned) sends them down the wrong path.
+    //
+    // 14 = agent Workspace account still being auto-provisioned. Wait, don't
+    // re-share. psd-workspace emits its own "try again in ~30 min" message.
+    if (res.code === 14 || (out && out.status === 'account-provisioning')) {
+      fail(
+        (out && out.message) ||
+          'Your agent Workspace account is still being set up automatically — no action needed. Try again in about 30 minutes.',
+        'gdoc_provisioning',
+        2
+      );
     }
-    // markdown export unsupported → retry as plain text before giving up
+    // 12 = transport/broker/network failure reaching Google. Transient — retry,
+    // don't re-share. The real diagnostic is on stderr (psd-workspace's fail()
+    // writes there); surface it rather than the sharing guidance.
+    if (res.code === 12) {
+      fail(
+        `Couldn't reach Google Workspace to read that document — a transient network/broker error. Try again shortly.${
+          res.stderr ? ` (${res.stderr.trim()})` : ''
+        }`,
+        'ingest_failed',
+        2
+      );
+    }
+    // A genuine permission/consent denial: Drive returns 403/404 for a doc the
+    // agent account can't see (the drive.file scope masks unshared files as 404).
+    // gws prints that error to the inherited stderr, so match on stdout JSON OR
+    // stderr. THIS is the case where re-sharing with the agent account fixes it.
+    const deniedText = (out && (out.message || out.guidance)) || res.stderr || '';
+    if (/40[34]|permission|consent|not shared|access denied|share/i.test(deniedText)) {
+      fail(
+        (out && (out.message || out.guidance)) ||
+          `Couldn't read that Google Doc. Share it with your agent account ` +
+            `(agnt_<your-uniqname>@psd401.net, Reader is enough) and try again.`,
+        'gdoc_denied',
+        2
+      );
+    }
+    // Otherwise the markdown export may just be unsupported for this doc → retry
+    // as plain text before giving up.
     res = tryExport('text/plain');
   }
   if (res.code !== 0) {
@@ -357,10 +385,22 @@ function extractHeadings(markdown) {
 }
 
 function extractParagraphs(markdown) {
+  // Normalize CRLF first: a stray \r breaks up the \n{2,} block split, which
+  // would otherwise collapse a whole CRLF-encoded doc into one block.
   return String(markdown || '')
+    .replace(/\r\n?/g, '\n')
     .split(/\n{2,}/)
-    .map((b) => b.trim())
-    .filter((b) => b && !/^#{1,6}\s/.test(b)) // drop pure-heading blocks
+    // Drop only the heading LINE(S) inside a block, keeping any body text glued
+    // to a heading with no blank line between them (a very common real-world
+    // pattern) — previously the whole block was dropped, silently discarding the
+    // body and degrading the derived summary/quiz.
+    .map((b) =>
+      b
+        .split('\n')
+        .filter((line) => !/^\s*#{1,6}\s/.test(line))
+        .join('\n')
+        .trim()
+    )
     .map((b) => stripMarkdown(b))
     .filter((b) => b.length > 0);
 }
@@ -381,7 +421,10 @@ function deriveContent(markdown, title, overrides) {
   const paragraphs = extractParagraphs(markdown);
 
   const summaryBullets =
-    (overrides && Array.isArray(overrides.summary) && overrides.summary.length && overrides.summary) ||
+    // Coerce authored entries to strings — a bare number/object from LLM-authored
+    // JSON must not reach buildNarration (`b.endsWith`) and throw an uncaught
+    // TypeError that degrades to a generic exit(2) instead of a clean bad_args.
+    (overrides && Array.isArray(overrides.summary) && overrides.summary.length && overrides.summary.map((s) => String(s))) ||
     paragraphs.slice(0, 6).map((p) => {
       const first = splitSentences(p)[0] || p;
       return first.length > 220 ? first.slice(0, 217).trimEnd() + '…' : first;
@@ -400,27 +443,51 @@ function deriveContent(markdown, title, overrides) {
   const nonTitle = headings.filter((h) => h.text.toLowerCase().trim() !== titleLc).map((h) => h.text);
   const headingTargets = level2.length >= 2 ? level2 : nonTitle;
   const learningTargets =
-    (overrides && Array.isArray(overrides.learningTargets) && overrides.learningTargets.length && overrides.learningTargets) ||
+    (overrides && Array.isArray(overrides.learningTargets) && overrides.learningTargets.length && overrides.learningTargets.map((t) => String(t))) ||
     (headingTargets.length >= 2
       ? headingTargets.slice(0, 4).map((h) => `Understand ${h}.`)
       : [`Understand the key points of ${title}.`, `Explain why ${title} matters and when it applies.`]);
 
+  // Normalize FIRST, then check the normalized length: an authored quiz whose
+  // every item fails validation (e.g. <2 options) yields []; `[] || fallback`
+  // would keep the truthy empty array, shipping a zero-question quiz. Bind it so
+  // the deterministic fallback actually runs when nothing survives.
+  const authoredQuiz =
+    overrides && Array.isArray(overrides.quiz) && overrides.quiz.length
+      ? normalizeAuthoredQuiz(overrides.quiz)
+      : null;
   const quizItems =
-    (overrides && Array.isArray(overrides.quiz) && overrides.quiz.length && normalizeAuthoredQuiz(overrides.quiz)) ||
+    (authoredQuiz && authoredQuiz.length && authoredQuiz) ||
     buildDeterministicQuiz(summaryBullets, learningTargets, title);
 
   const narration =
-    (overrides && overrides.narration && typeof overrides.narration.script === 'string' && overrides.narration) ||
+    (overrides && overrides.narration && typeof overrides.narration.script === 'string' &&
+      normalizeAuthoredNarration(overrides.narration)) ||
     buildNarration(title, learningTargets, summaryBullets);
 
   return { learningTargets, summaryBullets, quizItems, narration };
+}
+
+// Coerce an answer index that may arrive as a real number OR a quoted numeric
+// string ("2") from LLM-authored JSON. Number.isInteger("2") is false, so the
+// old check silently defaulted a string index to 0 — marking the WRONG option
+// correct while the rationale described a different one.
+function toAnswerIndex(v) {
+  if (Number.isInteger(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    if (Number.isInteger(n)) return n;
+  }
+  return null;
 }
 
 function normalizeAuthoredQuiz(quiz) {
   return quiz
     .map((q, i) => {
       const options = Array.isArray(q.options) ? q.options.map(String) : [];
-      let correctIndex = Number.isInteger(q.answer) ? q.answer : Number.isInteger(q.correctIndex) ? q.correctIndex : 0;
+      let correctIndex = toAnswerIndex(q.answer);
+      if (correctIndex === null) correctIndex = toAnswerIndex(q.correctIndex);
+      if (correctIndex === null) correctIndex = 0;
       if (correctIndex < 0 || correctIndex >= options.length) correctIndex = 0;
       return {
         stem: String(q.question || q.stem || `Question ${i + 1}`),
@@ -477,25 +544,61 @@ function buildNarration(title, learningTargets, summaryBullets) {
     'Take a moment to check your understanding with the quiz below, and revisit the full document any time you need the details.'
   );
   const script = parts.join(' ');
-  // Segment on sentences for caption timing.
+  return { script, segments: segmentScript(script), transcript: script };
+}
+
+// Segment a narration script into timed caption cues (sentence-per-cue at the
+// rough narration pace). Shared by the deterministic narration and by an
+// authored --content-json narration that supplies a `script` but no `segments`.
+function segmentScript(script) {
   const sentences = splitSentences(script);
   let t = 0;
-  const segments = sentences.map((text) => {
+  return sentences.map((text) => {
     const words = text.split(/\s+/).filter(Boolean).length;
     const dur = Math.max(2, Math.round(words / WORDS_PER_SECOND));
     const seg = { text, start: t, end: t + dur };
     t += dur;
     return seg;
   });
-  return { script, segments, transcript: script };
 }
 
-function estimateNarrationSeconds(narration) {
+// Accept an authored narration (--content-json) and guarantee it has caption
+// `segments`. The pedagogy-rubric's own example authors `{ script }` with no
+// segments; without this the caption track would be built from [] — an empty
+// WEBVTT the structural a11y gate can't catch, shipping a captions track that
+// declares captions but renders no text.
+function normalizeAuthoredNarration(narr) {
+  const script = String(narr.script || '');
+  const segments =
+    Array.isArray(narr.segments) && narr.segments.length ? narr.segments : segmentScript(script);
+  return { ...narr, script, segments, transcript: narr.transcript || script };
+}
+
+// Unclamped narration length in seconds (may exceed the hyperframes video cap).
+function fullNarrationSeconds(narration) {
   if (narration.segments && narration.segments.length) {
-    return Math.min(MAX_VIDEO_SECONDS, narration.segments[narration.segments.length - 1].end);
+    return narration.segments[narration.segments.length - 1].end;
   }
   const words = String(narration.script || '').split(/\s+/).filter(Boolean).length;
-  return Math.min(MAX_VIDEO_SECONDS, Math.max(2, Math.round(words / WORDS_PER_SECOND)));
+  return Math.max(2, Math.round(words / WORDS_PER_SECOND));
+}
+
+// The rendered video's duration — clamped to the hyperframes hard cap. When the
+// full narration is longer than this, the muxed audio is trimmed to fit (see
+// resolveVideo's note) and the caption track is capped to match.
+function estimateNarrationSeconds(narration) {
+  return Math.min(MAX_VIDEO_SECONDS, fullNarrationSeconds(narration));
+}
+
+// Trim caption cues to the (clamped) video duration so the track never lists
+// cues that extend past the video's real end — dead, unreachable captions.
+function capSegments(segments, maxSeconds) {
+  const out = [];
+  for (const seg of segments || []) {
+    if (seg.start >= maxSeconds) break;
+    out.push(seg.end > maxSeconds ? { ...seg, end: maxSeconds } : seg);
+  }
+  return out;
 }
 
 // ── WebVTT captions (inlined as a data URI so the page stays self-contained) ───
@@ -585,6 +688,16 @@ const QUIZ_SCRIPT = `
       fb.textContent = (ok ? '\\u2713 Correct. ' : '\\u2717 Not quite. ') + expl;
       q.setAttribute('data-answered', ok ? 'correct' : 'incorrect');
     });
+    // Changing the selected answer AFTER checking must invalidate the stale
+    // feedback and the recorded result — otherwise "See my score" would score
+    // the previously-checked option, not the one now selected.
+    q.addEventListener('change', function (e) {
+      if (e.target && e.target.type === 'radio') {
+        fb.className = 'lp-feedback';
+        fb.textContent = '';
+        q.removeAttribute('data-answered');
+      }
+    });
   });
   var scoreBtn = document.getElementById('lp-score-btn');
   var scoreOut = document.getElementById('lp-score');
@@ -612,6 +725,7 @@ function renderSourceHtml(markdown) {
   // markup in the source can inject into the page. We add only <p>/<br> around
   // already-escaped text for basic readability.
   const blocks = String(markdown || '')
+    .replace(/\r\n?/g, '\n')
     .split(/\n{2,}/)
     .map((b) => b.replace(/\s+$/g, ''))
     .filter((b) => b.trim().length);
@@ -695,7 +809,10 @@ function assemblePage(opts) {
   const sourceSection = section(
     'source',
     'The full document',
-    `<details class="lp-source">\n  <summary>Read the full document</summary>\n  <div class="lp-source-body">\n${renderSourceHtml(
+    // tabindex="0" + role/label so the scrollable region is reachable and
+    // operable by keyboard — a native scrollable <div> is not in the tab order,
+    // so without this a keyboard-only user cannot scroll a long document.
+    `<details class="lp-source">\n  <summary>Read the full document</summary>\n  <div class="lp-source-body" tabindex="0" role="region" aria-label="Full document text">\n${renderSourceHtml(
       sourceMarkdown
     )}\n  </div>\n</details>`
   );
@@ -711,6 +828,10 @@ function assemblePage(opts) {
       color-scheme: light dark;
       --bg: #ffffff; --fg: #14181f; --muted: #4a5462;
       --card: #f4f6f9; --border: #c8cfd8; --accent: #0b5cad;
+      /* Button fill is a SEPARATE token from --accent: --accent must stay light
+         in dark mode (text/outline against a dark page), but a solid fill under
+         white button text must stay dark for >=4.5:1 text contrast (WCAG 1.4.3). */
+      --btn-bg: #0b5cad;
       --ok-bg: #e7f4ea; --ok-fg: #0f5323; --no-bg: #fdecec; --no-fg: #7a1220;
       --measure: 68ch;
     }
@@ -718,6 +839,9 @@ function assemblePage(opts) {
       :root {
         --bg: #0f1319; --fg: #eef2f7; --muted: #aab4c2;
         --card: #171d26; --border: #333d4a; --accent: #7fb4f0;
+        /* Dark, saturated blue: white text ~5.5:1 (1.4.3) and the fill still
+           reads as a button against the dark page (~3.3:1, 1.4.11). */
+        --btn-bg: #2c6bb0;
         --ok-bg: #10331c; --ok-fg: #b6e8c4; --no-bg: #3a1418; --no-fg: #f4b7bd;
       }
     }
@@ -749,7 +873,7 @@ function assemblePage(opts) {
     .lp-option input { margin-top: .3rem; }
     .lp-check, #lp-score-btn {
       margin-top: .6rem; font: inherit; font-weight: 600; cursor: pointer;
-      color: #fff; background: var(--accent); border: 2px solid transparent;
+      color: #fff; background: var(--btn-bg); border: 2px solid transparent;
       border-radius: 6px; padding: .5rem .9rem;
     }
     .lp-feedback { margin: .6rem 0 0; font-weight: 600; min-height: 1.2em; }
@@ -785,9 +909,21 @@ ${[targetsHtml, videoSection, audioSection, quizSection, summarySection, sourceS
 
 // ── media resolution (supply URL, generate, degrade, or dry-run placeholder) ───
 
+// Only http(s) and a matching data: media URL may be embedded in <source src>.
+// Mirrors psd-hyperframes' own --audio-url contract (https:// or data:audio/)
+// and refuses a javascript:/other-scheme URL rather than embedding it verbatim.
+function isSafeMediaUrl(url, kind) {
+  if (typeof url !== 'string') return false;
+  if (/^https?:\/\//i.test(url)) return true;
+  return new RegExp(`^data:${kind}\\/`, 'i').test(url);
+}
+
 async function resolveAudio(args, narration, deps, dryRunPlaceholders) {
   const run = deps.runSkill || runSkill;
   if (typeof args.audio_url === 'string') {
+    if (!isSafeMediaUrl(args.audio_url, 'audio')) {
+      return { media: null, omission: 'supplied --audio-url rejected (must be http(s):// or data:audio/)' };
+    }
     return { media: { url: args.audio_url }, omission: null };
   }
   const shouldGenerate = !args.dry_run || args.generate_media;
@@ -837,6 +973,9 @@ ${clips}
 async function resolveVideo(args, audioUrl, title, points, narration, deps, dryRunPlaceholders) {
   const run = deps.runSkill || runSkill;
   if (typeof args.video_url === 'string') {
+    if (!isSafeMediaUrl(args.video_url, 'video')) {
+      return { media: null, omission: 'supplied --video-url rejected (must be http(s):// or data:video/)' };
+    }
     return { media: { url: args.video_url }, omission: null };
   }
   const shouldGenerate = !args.dry_run || args.generate_media;
@@ -855,7 +994,10 @@ async function resolveVideo(args, audioUrl, title, points, narration, deps, dryR
     return { media: null, omission: `could not write composition: ${err.message}` };
   }
   const vArgs = ['--user', String(args.user), '--file', scenePath, '--duration', String(duration), '--width', '1280', '--height', '720'];
-  if (audioUrl && /^https:\/\//.test(audioUrl)) vArgs.push('--audio-url', audioUrl);
+  // psd-hyperframes accepts https:// or data:audio/ for the muxed narration track.
+  if (audioUrl && (/^https:\/\//i.test(audioUrl) || /^data:audio\//i.test(audioUrl))) {
+    vArgs.push('--audio-url', audioUrl);
+  }
   const res = run({ skill: 'hyperframes', args: vArgs });
   try {
     fs.rmSync(scenePath, { force: true });
@@ -866,17 +1008,65 @@ async function resolveVideo(args, audioUrl, title, points, narration, deps, dryR
   if (res.code !== 0 || !out || !out.url) {
     return { media: null, omission: (out && out.error) || 'psd-hyperframes failed' };
   }
-  return { media: { url: out.url }, omission: null };
+  const media = { url: out.url };
+  // The video is capped at MAX_VIDEO_SECONDS; hyperframes trims any longer muxed
+  // narration to fit. Say so on the page (via the existing note hook) and point
+  // to the full audio + transcript, so a truncated video isn't reported as if it
+  // carried the whole narration.
+  if (fullNarrationSeconds(narration) > MAX_VIDEO_SECONDS) {
+    media.note =
+      `This explainer video is capped at ${MAX_VIDEO_SECONDS} seconds; the complete ` +
+      `narration continues in the audio player and transcript below.`;
+  }
+  return { media, omission: null };
 }
 
 // ── publish ────────────────────────────────────────────────────────────────────
 
+// Build the shareable intranet reader URL for a published artifact. Prefer the
+// absolute deep link the API returns (created.url = ATRIUM_PUBLIC_BASE_URL/c/{slug}),
+// then build /c/{slug} from APP_BASE_URL, then fall back to whatever url the API
+// gave (may be relative). NOT /atrium/{id}/view — that is the author's draft
+// editor viewer, not the published intranet reader.
+function buildReaderUrl(created) {
+  if (typeof created.url === 'string' && /^https?:\/\//i.test(created.url)) return created.url;
+  if (APP_BASE_URL && created.slug) return `${APP_BASE_URL.replace(/\/$/, '')}/c/${created.slug}`;
+  if (typeof created.url === 'string' && created.url) return created.url;
+  return null;
+}
+
 function publishToAtrium(html, title, deps) {
   const run = deps.runSkill || runSkill;
-  const createRes = run({
-    skill: 'atrium',
-    args: ['create-artifact', '--title', title, '--code', html, '--body-format', 'html'],
-  });
+
+  // Pass the artifact code via a temp file, not a --code argv. A real board
+  // policy rendered with the full source inlined can exceed Linux's per-arg
+  // MAX_ARG_STRLEN (128 KB) and fail spawn with an opaque E2BIG. --code-file
+  // sidesteps the argv limit entirely.
+  const codePath = path.join(require('node:os').tmpdir(), `lp-artifact-${Date.now()}.html`);
+  try {
+    fs.writeFileSync(codePath, html);
+  } catch (err) {
+    fail(`could not stage the artifact for publish: ${err.message}`, 'publish_failed', 2);
+  }
+
+  let createRes;
+  try {
+    createRes = run({
+      skill: 'atrium',
+      // --visibility internal so any authenticated PSD user (staff/student) can
+      // read the published page. Creating without it leaves the object PRIVATE
+      // (owner/admin only) even after publish — the page would be invisible to
+      // exactly the audience it's for.
+      args: ['create-artifact', '--title', title, '--code-file', codePath, '--body-format', 'html', '--visibility', 'internal'],
+    });
+  } finally {
+    try {
+      fs.rmSync(codePath, { force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+
   const created = lastJson(createRes.stdout);
   if (createRes.code !== 0 || !created || !created.id) {
     fail(
@@ -891,14 +1081,20 @@ function publishToAtrium(html, title, deps) {
   });
   const published = lastJson(pubRes.stdout);
   if (pubRes.code !== 0) {
+    // The draft artifact already exists; surface its id/slug so the caller can
+    // retry the publish step directly instead of re-running the whole pipeline
+    // (which would create a duplicate draft each time).
     fail(
-      `Atrium publish failed: ${(published && published.message) || pubRes.stderr || 'unknown error'}`,
+      `Atrium publish failed for draft artifact ${created.id}` +
+        `${created.slug ? ` (slug ${created.slug})` : ''} — the draft was created but not published. ` +
+        `Retry with: psd-atrium publish --id ${created.id} --destination intranet. Cause: ${
+          (published && published.message) || pubRes.stderr || 'unknown error'
+        }`,
       'publish_failed',
       2
     );
   }
-  const readerUrl = APP_BASE_URL ? `${APP_BASE_URL.replace(/\/$/, '')}/atrium/${created.id}/view` : null;
-  return { artifact: created, publish: published, readerUrl };
+  return { artifact: created, publish: published, readerUrl: buildReaderUrl(created) };
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
@@ -944,8 +1140,11 @@ async function main(argv, deps = {}) {
     }
   }
 
-  // 1. Ingest → markdown.
-  const { markdown, sourceLabel } = await ingestSource(args, deps);
+  // 1. Ingest → markdown. Normalize CRLF once so every downstream consumer
+  // (heading/paragraph extraction, block splitting, full-source render) sees LF.
+  const ingested = await ingestSource(args, deps);
+  const markdown = String(ingested.markdown || '').replace(/\r\n?/g, '\n');
+  const sourceLabel = ingested.sourceLabel;
 
   // 2. Derive (or accept) the pedagogy content.
   const content = deriveContent(markdown, title, overrides);
@@ -970,7 +1169,11 @@ async function main(argv, deps = {}) {
   };
 
   // 5. Captions from the narration script (present whenever we have narration).
-  const vttDataUri = toVttDataUri(buildVtt(content.narration.segments || []));
+  // Cap the cues to the (clamped) video duration so the track never lists
+  // captions past the video's real end when the narration is trimmed to fit.
+  const vttDataUri = toVttDataUri(
+    buildVtt(capSegments(content.narration.segments || [], estimateNarrationSeconds(content.narration)))
+  );
 
   // 6. Assemble the self-contained page.
   const html = assemblePage({
@@ -1005,7 +1208,9 @@ async function main(argv, deps = {}) {
     quiz: content.quizItems.length,
     summary: content.summaryBullets.length,
     learningTargets: content.learningTargets.length,
-    fullSource: markdown.length > 0,
+    // Trim-check: a whitespace-only source renders the "(No source content.)"
+    // placeholder, so it must not be reported as a present full-source modality.
+    fullSource: markdown.trim().length > 0,
   };
 
   // 8. Dry-run: write locally. Otherwise publish to Atrium.

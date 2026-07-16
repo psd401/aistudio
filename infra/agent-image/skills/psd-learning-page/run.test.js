@@ -133,6 +133,78 @@ test('--content-json overrides derivation with authored quiz + summary', () => {
   expect(c.quizItems[0].explanation).toBe('because c');
 });
 
+test('extractParagraphs keeps body glued to a heading with no blank line', () => {
+  // "## Purpose\nThis explains..." (no blank line) must NOT drop the body.
+  const md = '## Purpose\nThis procedure explains the safe use of district devices.\n\n## Scope\nIt applies to all students.';
+  const paras = R.extractParagraphs(md);
+  expect(paras.join(' ')).toContain('This procedure explains');
+  expect(paras.join(' ')).toContain('It applies to all students');
+  // The heading text itself is stripped, not surfaced as body.
+  expect(paras.some((p) => p === 'Purpose' || p === 'Scope')).toBe(false);
+});
+
+test('extractParagraphs handles CRLF-encoded documents', () => {
+  const md = '# Title\r\n\r\nFirst real paragraph.\r\n\r\nSecond real paragraph.';
+  const paras = R.extractParagraphs(md);
+  expect(paras).toContain('First real paragraph.');
+  expect(paras).toContain('Second real paragraph.');
+});
+
+test('deriveContent falls back to a real quiz when every authored item is invalid', () => {
+  // Both items fail options.length >= 2 → normalized quiz is [] → must fall back
+  // to the deterministic quiz, not ship a zero-question section.
+  const c = R.deriveContent(SAMPLE_MD, 'T', {
+    quiz: [{ question: 'Q1?', options: ['only-one'] }, { question: 'Q2?' }],
+  });
+  expect(c.quizItems.length).toBeGreaterThan(0);
+  for (const q of c.quizItems) expect(q.options.length).toBeGreaterThanOrEqual(2);
+});
+
+test('normalizeAuthoredQuiz accepts a string-typed answer index', () => {
+  const c = R.deriveContent(SAMPLE_MD, 'T', {
+    quiz: [{ question: 'Q?', options: ['a', 'b', 'c'], answer: '2', rationale: 'c is right' }],
+  });
+  expect(c.quizItems[0].correctIndex).toBe(2);
+  expect(c.quizItems[0].options[c.quizItems[0].correctIndex]).toBe('c');
+});
+
+test('deriveContent coerces non-string summary/target entries instead of throwing', () => {
+  // A bare number in an authored summary must not throw inside buildNarration.
+  expect(() =>
+    R.deriveContent(SAMPLE_MD, 'T', { summary: [123, 'A valid point.'], learningTargets: [456] })
+  ).not.toThrow();
+  const c = R.deriveContent(SAMPLE_MD, 'T', { summary: [123, 'A valid point.'] });
+  expect(c.narration.script).toContain('123');
+});
+
+test('authored narration with a script but no segments still gets caption cues', () => {
+  const c = R.deriveContent(SAMPLE_MD, 'T', {
+    narration: { script: 'First sentence here. Second sentence here. Third one too.' },
+  });
+  expect(c.narration.segments.length).toBeGreaterThan(0);
+  expect(c.narration.transcript).toContain('First sentence');
+});
+
+test('resolveAudio/resolveVideo reject an unsafe supplied media URL scheme (noted omission)', async () => {
+  const noRun = () => { throw new Error('should not run'); };
+  const a = await R.resolveAudio(
+    R.parseArgs(argv('--user', 'a@b.net', '--audio-url', 'javascript:alert(1)')),
+    { script: 's' },
+    { runSkill: noRun },
+    false
+  );
+  expect(a.media).toBeNull();
+  expect(a.omission).toMatch(/rejected/i);
+  // A data:audio/ URI is allowed (matches psd-hyperframes' contract).
+  const ok = await R.resolveAudio(
+    R.parseArgs(argv('--user', 'a@b.net', '--audio-url', 'data:audio/mpeg;base64,AAAA')),
+    { script: 's' },
+    { runSkill: noRun },
+    false
+  );
+  expect(ok.media.url).toBe('data:audio/mpeg;base64,AAAA');
+});
+
 test('buildQuizHtml renders keyboard-operable inputs, per-item feedback + rationale, and a score control', () => {
   const html = R.buildQuizHtml([
     { stem: 'Stem one', options: ['A', 'B'], correctIndex: 1, explanation: 'B is right because reasons.' },
@@ -298,6 +370,43 @@ test('main --dry-run --generate-media still emits a valid page (with notes) when
   }
 });
 
+test('resolveVideo notes the 60s cap when the narration is longer than the video', async () => {
+  // A narration whose last cue ends well past MAX_VIDEO_SECONDS (60): the video
+  // is trimmed to fit, so the page must say so via the note hook.
+  const longNarration = { script: 'x', segments: [{ text: 'a', start: 0, end: 30 }, { text: 'b', start: 30, end: 90 }] };
+  const runSkill = () => ({ code: 0, stdout: JSON.stringify({ url: 'https://x/v.mp4' }), stderr: '' });
+  const v = await R.resolveVideo(
+    R.parseArgs(argv('--user', 'a@b.net')),
+    'https://x/a.mp3',
+    'T',
+    ['point'],
+    longNarration,
+    { runSkill },
+    false
+  );
+  expect(v.media.url).toBe('https://x/v.mp4');
+  expect(v.media.note).toMatch(/60 seconds|capped/i);
+});
+
+test('assemblePage wires a change listener that clears stale quiz feedback + result', () => {
+  const html = assembleWith(SAMPLE_MD);
+  expect(html).toContain("addEventListener('change'");
+  expect(html).toContain("removeAttribute('data-answered')");
+});
+
+test('main reports fullSource:false for a whitespace-only source', async () => {
+  const out = path.join(os.tmpdir(), `lp-blank-${Date.now()}.html`);
+  try {
+    await R.main(argv('--user', 'a@b.net', '--text', '   \n\n  ', '--title', 'T', '--dry-run', '--out', out), {
+      auditHtml: PASS_AUDIT,
+    });
+    const res = JSON.parse(stdout.trim());
+    expect(res.modalities.fullSource).toBe(false);
+  } finally {
+    fs.rmSync(out, { force: true });
+  }
+});
+
 // ── Google Docs ingest ──────────────────────────────────────────────────────────
 
 test('exportGoogleDoc returns the doc body from the stubbed psd-workspace call', () => {
@@ -314,16 +423,50 @@ test('exportGoogleDoc returns the doc body from the stubbed psd-workspace call',
   expect(calls[0].args.join(' ')).toContain('FILEID123');
 });
 
-test('exportGoogleDoc surfaces the share-with-agent guidance on a denied export (no crash)', () => {
+test('exportGoogleDoc surfaces share-with-agent guidance on a genuine permission denial', () => {
+  // A doc not shared with the agent account: gws exits non-zero and (per its
+  // stdio: inherit) prints the Drive 404/403 on the captured stderr — stdout is
+  // NOT structured JSON here.
   const run = () => ({
-    code: 12,
-    stdout: JSON.stringify({ status: 'upstream', message: 'File not found (404). Share it with your agent account agnt_x@psd401.net (Reader).' }),
-    stderr: '',
+    code: 2,
+    stdout: '',
+    stderr: 'gws: drive files export: Error 404: File not found: FILEID',
   });
   expect(() => R.exportGoogleDoc('FILEID', 'a@b.net', run)).toThrow(ExitError);
   const out = JSON.parse(stdout.trim());
   expect(out.error).toBe('gdoc_denied');
   expect(out.message).toMatch(/agent account/i);
+});
+
+test('exportGoogleDoc treats a transport error (exit 12) as transient — NOT a sharing problem', () => {
+  // psd-workspace exit 12 = broker/network failure; fail() writes to stderr only,
+  // stdout is empty. This must NOT tell the user to re-share the doc.
+  const run = () => ({
+    code: 12,
+    stdout: '',
+    stderr: 'psd-workspace: Unable to fetch agent workspace token: broker timeout',
+  });
+  expect(() => R.exportGoogleDoc('FILEID', 'a@b.net', run)).toThrow(ExitError);
+  const out = JSON.parse(stdout.trim());
+  expect(out.error).toBe('ingest_failed');
+  expect(out.message).not.toMatch(/share it with your agent account/i);
+  expect(out.message).toMatch(/transient|try again/i);
+});
+
+test('exportGoogleDoc treats account-provisioning (exit 14) as "wait", not "share"', () => {
+  const run = () => ({
+    code: 14,
+    stdout: JSON.stringify({
+      status: 'account-provisioning',
+      message: 'Your agent Workspace account is being set up automatically — try again in about 30 minutes.',
+    }),
+    stderr: '',
+  });
+  expect(() => R.exportGoogleDoc('FILEID', 'a@b.net', run)).toThrow(ExitError);
+  const out = JSON.parse(stdout.trim());
+  expect(out.error).toBe('gdoc_provisioning');
+  expect(out.message).toMatch(/30 minutes|being set up/i);
+  expect(out.message).not.toMatch(/share it with your agent account/i);
 });
 
 test('ingestSource routes --gdoc-url through psd-workspace export', async () => {
@@ -379,7 +522,9 @@ test('main publishes to Atrium (create + publish intranet) and returns the artif
   const calls = [];
   const runSkill = (spec) => {
     calls.push(spec);
-    if (spec.args[0] === 'create-artifact') return { code: 0, stdout: JSON.stringify({ id: 'art-42', slug: 'tech' }), stderr: '' };
+    if (spec.args[0] === 'create-artifact') {
+      return { code: 0, stdout: JSON.stringify({ id: 'art-42', slug: 'tech', url: 'https://studio.example/c/tech', visibilityLevel: 'internal' }), stderr: '' };
+    }
     if (spec.args[0] === 'publish') return { code: 0, stdout: JSON.stringify({ status: 'published', destination: 'intranet' }), stderr: '' };
     return { code: 1, stdout: '', stderr: 'unexpected' };
   };
@@ -392,10 +537,43 @@ test('main publishes to Atrium (create + publish intranet) and returns the artif
     expect(res.status).toBe('ok');
     expect(res.mode).toBe('published');
     expect(res.artifact.id).toBe('art-42');
+    // Reader URL is the published intranet reader (/c/{slug}), from the API's
+    // absolute deep link — NOT the /atrium/{id}/view draft editor route.
+    expect(res.readerUrl).toBe('https://studio.example/c/tech');
+    expect(res.readerUrl).not.toContain('/atrium/');
     const create = calls.find((c) => c.args[0] === 'create-artifact');
     const publish = calls.find((c) => c.args[0] === 'publish');
     expect(create.args).toContain('--body-format');
+    // Code goes via a temp file (avoids the argv-size limit), not inline --code.
+    expect(create.args).toContain('--code-file');
+    expect(create.args).not.toContain('--code');
+    // Must be created 'internal' or the published page is invisible to staff/students.
+    expect(create.args.join(' ')).toContain('--visibility internal');
     expect(publish.args.join(' ')).toContain('--destination intranet');
+  } finally {
+    fs.rmSync(src, { force: true });
+  }
+});
+
+test('publish failure surfaces the orphaned draft id for a targeted retry (no re-run)', async () => {
+  const src = path.join(os.tmpdir(), `lp-src4-${Date.now()}.md`);
+  fs.writeFileSync(src, SAMPLE_MD);
+  const runSkill = (spec) => {
+    if (spec.args[0] === 'create-artifact') return { code: 0, stdout: JSON.stringify({ id: 'art-99', slug: 'oops' }), stderr: '' };
+    if (spec.args[0] === 'publish') return { code: 2, stdout: JSON.stringify({ message: 'destination unavailable' }), stderr: '' };
+    return { code: 1, stdout: '', stderr: 'unexpected' };
+  };
+  try {
+    await expect(
+      R.main(argv('--user', 'a@b.net', '--source-file', src, '--title', 'T', '--video-url', 'https://x/v.mp4', '--audio-url', 'https://x/a.mp3'), {
+        runSkill,
+        auditHtml: PASS_AUDIT,
+      })
+    ).rejects.toThrow(ExitError);
+    const out = JSON.parse(stdout.trim());
+    expect(out.error).toBe('publish_failed');
+    expect(out.message).toContain('art-99');
+    expect(out.message).toMatch(/publish --id art-99/);
   } finally {
     fs.rmSync(src, { force: true });
   }
