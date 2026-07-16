@@ -175,6 +175,31 @@ test('normalizeAuthoredQuiz accepts a string-typed answer index', () => {
   expect(c.quizItems[0].options[c.quizItems[0].correctIndex]).toBe('c');
 });
 
+test('an out-of-range authored correctIndex drops the item (never mis-grades)', () => {
+  // A valid item + an item whose answer index exceeds its options: the invalid
+  // one is dropped rather than silently marking option 0 correct.
+  const c = R.deriveContent(SAMPLE_MD, 'T', {
+    quiz: [
+      { question: 'Good?', options: ['a', 'b', 'c'], answer: 1, rationale: 'b' },
+      { question: 'Bad?', options: ['a', 'b'], answer: 9, rationale: 'describes a 10th option' },
+    ],
+  });
+  expect(c.quizItems.length).toBe(1);
+  expect(c.quizItems[0].stem).toContain('Good?');
+  expect(c.quizItems[0].correctIndex).toBe(1);
+});
+
+test('an all-invalid authored quiz (out-of-range indices) falls back to the deterministic quiz', () => {
+  const c = R.deriveContent(SAMPLE_MD, 'T', {
+    quiz: [{ question: 'Bad?', options: ['a', 'b'], answer: 5 }],
+  });
+  expect(c.quizItems.length).toBeGreaterThan(0);
+  for (const q of c.quizItems) {
+    expect(q.correctIndex).toBeGreaterThanOrEqual(0);
+    expect(q.correctIndex).toBeLessThan(q.options.length);
+  }
+});
+
 test('deriveContent coerces non-string summary/target entries instead of throwing', () => {
   // A bare number in an authored summary must not throw inside buildNarration.
   expect(() =>

@@ -515,8 +515,11 @@ function normalizeAuthoredQuiz(quiz) {
       const options = Array.isArray(q.options) ? q.options.map(String) : [];
       let correctIndex = toAnswerIndex(q.answer);
       if (correctIndex === null) correctIndex = toAnswerIndex(q.correctIndex);
+      // A MISSING index defaults to the first option. An explicitly-authored
+      // out-of-range index is left as-is so the filter below DROPS the item —
+      // coercing it to 0 would silently mark the wrong option correct while the
+      // authored explanation describes a different one (a mis-graded quiz item).
       if (correctIndex === null) correctIndex = 0;
-      if (correctIndex < 0 || correctIndex >= options.length) correctIndex = 0;
       return {
         stem: String(q.question || q.stem || `Question ${i + 1}`),
         options,
@@ -524,7 +527,10 @@ function normalizeAuthoredQuiz(quiz) {
         explanation: String(q.rationale || q.explanation || ''),
       };
     })
-    .filter((q) => q.options.length >= 2);
+    // Drop items that can't render a valid single-answer question: fewer than 2
+    // options, or a correct index outside the options. All-invalid → [] → the
+    // deterministic quiz fallback runs (see deriveContent).
+    .filter((q) => q.options.length >= 2 && q.correctIndex >= 0 && q.correctIndex < q.options.length);
 }
 
 // A recognition/retrieval item per learning target: the correct option is a real
