@@ -389,15 +389,16 @@ function splitSentences(text) {
 
 function extractHeadings(markdown) {
   const out = [];
-  // Match the level + the rest of the line greedily (`.` excludes newline, so
-  // `.+` is linear per line). The old `(.+?)\s*#*$` had overlapping quantifiers
-  // over `\s`/`.`/`#` that backtrack polynomially (ReDoS). The optional ATX
-  // closing `###` is stripped afterward with an anchored, disjoint-class regex.
-  const re = /^(#{1,3})[ \t]+(.+)$/gm;
+  // Level + required whitespace + heading text captured as `\S.*` (starts with a
+  // non-space). Making the separator (`[ \t]+`) and the text disjoint removes the
+  // overlapping quantifiers that make `[ \t]+(.+)` / `(.+?)\s*#*$` backtrack
+  // polynomially (ReDoS). Trailing whitespace is trimmed in code (linear); a rare
+  // explicit ATX closing `###` is left to the authored-content override rather
+  // than a backtracking regex.
+  const re = /^(#{1,3})[ \t]+(\S.*)$/gm;
   let m;
   while ((m = re.exec(markdown))) {
-    const raw = m[2].replace(/[ \t]+#+[ \t]*$/, ''); // drop trailing ` ###` closing run
-    const text = stripMarkdown(raw);
+    const text = stripMarkdown(m[2].trimEnd());
     if (text) out.push({ level: m[1].length, text });
   }
   return out;
