@@ -222,8 +222,9 @@ export async function persistImageExchange(params: {
     estimatedCost?: number;
   };
   dbModelId: number;
+  routingMetadata?: Record<string, unknown>;
 }): Promise<void> {
-  const { conversationId, imagePrompt, imageResult, dbModelId } = params;
+  const { conversationId, imagePrompt, imageResult, dbModelId, routingMetadata = {} } = params;
 
   // Build assistant parts/content outside the transaction (pure computation).
   const messageParts: Array<{
@@ -275,7 +276,8 @@ export async function persistImageExchange(params: {
       modelId: dbModelId,
       metadata: sql`${safeJsonbStringify({
         generationType: 'image',
-        estimatedCost: imageResult.estimatedCost
+        estimatedCost: imageResult.estimatedCost,
+        routing: routingMetadata,
       })}::jsonb`,
       createdAt: new Date()
     });
@@ -477,7 +479,8 @@ async function handleFilePart(
  * Get previous generated images from conversation
  */
 export async function getPreviousGeneratedImages(
-  conversationId: string
+  conversationId: string,
+  userId: number
 ): Promise<ReferenceImage[]> {
   const referenceImages: ReferenceImage[] = [];
 
@@ -485,10 +488,15 @@ export async function getPreviousGeneratedImages(
     (db) => db
       .select({ parts: nexusMessages.parts })
       .from(nexusMessages)
+      .innerJoin(
+        nexusConversations,
+        eq(nexusMessages.conversationId, nexusConversations.id)
+      )
       .where(
         and(
           eq(nexusMessages.conversationId, conversationId),
-          eq(nexusMessages.role, 'assistant')
+          eq(nexusMessages.role, 'assistant'),
+          eq(nexusConversations.userId, userId)
         )
       )
       .orderBy(desc(nexusMessages.createdAt))
@@ -520,6 +528,45 @@ export async function getPreviousGeneratedImages(
 }
 
 /**
+ * Determine whether routing can safely treat the current request as having image
+ * context. Persisted history is scoped to the authenticated owner because routing
+ * runs before the normal conversation ownership check.
+ */
+export async function getImageRoutingContext(params: {
+  messages: ImageGenerationParams['messages'];
+  conversationId?: string;
+  userId: number;
+}): Promise<{ hasImageInput: boolean; hasPreviousGeneratedImage: boolean }> {
+  const lastUserMessage = [...params.messages].reverse().find(message => message.role === 'user');
+  const hasImageInput = lastUserMessage?.parts?.some(part => {
+    const mimeType = part.mimeType ?? part.mediaType;
+    return part.type === 'image'
+      || (part.type === 'file' && typeof mimeType === 'string' && mimeType.startsWith('image/'));
+  }) ?? false;
+
+  if (hasImageInput || !params.conversationId) {
+    return { hasImageInput, hasPreviousGeneratedImage: false };
+  }
+
+  try {
+    const previousImages = await getPreviousGeneratedImages(params.conversationId, params.userId);
+    return {
+      hasImageInput: false,
+      hasPreviousGeneratedImage: previousImages.length > 0,
+    };
+  } catch (error) {
+    // Prior-image context improves routing but is not required for an ordinary
+    // chat request. Degrade to no context instead of turning a lookup failure
+    // into a pre-stream 500.
+    log.warn('Could not load previous image context for routing', {
+      conversationId: params.conversationId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { hasImageInput: false, hasPreviousGeneratedImage: false };
+  }
+}
+
+/**
  * Create streaming response for image generation
  */
 export function createImageStreamResponse(params: {
@@ -528,8 +575,9 @@ export function createImageStreamResponse(params: {
   conversationTitle: string;
   isNewConversation: boolean;
   requestId: string;
+  routingMetadata?: Record<string, unknown>;
 }): Response {
-  const { imageResult, conversationId, conversationTitle, isNewConversation, requestId } = params;
+  const { imageResult, conversationId, conversationTitle, isNewConversation, requestId, routingMetadata } = params;
 
   let responseContent = '';
   if (imageResult.altText && imageResult.altText.trim()) {
@@ -547,6 +595,10 @@ export function createImageStreamResponse(params: {
 
   if (isNewConversation) {
     responseHeaders['X-Conversation-Title'] = encodeURIComponent(conversationTitle);
+  }
+  if (routingMetadata) {
+    const encodedRouting = encodeURIComponent(JSON.stringify(routingMetadata));
+    if (encodedRouting.length <= 4096) responseHeaders['X-Nexus-Routing'] = encodedRouting;
   }
 
   return createUIMessageStreamResponse({

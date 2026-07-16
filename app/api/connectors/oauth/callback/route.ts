@@ -29,7 +29,7 @@ import { nexusMcpServers, nexusMcpUserTokens } from "@/lib/db/schema"
 import { loadOAuthCredentials, rejectUnsafeMcpUrl } from "@/lib/mcp/connector-service"
 import { encryptToken, decryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
-import { getOAuthStateCookieName } from "../authorize/route"
+import { getOAuthStateCookieName } from "@/lib/mcp/oauth-state"
 
 const log = createLogger({ action: "oauth-callback" })
 

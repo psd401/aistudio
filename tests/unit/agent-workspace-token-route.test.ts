@@ -32,7 +32,8 @@ jest.mock("@/lib/agent-workspace/dwd-token-broker", () => {
   }
 })
 
-import { POST, __resetRateLimitForTests } from "@/app/api/agent/workspace-token/route"
+import { POST } from "@/app/api/agent/workspace-token/route"
+import { resetAgentWorkspaceTokenRateLimitForTests } from "@/lib/agent-workspace/token-rate-limit"
 import {
   AccountNotProvisionedError,
   BrokerNotConfiguredError,
@@ -49,7 +50,7 @@ import type { NextRequest } from "next/server"
 beforeEach(() => {
   authOk = true
   mintMock.mockReset()
-  __resetRateLimitForTests()
+  resetAgentWorkspaceTokenRateLimitForTests()
 })
 
 describe("POST /api/agent/workspace-token", () => {

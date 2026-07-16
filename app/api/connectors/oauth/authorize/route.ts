@@ -28,19 +28,9 @@ import { nexusMcpServers } from "@/lib/db/schema"
 import { requireUserAccess, loadOAuthCredentials, rejectUnsafeMcpUrl } from "@/lib/mcp/connector-service"
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
+import { getOAuthStateCookieName } from "@/lib/mcp/oauth-state"
 
 const log = createLogger({ action: "oauth-authorize" })
-
-/**
- * Builds a per-server cookie name for the encrypted PKCE state.
- * Using a per-server suffix allows concurrent OAuth flows for different
- * connectors without one overwriting the other's cookie.
- */
-export function getOAuthStateCookieName(serverId: string): string {
-  // Full UUID avoids collisions when only later segments differ.
-  // Dashes are valid in cookie names per RFC 6265.
-  return `mcp_oauth_state_${serverId}`
-}
 
 /** Max age for the state cookie (5 minutes — generous window for popup flow) */
 const STATE_COOKIE_MAX_AGE = 300

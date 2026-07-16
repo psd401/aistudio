@@ -51,37 +51,16 @@ import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
 import { validateInternalSecret } from "@/lib/agent-workspace/internal-auth"
 import { mintAgentWorkspaceTokenViaBoundary } from "@/lib/agent-workspace/mint-client"
 import {
+  checkAgentWorkspaceTokenRateLimit,
+  getAgentWorkspaceTokenRateLimit,
+} from "@/lib/agent-workspace/token-rate-limit"
+import {
   AccountNotProvisionedError,
   BrokerNotConfiguredError,
   InvalidOwnerError,
 } from "@/lib/agent-workspace/dwd-token-broker"
 
 const log = createLogger({ module: "agent-workspace-token" })
-
-/**
- * Per-owner mint rate limit (defense-in-depth behind the shared secret). The
- * cap is generous — a token lasts ~1h and the skill caches it within that
- * window, so legitimate minting is roughly hourly per owner. Fixed 1h window.
- *
- * NOTE: in-memory per-task (ECS runs multiple tasks) — the same non-atomic,
- * best-effort tradeoff consent-link documents. This bounds abuse of a single
- * task, not the fleet; a fleet-wide guard would need shared state (Redis/DB).
- */
-const RATE_LIMIT_PER_HOUR = Number(process.env.AGENT_WORKSPACE_TOKEN_RATE_LIMIT) || 120
-const RATE_WINDOW_MS = 60 * 60 * 1000
-const _mintWindow = new Map<string, { count: number; windowStart: number }>()
-
-function checkRateLimit(ownerEmail: string): boolean {
-  const now = Date.now()
-  const entry = _mintWindow.get(ownerEmail)
-  if (!entry || now - entry.windowStart >= RATE_WINDOW_MS) {
-    _mintWindow.set(ownerEmail, { count: 1, windowStart: now })
-    return true
-  }
-  if (entry.count >= RATE_LIMIT_PER_HOUR) return false
-  entry.count += 1
-  return true
-}
 
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
@@ -113,10 +92,11 @@ export async function POST(request: NextRequest) {
   // rate limit, since Google treats both as the same mailbox (claude review).
   const ownerEmail = rawOwnerEmail.toLowerCase()
 
-  if (!checkRateLimit(ownerEmail)) {
+  if (!checkAgentWorkspaceTokenRateLimit(ownerEmail)) {
+    const rateLimit = getAgentWorkspaceTokenRateLimit()
     log.warn("Workspace-token rate limit exceeded", sanitizeForLogging({ ownerEmail, requestId }))
     return NextResponse.json(
-      { error: `Rate limit exceeded — max ${RATE_LIMIT_PER_HOUR} tokens per hour per user` },
+      { error: `Rate limit exceeded — max ${rateLimit} tokens per hour per user` },
       { status: 429, headers: { "Retry-After": "3600" } }
     )
   }
@@ -157,9 +137,4 @@ export async function POST(request: NextRequest) {
       { status: 502 }
     )
   }
-}
-
-/** Test-only: clear the in-memory rate-limit window between tests. */
-export function __resetRateLimitForTests(): void {
-  _mintWindow.clear()
 }

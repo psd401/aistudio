@@ -19,10 +19,18 @@ test.describe('Nexus AI Tools Integration', () => {
     await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10000 })
   })
 
-  // nexus auto-selects a model on load, so the composer's Tools control is enabled
-  // without a manual pick. Open the Tools popover and wait until its content shows.
+  // Standard intentionally hides manual tools. Opt into Advanced/Auto before
+  // exercising the legacy optional tool controls.
+  async function enableAdvanced(page: Page) {
+    const routing = page.getByRole('button', { name: 'Nexus routing mode' })
+    await routing.click()
+    await page.getByTestId('nexus-family-auto').click()
+    await expect(routing).toContainText('Auto')
+  }
+
   async function openTools(page: Page) {
-    const toolsButton = page.getByRole('button', { name: /Tools/ })
+    await enableAdvanced(page)
+    const toolsButton = page.getByTestId('nexus-tools-control')
     await expect(toolsButton).toBeEnabled({ timeout: 15000 })
     await toolsButton.click()
     await expect(page.getByRole('heading', { name: 'AI Tools' })).toBeVisible()
@@ -39,33 +47,26 @@ test.describe('Nexus AI Tools Integration', () => {
     }
   })
 
-  test('toggles a tool when the selected model offers one', async ({ page }) => {
+  test('toggles a tool when offered or clearly reports that none are available', async ({ page }) => {
     await openTools(page)
     const firstSwitch = page.getByRole('switch').first()
     const hasTools = await firstSwitch.isVisible().catch(() => false)
-    test.skip(!hasTools, 'The selected model offers no tools in this seed environment')
-    const wasOn = await firstSwitch.isChecked()
-    await firstSwitch.click()
-    await expect(firstSwitch).toBeChecked({ checked: !wasOn })
-    await firstSwitch.click()
-    await expect(firstSwitch).toBeChecked({ checked: wasOn })
+    if (hasTools) {
+      const wasOn = await firstSwitch.isChecked()
+      await firstSwitch.click()
+      await expect(firstSwitch).toBeChecked({ checked: !wasOn })
+      await firstSwitch.click()
+      await expect(firstSwitch).toBeChecked({ checked: wasOn })
+    } else {
+      await expect(page.getByText(/No tools available/i)).toBeVisible()
+    }
   })
 
-  test('opens the model picker and lists selectable models', async ({ page }) => {
-    const picker = page.getByRole('button', { name: /Select AI model/i })
-    await expect(picker).toBeVisible({ timeout: 15000 })
-    await picker.click()
-    await expect(page.getByRole('heading', { name: 'AI Model' })).toBeVisible()
-    await expect(page.getByText('Choose the model for this conversation')).toBeVisible()
+  test('Advanced uses family routing and never restores the exact-model picker', async ({ page }) => {
+    await enableAdvanced(page)
+    await expect(page.getByTestId('nexus-tools-control')).toBeVisible()
+    await expect(page.getByTestId('nexus-mcp-control')).toBeVisible()
+    await expect(page.getByRole('button', { name: /Select AI model/i })).toHaveCount(0)
   })
 
-})
-
-test.describe('Tool Registry API', () => {
-  test('should return available tools for a model', async ({ request }) => {
-    // This would test the API endpoint that returns model capabilities
-    // For now, we'll test that the model has nexus_capabilities data
-    
-    test.skip(true, 'API endpoint test - would require direct database access or API route')
-  })
 })

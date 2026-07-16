@@ -939,6 +939,8 @@ export function isImageGenerationModel(modelId: string): boolean {
     'gpt-image',
     'dall-e',
     'gemini-2.5-flash-image',
+    'gemini-3.1-flash-image',
+    'gemini-3.1-flash-lite-image',
     'gemini-3-pro-image',
     'imagen'
   ];

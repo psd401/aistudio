@@ -1,4 +1,19 @@
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 /** @type {import('next').NextConfig} */
+
+const PROJECT_ROOT = path.dirname(fileURLToPath(import.meta.url))
+
+// Bun's isolated linker can install multiple physical copies of CodeMirror's
+// state/view packages, even when they resolve to the same version. CodeMirror
+// relies on instanceof checks for extension values, so bundling more than one
+// copy crashes the editor at runtime. Pin both bundlers to the root copies so
+// every CodeMirror extension shares the same module identity.
+const codeMirrorAliases = {
+  '@codemirror/state': './node_modules/@codemirror/state',
+  '@codemirror/view': './node_modules/@codemirror/view',
+}
 
 // Scope S3 image remote patterns to the application's own bucket/region
 // so next/image optimization cannot be used to proxy arbitrary S3 content.
@@ -35,6 +50,9 @@ const nextConfig = {
   // parallel Playwright load. See scripts/test/e2e-local.sh.
   distDir: process.env.NEXT_DIST_DIR || '.next',
   transpilePackages: ['recharts'],
+  turbopack: {
+    resolveAlias: codeMirrorAliases,
+  },
   serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2', 'postgres', 'mammoth', 'pdf-parse', 'oidc-provider', 'ws',
     // Atrium collab (#1051): the agent-bridge route opens a y-websocket client to
     // the collab server. These pure-ESM Yjs libs must run as real Node modules on
@@ -115,6 +133,12 @@ const nextConfig = {
     config.cache = {
       type: 'memory',
       maxGenerations: 1,
+    };
+
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@codemirror/state': path.join(PROJECT_ROOT, 'node_modules/@codemirror/state'),
+      '@codemirror/view': path.join(PROJECT_ROOT, 'node_modules/@codemirror/view'),
     };
 
     if (isServer) {

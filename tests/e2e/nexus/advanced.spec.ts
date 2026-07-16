@@ -2,7 +2,9 @@ import { test, expect } from '../fixtures'
 import { gotoNexus, sendMessage, waitForStreamingComplete, getConversationIdFromUrl } from './utils'
 import { authenticateContext } from '../helpers/session-auth'
 
-// Advanced Nexus E2E tests — fork conversation, model/tool/voice selectors, error handling.
+// Advanced Nexus E2E tests — fork conversation, voice, error handling, and persistence.
+// Deterministic model-router UI/wire coverage lives in model-router.spec.ts so it
+// remains runnable when live external-provider specs are excluded.
 
 // ── Fork API — Auth-independent ───────────────────────────────────────────────
 
@@ -88,9 +90,9 @@ test.describe('Nexus Fork Conversation — Authenticated', () => {
   })
 })
 
-// ── Model Selector UI — Authenticated ────────────────────────────────────────
+// ── Voice UI — Authenticated ─────────────────────────────────────────────────
 
-test.describe('Nexus Model Selector — Authenticated', () => {
+test.describe('Nexus Voice UI — Authenticated', () => {
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
@@ -99,50 +101,6 @@ test.describe('Nexus Model Selector — Authenticated', () => {
   test.beforeEach(async ({ page }) => {
     await authenticateContext(page.context())
     await gotoNexus(page)
-  })
-
-  test('model selector renders and is interactive', async ({ page }) => {
-    // Use isVisible() + short waitFor instead of count() — count() doesn't auto-wait
-    // and can return 0 on a still-rendering page, causing silent false-passes.
-    let modelSelectorFound = false
-    try {
-      await page.locator('[data-testid="model-selector"]').waitFor({ state: 'visible', timeout: 3_000 })
-      modelSelectorFound = true
-    } catch {
-      // Not present — check fallback selector
-    }
-
-    if (modelSelectorFound) {
-      const modelSelector = page.locator('[data-testid="model-selector"]')
-      await expect(modelSelector).toBeVisible()
-      await modelSelector.click()
-      const options = page.locator('[data-testid="model-option"]')
-      await expect(options.first()).toBeVisible({ timeout: 5_000 })
-    } else {
-      // Model selector may use different structure — check for button/select
-      try {
-        await page
-          .locator('button')
-          .filter({ hasText: /model|gpt|claude|gemini/i })
-          .first()
-          .waitFor({ state: 'visible', timeout: 3_000 })
-        await expect(
-          page.locator('button').filter({ hasText: /model|gpt|claude|gemini/i }).first()
-        ).toBeVisible()
-      } catch {
-        test.skip(true, 'Model selector not present in this environment')
-      }
-    }
-  })
-
-  test('tool selector renders for models that support tools', async ({ page }) => {
-    // Use waitFor instead of count() to properly wait for rendering
-    try {
-      await page.locator('[data-testid="tool-selector"]').waitFor({ state: 'visible', timeout: 3_000 })
-      await expect(page.locator('[data-testid="tool-selector"]')).toBeVisible()
-    } catch {
-      test.skip(true, 'Tool selector not visible (model may not support tools)')
-    }
   })
 
   test('voice button renders (enabled or disabled state)', async ({ page }) => {
@@ -294,6 +252,47 @@ test.describe('Nexus Message Persistence — Authenticated', () => {
 
   test.beforeEach(async ({ page }) => {
     await authenticateContext(page.context())
+  })
+
+  test('a live response exposes and persists its model-router decision', async ({ page }) => {
+    await gotoNexus(page)
+    const routingButton = page.getByRole('button', { name: 'Nexus routing mode' })
+    await routingButton.click()
+    await page.getByTestId('nexus-mode-standard').click()
+
+    const responsePromise = page.waitForResponse(response =>
+      response.url().includes('/api/nexus/chat')
+      && response.request().method() === 'POST'
+      && response.status() === 200
+    )
+    await sendMessage(page, 'Reply with only the word routed')
+    const response = await responsePromise
+    const encodedRouting = await response.headerValue('x-nexus-routing')
+    expect(encodedRouting).toBeTruthy()
+
+    const responseRouting = JSON.parse(decodeURIComponent(encodedRouting!)) as Record<string, unknown>
+    expect(responseRouting.experienceMode).toBe('standard')
+    expect(responseRouting.requestedFamily).toBe('auto')
+    expect(typeof responseRouting.selectedModelId).toBe('string')
+    expect(['deterministic', 'classifier', 'fallback']).toContain(responseRouting.decisionSource)
+
+    await waitForStreamingComplete(page)
+    const conversationId = getConversationIdFromUrl(page)
+    expect(conversationId).toBeTruthy()
+    const stored = await page.evaluate(async id => {
+      const result = await fetch(`/api/nexus/conversations/${id}/messages`)
+      return result.json()
+    }, conversationId!)
+    const assistant = [...stored.messages]
+      .reverse()
+      .find((message: { role: string }) => message.role === 'assistant') as {
+        metadata?: { routing?: Record<string, unknown> }
+      } | undefined
+    expect(assistant?.metadata?.routing).toMatchObject({
+      experienceMode: 'standard',
+      requestedFamily: 'auto',
+      selectedModelId: responseRouting.selectedModelId,
+    })
   })
 
   test('messages sent in chat are retrievable from /api/nexus/conversations/<id>/messages', async ({

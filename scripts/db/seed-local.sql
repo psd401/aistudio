@@ -75,6 +75,11 @@ FROM users u CROSS JOIN roles r
 WHERE u.email = 'staff@example.com' AND r.name = 'staff'
 ON CONFLICT (user_id, role_id) DO NOTHING;
 
+-- Keep the dedicated router E2E identity deterministic across local runs. Router
+-- tests use the staff account so they never race with the larger admin suite.
+DELETE FROM nexus_user_preferences
+WHERE user_id = (SELECT id FROM users WHERE cognito_sub = 'e2e-staff-user');
+
 -- Student user for testing student-level access.
 -- cognito_sub is the unique key (email is not); deterministic value keeps the
 -- seed idempotent (see staff user note above).

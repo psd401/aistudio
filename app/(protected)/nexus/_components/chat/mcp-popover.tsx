@@ -262,6 +262,7 @@ export function MCPPopover({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
+          data-testid="nexus-mcp-control"
           variant="ghost"
           size="sm"
           className={cn(

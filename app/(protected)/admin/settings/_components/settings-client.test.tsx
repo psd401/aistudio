@@ -254,6 +254,7 @@ jest.mock('react-hook-form', () => {
       }),
       formState: { errors: {} }
     }),
+    useWatch: ({ name }: { name: string }) => globalFormData[name],
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     Controller: ({ render }: any) => render({ field: { onChange: jest.fn(), value: '' } })
   }

@@ -9,9 +9,8 @@ import { authenticateContext } from "./helpers/session-auth";
  * they do NOT depend on a live LLM deciding to call a tool):
  *  1. With a workspace open, the chat request body carries `workspaceId` — the
  *     server uses it to bind read/edit content tools.
- *  2. Switching the model with a workspace open PRESERVES `?workspace=` (the
- *     model-change reset used to drop it, silently closing the open document and
- *     its content tools).
+ *  2. Switching the Advanced family with a workspace open PRESERVES
+ *     `?workspace=` and the open document/content tools.
  *
  * The live edit path (chat → agent bridge → live Yjs doc, chat → createVersion)
  * is proven separately; asserting it here would couple CI to a real model call.
@@ -21,11 +20,18 @@ import { authenticateContext } from "./helpers/session-auth";
 
 const OBJ_SLUG = process.env.ATRIUM_EDITOR_E2E_SLUG ?? "atrium-editor-e2e";
 
-async function pickAnyOtherModel(page: import("@playwright/test").Page) {
-  await page.locator('button[aria-label="Select AI model"]').first().click({ timeout: 10_000 });
-  const pop = page.locator('[data-radix-popper-content-wrapper], [role="dialog"]').last();
-  // Pick the second listed model (any change triggers the model-change reset).
-  await pop.locator("button").nth(1).click({ timeout: 5_000 });
+const MOCK_CHAT_STREAM = [
+  'data: {"type":"start","messageId":"e2e-workspace-assistant"}\n\n',
+  'data: {"type":"text-start","id":"e2e-workspace-text"}\n\n',
+  'data: {"type":"text-delta","id":"e2e-workspace-text","delta":"ok"}\n\n',
+  'data: {"type":"text-end","id":"e2e-workspace-text"}\n\n',
+  'data: {"type":"finish","finishReason":"stop"}\n\n',
+  'data: [DONE]\n\n',
+].join("");
+
+async function chooseClaudeFamily(page: import("@playwright/test").Page) {
+  await page.getByRole("button", { name: "Nexus routing mode" }).click();
+  await page.getByTestId("nexus-family-anthropic").click();
 }
 
 test.describe("Nexus workspace chat tools (§1087, authenticated)", () => {
@@ -34,26 +40,32 @@ test.describe("Nexus workspace chat tools (§1087, authenticated)", () => {
     "Requires the authed host dev server + seeded doc"
   );
 
-  test("chat request carries workspaceId, preserved across a model change", async ({ browser }) => {
+  test("chat request carries workspaceId, preserved across a family change", async ({ browser }) => {
     const context = await browser.newContext();
     await authenticateContext(context);
     try {
       const page = await context.newPage();
 
       const chatBodies: string[] = [];
-      page.on("request", (r) => {
-        if (r.url().includes("/api/nexus/chat") && r.method() === "POST") {
-          chatBodies.push(r.postData() ?? "");
-        }
-      });
+      await page.route("**/api/nexus/chat", async (route) => {
+        chatBodies.push(route.request().postData() ?? "");
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "x-vercel-ai-ui-message-stream": "v1",
+          },
+          body: MOCK_CHAT_STREAM,
+        });
+      }, { times: 1 });
 
       await page.goto(`/nexus?workspace=${OBJ_SLUG}`);
       const panel = page.getByTestId("workspace-panel");
       await expect(panel).toBeVisible({ timeout: 60_000 });
 
-      // Switch the model — this triggers the clean-URL reset. It MUST keep the
-      // workspace open (regression: it used to reload to a bare /nexus).
-      await pickAnyOtherModel(page);
+      // Change the Advanced family. The router control must not disturb the
+      // workspace or fragile conversation runtime.
+      await chooseClaudeFamily(page);
       await expect(page).toHaveURL(/workspace=/, { timeout: 20_000 });
       await expect(page.getByTestId("workspace-panel")).toBeVisible({ timeout: 60_000 });
 

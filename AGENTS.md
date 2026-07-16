@@ -1,0 +1,410 @@
+# AGENTS.md
+
+AI Studio codebase guidance for Codex. Optimized for token efficiency and accuracy.
+
+## 🚀 Quick Reference
+
+```bash
+# Local Development (Issue #607)
+bun run db:up              # Start local PostgreSQL (Docker)
+bun run dev:local          # Run Next.js with local database
+bun run db:studio          # Open Drizzle Studio to inspect DB
+bun run db:psql            # Connect to local DB via psql
+bun run db:seed            # Create test users (admin/staff/student)
+bun run db:reset           # Reset database (destroys all data)
+
+# Development (without Docker)
+bun run dev                # Start dev server (port 3000)
+bun run build              # Build for production
+bun run lint               # MUST pass before commit
+bun run typecheck          # MUST pass before commit
+bun run test:e2e           # Run E2E tests
+
+# Infrastructure (from /infra)
+cd infra && bunx cdk deploy --all                          # Deploy all stacks
+cd infra && bunx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
+```
+
+## 🎯 Critical Rules
+
+1. **Type Safety**: NO `any` types. Full TypeScript. Run `bun run lint` and `bun run typecheck` on ENTIRE codebase before commits.
+2. **Database Migrations**: Files 001-005 are IMMUTABLE. Only add migrations 010+. Add filename to `migrationFiles` array in `/infra/database/migrations.json`.
+3. **Logging**: NEVER use `console.log/error`. Always use `@/lib/logger`. See patterns below. **Exception**: `voice-server.js` and other CJS standalone scripts that run outside the Next.js runtime cannot import `@/lib/logger` — use `console.*` with `// eslint-disable-line no-console` comments.
+4. **Git Flow**: PRs target `dev` branch, never `main`. Write detailed commit messages.
+5. **Testing**: Add E2E tests for new features (see `docs/guides/TESTING.md` — E2E Expectations section). Run locally via `bunx playwright test tests/e2e/`.
+6. **Nexus Conversations**: MUST read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code. This system has broken multiple times - follow documented patterns exactly.
+7. **API Documentation**: When adding or modifying `/api/v1/` endpoints, update both `docs/API/v1/openapi.yaml` (OpenAPI spec) and `docs/API/v1/context-graph.md` (human-readable reference). Include request/response examples, error codes, and auth/scope requirements.
+
+## 🏗️ Architecture
+
+**Stack**: Next.js 15 App Router • ECS Fargate (SSR) • Aurora Serverless v2 • Cognito Auth
+
+**Core Patterns**:
+- Server Actions return `ActionState<T>`
+- Drizzle ORM for all DB operations (executeQuery/executeTransaction)
+- JWT sessions via NextAuth v5
+- Layered architecture (presentation → application → infrastructure)
+- **Reusable CDK constructs** for infrastructure consistency
+
+**File Structure**:
+```
+/app         → Pages & API routes
+/actions     → Server actions (*.actions.ts)
+/components  → UI components
+/lib         → Core utilities & adapters
+/infra       → AWS CDK infrastructure
+  ├── lib/constructs/        → Reusable CDK patterns
+  │   ├── security/          → IAM, secrets, roles
+  │   ├── network/           → VPC, shared networking
+  │   ├── compute/           → Lambda, ECS patterns
+  │   ├── monitoring/        → CloudWatch, ADOT
+  │   └── config/            → Environment configs
+  ├── lib/stacks/            → CDK stack definitions
+  └── database/              → RDS, migrations
+```
+
+## 🤖 AI Integration
+
+**AI SDK v6** with provider factory pattern:
+- Providers: OpenAI, Google (Gemini), Amazon Bedrock (Codex), Azure
+- Streaming: `streamText` for chat, SSE for assistant architect
+- Client: `@ai-sdk/react` with `useChat` hook
+
+**Provider Factory** (`/app/api/chat/lib/provider-factory.ts`):
+```typescript
+createProviderModel(provider: string, modelId: string): Promise<LanguageModel>
+```
+
+**Settings Management**:
+- Database-first with env fallback via `@/lib/settings-manager`
+- Cache with 5-minute TTL
+- AWS Lambda IAM role support for Bedrock
+
+## 📚 Document Processing
+
+**Supported**: PDF, DOCX, XLSX, PPTX, TXT, MD, CSV, JSON, XML, YAML (via `/lib/document-processing.ts` and `/lib/nexus/enhanced-attachment-adapters.ts`)
+**Storage**: S3 with presigned URLs for large files
+**Limits**: 500MB for Nexus attachments, 25MB for document processing (configurable per deployment)
+
+## 🗄️ Database Operations
+
+**ORM**: Drizzle ORM with postgres.js driver (direct PostgreSQL connection)
+
+**Always use Drizzle queries** - Import from `@/lib/db/drizzle` for type-safe operations:
+
+```typescript
+import { eq, and, desc } from "drizzle-orm";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import { users, userRoles, roles } from "@/lib/db/schema";
+
+// SELECT with type safety
+const user = await executeQuery(
+  (db) => db.select().from(users).where(eq(users.id, userId)).limit(1),
+  "getUserById"
+);
+
+// INSERT with returning
+const [newUser] = await executeQuery(
+  (db) => db.insert(users).values({ email, firstName }).returning(),
+  "createUser"
+);
+
+// UPDATE
+await executeQuery(
+  (db) => db.update(users).set({ firstName }).where(eq(users.id, userId)),
+  "updateUser"
+);
+
+// DELETE
+await executeQuery(
+  (db) => db.delete(users).where(eq(users.id, userId)),
+  "deleteUser"
+);
+```
+
+**Transactions** (automatic rollback on error):
+```typescript
+await executeTransaction(
+  async (tx) => {
+    await tx.delete(userRoles).where(eq(userRoles.userId, userId));
+    await tx.insert(userRoles).values(roleIds.map(id => ({ userId, roleId: id })));
+    // Side effects (emails, etc.) should be AFTER transaction, not inside
+  },
+  "updateUserRoles"
+);
+```
+
+**⚠️ CRITICAL - Transaction Pattern**:
+- ✅ Use `executeTransaction()` directly for multi-statement transactions
+- ✅ Transaction isolation levels are supported (serializable, repeatable read, etc.)
+- ❌ NEVER nest `db.transaction()` inside `executeQuery()`
+- See `/docs/database/drizzle-patterns.md` and `drizzle-client.ts` JSDoc
+
+**JSONB Columns** (type-safe via `.$type<T>()`):
+```typescript
+import type { UserSettings } from "@/lib/db/types/jsonb";
+
+// Schema definition
+settings: jsonb("settings").$type<UserSettings>(),
+
+// Query - TypeScript knows the shape
+user.settings.theme;  // "light" | "dark" | "system"
+```
+
+**Migrations** (see `/docs/database/drizzle-migration-guide.md`):
+```bash
+bun run drizzle:generate        # Generate from schema changes
+bun run migration:prepare       # Format for Lambda
+bun run migration:list          # List all migrations
+# Then add to migrationFiles array in /infra/database/migrations.json
+```
+
+**MCP tools for schema verification**:
+```bash
+mcp__awslabs_postgres-mcp-server__get_table_schema
+mcp__awslabs_postgres-mcp-server__run_query
+```
+
+**Aurora Serverless v2 Configuration**:
+- **Dev**: Auto-pause enabled (scales to 0 ACU when idle, saves ~$44/month)
+- **Prod**: Min 2 ACU, Max 8 ACU, always-on for reliability
+- **Connection**: postgres.js driver with connection pooling (max: 20, idle_timeout: 20s)
+- **Backups**: Automated daily snapshots, 7-day retention (dev), 30-day (prod)
+
+**Connection Management** (Issue #603):
+- Use `DATABASE_URL` for local dev (set in .env.local)
+- Use `DB_HOST/DB_USER/DB_PASSWORD` for ECS (auto-injected from Secrets Manager)
+- Connection pool auto-manages connections (max: 20 per container)
+- Graceful shutdown: Handled automatically via `instrumentation.ts`
+- Connection warmup: Pools are pre-initialized on server startup
+
+**Local Development Setup** (Issue #607):
+```bash
+# Quick Start (first time)
+bun run db:up              # Start PostgreSQL container
+bun run db:seed            # Create test users
+bun run dev:local          # Start Next.js with local DB
+
+# Daily workflow
+bun run db:up && bun run dev:local   # Start everything
+
+# Reset if database gets corrupted
+bun run db:reset           # Destroys all data, re-runs migrations
+bun run db:seed            # Re-create test users
+```
+
+**Local vs AWS Configuration**:
+| Environment | DATABASE_URL | DB_SSL |
+|-------------|--------------|--------|
+| Local Docker | `postgresql://postgres:postgres@localhost:5432/aistudio` | `false` |
+| AWS Aurora | `postgresql://user:pass@aurora-cluster:5432/aistudio` | `true` (default) |
+
+**Test Users** (after `bun run db:seed`):
+- `test@example.com` - administrator role
+- `staff@example.com` - staff role
+- `student@example.com` - student role
+
+**Raw SQL Results** (postgres.js driver):
+```typescript
+import { toPgRows, executeQuery } from "@/lib/db/drizzle-client";
+import { sql } from "drizzle-orm";
+
+// Raw SQL returns array-like object (no .rows property)
+const result = await executeQuery(
+  (db) => db.execute(sql`SELECT id, name FROM users WHERE active = true`),
+  "getActiveUsers"
+);
+const users = toPgRows<{ id: number; name: string }>(result);
+```
+
+**Troubleshooting**:
+- "Connection refused": Check VPC security groups allow traffic from ECS to Aurora
+- "Too many connections": Increase Aurora max_connections or reduce `DB_MAX_CONNECTIONS` per task
+- "SSL required": Ensure connection string includes `?sslmode=require` (auto-added by drizzle-client)
+- "Connection timeout": Check `DB_CONNECT_TIMEOUT` env var (default: 10s)
+- First request slow: Connection pool warmup happens on startup; check logs for "warmed up successfully"
+
+## 📝 Server Action Template
+
+```typescript
+"use server"
+import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
+import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
+import { getServerSession } from "@/lib/auth/server-session"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { eq } from "drizzle-orm"
+import { users } from "@/lib/db/schema"
+
+export async function actionName(params: ParamsType): Promise<ActionState<ReturnType>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("actionName")
+  const log = createLogger({ requestId, action: "actionName" })
+
+  try {
+    log.info("Action started", { params: sanitizeForLogging(params) })
+
+    // Auth check
+    const session = await getServerSession()
+    if (!session) {
+      log.warn("Unauthorized")
+      throw ErrorFactories.authNoSession()
+    }
+
+    // Business logic - use Drizzle ORM executeQuery
+    const result = await executeQuery(
+      (db) => db.select().from(users).where(eq(users.id, params.userId)),
+      "actionName"
+    )
+
+    timer({ status: "success" })
+    log.info("Action completed")
+    return createSuccess(result, "Success message")
+
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "User-friendly error", {
+      context: "actionName",
+      requestId,
+      operation: "actionName"
+    })
+  }
+}
+```
+
+## 🧪 Testing
+
+**E2E Testing** (config: `playwright.config.ts`; `baseURL` via `PLAYWRIGHT_BASE_URL`, default `:3000`):
+- Run locally: `bunx playwright test tests/e2e/`
+- Add specs to `tests/e2e/`
+- **Two tiers**: *guard* specs run unauthenticated (CI-safe); *functional* specs mint a session and are gated by `PLAYWRIGHT_AUTH_ENABLED`. To run authenticated functional tests (drive the real UI as a logged-in user), use the host `:3100` dev server + `tests/e2e/helpers/session-auth.ts` — see **`docs/guides/e2e-authenticated-testing.md`** (covers the migration/seed prereqs and the `tokenLifetimeMs` + `addCookies` auth gotchas).
+- See `docs/guides/TESTING.md` (E2E Expectations section) for when tests are required
+
+## 🏗️ Infrastructure Patterns
+
+See [infra/AGENTS.md](infra/AGENTS.md) (auto-loads when working under `/infra`): VPC/networking, Lambda sizing, ECS Fargate, monitoring/ADOT, and cost optimization patterns.
+
+## 🔒 Security & IAM
+
+### Application Security
+- Routes under `/(protected)` require authentication
+- Role-based UI access via `hasCapabilityAccess("capability-id")` - checks if the user's roles grant a capability (see Permissions below)
+- Parameterized queries prevent SQL injection
+- All secrets in AWS Secrets Manager with automatic rotation
+- `sanitizeForLogging()` for PII protection
+
+### Permissions
+
+Two **separate** authorization systems — never collapse them. See
+`docs/architecture/capabilities-and-scopes.md` for the full split, decision
+tree, and anti-patterns.
+
+- **Capabilities** — role-gated **UI features** for logged-in humans (Nexus,
+  Assistant Architect, admin pages). Check with `hasCapabilityAccess(identifier)`
+  (`utils/roles.ts`). Backed by `capabilities` / `role_capabilities`; registry in
+  `lib/capabilities/manifest.ts`.
+- **Scopes** — permissions on **API keys** for programmatic/MCP callers (e.g.
+  `assistants:execute`, `chat:read`). Check with `requireScope(auth, scope)`
+  (`lib/api/auth-middleware.ts`). Backed by `api_keys.scopes`; defined in
+  `lib/api-keys/scopes.ts`.
+- **Don't** gate API/MCP endpoints with `hasCapabilityAccess()`, **don't** gate
+  UI features with `requireScope()`, and **don't** share an identifier across the
+  two systems.
+- Note: `hasCapabilityAccess` (user access) is unrelated to `hasCapability` in
+  `lib/ai/capability-utils.ts` (AI-model feature flags).
+
+### Infrastructure Security (IAM Least Privilege)
+**CRITICAL**: All new Lambda/ECS roles MUST use `ServiceRoleFactory` — see [infra/AGENTS.md](infra/AGENTS.md) for the pattern, tag-based access control, and secrets management.
+
+## 📦 Key Dependencies
+
+- Vercel AI SDK v6 (`ai`, `@ai-sdk/react`, `@ai-sdk/*` providers)
+- Next.js 16 App Router
+- NextAuth v5
+- AWS SDK v3 clients
+
+## 🚨 Common Pitfalls
+
+### Code Quality
+- **Don't** use `any` types - full TypeScript strict mode required
+- **Don't** use console methods - use `@/lib/logger` instead
+- **Don't** skip type checking - entire codebase must pass
+- **Don't** commit without running lint and typecheck
+
+### Git & Deployment
+- **Don't** create PRs against `main` - always use `dev`
+- **Don't** modify files 001-005 in `/infra/database/schema/` (immutable migrations)
+
+### Infrastructure
+- **Don't** create Lambda/ECS roles manually - use `ServiceRoleFactory`
+- **Don't** create resources without `Environment` and `ManagedBy` tags
+- **Don't** use `Vpc.fromVpcAttributes` - use `VPCProvider.getOrCreate()`
+- **Don't** hardcode secrets - use AWS Secrets Manager
+- **Don't** trust app code for DB schema - use MCP tools
+- **Don't** deploy infrastructure without running `bunx cdk synth` first
+
+### Security
+- **Don't** grant `resources: ['*']` in IAM policies (except where AWS requires it)
+- **Don't** allow cross-environment access (dev → prod blocked by tags)
+- **Don't** skip tag-based conditions in custom IAM policies
+- **Review** `docs/guides/auth-security-checklist.md` for any PR touching OAuth/auth flows
+
+### Silent Failures (see `docs/guides/silent-failure-patterns.md`)
+- **Don't** use `undefined` in Drizzle `.set()` for clearable fields — use `?? null`
+- **Don't** read `toolResults` from `onStepFinish` — always use `onFinish` `event.steps`
+- **Don't** mutate AI SDK tool `args` in-place — return new objects from sanitization
+- **Don't** put `session` (object) in `useEffect` deps — use `status` (primitive)
+- **Don't** create tables with `updated_at` without the PostgreSQL trigger
+- **Don't** use `{}` as an accumulator for model/user-controlled keys — use `Object.create(null)`
+- **Don't** use static tool-call format (`tool-show_chart`) with `fromThreadMessageLike` — use `type: 'tool-call'` dynamic format
+- **Don't** chain `.replace()` for HTML entity decoding — use single-pass regex (see `lib/utils/text-sanitizer.ts`)
+- **Don't** use `response.json().catch(() => fallback)` without checking `response.ok` first — hides HTTP status codes; infra errors (502/503) become indistinguishable from app errors
+- **Don't** return (without throwing) from `customFetch` after showing a toast for non-2xx responses — AI SDK will try to parse the error body as SSE and throw a `TypeError`
+- **Don't** construct SNS Subject from variable-length arrays without a 100-char truncation guard — silent publish failures with no SDK error surfaced
+- **Don't** return `null` from a DB accessor for both not-found and error in an SWR cache — cache cannot distinguish the two; DB errors silently overwrite valid cached state with defaults
+- **Don't** pass a Web API `Blob` to `@google/genai` SDK methods — the SDK expects `{ data: base64string, mimeType: string }`, not a `Blob` object
+- **Don't** assume AWS SDK assessment objects are flat — check ALL sub-properties (e.g., `wordPolicy.customWords` AND `wordPolicy.managedWordLists`); missing one drops an entire blocking category from observability
+- **Don't** omit `state: 'output-available'` and `input` on tool-call UIMessage parts — `convertToModelMessages` silently skips the `tool_result` block, causing `AI_MissingToolResultsError` on replay
+- **Don't** consolidate multi-step MCP responses into a single DB row — persist each step separately inside `executeTransaction` or reload fails with consecutive user turns (see `chat-helpers.ts:saveConversationSteps`)
+
+### React (see `docs/guides/react-patterns.md`)
+- **Don't** put `key` on Provider/context wrapper components
+- **Don't** use boolean `useRef` for init guards on parameterized routes — use ID-tracking refs
+- **Don't** place hooks after conditional returns
+- **Don't** include `isLoading` state in polling `useEffect` deps — use `useRef` to prevent timer churn
+- **Don't** rely on `clearTimeout` alone for polling cleanup — pair with a `cancelled = true` flag
+- **Don't** assign callback refs inside `useEffect` — assign synchronously in the render body to close the stale-ref timing gap
+- **Don't** return internal state getters from hooks when the caller also supplies `fn` — use `onFailure(count)` event callbacks
+- **Don't** read a ref mutated inside a hook's `.catch()` without `+1` — use `onFailure(count)` callback instead (callers see pre-mutation value)
+- **Don't** pass unstable adapter references to `useChatRuntime` — use ref-based getters with empty dep arrays to prevent runtime re-initialization and duplicate messages
+
+## 📖 Documentation
+
+**Structure:**
+```
+/docs/
+├── README.md           # Documentation index
+├── ARCHITECTURE.md     # System architecture
+├── DEPLOYMENT.md       # Deployment guide
+├── guides/            # Development guides
+├── features/          # Feature docs
+├── operations/        # Ops & monitoring
+└── archive/           # Historical docs
+```
+
+**Maintenance:**
+- Keep docs current with code changes
+- Archive completed implementations
+- Remove outdated content
+- Update index when adding docs
+
+**OpenWiki (agent wiki):** `openwiki/` is an auto-maintained, agent-navigable index of this codebase — start at [openwiki/quickstart.md](openwiki/quickstart.md) for a structured map before spelunking. It coexists with `/docs` (human-oriented). The tree is refreshed by `.github/workflows/openwiki-update.yml` on every `dev` push (opens a rolling `openwiki/update` PR, served by Bedrock GLM-5). Do not hand-edit `openwiki/`; it is regenerated.
+
+## 🎯 Repository Knowledge System
+
+**Assistant Architect**: Processes repository context for AI assistants
+**Embeddings**: Vector search via `/lib/repositories/search-service.ts`
+**Knowledge Base**: Stored in S3, retrieved during execution
+
+---
+*Token-optimized for Codex efficiency. Last updated: May 2026*
+*Infrastructure optimized via Epic #372 - AWS Well-Architected Framework aligned*
