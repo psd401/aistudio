@@ -46,6 +46,23 @@ const atriumAllowedArtifactCdns: string[] = String(
   .map((s) => s.trim())
   .filter((s) => s.length > 0);
 
+// Workspace media bucket origin(s) for the Atrium sandbox `media-src` CSP.
+// Agent skills (psd-tts, psd-hyperframes, psd-html-artifact, psd-image-gen)
+// upload generated MP3/MP4/images to the deterministically-named workspace
+// bucket (AgentPlatformStack: `psd-agents-${env}-${account}`, the source of
+// truth for this name) and hand out unsigned path-style URLs
+// `https://{bucket}.s3.{region}.amazonaws.com/public-images/...` (no CloudFront,
+// no presigning). Scope the sandbox media-src to exactly that origin so a
+// psd-learning-page artifact can play its explainer video + narration in the
+// reader — never a wildcard. Returns [] (data: only in the CSP) when the CDK
+// account/region are unknown at synth.
+function workspaceMediaOrigins(environment: 'dev' | 'prod'): string[] {
+  const account = process.env.CDK_DEFAULT_ACCOUNT;
+  const region = process.env.CDK_DEFAULT_REGION;
+  if (!account || !region) return [];
+  return [`https://psd-agents-${environment}-${account}.s3.${region}.amazonaws.com`];
+}
+
 // Helper to get callback/logout URLs for any environment
 function getCallbackAndLogoutUrls(environment: string, baseDomain?: string): { callbackUrls: string[], logoutUrls: string[] } {
   // Determine ECS subdomain based on environment
@@ -176,6 +193,7 @@ const devAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandbo
     'http://localhost:3000',
   ],
   allowedArtifactCdns: atriumAllowedArtifactCdns,
+  allowedMediaOrigins: workspaceMediaOrigins('dev'),
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devAtriumSandboxStack).add('Environment', 'Dev');
@@ -341,6 +359,7 @@ const prodAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandb
   environment: 'prod',
   allowedParentOrigins: baseDomain ? [`https://${baseDomain}`] : [],
   allowedArtifactCdns: atriumAllowedArtifactCdns,
+  allowedMediaOrigins: workspaceMediaOrigins('prod'),
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(prodAtriumSandboxStack).add('Environment', 'Prod');
