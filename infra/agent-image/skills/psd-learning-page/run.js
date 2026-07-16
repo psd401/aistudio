@@ -695,22 +695,22 @@ function buildQuizHtml(quizItems) {
 
 const QUIZ_SCRIPT = `
 (function () {
-  var quiz = document.getElementById('lp-quiz');
+  const quiz = document.getElementById('lp-quiz');
   if (!quiz) return;
-  var questions = Array.prototype.slice.call(quiz.querySelectorAll('.lp-q'));
+  const questions = Array.prototype.slice.call(quiz.querySelectorAll('.lp-q'));
   questions.forEach(function (q) {
-    var btn = q.querySelector('.lp-check');
-    var fb = q.querySelector('.lp-feedback');
-    var correct = parseInt(q.getAttribute('data-correct'), 10);
-    var expl = q.getAttribute('data-explanation') || '';
+    const btn = q.querySelector('.lp-check');
+    const fb = q.querySelector('.lp-feedback');
+    const correct = parseInt(q.getAttribute('data-correct'), 10);
+    const expl = q.getAttribute('data-explanation') || '';
     btn.addEventListener('click', function () {
-      var chosen = q.querySelector('input[type=radio]:checked');
+      const chosen = q.querySelector('input[type=radio]:checked');
       if (!chosen) {
         fb.className = 'lp-feedback lp-unanswered';
         fb.textContent = 'Select an answer first.';
         return;
       }
-      var ok = parseInt(chosen.value, 10) === correct;
+      const ok = parseInt(chosen.value, 10) === correct;
       fb.className = 'lp-feedback ' + (ok ? 'lp-correct' : 'lp-incorrect');
       // More than colour: a word + a symbol carry the result, not hue alone.
       fb.textContent = (ok ? '\\u2713 Correct. ' : '\\u2717 Not quite. ') + expl;
@@ -727,13 +727,15 @@ const QUIZ_SCRIPT = `
       }
     });
   });
-  var scoreBtn = document.getElementById('lp-score-btn');
-  var scoreOut = document.getElementById('lp-score');
+  const scoreBtn = document.getElementById('lp-score-btn');
+  const scoreOut = document.getElementById('lp-score');
   if (scoreBtn && scoreOut) {
     scoreBtn.addEventListener('click', function () {
-      var total = questions.length, right = 0, answered = 0;
+      const total = questions.length;
+      let right = 0;
+      let answered = 0;
       questions.forEach(function (q) {
-        var st = q.getAttribute('data-answered');
+        const st = q.getAttribute('data-answered');
         if (st) { answered++; if (st === 'correct') right++; }
       });
       if (answered < total) {

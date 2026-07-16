@@ -189,7 +189,7 @@ async function cli(argv) {
     try {
       html = fs.readFileSync(args.file, 'utf8');
     } catch (err) {
-      process.stdout.write(
+      process.stderr.write(
         JSON.stringify({ error: 'bad_args', message: `--file not readable: ${err.message}` }) + '\n'
       );
       return 1;
@@ -197,7 +197,7 @@ async function cli(argv) {
   } else if (typeof args.html === 'string') {
     html = args.html;
   } else {
-    process.stdout.write(
+    process.stderr.write(
       JSON.stringify({ error: 'bad_args', message: '--file <path> or --html <string> is required' }) + '\n'
     );
     return 1;
@@ -207,7 +207,7 @@ async function cli(argv) {
   try {
     report = await auditHtml(html, { includeContrast: args.include_contrast === true });
   } catch (err) {
-    process.stdout.write(JSON.stringify({ error: 'audit_error', message: err.message }) + '\n');
+    process.stderr.write(JSON.stringify({ error: 'audit_error', message: err.message }) + '\n');
     return 2;
   }
 
@@ -219,7 +219,7 @@ if (require.main === module) {
   cli(process.argv)
     .then((code) => process.exit(code))
     .catch((err) => {
-      process.stdout.write(JSON.stringify({ error: 'audit_error', message: err.message }) + '\n');
+      process.stderr.write(JSON.stringify({ error: 'audit_error', message: err.message }) + '\n');
       process.exit(2);
     });
 }
