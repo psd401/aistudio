@@ -1,0 +1,10 @@
+{
+  "name": "psd-learning-page",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenClaw skill: turn a document (PDF/Google Doc/markdown) into a self-contained WCAG 2.2 AA multi-modal learning page (explainer video + captions, narrated audio + transcript, interactive quiz, summary, full source) and publish it to Atrium. Composes psd-pdf-to-markdown, psd-workspace, psd-tts, psd-hyperframes, psd-atrium and the shared psd-html-artifact a11y gate. #1245",
+  "main": "run.js",
+  "scripts": {
+    "test": "bun test"
+  }
+}
