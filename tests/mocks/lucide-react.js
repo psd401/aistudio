@@ -14,5 +14,7 @@ module.exports = {
   CheckCircleIcon: () => React.createElement('div', { className: 'mock-check-circle', 'data-testid': 'check-circle-icon' }),
   RefreshCw: () => React.createElement('div', { className: 'mock-refresh-cw', 'data-testid': 'refresh-cw-icon' }),
   Upload: () => React.createElement('div', { className: 'mock-upload', 'data-testid': 'upload-icon' }),
+  Activity: () => React.createElement('div', { className: 'mock-activity', 'data-testid': 'activity-icon' }),
+  Save: () => React.createElement('div', { className: 'mock-save', 'data-testid': 'save-icon' }),
   // Add other icons as needed
 };

@@ -1,6 +1,6 @@
 # Nexus model routing
 
-Nexus defaults to **Standard** mode. Users see one Nexus experience instead of an exact model, image-model, or MCP selector. The server classifies each request and chooses the appropriate model tier and capabilities. **Advanced** mode is opt-in and constrains routing to Auto, ChatGPT, Claude, or Gemini; the router still chooses the power level within that family.
+Nexus defaults to **Standard** mode. Users see one Nexus experience instead of an exact model, image-model, or MCP selector. The server classifies each request and chooses the appropriate model tier and capabilities. **Advanced** mode is opt-in and constrains routing to ChatGPT, Claude, or Gemini; the router still chooses the power level within that family.
 
 ## Request flow
 
@@ -18,17 +18,17 @@ The deterministic rules run before the model classifier because capability requi
 
 Set `NEXUS_ROUTER_MODE` in the settings table or environment:
 
-- `active`: execute the routed model and automatic connector selection.
-- `shadow` (default): classify and resolve, record `proposedModelId`, but execute the existing fallback model and connector list.
+- `active` (default): execute the routed model and automatic connector selection.
+- `shadow`: classify and resolve, record `proposedModelId`, but execute the existing fallback model and connector list.
 - `off`: use the legacy fallback model and manually enabled connectors.
 
-The user-facing experience still defaults to Standard; the independent runtime default is shadow so an existing deployment cannot change live model execution without an explicit administrator promotion. Use shadow mode to compare proposed routes against production traffic before changing execution. Stored routing metadata includes the config version, experience/runtime mode, requested and selected family, intent, tier, confidence, reason codes, decision source, selected/proposed model, fallback status, and PSD-data attachment status.
+The user-facing experience and runtime both default to active Standard routing. Use shadow mode explicitly when comparing proposed routes against existing production behavior. Stored routing metadata includes the config version, experience/runtime mode, requested and selected family, intent, tier, confidence, reason codes, decision source, selected/proposed model, fallback status, and PSD-data attachment status.
 An explicitly invalid runtime mode, or malformed router JSON while active, fails safely to shadow mode. A missing config is valid: the built-in specialist defaults and model metadata/name inference are used.
 
 ## Configuration
 
-`NEXUS_ROUTER_CONFIG_V1` is a JSON setting. Candidate values are `ai_models.model_id` strings (numeric database IDs are also accepted). Candidates are tried in order and remain subject to active/Nexus-enabled status and resource-access grants.
-Administrators can add or edit both router keys under **Admin → System Settings → AI Configuration**; the JSON value field expands for the router config.
+`NEXUS_ROUTER_CONFIG_V1` is stored as JSON. Candidate values are `ai_models.model_id` strings (numeric database IDs are also accepted). Candidates are tried in order and remain subject to active/Nexus-enabled status and resource-access grants.
+Administrators manage the rollout mode, Standard and family tier preferences, classifier, instructional specialist, image specialist, and PSD-data connector through the dedicated **Admin → System Settings → Nexus model routing** card. The generic settings table remains available for inspection and emergency edits.
 
 ```json
 {
@@ -69,13 +69,13 @@ Administrators can add or edit both router keys under **Admin → System Setting
 }
 ```
 
-The example IDs are illustrative and must match rows present in the deployment. Standard/Auto candidate lists are provider-neutral, so they may prefer Bedrock-native Nova or open-weight models as well as the named families. Advanced remains constrained to ChatGPT, Claude, or Gemini. For lighter administration, set `provider_metadata.nexusRouterTier` to `light`, `medium`, or `high` on model rows and leave candidate lists empty. Family is inferred where applicable from the provider/model ID. Explicit candidate arrays take priority.
+The example IDs are illustrative and must match rows present in the deployment. Standard/Auto candidate lists are provider-neutral, so they may prefer Bedrock-native Nova or open-weight models as well as the named families. Advanced remains constrained to ChatGPT, Claude, or Gemini. For lighter administration, leave candidate lists on Automatic; the router uses `provider_metadata.nexusRouterTier` or model-name inference. Family is inferred where applicable from the provider/model ID. Explicit candidate arrays take priority.
 
 For PSD-data, prefer `specialists.psdDataConnectorId` when the server UUID is stable. Otherwise the router normalizes the configured name, so `psd-data`, `PSD Data`, and `psd_data` match the same registered server. Existing connector authorization and Cognito pass-through remain enforced by the connector service.
 
 ## User experience and persistence
 
-The user preference is stored in `nexus_user_preferences.settings` as `nexusMode` and `preferredModelFamily`. Standard is the default for users with no preference. The composer’s routing control does not remount the assistant runtime; current values are read from refs by the stable transport. In Standard, manual model/tool/MCP controls are hidden. In Advanced, the family chooser and existing optional tool controls are available.
+The user preference is stored in `nexus_user_preferences.settings` as `nexusMode` and `preferredModelFamily`. Standard is the default for users with no preference. The composer’s first menu contains only Standard and Advanced; Advanced opens a second flyout containing ChatGPT, Claude, and Gemini. The control does not remount the assistant runtime; current values are read from refs by the stable transport. In Standard, manual model/tool/MCP controls are hidden. In Advanced, the existing optional tool controls are available after a family is selected.
 
 Image routing intentionally overrides a family constraint because it requires a generation capability. PSD-data augments the selected response model with its data source, so its response model still honors the family constraint. General and instructional response models also honor Advanced family selection; Auto can use the configured instructional specialist. Specialist-only image and Deep Research models are excluded from ordinary response routing.
 
@@ -85,7 +85,7 @@ For follow-up image edits, the router checks the authenticated user's recent per
 
 1. Register candidate models in `ai_models`, including capabilities and resource grants.
 2. Confirm the ECS task role can invoke Bedrock foundation models and inference profiles (the shared ECS construct grants both).
-3. Configure the router JSON and start with `shadow` if evaluating an existing deployment.
+3. Review the dedicated admin card; choose `shadow` explicitly if evaluating before live routing.
 4. Inspect assistant `metadata.routing`, classifier/fallback logs, latency, cost, user retries, and route overrides.
 5. Promote to `active`, keeping the legacy fallback model available.
 

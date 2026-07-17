@@ -12,7 +12,7 @@ import {
 const log = createLogger({ module: "nexus-model-router-classifier" })
 
 const IMAGE_PATTERN = /\b(generate|create|draw|design|make|edit|render)\b.{0,45}\b(image|picture|illustration|graphic|photo|poster|logo)\b|\b(image|picture|illustration|graphic|photo)\s+(generation|editing)\b/i
-const PSD_PATTERN = /\b(psd[- ]?data|power\s*school|student information system|student data|attendance|enrollment|gradebook|demographic)\b/i
+const PSD_PATTERN = /\b(psd[- ]?data|power\s*school|student information system|student data|attendance|enrollment|gradebook|demographic)\b|\bmcp\s+(connection|connector|server|tools?)\b/i
 const INSTRUCTION_PATTERN = /\b(lesson plan|rubric|curriculum|learning objective|teaching strategy|differentiat(?:e|ion)|instructional|pedagogy|classroom activity|discussion questions)\b/i
 const HIGH_PATTERN = /\b(architecture|migration|security review|threat model|root cause|research report|multi-step|optimize|prove|complex analysis)\b/i
 const LIGHT_PATTERN = /^(hi|hello|thanks|thank you|yes|no|ok|okay)[!. ]*$|^(what is|who is|when is|where is|how many)\b|\b(define|translate|summarize briefly|quick question)\b/i

@@ -9,7 +9,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { cn } from "@/lib/utils"
 
 const FAMILIES: Array<{ value: NexusChatPreferences["family"]; label: string }> = [
-  { value: "auto", label: "Auto" },
   { value: "openai", label: "ChatGPT" },
   { value: "anthropic", label: "Claude" },
   { value: "google", label: "Gemini" },
@@ -18,6 +17,7 @@ const FAMILIES: Array<{ value: NexusChatPreferences["family"]; label: string }> 
 export function PreferencesTab({ initialPreferences }: { initialPreferences: NexusChatPreferences }) {
   const [preferences, setPreferences] = useState(initialPreferences)
   const [saving, setSaving] = useState(false)
+  const advancedNeedsFamily = preferences.mode === "advanced" && preferences.family === "auto"
 
   const save = async () => {
     setSaving(true)
@@ -74,10 +74,13 @@ export function PreferencesTab({ initialPreferences }: { initialPreferences: Nex
                 </Button>
               ))}
             </div>
+            {advancedNeedsFamily && (
+              <p className="mt-2 text-sm text-muted-foreground">Choose ChatGPT, Claude, or Gemini to use Advanced mode.</p>
+            )}
           </div>
         )}
 
-        <Button data-testid="nexus-preference-save" type="button" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save preferences"}</Button>
+        <Button data-testid="nexus-preference-save" type="button" onClick={save} disabled={saving || advancedNeedsFamily}>{saving ? "Saving…" : "Save preferences"}</Button>
       </CardContent>
     </Card>
   )

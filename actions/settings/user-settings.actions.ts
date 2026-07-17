@@ -82,7 +82,10 @@ export interface NexusChatPreferences {
 const NexusChatPreferencesSchema = z.object({
   mode: z.enum(["standard", "advanced"]),
   family: z.enum(["auto", "openai", "anthropic", "google"]),
-})
+}).refine(
+  value => value.mode === "standard" || value.family !== "auto",
+  { path: ["family"], message: "Advanced mode requires ChatGPT, Claude, or Gemini" }
+)
 
 const DEFAULT_NEXUS_CHAT_PREFERENCES: NexusChatPreferences = {
   mode: "standard",
