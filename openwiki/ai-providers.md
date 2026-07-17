@@ -179,6 +179,39 @@ buildEditDocumentByIdTool()          // Edit any document by id/slug
 
 **Sources**: `/lib/nexus/workspace-chat-tools.ts`, `/lib/content/collab/snapshot-before-publish.ts`
 
+## Nexus Model Routing
+
+Nexus defaults to **Standard** mode where the server automatically classifies each request and selects the appropriate model tier and capabilities. Users see one unified Nexus experience instead of manually selecting models.
+
+### Request Flow
+
+1. **Authenticate** the user before classification
+2. **Apply guardrails** — K-12 input filtering and PII tokenization before classifier traffic
+3. **Deterministic rules** — Match image generation, PSD-data, and instructional requests to capability requirements
+4. **Classifier** — Ambiguous requests go to Amazon Nova Micro for provider-neutral `intent`, `tier`, `confidence`, and reason codes
+5. **Model resolution** — Select from configured candidates respecting access grants; fallback to closest tier if needed
+6. **Automatic connector attachment** — Image models for image intent; PSD-data MCP server for PSD-data intent
+7. **Persist routing metadata** — Stored on assistant-message metadata, exposed in `X-Nexus-Routing` header
+
+### Runtime Modes
+
+Set `NEXUS_ROUTER_MODE` in the settings table:
+
+| Mode | Behavior |
+|------|----------|
+| `active` (default) | Execute routed model with automatic connector selection |
+| `shadow` | Classify and record `proposedModelId`, but execute legacy fallback model |
+| `off` | Use legacy fallback model with manually enabled connectors |
+
+### User Experience Modes
+
+- **Standard** (default): Automatic model selection, manual controls hidden
+- **Advanced**: Opt-in family selection (ChatGPT, Claude, Gemini); router selects tier within family
+
+Configuration via **Admin → System Settings → Nexus model routing** card or `NEXUS_ROUTER_CONFIG_V1` JSON setting.
+
+**Sources**: `/docs/features/nexus-model-routing.md`, `/lib/nexus/model-router/`
+
 ## Nexus Chat Architecture
 
 ### Tech Stack

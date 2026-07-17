@@ -100,6 +100,22 @@ bun run test:streaming:contract  # Contract tests
 - `/infra/agent-image/skills/psd-last30days/scripts/test_last30days.py` - Last30days skill (#1180)
 - `/infra/agent-image/skills/psd-atrium/run.test.js` - Atrium skill tests (#1195)
 - `/infra/agent-image/skills/psd-atrium/common.test.js` - Atrium skill helpers (#1195)
+- `/infra/agent-image/skills/psd-hyperframes/render.test.js` - HyperFrames video rendering (#1240)
+- `/infra/agent-image/skills/psd-learning-page/run.test.js` - Learning page assembly (#1246)
+
+**Nexus Model Router**:
+- `/lib/nexus/model-router/__tests__/classifier.test.ts` - Request classification logic (#1244)
+- `/lib/nexus/model-router/__tests__/config.test.ts` - Router configuration parsing (#1244)
+- `/lib/nexus/model-router/__tests__/router.test.ts` - Model resolution and selection (#1244)
+
+**Agent Workspace**:
+- `/tests/unit/agent-workspace-token-route.test.ts` - DWD token broker route (#1232)
+- `/tests/unit/agent-provisioning-sheet.test.ts` - OneSync sheet writer (#1233)
+- `/tests/unit/dwd-token-broker.test.ts` - Domain-wide delegation broker (#1232)
+
+**Infrastructure**:
+- `/infra/lambdas/group-sync/sync.test.ts` - Group sync logic (#1203)
+- `/infra/hyperframes-render/handler.test.js` - Render Lambda (#1240)
 
 ## E2E Tests
 
@@ -118,13 +134,18 @@ bun run test:streaming:contract  # Contract tests
 | Admin Capabilities | `admin-capabilities.spec.ts` | RBAC configuration |
 | Admin Agents | `admin-agents.spec.ts` | Agent telemetry dashboard, iteration metrics (#1161) |
 | Admin Agents Triage | `admin-agents-triage-settings.functional.spec.ts` | Triage settings UI (#1172) |
+| Admin Groups | `admin-groups.functional.spec.ts` | Group sync UI (#1203) |
+| Admin Resource Grants | `admin-resource-grants.functional.spec.ts` | Per-resource access grants (#1206) |
+| Admin Nexus Router | `admin-nexus-router-settings.spec.ts` | Model routing settings (#1249) |
 | Atrium Documents | `atrium-document.guard.spec.ts` | Document editing |
 | Atrium Artifacts | `atrium-artifact.guard.spec.ts` | Artifact creation |
 | Atrium Publishing | `atrium-visibility-editor.spec.ts` | Publishing workflow |
 | Atrium Delete | `atrium-delete.functional.spec.ts` | Hard delete workflow (#1200) |
 | Atrium Archived View | `atrium-archived-view.functional.spec.ts` | Archived content library (#1201) |
+| Atrium Group Visibility | `atrium-group-visibility.functional.spec.ts` | Group visibility grants (#1205) |
 | Nexus Chat | `nexus-tools.spec.ts` | Chat functionality |
 | Nexus Workspace | `nexus-workspace-panel.spec.ts` | Workspace integration |
+| Nexus Model Router | `nexus/model-router.spec.ts` | Automatic model routing (#1244) |
 | Assistant Architect | `assistant-architect-streaming.spec.ts` | Tool execution |
 | MCP Describe Capabilities | `mcp-describe-capabilities.spec.ts` | Capability catalog meta-tool (#1100) |
 | Canva Consent Page | `canva-consent-page.spec.ts` | Canva OAuth flow UI (#1176) |

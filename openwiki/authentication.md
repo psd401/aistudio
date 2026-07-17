@@ -102,6 +102,60 @@ hasCapabilityAccess(identifier)
   → Return boolean
 ```
 
+### Role Sources
+
+Roles can be granted from multiple sources, tracked via `user_roles.source`:
+
+| Source | Description |
+|--------|-------------|
+| `manual` | Admin-assigned role grant |
+| `group-sync` | Automatically reconciled from Google Directory group membership |
+| `heuristic` | Default role assignment for new users |
+
+**Source**: `/lib/db/schema/tables/user-roles.ts`
+
+## Group-Based Authorization
+
+Google Directory group membership becomes a first-class authorization source. An hourly Lambda sync mirrors selected Google groups into the database, and that membership drives role assignments and per-resource access grants.
+
+### Architecture
+
+```
+Google Workspace Directory
+        │  (hourly EventBridge + admin "Sync now")
+        ▼
+  group-sync Lambda
+        │  1. resolve selection (picks ∪ prefix rules)
+        │  2. fetch transitive membership per group
+        │  3. full-replace group_members per group
+        │  4. reconcile managed roles from fresh membership
+        ▼
+   Postgres
+     groups · group_members · group_role_mappings
+     user_roles.source = 'group-sync' | 'manual'
+     resource_access_grants (per-resource)
+```
+
+### Group→Role Mappings
+
+Admins configure mappings in **Admin → Groups**:
+
+- `group_role_mappings` table: `group_email` → `role_id`
+- Members of a synced group automatically receive the mapped role
+- Role reconciliation runs at login and hourly via the sync Lambda
+
+### Per-Resource Access Grants
+
+Fine-grained access control on models, assistants, and agent skills:
+
+- `resource_access_grants` table: `grant_kind` = `role` | `group`
+- Users must match at least one grant to access the resource
+- Nexus model routing respects grants when selecting from configured candidates
+
+**Email as Join Key**: Membership is keyed by email (not `users` FK), so users who haven't signed in yet still sync. Joins use `lower(users.email) = lower(group_members.member_email)`.
+
+**Sources**: `/docs/features/google-group-sync.md`, `/lib/groups/queries.ts`, `/lib/db/drizzle/resource-access.ts`
+
 ## API Authentication
 
 ### API Keys
@@ -150,6 +204,20 @@ Autonomous agents can mint short-lived delegated tokens:
 - **Claim Structure**: `sub` = system user, `delegated_for` = human user ID
 
 **Source**: `/lib/oauth/delegated-token.ts`
+
+### Agent Workspace Token Broker
+
+Per-user agent accounts (`agnt_<user>@psd401.net`) obtain short-lived Google Workspace access tokens via domain-wide delegation (DWD). A dedicated mint Lambda provides confused-deputy hardening:
+
+| Component | Purpose |
+|-----------|---------|
+| `psd-agent-mint-{env}` Lambda | Sole WIF principal — only this role can sign JWTs |
+| `/api/agent/workspace-token` | Thin proxy to mint Lambda (frontend holds only `lambda:InvokeFunction`) |
+| `/api/agent/account-request` | Thin proxy for auto-provisioning agent accounts |
+
+**Security Model**: A frontend RCE/SSRF can only invoke the mint Lambda — which always derives `agnt_<owner>` server-side — and can never reach the WIF credential to sign arbitrary JWTs. Blast radius limited to agent accounts, not human mailboxes.
+
+**Sources**: `/docs/features/agent-workspace-integration.md`, `/lib/agent-workspace/mint-lambda-handler.ts`
 
 ## API Scopes
 

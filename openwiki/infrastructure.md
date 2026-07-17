@@ -203,6 +203,9 @@ Key skills:
 | `psd-aistudio` | Live capability catalog from AI Studio's registries via `describe_capabilities` MCP meta-tool (#1173) | `/infra/agent-image/skills/psd-aistudio/` |
 | `psd-email-triage` | Configure smart email triage from chat (rules, escalation, digest) | `/infra/agent-image/skills/psd-email-triage/` |
 | `psd-atrium` | Read and write Atrium content — find/read/create/edit/archive/delete documents and artifacts, publish/unpublish over `/api/v1/content` (#1195) | `/infra/agent-image/skills/psd-atrium/` |
+| `psd-hyperframes` | Compose HTML/CSS/JS scenes and render to MP4 via dedicated render Lambda (#1240) | `/infra/agent-image/skills/psd-hyperframes/` |
+| `psd-learning-page` | Turn documents into WCAG 2.2 AA multi-modal learning pages (video, audio, quiz, summary) and publish to Atrium (#1246) | `/infra/agent-image/skills/psd-learning-page/` |
+| `psd-classified-evaluation` | Evaluate classified content handling with structured rubric gateway (#1235) | `/infra/agent-image/skills/psd-classified-evaluation/` |
 
 ### MCP describe_capabilities Meta-Tool (#1100)
 
@@ -275,6 +278,22 @@ Zero-touch provisioning for the psd-atrium agent credential (#1197):
 **Rotation**: Delete the secret value or revoke the `api_keys` row → next deploy re-mints.
 
 **Source**: `/infra/lambdas/atrium-content-key-bootstrap/index.ts`
+
+### Processing Lambdas
+
+Additional Lambdas for scheduled and event-driven processing:
+
+| Lambda | Purpose | Trigger |
+|--------|---------|---------|
+| `group-sync-{env}` | Google Directory group membership sync (hourly) | EventBridge rule |
+| `psd-agent-mint-{env}` | DWD token broker for agent workspace (confused-deputy isolation) | API route proxy |
+| `hyperframes-render-{env}` | HTML/CSS/JS → MP4 rendering (Chromium + FFmpeg) | Skill invocation |
+
+**Group Sync**: Mirrors selected Google groups and their transitive membership into `groups` and `group_members` tables. Reconciles managed roles based on `group_role_mappings`. Source: `/infra/lambdas/group-sync/`
+
+**Mint Lambda**: Sole WIF principal for agent workspace tokens. Derives `agnt_<owner>` server-side, preventing confused-deputy attacks. Source: `/lib/agent-workspace/mint-lambda-handler.ts`
+
+**HyperFrames Render**: Dedicated Lambda for video rendering from psd-hyperframes skill. Bundles Chromium and FFmpeg, renders HTML compositions frame-by-frame. Source: `/infra/hyperframes-render/`
 
 ### Harness Adapter
 
