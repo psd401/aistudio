@@ -48,10 +48,15 @@ const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const execFileAsync = promisify(execFile);
 
 // ── Caps (v1). Documented in psd-hyperframes/SKILL.md — keep in sync. ─────────
-// A synchronous invoke has to fit inside the Lambda timeout AND the agent turn,
-// so v1 renders short scenes only. frames = fps × duration; 60s × 60fps = 3600
-// frames is the ceiling.
-const MAX_DURATION_SECONDS = 60;
+// A synchronous invoke has to fit inside the Lambda timeout AND the agent turn.
+// Render time scales with the FRAME COUNT (each frame = one headless screenshot),
+// so the real ceiling is frames, not seconds: `fps × duration ≤ MAX_FRAMES`.
+// MAX_FRAMES = 3600 is the proven budget (the former 60s × 60fps ceiling) that
+// fits inside RENDER_TIMEOUT_MS. Duration may now run up to 3 minutes, but a
+// longer scene must use a lower fps to stay within the same frame budget
+// (e.g. 180s at 20fps = 3600 frames — same render cost as 60s at 60fps).
+const MAX_DURATION_SECONDS = 180;
+const MAX_FRAMES = 3600;
 const DEFAULT_FPS = 30;
 const MIN_FPS = 1;
 const MAX_FPS = 60;
@@ -200,6 +205,12 @@ function validateRequest(event) {
   if (!Number.isFinite(fps) || fps < MIN_FPS || fps > MAX_FPS) {
     throw new RenderError('bad_request', `\`fps\` must be an integer between ${MIN_FPS} and ${MAX_FPS}.`);
   }
+  // NB: the frame-budget guard (fps × duration ≤ MAX_FRAMES) is enforced BELOW,
+  // after the composition's data-duration is scanned. hyperframes renders for the
+  // HTML's own data-duration, NOT the durationSeconds request field, so a caller
+  // could otherwise understate durationSeconds and smuggle a long timeline past a
+  // request-field-only check. The budget is checked against the actual render
+  // length = max(durationSeconds, largest declared data-duration).
 
   const width = asPositiveInt(event.width, DEFAULT_WIDTH);
   const height = asPositiveInt(event.height, DEFAULT_HEIGHT);
@@ -226,14 +237,33 @@ function validateRequest(event) {
   // attribute whitespace + numeric values are short, so caps of 20/15 are ample.
   const durationRegex = /data-duration\s{0,20}=\s{0,20}["']?\s{0,20}([\d.]{1,15})/gi;
   let match;
+  let maxDataDuration = 0;
   while ((match = durationRegex.exec(html)) !== null) {
     const value = Number(match[1]);
-    if (Number.isFinite(value) && value > MAX_DURATION_SECONDS + 0.5) {
-      throw new RenderError(
-        'bad_request',
-        `Composition declares data-duration=${value}s, above the ${MAX_DURATION_SECONDS}s v1 cap.`,
-      );
+    if (Number.isFinite(value)) {
+      if (value > MAX_DURATION_SECONDS + 0.5) {
+        throw new RenderError(
+          'bad_request',
+          `Composition declares data-duration=${value}s, above the ${MAX_DURATION_SECONDS}s v1 cap.`,
+        );
+      }
+      if (value > maxDataDuration) maxDataDuration = value;
     }
+  }
+
+  // Frame-budget guard — the real bound on render time (frames = fps × duration).
+  // Checked against the ACTUAL render length: hyperframes renders the HTML's own
+  // data-duration (the largest declared one = the root total), not the request
+  // field, so use max(durationSeconds, maxDataDuration) to catch an understated
+  // durationSeconds that hides a long timeline in the composition.
+  const renderSeconds = Math.max(durationSeconds, maxDataDuration);
+  const totalFrames = Math.ceil(fps * renderSeconds);
+  if (totalFrames > MAX_FRAMES) {
+    throw new RenderError(
+      'bad_request',
+      `fps × duration = ${totalFrames} frames (${fps}fps × ${renderSeconds}s) exceeds the ${MAX_FRAMES}-frame ` +
+        `render budget. Lower fps (≤ ${Math.max(MIN_FPS, Math.floor(MAX_FRAMES / renderSeconds))} at ${renderSeconds}s) or shorten the scene.`,
+    );
   }
 
   // Same defense-in-depth for the root canvas size. hyperframes sizes the

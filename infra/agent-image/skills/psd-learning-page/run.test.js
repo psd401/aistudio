@@ -309,6 +309,38 @@ test('assemblePage includes all five modalities, one h1, lang, captions track, a
   expect(html).toContain('src="data:text/vtt;base64,');
 });
 
+test('assemblePage ships the self-contained PSD-branded chrome (logo, nav, header)', () => {
+  const html = assembleWith(SAMPLE_MD);
+  // Embedded logo (data URI, not an external host — CSP-safe).
+  expect(html).toContain('class="lp-logo" src="data:image/png;base64,');
+  expect(html).toContain('alt="Peninsula School District"');
+  // Branded header band + eyebrow.
+  expect(html).toContain('class="lp-header"');
+  expect(html).toContain('class="lp-eyebrow"');
+  // Sticky in-page section nav with one link per section.
+  expect(html).toContain('class="lp-nav"');
+  for (const id of ['targets', 'video', 'audio', 'quiz', 'summary', 'source']) {
+    expect(html).toContain(`href="#${id}"`);
+    expect(html).toContain(`<section id="${id}"`);
+  }
+  // No external fonts/images/scripts — renders identically under the Atrium CSP.
+  expect(html).not.toContain('fonts.googleapis.com');
+  expect(html).not.toContain('http://');
+});
+
+test('quiz uses role="radiogroup" + aria-labelledby (no <fieldset> border artifacts)', () => {
+  const html = R.buildQuizHtml([
+    { stem: 'A long question stem that could wrap to several lines', options: ['A', 'B'], correctIndex: 0, explanation: 'x' },
+  ]);
+  expect(html).toContain('role="radiogroup"');
+  expect(html).toContain('aria-labelledby="lp-q0-label"');
+  expect(html).toContain('id="lp-q0-label"');
+  expect(html).not.toContain('<fieldset');
+  expect(html).not.toContain('<legend');
+  // radio-group semantics preserved via the shared name.
+  expect(html).toContain('name="lp-q0"');
+});
+
 test('document text is HTML-escaped — no injection from the source', () => {
   const malicious = [
     '# Title <script>alert(1)</script>',
@@ -413,9 +445,9 @@ test('main --dry-run --generate-media still emits a valid page (with notes) when
 });
 
 test('resolveVideo notes the 60s cap when the narration is longer than the video', async () => {
-  // A narration whose last cue ends well past MAX_VIDEO_SECONDS (60): the video
-  // is trimmed to fit, so the page must say so via the note hook.
-  const longNarration = { script: 'x', segments: [{ text: 'a', start: 0, end: 30 }, { text: 'b', start: 30, end: 90 }] };
+  // A narration whose last cue ends past MAX_VIDEO_SECONDS (180): the video is
+  // trimmed to the 3-minute cap, so the page must say so via the note hook.
+  const longNarration = { script: 'x', segments: [{ text: 'a', start: 0, end: 100 }, { text: 'b', start: 100, end: 200 }] };
   const runSkill = () => ({ code: 0, stdout: JSON.stringify({ url: 'https://x/v.mp4' }), stderr: '' });
   const v = await R.resolveVideo(
     R.parseArgs(argv('--user', 'a@b.net')),
@@ -427,14 +459,48 @@ test('resolveVideo notes the 60s cap when the narration is longer than the video
     false
   );
   expect(v.media.url).toBe('https://x/v.mp4');
-  expect(v.media.note).toMatch(/60 seconds|capped/i);
+  expect(v.media.note).toMatch(/minutes|capped/i);
 });
 
-test('a supplied --video-url does NOT truncate the caption track at 60s', async () => {
-  // A long narration (>60s) + a caller-supplied pre-rendered video: the 60s clamp
-  // (for hyperframes-trimmed video) must not apply, or captions vanish past 60s.
+test('a narration within the 3-minute cap is NOT trimmed (no video note)', async () => {
+  const runSkill = () => ({ code: 0, stdout: JSON.stringify({ url: 'https://x/v.mp4' }), stderr: '' });
+  const v = await R.resolveVideo(
+    R.parseArgs(argv('--user', 'a@b.net')),
+    'https://x/a.mp3',
+    'T',
+    ['point'],
+    { script: 'x', segments: [{ text: 'a', start: 0, end: 60 }, { text: 'b', start: 60, end: 167 }] }, // 2:47 < 3 min
+    { runSkill },
+    false
+  );
+  expect(v.media.url).toBe('https://x/v.mp4');
+  expect(v.media.note).toBeUndefined();
+});
+
+test('resolveVideo passes a budget-safe fps so a 3-minute video fits the render budget', async () => {
+  const calls = [];
+  const runSkill = (spec) => { calls.push(spec); return { code: 0, stdout: JSON.stringify({ url: 'https://x/v.mp4' }), stderr: '' }; };
+  await R.resolveVideo(
+    R.parseArgs(argv('--user', 'a@b.net')),
+    'https://x/a.mp3',
+    'T',
+    ['point'],
+    { script: 'x', segments: [{ text: 'a', start: 0, end: 200 }] }, // clamps to 180
+    { runSkill },
+    false
+  );
+  const a = calls[0].args;
+  const dur = Number(a[a.indexOf('--duration') + 1]);
+  const fps = Number(a[a.indexOf('--fps') + 1]);
+  expect(dur).toBeLessThanOrEqual(180);
+  expect(fps * dur).toBeLessThanOrEqual(3600); // hyperframes frame budget
+});
+
+test('a supplied --video-url does NOT truncate the caption track at the cap', async () => {
+  // A long narration (>3 min) + a caller-supplied pre-rendered video: the video
+  // cap clamp (for hyperframes-trimmed video) must not apply, or captions vanish.
   const out = tmpPath(`lp-vurl-${Date.now()}.html`);
-  const longScript = Array.from({ length: 40 }, (_, i) => `Sentence number ${i + 1} in the narration.`).join(' ');
+  const longScript = Array.from({ length: 130 }, (_, i) => `Sentence number ${i + 1} in the narration.`).join(' ');
   const contentJson = tmpPath(`cj-${Date.now()}.json`);
   fs.writeFileSync(contentJson, JSON.stringify({ narration: { script: longScript } }));
   try {
@@ -445,33 +511,33 @@ test('a supplied --video-url does NOT truncate the caption track at 60s', async 
       { auditHtml: PASS_AUDIT }
     );
     const html = fs.readFileSync(out, 'utf8');
-    // Decode the inlined VTT data URI and confirm it has cues ending past 60s.
+    // Decode the inlined VTT data URI and confirm cues run past the 180s cap.
     const m = html.match(/data:text\/vtt;base64,([A-Za-z0-9+/=]+)/);
     expect(m).toBeTruthy();
     const vtt = Buffer.from(m[1], 'base64').toString('utf8');
     const lastEnd = [...vtt.matchAll(/--> (\d\d):(\d\d):(\d\d)/g)]
       .map(([, h, mm, s]) => Number(h) * 3600 + Number(mm) * 60 + Number(s))
       .reduce((a, b) => Math.max(a, b), 0);
-    expect(lastEnd).toBeGreaterThan(60);
+    expect(lastEnd).toBeGreaterThan(180);
   } finally {
     fs.rmSync(out, { force: true });
     fs.rmSync(contentJson, { force: true });
   }
 });
 
-test('generated/placeholder video still caps captions at 60s', async () => {
+test('generated/placeholder video caps captions at the 3-minute video cap', async () => {
   // No --video-url → hyperframes-trimmed (or dry-run placeholder) → captions
-  // capped at 60s even though the full narration runs longer.
+  // capped at MAX_VIDEO_SECONDS (180) even though the full narration runs longer.
   const out = tmpPath(`lp-gen-${Date.now()}.html`);
-  const longScript = Array.from({ length: 40 }, (_, i) => `Sentence number ${i + 1} in the narration.`).join(' ');
+  const longScript = Array.from({ length: 130 }, (_, i) => `Sentence number ${i + 1} in the narration.`).join(' ');
   const contentJson = tmpPath(`cjg-${Date.now()}.json`);
   fs.writeFileSync(contentJson, JSON.stringify({ narration: { script: longScript } }));
   // Sanity: the full narration exceeds the cap, so a cap is observable.
   expect(R.deriveContent('Body.', 'T', { narration: { script: longScript } }).narration.segments.slice(-1)[0].end)
-    .toBeGreaterThan(60);
+    .toBeGreaterThan(180);
   try {
     await R.main(
-      argv('--user', 'a@b.net', '--text', 'Body text.', '--title', 'T', '--content-json', contentJson, '--dry-run', '--out', out),
+      argv('--user', 'a@b.net', '--text', 'Body.', '--title', 'T', '--content-json', contentJson, '--dry-run', '--out', out),
       { auditHtml: PASS_AUDIT }
     );
     const html = fs.readFileSync(out, 'utf8');
@@ -480,7 +546,7 @@ test('generated/placeholder video still caps captions at 60s', async () => {
     const lastEnd = [...vtt.matchAll(/--> (\d\d):(\d\d):(\d\d)/g)]
       .map(([, h, mm, s]) => Number(h) * 3600 + Number(mm) * 60 + Number(s))
       .reduce((a, b) => Math.max(a, b), 0);
-    expect(lastEnd).toBeLessThanOrEqual(60);
+    expect(lastEnd).toBeLessThanOrEqual(180);
   } finally {
     fs.rmSync(out, { force: true });
     fs.rmSync(contentJson, { force: true });

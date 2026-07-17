@@ -27,7 +27,8 @@ const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const REGION = process.env.AWS_REGION || 'us-east-1';
 // Keep in sync with the render Lambda (infra/hyperframes-render/handler.js) and
 // SKILL.md. Client-side checks fail fast; the Lambda re-validates authoritatively.
-const MAX_DURATION_SECONDS = 60;
+const MAX_DURATION_SECONDS = 180;
+const MAX_FRAMES = 3600; // render-time budget: fps × duration (see handler.js)
 const DEFAULT_FPS = 30;
 const MIN_FPS = 1;
 const MAX_FPS = 60;
@@ -199,13 +200,23 @@ function buildPayload(args) {
     fail('--duration must be a positive number of seconds', 'bad_args');
   }
   if (durationSeconds > MAX_DURATION_SECONDS) {
-    fail(`--duration must be ${MAX_DURATION_SECONDS}s or fewer (v1 cap). Split longer scenes.`, 'bad_args');
+    fail(`--duration must be ${MAX_DURATION_SECONDS}s (3 min) or fewer. Split longer scenes.`, 'bad_args');
   }
 
   if (args.fps === true) fail('--fps requires a value', 'bad_args');
   const fps = args.fps ? coerceInt(args.fps, '--fps') : DEFAULT_FPS;
   if (fps < MIN_FPS || fps > MAX_FPS) {
     fail(`--fps must be between ${MIN_FPS} and ${MAX_FPS}`, 'bad_args');
+  }
+  // Render time scales with total frames (fps × duration), not seconds — a longer
+  // scene must lower its fps to fit the budget. Fail fast; the Lambda re-checks.
+  const totalFrames = Math.ceil(fps * durationSeconds);
+  if (totalFrames > MAX_FRAMES) {
+    fail(
+      `fps × duration = ${totalFrames} frames exceeds the ${MAX_FRAMES}-frame render budget. ` +
+        `Use --fps ${Math.max(MIN_FPS, Math.floor(MAX_FRAMES / durationSeconds))} or fewer at ${durationSeconds}s.`,
+      'bad_args'
+    );
   }
 
   if (args.width === true) fail('--width requires a value', 'bad_args');

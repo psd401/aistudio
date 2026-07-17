@@ -87,6 +87,25 @@ test('validateRequest rejects fps out of range', () => {
   expect(() => validateRequest(validEvent({ fps: 61 }))).toThrow(/fps/);
 });
 
+test('validateRequest enforces the frame budget (fps × duration)', () => {
+  // 120s at 60fps = 7200 frames — each value in range, but over the render budget.
+  expect(() => validateRequest(validEvent({ durationSeconds: 120, fps: 60 }))).toThrow(/frame|budget/i);
+  // The full 3-minute cap is allowed at a budget-safe fps (180 × 20 = 3600).
+  expect(() => validateRequest(validEvent({ durationSeconds: 180, fps: 20 }))).not.toThrow();
+});
+
+test('frame budget is enforced against the composition data-duration, not just durationSeconds', () => {
+  // Codex #1248: hyperframes renders the HTML's data-duration, not the request
+  // field. An understated durationSeconds must not smuggle a long timeline: a
+  // 150s (under the 180s cap) composition at 60fps = 9000 frames, over budget.
+  const html =
+    '<!doctype html><html><body>' +
+    '<div data-composition-id="x" data-duration="150">long timeline</div></body></html>';
+  expect(() => validateRequest(validEvent({ html, durationSeconds: 60, fps: 60 }))).toThrow(/frame|budget/i);
+  // A matching short durationSeconds + short data-duration stays under budget.
+  expect(() => validateRequest(validEvent({ durationSeconds: 3, fps: 30 }))).not.toThrow();
+});
+
 test('validateRequest rejects dimensions out of range', () => {
   expect(() => validateRequest(validEvent({ width: 8 }))).toThrow(/width/);
   expect(() => validateRequest(validEvent({ height: 5000 }))).toThrow(/height/);

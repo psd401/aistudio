@@ -107,7 +107,20 @@ test('buildPayload rejects a missing / non-positive / over-cap duration', () => 
   const base = ['--user', 'p@psd401.net', '--html', HTML];
   expect(() => buildPayload(parseArgs(argv(...base)))).toThrow(ExitError);
   expect(() => buildPayload(parseArgs(argv(...base, '--duration', '0')))).toThrow(ExitError);
-  expect(() => buildPayload(parseArgs(argv(...base, '--duration', '61')))).toThrow(ExitError);
+  expect(() => buildPayload(parseArgs(argv(...base, '--duration', '181')))).toThrow(ExitError); // > 180s (3 min) cap
+});
+
+test('buildPayload allows up to the 3-minute cap at a budget-safe fps', () => {
+  const base = ['--user', 'p@psd401.net', '--html', HTML];
+  // 180s at 20fps = 3600 frames = exactly the render budget.
+  expect(() => buildPayload(parseArgs(argv(...base, '--duration', '180', '--fps', '20')))).not.toThrow();
+});
+
+test('buildPayload rejects an over-budget frame count (fps × duration > 3600)', () => {
+  const base = ['--user', 'p@psd401.net', '--html', HTML];
+  // 120s at 60fps = 7200 frames — over the budget even though each is in range.
+  expect(() => buildPayload(parseArgs(argv(...base, '--duration', '120', '--fps', '60')))).toThrow(ExitError);
+  expect(lastJson().error).toBe('bad_args');
 });
 
 test('buildPayload rejects fps and dimensions out of range', () => {

@@ -25,8 +25,12 @@ UUID in the path makes it unguessable — same model as Google Drive "anyone wit
 
 ## Limits (v1)
 
-- **Duration:** ≤ 60 seconds of output video. Split longer stories into multiple clips.
+- **Duration:** ≤ 180 seconds (3 min) of output video. Split longer stories into multiple clips.
 - **Frame rate:** 1–60 fps (default 30).
+- **Render budget:** total frames (`fps × duration`) must be ≤ **3600**. Render time scales
+  with frames, so a longer scene must use a lower fps — e.g. a full 180s video renders at
+  ≤ 20 fps (`180 × 20 = 3600`), the same render cost as a 60s clip at 60 fps. Requests over
+  the budget are rejected with the max fps for that duration.
 - **Dimensions:** 16–3840 px per side (default 1920×1080). Set them in the composition's
   viewport/CSS **and** pass `--width`/`--height` so the cap can be enforced.
 
@@ -99,7 +103,8 @@ node /opt/psd-skills/psd-hyperframes/render.js \
   (`<style>` before `</head>`, `<script>` before `</body>`). Prefer inlining directly in the
   HTML; these exist for convenience.
 - `--audio-url <https-url>` — optional narration/music track (see **Audio** below).
-- `--duration <seconds>` — **required**; must match the composition's `data-duration` and be ≤ 60.
+- `--duration <seconds>` — **required**; must match the composition's `data-duration`, be ≤ 180,
+  and keep `fps × duration ≤ 3600` (lower `--fps` for a long scene).
 
 Returns JSON: `{ "url": "…", "s3Key": "public-images/<email>/<uuid>.mp4", "bytes": N, "fps": 30, "durationSeconds": 3, "width": 1920, "height": 1080, "sharing": "public-by-link" }`.
 
