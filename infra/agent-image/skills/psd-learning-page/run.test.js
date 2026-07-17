@@ -328,11 +328,11 @@ test('assemblePage ships the self-contained PSD-branded chrome (logo, nav, heade
   expect(html).not.toContain('http://');
 });
 
-test('quiz uses role="group" + aria-labelledby (no <fieldset> border artifacts)', () => {
+test('quiz uses role="radiogroup" + aria-labelledby (no <fieldset> border artifacts)', () => {
   const html = R.buildQuizHtml([
     { stem: 'A long question stem that could wrap to several lines', options: ['A', 'B'], correctIndex: 0, explanation: 'x' },
   ]);
-  expect(html).toContain('role="group"');
+  expect(html).toContain('role="radiogroup"');
   expect(html).toContain('aria-labelledby="lp-q0-label"');
   expect(html).toContain('id="lp-q0-label"');
   expect(html).not.toContain('<fieldset');

@@ -683,13 +683,14 @@ function buildQuizHtml(quizItems) {
             )}</span></label>`
         )
         .join('\n');
-      // role="group" + aria-labelledby is the ARIA equivalent of fieldset/legend
-      // (a labelled group of the radios) WITHOUT the native <fieldset> border
-      // rendering, whose legend "notch" pierces a rounded card border and leaves
-      // artifacts even with float/flex workarounds. The radio-group semantics
-      // (arrow-key navigation) come from the shared `name`, not the fieldset.
+      // role="radiogroup" + aria-labelledby is the ARIA equivalent of a
+      // fieldset/legend around a set of radios (screen readers announce "radio
+      // group, N of M") WITHOUT the native <fieldset> border rendering, whose
+      // legend "notch" pierces a rounded card border and leaves artifacts even
+      // with float/flex workarounds. Arrow-key navigation comes from the native
+      // radios' shared `name`.
       return [
-        `<div class="lp-q" role="group" aria-labelledby="lp-q${qi}-label" data-correct="${q.correctIndex}" data-explanation="${escapeHtml(q.explanation)}">`,
+        `<div class="lp-q" role="radiogroup" aria-labelledby="lp-q${qi}-label" data-correct="${q.correctIndex}" data-explanation="${escapeHtml(q.explanation)}">`,
         `  <p class="lp-q-legend" id="lp-q${qi}-label">${qi + 1}. ${escapeHtml(q.stem)}</p>`,
         `  <div class="lp-q-body">`,
         options,
@@ -846,7 +847,7 @@ const PAGE_SCRIPT = `
   function progress() {
     if (!bar) return;
     var max = doc.scrollHeight - doc.clientHeight;
-    var y = window.pageYOffset || doc.scrollTop || 0;
+    var y = window.scrollY || doc.scrollTop || 0;
     bar.style.width = (max > 0 ? Math.min(100, Math.max(0, (y / max) * 100)) : 0) + '%';
   }
   window.addEventListener('scroll', progress, { passive: true });
