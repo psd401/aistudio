@@ -30,6 +30,7 @@ describe("Nexus request classifier", () => {
 
   it("routes PSD-data and instructional requests deterministically", () => {
     expect(deterministicClassify("Show attendance for this student")?.intent).toBe("psd-data")
+    expect(deterministicClassify("Do you have an MCP connection?")?.intent).toBe("psd-data")
     expect(deterministicClassify("Build a differentiated lesson plan")?.intent).toBe("instruction")
   })
 

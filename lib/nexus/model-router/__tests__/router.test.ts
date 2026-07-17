@@ -106,6 +106,7 @@ describe("Nexus model router", () => {
       requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
     })
     expect(result.connectorIds).toEqual(["54f0f531-f7ab-485e-bd6b-65a95c4bc871"])
+    expect(result.automaticConnectorIds).toEqual(["54f0f531-f7ab-485e-bd6b-65a95c4bc871"])
     expect(result.metadata.autoAttachedPsdData).toBe(true)
   })
 
@@ -173,21 +174,18 @@ describe("Nexus model router", () => {
     await expect(routeNexusRequest({
       text: "Create an image", fallbackModelId: "gpt-terra", experienceMode: "standard",
       requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
-    })).rejects.toThrow("image-generation model")
+    })).rejects.toThrow("Image generation is not available")
   })
 
-  it("continues without PSD-data when the connector lookup is unavailable", async () => {
+  it("fails clearly instead of silently answering without PSD-data", async () => {
     mockClassify.mockResolvedValue({
       intent: "psd-data", tier: "medium", confidence: 0.98,
       reasonCodes: ["psd_data_domain"], source: "deterministic",
     })
     mockExecuteQuery.mockRejectedValue(new Error("database unavailable"))
-    const result = await routeNexusRequest({
+    await expect(routeNexusRequest({
       text: "Get attendance", fallbackModelId: "gpt-terra", experienceMode: "standard",
       requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
-    })
-    expect(result.modelId).toBe("gpt-terra")
-    expect(result.connectorIds).toEqual([])
-    expect(result.metadata.autoAttachedPsdData).toBe(false)
+    })).rejects.toThrow("PSD Data is not configured")
   })
 })

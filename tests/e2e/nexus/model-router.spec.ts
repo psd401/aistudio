@@ -70,13 +70,14 @@ async function selectStandard(page: Page): Promise<void> {
 
 async function selectFamily(
   page: Page,
-  family: CapturedChatBody['modelFamily'],
+  family: Exclude<CapturedChatBody['modelFamily'], 'auto'>,
   label: string
 ): Promise<void> {
   const routing = page.getByRole('button', { name: 'Nexus routing mode' })
   await routing.click()
+  await page.getByTestId('nexus-mode-advanced').click()
   await page.getByTestId(`nexus-family-${family}`).click()
-  await expect(routing).toContainText(label)
+  await expect(routing).toContainText(`Advanced · ${label}`)
 }
 
 async function capturePrompt(page: Page, prompt: string): Promise<CapturedChatBody> {
@@ -108,17 +109,20 @@ test.describe('Nexus model router — authenticated deterministic UI and wire co
     await expect(page.getByTestId('nexus-mcp-control')).toHaveCount(0)
   })
 
-  test('Advanced exposes only family routing plus optional tools, skills, and MCP controls', async ({ page }) => {
+  test('the first routing menu shows only Standard and Advanced, then Advanced flies out to three families', async ({ page }) => {
     const routing = page.getByRole('button', { name: 'Nexus routing mode' })
     await routing.click()
     await expect(page.getByTestId('nexus-mode-standard')).toBeVisible()
-    await expect(page.getByTestId('nexus-family-auto')).toBeVisible()
+    await expect(page.getByTestId('nexus-mode-advanced')).toBeVisible()
+    await expect(page.getByTestId('nexus-family-openai')).toHaveCount(0)
+    await page.getByTestId('nexus-mode-advanced').click()
     await expect(page.getByTestId('nexus-family-openai')).toContainText('ChatGPT')
     await expect(page.getByTestId('nexus-family-anthropic')).toContainText('Claude')
     await expect(page.getByTestId('nexus-family-google')).toContainText('Gemini')
-    await page.getByTestId('nexus-family-auto').click()
+    await expect(page.getByTestId('nexus-family-auto')).toHaveCount(0)
+    await page.getByTestId('nexus-family-anthropic').click()
 
-    await expect(routing).toContainText('Auto')
+    await expect(routing).toContainText('Advanced · Claude')
     await expect(page.getByRole('button', { name: /Select AI model/i })).toHaveCount(0)
     await expect(page.getByTestId('nexus-tools-control')).toBeVisible()
     await expect(page.getByTestId('nexus-skills-control')).toBeVisible()
@@ -132,7 +136,7 @@ test.describe('Nexus model router — authenticated deterministic UI and wire co
         messages: [{ id: 'router-validation', role: 'user', content: 'hello' }],
         modelId: 'gpt-4o-mini',
       }
-      const [badMode, badFamily] = await Promise.all([
+      const [badMode, badFamily, advancedAuto] = await Promise.all([
         fetch('/api/nexus/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -143,10 +147,15 @@ test.describe('Nexus model router — authenticated deterministic UI and wire co
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ...body, nexusMode: 'advanced', modelFamily: 'other' }),
         }),
+        fetch('/api/nexus/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...body, nexusMode: 'advanced', modelFamily: 'auto' }),
+        }),
       ])
-      return [badMode.status, badFamily.status]
+      return [badMode.status, badFamily.status, advancedAuto.status]
     })
-    expect(statuses).toEqual([400, 400])
+    expect(statuses).toEqual([400, 400, 400])
   })
 
   test('Standard sends the canonical standard/auto wire contract and clears manual selections', async ({ page }) => {
@@ -162,7 +171,6 @@ test.describe('Nexus model router — authenticated deterministic UI and wire co
   })
 
   for (const option of [
-    { family: 'auto', label: 'Auto' },
     { family: 'openai', label: 'ChatGPT' },
     { family: 'anthropic', label: 'Claude' },
     { family: 'google', label: 'Gemini' },

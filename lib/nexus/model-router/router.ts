@@ -7,6 +7,7 @@ import { createLogger } from "@/lib/logger"
 import { hasCapability } from "@/lib/ai/capability-utils"
 import { classifyNexusRequest } from "./classifier"
 import { getNexusRouterConfig } from "./config"
+import { NexusSpecialistUnavailableError } from "./errors"
 import type {
   NexusExperienceMode,
   NexusModelFamily,
@@ -135,7 +136,10 @@ function selectModel(args: {
   }
 
   if (args.intent === "image") {
-    throw new Error("No accessible Nexus image-generation model is available")
+    throw new NexusSpecialistUnavailableError(
+      "image",
+      "Image generation is not available for your account right now. Ask an administrator to configure an accessible image model."
+    )
   }
   if (args.family !== "auto") {
     throw new Error(`No accessible Nexus model is available in the ${args.family} family`)
@@ -183,7 +187,7 @@ async function resolveAutomaticPsdConnector(
     }
     return connectorId
   } catch (error) {
-    log.warn("PSD-data MCP lookup failed; continuing with the routed model", {
+    log.warn("PSD-data MCP lookup failed; active routing will report the unavailable specialist", {
       error: error instanceof Error ? error.message : String(error),
     })
     return null
@@ -230,6 +234,7 @@ export async function routeNexusRequest(args: {
     return {
       modelId: fallback.modelId,
       connectorIds: args.enabledConnectorIds,
+      automaticConnectorIds: [],
       metadata: {
         version: config.version, runtimeMode: mode, experienceMode: args.experienceMode,
         requestedFamily: args.requestedFamily, selectedFamily: inferFamily(fallback) ?? "fallback",
@@ -249,6 +254,12 @@ export async function routeNexusRequest(args: {
     intent: decision.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
   }, mode, fallback)
   const psdConnectorId = await resolveAutomaticPsdConnector(decision.intent, config)
+  if (mode === "active" && decision.intent === "psd-data" && !psdConnectorId) {
+    throw new NexusSpecialistUnavailableError(
+      "psd-data",
+      "PSD Data is not configured or is temporarily unavailable. Contact an administrator or try again shortly."
+    )
+  }
   const proposedConnectors = psdConnectorId
     ? [...new Set([...args.enabledConnectorIds, psdConnectorId])]
     : args.enabledConnectorIds
@@ -264,6 +275,7 @@ export async function routeNexusRequest(args: {
   return {
     modelId: selected.modelId,
     connectorIds,
+    automaticConnectorIds: mode === "active" && psdConnectorId ? [psdConnectorId] : [],
     metadata: {
       version: config.version,
       runtimeMode: mode,

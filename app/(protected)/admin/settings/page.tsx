@@ -4,14 +4,24 @@ import { requireRole } from "@/lib/auth/role-helpers"
 import { getSettingsAction, getBrandingLogoUrlAction } from "@/actions/db/settings-actions"
 import { Skeleton } from "@/components/ui/skeleton"
 import { PageBranding } from "@/components/ui/page-branding"
+import { getNexusEnabledModels } from "@/lib/db/drizzle"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { nexusMcpServers } from "@/lib/db/schema"
+import { hasCapability } from "@/lib/ai/capability-utils"
+import { inferFamily } from "@/lib/nexus/model-router/router"
 
 export default async function SettingsPage() {
   await requireRole("administrator")
 
-  // Fetch settings and current logo URL in parallel
-  const [settingsResult, logoResult] = await Promise.all([
+  // Fetch settings, routing options, and current logo URL in parallel.
+  const [settingsResult, logoResult, models, connectors] = await Promise.all([
     getSettingsAction(),
-    getBrandingLogoUrlAction()
+    getBrandingLogoUrlAction(),
+    getNexusEnabledModels(),
+    executeQuery(
+      db => db.select({ id: nexusMcpServers.id, name: nexusMcpServers.name }).from(nexusMcpServers),
+      "getNexusRouterAdminConnectors"
+    ),
   ])
   const settings = settingsResult.isSuccess ? settingsResult.data : []
   const currentLogoUrl = (logoResult.isSuccess && logoResult.data) ? logoResult.data : "/logo.png"
@@ -27,7 +37,20 @@ export default async function SettingsPage() {
       </div>
 
       <Suspense fallback={<SettingsSkeleton />}>
-        <SettingsClient initialSettings={settings} currentLogoUrl={currentLogoUrl} />
+        <SettingsClient
+          initialSettings={settings}
+          currentLogoUrl={currentLogoUrl}
+          nexusRouterModels={models.map(model => ({
+            id: model.id,
+            name: model.name,
+            provider: model.provider,
+            modelId: model.modelId,
+            family: inferFamily(model),
+            imageGeneration: hasCapability(model.capabilities, "imageGeneration"),
+            deepResearch: hasCapability(model.capabilities, "deepResearch"),
+          }))}
+          nexusRouterConnectors={connectors}
+        />
       </Suspense>
     </div>
   )

@@ -90,5 +90,6 @@ export interface NexusRoutingMetadata {
 export interface NexusRouteResult {
   modelId: string
   connectorIds: string[]
+  automaticConnectorIds: string[]
   metadata: NexusRoutingMetadata
 }

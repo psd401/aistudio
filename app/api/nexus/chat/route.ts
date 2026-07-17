@@ -53,6 +53,7 @@ import {
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
 import { routeNexusRequest } from '@/lib/nexus/model-router/router';
+import { NexusSpecialistUnavailableError } from '@/lib/nexus/model-router/errors';
 import {
   nexusExperienceModeSchema,
   nexusModelFamilySchema,
@@ -344,7 +345,10 @@ const ChatRequestSchema = z.object({
   responseMode: z.enum(['standard', 'priority', 'flex']).optional(),
   nexusMode: nexusExperienceModeSchema.default('standard'),
   modelFamily: nexusModelFamilySchema.default('auto'),
-});
+}).refine(
+  value => value.nexusMode === 'standard' || value.modelFamily !== 'auto',
+  { path: ['modelFamily'], message: 'Advanced mode requires ChatGPT, Claude, or Gemini' }
+);
 
 /**
  * Handle image generation models
@@ -1474,6 +1478,16 @@ export async function POST(req: Request) {
         enabledConnectors, userId, userRoleNames, idToken: session.idToken, log,
       });
     connectorToolResults.push(...resolvedConnectorTools);
+    const failedAutomaticConnectorIds = routing.automaticConnectorIds.filter(
+      connectorId => failedConnectorIds.includes(connectorId)
+    );
+    if (failedAutomaticConnectorIds.length > 0) {
+      throw new NexusSpecialistUnavailableError(
+        'psd-data',
+        'PSD Data could not be connected for this request. Reconnect the service or try again shortly.',
+        failedAutomaticConnectorIds
+      );
+    }
 
     // 8b. Scope-gate built-in (AI SDK) tools via the unified tool catalog (#924),
     // then apply the bound skill's session binding (#925): allowed-tools pin over
@@ -1548,6 +1562,30 @@ function buildChatErrorResponse(
   log: ReturnType<typeof createLogger>,
   timer: (data: Record<string, unknown>) => void
 ): Response {
+  if (error instanceof NexusSpecialistUnavailableError) {
+    log.warn('Nexus specialist unavailable', {
+      specialist: error.specialist,
+      reconnectConnectorCount: error.reconnectConnectorIds.length,
+    });
+    timer({ status: 'error', reason: `${error.specialist}_unavailable` });
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Request-Id': requestId,
+    };
+    if (error.reconnectConnectorIds.length > 0) {
+      headers['X-Connector-Reconnect'] = error.reconnectConnectorIds.join(',');
+    }
+    return new Response(
+      JSON.stringify({
+        error: error.message,
+        code: 'NEXUS_SPECIALIST_UNAVAILABLE',
+        specialist: error.specialist,
+        requestId,
+      }),
+      { status: 503, headers }
+    );
+  }
+
   if (error instanceof ContentSafetyBlockedError) {
     log.warn('Content blocked by safety guardrails', {
       error: { message: error.message, name: error.name },
