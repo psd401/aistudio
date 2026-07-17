@@ -87,6 +87,13 @@ test('validateRequest rejects fps out of range', () => {
   expect(() => validateRequest(validEvent({ fps: 61 }))).toThrow(/fps/);
 });
 
+test('validateRequest enforces the frame budget (fps × duration)', () => {
+  // 120s at 60fps = 7200 frames — each value in range, but over the render budget.
+  expect(() => validateRequest(validEvent({ durationSeconds: 120, fps: 60 }))).toThrow(/frame|budget/i);
+  // The full 3-minute cap is allowed at a budget-safe fps (180 × 20 = 3600).
+  expect(() => validateRequest(validEvent({ durationSeconds: 180, fps: 20 }))).not.toThrow();
+});
+
 test('validateRequest rejects dimensions out of range', () => {
   expect(() => validateRequest(validEvent({ width: 8 }))).toThrow(/width/);
   expect(() => validateRequest(validEvent({ height: 5000 }))).toThrow(/height/);

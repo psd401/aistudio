@@ -48,10 +48,15 @@ const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const execFileAsync = promisify(execFile);
 
 // ── Caps (v1). Documented in psd-hyperframes/SKILL.md — keep in sync. ─────────
-// A synchronous invoke has to fit inside the Lambda timeout AND the agent turn,
-// so v1 renders short scenes only. frames = fps × duration; 60s × 60fps = 3600
-// frames is the ceiling.
-const MAX_DURATION_SECONDS = 60;
+// A synchronous invoke has to fit inside the Lambda timeout AND the agent turn.
+// Render time scales with the FRAME COUNT (each frame = one headless screenshot),
+// so the real ceiling is frames, not seconds: `fps × duration ≤ MAX_FRAMES`.
+// MAX_FRAMES = 3600 is the proven budget (the former 60s × 60fps ceiling) that
+// fits inside RENDER_TIMEOUT_MS. Duration may now run up to 3 minutes, but a
+// longer scene must use a lower fps to stay within the same frame budget
+// (e.g. 180s at 20fps = 3600 frames — same render cost as 60s at 60fps).
+const MAX_DURATION_SECONDS = 180;
+const MAX_FRAMES = 3600;
 const DEFAULT_FPS = 30;
 const MIN_FPS = 1;
 const MAX_FPS = 60;
@@ -199,6 +204,16 @@ function validateRequest(event) {
   const fps = asPositiveInt(event.fps, DEFAULT_FPS);
   if (!Number.isFinite(fps) || fps < MIN_FPS || fps > MAX_FPS) {
     throw new RenderError('bad_request', `\`fps\` must be an integer between ${MIN_FPS} and ${MAX_FPS}.`);
+  }
+  // Frame-budget guard — the real bound on render time (frames = fps × duration).
+  // A long scene must lower its fps to fit; e.g. 180s is allowed at ≤20fps.
+  const totalFrames = Math.ceil(fps * durationSeconds);
+  if (totalFrames > MAX_FRAMES) {
+    throw new RenderError(
+      'bad_request',
+      `fps × durationSeconds = ${totalFrames} frames exceeds the ${MAX_FRAMES}-frame render budget. ` +
+        `Lower fps (e.g. ${Math.max(MIN_FPS, Math.floor(MAX_FRAMES / durationSeconds))} at ${durationSeconds}s) or shorten the scene.`,
+    );
   }
 
   const width = asPositiveInt(event.width, DEFAULT_WIDTH);

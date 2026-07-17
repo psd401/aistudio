@@ -72,13 +72,17 @@ Optional:
 2. **Derive/accept** learning targets + bullet summary + quiz + narration script (rubric-driven).
 3. **Narration** → `psd-tts` (`--engine long-form --voice Ruth`) → an MP3 URL (used both as
    the audio intro and the video's audio track).
-4. **Video** → `psd-hyperframes` (author a short composition, pass `--audio-url`) → an MP4 URL.
-   Renders synchronously; on failure the page **degrades gracefully** (keeps the other
-   modalities + a noted omission).
-5. **Assemble** one self-contained WCAG 2.2 AA page: the MP4 with an inlined **WebVTT captions
+4. **Video** → `psd-hyperframes` (a title-card composition, `--audio-url` muxed, `--fps 20` so a
+   full-length video fits the render budget) → an MP4 URL. The video runs the full narration up
+   to the **3-minute** `psd-hyperframes` cap; a longer narration is trimmed and the page notes it
+   (the complete narration is always in the audio player + transcript). Renders synchronously; on
+   failure the page **degrades gracefully** (keeps the other modalities + a noted omission).
+5. **Assemble** one self-contained, **PSD-branded** WCAG 2.2 AA page: the Pacific-Northwest
+   palette + branded header (logo, eyebrow, title), a sticky section nav with in-view highlight,
+   a scroll progress bar, and card-styled sections — the MP4 with an inlined **WebVTT captions
    track**, the MP3 with a **visible transcript**, the interactive quiz (immediate feedback +
-   rationale, keyboard-operable, score, `aria-live`, more-than-color), the summary + targets,
-   and the HTML-escaped full source in a collapsible section.
+   rationale, keyboard-operable, score, `aria-live`, more-than-color), the summary + targets, and
+   the HTML-escaped full source in a collapsible section.
 6. **Accessibility gate** — the SAME shared `psd-html-artifact` axe gate runs; the page is
    **never** written or published with critical/serious violations (exit 3).
 7. **Publish** → `psd-atrium create-artifact --visibility internal` + `publish --destination
@@ -93,6 +97,22 @@ Media is embedded **by URL** (the HTML stays small), not inlined bytes — *exce
 `--dry-run` with no supplied URL, which embeds tiny **silent placeholder** clips as data URIs
 (labeled "Dry-run preview") so the `<video>`/`<audio>` are real + playable offline. The
 **published** page always carries the real generated explainer video + narration.
+
+## Styling (branded default — overridable)
+
+The page ships a **PSD-branded default template** (Pacific-Northwest palette, branded header,
+section nav, cards) that is **self-contained**: no external fonts/images/scripts, so it renders
+identically inside the Atrium sandbox CSP (the brand's Josefin faces load only where a font host
+is allowed and otherwise fall back to Arial/Georgia — the page looks the same either way).
+
+This is the **default, not the only option**. To produce a different look for a user who asks:
+run `--dry-run --out <path>` to get the assembled HTML, then restyle it and publish the result
+via `psd-atrium create-artifact --code-file <path> --body-format html --visibility internal`.
+The whole theme is driven by CSS custom properties in the inline `<style>` — override
+`--paper`, `--header-bg`, `--heading`, `--accent`, `--icon`, `--link`, `--font-head`,
+`--font-body`, etc. to reskin without touching the accessible `<main>` markup (labelled
+sections, ARIA live regions, captions, transcript, radio-group quiz). Keep any restyle self-
+contained (inline CSS, no external hosts) and re-verify contrast so it still clears WCAG 2.2 AA.
 
 ## Output
 

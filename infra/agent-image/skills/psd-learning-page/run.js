@@ -42,13 +42,19 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const { MP4_DATA_URI, MP3_DATA_URI } = require('./placeholder-media');
+const { PSD_LOGO_WHITE_DATA_URI } = require('./brand-assets');
 
 // Container layout (overridable so the unit tests can point at fakes).
 const SKILLS_DIR = process.env.PSD_SKILLS_DIR || '/opt/psd-skills';
 const VENV_PY = process.env.PSD_VENV_PYTHON || '/opt/agentcore-venv/bin/python3';
 const APP_BASE_URL = process.env.APP_BASE_URL || '';
 
-const MAX_VIDEO_SECONDS = 60; // psd-hyperframes hard cap
+const MAX_VIDEO_SECONDS = 180; // psd-hyperframes cap (3 min) — video runs the full narration
+// Title-card videos are near-static, so a low fps keeps the render within the
+// hyperframes frame budget (fps × duration ≤ 3600): 20 × 180 = 3600 exactly, and
+// fewer frames for any shorter narration. Bumping this without lowering the cap
+// would blow the budget for a full 3-minute video.
+const VIDEO_FPS = 20;
 const WORDS_PER_SECOND = 2.6; // rough narration pace for caption timing
 
 // ── output contract ──────────────────────────────────────────────────────────
@@ -677,13 +683,20 @@ function buildQuizHtml(quizItems) {
             )}</span></label>`
         )
         .join('\n');
+      // role="group" + aria-labelledby is the ARIA equivalent of fieldset/legend
+      // (a labelled group of the radios) WITHOUT the native <fieldset> border
+      // rendering, whose legend "notch" pierces a rounded card border and leaves
+      // artifacts even with float/flex workarounds. The radio-group semantics
+      // (arrow-key navigation) come from the shared `name`, not the fieldset.
       return [
-        `<fieldset class="lp-q" data-correct="${q.correctIndex}" data-explanation="${escapeHtml(q.explanation)}">`,
-        `  <legend>${qi + 1}. ${escapeHtml(q.stem)}</legend>`,
+        `<div class="lp-q" role="group" aria-labelledby="lp-q${qi}-label" data-correct="${q.correctIndex}" data-explanation="${escapeHtml(q.explanation)}">`,
+        `  <p class="lp-q-legend" id="lp-q${qi}-label">${qi + 1}. ${escapeHtml(q.stem)}</p>`,
+        `  <div class="lp-q-body">`,
         options,
-        `  <button type="button" class="lp-check">Check answer</button>`,
-        `  <p class="lp-feedback" role="status" aria-live="polite"></p>`,
-        `</fieldset>`,
+        `    <button type="button" class="lp-check">Check answer</button>`,
+        `    <p class="lp-feedback" role="status" aria-live="polite"></p>`,
+        `  </div>`,
+        `</div>`,
       ].join('\n');
     })
     .join('\n');
@@ -773,14 +786,95 @@ function renderSourceHtml(markdown) {
 
 // ── page assembly ──────────────────────────────────────────────────────────────
 
+// Inline line-icons (decorative — the adjacent heading/label carries the meaning,
+// so they are aria-hidden and exempt from WCAG 1.4.11). Inline SVG is CSP-safe
+// (no img-src) and inherits its color via `currentColor`.
+const ICONS = {
+  target:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg>',
+  video:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="6" width="13" height="12" rx="2"/><path d="M15.5 10l6-3v10l-6-3z"/></svg>',
+  audio:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><rect x="3" y="13" width="4" height="6" rx="1.5"/><rect x="17" y="13" width="4" height="6" rx="1.5"/></svg>',
+  quiz:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.2 9.3a2.8 2.8 0 0 1 5.4 1c0 1.9-2.6 2.3-2.6 3.9"/><circle cx="12" cy="17" r="1.1" fill="currentColor" stroke="none"/></svg>',
+  summary:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="3.5" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="3.5" cy="18" r="1.3" fill="currentColor" stroke="none"/></svg>',
+  source:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2.5h8l4 4V21a.5.5 0 0 1-.5.5h-11A.5.5 0 0 1 6 21z"/><path d="M14 2.5V6.5h4"/><path d="M9 12h6M9 16h6"/></svg>',
+};
+
+// Section order + short nav labels + heading icon. Every section always renders
+// (video/audio show a noted omission when their media is unavailable), so the
+// section nav is stable.
+const SECTION_ORDER = ['targets', 'video', 'audio', 'quiz', 'summary', 'source'];
+const SECTION_META = {
+  targets: { nav: 'Overview', icon: 'target' },
+  video: { nav: 'Watch', icon: 'video' },
+  audio: { nav: 'Listen', icon: 'audio' },
+  quiz: { nav: 'Check understanding', icon: 'quiz' },
+  summary: { nav: 'Key points', icon: 'summary' },
+  source: { nav: 'Full document', icon: 'source' },
+};
+
 function section(id, heading, inner) {
+  const icon = SECTION_META[id] ? ICONS[SECTION_META[id].icon] : '';
   return [
-    `<section aria-labelledby="${id}-h">`,
-    `  <h2 id="${id}-h">${escapeHtml(heading)}</h2>`,
+    `<section id="${id}" aria-labelledby="${id}-h">`,
+    `  <h2 id="${id}-h" class="lp-h2"><span class="lp-h2-icon" aria-hidden="true">${icon}</span>${escapeHtml(heading)}</h2>`,
     inner,
     `</section>`,
   ].join('\n');
 }
+
+// Sticky in-page section nav. Short labels + icons; the in-view section is
+// highlighted at runtime (IntersectionObserver in the page script).
+function buildNav() {
+  const items = SECTION_ORDER.map((id) => {
+    const m = SECTION_META[id];
+    return `    <li><a class="lp-nav-link" href="#${id}" data-nav="${id}"><span class="lp-nav-icon" aria-hidden="true">${ICONS[m.icon]}</span><span>${escapeHtml(m.nav)}</span></a></li>`;
+  }).join('\n');
+  return `<nav class="lp-nav" aria-label="Sections on this page">\n  <p class="lp-nav-title" aria-hidden="true">On this page</p>\n  <ul>\n${items}\n  </ul>\n</nav>`;
+}
+
+// Progress bar + section-nav in-view highlight. Presentation-only, degrades
+// gracefully (no IntersectionObserver → nav stays a plain anchor list).
+const PAGE_SCRIPT = `
+(function () {
+  var doc = document.documentElement;
+  var bar = document.getElementById('lp-progress-bar');
+  function progress() {
+    if (!bar) return;
+    var max = doc.scrollHeight - doc.clientHeight;
+    var y = window.pageYOffset || doc.scrollTop || 0;
+    bar.style.width = (max > 0 ? Math.min(100, Math.max(0, (y / max) * 100)) : 0) + '%';
+  }
+  window.addEventListener('scroll', progress, { passive: true });
+  window.addEventListener('resize', progress);
+  progress();
+
+  var links = {};
+  Array.prototype.forEach.call(document.querySelectorAll('.lp-nav-link'), function (a) {
+    links[a.getAttribute('data-nav')] = a;
+  });
+  var sections = Array.prototype.slice.call(document.querySelectorAll('main > section[id]'));
+  function setActive(id) {
+    Object.keys(links).forEach(function (key) {
+      var on = key === id;
+      links[key].classList.toggle('active', on);
+      if (on) links[key].setAttribute('aria-current', 'true');
+      else links[key].removeAttribute('aria-current');
+    });
+  }
+  if (sections.length) setActive(sections[0].id);
+  if ('IntersectionObserver' in window && sections.length) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) { if (e.isIntersecting) setActive(e.target.id); });
+    }, { rootMargin: '-45% 0px -50% 0px', threshold: 0 });
+    sections.forEach(function (s) { io.observe(s); });
+  }
+})();
+`;
 
 /**
  * Assemble the single self-contained WCAG 2.2 AA page. `media.video` /
@@ -853,6 +947,8 @@ function assemblePage(opts) {
     )}\n  </div>\n</details>`
   );
 
+  const sectionsHtml = [targetsHtml, videoSection, audioSection, quizSection, summarySection, sourceSection].join('\n');
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -860,84 +956,137 @@ function assemblePage(opts) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(title)} — Learning page</title>
   <style>
+    /* Peninsula School District brand (Pacific Northwest palette). Josefin Sans/
+       Slab are the brand faces; they load only where a font host is allowed, so
+       the page ships the brand fallbacks (Arial / Georgia) — no external fonts,
+       images, or scripts, so it renders identically inside the Atrium sandbox CSP. */
     :root {
       color-scheme: light dark;
-      --bg: #ffffff; --fg: #14181f; --muted: #4a5462;
-      --card: #f4f6f9; --border: #c8cfd8; --accent: #0b5cad;
-      /* Button fill is a SEPARATE token from --accent: --accent must stay light
-         in dark mode (text/outline against a dark page), but a solid fill under
-         white button text must stay dark for >=4.5:1 text contrast (WCAG 1.4.3). */
-      --btn-bg: #0b5cad;
-      --ok-bg: #e7f4ea; --ok-fg: #0f5323; --no-bg: #fdecec; --no-fg: #7a1220;
-      --measure: 68ch;
+      --font-head: 'Josefin Sans', 'Segoe UI', system-ui, Arial, sans-serif;
+      --font-body: 'Josefin Slab', Georgia, 'Times New Roman', serif;
+      --paper: #fffaec;        /* skylight body background */
+      --ink: #22353b;          /* body text on paper */
+      --header-bg: #25424c;    /* Pacific header band */
+      --heading: #25424c;      /* Pacific heading text (light on dark page in dark mode) */
+      --pacific-fg: #fdf7e8;   /* text on the Pacific header */
+      --eyebrow: #bcd6c8;      /* eyebrow label on Pacific */
+      --subtitle-fg: #dbe6de;  /* subtitle on Pacific */
+      --accent: #6ca18a;       /* sea glass — decorative bars/bullets */
+      --icon: #3f6b57;         /* cedar green — icons (kept visible, >=3:1) */
+      --link: #2e5f78;         /* whulge — links */
+      --muted: #55675f;        /* muted text (>=4.5:1 on paper) */
+      --card: #ffffff;
+      --card-2: #f4efdf;       /* nav / hover surface */
+      --border: #e5decb;
+      --border-strong: #cdc4ad;
+      --progress: #25424c;     /* scroll-progress fill */
+      --ok-bg: #e7f4ea; --ok-fg: #14562a; --no-bg: #fdecec; --no-fg: #7a1220;
+      --btn-bg: #3f6b57; --btn-fg: #ffffff;  /* cedar button, white text >=4.5:1 */
+      --measure: 66ch;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #0f1319; --fg: #eef2f7; --muted: #aab4c2;
-        --card: #171d26; --border: #333d4a; --accent: #7fb4f0;
-        /* Dark, saturated blue: white text ~5.5:1 (1.4.3) and the fill still
-           reads as a button against the dark page (~3.3:1, 1.4.11). */
-        --btn-bg: #2c6bb0;
-        --ok-bg: #10331c; --ok-fg: #b6e8c4; --no-bg: #3a1418; --no-fg: #f4b7bd;
+        --paper: #0f1f1e; --ink: #e7eee9;
+        --header-bg: #0a1719; --heading: #bfe0d0; --pacific-fg: #f2f7f0;
+        --eyebrow: #8fc0aa; --subtitle-fg: #c7d6cd;
+        --accent: #6ca18a; --icon: #86c1a5; --link: #8fc3e2; --muted: #a6b7b0;
+        --card: #172928; --card-2: #12201f; --border: #2c4140; --border-strong: #3a4f4e;
+        --progress: #6ca18a;
+        --ok-bg: #12331e; --ok-fg: #bce8c8; --no-bg: #3a1519; --no-fg: #f4b7bd;
+        --btn-bg: #4f8a70; --btn-fg: #08130f;  /* light green fill, dark text >=4.5:1 */
       }
     }
     * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 4.5rem; }
     body {
-      margin: 0; background: var(--bg); color: var(--fg);
-      font: 1rem/1.6 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-      -webkit-text-size-adjust: 100%;
+      margin: 0; background: var(--paper); color: var(--ink);
+      font: 1.05rem/1.65 var(--font-body); -webkit-text-size-adjust: 100%;
     }
-    .lp-wrap { max-width: 960px; margin: 0 auto; padding: clamp(1rem, 2vw, 2rem); }
-    header.lp-header { border-bottom: 3px solid var(--accent); padding-bottom: 1rem; margin-bottom: 1.5rem; }
-    h1 { font-size: clamp(1.6rem, 1.2rem + 2vw, 2.4rem); line-height: 1.15; margin: 0 0 .25rem; text-wrap: balance; }
-    h2 { font-size: clamp(1.25rem, 1.1rem + 1vw, 1.6rem); margin: 0 0 .75rem; }
-    .lp-subtitle { color: var(--muted); margin: 0; max-width: var(--measure); }
-    main > section { margin: 0 0 2.5rem; }
-    p, li { max-width: var(--measure); text-wrap: pretty; }
-    ul { padding-left: 1.25rem; }
-    a { color: var(--accent); }
-    :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
-    .lp-video, .lp-audio { width: 100%; max-width: 100%; background: #000; border-radius: 6px; }
-    .lp-audio { background: var(--card); }
-    .lp-note { color: var(--muted); font-size: .95rem; }
-    .lp-transcript, .lp-source { margin-top: 1rem; border: 1px solid var(--border); border-radius: 6px; padding: .5rem .9rem; background: var(--card); }
-    .lp-transcript summary, .lp-source summary { cursor: pointer; font-weight: 600; }
+    .lp-accent { height: 5px; background: var(--accent); }
+    .lp-progress { position: sticky; top: 0; height: 4px; background: transparent; z-index: 20; }
+    .lp-progress > span { display: block; height: 100%; width: 0; background: var(--progress); }
+    .lp-header { background: var(--header-bg); color: var(--pacific-fg); }
+    .lp-header-inner { max-width: 1120px; margin: 0 auto; padding: clamp(1.5rem, 3vw, 2.4rem) clamp(1.1rem, 4vw, 2.5rem) clamp(1.6rem, 3vw, 2.3rem); }
+    .lp-logo { height: 46px; width: auto; display: block; margin: 0 0 1.3rem; }
+    .lp-eyebrow { font-family: var(--font-head); text-transform: uppercase; letter-spacing: .13em; font-size: .78rem; font-weight: 700; color: var(--eyebrow); margin: 0 0 .5rem; }
+    .lp-header h1 { font-family: var(--font-head); font-weight: 700; font-size: clamp(1.9rem, 1.25rem + 3vw, 3rem); line-height: 1.1; margin: 0 0 .55rem; text-wrap: balance; color: var(--pacific-fg); }
+    .lp-subtitle { margin: 0; max-width: var(--measure); color: var(--subtitle-fg); font-size: 1.05rem; }
+    .lp-body { max-width: 1120px; margin: 0 auto; padding: clamp(1.5rem, 3vw, 2.5rem) clamp(1.1rem, 4vw, 2.5rem); display: grid; gap: clamp(1.4rem, 4vw, 3rem); grid-template-columns: 1fr; }
+    @media (min-width: 900px) { .lp-body { grid-template-columns: 208px minmax(0, 1fr); align-items: start; } }
+    .lp-nav { position: sticky; top: 1.4rem; font-family: var(--font-head); }
+    @media (max-width: 899px) { .lp-nav { position: static; top: auto; } }
+    .lp-nav-title { text-transform: uppercase; letter-spacing: .09em; font-size: .72rem; font-weight: 700; color: var(--muted); margin: 0 0 .55rem .25rem; }
+    .lp-nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .12rem; }
+    @media (max-width: 899px) { .lp-nav ul { flex-direction: row; flex-wrap: wrap; gap: .4rem; } }
+    .lp-nav-link { display: flex; align-items: center; gap: .55rem; padding: .5rem .7rem; border-radius: 9px; text-decoration: none; color: var(--ink); font-weight: 600; font-size: .93rem; border: 1px solid transparent; }
+    .lp-nav-link:hover { background: var(--card-2); }
+    .lp-nav-link.active { background: var(--card); border-color: var(--border-strong); color: var(--heading); }
+    .lp-nav-icon { display: inline-flex; color: var(--icon); flex: none; }
+    .lp-nav-icon svg { width: 18px; height: 18px; }
+    main { min-width: 0; }
+    main > section { margin: 0 0 clamp(2rem, 4vw, 3.1rem); scroll-margin-top: 4.5rem; }
+    .lp-h2 { font-family: var(--font-head); font-weight: 700; color: var(--heading); font-size: clamp(1.4rem, 1.15rem + 1.1vw, 1.85rem); line-height: 1.2; margin: 0 0 1rem; display: flex; align-items: center; gap: .6rem; }
+    .lp-h2-icon { display: inline-flex; color: var(--icon); flex: none; }
+    .lp-h2-icon svg { width: 26px; height: 26px; }
+    p, li { text-wrap: pretty; }
+    main p { max-width: var(--measure); }
+    a { color: var(--link); }
+    :focus-visible { outline: 3px solid var(--icon); outline-offset: 2px; border-radius: 4px; }
+    .lp-targets, .lp-summary { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .65rem; }
+    .lp-targets li, .lp-summary li { position: relative; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: .85rem 1rem .85rem 2.4rem; max-width: var(--measure); }
+    .lp-targets li::before, .lp-summary li::before { content: ""; position: absolute; left: 1rem; top: 1.35rem; width: .6rem; height: .6rem; border-radius: 50%; background: var(--icon); }
+    .lp-video, .lp-audio { width: 100%; max-width: 100%; border-radius: 12px; }
+    .lp-video { background: #0b1a1c; border: 1px solid var(--border); }
+    .lp-audio { background: var(--card); border: 1px solid var(--border); }
+    .lp-note { color: var(--muted); font-size: .95rem; max-width: var(--measure); }
+    .lp-transcript, .lp-source { margin-top: 1rem; border: 1px solid var(--border); border-radius: 12px; padding: .7rem 1rem; background: var(--card); }
+    .lp-transcript summary, .lp-source summary { cursor: pointer; font-weight: 700; font-family: var(--font-head); color: var(--heading); }
     .lp-source-body { max-height: 60vh; overflow: auto; margin-top: .75rem; }
-    .lp-q { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.1rem; margin: 0 0 1.1rem; background: var(--card); }
-    .lp-q legend { font-weight: 600; padding: 0 .3rem; }
-    .lp-option { display: flex; align-items: flex-start; gap: .5rem; padding: .35rem 0; cursor: pointer; }
-    .lp-option input { margin-top: .3rem; }
-    .lp-check, #lp-score-btn {
-      margin-top: .6rem; font: inherit; font-weight: 600; cursor: pointer;
-      color: #fff; background: var(--btn-bg); border: 2px solid transparent;
-      border-radius: 6px; padding: .5rem .9rem;
-    }
-    .lp-feedback { margin: .6rem 0 0; font-weight: 600; min-height: 1.2em; }
-    .lp-feedback.lp-correct { color: var(--ok-fg); background: var(--ok-bg); padding: .4rem .6rem; border-radius: 6px; }
-    .lp-feedback.lp-incorrect { color: var(--no-fg); background: var(--no-bg); padding: .4rem .6rem; border-radius: 6px; }
+    #lp-quiz { display: flex; flex-direction: column; gap: 1rem; margin-top: .5rem; }
+    /* .lp-q is a role="group" <div> (not a <fieldset>), so the question header is
+       a plain block and the rounded card border has no legend notch/artifacts. */
+    .lp-q { border: 1px solid var(--border); border-radius: 14px; background: var(--card); padding: 1.1rem 1.25rem; }
+    .lp-q-legend { margin: 0 0 .9rem; padding: 0; font-family: var(--font-head); font-weight: 700; color: var(--heading); font-size: 1.05rem; line-height: 1.4; }
+    .lp-option { display: flex; align-items: flex-start; gap: .6rem; padding: .5rem .55rem; border-radius: 9px; cursor: pointer; }
+    .lp-option:hover { background: var(--card-2); }
+    .lp-option input { margin-top: .3rem; flex: none; width: 1.05rem; height: 1.05rem; accent-color: var(--icon); }
+    .lp-option span { display: block; }
+    .lp-check, #lp-score-btn { margin-top: .9rem; font-family: var(--font-head); font-weight: 700; font-size: .98rem; cursor: pointer; color: var(--btn-fg); background: var(--btn-bg); border: 2px solid transparent; border-radius: 9px; padding: .6rem 1.1rem; }
+    .lp-check:hover, #lp-score-btn:hover { filter: brightness(1.07); }
+    .lp-feedback { margin: .85rem 0 0; font-weight: 700; min-height: 1.2em; }
+    .lp-feedback.lp-correct { color: var(--ok-fg); background: var(--ok-bg); padding: .5rem .7rem; border-radius: 9px; }
+    .lp-feedback.lp-incorrect { color: var(--no-fg); background: var(--no-bg); padding: .5rem .7rem; border-radius: 9px; }
     .lp-feedback.lp-unanswered { color: var(--no-fg); }
-    .lp-score-row { border-top: 1px solid var(--border); padding-top: 1rem; }
-    #lp-score { font-weight: 600; }
-    footer.lp-footer { border-top: 1px solid var(--border); margin-top: 2rem; padding-top: 1rem; color: var(--muted); font-size: .9rem; }
+    .lp-score-row { margin-top: 1.25rem; border-top: 1px solid var(--border); padding-top: 1.1rem; }
+    #lp-score { font-weight: 700; margin: .5rem 0 0; }
+    .lp-footer { max-width: 1120px; margin: 0 auto; padding: 1.4rem clamp(1.1rem, 4vw, 2.5rem) 2.6rem; border-top: 1px solid var(--border); color: var(--muted); font-size: .9rem; }
     @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
     }
   </style>
 </head>
 <body>
-  <div class="lp-wrap">
-    <header class="lp-header">
+  <div class="lp-accent" aria-hidden="true"></div>
+  <div class="lp-progress" aria-hidden="true"><span id="lp-progress-bar"></span></div>
+  <header class="lp-header">
+    <div class="lp-header-inner">
+      <img class="lp-logo" src="${PSD_LOGO_WHITE_DATA_URI}" alt="Peninsula School District" width="150" height="46">
+      <p class="lp-eyebrow">Learning Page</p>
       <h1>${escapeHtml(title)}</h1>
       <p class="lp-subtitle">${escapeHtml(subtitle || 'A multi-modal learning page — watch, listen, read, and check your understanding.')}</p>
-    </header>
+    </div>
+  </header>
+  <div class="lp-body">
+    ${buildNav()}
     <main>
-${[targetsHtml, videoSection, audioSection, quizSection, summarySection, sourceSection].join('\n')}
+${sectionsHtml}
     </main>
-    <footer class="lp-footer">
-      <p>Generated learning page (UDL 3.0 · WCAG 2.2 AA). Watch, listen, read, and self-test — pick the path that works for you.</p>
-    </footer>
   </div>
-  <script>${QUIZ_SCRIPT}</script>
+  <footer class="lp-footer">
+    <p>Peninsula School District learning page (UDL 3.0 · WCAG 2.2 AA). Watch, listen, read, and self-test — pick the path that works for you.</p>
+  </footer>
+  <script>${PAGE_SCRIPT}${QUIZ_SCRIPT}</script>
 </body>
 </html>
 `;
@@ -1036,7 +1185,7 @@ async function resolveVideo(args, audioUrl, title, points, narration, deps, dryR
   }
   let res;
   try {
-    const vArgs = ['--user', String(args.user), '--file', scenePath, '--duration', String(duration), '--width', '1280', '--height', '720'];
+    const vArgs = ['--user', String(args.user), '--file', scenePath, '--duration', String(duration), '--fps', String(VIDEO_FPS), '--width', '1280', '--height', '720'];
     // psd-hyperframes accepts https:// or data:audio/ for the muxed narration track.
     if (audioUrl && (/^https:\/\//i.test(audioUrl) || /^data:audio\//i.test(audioUrl))) {
       vArgs.push('--audio-url', audioUrl);
@@ -1055,14 +1204,15 @@ async function resolveVideo(args, audioUrl, title, points, narration, deps, dryR
     return { media: null, omission: (out && out.error) || 'psd-hyperframes failed' };
   }
   const media = { url: out.url };
-  // The video is capped at MAX_VIDEO_SECONDS; hyperframes trims any longer muxed
-  // narration to fit. Say so on the page (via the existing note hook) and point
-  // to the full audio + transcript, so a truncated video isn't reported as if it
-  // carried the whole narration.
+  // The video runs the full narration up to the MAX_VIDEO_SECONDS (3 min) cap;
+  // only a narration longer than that is trimmed by hyperframes. Note it (via the
+  // existing hook) and point to the full audio + transcript so a trimmed video is
+  // not reported as if it carried the whole narration.
   if (fullNarrationSeconds(narration) > MAX_VIDEO_SECONDS) {
+    const mins = Math.round(MAX_VIDEO_SECONDS / 60);
     media.note =
-      `This explainer video is capped at ${MAX_VIDEO_SECONDS} seconds; the complete ` +
-      `narration continues in the audio player and transcript below.`;
+      `This explainer video is capped at ${mins} minutes; the complete narration ` +
+      `continues in the audio player and transcript below.`;
   }
   return { media, omission: null };
 }
