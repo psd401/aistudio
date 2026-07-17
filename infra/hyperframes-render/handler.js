@@ -205,16 +205,12 @@ function validateRequest(event) {
   if (!Number.isFinite(fps) || fps < MIN_FPS || fps > MAX_FPS) {
     throw new RenderError('bad_request', `\`fps\` must be an integer between ${MIN_FPS} and ${MAX_FPS}.`);
   }
-  // Frame-budget guard — the real bound on render time (frames = fps × duration).
-  // A long scene must lower its fps to fit; e.g. 180s is allowed at ≤20fps.
-  const totalFrames = Math.ceil(fps * durationSeconds);
-  if (totalFrames > MAX_FRAMES) {
-    throw new RenderError(
-      'bad_request',
-      `fps × durationSeconds = ${totalFrames} frames exceeds the ${MAX_FRAMES}-frame render budget. ` +
-        `Lower fps (e.g. ${Math.max(MIN_FPS, Math.floor(MAX_FRAMES / durationSeconds))} at ${durationSeconds}s) or shorten the scene.`,
-    );
-  }
+  // NB: the frame-budget guard (fps × duration ≤ MAX_FRAMES) is enforced BELOW,
+  // after the composition's data-duration is scanned. hyperframes renders for the
+  // HTML's own data-duration, NOT the durationSeconds request field, so a caller
+  // could otherwise understate durationSeconds and smuggle a long timeline past a
+  // request-field-only check. The budget is checked against the actual render
+  // length = max(durationSeconds, largest declared data-duration).
 
   const width = asPositiveInt(event.width, DEFAULT_WIDTH);
   const height = asPositiveInt(event.height, DEFAULT_HEIGHT);
@@ -241,14 +237,33 @@ function validateRequest(event) {
   // attribute whitespace + numeric values are short, so caps of 20/15 are ample.
   const durationRegex = /data-duration\s{0,20}=\s{0,20}["']?\s{0,20}([\d.]{1,15})/gi;
   let match;
+  let maxDataDuration = 0;
   while ((match = durationRegex.exec(html)) !== null) {
     const value = Number(match[1]);
-    if (Number.isFinite(value) && value > MAX_DURATION_SECONDS + 0.5) {
-      throw new RenderError(
-        'bad_request',
-        `Composition declares data-duration=${value}s, above the ${MAX_DURATION_SECONDS}s v1 cap.`,
-      );
+    if (Number.isFinite(value)) {
+      if (value > MAX_DURATION_SECONDS + 0.5) {
+        throw new RenderError(
+          'bad_request',
+          `Composition declares data-duration=${value}s, above the ${MAX_DURATION_SECONDS}s v1 cap.`,
+        );
+      }
+      if (value > maxDataDuration) maxDataDuration = value;
     }
+  }
+
+  // Frame-budget guard — the real bound on render time (frames = fps × duration).
+  // Checked against the ACTUAL render length: hyperframes renders the HTML's own
+  // data-duration (the largest declared one = the root total), not the request
+  // field, so use max(durationSeconds, maxDataDuration) to catch an understated
+  // durationSeconds that hides a long timeline in the composition.
+  const renderSeconds = Math.max(durationSeconds, maxDataDuration);
+  const totalFrames = Math.ceil(fps * renderSeconds);
+  if (totalFrames > MAX_FRAMES) {
+    throw new RenderError(
+      'bad_request',
+      `fps × duration = ${totalFrames} frames (${fps}fps × ${renderSeconds}s) exceeds the ${MAX_FRAMES}-frame ` +
+        `render budget. Lower fps (≤ ${Math.max(MIN_FPS, Math.floor(MAX_FRAMES / renderSeconds))} at ${renderSeconds}s) or shorten the scene.`,
+    );
   }
 
   // Same defense-in-depth for the root canvas size. hyperframes sizes the
