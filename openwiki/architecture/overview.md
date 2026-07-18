@@ -65,11 +65,13 @@ Core utilities and adapters for external services.
 
 ### 1. Provider Factory Pattern
 
-Unified interface for multiple AI providers through `/lib/streaming/nexus-provider-factory.ts`:
+Unified interface for multiple AI providers through `/lib/streaming/nexus/nexus-provider-factory.ts`:
 
 ```typescript
 createProviderModel(provider: string, modelId: string): Promise<LanguageModel>
 ```
+
+Defined in `/lib/ai/provider-factory.ts` and orchestrated by the Nexus provider factory.
 
 Supported providers:
 - OpenAI (GPT-5, GPT-4)

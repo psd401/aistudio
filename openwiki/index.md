@@ -11,6 +11,7 @@ description: "Files and subdirectories in OpenWiki."
 # Directories
 
 - [agent-platform](agent-platform/)
+- [api-integration](api-integration/)
 - [app-features](app-features/)
 - [architecture](architecture/)
 - [data-models](data-models/)
