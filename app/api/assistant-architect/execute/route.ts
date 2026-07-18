@@ -5,7 +5,7 @@ import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getAssistantArchitectByIdAction } from '@/actions/db/assistant-architect-actions';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
-import { getAIModelById, getUserById } from '@/lib/db/drizzle';
+import { getUserById } from '@/lib/db/drizzle';
 import { userCanAccessResource, filterAccessibleResourceIds } from '@/lib/db/drizzle/resource-access';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { sql } from 'drizzle-orm';
@@ -31,7 +31,15 @@ import {
 } from '@/lib/agents';
 import type { ToolInvocationAudit } from '@/lib/agents';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
-import type { AssistantArchitectMode } from '@/lib/db/schema/tables/assistant-architects';
+import type {
+  AssistantArchitectMode,
+  AssistantModelFamily,
+  AssistantModelRoutingMode,
+} from '@/lib/db/schema/tables/assistant-architects';
+import {
+  routeAssistantArchitectModel,
+  type AssistantArchitectRoutingMetadata,
+} from '@/lib/assistant-architect/model-router';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
@@ -111,6 +119,9 @@ interface PromptExecutionContext {
   executionStartTime: number;
   /** The executing assistant's id, for the Atrium retrieval-scope gate (§16.4). */
   assistantId: number;
+  modelRoutingMode: AssistantModelRoutingMode;
+  modelRoutingFamily: AssistantModelFamily | null;
+  modelRoutes: Map<number, AssistantArchitectRoutingMetadata>;
   /**
    * The Atrium content Requester the execution retrieves as (Phase 6, Issue
    * #1056): the session user, so every Atrium hit is bounded by THEIR
@@ -452,13 +463,13 @@ async function authorizeAndLoadArchitect(
   // error. Admins pass inside userCanAccessResource; a model with zero grants is
   // unrestricted. Distinct ids only, to avoid redundant checks in a chain that
   // reuses a model.
-  const distinctModelIds = [
+  const distinctModelIds = (architect.modelRoutingMode ?? 'legacy') === 'legacy' ? [
     ...new Set(
       prompts
         .map((p) => p.modelId)
         .filter((id): id is number => typeof id === 'number')
     ),
-  ];
+  ] : [];
   if (distinctModelIds.length > 0) {
     const accessibleModelIds = await filterAccessibleResourceIds(userId, 'model', distinctModelIds);
     if (accessibleModelIds.size !== distinctModelIds.length) {
@@ -868,6 +879,9 @@ export async function POST(req: Request) {
       userId,
       executionStartTime: Date.now(),
       assistantId: toolId,
+      modelRoutingMode: architect.modelRoutingMode ?? 'legacy',
+      modelRoutingFamily: architect.modelRoutingFamily ?? null,
+      modelRoutes: new Map(),
       atriumRequester,
       conversation: nexusConversationId ? {
         conversationId: nexusConversationId,
@@ -1199,6 +1213,8 @@ function buildCostRates(
 interface AgenticArchitectFields {
   name: string;
   mode?: AssistantArchitectMode | null;
+  modelRoutingMode: AssistantModelRoutingMode;
+  modelRoutingFamily: AssistantModelFamily | null;
   agentEnabledTools?: string[] | null;
   agentEnabledConnectors?: string[] | null;
   agentMaxSteps?: number | null;
@@ -1280,9 +1296,10 @@ async function persistAgenticResult(args: {
   steps: Array<{ toolCalls?: unknown[] }>;
   /** Per-token USD rates used by the in-loop cost cap; null = model unpriced. */
   costRates: { inputPerToken: number; outputPerToken: number } | null;
+  modelRouting: AssistantArchitectRoutingMetadata;
   log: ReturnType<typeof createLogger>;
 }): Promise<void> {
-  const { context, drivingPromptId, agentStartTime, text, usage, finishReason, steps, costRates, log } = args;
+  const { context, drivingPromptId, agentStartTime, text, usage, finishReason, steps, costRates, modelRouting, log } = args;
   const executionTimeMs = Date.now() - agentStartTime;
   const toolCallCount = steps.reduce((n, s) => n + (s.toolCalls?.length || 0), 0);
   // Persist the run's estimated spend (#926 — epic #922 completion audit): the
@@ -1299,6 +1316,7 @@ async function persistAgenticResult(args: {
   log.info('Agentic execution finished', {
     executionId: context.executionId,
     estimatedCostCents,
+    modelRouting,
     finishReason,
     steps: steps.length,
     toolCalls: toolCallCount,
@@ -1314,6 +1332,7 @@ async function persistAgenticResult(args: {
     // Estimated run cost in cents (null when unpriceable) — queryable per-run
     // spend for audit/reconciliation (#926).
     estimatedCostCents,
+    modelRouting,
   };
   // Bind every value as a parameter (never sql.raw + manual escaping, which is
   // fragile and bypasses Drizzle's parameterization). The jsonb and enum casts
@@ -1336,6 +1355,7 @@ async function persistAgenticResult(args: {
         promptName: 'Agentic run',
         position: 0,
         executionTimeMs,
+        modelRouting: modelRouting as unknown as Record<string, unknown>,
       };
       await createMessageWithStats({
         conversationId: context.conversation.conversationId,
@@ -1347,6 +1367,7 @@ async function persistAgenticResult(args: {
           completionTokens: usage.completionTokens,
           totalTokens: usage.totalTokens,
         } : undefined,
+        modelId: modelRouting.selectedModelDbId,
         metadata: metadata as unknown as Record<string, unknown>,
       });
     } catch (msgErr) {
@@ -1381,6 +1402,7 @@ async function persistAgenticResult(args: {
         metadata: {
           ...existing.metadata,
           ...buildExecutionMetadata(context.conversation.assistantId, context.conversation.assistantName, context.executionId, 'completed'),
+          modelRouting: [...context.modelRoutes.values()],
         },
       });
       await updateConversationStats(context.conversation.conversationId);
@@ -1526,13 +1548,6 @@ async function executeAgenticAssistant(args: {
       details: { executionId: context.executionId }
     });
   }
-  const modelData = await getAIModelById(drivingPrompt.modelId);
-  if (!modelData || !modelData.modelId || !modelData.provider) {
-    throw ErrorFactories.dbRecordNotFound('ai_models', drivingPrompt.modelId, {
-      details: { executionId: context.executionId }
-    });
-  }
-
   // Tool-invocation audit sink — persists one tool-execution-complete event per
   // invocation (extracted to a module-level helper to keep this function lean).
   const onToolInvocation = (event: ToolInvocationAudit) =>
@@ -1578,6 +1593,20 @@ async function executeAgenticAssistant(args: {
     role: 'user',
     parts: [{ type: 'text', text: userText }, ...imageParts],
   };
+  const modelRoute = await routeAssistantArchitectModel({
+    text: userText,
+    userId: context.userId,
+    fallbackModelDbId: drivingPrompt.modelId,
+    routingMode: context.modelRoutingMode,
+    requestedFamily: context.modelRoutingFamily,
+    requirements: {
+      requiredTools: config.enabledToolIdentifiers,
+      requiresFunctionCalling: Object.keys(resolved.tools).length > 0,
+      requiresVision: imageParts.length > 0,
+    },
+  });
+  const modelData = modelRoute.model;
+  context.modelRoutes.set(drivingPrompt.id, modelRoute.metadata);
 
   const agentStartTime = Date.now();
   // Hoisted so onFinish can persist the run's estimated cost with the SAME rates
@@ -1629,7 +1658,8 @@ async function executeAgenticAssistant(args: {
           try {
             await persistAgenticResult({
               context, drivingPromptId: drivingPrompt.id, agentStartTime,
-              text: text || '', usage, finishReason, steps: steps || [], costRates, log,
+              text: text || '', usage, finishReason, steps: steps || [], costRates,
+              modelRouting: modelRoute.metadata, log,
             });
           } catch (saveError) {
             log.error('Failed to finalize agentic execution', { error: saveError, executionId: context.executionId });
@@ -1691,29 +1721,11 @@ interface SinglePromptOptions {
 async function resolvePromptModelAndTools(
   prompt: ChainPrompt,
   modelDbId: number,
+  routingText: string,
   context: PromptExecutionContext,
   log: ReturnType<typeof createLogger>
 ): Promise<{ modelId: string; provider: string; enabledTools: string[]; promptTools: ToolSet }> {
-  // 4. Get AI model configuration
-  const modelData = await getAIModelById(modelDbId);
-
-  if (!modelData) {
-    throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
-      details: { promptId: prompt.id, modelId: prompt.modelId }
-    });
-  }
-
-  // Validate model data
-  if (!modelData.modelId || !modelData.provider) {
-    throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
-      details: { promptId: prompt.id, modelId: prompt.modelId, reason: 'Invalid model data' }
-    });
-  }
-
-  const modelId = String(modelData.modelId);
-  const provider = String(modelData.provider);
-
-  // 5. Prepare tools for this prompt
+  // 4. Prepare tools and their capability requirements before routing.
   const enabledTools: string[] = [...(prompt.enabledTools || [])];
   let promptTools = {};
 
@@ -1734,6 +1746,19 @@ async function resolvePromptModelAndTools(
     promptTools = { ...promptTools, ...repoTools };
   }
 
+  const route = await routeAssistantArchitectModel({
+    text: routingText,
+    userId: context.userId,
+    fallbackModelDbId: modelDbId,
+    routingMode: context.modelRoutingMode,
+    requestedFamily: context.modelRoutingFamily,
+    requirements: {
+      requiredTools: enabledTools,
+      requiresFunctionCalling: enabledTools.length > 0 || Object.keys(promptTools).length > 0,
+    },
+  });
+  context.modelRoutes.set(prompt.id, route.metadata);
+
   log.debug('Tools configured for prompt', {
     promptId: prompt.id,
     enabledTools,
@@ -1741,7 +1766,12 @@ async function resolvePromptModelAndTools(
     tools: Object.keys(promptTools)
   });
 
-  return { modelId, provider, enabledTools, promptTools };
+  return {
+    modelId: route.modelId,
+    provider: route.provider,
+    enabledTools,
+    promptTools,
+  };
 }
 
 /**
@@ -1909,7 +1939,8 @@ async function savePromptResultRow(args: {
   const promptInputData = {
     originalContent: prompt.content,
     processedContent,
-    repositoryContext: repositoryContext ? 'included' : 'none'
+    repositoryContext: repositoryContext ? 'included' : 'none',
+    modelRouting: context.modelRoutes.get(prompt.id),
   };
   const inputDataJson = JSON.stringify(promptInputData);
   await executeQuery(
@@ -1952,6 +1983,7 @@ async function savePromptConversationMessage(args: {
       promptName: prompt.name,
       position: prompt.position,
       executionTimeMs,
+      modelRouting: context.modelRoutes.get(prompt.id) as unknown as Record<string, unknown>,
     };
 
     await createMessageWithStats({
@@ -1964,6 +1996,7 @@ async function savePromptConversationMessage(args: {
         completionTokens: usage.completionTokens,
         totalTokens: usage.totalTokens,
       } : undefined,
+      modelId: context.modelRoutes.get(prompt.id)?.selectedModelDbId,
       metadata: metadata as unknown as Record<string, unknown>,
     });
 
@@ -2036,6 +2069,7 @@ async function finalizeExecutionOnLastPrompt(
             context.executionId,
             'completed'
           ),
+          modelRouting: [...context.modelRoutes.values()],
         },
       });
 
@@ -2372,7 +2406,7 @@ async function executeSinglePromptWithCompletion(
     // 4-5. Resolve AI model configuration + prepare per-prompt tools
     // (prompt.modelId is narrowed to a number by the guard above)
     const { modelId, provider, enabledTools, promptTools } =
-      await resolvePromptModelAndTools(prompt, prompt.modelId, context, log);
+      await resolvePromptModelAndTools(prompt, prompt.modelId, processedContent, context, log);
 
     // 6. Wrap streaming in Promise that resolves on completion
     // Use Promise-based pattern to avoid race condition between stream creation and onFinish

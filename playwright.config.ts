@@ -28,7 +28,7 @@ import { defineConfig, devices } from '@playwright/test'
  * nexus CRUD/ownership, atrium) runs in CI.
  */
 const EXTERNAL_PROVIDER_SPECS =
-  /(voice-mode|assistant-architect-(streaming|tools|agentic-mode)|nexus-chat-tools|model-compare-polling|nexus\/(chat-core|advanced))\.spec\.ts$/
+  /(voice-mode|assistant-architect-(streaming|tools|agentic-mode)|nexus-chat-tools|nexus-workspace-chat-live|model-compare-polling|nexus\/(chat-core|advanced))\.spec\.ts$/
 
 export default defineConfig({
   testDir: './tests/e2e',

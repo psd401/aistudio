@@ -28,7 +28,7 @@ An explicitly invalid runtime mode, or malformed router JSON while active, fails
 ## Configuration
 
 `NEXUS_ROUTER_CONFIG_V1` is stored as JSON. Candidate values are `ai_models.model_id` strings (numeric database IDs are also accepted). Candidates are tried in order and remain subject to active/Nexus-enabled status and resource-access grants.
-Administrators manage the rollout mode, Standard and family tier preferences, classifier, instructional specialist, image specialist, and PSD-data connector through the dedicated **Admin → System Settings → Nexus model routing** card. The generic settings table remains available for inspection and emergency edits.
+Administrators manage the shared tier preferences and classifier plus independent Nexus and Assistant Architect rollout modes through the dedicated **Admin → System Settings → Model routing** card. Image and PSD-data specialists remain Nexus-specific. The generic settings table remains available for inspection and emergency edits.
 
 ```json
 {
@@ -69,7 +69,9 @@ Administrators manage the rollout mode, Standard and family tier preferences, cl
 }
 ```
 
-The example IDs are illustrative and must match rows present in the deployment. Standard/Auto candidate lists are provider-neutral, so they may prefer Bedrock-native Nova or open-weight models as well as the named families. Advanced remains constrained to ChatGPT, Claude, or Gemini. For lighter administration, leave candidate lists on Automatic; the router uses `provider_metadata.nexusRouterTier` or model-name inference. Family is inferred where applicable from the provider/model ID. Explicit candidate arrays take priority.
+The example IDs are illustrative and must match rows present in the deployment. Standard/Auto candidate lists are provider-neutral, so they may prefer Bedrock-native Nova or open-weight models as well as the named families. Advanced remains constrained to ChatGPT, Claude, or Gemini. For lighter administration, leave candidate lists on Automatic; the router uses `provider_metadata.modelRouterTier`, the compatible `nexusRouterTier` key, or model-name inference. Family is inferred where applicable from the provider/model ID. Explicit candidate arrays take priority.
+
+Assistant Architect reuses the text-model tier/family selection core and this configuration, but keeps its own capability surface: image generation is an authorized agent tool and MCP connectors remain author-selected. See [Assistant Architect model routing](./assistant-architect-model-routing.md).
 
 For PSD-data, prefer `specialists.psdDataConnectorId` when the server UUID is stable. Otherwise the router normalizes the configured name, so `psd-data`, `PSD Data`, and `psd_data` match the same registered server. Existing connector authorization and Cognito pass-through remain enforced by the connector service.
 

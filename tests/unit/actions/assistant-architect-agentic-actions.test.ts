@@ -275,6 +275,26 @@ describe("validateAgentTools — via updateAssistantArchitectAction", () => {
     )
   })
 
+  it("merges a family-only routing update with the assistant's current mode", async () => {
+    getArchitectByIdMock.mockResolvedValue(draftArchitect({
+      modelRoutingMode: "advanced",
+      modelRoutingFamily: "anthropic",
+    }))
+
+    const result = await updateAssistantArchitectAction("1", {
+      modelRoutingFamily: "google",
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(updateArchitectMock).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        modelRoutingMode: "advanced",
+        modelRoutingFamily: "google",
+      })
+    )
+  })
+
   it("accepts an empty agentEnabledTools array without hitting the catalog", async () => {
     const result = await updateAssistantArchitectAction("1", {
       agentEnabledTools: [],

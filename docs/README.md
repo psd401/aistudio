@@ -167,6 +167,8 @@ AI integration patterns using Vercel AI SDK v6, provider factory implementation,
 
 **[Nexus model routing](./features/nexus-model-routing.md)** — Standard/Advanced UX, Nova Micro classification, family/tier resolution, automatic image and PSD-data MCP dispatch, configuration, fallbacks, and rollout modes.
 
+**[Assistant Architect model routing](./features/assistant-architect-model-routing.md)** — Standard/Advanced authoring, shared capability-aware tier routing, legacy compatibility, execution surfaces, and independent rollout controls.
+
 #### [features/navigation.md](./features/navigation.md)
 Dynamic navigation system with role-based menu items.
 

@@ -12,7 +12,7 @@ import { UIMessage } from "ai"
 import { z } from "zod"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import { createLogger, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { getAIModelById, getUserById } from "@/lib/db/drizzle"
+import { getUserById } from "@/lib/db/drizzle"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { sql } from "drizzle-orm"
 import { unifiedStreamingService } from "@/lib/streaming/unified-streaming-service"
@@ -30,6 +30,11 @@ import type { StreamRequest } from "@/lib/streaming/types"
 import { ContentSafetyBlockedError } from "@/lib/streaming/types"
 import { storeExecutionEvent } from "@/lib/assistant-architect/event-storage"
 import { decodeMdxEditorEscapes } from "@/lib/utils/text-sanitizer"
+import {
+  routeAssistantArchitectModel,
+  type AssistantArchitectRoutingMetadata,
+} from "@/lib/assistant-architect/model-router"
+import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects"
 
 // ============================================
 // Constants
@@ -84,6 +89,9 @@ interface PromptExecutionContext {
   executionStartTime: number
   /** The assistant being executed — keys the Atrium retrieval_scope lookup. */
   assistantId: number
+  modelRoutingMode: AssistantModelRoutingMode
+  modelRoutingFamily: AssistantModelFamily | null
+  modelRoutes: Map<number, AssistantArchitectRoutingMetadata>
   /**
    * The key owner's content Requester, or null when unresolvable. Atrium
    * retrieval is bounded per hit by THIS caller's canView; null skips it
@@ -182,6 +190,8 @@ async function prepareAssistantExecution(
 
   log.info("Assistant loaded", sanitizeForLogging({
     assistantId,
+    modelRoutingMode: architect.modelRoutingMode ?? "legacy",
+    modelRoutingFamily: architect.modelRoutingFamily ?? null,
     name: architect.name,
     promptCount: prompts.length,
   }))
@@ -244,6 +254,9 @@ async function prepareAssistantExecution(
     userId,
     executionStartTime: Date.now(),
     assistantId,
+    modelRoutingMode: architect.modelRoutingMode ?? "legacy",
+    modelRoutingFamily: architect.modelRoutingFamily ?? null,
+    modelRoutes: new Map(),
     atriumRequester: await requesterForUserId(userId),
   }
 
@@ -619,16 +632,7 @@ async function executeSinglePromptWithCompletion(
 
     const messages = [...context.accumulatedMessages, userMessage]
 
-    // 4. Get model
-    const modelData = await getAIModelById(prompt.modelId)
-    if (!modelData || !modelData.modelId || !modelData.provider) {
-      throw ErrorFactories.dbRecordNotFound("ai_models", prompt.modelId || "unknown")
-    }
-
-    const modelId = String(modelData.modelId)
-    const provider = String(modelData.provider)
-
-    // 5. Prepare tools
+    // 4-5. Prepare tools, then route to a compatible model.
     const enabledTools: string[] = [...(prompt.enabledTools || [])]
     let promptTools = {}
 
@@ -640,6 +644,18 @@ async function executeSinglePromptWithCompletion(
       })
       promptTools = { ...promptTools, ...repoTools }
     }
+    const modelRoute = await routeAssistantArchitectModel({
+      text: processedContent,
+      userId: context.userId,
+      fallbackModelDbId: prompt.modelId,
+      routingMode: context.modelRoutingMode,
+      requestedFamily: context.modelRoutingFamily,
+      requirements: {
+        requiredTools: enabledTools,
+        requiresFunctionCalling: enabledTools.length > 0 || Object.keys(promptTools).length > 0,
+      },
+    })
+    context.modelRoutes.set(prompt.id, modelRoute.metadata)
 
     // 6. Stream execution via Promise pattern
     return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
@@ -652,8 +668,8 @@ async function executeSinglePromptWithCompletion(
 
       const streamRequest: StreamRequest = {
         messages,
-        modelId: String(modelId),
-        provider: String(provider),
+        modelId: modelRoute.modelId,
+        provider: modelRoute.provider,
         userId: context.userId.toString(),
         sessionId: context.userCognitoSub,
         conversationId: undefined,
@@ -673,6 +689,7 @@ async function executeSinglePromptWithCompletion(
                 originalContent: prompt.content,
                 processedContent,
                 repositoryContext: repositoryContext ? "included" : "none",
+                modelRouting: modelRoute.metadata,
               }
               const inputDataJson = JSON.stringify(promptInputData)
 
@@ -854,13 +871,7 @@ async function executeSinglePromptCollectText(
 
     const messages = [...context.accumulatedMessages, userMessage]
 
-    // Get model
-    const modelData = await getAIModelById(prompt.modelId)
-    if (!modelData || !modelData.modelId || !modelData.provider) {
-      throw ErrorFactories.dbRecordNotFound("ai_models", prompt.modelId || "unknown")
-    }
-
-    // Prepare tools
+    // Prepare tools and route to a compatible model.
     const enabledTools: string[] = [...(prompt.enabledTools || [])]
     let promptTools = {}
     if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
@@ -871,13 +882,25 @@ async function executeSinglePromptCollectText(
       })
       promptTools = { ...promptTools, ...repoTools }
     }
+    const modelRoute = await routeAssistantArchitectModel({
+      text: processedContent,
+      userId: context.userId,
+      fallbackModelDbId: prompt.modelId,
+      routingMode: context.modelRoutingMode,
+      requestedFamily: context.modelRoutingFamily,
+      requirements: {
+        requiredTools: enabledTools,
+        requiresFunctionCalling: enabledTools.length > 0 || Object.keys(promptTools).length > 0,
+      },
+    })
+    context.modelRoutes.set(prompt.id, modelRoute.metadata)
 
     // Stream and collect text
     return new Promise((resolve, reject) => {
       const streamRequest: StreamRequest = {
         messages,
-        modelId: String(modelData.modelId),
-        provider: String(modelData.provider),
+        modelId: modelRoute.modelId,
+        provider: modelRoute.provider,
         userId: context.userId.toString(),
         sessionId: context.userCognitoSub,
         source: "assistant_execution" as const,
@@ -895,6 +918,7 @@ async function executeSinglePromptCollectText(
                 originalContent: prompt.content,
                 processedContent,
                 repositoryContext: repositoryContext ? "included" : "none",
+                modelRouting: modelRoute.metadata,
               }
               const inputDataJson = JSON.stringify(promptInputData)
 

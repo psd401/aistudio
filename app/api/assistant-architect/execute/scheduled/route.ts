@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { NextRequest } from 'next/server';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
 import { ErrorFactories } from '@/lib/error-utils';
-import { getUserById, getAssistantArchitectById, getChainPrompts, getAIModelById } from '@/lib/db/drizzle';
+import { getUserById, getAssistantArchitectById, getChainPrompts } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { eq, desc, sql } from 'drizzle-orm';
 import { promptResults, scheduledExecutions, executionResults } from '@/lib/db/schema';
@@ -21,6 +21,11 @@ import type { StreamRequest } from '@/lib/streaming/types';
 import type { UIMessage } from 'ai';
 import jwt from 'jsonwebtoken';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import {
+  routeAssistantArchitectModel,
+  type AssistantArchitectRoutingMetadata,
+} from '@/lib/assistant-architect/model-router';
+import type { AssistantModelFamily, AssistantModelRoutingMode } from '@/lib/db/schema/tables/assistant-architects';
 
 // Allow up to 15 minutes for long scheduled executions
 export const maxDuration = 900;
@@ -82,6 +87,9 @@ interface PromptExecutionContext {
   userId: number;
   /** The executing assistant's id, for the Atrium retrieval-scope gate (§16.4). */
   assistantId: number;
+  modelRoutingMode: AssistantModelRoutingMode;
+  modelRoutingFamily: AssistantModelFamily | null;
+  modelRoutes: Map<number, AssistantArchitectRoutingMetadata>;
   /**
    * The autonomous agent Requester the run executes as (§25 service identity),
    * when the schedule specified an `agent_identity_id`. Null = the run authors any
@@ -543,6 +551,9 @@ export async function POST(req: NextRequest) {
       assistantOwnerSub,
       userId,
       assistantId: toolId,
+      modelRoutingMode: architect.modelRoutingMode ?? 'legacy',
+      modelRoutingFamily: architect.modelRoutingFamily ?? null,
+      modelRoutes: new Map(),
       // The resolved service-identity Requester (null when the schedule runs as the
       // owning user). Threaded so the content-authoring tool wiring reads its write
       // authority from the identity's scopes.
@@ -586,8 +597,18 @@ export async function POST(req: NextRequest) {
       );
 
       const resultData = promptResultsQuery && promptResultsQuery.length > 0 && promptResultsQuery[0].outputData
-        ? { output: promptResultsQuery[0].outputData, executionId, toolId }
-        : { output: 'No output generated', executionId, toolId };
+        ? {
+            output: promptResultsQuery[0].outputData,
+            executionId,
+            toolId,
+            modelRouting: [...context.modelRoutes.values()],
+          }
+        : {
+            output: 'No output generated',
+            executionId,
+            toolId,
+            modelRouting: [...context.modelRoutes.values()],
+          };
 
       log.info('Retrieved prompt results', {
         executionId,
@@ -895,25 +916,7 @@ async function executePromptChainServerSide(
 
       const messages = [...context.accumulatedMessages, userMessage];
 
-      // 4. Get AI model configuration
-      const modelData = await getAIModelById(prompt.modelId!);
-
-      if (!modelData) {
-        throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
-          details: { promptId: prompt.id, modelId: prompt.modelId }
-        });
-      }
-
-      if (!modelData.modelId || !modelData.provider) {
-        throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
-          details: { promptId: prompt.id, modelId: prompt.modelId, reason: 'Invalid model data' }
-        });
-      }
-
-      const modelId = String(modelData.modelId);
-      const provider = String(modelData.provider);
-
-      // 5. Prepare tools for this prompt
+      // 4-5. Prepare tools and route to a compatible model.
       const enabledTools: string[] = [...(prompt.enabledTools || [])];
       let promptTools = {};
 
@@ -933,6 +936,18 @@ async function executePromptChainServerSide(
         // Merge repository tools
         promptTools = { ...promptTools, ...repoTools };
       }
+      const modelRoute = await routeAssistantArchitectModel({
+        text: processedContent,
+        userId: context.userId,
+        fallbackModelDbId: prompt.modelId,
+        routingMode: context.modelRoutingMode,
+        requestedFamily: context.modelRoutingFamily,
+        requirements: {
+          requiredTools: enabledTools,
+          requiresFunctionCalling: enabledTools.length > 0 || Object.keys(promptTools).length > 0,
+        },
+      });
+      context.modelRoutes.set(prompt.id, modelRoute.metadata);
 
       log.debug('Tools configured for prompt', {
         promptId: prompt.id,
@@ -976,8 +991,8 @@ async function executePromptChainServerSide(
 
       const streamRequest: StreamRequest = {
         messages,
-        modelId,
-        provider,
+        modelId: modelRoute.modelId,
+        provider: modelRoute.provider,
         userId: context.userId.toString(),
         sessionId: context.userCognitoSub,
         conversationId: undefined,
@@ -1038,7 +1053,8 @@ async function executePromptChainServerSide(
               const promptInputData = {
                 originalContent: prompt.content,
                 processedContent,
-                repositoryContext: repositoryContext ? 'included' : 'none'
+                repositoryContext: repositoryContext ? 'included' : 'none',
+                modelRouting: modelRoute.metadata,
               };
               const inputDataJson = JSON.stringify(promptInputData);
               await executeQuery(

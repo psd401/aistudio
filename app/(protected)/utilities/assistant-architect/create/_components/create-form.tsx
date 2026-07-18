@@ -20,6 +20,7 @@ import { AssistantDetailsForm } from "./assistant-details-form"
 import { InputFieldsSection } from "./input-fields-section"
 import type { InputFieldData } from "./input-field-editor"
 import { AgenticModeSection, type AgenticConfigState } from "./agentic-mode-section"
+import { ModelRoutingSection, type ModelRoutingState } from "./model-routing-section"
 
 interface CreateFormProps {
   initialData?: SelectAssistantArchitect
@@ -61,6 +62,10 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
     initialData?.id ? String(initialData.id) : null
   )
   const [inputFields, setInputFields] = useState<SelectToolInputField[]>(initialInputFields)
+  const [routing, setRouting] = useState<ModelRoutingState>(() => ({
+    mode: initialData?.modelRoutingMode ?? "standard",
+    family: initialData?.modelRoutingFamily ?? null,
+  }))
 
   // Agentic mode config (Issue #926). Initialized from the existing assistant
   // when editing; defaults to prompt-chain for new assistants.
@@ -105,6 +110,10 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
     if (!isValid) return null
 
     const agenticPayload = toAgenticPayload(agentic)
+    const routingPayload = {
+      modelRoutingMode: routing.mode,
+      modelRoutingFamily: routing.mode === "advanced" ? routing.family : null,
+    }
 
     try {
       setIsSubmitting(true)
@@ -112,6 +121,7 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
         const result = await updateAssistantArchitectAction(assistantId, {
           ...values,
           ...agenticPayload,
+          ...routingPayload,
         })
         if (!result.isSuccess) throw new Error(result.message)
         return assistantId
@@ -122,6 +132,7 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
         imagePath: values.imagePath,
         status: "draft",
         ...agenticPayload,
+        ...routingPayload,
       })
       if (!result.isSuccess) throw new Error(result.message)
       const newId = String(result.data.id)
@@ -137,7 +148,7 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
     } finally {
       setIsSubmitting(false)
     }
-  }, [form, assistantId, toast, agentic])
+  }, [form, assistantId, toast, agentic, routing])
 
   const handleAddField = useCallback(async () => saveAssistant(), [saveAssistant])
 
@@ -200,6 +211,12 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
         value={agentic}
         onChange={setAgentic}
         lockAgentic={lockAgentic}
+        disabled={isSubmitting}
+      />
+
+      <ModelRoutingSection
+        value={routing}
+        onChange={setRouting}
         disabled={isSubmitting}
       />
 

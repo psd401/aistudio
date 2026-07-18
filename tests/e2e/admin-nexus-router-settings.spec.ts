@@ -15,6 +15,7 @@ test.describe('Admin Nexus router settings', () => {
   test('renders rollout, tier, classifier, image, instruction, and PSD-data controls', async ({ page }) => {
     await expect(page.getByTestId('nexus-router-settings-card')).toBeVisible()
     await expect(page.getByTestId('nexus-router-admin-mode')).toBeVisible()
+    await expect(page.getByTestId('assistant-architect-router-admin-mode')).toBeVisible()
     await expect(page.getByTestId('nexus-router-auto-light')).toBeVisible()
     await expect(page.getByTestId('nexus-router-auto-medium')).toBeVisible()
     await expect(page.getByTestId('nexus-router-auto-high')).toBeVisible()
@@ -40,7 +41,9 @@ test.describe('Admin Nexus router settings', () => {
     await expect(page.getByTestId('nexus-router-admin-save')).toBeEnabled()
 
     await page.reload()
-    await expect(page.getByTestId('nexus-router-admin-mode')).toContainText('Active')
-    await expect(page.getByTestId('nexus-router-classifier-model')).toHaveValue('us.amazon.nova-micro-v1:0')
+    const reloadedCard = page.getByTestId('nexus-router-settings-card').last()
+    await expect(reloadedCard.getByTestId('nexus-router-admin-mode')).toContainText('Active')
+    await expect(reloadedCard.getByTestId('assistant-architect-router-admin-mode')).toContainText('Active')
+    await expect(reloadedCard.getByTestId('nexus-router-classifier-model')).toHaveValue('us.amazon.nova-micro-v1:0')
   })
 })

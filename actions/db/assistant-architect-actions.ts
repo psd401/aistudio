@@ -49,12 +49,19 @@ import {
   deleteChainPrompt,
   getAIModels,
   getAIModelById,
+  getArchitectEnabledModels,
   getAssistantArchitectsByStatus,
   getRoleByName
 } from "@/lib/db/drizzle";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
 import { navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities, type AssistantRetrievalScope } from "@/lib/db/schema";
+import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects";
+import {
+  inferModelFamily,
+  isExecutableTextModel,
+  modelSupportsProviderNativeTool,
+} from "@/lib/ai/model-router/core";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -152,6 +159,112 @@ async function validateEnabledTools(
       message: `Error validating tools: ${error instanceof Error ? error.message : 'Unknown error'}`
     };
   }
+}
+
+function resolveModelRoutingFields(data: Partial<InsertAssistantArchitect>):
+  | { fields: { modelRoutingMode?: AssistantModelRoutingMode; modelRoutingFamily?: AssistantModelFamily | null } }
+  | { error: string } {
+  if (data.modelRoutingMode === undefined && data.modelRoutingFamily === undefined) {
+    return { fields: {} };
+  }
+  const mode = data.modelRoutingMode;
+  if (mode !== undefined && !["legacy", "standard", "advanced"].includes(mode)) {
+    return { error: "Invalid model routing mode" };
+  }
+  if (mode === "advanced") {
+    if (!data.modelRoutingFamily || !["openai", "anthropic", "google"].includes(data.modelRoutingFamily)) {
+      return { error: "Advanced routing requires ChatGPT, Claude, or Gemini" };
+    }
+    return { fields: { modelRoutingMode: mode, modelRoutingFamily: data.modelRoutingFamily } };
+  }
+  if (mode === "legacy" || mode === "standard") {
+    return { fields: { modelRoutingMode: mode, modelRoutingFamily: null } };
+  }
+  if (data.modelRoutingFamily !== undefined) {
+    return { error: "Choose Advanced routing before selecting a model family" };
+  }
+  return { fields: {} };
+}
+
+async function validateEnabledToolsForRouting(
+  enabledTools: string[],
+  architect: Pick<SelectAssistantArchitect, "modelRoutingMode" | "modelRoutingFamily">,
+  userId: number,
+  fallbackModelId: number | null | undefined
+): Promise<{ isValid: boolean; invalidTools: string[]; message?: string }> {
+  const routingMode = architect.modelRoutingMode ?? "legacy";
+  if (routingMode === "legacy") {
+    if (!fallbackModelId) {
+      return { isValid: false, invalidTools: enabledTools, message: "Choose a model before enabling tools" };
+    }
+    return validateEnabledTools(enabledTools, fallbackModelId);
+  }
+  if (enabledTools.length === 0) return { isValid: true, invalidTools: [] };
+
+  const knownTools = new Set(getAllTools().map(tool => tool.name));
+  const unknownTools = enabledTools.filter(tool => !knownTools.has(tool));
+  if (unknownTools.length > 0) {
+    return { isValid: false, invalidTools: unknownTools, message: `Unknown tools: ${unknownTools.join(", ")}` };
+  }
+
+  const models = (await getArchitectEnabledModels()).filter(model =>
+    isExecutableTextModel(model)
+    && (routingMode !== "advanced"
+      || inferModelFamily(model) === architect.modelRoutingFamily)
+  );
+  const accessibleIds = await filterAccessibleResourceIds(userId, "model", models.map(model => model.id));
+  const accessible = models.filter(model => accessibleIds.has(String(model.id)));
+  const availableByModel = await Promise.all(
+    accessible.map(async model => new Set(
+      (await getAvailableToolsForModel(model.modelId))
+        .filter(tool => modelSupportsProviderNativeTool(model, tool.name))
+        .map(tool => tool.name)
+    ))
+  );
+  if (availableByModel.some(tools => enabledTools.every(tool => tools.has(tool)))) {
+    return { isValid: true, invalidTools: [] };
+  }
+  return {
+    isValid: false,
+    invalidTools: enabledTools,
+    message: "No accessible model in this routing mode supports all selected tools",
+  };
+}
+
+async function resolveAutomaticPromptFallbackModelId(
+  architect: Pick<SelectAssistantArchitect, "modelRoutingMode" | "modelRoutingFamily">,
+  userId: number,
+  requestedModelId: number | undefined,
+  enabledTools: string[]
+): Promise<number | null> {
+  const routingMode = architect.modelRoutingMode ?? "legacy";
+  const candidates = (await getArchitectEnabledModels()).filter(model =>
+    isExecutableTextModel(model)
+    && (routingMode !== "advanced"
+      || inferModelFamily(model) === architect.modelRoutingFamily)
+  );
+  const accessibleIds = await filterAccessibleResourceIds(
+    userId,
+    "model",
+    candidates.map(model => model.id)
+  );
+  const accessible = candidates.filter(model => accessibleIds.has(String(model.id)));
+  const compatible = enabledTools.length === 0
+    ? accessible
+    : (await Promise.all(accessible.map(async model => ({
+      model,
+      tools: new Set(
+        (await getAvailableToolsForModel(model.modelId))
+          .filter(tool => modelSupportsProviderNativeTool(model, tool.name))
+          .map(tool => tool.name)
+      ),
+    })))).filter(candidate => enabledTools.every(tool => candidate.tools.has(tool)))
+      .map(candidate => candidate.model);
+
+  const requested = requestedModelId
+    ? compatible.find(model => model.id === requestedModelId)
+    : undefined;
+  return requested?.id ?? compatible[0]?.id ?? null;
 }
 
 /**
@@ -390,12 +503,24 @@ export async function createAssistantArchitectAction(
       }])
     }
 
+    const routingResult = resolveModelRoutingFields({
+      ...assistant,
+      modelRoutingMode: assistant.modelRoutingMode ?? "standard",
+    });
+    if ("error" in routingResult) {
+      throw ErrorFactories.validationFailed([{
+        field: "modelRoutingMode",
+        message: routingResult.error,
+      }]);
+    }
+
     const architect = await drizzleCreateAssistantArchitect({
       name: assistant.name,
       description: assistant.description || null,
       userId: currentUser.data.user.id,
       status: (assistant.status || 'draft') as "draft" | "pending_approval" | "approved" | "rejected" | "disabled",
       imagePath: assistant.imagePath || null,
+      ...routingResult.fields,
       ...agentResult.fields,
     });
 
@@ -512,6 +637,8 @@ export async function getAssistantArchitectsAction(): Promise<
           updatedAt: architect.updatedAt,
           // Agentic mode fields (Issue #926)
           mode: architect.mode,
+          modelRoutingMode: architect.modelRoutingMode,
+          modelRoutingFamily: architect.modelRoutingFamily,
           agentEnabledTools: architect.agentEnabledTools,
           agentEnabledConnectors: architect.agentEnabledConnectors,
           agentMaxSteps: architect.agentMaxSteps,
@@ -730,6 +857,8 @@ type AssistantArchitectBaseUpdates = Partial<{
   timeoutSeconds: number | null;
   // Retrieval scoping (Atrium Phase 6, Issue #1056)
   retrievalScope: AssistantRetrievalScope | null;
+  modelRoutingMode: AssistantModelRoutingMode;
+  modelRoutingFamily: AssistantModelFamily | null;
   // Agentic mode (Issue #926)
   mode: "prompt_chain" | "agentic";
   agentEnabledTools: string[];
@@ -823,6 +952,19 @@ export async function updateAssistantArchitectAction(
     // Build update data object with only provided fields. Branch logic is
     // extracted to keep this action's cyclomatic complexity bounded.
     const updateData = buildAssistantArchitectBaseUpdates(data);
+
+    const routingResult = data.modelRoutingMode === undefined && data.modelRoutingFamily === undefined
+      ? { fields: {} }
+      : resolveModelRoutingFields({
+        modelRoutingMode: data.modelRoutingMode ?? currentTool.modelRoutingMode ?? "legacy",
+        modelRoutingFamily: data.modelRoutingFamily !== undefined
+          ? data.modelRoutingFamily
+          : currentTool.modelRoutingFamily,
+      });
+    if ("error" in routingResult) {
+      return { isSuccess: false, message: routingResult.error }
+    }
+    Object.assign(updateData, routingResult.fields);
 
     // Agentic mode fields (Issue #926) — resolved + validated in a helper to keep
     // this action's cyclomatic complexity bounded.
@@ -1320,7 +1462,7 @@ export async function addChainPromptAction(
     name: string
     content: string
     systemContext?: string
-    modelId: number
+    modelId?: number
     position: number
     inputMapping?: Record<string, string>
     repositoryIds?: number[]
@@ -1350,11 +1492,34 @@ export async function addChainPromptAction(
     if (!architect) {
       return { isSuccess: false, message: "Tool not found" };
     }
-    await authorizePromptMutation(architect.userId, log);
+    const currentUserId = await authorizePromptMutation(architect.userId, log);
+
+    const routingMode = architect.modelRoutingMode ?? "legacy";
+    const fallbackModelId = routingMode === "legacy"
+      ? data.modelId ?? (await getArchitectEnabledModels())[0]?.id
+      : await resolveAutomaticPromptFallbackModelId(
+        architect,
+        currentUserId,
+        data.modelId,
+        data.enabledTools ?? []
+      );
+    if (!fallbackModelId) {
+      return {
+        isSuccess: false,
+        message: routingMode === "legacy"
+          ? "No Assistant Architect model is available"
+          : "No accessible model in this routing mode supports all selected tools",
+      };
+    }
 
     // Validate enabled tools if provided
     if (data.enabledTools && data.enabledTools.length > 0) {
-      const toolValidation = await validateEnabledTools(data.enabledTools, data.modelId);
+      const toolValidation = await validateEnabledToolsForRouting(
+        data.enabledTools,
+        architect,
+        currentUserId,
+        fallbackModelId
+      );
       if (!toolValidation.isValid) {
         log.warn("Invalid tools provided", { invalidTools: toolValidation.invalidTools, message: toolValidation.message });
         return {
@@ -1377,7 +1542,7 @@ export async function addChainPromptAction(
       assistantArchitectId: architectIdInt,
       name: data.name,
       content: data.content,
-      modelId: data.modelId,
+      modelId: fallbackModelId,
       position: data.position,
       systemContext: data.systemContext,
       inputMapping: data.inputMapping,
@@ -1475,16 +1640,35 @@ function buildChainPromptUpdates(data: Partial<InsertChainPrompt>): ChainPromptU
  */
 async function validatePromptEnabledToolsUpdate(
   enabledTools: string[] | null | undefined,
-  dataModelId: number | null | undefined,
-  promptModelId: number | null | undefined
+  dataModelId: unknown,
+  promptModelId: unknown,
+  architect: Pick<SelectAssistantArchitect, "modelRoutingMode" | "modelRoutingFamily">,
+  userId: number
 ): Promise<{ message: string; logMeta: { invalidTools: string[]; message?: string } } | null> {
   if (!enabledTools) return null;
 
   // Use provided modelId or fall back to existing prompt's modelId
-  const modelIdToValidate = dataModelId || promptModelId;
-  if (!modelIdToValidate) return null;
+  const modelIdToValidate = dataModelId ?? promptModelId;
+  if (typeof modelIdToValidate !== "number" && typeof modelIdToValidate !== "string") {
+    return {
+      message: "Invalid model ID format",
+      logMeta: { invalidTools: enabledTools, message: "Invalid model ID format" },
+    };
+  }
+  const parsedModelId = Number(modelIdToValidate);
+  if (!Number.isSafeInteger(parsedModelId) || parsedModelId <= 0) {
+    return {
+      message: "Invalid model ID format",
+      logMeta: { invalidTools: enabledTools, message: "Invalid model ID format" },
+    };
+  }
 
-  const toolValidation = await validateEnabledTools(enabledTools, Number(modelIdToValidate));
+  const toolValidation = await validateEnabledToolsForRouting(
+    enabledTools,
+    architect,
+    userId,
+    parsedModelId
+  );
   if (toolValidation.isValid) return null;
 
   return {
@@ -1520,7 +1704,7 @@ async function validatePromptRepositoryAccessUpdate(
 async function authorizePromptMutation(
   architectUserId: number | null,
   log: ReturnType<typeof createLogger>
-): Promise<void> {
+): Promise<number> {
   const isAdmin = await hasRole("administrator");
 
   // Get current user with proper error handling
@@ -1539,6 +1723,7 @@ async function authorizePromptMutation(
     });
     throw ErrorFactories.authzToolAccessDenied("assistant_architect");
   }
+  return currentUserId;
 }
 
 export async function updatePromptAction(
@@ -1569,7 +1754,8 @@ export async function updatePromptAction(
           .select({
             id: chainPrompts.id,
             assistantArchitectId: chainPrompts.assistantArchitectId,
-            modelId: chainPrompts.modelId
+            modelId: chainPrompts.modelId,
+            enabledTools: chainPrompts.enabledTools,
           })
           .from(chainPrompts)
           .where(eq(chainPrompts.id, idInt))
@@ -1591,14 +1777,35 @@ export async function updatePromptAction(
     // Only tool creator or admin can update prompts. Auth resolution (admin/creator
     // check, with the original throwing semantics) is extracted to keep this action's
     // cyclomatic complexity bounded.
-    await authorizePromptMutation(architect.userId, log);
+    const currentUserId = await authorizePromptMutation(architect.userId, log);
+
+    const routingMode = architect.modelRoutingMode ?? "legacy";
+    const automaticFallbackModelId = routingMode === "legacy"
+      ? null
+      : await resolveAutomaticPromptFallbackModelId(
+        architect,
+        currentUserId,
+        data.modelId ?? prompt.modelId ?? undefined,
+        data.enabledTools ?? prompt.enabledTools ?? []
+      );
+    if (routingMode !== "legacy" && !automaticFallbackModelId) {
+      return {
+        isSuccess: false,
+        message: "No accessible model in this routing mode supports all selected tools",
+      };
+    }
+    const effectiveData: Partial<InsertChainPrompt> = automaticFallbackModelId
+      ? { ...data, modelId: automaticFallbackModelId }
+      : data;
 
     // Validate enabled tools if being updated. Branch logic is extracted to keep
     // this action's cyclomatic complexity bounded.
     const enabledToolsError = await validatePromptEnabledToolsUpdate(
-      data.enabledTools,
-      data.modelId,
-      prompt.modelId
+      effectiveData.enabledTools,
+      effectiveData.modelId,
+      prompt.modelId,
+      architect,
+      currentUserId
     );
     if (enabledToolsError) {
       log.warn("Invalid tools provided for update", enabledToolsError.logMeta);
@@ -1606,14 +1813,14 @@ export async function updatePromptAction(
     }
 
     // If repository IDs are being updated, validate user has access.
-    const repositoryAccessError = await validatePromptRepositoryAccessUpdate(data.repositoryIds);
+    const repositoryAccessError = await validatePromptRepositoryAccessUpdate(effectiveData.repositoryIds);
     if (repositoryAccessError) {
       return { isSuccess: false, message: repositoryAccessError };
     }
 
     // Build update data matching ChainPromptUpdateData type. The branch logic is
     // extracted to keep this action's cyclomatic complexity bounded.
-    const updates = buildChainPromptUpdates(data);
+    const updates = buildChainPromptUpdates(effectiveData);
 
     if (Object.keys(updates).length === 0) {
       return { isSuccess: false, message: "No fields to update" }
