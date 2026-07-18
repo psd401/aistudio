@@ -13,6 +13,13 @@
 # "cache_control: Extra inputs are not permitted" (block-level caching is fine,
 # but openwiki exposes no knob).
 #
+# ⚠️ Scaffolder clobber warning: running `openwiki code --init` locally rewrites
+# THIS FILE with openwiki's stock template (OpenRouter provider, unpinned
+# install, no secret gate, add-paths spanning CLAUDE.md/AGENTS.md). Never accept
+# that rewrite — restore this hardened version. In CI this is harmless: the
+# create-pull-request `add-paths: openwiki` cap keeps any scaffold churn out of
+# the rolling PR.
+#
 # Manual prerequisites (one-time, out of code — see issue #1101):
 #   1. Add the `BEDROCK_API_KEY` repo secret — a LONG-TERM Bedrock API key
 #      (AWS console -> Bedrock -> API keys -> long-term; it is an IAM
@@ -20,8 +27,9 @@
 #      strand the schedule.
 #   2. Enable Settings -> Actions -> General -> Workflow permissions ->
 #      "Allow GitHub Actions to create and approve pull requests".
-#   (The initial `openwiki/` tree is committed with PR #1163 — the `--update`
-#   runs below refresh it incrementally.)
+#   (The initial `openwiki/` tree is committed with PR #1163; the OKF v0.1
+#   regeneration landed with the 0.2.0 bump — the `--update` runs below refresh
+#   it incrementally.)
 #
 # The scheduled PR is opened by the default GITHUB_TOKEN, so (by GitHub's
 # anti-recursion rule) it does NOT trigger ci.yml / claude-code-review.yml. That is
@@ -109,6 +117,13 @@ jobs:
         if: steps.gate.outputs.configured == 'true'
         # Version-pinned: this job runs on a schedule with a provider secret, so we
         # do not auto-adopt an unreviewed OpenWiki release. Bump deliberately.
+        # 0.2.0 emits Open Knowledge Format (OKF v0.1) pages — YAML front matter
+        # with a required `type`, reserved per-directory index.md — the same OKF
+        # v0.1 profile Atrium pins in lib/content/okf/profile.ts, so the wiki is
+        # importable as an Atrium bundle. The one-time full OKF regeneration of
+        # openwiki/ was generated locally alongside this pin (per the "full
+        # first-generation is done locally" note above); these --update runs
+        # maintain it incrementally.
         #
         # Transitive deps stay caret-ranged (global install has no lockfile) — this
         # is inherent to the issue's chosen "global CLI via npm -g" design. We do
@@ -118,16 +133,23 @@ jobs:
         # runtime. Residual supply-chain risk is bounded by the job-scoped
         # GITHUB_TOKEN (contents+PR write on this repo only), the human-reviewed PR,
         # and `add-paths: openwiki` capping where generated content can land.
-        run: npm install --global openwiki@0.0.4
+        run: npm install --global openwiki@0.2.0
 
       - name: Run OpenWiki
         if: steps.gate.outputs.configured == 'true'
-        run: openwiki --update --print
+        # `code` mode is explicit (0.1.0 made the CLI general-purpose; bare
+        # `openwiki` still defaults to code mode, but say what we mean).
+        run: openwiki code --update --print
         env:
           OPENWIKI_PROVIDER: openai-compatible
           OPENWIKI_MODEL_ID: zai.glm-5
           OPENAI_COMPATIBLE_BASE_URL: https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1
           OPENAI_COMPATIBLE_API_KEY: ${{ secrets.BEDROCK_API_KEY }}
+          # 0.2.0 added anonymous CLI telemetry (run events). District policy:
+          # no third-party usage phone-home from CI. DO_NOT_TRACK set as well as
+          # the OpenWiki-specific flag so future telemetry libs are covered too.
+          OPENWIKI_TELEMETRY_DISABLED: "1"
+          DO_NOT_TRACK: "1"
           # Optional LangSmith tracing — enable only if a LANGSMITH_API_KEY secret exists:
           # LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
           # LANGCHAIN_PROJECT: openwiki
