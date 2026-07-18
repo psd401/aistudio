@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Activity, Save } from "lucide-react"
 import { updateNexusRouterSettings } from "@/actions/settings/nexus-router-settings.actions"
@@ -149,6 +149,7 @@ export function NexusRouterSettingsCard({
   const [architectMode, setArchitectMode] = useState<NexusRouterRuntimeMode>(initial.architectMode)
   const [config, setConfig] = useState<NexusRouterConfig>(initial.config)
   const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
   const { toast } = useToast()
   const router = useRouter()
 
@@ -163,6 +164,8 @@ export function NexusRouterSettingsCard({
   )
 
   const save = async () => {
+    if (savingRef.current) return
+    savingRef.current = true
     setSaving(true)
     try {
       const result = await updateNexusRouterSettings({ mode, architectMode, config })
@@ -176,6 +179,7 @@ export function NexusRouterSettingsCard({
         variant: "destructive",
       })
     } finally {
+      savingRef.current = false
       setSaving(false)
     }
   }

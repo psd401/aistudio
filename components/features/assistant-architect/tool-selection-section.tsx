@@ -16,7 +16,12 @@ import type { SelectAiModel } from '@/types'
 import { getAvailableToolsForModel, type ToolConfig } from '@/lib/tools'
 import { createLogger } from '@/lib/client-logger'
 import type { AssistantModelFamily } from '@/lib/db/schema/tables/assistant-architects'
-import { inferModelFamily, isExecutableTextModel } from '@/lib/ai/model-router/core'
+import {
+  compatibleRoutedToolNames,
+  inferModelFamily,
+  isExecutableTextModel,
+  modelSupportsProviderNativeTool,
+} from '@/lib/ai/model-router/core'
 
 const log = createLogger({ moduleName: 'tool-selection-section' })
 
@@ -94,11 +99,20 @@ export function ToolSelectionSection({
       automaticRouting,
     })
 
-    Promise.all(candidateModels.map(model => getAvailableToolsForModel(model.modelId)))
-      .then(toolLists => {
+    Promise.all(candidateModels.map(async model => ({
+      tools: (await getAvailableToolsForModel(model.modelId))
+        .filter(tool => modelSupportsProviderNativeTool(model, tool.name)),
+    })))
+      .then(candidateToolLists => {
+        const compatibleNames = compatibleRoutedToolNames(
+          candidateToolLists.map(candidate => candidate.tools.map(tool => tool.name)),
+          enabledTools
+        )
         const byName = new Map<string, ToolConfig>()
-        for (const tools of toolLists) {
-          for (const tool of tools) byName.set(tool.name, tool)
+        for (const candidate of candidateToolLists) {
+          for (const tool of candidate.tools) {
+            if (compatibleNames.has(tool.name)) byName.set(tool.name, tool)
+          }
         }
         const tools = [...byName.values()]
         log.debug('Tools loaded', { tools: tools.map(t => t.name) })

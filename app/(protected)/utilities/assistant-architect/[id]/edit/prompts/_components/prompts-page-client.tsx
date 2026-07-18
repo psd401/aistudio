@@ -604,13 +604,15 @@ function usePromptHandlers({
   setIsAddDialogOpen, setIsEditDialogOpen, setIsLoading, reactFlowInstanceRef,
   setDeletePromptId, setShowDeleteDialog, modelRoutingMode
 }: UsePromptHandlersProps) {
+  const loadingRef = useRef(false)
   const handleAddPrompt = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
+    if (loadingRef.current) return
+    loadingRef.current = true
     setIsLoading(true)
     try {
       if (modelRoutingMode === "legacy" && !form.modelId) {
         toast.error("You must select a model for the prompt.")
-        setIsLoading(false)
         return
       }
       const result = await addChainPromptAction(assistantId, {
@@ -635,17 +637,21 @@ function usePromptHandlers({
     } catch (error) {
       log.error("Failed to add prompt", { error, assistantId })
       toast.error("Failed to add prompt")
-    } finally { setIsLoading(false) }
+    } finally {
+      loadingRef.current = false
+      setIsLoading(false)
+    }
   }, [assistantId, form, prompts.length, setIsLoading, setIsAddDialogOpen, setPrompts, setFlowKey, modelRoutingMode])
 
   const handleEditPrompt = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
     if (!form.editingPrompt) return
+    if (loadingRef.current) return
+    loadingRef.current = true
     setIsLoading(true)
     try {
       if (modelRoutingMode === "legacy" && !form.modelId) {
         toast.error("You must select a model for the prompt.")
-        setIsLoading(false)
         return
       }
       const result = await updatePromptAction(form.editingPrompt.id.toString(), {
@@ -672,7 +678,10 @@ function usePromptHandlers({
     } catch (error) {
       log.error("Failed to update prompt", { error, promptId: form.editingPrompt?.id })
       toast.error("Failed to update prompt")
-    } finally { setIsLoading(false) }
+    } finally {
+      loadingRef.current = false
+      setIsLoading(false)
+    }
   }, [form, setIsLoading, setIsEditDialogOpen, setPrompts, setFlowKey, modelRoutingMode])
 
   // Show delete confirmation dialog (non-blocking)

@@ -1,9 +1,11 @@
 /** @jest-environment node */
 
 import {
+  compatibleRoutedToolNames,
   inferModelFamily,
   inferModelTier,
   isExecutableTextModel,
+  modelSupportsProviderNativeTool,
   selectRoutedTextModel,
   type RoutableModel,
 } from "../core"
@@ -25,6 +27,21 @@ describe("shared model router core", () => {
 
   it("excludes specialist-only image endpoints from text routing", () => {
     expect(isExecutableTextModel(models[4])).toBe(false)
+  })
+
+  it("matches routed native tools to the provider adapter that can materialize them", () => {
+    expect(modelSupportsProviderNativeTool(models[1], "webSearch")).toBe(false)
+    expect(modelSupportsProviderNativeTool({ ...models[2], modelId: "gpt-5.6-sol" }, "webSearch")).toBe(true)
+    expect(modelSupportsProviderNativeTool(models[3], "webSearch")).toBe(true)
+    expect(modelSupportsProviderNativeTool(models[3], "codeInterpreter")).toBe(false)
+    expect(modelSupportsProviderNativeTool(models[2], "generateImage")).toBe(false)
+  })
+
+  it("offers only tools that remain compatible with the current automatic selection", () => {
+    const byModel = [["webSearch"], ["codeInterpreter"], ["webSearch", "codeInterpreter"]]
+    expect([...compatibleRoutedToolNames(byModel, [])]).toEqual(["webSearch", "codeInterpreter"])
+    expect([...compatibleRoutedToolNames(byModel, ["webSearch"])]).toEqual(["webSearch", "codeInterpreter"])
+    expect([...compatibleRoutedToolNames(byModel.slice(0, 2), ["webSearch", "codeInterpreter"])]).toEqual([])
   })
 
   it("honors configured candidates before inferred tier candidates", () => {
@@ -63,6 +80,20 @@ describe("shared model router core", () => {
       tier: "medium",
       fallbackModelId: "2",
       requirements: { requiresFunctionCalling: true },
+    })
+    expect(result?.model.id).toBe(4)
+  })
+
+  it("does not route provider-native tools to a Bedrock model that drops them", () => {
+    const geminiWithSearch = { ...models[3], capabilities: '["web_search"]' }
+    const result = selectRoutedTextModel({
+      models: [models[1], geminiWithSearch],
+      configuredCandidateIds: [models[1].modelId],
+      accessibleIds: new Set(["2", "4"]),
+      family: "auto",
+      tier: "medium",
+      fallbackModelId: "2",
+      requirements: { requiredTools: ["webSearch"], requiresFunctionCalling: true },
     })
     expect(result?.model.id).toBe(4)
   })

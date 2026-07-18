@@ -57,7 +57,11 @@ import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
 import { navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities, type AssistantRetrievalScope } from "@/lib/db/schema";
 import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects";
-import { inferModelFamily, isExecutableTextModel } from "@/lib/ai/model-router/core";
+import {
+  inferModelFamily,
+  isExecutableTextModel,
+  modelSupportsProviderNativeTool,
+} from "@/lib/ai/model-router/core";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -211,7 +215,11 @@ async function validateEnabledToolsForRouting(
   const accessibleIds = await filterAccessibleResourceIds(userId, "model", models.map(model => model.id));
   const accessible = models.filter(model => accessibleIds.has(String(model.id)));
   const availableByModel = await Promise.all(
-    accessible.map(async model => new Set((await getAvailableToolsForModel(model.modelId)).map(tool => tool.name)))
+    accessible.map(async model => new Set(
+      (await getAvailableToolsForModel(model.modelId))
+        .filter(tool => modelSupportsProviderNativeTool(model, tool.name))
+        .map(tool => tool.name)
+    ))
   );
   if (availableByModel.some(tools => enabledTools.every(tool => tools.has(tool)))) {
     return { isValid: true, invalidTools: [] };
@@ -245,7 +253,11 @@ async function resolveAutomaticPromptFallbackModelId(
     ? accessible
     : (await Promise.all(accessible.map(async model => ({
       model,
-      tools: new Set((await getAvailableToolsForModel(model.modelId)).map(tool => tool.name)),
+      tools: new Set(
+        (await getAvailableToolsForModel(model.modelId))
+          .filter(tool => modelSupportsProviderNativeTool(model, tool.name))
+          .map(tool => tool.name)
+      ),
     })))).filter(candidate => enabledTools.every(tool => candidate.tools.has(tool)))
       .map(candidate => candidate.model);
 
@@ -941,7 +953,14 @@ export async function updateAssistantArchitectAction(
     // extracted to keep this action's cyclomatic complexity bounded.
     const updateData = buildAssistantArchitectBaseUpdates(data);
 
-    const routingResult = resolveModelRoutingFields(data);
+    const routingResult = data.modelRoutingMode === undefined && data.modelRoutingFamily === undefined
+      ? { fields: {} }
+      : resolveModelRoutingFields({
+        modelRoutingMode: data.modelRoutingMode ?? currentTool.modelRoutingMode ?? "legacy",
+        modelRoutingFamily: data.modelRoutingFamily !== undefined
+          ? data.modelRoutingFamily
+          : currentTool.modelRoutingFamily,
+      });
     if ("error" in routingResult) {
       return { isSuccess: false, message: routingResult.error }
     }
@@ -1621,22 +1640,34 @@ function buildChainPromptUpdates(data: Partial<InsertChainPrompt>): ChainPromptU
  */
 async function validatePromptEnabledToolsUpdate(
   enabledTools: string[] | null | undefined,
-  dataModelId: number | null | undefined,
-  promptModelId: number | null | undefined,
+  dataModelId: unknown,
+  promptModelId: unknown,
   architect: Pick<SelectAssistantArchitect, "modelRoutingMode" | "modelRoutingFamily">,
   userId: number
 ): Promise<{ message: string; logMeta: { invalidTools: string[]; message?: string } } | null> {
   if (!enabledTools) return null;
 
   // Use provided modelId or fall back to existing prompt's modelId
-  const modelIdToValidate = dataModelId || promptModelId;
-  if (!modelIdToValidate) return null;
+  const modelIdToValidate = dataModelId ?? promptModelId;
+  if (typeof modelIdToValidate !== "number" && typeof modelIdToValidate !== "string") {
+    return {
+      message: "Invalid model ID format",
+      logMeta: { invalidTools: enabledTools, message: "Invalid model ID format" },
+    };
+  }
+  const parsedModelId = Number(modelIdToValidate);
+  if (!Number.isSafeInteger(parsedModelId) || parsedModelId <= 0) {
+    return {
+      message: "Invalid model ID format",
+      logMeta: { invalidTools: enabledTools, message: "Invalid model ID format" },
+    };
+  }
 
   const toolValidation = await validateEnabledToolsForRouting(
     enabledTools,
     architect,
     userId,
-    Number(modelIdToValidate)
+    parsedModelId
   );
   if (toolValidation.isValid) return null;
 

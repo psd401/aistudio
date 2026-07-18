@@ -55,6 +55,43 @@ export function isExecutableTextModel(model: RoutableModel): boolean {
   )
 }
 
+/**
+ * Mirror the provider adapters' current friendly-name support so routing never
+ * selects a model whose adapter will silently filter an authored native tool.
+ * Unknown tool names are treated as non-native (for example MCP/agent tools)
+ * and remain governed by their own resolver plus function-calling support.
+ */
+export function modelSupportsProviderNativeTool(
+  model: Pick<RoutableModel, "provider" | "modelId">,
+  toolName: string
+): boolean {
+  const provider = model.provider.toLowerCase()
+  if (toolName === "codeInterpreter") return provider === "openai"
+  if (toolName === "webSearch") {
+    if (provider === "google") return true
+    if (provider !== "openai") return false
+    return /(?:^|[./:_-])(gpt-5|o3|o4)/i.test(model.modelId)
+  }
+  // No streaming adapter currently materializes the selectable generateImage
+  // tool. Image generation in Assistant Architect is the agent-platform
+  // `images.generate` tool, which is intentionally not handled here.
+  if (toolName === "generateImage") return false
+  return true
+}
+
+export function compatibleRoutedToolNames(
+  toolNamesByModel: string[][],
+  enabledTools: string[]
+): Set<string> {
+  const compatibleModels = enabledTools.length === 0
+    ? toolNamesByModel
+    : toolNamesByModel.filter(toolNames => {
+      const available = new Set(toolNames)
+      return enabledTools.every(tool => available.has(tool))
+    })
+  return new Set(compatibleModels.flat())
+}
+
 export function modelMeetsCapabilityRequirements(
   model: RoutableModel,
   requirements: ModelCapabilityRequirements
@@ -69,6 +106,7 @@ export function modelMeetsCapabilityRequirements(
   for (const toolName of requirements.requiredTools ?? []) {
     const tool = getSelectableToolConfig(toolName)
     if (!tool || tool.requiredCapabilities.length === 0) continue
+    if (!modelSupportsProviderNativeTool(model, toolName)) return false
     if (!hasAnyCapability(model.capabilities, tool.requiredCapabilities)) return false
   }
   return true
