@@ -26,6 +26,8 @@ import { users } from "./users";
  * 082) rather than a pg enum, so adding a future mode needs no enum migration.
  */
 export type AssistantArchitectMode = "prompt_chain" | "agentic";
+export type AssistantModelRoutingMode = "legacy" | "standard" | "advanced";
+export type AssistantModelFamily = "openai" | "anthropic" | "google";
 
 /**
  * Atrium Phase 6 (Issue #1056) retrieval scope: narrows
@@ -61,6 +63,17 @@ export const assistantArchitects = pgTable("assistant_architects", {
   // ── Agentic mode (Issue #926) ──────────────────────────────────────────────
   /** Runtime mode. Defaults to `prompt_chain` for backward compatibility. */
   mode: text("mode").$type<AssistantArchitectMode>().default("prompt_chain").notNull(),
+  /**
+   * Model selection behavior. Existing rows migrate to `legacy` so their exact
+   * per-prompt model pins remain reproducible; new assistants explicitly opt in
+   * to `standard` from the create action.
+   */
+  modelRoutingMode: text("model_routing_mode")
+    .$type<AssistantModelRoutingMode>()
+    .default("legacy")
+    .notNull(),
+  /** Provider-family constraint used only when modelRoutingMode is `advanced`. */
+  modelRoutingFamily: text("model_routing_family").$type<AssistantModelFamily>(),
   /**
    * Tool identifiers (catalog `domain.action` form) the author enabled for the
    * agent loop. Resolved against the unified catalog and intersected with the

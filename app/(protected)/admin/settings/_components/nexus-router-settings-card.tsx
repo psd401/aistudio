@@ -56,22 +56,26 @@ export interface NexusRouterConnectorOption {
 
 function parseInitialSettings(settings: Setting[]): {
   mode: NexusRouterRuntimeMode
+  architectMode: NexusRouterRuntimeMode
   config: NexusRouterConfig
 } {
   const modeValue = settings.find(setting => setting.key === "NEXUS_ROUTER_MODE")?.value
   const modeResult = nexusRouterRuntimeModeSchema.safeParse(modeValue ?? "active")
+  const architectModeValue = settings.find(setting => setting.key === "ASSISTANT_ARCHITECT_ROUTER_MODE")?.value
+  const architectModeResult = nexusRouterRuntimeModeSchema.safeParse(architectModeValue ?? "active")
+  const architectMode = architectModeResult.success ? architectModeResult.data : "shadow"
   const rawConfig = settings.find(setting => setting.key === "NEXUS_ROUTER_CONFIG_V1")?.value
-  if (!rawConfig) return { mode: modeResult.success ? modeResult.data : "shadow", config: nexusRouterConfigSchema.parse({}) }
+  if (!rawConfig) return { mode: modeResult.success ? modeResult.data : "shadow", architectMode, config: nexusRouterConfigSchema.parse({}) }
 
   try {
     const configResult = nexusRouterConfigSchema.safeParse(JSON.parse(rawConfig) as unknown)
     if (configResult.success) {
-      return { mode: modeResult.success ? modeResult.data : "shadow", config: configResult.data }
+      return { mode: modeResult.success ? modeResult.data : "shadow", architectMode, config: configResult.data }
     }
   } catch {
     // The card deliberately falls back to a valid, editable configuration.
   }
-  return { mode: "shadow", config: nexusRouterConfigSchema.parse({}) }
+  return { mode: "shadow", architectMode: "shadow", config: nexusRouterConfigSchema.parse({}) }
 }
 
 function getTierCandidates(
@@ -142,6 +146,7 @@ export function NexusRouterSettingsCard({
 }) {
   const initial = useMemo(() => parseInitialSettings(settings), [settings])
   const [mode, setMode] = useState<NexusRouterRuntimeMode>(initial.mode)
+  const [architectMode, setArchitectMode] = useState<NexusRouterRuntimeMode>(initial.architectMode)
   const [config, setConfig] = useState<NexusRouterConfig>(initial.config)
   const [saving, setSaving] = useState(false)
   const { toast } = useToast()
@@ -160,13 +165,13 @@ export function NexusRouterSettingsCard({
   const save = async () => {
     setSaving(true)
     try {
-      const result = await updateNexusRouterSettings({ mode, config })
+      const result = await updateNexusRouterSettings({ mode, architectMode, config })
       if (!result.isSuccess) throw new Error(result.message)
-      toast({ title: "Nexus routing saved", description: "New requests will use this configuration." })
+      toast({ title: "Model routing saved", description: "New requests will use this configuration." })
       router.refresh()
     } catch (error) {
       toast({
-        title: "Could not save Nexus routing",
+        title: "Could not save model routing",
         description: error instanceof Error ? error.message : "Please try again.",
         variant: "destructive",
       })
@@ -182,33 +187,54 @@ export function NexusRouterSettingsCard({
           <div>
             <CardTitle className="flex items-center gap-2">
               <Activity className="h-5 w-5" />
-              Nexus model routing
+              Model routing
             </CardTitle>
             <CardDescription className="mt-1">
-              Control rollout, model tiers, instructional routing, image generation, and automatic PSD-data access.
+              Share model tiers across Nexus and Assistant Architect while controlling each rollout independently.
             </CardDescription>
           </div>
-          <Badge variant={mode === "active" ? "default" : "secondary"}>
-            {mode === "active" ? "Active" : mode === "shadow" ? "Observe only" : "Off"}
-          </Badge>
+          <div className="flex flex-wrap gap-2">
+            <Badge variant={mode === "active" ? "default" : "secondary"}>Nexus · {mode}</Badge>
+            <Badge variant={architectMode === "active" ? "default" : "secondary"}>
+              Architect · {architectMode}
+            </Badge>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-6">
-        <div className="grid gap-2 md:max-w-sm">
-          <Label htmlFor="nexus-router-mode">Routing mode</Label>
-          <Select value={mode} onValueChange={value => setMode(nexusRouterRuntimeModeSchema.parse(value))}>
-            <SelectTrigger id="nexus-router-mode" data-testid="nexus-router-admin-mode">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="active">Active — route live requests</SelectItem>
-              <SelectItem value="shadow">Observe only — record proposals, use fallback</SelectItem>
-              <SelectItem value="off">Off — always use fallback</SelectItem>
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            Observe-only mode is why every executed request appears as the fallback model in activity reports.
-          </p>
+        <div className="grid gap-5 md:grid-cols-2">
+          <div className="grid gap-2">
+            <Label htmlFor="nexus-router-mode">Nexus routing mode</Label>
+            <Select value={mode} onValueChange={value => setMode(nexusRouterRuntimeModeSchema.parse(value))}>
+              <SelectTrigger id="nexus-router-mode" data-testid="nexus-router-admin-mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="active">Active — route live requests</SelectItem>
+                <SelectItem value="shadow">Observe only — record proposals, use fallback</SelectItem>
+                <SelectItem value="off">Off — always use fallback</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Observe-only mode is why every executed request appears as the fallback model in activity reports.
+            </p>
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="assistant-architect-router-mode">Assistant Architect routing mode</Label>
+            <Select value={architectMode} onValueChange={value => setArchitectMode(nexusRouterRuntimeModeSchema.parse(value))}>
+              <SelectTrigger id="assistant-architect-router-mode" data-testid="assistant-architect-router-admin-mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="active">Active — route live executions</SelectItem>
+                <SelectItem value="shadow">Observe only — record proposals, use fallback</SelectItem>
+                <SelectItem value="off">Off — always use fallback</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Applies to Standard and Advanced assistants; legacy assistants stay pinned.
+            </p>
+          </div>
         </div>
 
         <Separator />

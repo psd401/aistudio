@@ -18,9 +18,11 @@ import {
   nexusRouterRuntimeModeSchema,
 } from "@/lib/nexus/model-router/types"
 import type { ActionState } from "@/types"
+import { ASSISTANT_ARCHITECT_ROUTER_MODE_KEY } from "@/lib/assistant-architect/model-router-config"
 
 const inputSchema = z.object({
   mode: nexusRouterRuntimeModeSchema,
+  architectMode: nexusRouterRuntimeModeSchema,
   config: nexusRouterConfigSchema,
 })
 
@@ -28,7 +30,7 @@ export type NexusRouterSettingsInput = z.input<typeof inputSchema>
 
 export async function updateNexusRouterSettings(
   input: NexusRouterSettingsInput
-): Promise<ActionState<{ mode: string; config: string }>> {
+): Promise<ActionState<{ mode: string; architectMode: string; config: string }>> {
   const requestId = generateRequestId()
   const timer = startTimer("updateNexusRouterSettings")
   const log = createLogger({ requestId, action: "updateNexusRouterSettings" })
@@ -64,6 +66,24 @@ export async function updateNexusRouterSettings(
       })
 
       await tx.insert(settings).values({
+        key: ASSISTANT_ARCHITECT_ROUTER_MODE_KEY,
+        value: parsed.architectMode,
+        description: "Assistant Architect model router rollout mode: active, shadow, or off",
+        category: "ai",
+        isSecret: false,
+        updatedAt: now,
+      }).onConflictDoUpdate({
+        target: settings.key,
+        set: {
+          value: parsed.architectMode,
+          description: "Assistant Architect model router rollout mode: active, shadow, or off",
+          category: "ai",
+          isSecret: false,
+          updatedAt: now,
+        },
+      })
+
+      await tx.insert(settings).values({
         key: NEXUS_ROUTER_CONFIG_KEY,
         value: serializedConfig,
         description: "Nexus classifier, tier, family, image, instruction, and PSD-data routing configuration",
@@ -85,14 +105,14 @@ export async function updateNexusRouterSettings(
     await revalidateSettingsCache()
     revalidatePath("/admin/settings")
     timer({ status: "success" })
-    log.info("Nexus router settings updated", { mode: parsed.mode })
+    log.info("Model router settings updated", { mode: parsed.mode, architectMode: parsed.architectMode })
     return createSuccess(
-      { mode: parsed.mode, config: serializedConfig },
-      "Nexus routing settings saved"
+      { mode: parsed.mode, architectMode: parsed.architectMode, config: serializedConfig },
+      "Model routing settings saved"
     )
   } catch (error) {
     timer({ status: "error" })
-    return handleError(error, "Failed to save Nexus routing settings", {
+    return handleError(error, "Failed to save model routing settings", {
       context: "updateNexusRouterSettings",
       requestId,
       operation: "updateNexusRouterSettings",

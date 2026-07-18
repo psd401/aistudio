@@ -1063,7 +1063,17 @@ export async function getAssistantConversationActivity(
               title: nexusConversations.title,
               assistantName: sql<string | null>`${nexusConversations.metadata}->>'assistantName'`,
               executionStatus: sql<string | null>`${nexusConversations.metadata}->>'executionStatus'`,
-              modelUsed: nexusConversations.modelUsed,
+              modelUsed: sql<string | null>`COALESCE(
+                ${nexusConversations.modelUsed},
+                (
+                  SELECT nm.metadata->'modelRouting'->>'selectedModelId'
+                  FROM nexus_messages nm
+                  WHERE nm.conversation_id = ${nexusConversations.id}
+                    AND nm.metadata->'modelRouting'->>'selectedModelId' IS NOT NULL
+                  ORDER BY nm.created_at DESC
+                  LIMIT 1
+                )
+              )`,
               messageCount: nexusConversations.messageCount,
               totalTokens: tokenSubquery,
               costUsd: costSubquery,

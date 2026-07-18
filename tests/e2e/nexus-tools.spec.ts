@@ -19,13 +19,14 @@ test.describe('Nexus AI Tools Integration', () => {
     await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10000 })
   })
 
-  // Standard intentionally hides manual tools. Opt into Advanced/Auto before
-  // exercising the legacy optional tool controls.
+  // Standard intentionally hides manual tools. Opt into an Advanced family
+  // before exercising the legacy optional tool controls.
   async function enableAdvanced(page: Page) {
     const routing = page.getByRole('button', { name: 'Nexus routing mode' })
     await routing.click()
-    await page.getByTestId('nexus-family-auto').click()
-    await expect(routing).toContainText('Auto')
+    await page.getByTestId('nexus-mode-advanced').click()
+    await page.getByTestId('nexus-family-openai').click()
+    await expect(routing).toContainText('ChatGPT')
   }
 
   async function openTools(page: Page) {

@@ -51,6 +51,7 @@ import {
   type MDXEditorMethods
 } from "@mdxeditor/editor"
 import type { SelectAiModel, SelectChainPrompt, SelectToolInputField } from "@/types"
+import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects"
 
 // Dynamic import MDXEditor to avoid SSR issues
 const MDXEditor = dynamic(() => import("@mdxeditor/editor").then(mod => mod.MDXEditor), { ssr: false })
@@ -96,6 +97,8 @@ interface PromptEditorModalProps {
   // Actions
   onSubmit: (e: React.FormEvent) => Promise<void>
   isLoading: boolean
+  modelRoutingMode: AssistantModelRoutingMode
+  modelRoutingFamily: AssistantModelFamily | null
 }
 
 // Click-to-insert variable badge component
@@ -434,6 +437,8 @@ interface SettingsColumnProps {
   handleInsertVariable: (variable: string) => void
   models: SelectAiModel[]
   isLoading: boolean
+  modelRoutingMode: AssistantModelRoutingMode
+  modelRoutingFamily: AssistantModelFamily | null
 }
 
 function SettingsColumn({
@@ -455,7 +460,9 @@ function SettingsColumn({
   availableVariables,
   handleInsertVariable,
   models,
-  isLoading
+  isLoading,
+  modelRoutingMode,
+  modelRoutingFamily
 }: SettingsColumnProps) {
   const handlePromptNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setPromptName(e.target.value)
@@ -491,23 +498,36 @@ function SettingsColumn({
       {/* Section: Model & Capabilities */}
       <section className="space-y-4">
         <h3 className="text-sm font-semibold text-foreground">Model & Capabilities</h3>
-        <div className="space-y-2">
-          <Label htmlFor="model">AI Model *</Label>
-          <ModelSelectorFormAdapter
-            models={models}
-            value={modelId}
-            onValueChange={setModelId}
-            placeholder="Select an AI model"
-            className="bg-muted"
-            requiredCapabilities={CHAT_CAPABILITIES}
-            hideCapabilityMissing={true}
-          />
-        </div>
+        {modelRoutingMode === "legacy" ? (
+          <div className="space-y-2" data-testid="assistant-prompt-pinned-model">
+            <Label htmlFor="model">AI Model *</Label>
+            <ModelSelectorFormAdapter
+              models={models}
+              value={modelId}
+              onValueChange={setModelId}
+              placeholder="Select an AI model"
+              className="bg-muted"
+              requiredCapabilities={CHAT_CAPABILITIES}
+              hideCapabilityMissing={true}
+            />
+          </div>
+        ) : (
+          <div className="rounded-md border bg-muted/40 p-3" data-testid="assistant-prompt-automatic-model">
+            <div className="text-sm font-medium">Automatic model selection</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {modelRoutingMode === "advanced"
+                ? `Routes within ${modelRoutingFamily === "openai" ? "ChatGPT" : modelRoutingFamily === "google" ? "Gemini" : modelRoutingFamily === "anthropic" ? "Claude" : "the selected family"}.`
+                : "Standard routing chooses the right model for each execution."}
+            </p>
+          </div>
+        )}
         <ToolSelectionSection
           selectedModelId={parsedModelId}
           enabledTools={enabledTools}
           onToolsChange={setEnabledTools}
           models={models}
+          automaticRouting={modelRoutingMode !== "legacy"}
+          modelFamily={modelRoutingFamily}
           disabled={isLoading}
         />
       </section>
@@ -657,6 +677,8 @@ interface MainContentAreaProps {
   promptTokens: number
   maxTokens?: number | null
   mdxEditorRef: React.RefObject<MDXEditorMethods | null>
+  modelRoutingMode: AssistantModelRoutingMode
+  modelRoutingFamily: AssistantModelFamily | null
 }
 
 function MainContentArea({
@@ -683,7 +705,9 @@ function MainContentArea({
   setPromptContent,
   promptTokens,
   maxTokens,
-  mdxEditorRef
+  mdxEditorRef,
+  modelRoutingMode,
+  modelRoutingFamily
 }: MainContentAreaProps) {
   return (
     <div className="flex-1 overflow-hidden px-6 py-4">
@@ -708,6 +732,8 @@ function MainContentArea({
           handleInsertVariable={handleInsertVariable}
           models={models}
           isLoading={isLoading}
+          modelRoutingMode={modelRoutingMode}
+          modelRoutingFamily={modelRoutingFamily}
         />
         <EditorColumn
           promptContent={promptContent}
@@ -895,7 +921,9 @@ export function PromptEditorModal({
   prompts,
   editingPrompt,
   onSubmit,
-  isLoading
+  isLoading,
+  modelRoutingMode,
+  modelRoutingFamily
 }: PromptEditorModalProps) {
   const mdxEditorRef = useRef<MDXEditorMethods>(null)
   const formRef = useRef<HTMLFormElement>(null)
@@ -1009,6 +1037,8 @@ export function PromptEditorModal({
                 promptTokens={promptTokens}
                 maxTokens={selectedModel?.maxTokens}
                 mdxEditorRef={mdxEditorRef}
+                modelRoutingMode={modelRoutingMode}
+                modelRoutingFamily={modelRoutingFamily}
               />
               <DialogFooter
                 mode={mode}

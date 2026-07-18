@@ -9,7 +9,7 @@ when creating or editing an assistant.
 
 ### Prompt-chain mode (default)
 
-Form inputs → an ordered sequence of prompt templates run with one model →
+Form inputs → an ordered sequence of prompt templates run with a routed model per step →
 text output. The model has **no autonomy**: it cannot call tools or decide what
 to do next. Prompts execute by `position` (0, then 1, …); prompts at the same
 position run in parallel.
@@ -93,6 +93,11 @@ These are agent-platform tools only — they are **not** advertised on the exter
 MCP server. Their handlers live in `lib/agents/agent-tools/` and resolve lazily at
 dispatch time.
 
+Standard/Advanced model routing is independent of agentic mode. The router chooses
+a compatible driving model after authorized tools and image inputs are known; it
+does not add tools or MCP connectors. See
+[Assistant Architect model routing](./assistant-architect-model-routing.md).
+
 **No agentic recursion.** `assistants.execute` is agent-callable, but the
 execution surface it dispatches to (`executeAssistantForJobCompletion`) rejects
 `mode: 'agentic'` assistants outright — an agentic loop can only invoke
@@ -123,8 +128,9 @@ approved for destructive actions.
 Form input values that are images — base64 `data:image/…` URIs or http(s) image
 URLs — are detected and attached to the initial user message as AI SDK file
 parts, so a **vision-capable model** can see them (`lib/agents/vision.ts`). Up to
-10 images per run are attached. The author is responsible for selecting a
-vision-capable model; non-image inputs are unaffected.
+10 images per run are attached. Automatic routing excludes models explicitly
+configured without vision support; legacy assistants remain responsible for their
+pinned model. Non-image inputs are unaffected.
 
 ## Security model — dual scope intersection
 

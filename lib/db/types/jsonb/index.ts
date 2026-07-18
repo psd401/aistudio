@@ -62,6 +62,11 @@ export interface ProviderMetadata {
   max_context_length?: number;
   supports_streaming?: boolean;
   supports_function_calling?: boolean;
+  supports_vision?: boolean;
+  /** Preferred shared automatic-routing tier. */
+  modelRouterTier?: "light" | "medium" | "high";
+  /** Legacy Nexus-specific routing tier retained for backward compatibility. */
+  nexusRouterTier?: "light" | "medium" | "high";
   /** Allow additional provider-specific fields */
   [key: string]: unknown;
 }
@@ -106,6 +111,7 @@ export interface AssistantArchitectMessageMetadata extends NexusConversationMeta
   promptName: string;
   position: number;
   executionTimeMs?: number;
+  modelRouting?: Record<string, unknown>;
   failed?: boolean;
   error?: string;
 }

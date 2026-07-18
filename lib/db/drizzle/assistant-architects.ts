@@ -65,6 +65,8 @@ import { CAPABILITY_MANIFEST } from "@/lib/capabilities/manifest";
 // Single source of truth for the runtime mode union (#926) — see re-export below.
 import type {
   AssistantArchitectMode,
+  AssistantModelFamily,
+  AssistantModelRoutingMode,
   AssistantRetrievalScope,
 } from "@/lib/db/schema/tables/assistant-architects";
 
@@ -115,6 +117,8 @@ export interface AssistantArchitectData {
   imagePath?: string | null;
   // Agentic mode (Issue #926)
   mode?: AssistantArchitectMode;
+  modelRoutingMode?: AssistantModelRoutingMode;
+  modelRoutingFamily?: AssistantModelFamily | null;
   agentEnabledTools?: string[];
   agentEnabledConnectors?: string[];
   agentMaxSteps?: number;
@@ -134,6 +138,8 @@ export interface AssistantArchitectUpdateData {
   imagePath?: string | null;
   // Agentic mode (Issue #926)
   mode?: AssistantArchitectMode;
+  modelRoutingMode?: AssistantModelRoutingMode;
+  modelRoutingFamily?: AssistantModelFamily | null;
   agentEnabledTools?: string[];
   agentEnabledConnectors?: string[];
   agentMaxSteps?: number;
@@ -157,6 +163,8 @@ export interface AssistantArchitectWithCreator {
   updatedAt: Date;
   // Agentic mode (Issue #926)
   mode: AssistantArchitectMode;
+  modelRoutingMode: AssistantModelRoutingMode;
+  modelRoutingFamily: AssistantModelFamily | null;
   agentEnabledTools: string[];
   agentEnabledConnectors: string[];
   agentMaxSteps: number;
@@ -199,6 +207,8 @@ export async function getAssistantArchitects(): Promise<
           updatedAt: assistantArchitects.updatedAt,
           // Agentic mode (Issue #926)
           mode: assistantArchitects.mode,
+          modelRoutingMode: assistantArchitects.modelRoutingMode,
+          modelRoutingFamily: assistantArchitects.modelRoutingFamily,
           agentEnabledTools: assistantArchitects.agentEnabledTools,
           agentEnabledConnectors: assistantArchitects.agentEnabledConnectors,
           agentMaxSteps: assistantArchitects.agentMaxSteps,
@@ -231,6 +241,8 @@ export async function getAssistantArchitects(): Promise<
     updatedAt: row.updatedAt,
     // Agentic mode (Issue #926)
     mode: row.mode,
+    modelRoutingMode: row.modelRoutingMode,
+    modelRoutingFamily: row.modelRoutingFamily,
     agentEnabledTools: row.agentEnabledTools,
     agentEnabledConnectors: row.agentEnabledConnectors,
     agentMaxSteps: row.agentMaxSteps,
@@ -289,6 +301,8 @@ export async function getAssistantArchitectWithCreator(
           updatedAt: assistantArchitects.updatedAt,
           // Agentic mode (Issue #926)
           mode: assistantArchitects.mode,
+          modelRoutingMode: assistantArchitects.modelRoutingMode,
+          modelRoutingFamily: assistantArchitects.modelRoutingFamily,
           agentEnabledTools: assistantArchitects.agentEnabledTools,
           agentEnabledConnectors: assistantArchitects.agentEnabledConnectors,
           agentMaxSteps: assistantArchitects.agentMaxSteps,
@@ -324,6 +338,8 @@ export async function getAssistantArchitectWithCreator(
     updatedAt: row.updatedAt,
     // Agentic mode (Issue #926)
     mode: row.mode,
+    modelRoutingMode: row.modelRoutingMode,
+    modelRoutingFamily: row.modelRoutingFamily,
     agentEnabledTools: row.agentEnabledTools,
     agentEnabledConnectors: row.agentEnabledConnectors,
     agentMaxSteps: row.agentMaxSteps,
@@ -406,6 +422,12 @@ export async function createAssistantArchitect(data: AssistantArchitectData) {
           // pass through explicitly so a caller creating an agentic assistant in
           // one step gets the right mode + config.
           ...(data.mode !== undefined ? { mode: data.mode } : {}),
+          ...(data.modelRoutingMode !== undefined
+            ? { modelRoutingMode: data.modelRoutingMode }
+            : {}),
+          ...(data.modelRoutingFamily !== undefined
+            ? { modelRoutingFamily: data.modelRoutingFamily }
+            : {}),
           ...(data.agentEnabledTools !== undefined
             ? { agentEnabledTools: data.agentEnabledTools }
             : {}),

@@ -41,6 +41,7 @@ import {
 import type { SelectAiModel, SelectChainPrompt, SelectToolInputField } from "@/types"
 import React from "react"
 import { PromptEditorModal } from "@/components/features/assistant-architect/prompt-editor-modal"
+import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects"
 
 // Parallel group multiplier constant - supports up to 1000 nodes per position level
 // Used to encode position into parallel group ID: (position * MULTIPLIER + index)
@@ -54,6 +55,8 @@ interface PromptsPageClientProps {
   prompts: SelectChainPrompt[]
   models: SelectAiModel[]
   inputFields: SelectToolInputField[]
+  modelRoutingMode: AssistantModelRoutingMode
+  modelRoutingFamily: AssistantModelFamily | null
 }
 
 // Start Node Component
@@ -178,6 +181,7 @@ interface FlowProps {
   models: SelectAiModel[]
   onEdit: (prompt: SelectChainPrompt) => void
   onDelete: (id: string) => void
+  modelLabel: string | null
 }
 
 // Helper to create edges for branching (one to many)
@@ -322,7 +326,8 @@ function initializeFlowFromPrompts(
   prompts: SelectChainPrompt[],
   models: SelectAiModel[],
   onEdit: (prompt: SelectChainPrompt) => void,
-  onDelete: (id: string) => void
+  onDelete: (id: string) => void,
+  modelLabel: string | null
 ): InitializeFlowResult {
   const startNode: Node = {
     id: 'start',
@@ -361,7 +366,7 @@ function initializeFlowFromPrompts(
         data: {
           name: prompt.name,
           content: prompt.content,
-          modelName: models.find(m => m.id === prompt.modelId)?.name || 'None',
+          modelName: modelLabel ?? models.find(m => m.id === prompt.modelId)?.name ?? 'None',
           systemContext: prompt.systemContext,
           modelId: prompt.modelId,
           inputMapping: prompt.inputMapping,
@@ -411,7 +416,8 @@ function FlowComponent({
   prompts,
   models,
   onEdit,
-  onDelete
+  onDelete,
+  modelLabel
 }: FlowProps, ref: React.ForwardedRef<FlowHandle>) {
   const initialNodes: Node[] = []
   const initialEdges: Edge[] = []
@@ -481,7 +487,8 @@ function FlowComponent({
       prompts,
       models,
       onEdit,
-      onDelete
+      onDelete,
+      modelLabel
     )
 
     setNodes(initializedNodes)
@@ -492,7 +499,7 @@ function FlowComponent({
     setTimeout(() => {
       isInitialRender.current = false
     }, 500)
-  }, [prompts, models, onEdit, onDelete, setNodes, setEdges])
+  }, [prompts, models, onEdit, onDelete, modelLabel, setNodes, setEdges])
 
   return (
     <ReactFlow
@@ -588,19 +595,20 @@ interface UsePromptHandlersProps {
   reactFlowInstanceRef: React.RefObject<FlowHandle | null>
   setDeletePromptId: React.Dispatch<React.SetStateAction<string | null>>
   setShowDeleteDialog: React.Dispatch<React.SetStateAction<boolean>>
+  modelRoutingMode: AssistantModelRoutingMode
 }
 
 // Custom hook for prompt CRUD handlers
 function usePromptHandlers({
   assistantId, form, prompts, setPrompts, setFlowKey,
   setIsAddDialogOpen, setIsEditDialogOpen, setIsLoading, reactFlowInstanceRef,
-  setDeletePromptId, setShowDeleteDialog
+  setDeletePromptId, setShowDeleteDialog, modelRoutingMode
 }: UsePromptHandlersProps) {
   const handleAddPrompt = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
     setIsLoading(true)
     try {
-      if (!form.modelId) {
+      if (modelRoutingMode === "legacy" && !form.modelId) {
         toast.error("You must select a model for the prompt.")
         setIsLoading(false)
         return
@@ -609,7 +617,7 @@ function usePromptHandlers({
         name: form.promptName,
         content: decodeMdxEditorEscapes(form.promptContent),
         systemContext: form.systemContext || undefined,
-        modelId: Number.parseInt(form.modelId),
+        ...(form.modelId ? { modelId: Number.parseInt(form.modelId) } : {}),
         position: prompts.length,
         repositoryIds: form.useExternalKnowledge ? form.selectedRepositoryIds : [],
         enabledTools: form.enabledTools,
@@ -628,14 +636,14 @@ function usePromptHandlers({
       log.error("Failed to add prompt", { error, assistantId })
       toast.error("Failed to add prompt")
     } finally { setIsLoading(false) }
-  }, [assistantId, form, prompts.length, setIsLoading, setIsAddDialogOpen, setPrompts, setFlowKey])
+  }, [assistantId, form, prompts.length, setIsLoading, setIsAddDialogOpen, setPrompts, setFlowKey, modelRoutingMode])
 
   const handleEditPrompt = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
     if (!form.editingPrompt) return
     setIsLoading(true)
     try {
-      if (!form.modelId) {
+      if (modelRoutingMode === "legacy" && !form.modelId) {
         toast.error("You must select a model for the prompt.")
         setIsLoading(false)
         return
@@ -644,7 +652,7 @@ function usePromptHandlers({
         name: form.promptName,
         content: decodeMdxEditorEscapes(form.promptContent),
         systemContext: form.systemContext || undefined,
-        modelId: Number.parseInt(form.modelId),
+        ...(form.modelId ? { modelId: Number.parseInt(form.modelId) } : {}),
         repositoryIds: form.useExternalKnowledge && form.selectedRepositoryIds.length > 0
           ? form.selectedRepositoryIds.filter(id => id !== undefined && id !== null) : [],
         enabledTools: form.enabledTools,
@@ -665,7 +673,7 @@ function usePromptHandlers({
       log.error("Failed to update prompt", { error, promptId: form.editingPrompt?.id })
       toast.error("Failed to update prompt")
     } finally { setIsLoading(false) }
-  }, [form, setIsLoading, setIsEditDialogOpen, setPrompts, setFlowKey])
+  }, [form, setIsLoading, setIsEditDialogOpen, setPrompts, setFlowKey, modelRoutingMode])
 
   // Show delete confirmation dialog (non-blocking)
   const handleDeletePrompt = useCallback((promptId: string) => {
@@ -723,7 +731,14 @@ function usePromptHandlers({
   return { handleAddPrompt, handleEditPrompt, handleDeletePrompt, confirmDeletePrompt, openEditDialog }
 }
 
-export function PromptsPageClient({ assistantId, prompts: initialPrompts, models, inputFields }: PromptsPageClientProps) {
+export function PromptsPageClient({
+  assistantId,
+  prompts: initialPrompts,
+  models,
+  inputFields,
+  modelRoutingMode,
+  modelRoutingFamily,
+}: PromptsPageClientProps) {
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -739,8 +754,13 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
   const { handleAddPrompt, handleEditPrompt, handleDeletePrompt, confirmDeletePrompt, openEditDialog } = usePromptHandlers({
     assistantId, form, prompts, setPrompts, setFlowKey,
     setIsAddDialogOpen, setIsEditDialogOpen, setIsLoading, reactFlowInstanceRef,
-    setDeletePromptId, setShowDeleteDialog
+    setDeletePromptId, setShowDeleteDialog, modelRoutingMode
   })
+  const modelLabel = modelRoutingMode === "standard"
+    ? "Standard"
+    : modelRoutingMode === "advanced"
+      ? `Advanced · ${modelRoutingFamily === "openai" ? "ChatGPT" : modelRoutingFamily === "google" ? "Gemini" : modelRoutingFamily === "anthropic" ? "Claude" : "Model family"}`
+      : null
 
   const handleAddButtonClick = useCallback(() => {
     form.resetFormState()
@@ -784,6 +804,7 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
             models={models}
             onEdit={openEditDialog}
             onDelete={handleDeletePrompt}
+            modelLabel={modelLabel}
             ref={reactFlowInstanceRef}
           />
         </ReactFlowProvider>
@@ -819,6 +840,8 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
         editingPrompt={null}
         onSubmit={handleAddPrompt}
         isLoading={isLoading}
+        modelRoutingMode={modelRoutingMode}
+        modelRoutingFamily={modelRoutingFamily}
       />
 
       {/* Edit Prompt Modal */}
@@ -846,6 +869,8 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
         editingPrompt={form.editingPrompt}
         onSubmit={handleEditPrompt}
         isLoading={isLoading}
+        modelRoutingMode={modelRoutingMode}
+        modelRoutingFamily={modelRoutingFamily}
       />
 
       {/* Delete Confirmation Dialog */}
@@ -865,4 +890,4 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
       </AlertDialog>
     </div>
   )
-} 
+}
