@@ -39,9 +39,12 @@
 #                      postgres). Deliberately NOT plain DATABASE_URL — that is
 #                      sourced from .env.local and may be container-perspective.
 #   E2E_DB_SSL         DB_SSL for a runner-started server (default: false)
+#   E2E_ATRIUM_STORAGE_DIR local filesystem root for Atrium snapshots (default:
+#                      /tmp/aistudio-atrium-e2e-<port>; never touches AWS S3)
 #   E2E_WORKERS=2      Playwright worker count (global-setup warms every route the
 #                      suite hits, so a cold server doesn't thrash at 2; drop to 1
 #                      if you still see compile-timeout flakiness)
+#   PLAYWRIGHT_WARM=0  skip route warm-up for a narrow diagnostic rerun
 #   E2E_RUN_EXTERNAL=1 also run live-provider specs (AI chat / voice; needs keys)
 set -uo pipefail
 
@@ -75,6 +78,7 @@ else
   # E2E_DATABASE_URL / E2E_DB_SSL to point the suite at a non-default DB.
   AUTH_URL="$BASE" NEXT_DIST_DIR=.next-e2e \
   DATABASE_URL="${E2E_DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/aistudio}" \
+  ATRIUM_LOCAL_STORAGE_DIR="${E2E_ATRIUM_STORAGE_DIR:-/tmp/aistudio-atrium-e2e-${E2E_PORT}}" \
   DB_SSL="${E2E_DB_SSL:-false}" PORT="$E2E_PORT" HOSTNAME=127.0.0.1 \
     bun run server.ts > /tmp/e2e-local-server.log 2>&1 &
   STARTED_PID=$!
@@ -102,7 +106,7 @@ fi
 # Allowed: local Docker postgres is fair game (Aurora is off-limits; only
 # data-destroying commands are forbidden). `docker exec … psql` matches `db:seed`.
 if docker exec -i aistudio-postgres pg_isready -U postgres >/dev/null 2>&1; then
-  echo "e2e-local: seeding local DB (test users + Atrium reference doc + doc state)…"
+  echo "e2e-local: seeding local DB (test users + authenticated E2E fixtures)…"
   docker exec -i aistudio-postgres psql -U postgres -d aistudio -v ON_ERROR_STOP=0 -q \
     < scripts/db/seed-local.sql >/dev/null 2>&1 || true
   docker exec -i aistudio-postgres psql -U postgres -d aistudio -v ON_ERROR_STOP=0 -q \
@@ -122,6 +126,25 @@ if docker exec -i aistudio-postgres pg_isready -U postgres >/dev/null 2>&1; then
   # public-reader spec and the Meridian slice-E anonymous reader assertions.
   docker exec -i aistudio-postgres psql -U postgres -d aistudio -v ON_ERROR_STOP=0 -q \
     < tests/e2e/fixtures/atrium-public-seed.sql >/dev/null 2>&1 || true
+  # Visibility editor + Google-group visibility fixtures. These specs are part of
+  # the authenticated suite and must work from a freshly reset local database.
+  if ! docker exec -i aistudio-postgres psql -U postgres -d aistudio -v ON_ERROR_STOP=1 -q \
+    < tests/e2e/fixtures/atrium-visibility-seed.sql >/dev/null; then
+    echo "❌ e2e-local: failed to seed Atrium visibility fixture"
+    exit 1
+  fi
+  if ! docker exec -i aistudio-postgres psql -U postgres -d aistudio -v ON_ERROR_STOP=1 -q \
+    < tests/e2e/fixtures/atrium-group-visibility-seed.sql >/dev/null; then
+    echo "❌ e2e-local: failed to seed Atrium group-visibility fixture"
+    exit 1
+  fi
+  # The access-editor E2E covers models, assistants, and skills. Clean local DBs
+  # already receive models + assistants above; add the deterministic skill row.
+  if ! docker exec -i aistudio-postgres psql -U postgres -d aistudio -v ON_ERROR_STOP=1 -q \
+    < tests/e2e/fixtures/resource-grants-seed.sql >/dev/null; then
+    echo "❌ e2e-local: failed to seed resource-grants fixture"
+    exit 1
+  fi
   DATABASE_URL="postgresql://postgres:postgres@localhost:5432/aistudio" DB_SSL=false \
     bun run scripts/dev/seed-atrium-doc-state.ts >/dev/null 2>&1 || true
 else
@@ -134,7 +157,7 @@ fi
 # suite doesn't hit cold-compile timeouts. retries cover any residual dev slowness.
 export PLAYWRIGHT_BASE_URL="$BASE"
 export PLAYWRIGHT_AUTH_ENABLED=true
-export PLAYWRIGHT_WARM=1
+export PLAYWRIGHT_WARM="${PLAYWRIGHT_WARM:-1}"
 if [ "${E2E_RUN_EXTERNAL:-}" != "1" ]; then export E2E_EXCLUDE_EXTERNAL=1; fi
 
 # Default to ONE worker: the host `next dev` server recompiles routes on demand and
@@ -154,7 +177,9 @@ set +o pipefail
 # flakiness (collab/streaming/ReactFlow/modal) that no amount of serial + retry fully
 # removes. Block the push only on GENUINE failures (a "N failed" summary line), not a
 # flaky-only run. CI (built app, stricter, retries) remains the hard gate.
-if [ "$RESULT" -ne 0 ] && ! grep -qE "^[[:space:]]+[0-9]+ failed" "$RUN_LOG"; then
+if [ "$RESULT" -ne 0 ] &&
+   grep -qE "^[[:space:]]+[0-9]+ flaky" "$RUN_LOG" &&
+   ! grep -qE "^[[:space:]]+[0-9]+ failed" "$RUN_LOG"; then
   echo ""
   echo "e2e-local: only flaky tests (passed on retry) — no genuine failures. Treating as pass."
   RESULT=0

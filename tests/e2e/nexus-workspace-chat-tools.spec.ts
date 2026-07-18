@@ -31,6 +31,7 @@ const MOCK_CHAT_STREAM = [
 
 async function chooseClaudeFamily(page: import("@playwright/test").Page) {
   await page.getByRole("button", { name: "Nexus routing mode" }).click();
+  await page.getByTestId("nexus-mode-advanced").click();
   await page.getByTestId("nexus-family-anthropic").click();
 }
 

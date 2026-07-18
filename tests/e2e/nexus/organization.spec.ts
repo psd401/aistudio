@@ -345,6 +345,10 @@ test.describe('Nexus Sidebar — Authenticated', () => {
   })
 
   test('sending multiple messages maintains correct message count', async ({ page }) => {
+    test.skip(
+      process.env.E2E_RUN_EXTERNAL !== '1',
+      'Counting assistant replies needs a live model — set E2E_RUN_EXTERNAL=1'
+    )
     await gotoNexus(page)
 
     await sendMessage(page, 'First message')

@@ -25,6 +25,9 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import type { Dirent } from "node:fs";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { dirname, resolve, sep } from "node:path";
 import { Settings } from "@/lib/settings-manager";
 import { ErrorFactories } from "@/lib/error-utils";
 
@@ -36,6 +39,55 @@ export const ATRIUM_PREFIX = "atrium";
 // after a Settings change until container restart. The S3Client is cached but
 // keyed on its region and rebuilt when the region changes.
 let cachedClient: { region: string; client: S3Client } | null = null;
+
+/**
+ * Optional filesystem-backed store for local E2E runs. Production leaves this
+ * unset and always uses S3. Keeping the adapter behind a server-only environment
+ * variable lets a freshly reset local database exercise snapshot reads/writes
+ * without contacting or mutating an AWS bucket.
+ */
+function getLocalStorageRoot(): string | null {
+  const configured = process.env.ATRIUM_LOCAL_STORAGE_DIR?.trim();
+  return configured ? resolve(configured) : null;
+}
+
+/** Resolve an Atrium key below the configured root and reject path escape. */
+function resolveLocalKey(root: string, key: string): string {
+  const target = resolve(root, key);
+  if (target !== root && !target.startsWith(`${root}${sep}`)) {
+    throw ErrorFactories.validationFailed([
+      { field: "key", message: "Invalid storage key: path escapes local root" },
+    ]);
+  }
+  return target;
+}
+
+async function countLocalFiles(directory: string): Promise<number> {
+  let entries: Dirent<string>[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return 0;
+    }
+    throw error;
+  }
+
+  let count = 0;
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      count += await countLocalFiles(resolve(directory, entry.name));
+    } else if (entry.isFile()) {
+      count += 1;
+    }
+  }
+  return count;
+}
 
 async function getConfig(): Promise<{ bucket: string; region: string }> {
   const config = await Settings.getS3();
@@ -132,6 +184,13 @@ export const s3Store = {
     contentType: string,
     contentDisposition?: string
   ): Promise<void> {
+    const localRoot = getLocalStorageRoot();
+    if (localRoot) {
+      const target = resolveLocalKey(localRoot, key);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, body, "utf8");
+      return;
+    }
     const client = await getClient();
     const { bucket } = await getConfig();
     await client.send(
@@ -148,6 +207,10 @@ export const s3Store = {
 
   /** Read a text body from S3 at the given key. */
   async getText(key: string): Promise<string> {
+    const localRoot = getLocalStorageRoot();
+    if (localRoot) {
+      return readFile(resolveLocalKey(localRoot, key), "utf8");
+    }
     const client = await getClient();
     const { bucket } = await getConfig();
     const response = await client.send(
@@ -173,6 +236,16 @@ export const s3Store = {
    */
   async deleteObjectTree(objectId: string): Promise<number> {
     assertSafeSegment(objectId, "objectId");
+    const localRoot = getLocalStorageRoot();
+    if (localRoot) {
+      const objectDirectory = resolveLocalKey(
+        localRoot,
+        `${ATRIUM_PREFIX}/objects/${objectId}`
+      );
+      const deleted = await countLocalFiles(objectDirectory);
+      await rm(objectDirectory, { recursive: true, force: true });
+      return deleted;
+    }
     const client = await getClient();
     const { bucket } = await getConfig();
     const prefix = `${ATRIUM_PREFIX}/objects/${objectId}/`;
@@ -211,6 +284,11 @@ export const s3Store = {
 
   /** Generate a presigned read URL for the given key (default 5 min TTL). */
   async signedReadUrl(key: string, ttlSeconds = 300): Promise<string> {
+    if (getLocalStorageRoot()) {
+      throw ErrorFactories.sysInternalError(
+        "Signed read URLs are unavailable with local Atrium storage"
+      );
+    }
     const client = await getClient();
     const { bucket } = await getConfig();
     return getSignedUrl(

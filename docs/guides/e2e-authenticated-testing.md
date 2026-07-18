@@ -36,6 +36,15 @@ Authenticated tests mint a session cookie with `AUTH_SECRET` and inject it via
 is only valid against a server whose `AUTH_SECRET` **matches** the one used to
 mint it.
 
+For the complete local suite, prefer `bun run test:e2e:local`. The runner starts
+or reuses the host development server, seeds the test users and every committed
+authenticated fixture (including Atrium visibility/group content and resource
+grant rows), warms the routes, and then runs Playwright serially. This makes a
+freshly reset local database sufficient without manually applying individual SQL
+files from `tests/e2e/fixtures/`. A runner-started server also sets
+`ATRIUM_LOCAL_STORAGE_DIR` to a port-scoped directory under `/tmp`, so Atrium
+snapshot tests use disposable filesystem storage instead of contacting AWS S3.
+
 > ⚠️ The Docker `:3000` container is a **prod-built image** and will not accept a
 > host-minted cookie reliably. Run a **host dev server** on a separate port whose
 > `node_modules`/`.env.local` match your mint script.
