@@ -103,6 +103,7 @@ describe("handleCaptureDecision (MCP)", () => {
       nodesCreated: 3,
       edgesCreated: 2,
       completenessScore: 75,
+      completenessMethod: "rule-based",
       warnings: ["No conditions"],
     })
   })

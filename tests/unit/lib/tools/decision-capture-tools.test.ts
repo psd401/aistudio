@@ -68,8 +68,10 @@ function makeTx(opts: {
           }
         }
         insertedNodes.push(...rows)
+        // Node inserts are awaited directly (ids are generated client-side, no
+        // RETURNING), so failure must reject from values() itself.
         if (failNodeCode) {
-          return { returning: () => Promise.reject({ code: failNodeCode }) }
+          return Promise.reject({ code: failNodeCode })
         }
         const ids = rows.map(() => {
           const id = nodeIds[nodeIdx] ?? `node-${nodeIdx + 1}`

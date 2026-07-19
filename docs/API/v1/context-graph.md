@@ -611,6 +611,7 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
     "nodesCreated": 9,
     "edgesCreated": 10,
     "completenessScore": 100,
+    "completenessMethod": "rule-based",
     "warnings": []
   },
   "meta": {

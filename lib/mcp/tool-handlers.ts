@@ -190,6 +190,7 @@ async function handleCaptureDecision(
             nodesCreated: result.nodesCreated,
             edgesCreated: result.edgesCreated,
             completenessScore: result.completenessScore,
+            completenessMethod: result.completenessMethod,
             ...(result.warnings.length > 0 && { warnings: result.warnings }),
           }),
         },

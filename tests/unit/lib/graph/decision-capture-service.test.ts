@@ -404,7 +404,7 @@ describe("captureStructuredDecision", () => {
 
   describe("orchestration flow", () => {
     it("should translate payload, persist in transaction, and compute score", async () => {
-      const { translated } = setupMocks({ score: 75, warnings: ["Missing conditions"] })
+      const { translated, tx } = setupMocks({ score: 75, warnings: ["Missing conditions"] })
 
       const payload = createPayload()
       const result = await captureStructuredDecision(payload, 1, "req-123")
@@ -426,8 +426,11 @@ describe("captureStructuredDecision", () => {
         expect.anything()
       )
 
+      // decisionNodeId is generated client-side; it must equal the id of the
+      // first inserted node (the temp-1 decision node).
+      const insertedNodes = tx._getInsertedNodes() as Array<{ id: string }>
       expect(result).toEqual({
-        decisionNodeId: "node-uuid-1",
+        decisionNodeId: insertedNodes[0].id,
         nodesCreated: 2,
         edgesCreated: 1,
         completenessScore: 75,
@@ -520,12 +523,15 @@ describe("captureStructuredDecision", () => {
       expect(result.edgesCreated).toBe(2)
     })
 
-    it("should set decisionNodeId from the first node (temp-1)", async () => {
-      setupMocks({ nodeIds: ["decision-uuid-abc", "person-uuid-def"] })
+    it("should set decisionNodeId to the generated id of the primary (temp-1) node", async () => {
+      const { tx } = setupMocks()
 
       const result = await captureStructuredDecision(createPayload(), 1, "req-123")
 
-      expect(result.decisionNodeId).toBe("decision-uuid-abc")
+      const insertedNodes = tx._getInsertedNodes() as Array<{ id: string; nodeType: string }>
+      expect(insertedNodes[0].nodeType).toBe("decision")
+      expect(result.decisionNodeId).toBe(insertedNodes[0].id)
+      expect(result.decisionNodeId).toMatch(/^[0-9a-f-]{36}$/)
     })
 
     it("should merge user metadata only onto the primary decision node (temp-1)", async () => {

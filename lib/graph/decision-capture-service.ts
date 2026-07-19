@@ -197,6 +197,167 @@ function toPgCode(error: unknown): string | undefined {
   return undefined
 }
 
+type DbTx = Parameters<Parameters<typeof executeTransaction>[0]>[0]
+
+interface EdgeInsertValue {
+  sourceNodeId: string
+  targetNodeId: string
+  edgeType: string
+  metadata: { source: string }
+  createdBy: number
+}
+
+/** Validate that every relatedTo reference exists (atomic with the writes). */
+async function assertRelatedNodesExist(tx: DbTx, relatedTo: string[] | undefined): Promise<void> {
+  if (!relatedTo || relatedTo.length === 0) return
+  const existingNodes = await tx
+    .select({ id: graphNodes.id })
+    .from(graphNodes)
+    .where(inArray(graphNodes.id, relatedTo))
+  const foundIds = new Set(existingNodes.map((n) => n.id))
+  const missingIds = relatedTo.filter((id) => !foundIds.has(id))
+  if (missingIds.length > 0) {
+    throw ErrorFactories.validationFailed([
+      { field: "relatedTo", message: `Referenced nodes do not exist: ${missingIds.join(", ")}` },
+    ])
+  }
+}
+
+/**
+ * Verify reused nodes (existingNodeId) in one batched SELECT, checking both
+ * existence and that the DB row's actual nodeType matches the caller's declared
+ * nodeType — otherwise a mistyped reuse could fake completeness (e.g. an
+ * "evidence" node declared as "person").
+ */
+async function verifyReusedNodes(tx: DbTx, reusedNodes: SubgraphNodeInput[]): Promise<void> {
+  if (reusedNodes.length === 0) return
+  const reusedIds = Array.from(new Set(reusedNodes.map((n) => n.existingNodeId as string)))
+  const existingRows = await tx
+    .select({ id: graphNodes.id, nodeType: graphNodes.nodeType })
+    .from(graphNodes)
+    .where(inArray(graphNodes.id, reusedIds))
+  const typeById = new Map(existingRows.map((row) => [row.id, row.nodeType]))
+
+  for (const node of reusedNodes) {
+    const existingNodeId = node.existingNodeId as string
+    const existingType = typeById.get(existingNodeId)
+    if (existingType === undefined) {
+      throw ErrorFactories.validationFailed([
+        { field: "nodes", message: `Referenced node does not exist: ${existingNodeId}` },
+      ])
+    }
+    const declaredType = node.nodeType.trim()
+    if (existingType !== declaredType) {
+      throw ErrorFactories.validationFailed([
+        {
+          field: "nodes",
+          message: `Node ${existingNodeId} is a "${existingType}" node, not "${declaredType}"`,
+        },
+      ])
+    }
+  }
+}
+
+/**
+ * Build insert values for new nodes. Ids are generated client-side so the
+ * tempId -> id mapping never depends on multi-row RETURNING order, which
+ * PostgreSQL does not formally guarantee. userMetadata is spread FIRST so
+ * callers can annotate the primary node but can never overwrite internal
+ * provenance keys (source/agentId in node.metadata) or the completeness
+ * snapshot.
+ */
+function buildNewNodeValues(
+  newNodes: SubgraphNodeInput[],
+  options: PersistOptions,
+  isPrimaryNode: (node: SubgraphNodeInput) => boolean
+) {
+  return newNodes.map((node) => {
+    const isPrimary = isPrimaryNode(node)
+    const nodeMetadata: Record<string, unknown> = {
+      ...(isPrimary && options.userMetadata ? options.userMetadata : {}),
+      ...(node.metadata ?? {}),
+      ...(isPrimary && options.completeness ? { completeness: options.completeness } : {}),
+    }
+    return {
+      id: crypto.randomUUID(),
+      name: node.name.trim(),
+      nodeType: node.nodeType.trim(),
+      nodeClass: "decision",
+      description: node.description?.trim() || null,
+      metadata: nodeMetadata,
+      createdBy: options.userId,
+    }
+  })
+}
+
+/**
+ * Resolve edges to real ids, rejecting unknown references and resolved
+ * self-references, deduplicating by source|target|type, and appending CONTEXT
+ * edges for relatedTo. Pure — no DB access.
+ */
+function resolveEdgeValues(
+  edges: SubgraphEdgeInput[],
+  tempIdToRealId: Map<string, string>,
+  decisionNodeId: string | null,
+  options: PersistOptions
+): EdgeInsertValue[] {
+  const { source, userId, relatedTo } = options
+  const seenEdges = new Set<string>()
+  const resolved: EdgeInsertValue[] = []
+
+  for (const edge of edges) {
+    const sourceId = tempIdToRealId.get(edge.sourceTempId)
+    const targetId = tempIdToRealId.get(edge.targetTempId)
+    if (!sourceId || !targetId) {
+      throw ErrorFactories.validationFailed([
+        {
+          field: "edges",
+          message: `Edge references unknown node: source=${edge.sourceTempId}, target=${edge.targetTempId}`,
+        },
+      ])
+    }
+    // Re-check self-reference on RESOLVED ids: two distinct tempIds can map to
+    // the same real node via existingNodeId. The DB chk_no_self_reference
+    // constraint remains the backstop; this throws the same friendly error
+    // without waiting for the insert to fail.
+    if (sourceId === targetId) {
+      throw ErrorFactories.validationFailed([
+        { field: "edges", message: "A node cannot connect to itself" },
+      ])
+    }
+    const edgeType = edge.edgeType.trim()
+    const key = `${sourceId}|${targetId}|${edgeType}`
+    if (seenEdges.has(key)) continue
+    seenEdges.add(key)
+    resolved.push({
+      sourceNodeId: sourceId,
+      targetNodeId: targetId,
+      edgeType,
+      metadata: { source },
+      createdBy: userId,
+    })
+  }
+
+  // CONTEXT edges for relatedTo (deduped; guard against self-ref).
+  if (relatedTo && relatedTo.length > 0 && decisionNodeId) {
+    for (const relatedNodeId of relatedTo) {
+      if (relatedNodeId === decisionNodeId) continue
+      const key = `${relatedNodeId}|${decisionNodeId}|CONTEXT`
+      if (seenEdges.has(key)) continue
+      seenEdges.add(key)
+      resolved.push({
+        sourceNodeId: relatedNodeId,
+        targetNodeId: decisionNodeId,
+        edgeType: "CONTEXT",
+        metadata: { source },
+        createdBy: userId,
+      })
+    }
+  }
+
+  return resolved
+}
+
 /**
  * Persist a decision subgraph atomically. Shared by every capture channel.
  *
@@ -214,7 +375,7 @@ async function persistDecisionSubgraph(
   edges: SubgraphEdgeInput[],
   options: PersistOptions
 ): Promise<PersistResult> {
-  const { source, userId, requestId } = options
+  const { requestId } = options
   const log = createLogger({ requestId, operation: "persistDecisionSubgraph" })
 
   // 1. Enforce the closed vocabulary before opening a transaction.
@@ -229,6 +390,10 @@ async function persistDecisionSubgraph(
     }
   }
 
+  const isPrimaryNode = (node: SubgraphNodeInput): boolean =>
+    options.primaryDecisionTempId !== undefined &&
+    node.tempId === options.primaryDecisionTempId
+
   let decisionNodeId: string | null = null
   const committedNodeIds: string[] = []
   const committedEdgeIds: string[] = []
@@ -237,88 +402,23 @@ async function persistDecisionSubgraph(
     const tempIdToRealId = new Map<string, string>()
 
     // 3. Validate relatedTo references exist (atomic with the writes).
-    if (options.relatedTo && options.relatedTo.length > 0) {
-      const existingNodes = await tx
-        .select({ id: graphNodes.id })
-        .from(graphNodes)
-        .where(inArray(graphNodes.id, options.relatedTo))
-      const foundIds = new Set(existingNodes.map((n) => n.id))
-      const missingIds = options.relatedTo.filter((id) => !foundIds.has(id))
-      if (missingIds.length > 0) {
-        throw ErrorFactories.validationFailed([
-          {
-            field: "relatedTo",
-            message: `Referenced nodes do not exist: ${missingIds.join(", ")}`,
-          },
-        ])
-      }
-    }
+    await assertRelatedNodesExist(tx, options.relatedTo)
 
-    // 4a. Verify reused nodes (existingNodeId) in one batched SELECT, checking
-    // both existence and that the DB row's actual nodeType matches the caller's
-    // declared nodeType — otherwise a mistyped reuse could fake completeness
-    // (e.g. an "evidence" node declared as "person").
-    const isPrimaryNode = (node: SubgraphNodeInput): boolean =>
-      options.primaryDecisionTempId !== undefined &&
-      node.tempId === options.primaryDecisionTempId
-
+    // 4a. Verify reused nodes (existence + nodeType match), then map them.
     const reusedNodes = nodes.filter((n) => n.existingNodeId)
-    if (reusedNodes.length > 0) {
-      const reusedIds = Array.from(new Set(reusedNodes.map((n) => n.existingNodeId as string)))
-      const existingRows = await tx
-        .select({ id: graphNodes.id, nodeType: graphNodes.nodeType })
-        .from(graphNodes)
-        .where(inArray(graphNodes.id, reusedIds))
-      const typeById = new Map(existingRows.map((row) => [row.id, row.nodeType]))
-
-      for (const node of reusedNodes) {
-        const existingNodeId = node.existingNodeId as string
-        const existingType = typeById.get(existingNodeId)
-        if (existingType === undefined) {
-          throw ErrorFactories.validationFailed([
-            { field: "nodes", message: `Referenced node does not exist: ${existingNodeId}` },
-          ])
-        }
-        const declaredType = node.nodeType.trim()
-        if (existingType !== declaredType) {
-          throw ErrorFactories.validationFailed([
-            {
-              field: "nodes",
-              message: `Node ${existingNodeId} is a "${existingType}" node, not "${declaredType}"`,
-            },
-          ])
-        }
-        tempIdToRealId.set(node.tempId, existingNodeId)
-        if (isPrimaryNode(node)) decisionNodeId = existingNodeId
-      }
+    await verifyReusedNodes(tx, reusedNodes)
+    for (const node of reusedNodes) {
+      const existingNodeId = node.existingNodeId as string
+      tempIdToRealId.set(node.tempId, existingNodeId)
+      if (isPrimaryNode(node)) decisionNodeId = existingNodeId
     }
 
-    // 4b. Insert new nodes in one batched statement. userMetadata is spread
-    // FIRST so callers can annotate the primary node but can never overwrite
-    // internal provenance keys (source/agentId in node.metadata) or the
-    // completeness snapshot.
+    // 4b. Insert new nodes in one batched statement (client-generated ids).
     const newNodes = nodes.filter((n) => !n.existingNodeId)
     if (newNodes.length > 0) {
-      const values = newNodes.map((node) => {
-        const isPrimary = isPrimaryNode(node)
-        const nodeMetadata: Record<string, unknown> = {
-          ...(isPrimary && options.userMetadata ? options.userMetadata : {}),
-          ...(node.metadata ?? {}),
-          ...(isPrimary && options.completeness ? { completeness: options.completeness } : {}),
-        }
-        return {
-          name: node.name.trim(),
-          nodeType: node.nodeType.trim(),
-          nodeClass: "decision",
-          description: node.description?.trim() || null,
-          metadata: nodeMetadata,
-          createdBy: userId,
-        }
-      })
-
-      let insertedNodes: Array<{ id: string }>
+      const values = buildNewNodeValues(newNodes, options, isPrimaryNode)
       try {
-        insertedNodes = await tx.insert(graphNodes).values(values).returning({ id: graphNodes.id })
+        await tx.insert(graphNodes).values(values)
       } catch (error: unknown) {
         // Map integrity-constraint violations (class 23) to typed errors so they
         // are neither retried by executeTransaction nor leaked raw. Other errors
@@ -330,78 +430,16 @@ async function persistDecisionSubgraph(
         }
         throw error
       }
-      if (insertedNodes.length !== newNodes.length) {
-        throw new Error(
-          `Node insert returned ${insertedNodes.length} ids for ${newNodes.length} values`
-        )
-      }
 
-      newNodes.forEach((node, i) => {
-        tempIdToRealId.set(node.tempId, insertedNodes[i].id)
-        committedNodeIds.push(insertedNodes[i].id)
-        if (isPrimaryNode(node)) decisionNodeId = insertedNodes[i].id
-      })
-    }
-
-    // 5. Resolve edges to real IDs, dropping resolved self-refs / duplicates.
-    const seenEdges = new Set<string>()
-    const resolvedEdgeValues: Array<{
-      sourceNodeId: string
-      targetNodeId: string
-      edgeType: string
-      metadata: { source: string }
-      createdBy: number
-    }> = []
-
-    for (const edge of edges) {
-      const sourceId = tempIdToRealId.get(edge.sourceTempId)
-      const targetId = tempIdToRealId.get(edge.targetTempId)
-      if (!sourceId || !targetId) {
-        throw ErrorFactories.validationFailed([
-          {
-            field: "edges",
-            message: `Edge references unknown node: source=${edge.sourceTempId}, target=${edge.targetTempId}`,
-          },
-        ])
-      }
-      // Re-check self-reference on RESOLVED ids: two distinct tempIds can map to
-      // the same real node via existingNodeId. The DB chk_no_self_reference
-      // constraint remains the backstop; this throws the same friendly error
-      // without waiting for the insert to fail.
-      if (sourceId === targetId) {
-        throw ErrorFactories.validationFailed([
-          { field: "edges", message: "A node cannot connect to itself" },
-        ])
-      }
-      const edgeType = edge.edgeType.trim()
-      const key = `${sourceId}|${targetId}|${edgeType}`
-      if (seenEdges.has(key)) continue
-      seenEdges.add(key)
-      resolvedEdgeValues.push({
-        sourceNodeId: sourceId,
-        targetNodeId: targetId,
-        edgeType,
-        metadata: { source },
-        createdBy: userId,
-      })
-    }
-
-    // 6. CONTEXT edges for relatedTo (deduped; guard against self-ref).
-    if (options.relatedTo && options.relatedTo.length > 0 && decisionNodeId) {
-      for (const relatedNodeId of options.relatedTo) {
-        if (relatedNodeId === decisionNodeId) continue
-        const key = `${relatedNodeId}|${decisionNodeId}|CONTEXT`
-        if (seenEdges.has(key)) continue
-        seenEdges.add(key)
-        resolvedEdgeValues.push({
-          sourceNodeId: relatedNodeId,
-          targetNodeId: decisionNodeId,
-          edgeType: "CONTEXT",
-          metadata: { source },
-          createdBy: userId,
-        })
+      for (const [i, node] of newNodes.entries()) {
+        tempIdToRealId.set(node.tempId, values[i].id)
+        committedNodeIds.push(values[i].id)
+        if (isPrimaryNode(node)) decisionNodeId = values[i].id
       }
     }
+
+    // 5+6. Resolve edges (self-ref / dedup / CONTEXT) — pure, throws typed errors.
+    const resolvedEdgeValues = resolveEdgeValues(edges, tempIdToRealId, decisionNodeId, options)
 
     // 7. Batch insert edges; map DB constraint violations to friendly errors.
     if (resolvedEdgeValues.length > 0) {

@@ -128,16 +128,19 @@ function clampLimit(limit?: number): number {
 
 /**
  * Escape ILIKE pattern metacharacters so user search text is matched literally.
- * Backslash is escaped FIRST (so it doesn't double-escape the wildcards we add),
- * then `%` and `_`. Length is capped at 100 chars and trimmed.
+ * Order matters: trim, then cap the RAW input at 100 chars, then escape —
+ * slicing after escaping could cut an escape sequence in half and leave a
+ * dangling backslash that corrupts the surrounding pattern, and slicing before
+ * trimming could reduce whitespace-padded input to an empty string.
+ * Backslash is escaped first so it doesn't double-escape the wildcards.
  * Exported for unit testing (Issue #1251).
  */
 export function escapeIlikePattern(search: string): string {
   return search
+    .trim()
+    .slice(0, 100) // Cap raw input length before escaping
     .replace(/\\/g, "\\\\") // Escape backslashes first
     .replace(/[%_]/g, "\\$&") // Then escape ILIKE wildcards
-    .slice(0, 100) // Limit length
-    .trim()
 }
 
 export async function queryGraphNodes(
