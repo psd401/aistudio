@@ -46,8 +46,8 @@ describe("Decision Node Types", () => {
 })
 
 describe("Decision Edge Types", () => {
-  it("should define exactly 18 edge types", () => {
-    expect(DECISION_EDGE_TYPES).toHaveLength(18)
+  it("should define exactly 22 edge types", () => {
+    expect(DECISION_EDGE_TYPES).toHaveLength(22)
   })
 
   it("should include all required edge types", () => {
@@ -70,6 +70,11 @@ describe("Decision Edge Types", () => {
       "WOULD_REQUIRE",
       "CONDITION",
       "REJECTED",
+      // Decision lifecycle + DACI + entity resolution (Issue #1252)
+      "SUPERSEDED_BY",
+      "SAME_AS",
+      "CONSULTED",
+      "NOTIFIED",
     ]
     expect([...DECISION_EDGE_TYPES]).toEqual(expected)
   })

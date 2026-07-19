@@ -541,3 +541,19 @@ jest.mock('@/lib/db/drizzle-client', () => {
     }
   };
 });
+
+// Graph embeddings (Issue #1252) — the direct-Bedrock helper is globally mocked
+// so unit tests that exercise the decision-capture path (entity resolution runs
+// inside it) never make a real Bedrock network call. Returns a deterministic
+// 512-dim vector; the value is irrelevant to entity-resolution logic, which is
+// driven by the similarity-search results (executeQuery, mocked separately).
+// Tests that exercise the REAL helper (graph-embeddings.test.ts) override this
+// with jest.requireActual and mock the AWS SDK instead.
+jest.mock('@/lib/graph/graph-embeddings', () => ({
+  __esModule: true,
+  GRAPH_EMBEDDING_DIMENSIONS: 512,
+  DEFAULT_GRAPH_EMBEDDING_MODEL_ID: 'amazon.titan-embed-text-v2:0',
+  getGraphEmbeddingModelId: jest.fn(() => Promise.resolve('amazon.titan-embed-text-v2:0')),
+  generateGraphEmbedding: jest.fn(() => Promise.resolve(new Array(512).fill(0.01))),
+  __resetGraphEmbeddingClient: jest.fn(),
+}));
