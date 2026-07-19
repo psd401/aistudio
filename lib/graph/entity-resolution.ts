@@ -184,10 +184,6 @@ export async function resolveEntities<T extends ResolvableNode>(
   }
 
   for (const node of candidates) {
-    // Once embedding is known-broken this pass, stop calling Bedrock (avoids N
-    // sequential timeouts) — the remaining nodes are simply created without dedup.
-    if (degraded) break
-
     let embedding: number[]
     try {
       embedding = await generateGraphEmbedding(embeddingText(node))
