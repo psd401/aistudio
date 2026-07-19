@@ -34,6 +34,7 @@ jest.mock("@/lib/error-utils", () => ({
 
 import {
   captureStructuredDecision,
+  commitDecisionSubgraph,
   createDecisionSchema,
   type DecisionPayload,
 } from "@/lib/graph/decision-capture-service"
@@ -50,6 +51,7 @@ function createPayload(overrides: Partial<DecisionPayload> = {}): DecisionPayloa
   return {
     decision: "Use PostgreSQL for the data layer",
     decidedBy: "Engineering Team",
+    relatedTo: undefined,
     ...overrides,
   }
 }
@@ -67,7 +69,7 @@ function createTranslatedGraph(nodeCount = 2, edgeCount = 1) {
     targetTempId: "temp-1",
     edgeType: "PROPOSED",
   }))
-  return { nodes, edges }
+  return { nodes, edges, decisionTempId: "temp-1" }
 }
 
 /** Creates a mock transaction object that tracks insert calls */
@@ -94,22 +96,25 @@ function createMockTx(options: {
         ),
       }),
     }),
+    // Nodes and edges both arrive as batched arrays; edge rows carry edgeType.
     insert: jest.fn().mockImplementation(() => ({
       values: jest.fn().mockImplementation((vals: unknown) => {
-        if (Array.isArray(vals)) {
-          insertedEdgeValues.push(...vals)
+        const rows = vals as Array<Record<string, unknown>>
+        if (rows.length > 0 && "edgeType" in rows[0]) {
+          insertedEdgeValues.push(...rows)
           return {
             returning: jest.fn().mockResolvedValue(
-              edgeIds.map((id) => ({ id }))
+              rows.map((_, i) => ({ id: edgeIds[i] ?? `edge-uuid-${i + 1}` }))
             ),
           }
         }
-        insertedNodeValues.push(vals)
-        const nodeId = nodeIds[nodeInsertCount] ?? `node-uuid-${nodeInsertCount + 1}`
-        nodeInsertCount++
-        return {
-          returning: jest.fn().mockResolvedValue([{ id: nodeId }]),
-        }
+        insertedNodeValues.push(...rows)
+        const ids = rows.map(() => {
+          const nodeId = nodeIds[nodeInsertCount] ?? `node-uuid-${nodeInsertCount + 1}`
+          nodeInsertCount++
+          return { id: nodeId }
+        })
+        return { returning: jest.fn().mockResolvedValue(ids) }
       }),
     })),
     _getInsertedNodes: () => insertedNodeValues,
@@ -399,7 +404,7 @@ describe("captureStructuredDecision", () => {
 
   describe("orchestration flow", () => {
     it("should translate payload, persist in transaction, and compute score", async () => {
-      const { translated } = setupMocks({ score: 75, warnings: ["Missing conditions"] })
+      const { translated, tx } = setupMocks({ score: 75, warnings: ["Missing conditions"] })
 
       const payload = createPayload()
       const result = await captureStructuredDecision(payload, 1, "req-123")
@@ -421,8 +426,11 @@ describe("captureStructuredDecision", () => {
         expect.anything()
       )
 
+      // decisionNodeId is generated client-side; it must equal the id of the
+      // first inserted node (the temp-1 decision node).
+      const insertedNodes = tx._getInsertedNodes() as Array<{ id: string }>
       expect(result).toEqual({
-        decisionNodeId: "node-uuid-1",
+        decisionNodeId: insertedNodes[0].id,
         nodesCreated: 2,
         edgesCreated: 1,
         completenessScore: 75,
@@ -488,38 +496,19 @@ describe("captureStructuredDecision", () => {
       )
 
       expect(result.nodesCreated).toBe(6)
-      expect(result.edgesCreated).toBe(5)
+      // 5 translated edges + 1 CONTEXT edge for the relatedTo reference.
+      expect(result.edgesCreated).toBe(6)
       expect(result.completenessScore).toBe(100)
       expect(result.completenessMethod).toBe("llm-enhanced")
     })
   })
 
   describe("transaction persistence", () => {
-    it("should create nodes sequentially in transaction", async () => {
+    it("should batch node inserts into a single statement (plus one edge batch)", async () => {
       const translated = createTranslatedGraph(3, 2)
       mockTranslatePayloadToGraph.mockReturnValue(translated)
 
-      const insertCalls: string[] = []
-      const tx = {
-        select: jest.fn().mockReturnValue({
-          from: jest.fn().mockReturnValue({
-            where: jest.fn().mockResolvedValue([]),
-          }),
-        }),
-        insert: jest.fn().mockImplementation(() => {
-          insertCalls.push("insert")
-          return {
-            values: jest.fn().mockImplementation((vals: unknown) => {
-              if (Array.isArray(vals)) {
-                return { returning: jest.fn().mockResolvedValue(vals.map((_, i) => ({ id: `edge-${i}` }))) }
-              }
-              const idx = insertCalls.length
-              return { returning: jest.fn().mockResolvedValue([{ id: `node-${idx}` }]) }
-            }),
-          }
-        }),
-      }
-
+      const tx = createMockTx({ nodeIds: ["n1", "n2", "n3"], edgeIds: ["e1", "e2"] })
       mockExecuteTransaction.mockImplementation(async (callback: unknown) => {
         await (callback as (t: unknown) => Promise<void>)(tx)
       })
@@ -528,40 +517,28 @@ describe("captureStructuredDecision", () => {
 
       const result = await captureStructuredDecision(createPayload(), 1, "req-123")
 
-      // 3 node inserts + 1 batch edge insert = 4 total insert calls
-      expect(tx.insert).toHaveBeenCalledTimes(4)
+      // 1 batched node insert + 1 batched edge insert = 2 insert calls (no N+1).
+      expect(tx.insert).toHaveBeenCalledTimes(2)
       expect(result.nodesCreated).toBe(3)
+      expect(result.edgesCreated).toBe(2)
     })
 
-    it("should set decisionNodeId from the first node (temp-1)", async () => {
-      setupMocks({ nodeIds: ["decision-uuid-abc", "person-uuid-def"] })
+    it("should set decisionNodeId to the generated id of the primary (temp-1) node", async () => {
+      const { tx } = setupMocks()
 
       const result = await captureStructuredDecision(createPayload(), 1, "req-123")
 
-      expect(result.decisionNodeId).toBe("decision-uuid-abc")
+      const insertedNodes = tx._getInsertedNodes() as Array<{ id: string; nodeType: string }>
+      expect(insertedNodes[0].nodeType).toBe("decision")
+      expect(result.decisionNodeId).toBe(insertedNodes[0].id)
+      expect(result.decisionNodeId).toMatch(/^[0-9a-f-]{36}$/)
     })
 
     it("should merge user metadata only onto the primary decision node (temp-1)", async () => {
       const translated = createTranslatedGraph()
       mockTranslatePayloadToGraph.mockReturnValue(translated)
 
-      const insertedValues: unknown[] = []
-      const tx = {
-        select: jest.fn().mockReturnValue({
-          from: jest.fn().mockReturnValue({
-            where: jest.fn().mockResolvedValue([]),
-          }),
-        }),
-        insert: jest.fn().mockImplementation(() => ({
-          values: jest.fn().mockImplementation((vals: unknown) => {
-            if (!Array.isArray(vals)) insertedValues.push(vals)
-            return {
-              returning: jest.fn().mockResolvedValue([{ id: `id-${insertedValues.length}` }]),
-            }
-          }),
-        })),
-      }
-
+      const tx = createMockTx()
       mockExecuteTransaction.mockImplementation(async (callback: unknown) => {
         await (callback as (t: unknown) => Promise<void>)(tx)
       })
@@ -570,6 +547,8 @@ describe("captureStructuredDecision", () => {
       const payload = createPayload({ metadata: { project: "ai-studio" } })
       await captureStructuredDecision(payload, 1, "req-123")
 
+      const insertedValues = tx._getInsertedNodes()
+
       // First node (temp-1 decision) should have merged metadata
       const firstNode = insertedValues[0] as Record<string, unknown>
       const firstMetadata = firstNode.metadata as Record<string, unknown>
@@ -577,34 +556,35 @@ describe("captureStructuredDecision", () => {
       expect(firstMetadata).toHaveProperty("source")
 
       // Second node (temp-2 person) should NOT have user metadata
-      if (insertedValues.length > 1) {
-        const secondNode = insertedValues[1] as Record<string, unknown>
-        const secondMetadata = secondNode.metadata as Record<string, unknown>
-        expect(secondMetadata).not.toHaveProperty("project")
-      }
+      const secondNode = insertedValues[1] as Record<string, unknown>
+      const secondMetadata = secondNode.metadata as Record<string, unknown>
+      expect(secondMetadata).not.toHaveProperty("project")
+    })
+
+    it("should not let user metadata overwrite internal provenance keys", async () => {
+      const translated = createTranslatedGraph()
+      mockTranslatePayloadToGraph.mockReturnValue(translated)
+
+      const tx = createMockTx()
+      mockExecuteTransaction.mockImplementation(async (callback: unknown) => {
+        await (callback as (t: unknown) => Promise<void>)(tx)
+      })
+      mockComputeLlmScore.mockResolvedValue({ score: 50, warnings: [], method: "rule-based" } as never)
+
+      // Caller tries to spoof the provenance tag on the primary decision node.
+      const payload = createPayload({ metadata: { source: "human-verified" } })
+      await captureStructuredDecision(payload, 1, "req-123")
+
+      const firstNode = tx._getInsertedNodes()[0] as Record<string, unknown>
+      const firstMetadata = firstNode.metadata as Record<string, unknown>
+      expect(firstMetadata.source).toBe("api")
     })
 
     it("should not merge metadata when payload has no metadata", async () => {
       const translated = createTranslatedGraph()
       mockTranslatePayloadToGraph.mockReturnValue(translated)
 
-      const insertedValues: unknown[] = []
-      const tx = {
-        select: jest.fn().mockReturnValue({
-          from: jest.fn().mockReturnValue({
-            where: jest.fn().mockResolvedValue([]),
-          }),
-        }),
-        insert: jest.fn().mockImplementation(() => ({
-          values: jest.fn().mockImplementation((vals: unknown) => {
-            if (!Array.isArray(vals)) insertedValues.push(vals)
-            return {
-              returning: jest.fn().mockResolvedValue([{ id: `id-${insertedValues.length}` }]),
-            }
-          }),
-        })),
-      }
-
+      const tx = createMockTx()
       mockExecuteTransaction.mockImplementation(async (callback: unknown) => {
         await (callback as (t: unknown) => Promise<void>)(tx)
       })
@@ -612,7 +592,7 @@ describe("captureStructuredDecision", () => {
 
       await captureStructuredDecision(createPayload(), 1, "req-123")
 
-      const firstNode = insertedValues[0] as Record<string, unknown>
+      const firstNode = tx._getInsertedNodes()[0] as Record<string, unknown>
       const firstMetadata = firstNode.metadata as Record<string, unknown>
       expect(firstMetadata).toEqual({ source: "api" })
     })
@@ -822,5 +802,214 @@ describe("captureStructuredDecision", () => {
       expect(result.nodesCreated).toBe(5)
       expect(result.edgesCreated).toBe(4)
     })
+  })
+
+  // ============================================
+  // Issue #1251 — vocabulary + self-reference enforcement on the REST/MCP path
+  // ============================================
+
+  describe("write-time guards (Issue #1251)", () => {
+    beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+    it("rejects an off-vocabulary node type before opening a transaction", async () => {
+      mockTranslatePayloadToGraph.mockReturnValue({
+        nodes: [{ tempId: "temp-1", name: "D", nodeType: "banana", description: null, metadata: { source: "api" } }],
+        edges: [],
+      })
+
+      await expect(
+        captureStructuredDecision(createPayload(), 1, "req-123")
+      ).rejects.toThrow(/Unknown node type/)
+      expect(mockExecuteTransaction).not.toHaveBeenCalled()
+    })
+
+    it("rejects an off-vocabulary edge type", async () => {
+      mockTranslatePayloadToGraph.mockReturnValue({
+        nodes: [
+          { tempId: "temp-1", name: "D", nodeType: "decision", description: null, metadata: { source: "api" } },
+          { tempId: "temp-2", name: "P", nodeType: "person", description: null, metadata: { source: "api" } },
+        ],
+        edges: [{ sourceTempId: "temp-2", targetTempId: "temp-1", edgeType: "HIGH_FIVED" }],
+      })
+
+      await expect(
+        captureStructuredDecision(createPayload(), 1, "req-123")
+      ).rejects.toThrow(/Unknown edge type/)
+    })
+
+    it("rejects a self-referencing edge", async () => {
+      mockTranslatePayloadToGraph.mockReturnValue({
+        nodes: [{ tempId: "temp-1", name: "D", nodeType: "decision", description: null, metadata: { source: "api" } }],
+        edges: [{ sourceTempId: "temp-1", targetTempId: "temp-1", edgeType: "INFLUENCED" }],
+      })
+
+      await expect(
+        captureStructuredDecision(createPayload(), 1, "req-123")
+      ).rejects.toThrow(/cannot connect to itself/)
+      expect(mockExecuteTransaction).not.toHaveBeenCalled()
+    })
+  })
+})
+
+// ============================================
+// createDecisionSchema — relatedTo dedup (Issue #1251)
+// ============================================
+
+describe("createDecisionSchema relatedTo dedup", () => {
+  it("deduplicates identical relatedTo UUIDs", () => {
+    const uuid = "550e8400-e29b-41d4-a716-446655440000"
+    const result = createDecisionSchema.safeParse({
+      decision: "Use PostgreSQL",
+      decidedBy: "Team",
+      relatedTo: [uuid, uuid, uuid],
+    })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.relatedTo).toEqual([uuid])
+    }
+  })
+
+  it("deduplicates case-variant spellings of the same UUID (Postgres uuids are case-insensitive)", () => {
+    const lower = "550e8400-e29b-41d4-a716-446655440000"
+    const upper = "550E8400-E29B-41D4-A716-446655440000"
+    const result = createDecisionSchema.safeParse({
+      decision: "Use PostgreSQL",
+      decidedBy: "Team",
+      relatedTo: [lower, upper],
+    })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.relatedTo).toEqual([lower])
+    }
+  })
+
+  it("preserves distinct relatedTo UUIDs", () => {
+    const a = "550e8400-e29b-41d4-a716-446655440001"
+    const b = "550e8400-e29b-41d4-a716-446655440002"
+    const result = createDecisionSchema.safeParse({
+      decision: "Use PostgreSQL",
+      decidedBy: "Team",
+      relatedTo: [a, b, a],
+    })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.relatedTo).toEqual([a, b])
+    }
+  })
+})
+
+// ============================================
+// commitDecisionSubgraph — conversational commit path (Issue #1251)
+// ============================================
+
+describe("commitDecisionSubgraph", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  /** Mock tx: batched node/edge inserts, discriminated by edgeType on the rows. */
+  function commitTx(nodeIds: string[]) {
+    let nodeIdx = 0
+    const insertedNodes: Array<Record<string, unknown>> = []
+    const insertedEdges: Array<Record<string, unknown>> = []
+    const tx = {
+      select: jest.fn().mockReturnValue({
+        from: jest.fn().mockReturnValue({
+          where: jest.fn().mockResolvedValue([]),
+        }),
+      }),
+      insert: jest.fn().mockImplementation(() => ({
+        values: jest.fn().mockImplementation((vals: unknown) => {
+          const rows = vals as Array<Record<string, unknown>>
+          if (rows.length > 0 && "edgeType" in rows[0]) {
+            insertedEdges.push(...rows)
+            return { returning: jest.fn().mockResolvedValue(rows.map((_, i) => ({ id: `edge-${i}` }))) }
+          }
+          insertedNodes.push(...rows)
+          const ids = rows.map(() => {
+            const id = nodeIds[nodeIdx] ?? `node-${nodeIdx + 1}`
+            nodeIdx++
+            return { id }
+          })
+          return { returning: jest.fn().mockResolvedValue(ids) }
+        }),
+      })),
+    }
+    mockExecuteTransaction.mockImplementation(async (cb: unknown) => {
+      await (cb as (t: unknown) => Promise<void>)(tx)
+    })
+    return { insertedNodes, insertedEdges }
+  }
+
+  const fullInput = {
+    summary: "Adopt PG",
+    nodes: [
+      { tempId: "d", name: "Adopt PG", nodeType: "decision", description: null },
+      { tempId: "p", name: "Eng", nodeType: "person", description: null },
+      { tempId: "e", name: "Benchmarks", nodeType: "evidence", description: null },
+      { tempId: "c", name: "Revisit at 10TB", nodeType: "condition", description: null },
+    ],
+    edges: [
+      { sourceTempId: "p", targetTempId: "d", edgeType: "PROPOSED" },
+      { sourceTempId: "e", targetTempId: "d", edgeType: "INFORMED" },
+      { sourceTempId: "c", targetTempId: "d", edgeType: "CONDITION" },
+    ],
+  }
+
+  it("recomputes completeness (100) and persists it on the decision node metadata", async () => {
+    const { insertedNodes } = commitTx(["nd", "np", "ne", "nc"])
+
+    const result = await commitDecisionSubgraph(fullInput, 1, "req-1")
+
+    expect(result.completenessScore).toBe(100)
+    expect(result.completenessMethod).toBe("rule-based")
+    const decisionNode = insertedNodes.find((n) => n.nodeType === "decision") as {
+      metadata?: { completeness?: { score?: number } }
+    }
+    expect(decisionNode?.metadata?.completeness?.score).toBe(100)
+  })
+
+  it("deduplicates identical edges before insert", async () => {
+    const { insertedEdges } = commitTx(["nd", "np"])
+
+    const result = await commitDecisionSubgraph(
+      {
+        summary: "s",
+        nodes: [
+          { tempId: "d", name: "D", nodeType: "decision", description: null },
+          { tempId: "p", name: "P", nodeType: "person", description: null },
+        ],
+        edges: [
+          { sourceTempId: "p", targetTempId: "d", edgeType: "PROPOSED" },
+          { sourceTempId: "p", targetTempId: "d", edgeType: "PROPOSED" },
+        ],
+      },
+      1,
+      "req-1"
+    )
+
+    expect(result.committedEdgeIds).toHaveLength(1)
+    expect(insertedEdges).toHaveLength(1)
+  })
+
+  it("rejects off-vocabulary and self-referencing edges", async () => {
+    commitTx(["nd"])
+    await expect(
+      commitDecisionSubgraph(
+        { summary: "s", nodes: [{ tempId: "d", name: "D", nodeType: "decision", description: null }], edges: [{ sourceTempId: "d", targetTempId: "d", edgeType: "INFLUENCED" }] },
+        1,
+        "req-1"
+      )
+    ).rejects.toThrow(/cannot connect to itself/)
+
+    await expect(
+      commitDecisionSubgraph(
+        { summary: "s", nodes: [{ tempId: "d", name: "D", nodeType: "wizard", description: null }], edges: [] },
+        1,
+        "req-1"
+      )
+    ).rejects.toThrow(/Unknown node type/)
   })
 })

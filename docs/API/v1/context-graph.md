@@ -15,7 +15,15 @@ All `/api/v1/graph/*` endpoints require authentication. Two modes are supported:
 | Mode | Header / Mechanism | Scopes |
 |------|--------------------|--------|
 | API Key | `Authorization: Bearer sk-...` | Per-key scopes set at creation |
-| Session | Browser cookie (`next-auth.session-token`) | Full access (`*`) for user's role |
+| Session | Browser cookie (`next-auth.session-token`) | Role-derived scopes (REV-SEC-161) |
+
+> **Session scopes (REV-SEC-161):** A browser session is **not** granted wildcard
+> (`*`) access. Its scopes are derived from the caller's roles via `ROLE_SCOPES`
+> (`lib/api/auth-middleware.ts`), the same single source of truth used for API keys.
+> A logged-in user therefore only satisfies `graph:write` if their role grants it
+> (administrators do; staff receive `graph:read`). This closed a prior gap where
+> every session received `["*"]` and any authenticated user could satisfy
+> admin-only scope-gated routes with just their browser cookie.
 
 **Scopes:**
 
@@ -533,7 +541,9 @@ skill or assistant pinned to a removed version receives.
 
 Create a structured decision subgraph from a single payload. Requires `graph:write`.
 
-This is a high-level endpoint that accepts a structured decision and automatically creates the appropriate nodes, edges, and relationships in the context graph. It also runs completeness validation (rule-based, with optional LLM enhancement).
+This is a high-level endpoint that accepts a structured decision and automatically creates the appropriate nodes, edges, and relationships in the context graph. It also runs completeness validation (deterministic rule-based score, with optional LLM-authored advisory warnings).
+
+All node/edge types are drawn from the closed decision vocabulary (`lib/graph/decision-framework.ts`) and enforced at write time. `relatedTo` UUIDs are de-duplicated; duplicate or self-referencing edges are rejected with a typed `400` validation error rather than a raw database error.
 
 **Request body:**
 
@@ -573,7 +583,7 @@ The response includes a `completenessScore` (0-100) based on four criteria (25 p
 3. At least one `evidence` or `constraint` connected via `INFORMED` or `CONSTRAINED`
 4. At least one `condition` connected via `CONDITION`
 
-If the `DECISION_CAPTURE_MODEL` setting is configured, an LLM-enhanced score may replace the rule-based score (with warnings). The scoring method is not guaranteed — always check `warnings` for actionable feedback.
+The rule-based score is **authoritative** — it is deterministic and auditable, and the returned `completenessScore` always reflects it. If the `DECISION_CAPTURE_MODEL` setting is configured, an LLM pass runs and may **append advisory warnings/insights** to `warnings`; it never changes the numeric score. When `completenessMethod` is `"llm-enhanced"`, advisory warnings were appended; `"rule-based"` means the LLM pass was unavailable or failed (LLM scoring never blocks a capture). Always check `warnings` for actionable feedback.
 
 **Example request:**
 
@@ -601,6 +611,7 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
     "nodesCreated": 9,
     "edgesCreated": 10,
     "completenessScore": 100,
+    "completenessMethod": "rule-based",
     "warnings": []
   },
   "meta": {
@@ -609,7 +620,7 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 }
 ```
 
-**Response `400`** — Validation error (Zod issues) or missing `relatedTo` UUIDs.
+**Response `400`** — Validation error (Zod issues), missing `relatedTo` UUIDs, an off-vocabulary node/edge type, or a self-referencing / duplicate edge. Returns a typed error message, never a raw database string.
 **Response `401`** — Missing or invalid API key.
 **Response `403`** — API key lacks `graph:write` scope.
 **Response `500`** — Internal error.

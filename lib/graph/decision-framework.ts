@@ -218,6 +218,28 @@ export function validateDecisionCompleteness(
   }
 }
 
+/**
+ * Score a decision subgraph whose nodes are keyed by tempId.
+ * 4 criteria checked (validateDecisionCompleteness), each worth 25 points:
+ * score = (4 - missing.length) * 25. Shared by the REST/MCP translator and the
+ * conversational commit path so the formula cannot drift between channels
+ * (Issue #1251).
+ */
+export function scoreDecisionSubgraph(
+  nodes: ReadonlyArray<{ tempId: string; nodeType: string }>,
+  edges: ReadonlyArray<{ sourceTempId: string; targetTempId: string; edgeType: string }>
+): { score: number; warnings: string[] } {
+  const result = validateDecisionCompleteness(
+    nodes.map((n) => ({ id: n.tempId, nodeType: n.nodeType })),
+    edges.map((e) => ({
+      sourceNodeId: e.sourceTempId,
+      targetNodeId: e.targetTempId,
+      edgeType: e.edgeType,
+    }))
+  )
+  return { score: (4 - result.missing.length) * 25, warnings: result.missing }
+}
+
 // ============================================
 // LLM Prompt Fragment
 // ============================================

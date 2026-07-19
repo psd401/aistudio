@@ -17,11 +17,7 @@ import { createProviderModel } from "@/lib/ai/provider-factory"
 import { getModelConfig } from "@/lib/ai/model-config"
 import { getRequiredSetting } from "@/lib/settings-manager"
 import { getDecisionFrameworkPrompt } from "@/lib/graph/decision-framework"
-import {
-  validateDecisionCompleteness,
-  type DecisionSubgraphNode,
-  type DecisionSubgraphEdge,
-} from "@/lib/graph/decision-framework"
+import { scoreDecisionSubgraph } from "@/lib/graph/decision-framework"
 import type { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -48,6 +44,13 @@ export interface TranslatedNode {
   nodeType: string
   description: string | null
   metadata: Record<string, unknown>
+  /**
+   * If set, this node links to an existing graph node (by UUID) instead of
+   * creating a new one. Used by the conversational capture channel
+   * (commit_decision) so the shared persist path can reuse nodes. The REST/MCP
+   * translator never sets this — it always mints fresh nodes.
+   */
+  existingNodeId?: string
 }
 
 /** An edge between two temp-ID'd nodes */
@@ -61,9 +64,22 @@ export interface TranslatedEdge {
 export interface TranslatedDecision {
   nodes: TranslatedNode[]
   edges: TranslatedEdge[]
+  /**
+   * tempId of the primary decision node. Callers must use this (never a
+   * hardcoded literal) to identify the decision node — it stays correct even if
+   * the emission order of translatePayloadToGraph changes.
+   */
+  decisionTempId: string
 }
 
-/** Completeness score + warnings */
+/**
+ * Completeness score + warnings.
+ *
+ * `score` is ALWAYS the deterministic rule-based score — it is authoritative and
+ * auditable (Issue #1251). `method` reflects whether the optional LLM pass ran:
+ * "llm-enhanced" means the LLM appended advisory warnings/insights on top of the
+ * rule-based `warnings`; the LLM never changes the numeric score.
+ */
 export interface CompletenessResult {
   score: number
   warnings: string[]
@@ -230,7 +246,7 @@ export function translatePayloadToGraph(
     }
   }
 
-  return { nodes, edges }
+  return { nodes, edges, decisionTempId }
 }
 
 // ============================================
@@ -246,25 +262,8 @@ export function computeRuleBasedScore(
   nodes: TranslatedNode[],
   edges: TranslatedEdge[]
 ): CompletenessResult {
-  const subgraphNodes: DecisionSubgraphNode[] = nodes.map((n) => ({
-    id: n.tempId,
-    nodeType: n.nodeType,
-  }))
-
-  const subgraphEdges: DecisionSubgraphEdge[] = edges.map((e) => ({
-    sourceNodeId: e.sourceTempId,
-    targetNodeId: e.targetTempId,
-    edgeType: e.edgeType,
-  }))
-
-  const result = validateDecisionCompleteness(subgraphNodes, subgraphEdges)
-  const score = (4 - result.missing.length) * 25
-
-  return {
-    score,
-    warnings: result.missing,
-    method: "rule-based",
-  }
+  const { score, warnings } = scoreDecisionSubgraph(nodes, edges)
+  return { score, warnings, method: "rule-based" }
 }
 
 /**
@@ -306,42 +305,47 @@ Rule-based warnings: ${ruleResult.warnings.length > 0 ? ruleResult.warnings.join
 }
 
 /**
- * Parse JSON from LLM response text, returning score + warnings or null if unparseable.
- * Uses Zod for runtime validation of LLM output shape.
+ * Zod shape for the LLM's JSON reply. The `score` field is accepted for
+ * backward-compatible parsing but intentionally IGNORED — the rule-based score
+ * is authoritative (Issue #1251). Only `warnings` (advisory) are surfaced.
  */
 const llmResponseSchema = z.object({
   score: z.number().optional(),
   warnings: z.array(z.string()).optional(),
 })
 
-function parseLlmResponse(
-  text: string,
-  fallback: CompletenessResult
-): CompletenessResult | null {
+/**
+ * Parse ADVISORY feedback from the LLM response text. Returns the LLM's
+ * warnings/insights, or null if the text contains no parseable JSON object.
+ *
+ * The LLM's numeric score is deliberately dropped here: the deterministic
+ * rule-based score remains authoritative and auditable. The LLM can only add
+ * qualitative warnings on top of it.
+ */
+function parseLlmAdvisory(text: string): { warnings: string[] } | null {
   const jsonMatch = text.trim().match(/{[\S\s]*}/)
   if (!jsonMatch) return null
 
   try {
     const parsed = llmResponseSchema.safeParse(JSON.parse(jsonMatch[0]))
     if (!parsed.success) return null
-
-    const score = typeof parsed.data.score === "number"
-      ? Math.min(100, Math.max(0, Math.round(parsed.data.score)))
-      : fallback.score
-    const warnings = parsed.data.warnings ?? fallback.warnings
-
-    return { score, warnings, method: "llm-enhanced" }
+    return { warnings: parsed.data.warnings ?? [] }
   } catch {
     return null
   }
 }
 
 /**
- * Attempt LLM-enhanced scoring. Falls back to rule-based on any failure.
+ * Compute the completeness score, optionally augmenting the rule-based warnings
+ * with advisory LLM feedback.
  *
- * Resolves model via DECISION_CAPTURE_MODEL setting -> getModelConfig() -> createProviderModel().
- * Uses generateText() with a decision framework prompt + validation suffix.
- * 10s timeout via AbortController.
+ * The returned `score` is ALWAYS the deterministic rule-based score — the LLM
+ * NEVER overrides it (Issue #1251, DoD: "rule-based score is authoritative; LLM
+ * enhancement only appends advisory warnings/insights"). When the DECISION_CAPTURE_MODEL
+ * setting resolves, the LLM pass runs (10s timeout via AbortController) and any
+ * new warnings it returns are appended (deduped). On any failure — missing model,
+ * unparseable output, timeout, provider error — the rule-based result is returned
+ * unchanged. LLM scoring never blocks or fails a capture.
  */
 export async function computeLlmScore(
   payload: DecisionApiPayload,
@@ -375,12 +379,18 @@ export async function computeLlmScore(
       })
       clearTimeout(timeout)
 
-      const llmResult = parseLlmResponse(result.text, ruleResult)
-      if (!llmResult) {
+      const advisory = parseLlmAdvisory(result.text)
+      if (!advisory) {
         log.warn("LLM response did not contain valid JSON, using rule-based score")
         return ruleResult
       }
-      return llmResult
+
+      // Rule-based score stays authoritative; append advisory LLM warnings (deduped).
+      const warnings = [...ruleResult.warnings]
+      for (const w of advisory.warnings) {
+        if (w && !warnings.includes(w)) warnings.push(w)
+      }
+      return { score: ruleResult.score, warnings, method: "llm-enhanced" }
     } finally {
       clearTimeout(timeout)
     }

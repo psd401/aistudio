@@ -584,6 +584,16 @@ paths:
         Accepts a structured decision payload and creates the appropriate
         nodes, edges, and relationships in the context graph. Returns the
         decision node ID, counts of created resources, and a completeness score.
+
+        All node/edge types are drawn from the closed decision vocabulary and
+        enforced at write time. `relatedTo` UUIDs are de-duplicated
+        (case-insensitively); duplicate or self-referencing edges are rejected
+        with a typed `400` validation error carrying a specific message (e.g.
+        "A node cannot connect to itself") — never a raw database string.
+
+        The `completenessScore` is always the deterministic rule-based score;
+        `completenessMethod` reports whether an optional LLM pass appended
+        advisory warnings ("llm-enhanced") or was unavailable ("rule-based").
         Requires `graph:write` scope.
       security:
         - BearerAuth: []
@@ -2474,7 +2484,10 @@ components:
           items:
             type: string
             format: uuid
-          description: Existing node IDs to link via CONTEXT edges
+          description: >-
+            Existing node IDs to link via CONTEXT edges. De-duplicated
+            case-insensitively before edges are created; every ID must reference
+            an existing node or the request fails with a 400.
         agentId:
           type: string
           maxLength: 200
@@ -2490,7 +2503,7 @@ components:
       properties:
         data:
           type: object
-          required: [decisionNodeId, nodesCreated, edgesCreated, completenessScore]
+          required: [decisionNodeId, nodesCreated, edgesCreated, completenessScore, completenessMethod]
           properties:
             decisionNodeId:
               type: string
@@ -2506,12 +2519,19 @@ components:
               type: integer
               minimum: 0
               maximum: 100
-              description: "Completeness score (0-100). 25 points per criterion: decision node, person, evidence/constraint, condition."
+              description: "Deterministic rule-based completeness score (0-100), 25 points per criterion: decision node, person, evidence/constraint, condition. The optional LLM pass never changes this number."
+            completenessMethod:
+              type: string
+              enum: [rule-based, llm-enhanced]
+              description: >-
+                "llm-enhanced" when the optional LLM pass ran and may have
+                appended advisory warnings; "rule-based" when it was
+                unavailable or failed. The score is rule-based either way.
             warnings:
               type: array
               items:
                 type: string
-              description: Completeness warnings (missing elements). Omitted when empty.
+              description: Completeness warnings (missing elements, plus LLM advisory insights when completenessMethod is "llm-enhanced"). Omitted when empty.
         meta:
           type: object
           required: [requestId]
