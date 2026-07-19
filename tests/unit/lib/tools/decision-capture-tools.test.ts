@@ -334,6 +334,59 @@ describe("commit_decision primary selection", () => {
 
     expect(result.error).toContain('isPrimary must be set on a "decision" node')
   })
+
+  it("stores rejected alternatives with status='rejected' and the primary with 'accepted'", async () => {
+    const built = useTx({ nodeIds: ["nalt", "nd", "np", "ne", "nc"] })
+    const { commit } = getTools()
+
+    expectSuccess(await commit({ summary: "s", ...withRejectedAlternative(true) }))
+
+    const decisions = built.insertedNodes.filter((n) => n.nodeType === "decision")
+    const alt = decisions.find((n) => n.name === "Use MySQL")
+    const primary = decisions.find((n) => n.name === "Adopt PG")
+    expect(alt?.status).toBe("rejected")
+    expect((alt?.metadata as { rejected?: boolean } | undefined)?.rejected).toBe(true)
+    expect(primary?.status).toBe("accepted")
+    expect((primary?.metadata as { rejected?: boolean } | undefined)?.rejected).toBeUndefined()
+  })
+
+  it("rejects a proposal with no decision node at all", async () => {
+    useTx({ nodeIds: [] })
+    const { commit } = getTools()
+
+    const result = expectFailure(await commit({
+      summary: "s",
+      nodes: [
+        { tempId: "p", name: "Eng", nodeType: "person", description: null },
+        { tempId: "e", name: "Benchmarks", nodeType: "evidence", description: null },
+      ],
+      edges: [{ sourceTempId: "e", targetTempId: "p", edgeType: "CONTEXT" }],
+    }))
+
+    expect(result.error).toContain('No "decision" node')
+    expect(mockExecuteTransaction).not.toHaveBeenCalled()
+  })
+
+  it("rejects a SUPERSEDED_BY edge aimed at a non-primary decision node", async () => {
+    useTx({ existingRows: [{ id: "old-uuid", nodeType: "decision" }], nodeIds: [] })
+    const { commit } = getTools()
+
+    const sg = withRejectedAlternative(true)
+    const result = expectFailure(await commit({
+      summary: "s",
+      nodes: [
+        ...sg.nodes,
+        { tempId: "old", name: "Old decision", nodeType: "decision", description: null, existingNodeId: "old-uuid" },
+      ],
+      edges: [
+        ...sg.edges,
+        // Aims supersession at the REJECTED alternative, not the adopted decision.
+        { sourceTempId: "old", targetTempId: "alt", edgeType: "SUPERSEDED_BY" },
+      ],
+    }))
+
+    expect(result.error).toContain("SUPERSEDED_BY must target the primary")
+  })
 })
 
 // ============================================

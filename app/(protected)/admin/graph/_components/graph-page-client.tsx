@@ -41,8 +41,8 @@ import {
   deleteGraphEdge,
   getNodeConnections,
 } from "@/actions/graph.actions"
-import type { NodeConnection } from "@/lib/graph"
-import type { SelectGraphNode, SelectGraphEdge } from "@/lib/db/types"
+import type { NodeConnection, PublicGraphNode } from "@/lib/graph"
+import type { SelectGraphEdge } from "@/lib/db/types"
 
 type ActiveTab = "nodes" | "edges"
 
@@ -50,7 +50,7 @@ export function GraphPageClient() {
   const { toast } = useToast()
 
   // Data state
-  const [nodes, setNodes] = useState<SelectGraphNode[]>([])
+  const [nodes, setNodes] = useState<PublicGraphNode[]>([])
   const [edges, setEdges] = useState<SelectGraphEdge[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -69,20 +69,20 @@ export function GraphPageClient() {
 
   // Node form sheet state
   const [nodeFormOpen, setNodeFormOpen] = useState(false)
-  const [editingNode, setEditingNode] = useState<SelectGraphNode | null>(null)
+  const [editingNode, setEditingNode] = useState<PublicGraphNode | null>(null)
 
   // Edge form sheet state
   const [edgeFormOpen, setEdgeFormOpen] = useState(false)
 
   // Node detail sheet state
-  const [detailNode, setDetailNode] = useState<SelectGraphNode | null>(null)
+  const [detailNode, setDetailNode] = useState<PublicGraphNode | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
   const [connections, setConnections] = useState<NodeConnection[]>([])
   const [loadingConnections, setLoadingConnections] = useState(false)
 
   // Delete dialog state
   const [deleteNodeDialog, setDeleteNodeDialog] = useState(false)
-  const [nodeToDelete, setNodeToDelete] = useState<SelectGraphNode | null>(null)
+  const [nodeToDelete, setNodeToDelete] = useState<PublicGraphNode | null>(null)
   const [deleteEdgeDialog, setDeleteEdgeDialog] = useState(false)
   const [edgeToDelete, setEdgeToDelete] = useState<EdgeTableRow | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -275,7 +275,7 @@ export function GraphPageClient() {
     [nodes]
   )
 
-  const handleEditFromDetail = useCallback((node: SelectGraphNode) => {
+  const handleEditFromDetail = useCallback((node: PublicGraphNode) => {
     setDetailOpen(false)
     setEditingNode(node)
     setNodeFormOpen(true)
@@ -292,7 +292,7 @@ export function GraphPageClient() {
     [nodes]
   )
 
-  const handleDeleteFromDetail = useCallback((node: SelectGraphNode) => {
+  const handleDeleteFromDetail = useCallback((node: PublicGraphNode) => {
     setDetailOpen(false)
     setNodeToDelete(node)
     setDeleteNodeDialog(true)

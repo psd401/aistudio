@@ -117,11 +117,11 @@ Note: These users require Cognito authentication in the actual app. For local te
 
 ### PostgreSQL (postgres)
 
-- **Image**: postgres:16-alpine
+- **Image**: pgvector/pgvector:pg16 (PostgreSQL 16 + pgvector, matching Aurora; required since migration 115's embedding column)
 - **Port**: 5432
 - **Credentials**: postgres/postgres
 - **Database**: aistudio
-- **Volume**: postgres_data (persistent)
+- **Volume**: postgres_data_pgvector (persistent; the pre-#1252 `postgres_data` alpine volume is retired but left on disk)
 
 ### Next.js App (app) - Optional
 

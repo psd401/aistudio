@@ -162,9 +162,14 @@ List nodes with optional filters and pagination. Requires `graph:read`.
 |------|------|-------------|
 | `nodeType` | string | Exact match filter |
 | `nodeClass` | string | Exact match filter |
-| `search` | string (1-100 chars) | Case-insensitive search on `name` and `description` |
+| `status` | enum (`proposed` \| `accepted` \| `superseded` \| `rejected`) | Decision lifecycle filter (Issue #1252). Combine with `nodeType=decision&status=accepted` for the "current decision on X" query. Excludes NULL-status (non-decision) nodes. |
+| `search` | string (1-100 chars) | Case-insensitive **lexical** (ILIKE) search on `name` and `description` |
+| `q` | string (1-500 chars) | **Semantic** (embedding-based) search — returns paraphrase matches ranked by similarity (Issue #1252). Falls back to lexical search on the same text if embeddings are unavailable. Combine with `nodeType` to scope (e.g. `nodeType=decision`). |
 | `limit` | integer (1-100) | Page size (default 50) |
-| `cursor` | string | Pagination cursor |
+| `cursor` | string | Pagination cursor (lexical results only; semantic results are unpaginated) |
+
+When `q` is supplied, each result includes a `similarity` (0-1) score and the
+response `meta.method` is `"semantic"` (or `"lexical-fallback"` if embedding failed).
 
 **Example request:**
 
@@ -344,6 +349,44 @@ Get all connections (incoming + outgoing edges) for a node. Requires `graph:read
 
 ---
 
+#### `GET /api/v1/graph/nodes/{nodeId}/package`
+
+Get a self-contained **decision package** for a node (Issue #1252): the decision
+plus its evidence, constraints, reasoning, persons, conditions, outcomes, and
+supersession chain, gathered by a depth-bounded, cycle-safe recursive CTE (graph
+expansion). Requires `graph:read`.
+
+**Query parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `depth` | integer (1-3) | Graph-expansion radius in hops (default 2) |
+
+**Response `200`**
+
+```json
+{
+  "data": {
+    "decision": { "id": "…", "name": "Adopt PostgreSQL", "nodeType": "decision", "status": "accepted", "supersededAt": null, "depth": 0 },
+    "persons": [ { "id": "…", "name": "Engineering", "nodeType": "person", "depth": 1 } ],
+    "evidence": [ { "id": "…", "name": "Benchmarks", "nodeType": "evidence", "depth": 1 } ],
+    "constraints": [],
+    "reasoning": [],
+    "conditions": [ { "id": "…", "name": "Revisit at 10TB", "nodeType": "condition", "depth": 1 } ],
+    "outcomes": [],
+    "policies": [],
+    "edges": [ { "id": "…", "sourceNodeId": "…", "targetNodeId": "…", "edgeType": "SUPERSEDED_BY" } ],
+    "supersessionChain": [ { "supersededId": "…old…", "supersededById": "…new…" } ],
+    "depth": 2
+  },
+  "meta": { "requestId": "req_abc123", "depth": 2 }
+}
+```
+
+**Response `404`** — Node not found.
+
+---
+
 ### Edges
 
 #### `GET /api/v1/graph/edges`
@@ -511,10 +554,15 @@ skill or assistant pinned to a removed version receives.
 | `nodeClass` | string | Sub-classification (e.g. `policy`, `budget`) |
 | `name` | string | Display name |
 | `description` | string\|null | Optional description |
-| `metadata` | object | Arbitrary JSONB key-value pairs |
+| `metadata` | object | Arbitrary JSONB key-value pairs. Agent-authored captures include a typed `provenance` block (`extractionMethod`, `sourceRef`, `confidence`); auto-reused nodes include `dedup` (`matchedNodeId`, `similarity`) — Issue #1252 |
+| `status` | string\|null | Decision lifecycle (Issue #1252): `proposed` \| `accepted` \| `superseded` \| `rejected`. Null for non-decision nodes |
+| `supersededAt` | ISO 8601\|null | Set when a newer decision supersedes this one (Issue #1252) |
 | `createdBy` | integer\|null | Creator's user ID |
 | `createdAt` | ISO 8601 | Creation timestamp |
 | `updatedAt` | ISO 8601 | Last update timestamp |
+
+> `embedding` (512-dim pgvector, Issue #1252) also exists on the row for entity
+> resolution + semantic search but is never returned in API responses.
 
 ### GraphEdge
 
@@ -556,6 +604,9 @@ All node/edge types are drawn from the closed decision vocabulary (`lib/graph/de
 | `constraints` | string[] | no | max 20 items, each 1-2000 chars |
 | `conditions` | string[] | no | max 20 items — triggers to revisit |
 | `alternatives_considered` | string[] | no | max 20 items — rejected alternatives |
+| `consulted` | string[] | no | max 20, each 1-500 — DACI parties consulted (person node + `CONSULTED` edge) — Issue #1252 |
+| `notified` | string[] | no | max 20, each 1-500 — DACI parties notified/informed (person node + `NOTIFIED` edge) — Issue #1252 |
+| `supersedes` | UUID[] | no | max 20 — existing decision node IDs this decision supersedes (each marked `status=superseded` + `SUPERSEDED_BY` edge) — Issue #1252 |
 | `relatedTo` | UUID[] | no | max 50 — existing node IDs to link via CONTEXT edges |
 | `agentId` | string | no | max 200 chars — external agent identifier |
 | `metadata` | object | no | Arbitrary key-value pairs (attached to decision node) |
@@ -570,10 +621,13 @@ All node/edge types are drawn from the closed decision vocabulary (`lib/graph/de
 | `constraints[i]` | `constraint` | `CONSTRAINED` | constraint → decision |
 | `reasoning` | `reasoning` | `PART_OF` | reasoning → decision |
 | `conditions[i]` | `condition` | `CONDITION` | condition → decision |
-| `alternatives_considered[i]` | `decision` (metadata: `{rejected: true}`) | `REJECTED` + `COMPARED_AGAINST` | person → alt (REJECTED), alt → decision (COMPARED_AGAINST) |
+| `alternatives_considered[i]` | `decision` (metadata: `{rejected: true}`, `status: rejected`) | `REJECTED` + `COMPARED_AGAINST` | person → alt (REJECTED), alt → decision (COMPARED_AGAINST) |
+| `consulted[i]` | `person` | `CONSULTED` | decision → person |
+| `notified[i]` | `person` | `NOTIFIED` | decision → person |
+| `supersedes[i]` | (existing `decision`) | `SUPERSEDED_BY` | old → new; old node set `status=superseded` + `supersededAt` |
 | `relatedTo[i]` | (existing node) | `CONTEXT` | related → decision |
 
-All created nodes have `nodeClass: "decision"`. When `agentId` is provided, nodes include `metadata.source: "agent"` and `metadata.agentId`; otherwise `metadata.source: "api"`.
+All created nodes have `nodeClass: "decision"`. The primary decision is stamped `status: "accepted"`. When `agentId` is provided, nodes include `metadata.source: "agent"` and `metadata.agentId`; otherwise `metadata.source: "api"`. Every node/edge carries a typed `metadata.provenance` block (Issue #1252). Person/evidence/policy nodes are deduplicated against existing nodes at write time (entity resolution) — the response `warnings` array surfaces any auto-reuse or near-duplicate candidates.
 
 **Completeness scoring:**
 

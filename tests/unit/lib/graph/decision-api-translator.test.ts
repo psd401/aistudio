@@ -161,9 +161,46 @@ describe("translatePayloadToGraph", () => {
       "INFORMED", "LED_TO", "CONSTRAINED", "PROPOSED", "APPROVED_BY", "SUPPORTED_BY", "REPLACED_BY",
       "CHANGED_BY", "PART_OF", "RESULTED_IN", "PRECEDENT", "CONTEXT", "COMPARED_AGAINST", "INFLUENCED",
       "BLOCKED", "WOULD_REQUIRE", "CONDITION", "REJECTED",
+      "SUPERSEDED_BY", "SAME_AS", "CONSULTED", "NOTIFIED",
     ])
     for (const n of nodes) expect(allowedNodes.has(n.nodeType)).toBe(true)
     for (const e of edges) expect(allowedEdges.has(e.edgeType)).toBe(true)
+  })
+
+  // ============================================
+  // Issue #1252 — DACI parties + supersession
+  // ============================================
+
+  it("emits CONSULTED / NOTIFIED person nodes (DACI) linked from the decision", () => {
+    const payload = {
+      decision: "D",
+      decidedBy: "Team",
+      consulted: ["Legal"],
+      notified: ["Board"],
+    }
+    const { nodes, edges, decisionTempId } = translatePayloadToGraph(payload, "api")
+
+    const persons = nodes.filter((n) => n.nodeType === "person").map((n) => n.name)
+    expect(persons).toEqual(expect.arrayContaining(["Team", "Legal", "Board"]))
+
+    const consulted = edges.find((e) => e.edgeType === "CONSULTED")
+    const notified = edges.find((e) => e.edgeType === "NOTIFIED")
+    expect(consulted?.sourceTempId).toBe(decisionTempId) // decision -> person
+    expect(notified?.sourceTempId).toBe(decisionTempId)
+  })
+
+  it("emits a reused decision node + SUPERSEDED_BY edge for each supersedes id", () => {
+    const oldId = "550e8400-e29b-41d4-a716-446655440000"
+    const payload = { decision: "New", decidedBy: "Team", supersedes: [oldId] }
+    const { nodes, edges, decisionTempId } = translatePayloadToGraph(payload, "api")
+
+    const reused = nodes.find((n) => n.existingNodeId === oldId)
+    expect(reused).toBeDefined()
+    expect(reused?.nodeType).toBe("decision")
+
+    const supEdge = edges.find((e) => e.edgeType === "SUPERSEDED_BY")
+    expect(supEdge?.sourceTempId).toBe(reused?.tempId) // old (reused) -> new
+    expect(supEdge?.targetTempId).toBe(decisionTempId)
   })
 })
 

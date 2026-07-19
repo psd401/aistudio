@@ -12,6 +12,7 @@ import {
   queryGraphNodes,
   insertGraphNode,
 } from "@/lib/graph"
+import { semanticSearchNodes } from "@/lib/graph/decision-retrieval"
 import { createLogger } from "@/lib/logger"
 import { graphMetadataSchema } from "@/lib/validations/api-schemas"
 
@@ -22,7 +23,13 @@ import { graphMetadataSchema } from "@/lib/validations/api-schemas"
 const listQuerySchema = z.object({
   nodeType: z.string().max(100).optional(),
   nodeClass: z.string().max(100).optional(),
+  // Decision lifecycle status filter (Issue #1252). With `nodeType=decision`,
+  // `status=accepted` returns only current (non-superseded) decisions.
+  status: z.enum(["proposed", "accepted", "superseded", "rejected"]).optional(),
   search: z.string().min(1).max(100).optional(),
+  // Semantic (embedding-based) search term (Issue #1252). When present, returns
+  // paraphrase matches ranked by similarity instead of literal ILIKE hits.
+  q: z.string().min(1).max(500).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
   cursor: z.string().optional(),
 })
@@ -53,9 +60,46 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid query parameters", parsed.error.issues)
   }
 
-  const { limit, cursor, ...filters } = parsed.data
+  const { limit, cursor, q, ...filters } = parsed.data
 
   try {
+    // Semantic search (Issue #1252): `q` returns embedding-based paraphrase
+    // matches. On embedding failure it degrades to lexical ILIKE search so the
+    // caller always gets results rather than a 500.
+    if (q) {
+      try {
+        // Pass the full filter set — the lexical fallback honors these, so the
+        // semantic path must too or a `status=accepted` query could return
+        // superseded decisions.
+        const matches = await semanticSearchNodes(q, {
+          limit: limit ?? 50,
+          nodeType: filters.nodeType,
+          nodeClass: filters.nodeClass,
+          status: filters.status,
+        })
+        log.info("Semantic graph node search", { count: matches.length, userId: auth.userId })
+        return createApiResponse(
+          {
+            data: matches,
+            meta: { requestId, limit: limit ?? 50, method: "semantic", nextCursor: null },
+          },
+          requestId
+        )
+      } catch (semanticError) {
+        log.warn("Semantic search failed, falling back to lexical", {
+          error: semanticError instanceof Error ? semanticError.message : String(semanticError),
+        })
+        const fallback = await queryGraphNodes({ ...filters, search: q }, { limit, cursor })
+        return createApiResponse(
+          {
+            data: fallback.items,
+            meta: { requestId, limit: limit ?? 50, method: "lexical-fallback", nextCursor: fallback.nextCursor },
+          },
+          requestId
+        )
+      }
+    }
+
     const result = await queryGraphNodes(filters, { limit, cursor })
 
     log.info("Listed graph nodes", { count: result.items.length, userId: auth.userId })

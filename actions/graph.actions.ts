@@ -25,8 +25,9 @@ import {
   queryNodeConnections,
   GraphServiceError,
 } from "@/lib/graph"
-import type { SelectGraphNode, SelectGraphEdge } from "@/lib/db/types"
+import type { SelectGraphEdge } from "@/lib/db/types"
 import type {
+  PublicGraphNode,
   GraphNodeFilters,
   GraphEdgeFilters,
   CreateNodeInput,
@@ -44,7 +45,7 @@ import type {
  */
 export async function getGraphNodes(
   filters?: GraphNodeFilters
-): Promise<ActionState<SelectGraphNode[]>> {
+): Promise<ActionState<PublicGraphNode[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getGraphNodes")
   const log = createLogger({ requestId, action: "getGraphNodes" })
@@ -76,7 +77,7 @@ export async function getGraphNodes(
  */
 export async function getGraphNode(
   nodeId: string
-): Promise<ActionState<SelectGraphNode>> {
+): Promise<ActionState<PublicGraphNode>> {
   const requestId = generateRequestId()
   const timer = startTimer("getGraphNode")
   const log = createLogger({ requestId, action: "getGraphNode" })
@@ -110,7 +111,7 @@ export async function getGraphNode(
  */
 export async function createGraphNode(
   input: CreateNodeInput
-): Promise<ActionState<SelectGraphNode>> {
+): Promise<ActionState<PublicGraphNode>> {
   const requestId = generateRequestId()
   const timer = startTimer("createGraphNode")
   const log = createLogger({ requestId, action: "createGraphNode" })
@@ -153,7 +154,7 @@ export async function createGraphNode(
 export async function updateGraphNode(
   nodeId: string,
   input: UpdateNodeInput
-): Promise<ActionState<SelectGraphNode>> {
+): Promise<ActionState<PublicGraphNode>> {
   const requestId = generateRequestId()
   const timer = startTimer("updateGraphNode")
   const log = createLogger({ requestId, action: "updateGraphNode" })

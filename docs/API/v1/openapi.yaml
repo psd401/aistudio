@@ -162,15 +162,18 @@ paths:
       summary: List nodes
       description: |
         Returns a paginated list of graph nodes.
-        Supports filtering by `nodeType`, `nodeClass`, and full-text `search`
-        (searches `name` and `description` fields via case-insensitive match).
+        Supports filtering by `nodeType`, `nodeClass`, and lexical `search`
+        (case-insensitive `name`/`description` match), plus semantic `q`
+        (embedding-based paraphrase search, Issue #1252).
       security:
         - BearerAuth: []
         - SessionAuth: []
       parameters:
         - $ref: "#/components/parameters/nodeTypeFilter"
         - $ref: "#/components/parameters/nodeClassFilter"
+        - $ref: "#/components/parameters/statusFilter"
         - $ref: "#/components/parameters/searchFilter"
+        - $ref: "#/components/parameters/semanticQueryFilter"
         - $ref: "#/components/parameters/limitParam"
         - $ref: "#/components/parameters/cursorParam"
       responses:
@@ -396,6 +399,46 @@ paths:
               $ref: "#/components/headers/X-RateLimit-Remaining"
             X-RateLimit-Reset:
               $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /graph/nodes/{nodeId}/package:
+    parameters:
+      - $ref: "#/components/parameters/nodeIdPath"
+    get:
+      operationId: getDecisionPackage
+      tags: [Nodes]
+      summary: Get a decision package
+      description: >
+        Returns a self-contained decision package (Issue #1252): the decision
+        plus its evidence, constraints, reasoning, persons, conditions, outcomes,
+        and supersession chain, gathered by a depth-bounded, cycle-safe recursive
+        CTE. Requires `graph:read` scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/packageDepthParam"
+      responses:
+        "200":
+          description: Decision package
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecisionPackageResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":
@@ -2061,14 +2104,48 @@ components:
         type: string
         maxLength: 100
 
+    statusFilter:
+      name: status
+      in: query
+      description: >
+        Filter by decision lifecycle status (Issue #1252). Combine with
+        `nodeType=decision` and `status=accepted` to return only current
+        (non-superseded) decisions — the "what is the current decision on X"
+        query. Nodes with a NULL status (all non-decision nodes) are excluded.
+      schema:
+        type: string
+        enum: [proposed, accepted, superseded, rejected]
+
     searchFilter:
       name: search
       in: query
-      description: Case-insensitive search across name and description
+      description: Case-insensitive lexical (ILIKE) search across name and description
       schema:
         type: string
         minLength: 1
         maxLength: 100
+
+    semanticQueryFilter:
+      name: q
+      in: query
+      description: >
+        Semantic (embedding-based) search — returns paraphrase matches ranked by
+        cosine similarity (Issue #1252). Combine with `nodeType` to scope. Falls
+        back to lexical search on the same text if embeddings are unavailable.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 500
+
+    packageDepthParam:
+      name: depth
+      in: query
+      description: "Decision-package graph-expansion radius in hops (default: 2, max: 3)"
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 3
+        default: 2
 
     limitParam:
       name: limit
@@ -2321,7 +2398,22 @@ components:
         metadata:
           type: object
           additionalProperties: true
-          description: Arbitrary key-value metadata
+          description: >
+            Arbitrary key-value metadata. Agent-authored captures include a typed
+            `provenance` block (`extractionMethod`, `sourceRef`, `confidence`);
+            auto-reused nodes include `dedup` (`matchedNodeId`, `similarity`).
+        status:
+          type: string
+          nullable: true
+          enum: [proposed, accepted, superseded, rejected]
+          description: >
+            Decision lifecycle status (Issue #1252). Set on `decision` nodes only;
+            null for other node types.
+        supersededAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Set when a newer decision supersedes this one (Issue #1252)
         createdBy:
           type: integer
           nullable: true
@@ -2478,6 +2570,36 @@ components:
             minLength: 1
             maxLength: 2000
           description: Rejected alternatives
+        consulted:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 500
+          description: >-
+            DACI parties consulted about the decision (Issue #1252). Each becomes
+            a person node linked via a `CONSULTED` edge.
+        notified:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 500
+          description: >-
+            DACI parties notified/informed of the decision (Issue #1252). Each
+            becomes a person node linked via a `NOTIFIED` edge.
+        supersedes:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            format: uuid
+          description: >-
+            Existing decision node IDs this decision supersedes (Issue #1252).
+            Each is marked `status=superseded` (+ `supersededAt`) and linked
+            `SUPERSEDED_BY` (old → new). De-duplicated case-insensitively.
         relatedTo:
           type: array
           maxItems: 50
@@ -2645,6 +2767,88 @@ components:
             requestId:
               type: string
             total:
+              type: integer
+
+    # -- Decision package (Issue #1252) --
+    SupersessionLink:
+      type: object
+      required: [supersededId, supersededById]
+      properties:
+        supersededId:
+          type: string
+          format: uuid
+          description: The decision that was superseded
+        supersededById:
+          type: string
+          format: uuid
+          description: The decision that superseded it
+
+    DecisionPackage:
+      type: object
+      required:
+        [decision, nodes, edges, persons, evidence, constraints, reasoning, conditions, outcomes, policies, supersessionChain, depth]
+      properties:
+        decision:
+          $ref: "#/components/schemas/GraphNode"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+          description: Every node reachable within the depth bound (including the seed)
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphEdge"
+          description: Edges whose endpoints are both inside the package
+        persons:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        constraints:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        reasoning:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        outcomes:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        supersessionChain:
+          type: array
+          items:
+            $ref: "#/components/schemas/SupersessionLink"
+        depth:
+          type: integer
+          description: The depth bound actually used (1-3)
+
+    DecisionPackageResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/DecisionPackage"
+        meta:
+          type: object
+          required: [requestId, depth]
+          properties:
+            requestId:
+              type: string
+            depth:
               type: integer
 
     DeleteResponse:

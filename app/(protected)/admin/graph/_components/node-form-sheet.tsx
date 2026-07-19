@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
-import type { SelectGraphNode } from "@/lib/db/types"
+import type { PublicGraphNode } from "@/lib/graph"
 
 export interface NodeFormData {
   name: string
@@ -20,7 +20,7 @@ export interface NodeFormData {
 interface NodeFormSheetProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  node?: SelectGraphNode | null
+  node?: PublicGraphNode | null
   onSave: (data: NodeFormData) => Promise<void>
 }
 

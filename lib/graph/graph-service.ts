@@ -20,10 +20,40 @@ import type {
 // Input / Output Types
 // ============================================
 
+/**
+ * A graph node as returned to API/tool consumers: every column EXCEPT the
+ * 512-dim `embedding` vector (Issue #1252). The embedding is an internal
+ * entity-resolution / semantic-search artifact and must never appear in a
+ * response (payload bloat + leaking the internal representation), so the read
+ * and write helpers select an explicit column set rather than `SELECT *`.
+ */
+export type PublicGraphNode = Omit<SelectGraphNode, "embedding">
+
+const publicNodeColumns = {
+  id: graphNodes.id,
+  nodeType: graphNodes.nodeType,
+  nodeClass: graphNodes.nodeClass,
+  name: graphNodes.name,
+  description: graphNodes.description,
+  metadata: graphNodes.metadata,
+  status: graphNodes.status,
+  supersededAt: graphNodes.supersededAt,
+  createdBy: graphNodes.createdBy,
+  createdAt: graphNodes.createdAt,
+  updatedAt: graphNodes.updatedAt,
+} as const
+
 export interface GraphNodeFilters {
   nodeType?: string
   nodeClass?: string
   search?: string
+  /**
+   * Decision lifecycle status filter (Issue #1252). Combined with
+   * `nodeType: "decision"` this answers "what is the current decision on X"
+   * (status=accepted) directly instead of by graph traversal — the reason the
+   * partial `(node_type, status)` index exists. NULL-status nodes are excluded.
+   */
+  status?: string
 }
 
 export interface GraphEdgeFilters {
@@ -143,13 +173,8 @@ export function escapeIlikePattern(search: string): string {
     .replace(/[%_]/g, "\\$&") // Then escape ILIKE wildcards
 }
 
-export async function queryGraphNodes(
-  filters?: GraphNodeFilters,
-  pagination?: PaginationParams
-): Promise<PaginatedResult<SelectGraphNode>> {
-  const limit = clampLimit(pagination?.limit)
-  const cursor = pagination?.cursor ? decodeCursor(pagination.cursor) : null
-
+/** Translate the optional node filters into SQL conditions. */
+function buildNodeFilterConditions(filters?: GraphNodeFilters): SQL[] {
   const conditions: SQL[] = []
 
   if (filters?.nodeType) {
@@ -157,6 +182,9 @@ export async function queryGraphNodes(
   }
   if (filters?.nodeClass) {
     conditions.push(eq(graphNodes.nodeClass, filters.nodeClass))
+  }
+  if (filters?.status) {
+    conditions.push(eq(graphNodes.status, filters.status))
   }
   if (filters?.search) {
     // Escape ILIKE special characters: backslash first, then wildcards
@@ -171,6 +199,18 @@ export async function queryGraphNodes(
       )
     }
   }
+
+  return conditions
+}
+
+export async function queryGraphNodes(
+  filters?: GraphNodeFilters,
+  pagination?: PaginationParams
+): Promise<PaginatedResult<PublicGraphNode>> {
+  const limit = clampLimit(pagination?.limit)
+  const cursor = pagination?.cursor ? decodeCursor(pagination.cursor) : null
+
+  const conditions: SQL[] = buildNodeFilterConditions(filters)
 
   // Cursor condition: fetch rows older than cursor (descending order)
   if (cursor) {
@@ -188,7 +228,7 @@ export async function queryGraphNodes(
   // Fetch limit + 1 to detect hasMore
   const rows = await executeQuery(
     (db) => {
-      const query = db.select().from(graphNodes)
+      const query = db.select(publicNodeColumns).from(graphNodes)
       const ordered = conditions.length > 0
         ? query.where(and(...conditions)).orderBy(desc(graphNodes.createdAt), desc(graphNodes.id))
         : query.orderBy(desc(graphNodes.createdAt), desc(graphNodes.id))
@@ -208,11 +248,11 @@ export async function queryGraphNodes(
 
 export async function queryGraphNode(
   nodeId: string
-): Promise<SelectGraphNode | null> {
+): Promise<PublicGraphNode | null> {
   const [node] = await executeQuery(
     (db) =>
       db
-        .select()
+        .select(publicNodeColumns)
         .from(graphNodes)
         .where(eq(graphNodes.id, nodeId))
         .limit(1),
@@ -224,7 +264,7 @@ export async function queryGraphNode(
 export async function insertGraphNode(
   input: CreateNodeInput,
   createdBy: number
-): Promise<SelectGraphNode> {
+): Promise<PublicGraphNode> {
   const [newNode] = await executeQuery(
     (db) =>
       db
@@ -237,7 +277,7 @@ export async function insertGraphNode(
           metadata: input.metadata ?? {},
           createdBy,
         })
-        .returning(),
+        .returning(publicNodeColumns),
     "insertGraphNode"
   )
   return newNode
@@ -246,7 +286,7 @@ export async function insertGraphNode(
 export async function patchGraphNode(
   nodeId: string,
   input: UpdateNodeInput
-): Promise<SelectGraphNode | null> {
+): Promise<PublicGraphNode | null> {
   const setValues: Record<string, unknown> = {
     updatedAt: new Date(),
   }
@@ -264,7 +304,7 @@ export async function patchGraphNode(
         .update(graphNodes)
         .set(setValues)
         .where(eq(graphNodes.id, nodeId))
-        .returning(),
+        .returning(publicNodeColumns),
     "patchGraphNode"
   )
   return updated ?? null

@@ -77,9 +77,39 @@ export const DECISION_EDGE_TYPES = [
   "WOULD_REQUIRE",     // decision → constraint (implementing this would require that)
   "CONDITION",         // condition → decision (this condition applies to that decision)
   "REJECTED",          // person → decision (person rejected this alternative)
+  // Decision lifecycle + DACI accountability + entity resolution (Issue #1252)
+  "SUPERSEDED_BY",     // decision → decision (old decision superseded by new one)
+  "SAME_AS",           // any → any (non-destructive entity-resolution canonicalization)
+  "CONSULTED",         // decision → person (person was consulted — DACI "C")
+  "NOTIFIED",          // decision → person (person was informed — DACI "I")
 ] as const
 
 export type DecisionEdgeType = typeof DECISION_EDGE_TYPES[number]
+
+// ============================================
+// Decision Lifecycle Status (Issue #1252)
+// ============================================
+
+/**
+ * MADR 4.0 decision lifecycle statuses. Stored on the nullable
+ * `graph_nodes.status` column for `decision`-typed nodes only.
+ *   - proposed  — under consideration, not yet adopted
+ *   - accepted  — the currently-in-force decision (default for a captured decision)
+ *   - superseded — replaced by a newer decision (see `superseded_at` + SUPERSEDED_BY)
+ *   - rejected  — an alternative that was considered and not adopted
+ */
+export const DECISION_STATUSES = [
+  "proposed",
+  "accepted",
+  "superseded",
+  "rejected",
+] as const
+
+export type DecisionStatus = typeof DECISION_STATUSES[number]
+
+export function isDecisionStatus(value: unknown): value is DecisionStatus {
+  return typeof value === "string" && (DECISION_STATUSES as readonly string[]).includes(value)
+}
 
 /**
  * Human-readable descriptions for each edge type.
@@ -104,6 +134,10 @@ export const DECISION_EDGE_TYPE_DESCRIPTIONS: Record<DecisionEdgeType, string> =
   WOULD_REQUIRE:    "Implementing the source decision would require the target",
   CONDITION:        "Source condition applies to the target decision",
   REJECTED:         "Source person rejected the target decision/alternative",
+  SUPERSEDED_BY:    "Source decision was superseded by the target decision",
+  SAME_AS:          "Source node is the same real-world entity as the target node (non-destructive canonicalization)",
+  CONSULTED:        "The target person was consulted about the source decision (DACI: Consulted)",
+  NOTIFIED:         "The target person was notified/informed of the source decision (DACI: Informed)",
 }
 
 // ============================================
@@ -283,6 +317,10 @@ Use these edge types to connect nodes:
 - **WOULD_REQUIRE** — Implementing a decision would require something
 - **CONDITION** — A condition applies to a decision
 - **REJECTED** — A person rejected an alternative
+- **SUPERSEDED_BY** — An older decision was superseded by a newer one (marks the old one superseded)
+- **SAME_AS** — Two nodes are the same real-world entity (non-destructive canonicalization)
+- **CONSULTED** — A person was consulted about a decision (DACI: Consulted)
+- **NOTIFIED** — A person was notified/informed of a decision (DACI: Informed)
 
 ## Completeness
 A decision is considered complete when it has ALL of the following:

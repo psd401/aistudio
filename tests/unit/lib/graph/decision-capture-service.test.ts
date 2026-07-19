@@ -39,9 +39,12 @@ import {
   type DecisionPayload,
 } from "@/lib/graph/decision-capture-service"
 import { executeTransaction } from "@/lib/db/drizzle-client"
+import { generateGraphEmbedding } from "@/lib/graph/graph-embeddings"
 
 // Cast the globally-mocked executeTransaction for per-test control
 const mockExecuteTransaction = executeTransaction as jest.MockedFunction<typeof executeTransaction>
+// generateGraphEmbedding is globally mocked (jest.setup.js) → deterministic vector.
+const mockGenerateEmbedding = generateGraphEmbedding as jest.MockedFunction<typeof generateGraphEmbedding>
 
 // ============================================
 // Test Helpers
@@ -52,6 +55,9 @@ function createPayload(overrides: Partial<DecisionPayload> = {}): DecisionPayloa
     decision: "Use PostgreSQL for the data layer",
     decidedBy: "Engineering Team",
     relatedTo: undefined,
+    // `supersedes` carries a zod .transform(), so the parsed type always has the
+    // key present (string[] | undefined) — mirror that in the manual helper.
+    supersedes: undefined,
     ...overrides,
   }
 }
@@ -87,6 +93,7 @@ function createMockTx(options: {
   let nodeInsertCount = 0
   const insertedNodeValues: unknown[] = []
   const insertedEdgeValues: unknown[] = []
+  const updateValues: unknown[] = []
 
   const tx = {
     select: jest.fn().mockReturnValue({
@@ -96,6 +103,13 @@ function createMockTx(options: {
         ),
       }),
     }),
+    // Supersession status update (Issue #1252): tx.update(...).set(...).where(...).
+    update: jest.fn().mockImplementation(() => ({
+      set: jest.fn().mockImplementation((vals: unknown) => {
+        updateValues.push(vals)
+        return { where: jest.fn().mockResolvedValue(undefined) }
+      }),
+    })),
     // Nodes and edges both arrive as batched arrays; edge rows carry edgeType.
     insert: jest.fn().mockImplementation(() => ({
       values: jest.fn().mockImplementation((vals: unknown) => {
@@ -119,6 +133,7 @@ function createMockTx(options: {
     })),
     _getInsertedNodes: () => insertedNodeValues,
     _getInsertedEdges: () => insertedEdgeValues,
+    _getUpdates: () => updateValues,
   }
 
   return tx
@@ -594,7 +609,32 @@ describe("captureStructuredDecision", () => {
 
       const firstNode = tx._getInsertedNodes()[0] as Record<string, unknown>
       const firstMetadata = firstNode.metadata as Record<string, unknown>
-      expect(firstMetadata).toEqual({ source: "api" })
+      // Provenance is written on every agent-authored node (Issue #1252).
+      expect(firstMetadata).toEqual({
+        source: "api",
+        provenance: { extractionMethod: "api", sourceRef: "req-123", confidence: 1 },
+      })
+    })
+
+    it("should strip caller-supplied metadata.dedup (ER audit key is never caller-writable)", async () => {
+      const translated = createTranslatedGraph()
+      mockTranslatePayloadToGraph.mockReturnValue(translated)
+
+      const tx = createMockTx()
+      mockExecuteTransaction.mockImplementation(async (callback: unknown) => {
+        await (callback as (t: unknown) => Promise<void>)(tx)
+      })
+      mockComputeLlmScore.mockResolvedValue({ score: 50, warnings: [], method: "rule-based" } as never)
+
+      const payload = createPayload({
+        metadata: { dedup: { matchedNodeId: "forged-uuid", similarity: 0.99 }, project: "ok" },
+      })
+      await captureStructuredDecision(payload, 1, "req-123")
+
+      const firstNode = tx._getInsertedNodes()[0] as Record<string, unknown>
+      const firstMetadata = firstNode.metadata as Record<string, unknown>
+      expect(firstMetadata).not.toHaveProperty("dedup")
+      expect(firstMetadata).toHaveProperty("project", "ok")
     })
   })
 
@@ -1011,5 +1051,146 @@ describe("commitDecisionSubgraph", () => {
         "req-1"
       )
     ).rejects.toThrow(/Unknown node type/)
+  })
+})
+
+// ============================================
+// Issue #1252 — lifecycle status, supersession, provenance, ER warnings
+// ============================================
+
+const OLD_DECISION_ID = "99999999-9999-9999-9999-999999999999"
+
+describe("decision lifecycle + supersession + provenance (Issue #1252)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockGenerateEmbedding.mockResolvedValue(new Array(512).fill(0.01))
+  })
+
+  /** Mock tx that also records tx.update(...).set(...) calls (supersession). */
+  function lifecycleTx(reusedRows: Array<{ id: string; nodeType: string }> = []) {
+    const insertedNodes: Array<Record<string, unknown>> = []
+    const insertedEdges: Array<Record<string, unknown>> = []
+    const updates: Array<Record<string, unknown>> = []
+    const tx = {
+      select: () => ({ from: () => ({ where: () => Promise.resolve(reusedRows) }) }),
+      insert: () => ({
+        values: (vals: unknown) => {
+          const rows = vals as Array<Record<string, unknown>>
+          if (rows.length > 0 && "edgeType" in rows[0]) {
+            insertedEdges.push(...rows)
+            return { returning: () => Promise.resolve(rows.map((_, i) => ({ id: `edge-${i}` }))) }
+          }
+          insertedNodes.push(...rows)
+          return { returning: () => Promise.resolve(rows.map((_, i) => ({ id: `node-${i}` }))) }
+        },
+      }),
+      update: () => ({
+        set: (vals: unknown) => {
+          updates.push(vals as Record<string, unknown>)
+          return { where: () => Promise.resolve(undefined) }
+        },
+      }),
+    }
+    mockExecuteTransaction.mockImplementation(async (cb: unknown) => {
+      await (cb as (t: unknown) => Promise<void>)(tx)
+    })
+    return { insertedNodes, insertedEdges, updates }
+  }
+
+  it("sets status=superseded + superseded_at on the old node and inserts a SUPERSEDED_BY edge", async () => {
+    // Translated subgraph: new decision + person + a REUSED old decision node
+    // wired SUPERSEDED_BY -> new (mirrors what the translator emits for supersedes[]).
+    mockTranslatePayloadToGraph.mockReturnValue({
+      nodes: [
+        { tempId: "temp-1", name: "Adopt PG", nodeType: "decision", description: null, metadata: { source: "api" } },
+        { tempId: "temp-2", name: "Eng", nodeType: "person", description: null, metadata: { source: "api" } },
+        { tempId: "temp-old", name: OLD_DECISION_ID, nodeType: "decision", description: null, metadata: {}, existingNodeId: OLD_DECISION_ID },
+      ],
+      edges: [
+        { sourceTempId: "temp-2", targetTempId: "temp-1", edgeType: "PROPOSED" },
+        { sourceTempId: "temp-old", targetTempId: "temp-1", edgeType: "SUPERSEDED_BY" },
+      ],
+      decisionTempId: "temp-1",
+    })
+    mockComputeLlmScore.mockResolvedValue({ score: 75, warnings: [], method: "rule-based" } as never)
+    const { insertedEdges, updates } = lifecycleTx([{ id: OLD_DECISION_ID, nodeType: "decision" }])
+
+    await captureStructuredDecision(createPayload(), 1, "req-1")
+
+    expect(insertedEdges.some((e) => e.edgeType === "SUPERSEDED_BY")).toBe(true)
+    expect(updates).toHaveLength(1)
+    expect(updates[0]).toMatchObject({ status: "superseded" })
+    expect(updates[0].supersededAt).toBeInstanceOf(Date)
+  })
+
+  it("does NOT run a status update when there is no SUPERSEDED_BY edge", async () => {
+    mockTranslatePayloadToGraph.mockReturnValue(createTranslatedGraph())
+    mockComputeLlmScore.mockResolvedValue({ score: 50, warnings: [], method: "rule-based" } as never)
+    const { updates } = lifecycleTx()
+
+    await captureStructuredDecision(createPayload(), 1, "req-1")
+
+    expect(updates).toHaveLength(0)
+  })
+
+  it("stamps new decision nodes accepted, rejected alternatives rejected, and non-decisions null", async () => {
+    mockTranslatePayloadToGraph.mockReturnValue({
+      nodes: [
+        { tempId: "temp-1", name: "Adopt PG", nodeType: "decision", description: null, metadata: { source: "api" } },
+        { tempId: "temp-2", name: "Use Mongo", nodeType: "decision", description: null, metadata: { source: "api", rejected: true } },
+        { tempId: "temp-3", name: "Eng", nodeType: "person", description: null, metadata: { source: "api" } },
+      ],
+      edges: [],
+      decisionTempId: "temp-1",
+    })
+    mockComputeLlmScore.mockResolvedValue({ score: 50, warnings: [], method: "rule-based" } as never)
+    const { insertedNodes } = lifecycleTx()
+
+    await captureStructuredDecision(createPayload(), 1, "req-1")
+
+    const byName = (name: string) => insertedNodes.find((n) => n.name === name) as Record<string, unknown>
+    expect(byName("Adopt PG").status).toBe("accepted")
+    expect(byName("Use Mongo").status).toBe("rejected")
+    expect(byName("Eng").status).toBeNull()
+  })
+
+  it("writes PROV-O provenance on nodes and edges (extractionMethod=agent when agentId set)", async () => {
+    mockTranslatePayloadToGraph.mockReturnValue({
+      nodes: [
+        { tempId: "temp-1", name: "Adopt PG", nodeType: "decision", description: null, metadata: { source: "agent", agentId: "claude" } },
+        { tempId: "temp-2", name: "Eng", nodeType: "person", description: null, metadata: { source: "agent" } },
+      ],
+      edges: [{ sourceTempId: "temp-2", targetTempId: "temp-1", edgeType: "PROPOSED" }],
+      decisionTempId: "temp-1",
+    })
+    mockComputeLlmScore.mockResolvedValue({ score: 50, warnings: [], method: "rule-based" } as never)
+    const { insertedNodes, insertedEdges } = lifecycleTx()
+
+    await captureStructuredDecision(createPayload({ agentId: "claude" }), 7, "req-9")
+
+    const decision = insertedNodes.find((n) => n.nodeType === "decision") as { metadata: Record<string, unknown> }
+    expect(decision.metadata.provenance).toEqual({
+      extractionMethod: "agent",
+      sourceRef: "claude",
+      confidence: 1,
+    })
+    expect((insertedEdges[0].metadata as Record<string, unknown>).provenance).toEqual({
+      extractionMethod: "agent",
+      sourceRef: "claude",
+      confidence: 1,
+    })
+  })
+
+  it("threads entity-resolution degradation warnings into the result (capture never lost)", async () => {
+    mockTranslatePayloadToGraph.mockReturnValue(createTranslatedGraph())
+    mockComputeLlmScore.mockResolvedValue({ score: 50, warnings: [], method: "rule-based" } as never)
+    lifecycleTx()
+    // First (and only, due to short-circuit) embed call fails → ER degrades.
+    mockGenerateEmbedding.mockRejectedValueOnce(new Error("Bedrock timeout"))
+
+    const result = await captureStructuredDecision(createPayload(), 1, "req-1")
+
+    expect(result.decisionNodeId).toBeDefined()
+    expect(result.warnings.some((w) => /Entity resolution unavailable/.test(w))).toBe(true)
   })
 })

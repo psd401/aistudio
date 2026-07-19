@@ -42,6 +42,23 @@ test.describe('Decision graph admin view (#1251)', () => {
     })
     expect(res.status()).toBe(201)
 
+    const decisionId = ((await res.json()) as { data: { decisionNodeId: string } }).data
+      .decisionNodeId
+
+    // Entity resolution (#1252) may auto-reuse a near-identical person/evidence
+    // node from a previous run (the names differ only by tag, which embeds at
+    // >=0.90 similarity), so only the DECISION node is guaranteed to carry this
+    // run's tag. Verify the person/evidence roles are attached via the package
+    // endpoint — reused or fresh — and the UI via the decision row.
+    const pkgRes = await page.request.get(`/api/v1/graph/nodes/${decisionId}/package`)
+    expect(pkgRes.status()).toBe(200)
+    const pkg = (await pkgRes.json()) as {
+      data: { persons: unknown[]; evidence: unknown[]; conditions: unknown[] }
+    }
+    expect(pkg.data.persons.length).toBeGreaterThanOrEqual(1)
+    expect(pkg.data.evidence.length).toBeGreaterThanOrEqual(1)
+    expect(pkg.data.conditions.length).toBeGreaterThanOrEqual(1)
+
     await page.goto('/admin/graph')
     await expect(page.getByRole('heading', { name: 'Context Graph' })).toBeVisible({ timeout: 20000 })
 
@@ -50,10 +67,9 @@ test.describe('Decision graph admin view (#1251)', () => {
     await expect(search).toBeVisible({ timeout: 15000 })
     await search.fill(tag)
 
-    // The decision, person, and evidence node rows all match the tag.
+    // The decision node row matches the tag (person/evidence may be deduped
+    // onto prior-run nodes whose names carry an older tag).
     await expect(page.getByText(`${tag} adopt Chromebooks`).first()).toBeVisible({ timeout: 15000 })
-    await expect(page.getByText(`${tag} Technology Committee`).first()).toBeVisible({ timeout: 15000 })
-    await expect(page.getByText(`${tag} TCO analysis shows savings`).first()).toBeVisible({ timeout: 15000 })
 
     await page.screenshot({
       path: `.verification/decision-graph-admin-view-${testInfo.project.name}.png`,
