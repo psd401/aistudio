@@ -115,8 +115,11 @@ export interface SemanticSearchOptions {
 // ============================================
 
 function clampDepth(depth?: number): number {
-  if (!depth || depth < 1) return DEFAULT_PACKAGE_DEPTH
-  return Math.min(depth, MAX_PACKAGE_DEPTH)
+  // Floor first: MCP passes raw numbers, and a fractional depth would silently
+  // change the recursive CTE's `r.depth < maxDepth` semantics.
+  const wholeDepth = depth === undefined ? Number.NaN : Math.floor(depth)
+  if (!wholeDepth || wholeDepth < 1) return DEFAULT_PACKAGE_DEPTH
+  return Math.min(wholeDepth, MAX_PACKAGE_DEPTH)
 }
 
 function toPackageNode(row: SelectGraphNode, depth: number): PackageNode {
@@ -276,9 +279,7 @@ export async function semanticSearchNodes(
 ): Promise<SemanticMatch[]> {
   const limit = Math.min(Math.max(options.limit ?? DEFAULT_SEMANTIC_LIMIT, 1), MAX_SEMANTIC_LIMIT)
   const threshold = options.threshold ?? DEFAULT_SEMANTIC_THRESHOLD
-  const nodeType = options.nodeType
-  const nodeClass = options.nodeClass
-  const status = options.status
+  const { nodeType, nodeClass, status } = options
 
   const embedding = await generateGraphEmbedding(q)
   const vectorLiteral = `[${embedding.join(",")}]`

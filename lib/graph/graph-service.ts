@@ -173,13 +173,8 @@ export function escapeIlikePattern(search: string): string {
     .replace(/[%_]/g, "\\$&") // Then escape ILIKE wildcards
 }
 
-export async function queryGraphNodes(
-  filters?: GraphNodeFilters,
-  pagination?: PaginationParams
-): Promise<PaginatedResult<PublicGraphNode>> {
-  const limit = clampLimit(pagination?.limit)
-  const cursor = pagination?.cursor ? decodeCursor(pagination.cursor) : null
-
+/** Translate the optional node filters into SQL conditions. */
+function buildNodeFilterConditions(filters?: GraphNodeFilters): SQL[] {
   const conditions: SQL[] = []
 
   if (filters?.nodeType) {
@@ -204,6 +199,18 @@ export async function queryGraphNodes(
       )
     }
   }
+
+  return conditions
+}
+
+export async function queryGraphNodes(
+  filters?: GraphNodeFilters,
+  pagination?: PaginationParams
+): Promise<PaginatedResult<PublicGraphNode>> {
+  const limit = clampLimit(pagination?.limit)
+  const cursor = pagination?.cursor ? decodeCursor(pagination.cursor) : null
+
+  const conditions: SQL[] = buildNodeFilterConditions(filters)
 
   // Cursor condition: fetch rows older than cursor (descending order)
   if (cursor) {

@@ -68,6 +68,9 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
     // caller always gets results rather than a 500.
     if (q) {
       try {
+        // Pass the full filter set — the lexical fallback honors these, so the
+        // semantic path must too or a `status=accepted` query could return
+        // superseded decisions.
         const matches = await semanticSearchNodes(q, {
           limit: limit ?? 50,
           nodeType: filters.nodeType,

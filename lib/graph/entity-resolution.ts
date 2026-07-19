@@ -19,7 +19,9 @@
  *
  * Graceful degradation: if the Bedrock embedding call fails, resolution is
  * skipped and the nodes are created WITHOUT dedup (a warning is returned). A
- * decision is never lost to this helper — see the DoD.
+ * per-node similarity-search failure degrades silently (logged only, no
+ * warning — one flaky ANN query should not spam the caller); the node is still
+ * created, just without reuse. A decision is never lost to this helper.
  */
 
 import { sql } from "drizzle-orm"

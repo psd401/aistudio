@@ -615,6 +615,27 @@ describe("captureStructuredDecision", () => {
         provenance: { extractionMethod: "api", sourceRef: "req-123", confidence: 1 },
       })
     })
+
+    it("should strip caller-supplied metadata.dedup (ER audit key is never caller-writable)", async () => {
+      const translated = createTranslatedGraph()
+      mockTranslatePayloadToGraph.mockReturnValue(translated)
+
+      const tx = createMockTx()
+      mockExecuteTransaction.mockImplementation(async (callback: unknown) => {
+        await (callback as (t: unknown) => Promise<void>)(tx)
+      })
+      mockComputeLlmScore.mockResolvedValue({ score: 50, warnings: [], method: "rule-based" } as never)
+
+      const payload = createPayload({
+        metadata: { dedup: { matchedNodeId: "forged-uuid", similarity: 0.99 }, project: "ok" },
+      })
+      await captureStructuredDecision(payload, 1, "req-123")
+
+      const firstNode = tx._getInsertedNodes()[0] as Record<string, unknown>
+      const firstMetadata = firstNode.metadata as Record<string, unknown>
+      expect(firstMetadata).not.toHaveProperty("dedup")
+      expect(firstMetadata).toHaveProperty("project", "ok")
+    })
   })
 
   describe("relatedTo validation", () => {

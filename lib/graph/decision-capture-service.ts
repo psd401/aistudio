@@ -313,8 +313,14 @@ function buildNewNodeValues(
 ) {
   return newNodes.map((node) => {
     const isPrimary = isPrimaryNode(node)
+    // `dedup` is an entity-resolution audit key. ER never writes it for
+    // decision nodes, so nothing would overwrite a caller-forged value on the
+    // primary — strip it from caller metadata (same never-spoofable guarantee
+    // as provenance/completeness below).
+    const userMetadata = isPrimary && options.userMetadata ? { ...options.userMetadata } : {}
+    delete userMetadata.dedup
     const nodeMetadata: Record<string, unknown> = {
-      ...(isPrimary && options.userMetadata ? options.userMetadata : {}),
+      ...userMetadata,
       ...(node.metadata ?? {}),
       // Provenance is written AFTER user/node metadata so a caller can never
       // spoof it, and the completeness snapshot is written last so it wins.
@@ -435,6 +441,28 @@ async function persistDecisionSubgraph(
       throw ErrorFactories.validationFailed([
         { field: "edges", message: "A node cannot connect to itself" },
       ])
+    }
+  }
+
+  // 2b. SUPERSEDED_BY must point at the primary (adopted) decision. The
+  // status-flip in this transaction marks every SUPERSEDED_BY source as
+  // superseded, so a stray edge aimed at a rejected alternative would retire a
+  // real decision in favor of a node that was never adopted. The REST/MCP
+  // translator always targets the primary; this guards the LLM-proposed chat
+  // channel.
+  if (options.primaryDecisionTempId !== undefined) {
+    for (const edge of edges) {
+      if (
+        edge.edgeType.trim() === "SUPERSEDED_BY" &&
+        edge.targetTempId !== options.primaryDecisionTempId
+      ) {
+        throw ErrorFactories.validationFailed([
+          {
+            field: "edges",
+            message: "SUPERSEDED_BY must target the primary decision node in this proposal",
+          },
+        ])
+      }
     }
   }
 
@@ -701,30 +729,25 @@ export async function commitDecisionSubgraph(
 ): Promise<CommitSubgraphResult> {
   const log = createLogger({ requestId, operation: "commitDecisionSubgraph" })
 
-  const nodes: SubgraphNodeInput[] = input.nodes.map((n) => ({
-    tempId: n.tempId,
-    name: n.name,
-    nodeType: n.nodeType,
-    description: n.description ?? null,
-    metadata: { source: "decision-capture", summary: input.summary.substring(0, 200) },
-    existingNodeId: n.existingNodeId,
-  }))
-  const edges: SubgraphEdgeInput[] = input.edges.map((e) => ({
-    sourceTempId: e.sourceTempId,
-    targetTempId: e.targetTempId,
-    edgeType: e.edgeType,
-  }))
-
-  // Recompute completeness over the committed subgraph (rule-based, authoritative).
-  const completeness = scoreDecisionSubgraph(nodes, edges)
+  // Vocabulary first so an off-vocabulary type gets its specific error before
+  // any primary-selection error (persistDecisionSubgraph re-checks harmlessly).
+  assertDecisionVocabulary(input.nodes, input.edges)
 
   // Primary decision node — receives the persisted completeness snapshot. With a
   // single "decision" node it is unambiguous; with several (rejected
   // alternatives are also typed "decision") the LLM must mark exactly one with
   // isPrimary, since array order is not a reliable signal. If the primary is
-  // reused (existingNodeId) or absent, metadata persistence is skipped but the
-  // score is still returned.
+  // reused (existingNodeId), metadata persistence is skipped but the score is
+  // still returned.
   const decisionNodes = input.nodes.filter((n) => n.nodeType.trim() === "decision")
+  if (decisionNodes.length === 0) {
+    throw ErrorFactories.validationFailed([
+      {
+        field: "nodes",
+        message: 'No "decision" node in the proposal — include the decision that was made',
+      },
+    ])
+  }
   const flaggedPrimaries = input.nodes.filter((n) => n.isPrimary)
   if (flaggedPrimaries.length > 1) {
     throw ErrorFactories.validationFailed([
@@ -737,7 +760,7 @@ export async function commitDecisionSubgraph(
     ])
   }
   const primary = flaggedPrimaries[0] ?? (decisionNodes.length === 1 ? decisionNodes[0] : undefined)
-  if (!primary && decisionNodes.length > 1) {
+  if (!primary) {
     throw ErrorFactories.validationFailed([
       {
         field: "nodes",
@@ -746,6 +769,33 @@ export async function commitDecisionSubgraph(
       },
     ])
   }
+
+  const nodes: SubgraphNodeInput[] = input.nodes.map((n) => ({
+    tempId: n.tempId,
+    name: n.name,
+    nodeType: n.nodeType,
+    description: n.description ?? null,
+    metadata: {
+      source: "decision-capture",
+      summary: input.summary.substring(0, 200),
+      // Decision-typed nodes that are not the primary are rejected
+      // alternatives; the marker drives statusForNewNode -> "rejected",
+      // matching the REST/MCP translator's metadata.rejected flag. Without it
+      // the chat channel would store alternatives as status="accepted".
+      ...(n.nodeType.trim() === "decision" && n.tempId !== primary.tempId
+        ? { rejected: true }
+        : {}),
+    },
+    existingNodeId: n.existingNodeId,
+  }))
+  const edges: SubgraphEdgeInput[] = input.edges.map((e) => ({
+    sourceTempId: e.sourceTempId,
+    targetTempId: e.targetTempId,
+    edgeType: e.edgeType,
+  }))
+
+  // Recompute completeness over the committed subgraph (rule-based, authoritative).
+  const completeness = scoreDecisionSubgraph(nodes, edges)
   const persistCompleteness =
     primary && !primary.existingNodeId
       ? { score: completeness.score, method: "rule-based" as const, warnings: completeness.warnings }

@@ -124,6 +124,7 @@ async function handleSearchDecisions(
   const log = createLogger({ action: "mcp.search_decisions" })
   const limit = typeof args.limit === "number" ? args.limit : 50
   const nodeType = typeof args.nodeType === "string" ? args.nodeType : undefined
+  const nodeClass = typeof args.nodeClass === "string" ? args.nodeClass : undefined
 
   // Semantic path (Issue #1252): a non-empty `q` triggers embedding-based
   // paraphrase search over decision nodes. Degrades to lexical ILIKE search on
@@ -135,6 +136,8 @@ async function handleSearchDecisions(
         limit,
         // `search_decisions` defaults to decision nodes; an explicit nodeType overrides.
         nodeType: nodeType ?? "decision",
+        // The lexical branch honors nodeClass, so the semantic branch must too.
+        nodeClass,
       })
       return {
         content: [

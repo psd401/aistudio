@@ -105,6 +105,16 @@ describe("decision-retrieval", () => {
       const pkg = await getDecisionPackage(SEED, { maxDepth: 99 })
       expect(pkg!.depth).toBe(MAX_PACKAGE_DEPTH)
     })
+
+    it("floors fractional depth values (MCP passes raw numbers through)", async () => {
+      mockExecuteQuery
+        .mockResolvedValueOnce([{ id: SEED, depth: 0 }] as never)
+        .mockResolvedValueOnce([node(SEED, "decision", "D")] as never)
+        .mockResolvedValueOnce([] as never)
+
+      const pkg = await getDecisionPackage(SEED, { maxDepth: 2.7 })
+      expect(pkg!.depth).toBe(2)
+    })
   })
 
   describe("semanticSearchNodes", () => {
@@ -142,6 +152,32 @@ describe("decision-retrieval", () => {
     it("throws when the embedding call fails (caller falls back to lexical)", async () => {
       mockGenerateEmbedding.mockRejectedValue(new Error("Bedrock down"))
       await expect(semanticSearchNodes("anything")).rejects.toThrow(/Bedrock down/)
+    })
+
+    it("applies status and nodeClass filters on the semantic path (parity with lexical)", async () => {
+      let capturedQuery: unknown
+      ;(mockExecuteQuery as unknown as jest.Mock).mockImplementationOnce(
+        async (cb: (db: { execute: (q: unknown) => Promise<unknown[]> }) => Promise<unknown>) =>
+          cb({
+            execute: (q: unknown) => {
+              capturedQuery = q
+              return Promise.resolve([])
+            },
+          })
+      )
+
+      await semanticSearchNodes("current database decisions", {
+        status: "accepted",
+        nodeClass: "strategic",
+      })
+
+      // Inspect the drizzle SQL object: the filter fragments and their bound
+      // values must be present exactly when the options are provided.
+      const rendered = require("util").inspect(capturedQuery, { depth: 10 })
+      expect(rendered).toContain("node_class")
+      expect(rendered).toContain("strategic")
+      expect(rendered).toContain("status")
+      expect(rendered).toContain("accepted")
     })
   })
 })
