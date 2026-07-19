@@ -19,6 +19,7 @@ import {
 import {
   captureStructuredDecision,
   createDecisionSchema,
+  describeDecisionError,
 } from "@/lib/graph/decision-capture-service"
 import { isValidationError } from "@/types/error-types"
 import {
@@ -195,10 +196,14 @@ async function handleCaptureDecision(
       ],
     }
   } catch (error) {
+    // describeDecisionError surfaces the specific field messages (off-vocabulary
+    // type, self-referencing edge, duplicate edge) instead of the generic
+    // "Validation failed for N field(s)" — and never a raw Postgres string.
     if (isValidationError(error)) {
-      log.warn("capture_decision validation failed", { error: error.message })
+      const message = describeDecisionError(error)
+      log.warn("capture_decision validation failed", { error: message })
       return {
-        content: [{ type: "text", text: `Validation error: ${error.message}` }],
+        content: [{ type: "text", text: `Validation error: ${message}` }],
         isError: true,
       }
     }
@@ -206,7 +211,7 @@ async function handleCaptureDecision(
       error: error instanceof Error ? error.message : String(error),
     })
     return {
-      content: [{ type: "text", text: `Failed to capture decision: ${error instanceof Error ? error.message : "Unknown error"}` }],
+      content: [{ type: "text", text: `Failed to capture decision: ${describeDecisionError(error)}` }],
       isError: true,
     }
   }

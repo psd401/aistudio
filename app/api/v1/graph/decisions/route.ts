@@ -11,6 +11,7 @@ import { withApiAuth, requireScope, createApiResponse, createErrorResponse, pars
 import {
   captureStructuredDecision,
   createDecisionSchema,
+  describeDecisionError,
 } from "@/lib/graph/decision-capture-service"
 import { isValidationError } from "@/types/error-types"
 import { createLogger } from "@/lib/logger"
@@ -58,8 +59,13 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     )
   } catch (error) {
     if (isValidationError(error)) {
-      log.warn("Decision subgraph validation failed", { error: error.message })
-      return createErrorResponse(requestId, 400, "VALIDATION_ERROR", error.message)
+      // describeDecisionError surfaces the specific field messages ("A node
+      // cannot connect to itself", off-vocabulary type, ...) instead of the
+      // generic "Validation failed for N field(s)" — same text MCP/chat return
+      // (Issue #1251 channel parity).
+      const message = describeDecisionError(error)
+      log.warn("Decision subgraph validation failed", { error: message })
+      return createErrorResponse(requestId, 400, "VALIDATION_ERROR", message)
     }
     log.error("Failed to create decision subgraph", {
       error: error instanceof Error ? error.message : String(error),

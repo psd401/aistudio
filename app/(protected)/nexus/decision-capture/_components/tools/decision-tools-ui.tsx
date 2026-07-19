@@ -332,6 +332,9 @@ const CommittedDecisionRenderer = ({
     )
   }
 
+  const completenessScore = result?.completenessScore
+  const warnings = result?.warnings ?? []
+
   return (
     <Card className="border-green-200 bg-green-50/50">
       <CardHeader className="pb-3">
@@ -347,7 +350,25 @@ const CommittedDecisionRenderer = ({
         <p className="text-xs text-green-700 mt-1">
           {args?.summary || 'Decision saved to context graph.'}
         </p>
+        {typeof completenessScore === 'number' && (
+          <p className="text-xs text-green-800 mt-1" data-testid="commit-completeness">
+            Completeness: {completenessScore}/100
+          </p>
+        )}
       </CardHeader>
+      {warnings.length > 0 && (
+        <CardContent className="pt-0">
+          <div className="flex items-center gap-1 text-xs font-semibold text-green-800 mb-1">
+            <AlertCircle className="h-3 w-3" />
+            To strengthen this decision:
+          </div>
+          <ul className="space-y-0.5 ml-4">
+            {warnings.map((item, idx) => (
+              <li key={idx} className="text-xs text-green-700 list-disc">{item}</li>
+            ))}
+          </ul>
+        </CardContent>
+      )}
     </Card>
   )
 }

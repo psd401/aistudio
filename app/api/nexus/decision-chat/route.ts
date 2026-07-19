@@ -309,7 +309,7 @@ You are analyzing meeting transcripts to extract decisions. Follow these steps:
    - Implicit decisions (agreements reached, options selected)
    - Rejected alternatives (these are also valuable context)
 
-3. **Propose structured subgraphs**: For each decision, use \`propose_decision\` to create a structured proposal with nodes and edges. The completeness check will tell you what's missing.
+3. **Propose structured subgraphs**: For each decision, use \`propose_decision\` to create a structured proposal with nodes and edges. The completeness check will tell you what's missing. When a proposal contains more than one "decision"-typed node (rejected alternatives are also typed "decision"), set \`isPrimary: true\` on the decision that was actually adopted — committing multiple decision nodes without it is rejected.
 
 4. **Ask follow-up questions** when the transcript is vague about:
    - Who proposed or approved the decision

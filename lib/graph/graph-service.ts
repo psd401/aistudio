@@ -126,6 +126,20 @@ function clampLimit(limit?: number): number {
   return Math.min(limit, MAX_LIMIT)
 }
 
+/**
+ * Escape ILIKE pattern metacharacters so user search text is matched literally.
+ * Backslash is escaped FIRST (so it doesn't double-escape the wildcards we add),
+ * then `%` and `_`. Length is capped at 100 chars and trimmed.
+ * Exported for unit testing (Issue #1251).
+ */
+export function escapeIlikePattern(search: string): string {
+  return search
+    .replace(/\\/g, "\\\\") // Escape backslashes first
+    .replace(/[%_]/g, "\\$&") // Then escape ILIKE wildcards
+    .slice(0, 100) // Limit length
+    .trim()
+}
+
 export async function queryGraphNodes(
   filters?: GraphNodeFilters,
   pagination?: PaginationParams
@@ -143,11 +157,7 @@ export async function queryGraphNodes(
   }
   if (filters?.search) {
     // Escape ILIKE special characters: backslash first, then wildcards
-    const sanitized = filters.search
-      .replace(/\\/g, '\\\\')    // Escape backslashes first
-      .replace(/[%_]/g, '\\$&')  // Then escape ILIKE wildcards
-      .slice(0, 100)              // Limit length
-      .trim()
+    const sanitized = escapeIlikePattern(filters.search)
 
     if (sanitized.length > 0) {
       conditions.push(

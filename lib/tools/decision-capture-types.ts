@@ -31,6 +31,12 @@ export interface ProposedNode {
   nodeType: string
   description: string | null
   existingNodeId?: string
+  /**
+   * Marks the primary decision — the one actually adopted. Required when a
+   * proposal contains more than one "decision"-typed node (rejected
+   * alternatives also use nodeType "decision").
+   */
+  isPrimary?: boolean
 }
 
 export interface ProposedEdge {
@@ -61,9 +67,27 @@ export interface CommitDecisionArgs {
   summary: string
 }
 
-export interface CommitDecisionResult {
-  success: boolean
-  committedNodeIds: string[]
-  committedEdgeIds: string[]
-  error?: string
-}
+/**
+ * Discriminated on `success` so consumers get static guarantees: completeness
+ * fields exist exactly when the commit succeeded, `error` exactly when it
+ * failed.
+ */
+export type CommitDecisionResult =
+  | {
+      success: true
+      committedNodeIds: string[]
+      committedEdgeIds: string[]
+      /** Rule-based completeness score (0-100) recomputed over the committed subgraph. */
+      completenessScore: number
+      /** Always "rule-based" for the committed subgraph (authoritative). */
+      completenessMethod: "rule-based"
+      /** Completeness warnings (missing decision elements). */
+      warnings: string[]
+    }
+  | {
+      success: false
+      committedNodeIds: string[]
+      committedEdgeIds: string[]
+      /** Friendly, user-facing error message (never a raw DB string). */
+      error: string
+    }
