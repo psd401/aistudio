@@ -23,13 +23,18 @@ export const MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "search_decisions",
     description:
-      "Search decision graph nodes by type, class, or text query. Returns paginated results.",
+      "Search decision graph nodes. Provide `q` for semantic (embedding-based) paraphrase search over decision nodes, or `query` for literal text (ILIKE) search. Returns paginated results.",
     inputSchema: {
       type: "object",
       properties: {
+        q: {
+          type: "string",
+          description:
+            "Semantic search query — returns paraphrase matches (embedding-based) over decision nodes. Falls back to literal search if embeddings are unavailable.",
+        },
         query: {
           type: "string",
-          description: "Text search across node names and descriptions",
+          description: "Literal text search (ILIKE) across node names and descriptions",
         },
         nodeType: {
           type: "string",
@@ -102,6 +107,21 @@ Example:
           items: { type: "string" },
           description: "Alternative options that were considered and rejected (max 20 items)",
         },
+        consulted: {
+          type: "array",
+          items: { type: "string" },
+          description: "DACI: people/roles consulted about the decision — each linked via a CONSULTED edge (max 20 items)",
+        },
+        notified: {
+          type: "array",
+          items: { type: "string" },
+          description: "DACI: people/roles notified/informed of the decision — each linked via a NOTIFIED edge (max 20 items)",
+        },
+        supersedes: {
+          type: "array",
+          items: { type: "string" },
+          description: "UUIDs of existing decision nodes this decision supersedes — each is marked status=superseded and linked SUPERSEDED_BY (max 20)",
+        },
         relatedTo: {
           type: "array",
           items: { type: "string" },
@@ -170,13 +190,18 @@ Example:
   {
     name: "get_decision_graph",
     description:
-      "Get details of a specific decision node and all its connections (incoming and outgoing edges).",
+      "Get a self-contained decision package for a node: the decision plus its evidence, constraints, reasoning, persons, conditions, outcomes, and supersession chain, gathered by a depth-bounded graph expansion.",
     inputSchema: {
       type: "object",
       properties: {
         nodeId: {
           type: "string",
           description: "UUID of the graph node to retrieve",
+        },
+        depth: {
+          type: "number",
+          description: "Graph-expansion radius in hops (1-3, default 2)",
+          default: 2,
         },
       },
       required: ["nodeId"],

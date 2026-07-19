@@ -13,17 +13,17 @@ import {
   IconArrowLeft,
   IconLoader2,
 } from "@tabler/icons-react"
-import type { SelectGraphNode } from "@/lib/db/types"
+import type { PublicGraphNode } from "@/lib/graph"
 import type { NodeConnection } from "@/lib/graph"
 
 interface NodeDetailSheetProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  node: SelectGraphNode | null
+  node: PublicGraphNode | null
   connections: NodeConnection[]
   loadingConnections: boolean
-  onEdit: (node: SelectGraphNode) => void
-  onDelete: (node: SelectGraphNode) => void
+  onEdit: (node: PublicGraphNode) => void
+  onDelete: (node: PublicGraphNode) => void
 }
 
 export function NodeDetailSheet({

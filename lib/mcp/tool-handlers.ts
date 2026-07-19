@@ -13,9 +13,11 @@ import type { McpToolHandler, McpToolResult } from "./types"
 import { createLogger } from "@/lib/logger"
 import {
   queryGraphNodes,
-  queryGraphNode,
-  queryNodeConnections,
 } from "@/lib/graph/graph-service"
+import {
+  getDecisionPackage,
+  semanticSearchNodes,
+} from "@/lib/graph/decision-retrieval"
 import {
   captureStructuredDecision,
   createDecisionSchema,
@@ -119,14 +121,57 @@ async function handleDescribeCapabilities(
 async function handleSearchDecisions(
   args: Record<string, unknown>,
 ): Promise<McpToolResult> {
+  const log = createLogger({ action: "mcp.search_decisions" })
+  const limit = typeof args.limit === "number" ? args.limit : 50
+  const nodeType = typeof args.nodeType === "string" ? args.nodeType : undefined
+
+  // Semantic path (Issue #1252): a non-empty `q` triggers embedding-based
+  // paraphrase search over decision nodes. Degrades to lexical ILIKE search on
+  // the same text if the embedding call fails — never a hard error.
+  const q = typeof args.q === "string" && args.q.trim().length > 0 ? args.q.trim() : undefined
+  if (q) {
+    try {
+      const matches = await semanticSearchNodes(q, {
+        limit,
+        // `search_decisions` defaults to decision nodes; an explicit nodeType overrides.
+        nodeType: nodeType ?? "decision",
+      })
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              nodes: matches.map((m) => ({
+                id: m.id,
+                name: m.name,
+                nodeType: m.nodeType,
+                nodeClass: m.nodeClass,
+                description: m.description,
+                status: m.status,
+                similarity: m.similarity,
+              })),
+              method: "semantic",
+            }),
+          },
+        ],
+      }
+    } catch (error) {
+      log.warn("Semantic search failed, falling back to lexical", {
+        error: error instanceof Error ? error.message : String(error),
+      })
+      // fall through to lexical search using `q` as the ILIKE term
+    }
+  }
+
   const result = await queryGraphNodes(
     {
-      search: typeof args.query === "string" ? args.query : undefined,
-      nodeType: typeof args.nodeType === "string" ? args.nodeType : undefined,
+      search:
+        q ?? (typeof args.query === "string" ? args.query : undefined),
+      nodeType,
       nodeClass: typeof args.nodeClass === "string" ? args.nodeClass : undefined,
     },
     {
-      limit: typeof args.limit === "number" ? args.limit : 50,
+      limit,
       cursor: typeof args.cursor === "string" ? args.cursor : undefined,
     }
   )
@@ -142,9 +187,11 @@ async function handleSearchDecisions(
             nodeType: n.nodeType,
             nodeClass: n.nodeClass,
             description: n.description,
+            status: n.status,
             createdAt: n.createdAt,
           })),
           nextCursor: result.nextCursor,
+          method: q ? "lexical-fallback" : "lexical",
         }),
       },
     ],
@@ -386,12 +433,14 @@ async function handleGetDecisionGraph(
     }
   }
 
-  const [node, connections] = await Promise.all([
-    queryGraphNode(nodeId),
-    queryNodeConnections(nodeId),
-  ])
+  // Decision-package retrieval (Issue #1252): the decision plus its evidence,
+  // constraints, reasoning, persons, conditions, outcomes, and supersession
+  // chain via a depth-bounded, cycle-safe recursive CTE — one self-contained
+  // response instead of a single 1-hop connection list.
+  const depth = typeof args.depth === "number" ? args.depth : undefined
+  const pkg = await getDecisionPackage(nodeId, { maxDepth: depth })
 
-  if (!node) {
+  if (!pkg) {
     return {
       content: [{ type: "text", text: `Node not found: ${nodeId}` }],
       isError: true,
@@ -403,20 +452,17 @@ async function handleGetDecisionGraph(
       {
         type: "text",
         text: JSON.stringify({
-          node: {
-            id: node.id,
-            name: node.name,
-            nodeType: node.nodeType,
-            nodeClass: node.nodeClass,
-            description: node.description,
-            metadata: node.metadata,
-            createdAt: node.createdAt,
-          },
-          connections: connections.map((c) => ({
-            direction: c.direction,
-            edgeType: c.edge.edgeType,
-            connectedNode: c.connectedNode,
-          })),
+          decision: pkg.decision,
+          persons: pkg.persons,
+          evidence: pkg.evidence,
+          constraints: pkg.constraints,
+          reasoning: pkg.reasoning,
+          conditions: pkg.conditions,
+          outcomes: pkg.outcomes,
+          policies: pkg.policies,
+          edges: pkg.edges,
+          supersessionChain: pkg.supersessionChain,
+          depth: pkg.depth,
         }),
       },
     ],
