@@ -71,6 +71,8 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
         const matches = await semanticSearchNodes(q, {
           limit: limit ?? 50,
           nodeType: filters.nodeType,
+          nodeClass: filters.nodeClass,
+          status: filters.status,
         })
         log.info("Semantic graph node search", { count: matches.length, userId: auth.userId })
         return createApiResponse(
