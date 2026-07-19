@@ -63,7 +63,7 @@ CREATE INDEX IF NOT EXISTS idx_graph_nodes_embedding_hnsw
 -- -----------------------------------------------------
 UPDATE graph_nodes
   SET status = 'accepted'
-  WHERE node_type = 'decision' AND status IS NULL;
+  WHERE node_type = 'decision';
 
 -- -----------------------------------------------------
 -- 4. Seed the graph embedding model setting
