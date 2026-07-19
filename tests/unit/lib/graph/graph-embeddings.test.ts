@@ -93,6 +93,11 @@ describe("graph-embeddings", () => {
       await expect(generateGraphEmbedding("x")).rejects.toThrow(/unexpected embedding shape/)
     })
 
+    it("throws instead of crashing when the response body decodes to null", async () => {
+      mockSend.mockResolvedValue({ body: new TextEncoder().encode("null") })
+      await expect(generateGraphEmbedding("x")).rejects.toThrow(/unexpected embedding shape/)
+    })
+
     it("propagates Bedrock errors (so callers can degrade)", async () => {
       mockSend.mockRejectedValue(new Error("AccessDeniedException"))
       await expect(generateGraphEmbedding("x")).rejects.toThrow(/AccessDeniedException/)

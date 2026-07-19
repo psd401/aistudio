@@ -103,15 +103,17 @@ export async function generateGraphEmbedding(text: string): Promise<number[]> {
 
     const parsed = JSON.parse(
       new TextDecoder().decode(response.body)
-    ) as TitanEmbedResponse
+    ) as TitanEmbedResponse | null
 
     if (
+      !parsed ||
+      typeof parsed !== "object" ||
       !Array.isArray(parsed.embedding) ||
       parsed.embedding.length !== GRAPH_EMBEDDING_DIMENSIONS
     ) {
       throw new Error(
         `generateGraphEmbedding: unexpected embedding shape from ${modelId} — expected ${GRAPH_EMBEDDING_DIMENSIONS} dims, got ${
-          Array.isArray(parsed.embedding) ? parsed.embedding.length : "none"
+          parsed && Array.isArray(parsed.embedding) ? parsed.embedding.length : "none"
         }`
       )
     }
