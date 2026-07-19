@@ -35,6 +35,8 @@ const MAX_SEMANTIC_LIMIT = 50
 /** Minimum cosine similarity for a semantic hit (paraphrase-tolerant). */
 const DEFAULT_SEMANTIC_THRESHOLD = 0.4
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 // ============================================
 // Types
 // ============================================
@@ -101,6 +103,10 @@ export interface SemanticSearchOptions {
   limit?: number
   /** Restrict to a node type (e.g. "decision" for a decision search). */
   nodeType?: string
+  /** Restrict to a node class. */
+  nodeClass?: string
+  /** Restrict to a decision lifecycle status (e.g. "accepted" for current decisions). */
+  status?: string
   threshold?: number
 }
 
@@ -141,6 +147,10 @@ export async function getDecisionPackage(
   nodeId: string,
   options: { maxDepth?: number } = {}
 ): Promise<DecisionPackage | null> {
+  if (!UUID_REGEX.test(nodeId)) {
+    return null
+  }
+
   const maxDepth = clampDepth(options.maxDepth)
   const log = createLogger({ operation: "getDecisionPackage" })
 
@@ -267,6 +277,8 @@ export async function semanticSearchNodes(
   const limit = Math.min(Math.max(options.limit ?? DEFAULT_SEMANTIC_LIMIT, 1), MAX_SEMANTIC_LIMIT)
   const threshold = options.threshold ?? DEFAULT_SEMANTIC_THRESHOLD
   const nodeType = options.nodeType
+  const nodeClass = options.nodeClass
+  const status = options.status
 
   const embedding = await generateGraphEmbedding(q)
   const vectorLiteral = `[${embedding.join(",")}]`
@@ -285,6 +297,8 @@ export async function semanticSearchNodes(
         FROM graph_nodes
         WHERE embedding IS NOT NULL
           ${nodeType ? sql`AND node_type = ${nodeType}` : sql``}
+          ${nodeClass ? sql`AND node_class = ${nodeClass}` : sql``}
+          ${status ? sql`AND status = ${status}` : sql``}
           AND 1 - (embedding <=> ${vectorLiteral}::vector) >= ${threshold}
         ORDER BY embedding <=> ${vectorLiteral}::vector
         LIMIT ${limit}

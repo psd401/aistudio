@@ -50,6 +50,12 @@ describe("decision-retrieval", () => {
       expect(pkg).toBeNull()
     })
 
+    it("returns null for a malformed node id without querying the database", async () => {
+      const pkg = await getDecisionPackage("not-a-uuid")
+      expect(pkg).toBeNull()
+      expect(mockExecuteQuery).not.toHaveBeenCalled()
+    })
+
     it("assembles the package, groups nodes by type, and derives the supersession chain", async () => {
       mockExecuteQuery
         // 1) reachable CTE
