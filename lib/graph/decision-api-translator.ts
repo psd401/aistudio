@@ -33,6 +33,12 @@ export interface DecisionApiPayload {
   constraints?: string[]
   conditions?: string[]
   alternatives_considered?: string[]
+  /** DACI: people consulted about the decision (person node + CONSULTED edge). */
+  consulted?: string[]
+  /** DACI: people notified/informed of the decision (person node + NOTIFIED edge). */
+  notified?: string[]
+  /** Existing decision node UUIDs this decision supersedes (SUPERSEDED_BY + status). */
+  supersedes?: string[]
   relatedTo?: string[]
   agentId?: string
 }
@@ -131,6 +137,28 @@ export function translatePayloadToGraph(
     metadata: { ...baseMetadata },
   })
 
+  /**
+   * Add one typed node per item and connect it to the decision. `dir` picks the
+   * edge direction: "toDecision" (item → decision, e.g. evidence INFORMED) or
+   * "fromDecision" (decision → item, e.g. decision CONSULTED person).
+   */
+  function addLinked(
+    items: string[] | undefined,
+    nodeType: string,
+    edgeType: string,
+    dir: "toDecision" | "fromDecision"
+  ): void {
+    for (const name of items ?? []) {
+      const tempId = nextTempId()
+      nodes.push({ tempId, name, nodeType, description: null, metadata: { source } })
+      edges.push(
+        dir === "toDecision"
+          ? { sourceTempId: tempId, targetTempId: decisionTempId, edgeType }
+          : { sourceTempId: decisionTempId, targetTempId: tempId, edgeType }
+      )
+    }
+  }
+
   // 2. Person node (decidedBy) -> PROPOSED -> decision
   const personTempId = nextTempId()
   nodes.push({
@@ -138,112 +166,53 @@ export function translatePayloadToGraph(
     name: payload.decidedBy,
     nodeType: "person",
     description: null,
-    metadata: { source: baseMetadata.source },
+    metadata: { source },
   })
-  edges.push({
-    sourceTempId: personTempId,
-    targetTempId: decisionTempId,
-    edgeType: "PROPOSED",
-  })
+  edges.push({ sourceTempId: personTempId, targetTempId: decisionTempId, edgeType: "PROPOSED" })
 
-  // 3. Evidence nodes
-  if (payload.evidence) {
-    for (const ev of payload.evidence) {
-      const evTempId = nextTempId()
-      nodes.push({
-        tempId: evTempId,
-        name: ev,
-        nodeType: "evidence",
-        description: null,
-        metadata: { source: baseMetadata.source },
-      })
-      edges.push({
-        sourceTempId: evTempId,
-        targetTempId: decisionTempId,
-        edgeType: "INFORMED",
-      })
-    }
-  }
+  // 3-6. Evidence / constraints / reasoning / conditions -> decision
+  addLinked(payload.evidence, "evidence", "INFORMED", "toDecision")
+  addLinked(payload.constraints, "constraint", "CONSTRAINED", "toDecision")
+  addLinked(payload.reasoning ? [payload.reasoning] : undefined, "reasoning", "PART_OF", "toDecision")
+  addLinked(payload.conditions, "condition", "CONDITION", "toDecision")
 
-  // 4. Constraint nodes
-  if (payload.constraints) {
-    for (const c of payload.constraints) {
-      const cTempId = nextTempId()
-      nodes.push({
-        tempId: cTempId,
-        name: c,
-        nodeType: "constraint",
-        description: null,
-        metadata: { source: baseMetadata.source },
-      })
-      edges.push({
-        sourceTempId: cTempId,
-        targetTempId: decisionTempId,
-        edgeType: "CONSTRAINED",
-      })
-    }
-  }
-
-  // 5. Reasoning node (optional)
-  if (payload.reasoning) {
-    const rTempId = nextTempId()
+  // 7. Alternatives considered (rejected decisions): person -REJECTED-> alt,
+  //    alt -COMPARED_AGAINST-> decision.
+  for (const alt of payload.alternatives_considered ?? []) {
+    const altTempId = nextTempId()
     nodes.push({
-      tempId: rTempId,
-      name: payload.reasoning,
-      nodeType: "reasoning",
+      tempId: altTempId,
+      name: alt,
+      nodeType: "decision",
       description: null,
-      metadata: { source: baseMetadata.source },
+      metadata: { source, rejected: true },
     })
-    edges.push({
-      sourceTempId: rTempId,
-      targetTempId: decisionTempId,
-      edgeType: "PART_OF",
-    })
+    edges.push({ sourceTempId: personTempId, targetTempId: altTempId, edgeType: "REJECTED" })
+    edges.push({ sourceTempId: altTempId, targetTempId: decisionTempId, edgeType: "COMPARED_AGAINST" })
   }
 
-  // 6. Condition nodes
-  if (payload.conditions) {
-    for (const cond of payload.conditions) {
-      const condTempId = nextTempId()
-      nodes.push({
-        tempId: condTempId,
-        name: cond,
-        nodeType: "condition",
-        description: null,
-        metadata: { source: baseMetadata.source },
-      })
-      edges.push({
-        sourceTempId: condTempId,
-        targetTempId: decisionTempId,
-        edgeType: "CONDITION",
-      })
-    }
-  }
+  // 8-9. DACI parties (Issue #1252): decision -CONSULTED/NOTIFIED-> person.
+  addLinked(payload.consulted, "person", "CONSULTED", "fromDecision")
+  addLinked(payload.notified, "person", "NOTIFIED", "fromDecision")
 
-  // 7. Alternatives considered (rejected decisions)
-  if (payload.alternatives_considered) {
-    for (const alt of payload.alternatives_considered) {
-      const altTempId = nextTempId()
-      nodes.push({
-        tempId: altTempId,
-        name: alt,
-        nodeType: "decision",
-        description: null,
-        metadata: { source: baseMetadata.source, rejected: true },
-      })
-      // person -> REJECTED -> alt
-      edges.push({
-        sourceTempId: personTempId,
-        targetTempId: altTempId,
-        edgeType: "REJECTED",
-      })
-      // alt -> COMPARED_AGAINST -> decision
-      edges.push({
-        sourceTempId: altTempId,
-        targetTempId: decisionTempId,
-        edgeType: "COMPARED_AGAINST",
-      })
-    }
+  // 10. Supersession (Issue #1252). Each superseded id becomes a REUSED decision
+  //     node (existingNodeId) linked SUPERSEDED_BY (old -> new decision). The
+  //     shared persist path flips the old node's status to "superseded" and sets
+  //     superseded_at from the presence of these edges — the single mechanism all
+  //     three channels share. `name` is a placeholder (reused nodes are never
+  //     inserted, so it is unused); the persist layer verifies the node exists
+  //     and is a "decision" before wiring the edge.
+  for (const supersededId of payload.supersedes ?? []) {
+    const supTempId = nextTempId()
+    nodes.push({
+      tempId: supTempId,
+      name: supersededId,
+      nodeType: "decision",
+      description: null,
+      metadata: {},
+      existingNodeId: supersededId,
+    })
+    edges.push({ sourceTempId: supTempId, targetTempId: decisionTempId, edgeType: "SUPERSEDED_BY" })
   }
 
   return { nodes, edges, decisionTempId }

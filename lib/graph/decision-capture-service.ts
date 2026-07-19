@@ -17,7 +17,7 @@
  */
 
 import { z } from "zod"
-import { inArray } from "drizzle-orm"
+import { and, eq, inArray } from "drizzle-orm"
 import {
   translatePayloadToGraph,
   computeLlmScore,
@@ -30,6 +30,8 @@ import {
   isDecisionEdgeType,
   scoreDecisionSubgraph,
 } from "@/lib/graph/decision-framework"
+import { resolveEntities } from "@/lib/graph/entity-resolution"
+import type { GraphProvenance } from "@/lib/db/types/jsonb"
 import { ErrorFactories } from "@/lib/error-utils"
 import { isValidationError } from "@/types/error-types"
 import { executeTransaction } from "@/lib/db/drizzle-client"
@@ -49,6 +51,18 @@ export const createDecisionSchema = z.object({
   constraints: z.array(z.string().trim().min(1).max(2000)).max(20).optional(),
   conditions: z.array(z.string().trim().min(1).max(2000)).max(20).optional(),
   alternatives_considered: z.array(z.string().trim().min(1).max(2000)).max(20).optional(),
+  // DACI accountability (Issue #1252): people consulted about / notified of the
+  // decision. Each becomes a person node linked via CONSULTED / NOTIFIED.
+  consulted: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
+  notified: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
+  // Existing decision node UUIDs this decision supersedes (Issue #1252). Each is
+  // linked SUPERSEDED_BY (old → new) and marked status=superseded at write time.
+  // Deduped + lowercased like relatedTo (Postgres uuids are case-insensitive).
+  supersedes: z
+    .array(z.string().uuid("Each supersedes entry must be a valid UUID"))
+    .max(20)
+    .optional()
+    .transform((arr) => (arr ? Array.from(new Set(arr.map((id) => id.toLowerCase()))) : arr)),
   // Deduplicate relatedTo at the schema layer so identical UUIDs cannot produce
   // duplicate CONTEXT edges that trip the uq_edge_source_target_type constraint
   // (Issue #1251). Lowercased first because Postgres compares uuids
@@ -93,6 +107,8 @@ interface PersistResult {
   decisionNodeId: string | null
   committedNodeIds: string[]
   committedEdgeIds: string[]
+  /** Entity-resolution warnings (auto-reuse notices, candidate suggestions). */
+  warnings: string[]
 }
 
 /** Persisted completeness snapshot stored on the primary decision node. */
@@ -118,6 +134,8 @@ interface SubgraphNodeInput {
   description?: string | null
   metadata?: Record<string, unknown>
   existingNodeId?: string
+  /** 512-dim embedding attached by entity resolution; written for new nodes. */
+  embedding?: number[]
 }
 
 /** An edge referencing nodes by their tempId. */
@@ -131,6 +149,8 @@ interface PersistOptions {
   source: string
   userId: number
   requestId: string
+  /** Agent id when the capture is agent-authored — used as provenance sourceRef. */
+  agentId?: string
   /** Existing node UUIDs to link to the decision via CONTEXT edges (REST path). */
   relatedTo?: string[]
   /** tempId of the primary decision node — receives userMetadata + completeness. */
@@ -203,8 +223,28 @@ interface EdgeInsertValue {
   sourceNodeId: string
   targetNodeId: string
   edgeType: string
-  metadata: { source: string }
+  metadata: { source: string; provenance: GraphProvenance }
   createdBy: number
+}
+
+/**
+ * Build the PROV-O provenance block written on every agent-authored node/edge
+ * (Issue #1252). Structured translation of caller-supplied fields is
+ * deterministic, so confidence is 1; `sourceRef` is the agent id when present,
+ * else the requestId, so a capture is always traceable back to its origin.
+ */
+function buildProvenance(options: PersistOptions): GraphProvenance {
+  return {
+    extractionMethod: options.source,
+    sourceRef: options.agentId ?? options.requestId,
+    confidence: 1,
+  }
+}
+
+/** Lifecycle status for a NEW node: decisions are accepted (or rejected for alternatives); others null. */
+function statusForNewNode(node: SubgraphNodeInput): string | null {
+  if (node.nodeType.trim() !== "decision") return null
+  return node.metadata?.rejected === true ? "rejected" : "accepted"
 }
 
 /** Validate that every relatedTo reference exists (atomic with the writes). */
@@ -276,6 +316,9 @@ function buildNewNodeValues(
     const nodeMetadata: Record<string, unknown> = {
       ...(isPrimary && options.userMetadata ? options.userMetadata : {}),
       ...(node.metadata ?? {}),
+      // Provenance is written AFTER user/node metadata so a caller can never
+      // spoof it, and the completeness snapshot is written last so it wins.
+      provenance: buildProvenance(options),
       ...(isPrimary && options.completeness ? { completeness: options.completeness } : {}),
     }
     return {
@@ -285,6 +328,10 @@ function buildNewNodeValues(
       nodeClass: "decision",
       description: node.description?.trim() || null,
       metadata: nodeMetadata,
+      // Lifecycle status (Issue #1252): decision nodes get accepted/rejected,
+      // others null. Embedding (from entity resolution) enables semantic search.
+      status: statusForNewNode(node),
+      embedding: node.embedding ?? null,
       createdBy: options.userId,
     }
   })
@@ -302,6 +349,7 @@ function resolveEdgeValues(
   options: PersistOptions
 ): EdgeInsertValue[] {
   const { source, userId, relatedTo } = options
+  const provenance = buildProvenance(options)
   const seenEdges = new Set<string>()
   const resolved: EdgeInsertValue[] = []
 
@@ -333,7 +381,7 @@ function resolveEdgeValues(
       sourceNodeId: sourceId,
       targetNodeId: targetId,
       edgeType,
-      metadata: { source },
+      metadata: { source, provenance },
       createdBy: userId,
     })
   }
@@ -349,7 +397,7 @@ function resolveEdgeValues(
         sourceNodeId: relatedNodeId,
         targetNodeId: decisionNodeId,
         edgeType: "CONTEXT",
-        metadata: { source },
+        metadata: { source, provenance },
         createdBy: userId,
       })
     }
@@ -393,6 +441,13 @@ async function persistDecisionSubgraph(
   const isPrimaryNode = (node: SubgraphNodeInput): boolean =>
     options.primaryDecisionTempId !== undefined &&
     node.tempId === options.primaryDecisionTempId
+
+  // 2b. Entity resolution (Issue #1252) — BEFORE the transaction, because
+  // embedding + similarity search are external/read-only I/O that must not be
+  // held inside a write transaction. Mutates `nodes` in place (embedding,
+  // existingNodeId, metadata.dedup) and never throws for an embedding failure:
+  // the capture proceeds without dedup so a decision is never lost.
+  const er = await resolveEntities(nodes, { requestId })
 
   let decisionNodeId: string | null = null
   const committedNodeIds: string[] = []
@@ -470,13 +525,39 @@ async function persistDecisionSubgraph(
       }
     }
 
+    // 8. Supersession (Issue #1252): every SUPERSEDED_BY edge marks its SOURCE
+    // (the older decision) as superseded. The node_type='decision' guard means a
+    // stray SUPERSEDED_BY on a non-decision node can never flip an unrelated
+    // node's status. Idempotent — re-running sets the same values. This is the
+    // single mechanism shared by all three channels (REST supersedes[], MCP
+    // supersedes[], and a chat-proposed SUPERSEDED_BY edge).
+    const supersededSourceIds = [
+      ...new Set(
+        resolvedEdgeValues
+          .filter((e) => e.edgeType === "SUPERSEDED_BY")
+          .map((e) => e.sourceNodeId)
+      ),
+    ]
+    if (supersededSourceIds.length > 0) {
+      await tx
+        .update(graphNodes)
+        .set({ status: "superseded", supersededAt: new Date() })
+        .where(
+          and(
+            inArray(graphNodes.id, supersededSourceIds),
+            eq(graphNodes.nodeType, "decision")
+          )
+        )
+    }
+
     log.info("Transaction committed", {
       nodesCreated: committedNodeIds.length,
       edgesCreated: committedEdgeIds.length,
+      supersededCount: supersededSourceIds.length,
     })
   }, "createDecisionSubgraph")
 
-  return { decisionNodeId, committedNodeIds, committedEdgeIds }
+  return { decisionNodeId, committedNodeIds, committedEdgeIds, warnings: er.warnings }
 }
 
 // ============================================
@@ -504,6 +585,9 @@ export async function captureStructuredDecision(
     decision: sanitizeForLogging(payload.decision),
     decidedBy: sanitizeForLogging(payload.decidedBy),
     relatedToCount: payload.relatedTo?.length ?? 0,
+    supersedesCount: payload.supersedes?.length ?? 0,
+    consultedCount: payload.consulted?.length ?? 0,
+    notifiedCount: payload.notified?.length ?? 0,
     hasMetadata: !!payload.metadata,
     userId,
   })
@@ -518,6 +602,9 @@ export async function captureStructuredDecision(
     constraints: payload.constraints,
     conditions: payload.conditions,
     alternatives_considered: payload.alternatives_considered,
+    consulted: payload.consulted,
+    notified: payload.notified,
+    supersedes: payload.supersedes,
     relatedTo: payload.relatedTo,
     agentId: payload.agentId,
   }
@@ -530,6 +617,7 @@ export async function captureStructuredDecision(
     source,
     userId,
     requestId,
+    agentId: payload.agentId,
     relatedTo: payload.relatedTo,
     primaryDecisionTempId: translated.decisionTempId,
     userMetadata: payload.metadata,
@@ -559,7 +647,8 @@ export async function captureStructuredDecision(
     edgesCreated: result.committedEdgeIds.length,
     completenessScore: completeness.score,
     completenessMethod: completeness.method,
-    warnings: completeness.warnings,
+    // Completeness warnings first, then entity-resolution notices (dedup / candidates).
+    warnings: [...completeness.warnings, ...result.warnings],
   }
 }
 
@@ -684,7 +773,8 @@ export async function commitDecisionSubgraph(
     committedEdgeIds: result.committedEdgeIds,
     completenessScore: completeness.score,
     completenessMethod: "rule-based",
-    warnings: completeness.warnings,
+    // Completeness warnings first, then entity-resolution notices (dedup / candidates).
+    warnings: [...completeness.warnings, ...result.warnings],
   }
 }
 
