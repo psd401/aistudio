@@ -166,12 +166,26 @@ async function handleSearchDecisions(
     }
   }
 
+  return searchDecisionsLexical(args, { q, nodeType, nodeClass, limit })
+}
+
+/** Lexical (ILIKE) leg of search_decisions — direct `query` or semantic fallback. */
+async function searchDecisionsLexical(
+  args: Record<string, unknown>,
+  params: { q?: string; nodeType?: string; nodeClass?: string; limit: number }
+): Promise<McpToolResult> {
+  const { q, nodeType, nodeClass, limit } = params
+
   const result = await queryGraphNodes(
     {
       search:
         q ?? (typeof args.query === "string" ? args.query : undefined),
-      nodeType,
-      nodeClass: typeof args.nodeClass === "string" ? args.nodeClass : undefined,
+      // The semantic branch scopes to decisions by default; its lexical
+      // FALLBACK must keep that scope or an embedding outage silently widens
+      // results to every node type. A plain `query` (no `q`) keeps the
+      // historical un-scoped behavior.
+      nodeType: q ? (nodeType ?? "decision") : nodeType,
+      nodeClass,
     },
     {
       limit,

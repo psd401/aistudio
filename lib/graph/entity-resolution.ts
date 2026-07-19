@@ -166,6 +166,12 @@ function round3(n: number): number {
  * (each affected node is created as-is) so a capture is never lost. A genuinely
  * exceptional DB error from findSimilarNodes still degrades that node rather than
  * aborting the capture.
+ *
+ * Concurrency: because this runs before the write transaction, two captures
+ * mentioning the same near-duplicate entity at the same moment can both miss
+ * each other and create separate nodes. That is an ACCEPTED tradeoff — dedup is
+ * best-effort, never destructive, and SAME_AS canonicalization exists for
+ * cleanup — not a bug to "fix" with locks around external I/O.
  */
 export async function resolveEntities<T extends ResolvableNode>(
   nodes: T[],
