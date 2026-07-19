@@ -32,8 +32,15 @@ export const MAX_PACKAGE_DEPTH = 3
 
 const DEFAULT_SEMANTIC_LIMIT = 10
 const MAX_SEMANTIC_LIMIT = 50
-/** Minimum cosine similarity for a semantic hit (paraphrase-tolerant). */
-const DEFAULT_SEMANTIC_THRESHOLD = 0.4
+/**
+ * Minimum cosine similarity for a semantic hit (paraphrase-tolerant).
+ * Calibrated against titan-embed-text-v2@512 with real captures: keyword-free
+ * paraphrases of a stored decision measured 0.37-0.39 while unrelated
+ * decisions measured <= 0.18, so 0.3 admits paraphrases with margin and still
+ * excludes noise by a wide band. 0.4 sat just ABOVE the paraphrase band and
+ * filtered out exactly the matches the feature exists to find.
+ */
+const DEFAULT_SEMANTIC_THRESHOLD = 0.3
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
