@@ -393,7 +393,7 @@
     {
       "identifier": "decisions.graph_get",
       "name": "get_decision_graph",
-      "description": "Get details of a specific decision node and all its connections (incoming and outgoing edges).",
+      "description": "Get a self-contained decision package for a node: the decision plus its evidence, constraints, reasoning, persons, conditions, outcomes, and supersession chain, gathered by a depth-bounded graph expansion.",
       "surfaces": [
         "mcp",
         "internal"
@@ -415,7 +415,7 @@
     {
       "identifier": "decisions.search",
       "name": "search_decisions",
-      "description": "Search decision graph nodes by type, class, or text query. Returns paginated results.",
+      "description": "Search decision graph nodes. Provide `q` for semantic (embedding-based) paraphrase search over decision nodes, or `query` for literal text (ILIKE) search. Returns paginated results.",
       "surfaces": [
         "mcp",
         "internal"
