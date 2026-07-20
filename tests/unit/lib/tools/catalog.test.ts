@@ -97,7 +97,9 @@ describe("ToolCatalog", () => {
     dbRows = [
       {
         identifier: "decisions.search",
-        version: "v1",
+        // Must match the manifest's CURRENT version — the DB-beats-manifest
+        // assertion only holds when both sides describe the same version.
+        version: "v2",
         name: "search_decisions",
         description: "published description",
         inputSchema: publishedSchema,
@@ -177,7 +179,9 @@ describe("ToolCatalog", () => {
     dbRows = [
       {
         identifier: "decisions.search",
-        version: "v1",
+        // Matches the manifest's current version so the disable applies to the
+        // row the manifest would otherwise project.
+        version: "v2",
         name: "search_decisions",
         description: "x",
         inputSchema: { type: "object", properties: {} },
@@ -669,11 +673,12 @@ describe("ToolCatalog", () => {
       const mockLogger = createLogger()
       mockLogger.warn.mockClear()
 
-      // A deprecated CODE tool (search_decisions v1) — admin deprecated it in DB.
+      // A deprecated CODE tool (search_decisions v2, the manifest's current
+      // version) — admin deprecated it in DB.
       dbRows = [
         {
           identifier: "decisions.search",
-          version: "v1",
+          version: "v2",
           name: "search_decisions",
           description: "x",
           inputSchema: { type: "object", properties: {} },
@@ -684,7 +689,7 @@ describe("ToolCatalog", () => {
           source: "code",
           isActive: true,
           deprecatedAt: new Date("2026-01-01T00:00:00Z"),
-          replacedBy: "decisions.search@v2",
+          replacedBy: "decisions.search@v3",
           removalDate: new Date("2026-04-01T00:00:00Z"),
           handlerRef: "decisions.search",
         },
@@ -700,10 +705,10 @@ describe("ToolCatalog", () => {
       expect(mockLogger.warn).toHaveBeenCalledWith(
         "deprecated_tool_invocation",
         expect.objectContaining({
-          tool: "decisions.search@v1",
+          tool: "decisions.search@v2",
           callerType: "mcp_client",
           callerId: "7",
-          replacedBy: "decisions.search@v2",
+          replacedBy: "decisions.search@v3",
         })
       )
     })
