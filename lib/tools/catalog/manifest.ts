@@ -84,9 +84,10 @@ interface McpCatalogMapping {
    * schema in `lib/mcp/tool-registry.ts` changes, bump this (v1 -> v2 -> ...)
    * or the sync refuses the update and the deployed catalog keeps serving the
    * old contract while logging "Tool version immutability violation" on every
-   * boot.
+   * boot. Typed as `v${number}` so values missing the v prefix ("2", "latest")
+   * fail to compile; the version resolver ranks strict vN forms.
    */
-  version?: string;
+  version?: `v${number}`;
 }
 
 const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
