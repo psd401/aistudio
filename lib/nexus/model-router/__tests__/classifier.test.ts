@@ -39,7 +39,12 @@ describe("Nexus request classifier", () => {
       .toBe("web-search")
     expect(deterministicClassify("What is today's weather forecast for Tacoma?")?.intent)
       .toBe("web-search")
+    expect(deterministicClassify("What is the cost today for a first-class stamp?")?.intent)
+      .toBe("web-search")
+    expect(deterministicClassify("Show me technology news this week")?.intent)
+      .toBe("web-search")
     expect(deterministicClassify("Improve the current paragraph in my draft")).toBeNull()
+    expect(deterministicClassify("Summarize the current results in this spreadsheet")).toBeNull()
   })
 
   it("recognizes an edit instruction when an image is attached", async () => {

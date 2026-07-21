@@ -110,8 +110,7 @@ function firstAvailableCandidate(
   candidates: string[],
   models: NexusRouterModelOption[]
 ): string | undefined {
-  const available = new Set(models.map(model => model.modelId))
-  return candidates.find(candidate => available.has(candidate))
+  return candidates.find(candidate => models.some(model => model.modelId === candidate))
 }
 
 function RouterModelSelect({
