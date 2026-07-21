@@ -31,6 +31,11 @@ jest.mock("@/utils/roles", () => ({
   hasRole: jest.fn(async () => true),
 }));
 
+jest.mock("@/lib/repositories/content-platform/config", () => ({
+  getContentPlatformConfig: jest.fn(async () => ({ enabled: false, readV2Enabled: false })),
+  isContentReadV2Active: jest.fn(() => false),
+}));
+
 jest.mock("@/lib/repositories/search-service", () => {
   const hit = { chunkId: 1, itemId: 1, itemName: "x", content: "secret", similarity: 0.9, chunkIndex: 0, metadata: {} };
   return {

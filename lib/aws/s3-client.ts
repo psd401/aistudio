@@ -272,6 +272,34 @@ export async function documentExists(key: string): Promise<boolean> {
   }
 }
 
+export interface DocumentObjectMetadata {
+  contentLength: number;
+  contentType: string | null;
+  eTag: string | null;
+  metadata: Record<string, string>;
+}
+
+/**
+ * Read authoritative object metadata after a browser upload. Completion paths
+ * use this before registering a repository item so client-claimed size and MIME
+ * values cannot create a misleading or oversized database record.
+ */
+export async function getDocumentObjectMetadata(
+  key: string
+): Promise<DocumentObjectMetadata> {
+  const s3Client = await getS3Client()
+  const config = await getS3Config()
+  const response = await s3Client.send(
+    new HeadObjectCommand({ Bucket: config.bucket!, Key: key })
+  )
+  return {
+    contentLength: response.ContentLength ?? 0,
+    contentType: response.ContentType ?? null,
+    eTag: response.ETag ?? null,
+    metadata: response.Metadata ?? {},
+  }
+}
+
 // List documents for a user
 export async function listUserDocuments(
   userId: string,

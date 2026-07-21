@@ -48,6 +48,7 @@ const XLSX = __importStar(require("@e965/xlsx"));
 const sync_1 = require("csv-parse/sync");
 const marked_1 = require("marked");
 const textract_usage_1 = require("./textract-usage");
+const storage_key_1 = require("./storage-key");
 const s3Client = new client_s3_1.S3Client({});
 const rdsClient = new client_rds_data_1.RDSDataClient({});
 const dynamoClient = new client_dynamodb_1.DynamoDBClient({});
@@ -469,15 +470,6 @@ async function processFile(job) {
         throw error; // Re-throw to let Lambda handle retry logic
     }
 }
-// Validate S3 key to prevent path traversal attacks
-function validateS3Key(key) {
-    if (key.includes('../') || key.includes('..\\') || key.startsWith('/')) {
-        return false;
-    }
-    const newFormatPattern = /^repositories\/\d+\/\d+\/[^/]+$/;
-    const legacyFormatPattern = /^\d+\/\d+-[\w.\-]+$/;
-    return newFormatPattern.test(key) || legacyFormatPattern.test(key);
-}
 // Validate S3 bucket name against the expected environment bucket
 function validateBucketName(bucketName) {
     return bucketName === DOCUMENTS_BUCKET;
@@ -492,7 +484,7 @@ async function handler(event) {
                 console.error(`Invalid bucket name in job: ${job.bucketName}`);
                 throw new Error(`Invalid bucket name: ${job.bucketName}`);
             }
-            if (!validateS3Key(job.fileKey)) {
+            if (!(0, storage_key_1.validateRepositoryProcessingKey)(job.fileKey)) {
                 console.error(`Invalid S3 key detected: ${job.fileKey}`);
                 throw new Error(`Invalid S3 key: ${job.fileKey}`);
             }

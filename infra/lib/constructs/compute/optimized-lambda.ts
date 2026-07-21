@@ -90,7 +90,10 @@ export interface OptimizedLambdaProps {
   enableXRay?: boolean
   /** Enable Lambda Insights for enhanced monitoring */
   enableInsights?: boolean
-  /** Enable profiling for performance analysis */
+  /**
+   * @deprecated CodeGuru Profiler does not support the construct's Node.js 20
+   * runtime. Retained only for source compatibility.
+   */
   enableProfiling?: boolean
   /** Custom log retention (default: from config) */
   logRetention?: logs.RetentionDays
@@ -206,11 +209,6 @@ export class OptimizedLambda extends Construct {
 
       // Dead letter queue for critical functions
       deadLetterQueueEnabled: props.performanceProfile === "critical",
-
-      // Code signing and profiling for critical functions
-      ...(props.performanceProfile === "critical" && {
-        profiling: props.enableProfiling !== false,
-      }),
 
       // Lambda Insights for enhanced monitoring
       insightsVersion:

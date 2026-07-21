@@ -80,6 +80,11 @@ export * from "./tables/knowledge-repositories";
 export * from "./tables/repository-items";
 export * from "./tables/repository-item-chunks";
 export * from "./tables/repository-access";
+export * from "./tables/repository-item-versions";
+export * from "./tables/repository-upload-sessions";
+export * from "./tables/repository-processing-jobs";
+export * from "./tables/repository-artifacts";
+export * from "./tables/repository-index-generations";
 
 // ============================================
 // Prompt Library

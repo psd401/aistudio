@@ -19,6 +19,10 @@ jest.mock('@/utils/roles', () => ({ hasCapabilityAccess: mockHasCapabilityAccess
 jest.mock('@/lib/repositories/repository-access-guard', () => ({
   assertRepositoryReadAccess: mockAssertRepositoryReadAccess,
 }))
+jest.mock('@/lib/repositories/content-platform/config', () => ({
+  getContentPlatformConfig: jest.fn(async () => ({ enabled: false, readV2Enabled: false })),
+  isContentReadV2Active: jest.fn(() => false),
+}))
 jest.mock('@/lib/repositories/search-service', () => ({
   vectorSearch: mockVector, keywordSearch: mockKeyword, hybridSearch: mockHybrid,
 }))
@@ -61,7 +65,12 @@ describe('searchRepository authorization (REV-COR-062 / REV-SEC-081)', () => {
 
   it('clamps limit and vectorWeight before searching', async () => {
     await searchRepository({ query: 'x', repositoryId: 5, searchType: 'hybrid', limit: 100000, vectorWeight: 9 })
-    expect(mockHybrid).toHaveBeenCalledWith('x', { repositoryId: 5, limit: 50, vectorWeight: 1 })
+    expect(mockHybrid).toHaveBeenCalledWith('x', {
+      repositoryId: 5,
+      limit: 50,
+      vectorWeight: 1,
+      canonicalOnly: false,
+    })
   })
 
   it('allows an authorized search and returns results', async () => {

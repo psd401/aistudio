@@ -1,0 +1,9 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "incremental": false,
+    "types": ["node", "aws-lambda"]
+  },
+  "include": ["./*.ts", "../../../next-env.d.ts"],
+  "exclude": ["./__tests__"]
+}

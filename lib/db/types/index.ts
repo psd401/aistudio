@@ -66,6 +66,11 @@ import {
   repositoryItems,
   repositoryItemChunks,
   repositoryAccess,
+  repositoryItemVersions,
+  repositoryUploadSessions,
+  repositoryProcessingJobs,
+  repositoryArtifacts,
+  repositoryIndexGenerations,
   // Prompt Library
   promptLibrary,
   promptTags,
@@ -284,6 +289,21 @@ export type SelectRepositoryItemChunk = InferSelectModel<
   typeof repositoryItemChunks
 >;
 export type SelectRepositoryAccess = InferSelectModel<typeof repositoryAccess>;
+export type SelectRepositoryItemVersion = InferSelectModel<
+  typeof repositoryItemVersions
+>;
+export type SelectRepositoryUploadSession = InferSelectModel<
+  typeof repositoryUploadSessions
+>;
+export type SelectRepositoryProcessingJob = InferSelectModel<
+  typeof repositoryProcessingJobs
+>;
+export type SelectRepositoryArtifact = InferSelectModel<
+  typeof repositoryArtifacts
+>;
+export type SelectRepositoryIndexGeneration = InferSelectModel<
+  typeof repositoryIndexGenerations
+>;
 
 // ============================================
 // Knowledge Repositories - Insert Types
@@ -296,6 +316,21 @@ export type InsertRepositoryItemChunk = InferInsertModel<
   typeof repositoryItemChunks
 >;
 export type InsertRepositoryAccess = InferInsertModel<typeof repositoryAccess>;
+export type InsertRepositoryItemVersion = InferInsertModel<
+  typeof repositoryItemVersions
+>;
+export type InsertRepositoryUploadSession = InferInsertModel<
+  typeof repositoryUploadSessions
+>;
+export type InsertRepositoryProcessingJob = InferInsertModel<
+  typeof repositoryProcessingJobs
+>;
+export type InsertRepositoryArtifact = InferInsertModel<
+  typeof repositoryArtifacts
+>;
+export type InsertRepositoryIndexGeneration = InferInsertModel<
+  typeof repositoryIndexGenerations
+>;
 
 // ============================================
 // Prompt Library - Select Types

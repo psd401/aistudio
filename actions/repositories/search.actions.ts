@@ -16,6 +16,10 @@ import {
 import { vectorSearch, keywordSearch, hybridSearch, SearchResult } from "@/lib/repositories/search-service"
 import { hasCapabilityAccess } from "@/utils/roles"
 import { assertRepositoryReadAccess } from "@/lib/repositories/repository-access-guard"
+import {
+  getContentPlatformConfig,
+  isContentReadV2Active,
+} from "@/lib/repositories/content-platform/config"
 
 export interface SearchRepositoryParams {
   query: string
@@ -32,16 +36,18 @@ async function dispatchSearch(
   query: string,
   repositoryId: number,
   limit: number,
-  vectorWeight: number
+  vectorWeight: number,
+  canonicalOnly: boolean
 ): Promise<SearchResult[]> {
+  const commonOptions = { repositoryId, limit, canonicalOnly }
   switch (searchType) {
     case 'vector':
-      return vectorSearch(query, { repositoryId, limit })
+      return vectorSearch(query, commonOptions)
     case 'keyword':
-      return keywordSearch(query, { repositoryId, limit })
+      return keywordSearch(query, commonOptions)
     case 'hybrid':
     default:
-      return hybridSearch(query, { repositoryId, limit, vectorWeight })
+      return hybridSearch(query, { ...commonOptions, vectorWeight })
   }
 }
 
@@ -113,13 +119,24 @@ export async function searchRepository(
       queryPreview: query.substring(0, 50) // First 50 chars of query
     })
 
-    const results = await dispatchSearch(searchType, query, repositoryId, safeLimit, safeVectorWeight)
+    const canonicalOnly = isContentReadV2Active(
+      await getContentPlatformConfig()
+    )
+    const results = await dispatchSearch(
+      searchType,
+      query,
+      repositoryId,
+      safeLimit,
+      safeVectorWeight,
+      canonicalOnly
+    )
 
     log.info("Search completed successfully", {
       repositoryId,
       searchType,
       resultCount: results.length,
-      limit
+      limit,
+      canonicalOnly,
     })
     
     timer({ 

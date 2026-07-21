@@ -14,6 +14,7 @@ import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedroc
 import { eq, inArray, or, sql } from 'drizzle-orm';
 import { getDb, closeDb } from './db-client';
 import { settings, repositoryItems } from './schema';
+import { shouldMarkItemEmbedded } from './completion-policy';
 
 const log = {
   info: (msg: string, meta?: Record<string, unknown>) =>
@@ -142,6 +143,8 @@ async function generateEmbeddings(texts: string[], embSettings: EmbeddingSetting
 
 interface EmbeddingMessage {
   itemId: number;
+  /** Present for canonical index-generation batches. */
+  generationId?: string;
   chunkIds: number[];
   texts: string[];
 }
@@ -211,12 +214,31 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
       );
     }
 
-    await db
-      .update(repositoryItems)
-      .set({ processingStatus: 'embedded', updatedAt: new Date() })
-      .where(eq(repositoryItems.id, message.itemId));
+    let pendingGenerationChunks = 0;
+    if (message.generationId) {
+      const [pending] = await db.execute<{ pending_count: number }>(sql`
+        SELECT count(*)::integer AS pending_count
+        FROM repository_item_chunks
+        WHERE index_generation_id = ${message.generationId}::uuid
+          AND embedding IS NULL
+      `);
+      pendingGenerationChunks = pending?.pending_count ?? 0;
+    }
+    const generationComplete = shouldMarkItemEmbedded(
+      message,
+      pendingGenerationChunks
+    );
+    if (generationComplete) {
+      await db
+        .update(repositoryItems)
+        .set({ processingStatus: 'embedded', updatedAt: new Date() })
+        .where(eq(repositoryItems.id, message.itemId));
+    }
 
-    log.info(`Successfully generated embeddings for item ${message.itemId}`);
+    log.info(`Successfully generated embeddings for item ${message.itemId}`, {
+      generationComplete,
+      pendingGenerationChunks,
+    });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     log.error(`Failed to generate embeddings for item ${message.itemId}`, { error: errorMessage });
