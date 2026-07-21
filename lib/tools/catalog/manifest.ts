@@ -78,6 +78,16 @@ interface McpCatalogMapping {
    * executing it (Issue #926). Defaults to false.
    */
   destructive?: boolean;
+  /**
+   * Catalog version for this tool (defaults to "v1"). A published version's
+   * input/output schema is FROZEN by the sync (Issue #927) — whenever a tool's
+   * schema in `lib/mcp/tool-registry.ts` changes, bump this (v1 -> v2 -> ...)
+   * or the sync refuses the update and the deployed catalog keeps serving the
+   * old contract while logging "Tool version immutability violation" on every
+   * boot. Typed as `v${number}` so values missing the v prefix ("2", "latest")
+   * fail to compile; the version resolver ranks strict vN forms.
+   */
+  version?: `v${number}`;
 }
 
 const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
@@ -95,6 +105,8 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     identifier: "decisions.search",
     requiredScope: "mcp:search_decisions",
     internalScopes: ["mcp:search_decisions"],
+    // v2: #1252 added semantic `q` to the input schema.
+    version: "v2",
   },
   capture_decision: {
     identifier: "decisions.capture",
@@ -103,6 +115,8 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     // Writes new decision-graph nodes/edges — gated behind human confirmation in
     // an agent loop (#926).
     destructive: true,
+    // v2: #1252 added supersedes/consulted/notified to the input schema.
+    version: "v2",
   },
   execute_assistant: {
     identifier: "assistants.execute",
@@ -145,6 +159,8 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     identifier: "decisions.graph_get",
     requiredScope: "mcp:get_decision_graph",
     internalScopes: ["mcp:get_decision_graph"],
+    // v2: #1252 added `depth` to the input schema (decision-package retrieval).
+    version: "v2",
   },
   // Atrium content tools (Phase 5, Issue #1055). MCP-only catalog entries (the
   // REST surface is hand-documented in docs/API/v1/openapi.yaml, not generated
@@ -156,12 +172,16 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "content:create",
     internalScopes: ["content:create"],
     destructive: true,
+    // v2: `codeEncoding` added to the input schema (#1245 E2BIG fix).
+    version: "v2",
   },
   create_artifact: {
     identifier: "content.create_artifact",
     requiredScope: "content:create",
     internalScopes: ["content:create"],
     destructive: true,
+    // v2: `codeEncoding` added to the input schema (#1245 E2BIG fix).
+    version: "v2",
   },
   get_content: {
     identifier: "content.get",
@@ -184,12 +204,16 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "content:update",
     internalScopes: ["content:update"],
     destructive: true,
+    // v2: `codeEncoding` added to the input schema (#1245 E2BIG fix).
+    version: "v2",
   },
   set_visibility: {
     identifier: "content.set_visibility",
     requiredScope: "content:update",
     internalScopes: ["content:update"],
     destructive: true,
+    // v2: grants description gained the 'group' kind (directory groups, #1206).
+    version: "v2",
   },
   publish_content: {
     identifier: "content.publish",
@@ -259,7 +283,7 @@ const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
 
     return {
       identifier: mapping.identifier,
-      version: "v1",
+      version: mapping.version ?? "v1",
       name: tool.name,
       description: tool.description,
       inputSchema: tool.inputSchema,
