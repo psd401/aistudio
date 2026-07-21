@@ -71,7 +71,7 @@ const commonSettings = [
   { key: "LATIMER_API_KEY", category: "ai_providers", description: "Latimer.ai API key", isSecret: true },
   { key: "NEXUS_ROUTER_MODE", category: "ai", description: "Nexus model router mode: active, shadow, or off", isSecret: false },
   { key: "ASSISTANT_ARCHITECT_ROUTER_MODE", category: "ai", description: "Assistant Architect model router mode: active, shadow, or off", isSecret: false },
-  { key: "NEXUS_ROUTER_CONFIG_V1", category: "ai", description: "JSON configuration for Nexus classifier, family/tier candidates, and image/PSD-data specialists", isSecret: false },
+  { key: "NEXUS_ROUTER_CONFIG_V1", category: "ai", description: "JSON configuration for Nexus classifier, family/tier candidates, and web-search/image/PSD-data specialists", isSecret: false },
   { key: "S3_BUCKET", category: "storage", description: "AWS S3 bucket name for document storage", isSecret: false },
   { key: "AWS_REGION", category: "storage", description: "AWS region for S3 operations", isSecret: false },
   { key: "GITHUB_ISSUE_TOKEN", category: "external_services", description: "GitHub personal access token for creating issues", isSecret: true },

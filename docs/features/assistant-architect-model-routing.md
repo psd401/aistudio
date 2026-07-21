@@ -15,7 +15,7 @@ For every prompt-chain step, the runtime:
 5. enforces an Advanced family constraint and explicit function-calling or vision exclusions;
 6. executes the prompt and persists the routing decision in `prompt_results.input_data.modelRouting`.
 
-Agentic assistants route once per run after their author allow-list and executing-caller scopes have resolved the actual tool set. Image inputs require a vision-capable driving model. Image generation remains the authorized `images.generate` agent tool, and MCP connectors—including PSD-data—remain limited to the assistant's saved connector allow-list. The router does not silently attach connectors or broaden permissions.
+Agentic assistants route once per run after their author allow-list and executing-caller scopes have resolved the actual tool set. Image inputs require a vision-capable driving model. Image generation remains the authorized `images.generate` agent tool, MCP connectors—including PSD-data—remain limited to the assistant's saved connector allow-list, and web search remains an author-enabled prompt tool. When web search is enabled, the router selects a compatible provider/model; automatic prompt-based tool enablement remains Nexus-specific. The router does not silently attach connectors or broaden permissions.
 
 The same route adapter is used by the interactive UI, scheduled prompt chains, REST v1 execution, and MCP/job-completion execution. Agentic execution remains available only through its existing supported UI surface.
 

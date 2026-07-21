@@ -28,7 +28,7 @@ const models = [
   { id: 1, name: "Nova Micro", provider: "amazon-bedrock", modelId: "nova-micro", active: true, architectEnabled: true, capabilities: "[]", providerMetadata: { modelRouterTier: "light" } },
   { id: 2, name: "Claude Sonnet", provider: "amazon-bedrock", modelId: "claude-sonnet", active: true, architectEnabled: true, capabilities: "[]", providerMetadata: { modelRouterTier: "medium", supports_function_calling: true } },
   { id: 3, name: "GPT Sol", provider: "openai", modelId: "gpt-sol", active: true, architectEnabled: true, capabilities: "[]", providerMetadata: { modelRouterTier: "high" } },
-  { id: 4, name: "Gemini Flash", provider: "google", modelId: "gemini-flash", active: true, architectEnabled: true, capabilities: "[]", providerMetadata: { modelRouterTier: "medium" } },
+  { id: 4, name: "Gemini Flash", provider: "google", modelId: "gemini-flash", active: true, architectEnabled: true, capabilities: '["web_search"]', providerMetadata: { modelRouterTier: "medium" } },
   { id: 5, name: "Nano Banana", provider: "google", modelId: "gemini-flash-image", active: true, architectEnabled: true, capabilities: '["image_generation"]', providerMetadata: { modelRouterTier: "light" } },
 ]
 const config = nexusRouterConfigSchema.parse({
@@ -124,6 +124,20 @@ describe("Assistant Architect model router", () => {
     })
     expect(result.modelId).toBe("claude-sonnet")
     expect(result.modelId).not.toContain("image")
+  })
+
+  it("selects a web-search-capable model when the author enabled the tool", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "medium", confidence: 0.96,
+      reasonCodes: ["current_web_information"], source: "deterministic",
+    })
+    const result = await routeAssistantArchitectModel({
+      text: "Search the web for current guidance", userId: 7,
+      fallbackModelDbId: 1, routingMode: "standard",
+      requirements: { requiredTools: ["webSearch"] },
+    })
+    expect(result.modelId).toBe("gemini-flash")
+    expect(result.metadata.requiredTools).toEqual(["webSearch"])
   })
 
   it("records proposals without changing execution in shadow mode", async () => {

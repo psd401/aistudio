@@ -232,4 +232,16 @@ test.describe('Nexus model router — authenticated deterministic UI and wire co
     expect(JSON.stringify(body.messages.at(-1))).toContain(prompt)
     await expect(page.getByTestId('nexus-mcp-control')).toHaveCount(0)
   })
+
+  test('a current-information request goes through Standard without a manual web-search selection', async ({ page }) => {
+    await selectStandard(page)
+    const prompt = 'Search the web for the latest weather forecast in Tacoma'
+    const body = await capturePrompt(page, prompt)
+
+    expect(body.nexusMode).toBe('standard')
+    expect(body.modelFamily).toBe('auto')
+    expect(body.enabledTools ?? []).toEqual([])
+    expect(JSON.stringify(body.messages.at(-1))).toContain(prompt)
+    await expect(page.getByTestId('nexus-tools-control')).toHaveCount(0)
+  })
 })

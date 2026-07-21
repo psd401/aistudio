@@ -12,7 +12,7 @@ test.describe('Admin Nexus router settings', () => {
     await page.goto('/admin/settings')
   })
 
-  test('renders rollout, tier, classifier, image, instruction, and PSD-data controls', async ({ page }) => {
+  test('renders rollout, tier, classifier, web-search, image, instruction, and PSD-data controls', async ({ page }) => {
     await expect(page.getByTestId('nexus-router-settings-card')).toBeVisible()
     await expect(page.getByTestId('nexus-router-admin-mode')).toBeVisible()
     await expect(page.getByTestId('assistant-architect-router-admin-mode')).toBeVisible()
@@ -23,6 +23,7 @@ test.describe('Admin Nexus router settings', () => {
     await expect(page.getByTestId('nexus-router-anthropic-medium')).toBeVisible()
     await expect(page.getByTestId('nexus-router-google-medium')).toBeVisible()
     await expect(page.getByTestId('nexus-router-instruction-model')).toBeVisible()
+    await expect(page.getByTestId('nexus-router-web-search-model')).toBeVisible()
     await expect(page.getByTestId('nexus-router-image-model')).toBeVisible()
     await expect(page.getByTestId('nexus-router-psd-connector')).toBeVisible()
     await expect(page.getByTestId('nexus-router-classifier-model')).toHaveValue('us.amazon.nova-micro-v1:0')
