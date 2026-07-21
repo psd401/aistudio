@@ -247,6 +247,8 @@ const devProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-De
   alertEmail,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
+devProcessingStack.addDependency(devDbStack); // Reads database SSM parameters and uses the shared VPC
+devProcessingStack.addDependency(devStorageStack); // Reads the documents bucket SSM parameter
 cdk.Tags.of(devProcessingStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devProcessingStack).add(key, value));
 
@@ -412,6 +414,8 @@ const prodProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-P
   alertEmail,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
+prodProcessingStack.addDependency(prodDbStack); // Reads database SSM parameters and uses the shared VPC
+prodProcessingStack.addDependency(prodStorageStack); // Reads the documents bucket SSM parameter
 cdk.Tags.of(prodProcessingStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodProcessingStack).add(key, value));
 
@@ -497,6 +501,11 @@ if (baseDomain) {
   devFrontendStack.addDependency(devAgentPlatformStack); // Need agent workspace bucket name (#925)
   devFrontendStack.addDependency(devAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
   devFrontendStack.addDependency(devAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
+  devFrontendStack.addDependency(devProcessingStack); // Need processing queue and Lambda exports
+  devFrontendStack.addDependency(devDocumentProcessingStack); // Need document queue and table exports
+  if (devEmailNotificationStack) {
+    devFrontendStack.addDependency(devEmailNotificationStack); // Need notification queue export
+  }
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devFrontendStack).add(key, value));
 
@@ -522,6 +531,11 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodAgentPlatformStack); // Need agent workspace bucket name (#925)
   prodFrontendStack.addDependency(prodAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
   prodFrontendStack.addDependency(prodAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
+  prodFrontendStack.addDependency(prodProcessingStack); // Need processing queue and Lambda exports
+  prodFrontendStack.addDependency(prodDocumentProcessingStack); // Need document queue and table exports
+  if (prodEmailNotificationStack) {
+    prodFrontendStack.addDependency(prodEmailNotificationStack); // Need notification queue export
+  }
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodFrontendStack).add(key, value));
 
