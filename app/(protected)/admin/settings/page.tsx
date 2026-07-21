@@ -48,6 +48,8 @@ export default async function SettingsPage() {
             family: inferFamily(model),
             imageGeneration: hasCapability(model.capabilities, "imageGeneration"),
             deepResearch: hasCapability(model.capabilities, "deepResearch"),
+            webSearch: hasCapability(model.capabilities, "webSearch")
+              || hasCapability(model.capabilities, "grounding"),
           }))}
           nexusRouterConnectors={connectors}
         />

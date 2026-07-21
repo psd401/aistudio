@@ -17,14 +17,14 @@ jest.mock("@/lib/logger", () => ({
   createLogger: () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }),
 }))
 
-import { routeNexusRequest } from "../router"
+import { mergeRoutedToolNames, routeNexusRequest } from "../router"
 import { nexusRouterConfigSchema } from "../types"
 
 const models = [
   { id: 1, name: "GPT Luna", provider: "openai", modelId: "gpt-luna", capabilities: "[]", providerMetadata: { nexusRouterTier: "light" } },
   { id: 2, name: "GPT Terra", provider: "openai", modelId: "gpt-terra", capabilities: "[]", providerMetadata: { nexusRouterTier: "medium" } },
   { id: 3, name: "Claude Sonnet", provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet", capabilities: "[]", providerMetadata: { nexusRouterTier: "medium" } },
-  { id: 4, name: "Gemini Flash", provider: "google", modelId: "gemini-flash", capabilities: "[]", providerMetadata: { nexusRouterTier: "medium" } },
+  { id: 4, name: "Gemini Flash", provider: "google", modelId: "gemini-flash", capabilities: '["web_search"]', providerMetadata: { nexusRouterTier: "medium" } },
   { id: 5, name: "Nano Banana", provider: "google", modelId: "gemini-3.1-flash-image", capabilities: '["image_generation"]', providerMetadata: { nexusRouterTier: "light" } },
   { id: 6, name: "Gemini Deep Research", provider: "google", modelId: "gemini-deep-research", capabilities: '["deep_research"]', providerMetadata: { nexusRouterTier: "high" } },
   { id: 7, name: "Amazon Nova Lite", provider: "amazon-bedrock", modelId: "us.amazon.nova-lite-v1:0", capabilities: "[]", providerMetadata: { nexusRouterTier: "light" } },
@@ -39,6 +39,7 @@ const config = nexusRouterConfigSchema.parse({
   specialists: {
     imageModels: ["gemini-3.1-flash-image"],
     instructionModels: ["gemini-flash"],
+    webSearchModels: ["gemini-flash"],
     psdDataConnectorName: "psd-data",
   },
 })
@@ -53,6 +54,13 @@ describe("Nexus model router", () => {
       intent: "general", tier: "medium", confidence: 0.9,
       reasonCodes: ["normal_request"], source: "classifier",
     })
+  })
+
+  it("merges automatic web search with manually enabled tools without duplicates", () => {
+    expect(mergeRoutedToolNames(
+      ["codeInterpreter", "webSearch"],
+      ["webSearch"]
+    )).toEqual(["codeInterpreter", "webSearch"])
   })
 
   it("constrains Advanced routing to the selected family", async () => {
@@ -108,6 +116,33 @@ describe("Nexus model router", () => {
     expect(result.connectorIds).toEqual(["54f0f531-f7ab-485e-bd6b-65a95c4bc871"])
     expect(result.automaticConnectorIds).toEqual(["54f0f531-f7ab-485e-bd6b-65a95c4bc871"])
     expect(result.metadata.autoAttachedPsdData).toBe(true)
+  })
+
+  it("routes current-information requests to Gemini and automatically enables web search", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "medium", confidence: 0.96,
+      reasonCodes: ["current_web_information"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Search the web for today's weather", fallbackModelId: "gpt-terra",
+      experienceMode: "standard", requestedFamily: "auto",
+      enabledConnectorIds: [], userId: 7,
+    })
+    expect(result.modelId).toBe("gemini-flash")
+    expect(result.automaticToolNames).toEqual(["webSearch"])
+    expect(result.metadata.autoEnabledWebSearch).toBe(true)
+  })
+
+  it("fails clearly when the selected Advanced family cannot perform web search", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "medium", confidence: 0.96,
+      reasonCodes: ["current_web_information"], source: "deterministic",
+    })
+    await expect(routeNexusRequest({
+      text: "Browse the web for current policy", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "anthropic",
+      enabledConnectorIds: [], userId: 7,
+    })).rejects.toThrow("Web search is not available")
   })
 
   it("records a proposed route but executes the fallback in shadow mode", async () => {

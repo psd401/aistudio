@@ -18,6 +18,7 @@ describe("Nexus router configuration", () => {
     expect(result.mode).toBe("active")
     expect(result.config.classifier.modelId).toBe("us.amazon.nova-micro-v1:0")
     expect(result.config.specialists.imageModels[0]).toBe("gemini-3.1-flash-image-preview")
+    expect(result.config.specialists.webSearchModels[0]).toBe("gemini-3.5-flash")
   })
 
   it("loads ordered candidates and shadow mode from settings", async () => {

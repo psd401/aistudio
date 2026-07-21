@@ -32,6 +32,13 @@ const EXECUTABLE_PROVIDERS = new Set(["openai", "google", "amazon-bedrock", "azu
 export const inferFamily = inferModelFamily
 export const inferTier = inferModelTier
 
+export function mergeRoutedToolNames(
+  manuallyEnabledToolNames: string[],
+  automaticToolNames: string[]
+): string[] {
+  return [...new Set([...manuallyEnabledToolNames, ...automaticToolNames])]
+}
+
 function configuredCandidates(
   config: NexusRouterConfig,
   family: NexusModelFamily,
@@ -39,6 +46,7 @@ function configuredCandidates(
   intent: NexusRouterIntent
 ): string[] {
   if (intent === "image") return config.specialists.imageModels
+  if (intent === "web-search") return config.specialists.webSearchModels
   if (intent === "instruction" && family === "auto" && config.specialists.instructionModels.length > 0) {
     return config.specialists.instructionModels
   }
@@ -65,6 +73,7 @@ function selectModel(args: {
   intent: NexusRouterIntent
   fallbackModelId: string
   accessibleIds: Set<string>
+  requiredTools: string[]
 }): { model: NexusModelRow; fallbackUsed: boolean } {
   const configuredIds = configuredCandidates(args.config, args.family, args.tier, args.intent)
   if (args.intent === "image") {
@@ -96,12 +105,22 @@ function selectModel(args: {
     family: args.family,
     tier: args.tier,
     fallbackModelId: args.fallbackModelId,
+    requirements: {
+      requiredTools: args.requiredTools,
+    },
     additionalEligibility: model =>
       !hasCapability(model.capabilities, "imageGeneration")
-      && (args.intent !== "instruction" || args.family !== "auto" || inferFamily(model) === "google"),
+      && (args.intent !== "instruction" || args.family !== "auto" || inferFamily(model) === "google")
+      && (args.intent !== "web-search" || args.family !== "auto" || inferFamily(model) === "google"),
   })
   if (routed) return { model: routed.model as NexusModelRow, fallbackUsed: routed.fallbackUsed }
 
+  if (args.intent === "web-search") {
+    throw new NexusSpecialistUnavailableError(
+      "web-search",
+      "Web search is not available for your selected model family or account right now. Ask an administrator to configure an accessible Gemini web-search model."
+    )
+  }
   if (args.family !== "auto") {
     throw new Error(`No accessible Nexus model is available in the ${args.family} family`)
   }
@@ -167,6 +186,7 @@ export async function routeNexusRequest(args: {
   experienceMode: NexusExperienceMode
   requestedFamily: NexusModelFamily
   enabledConnectorIds: string[]
+  enabledToolNames?: string[]
   userId: number
   hasImageInput?: boolean
   hasPreviousGeneratedImage?: boolean
@@ -186,12 +206,13 @@ export async function routeNexusRequest(args: {
       modelId: fallback.modelId,
       connectorIds: args.enabledConnectorIds,
       automaticConnectorIds: [],
+      automaticToolNames: [],
       metadata: {
         version: config.version, runtimeMode: mode, experienceMode: args.experienceMode,
         requestedFamily: args.requestedFamily, selectedFamily: inferFamily(fallback) ?? "fallback",
         intent: "general", tier: inferTier(fallback), confidence: 1,
         reasonCodes: ["router_off"], decisionSource: "fallback", selectedModelId: fallback.modelId,
-        fallbackUsed: false, autoAttachedPsdData: false,
+        fallbackUsed: false, autoAttachedPsdData: false, autoEnabledWebSearch: false,
       },
     }
   }
@@ -200,9 +221,14 @@ export async function routeNexusRequest(args: {
     hasImageInput: args.hasImageInput,
     hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
   })
+  const requiredTools = [...new Set(args.enabledToolNames ?? [])]
+  if (decision.intent === "web-search" && !requiredTools.includes("webSearch")) {
+    requiredTools.push("webSearch")
+  }
   const selection = selectModelForRuntime({
     models, config, family: args.requestedFamily, tier: decision.tier,
     intent: decision.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
+    requiredTools,
   }, mode, fallback)
   const psdConnectorId = await resolveAutomaticPsdConnector(decision.intent, config)
   if (mode === "active" && decision.intent === "psd-data" && !psdConnectorId) {
@@ -216,17 +242,20 @@ export async function routeNexusRequest(args: {
     : args.enabledConnectorIds
   const selected = mode === "shadow" ? fallback : selection.model
   const connectorIds = mode === "shadow" ? args.enabledConnectorIds : proposedConnectors
+  const autoEnabledWebSearch = mode === "active" && decision.intent === "web-search"
 
   log.info("Nexus request routed", {
     mode, intent: decision.intent, tier: decision.tier, requestedFamily: args.requestedFamily,
     selectedModelId: selected.modelId, proposedModelId: selection.model.modelId,
     fallbackUsed: selection.fallbackUsed, autoAttachedPsdData: !!psdConnectorId,
+    autoEnabledWebSearch,
   })
 
   return {
     modelId: selected.modelId,
     connectorIds,
     automaticConnectorIds: mode === "active" && psdConnectorId ? [psdConnectorId] : [],
+    automaticToolNames: autoEnabledWebSearch ? ["webSearch"] : [],
     metadata: {
       version: config.version,
       runtimeMode: mode,
@@ -242,6 +271,7 @@ export async function routeNexusRequest(args: {
       proposedModelId: mode === "shadow" ? selection.model.modelId : undefined,
       fallbackUsed: selection.fallbackUsed || (mode === "shadow" && selection.model.modelId !== fallback.modelId),
       autoAttachedPsdData: mode === "active" && !!psdConnectorId,
+      autoEnabledWebSearch,
     },
   }
 }

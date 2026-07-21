@@ -52,7 +52,7 @@ import {
 } from '@/lib/skills/skill-tool-enforcement';
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
-import { routeNexusRequest } from '@/lib/nexus/model-router/router';
+import { mergeRoutedToolNames, routeNexusRequest } from '@/lib/nexus/model-router/router';
 import { NexusSpecialistUnavailableError } from '@/lib/nexus/model-router/errors';
 import {
   nexusExperienceModeSchema,
@@ -839,6 +839,7 @@ async function resolveRequestRouting(args: {
   nexusMode: z.infer<typeof nexusExperienceModeSchema>;
   modelFamily: z.infer<typeof nexusModelFamilySchema>;
   manuallyEnabledConnectors: string[];
+  manuallyEnabledTools: string[];
   userId: number;
   sessionId: string;
   existingConversationId?: string;
@@ -859,6 +860,7 @@ async function resolveRequestRouting(args: {
     experienceMode: args.nexusMode,
     requestedFamily: args.nexusMode === 'advanced' ? args.modelFamily : 'auto',
     enabledConnectorIds: args.manuallyEnabledConnectors,
+    enabledToolNames: args.manuallyEnabledTools,
     userId: args.userId,
     hasImageInput: imageContext.hasImageInput,
     hasPreviousGeneratedImage: imageContext.hasPreviousGeneratedImage,
@@ -1173,6 +1175,34 @@ async function scopeFilterEnabledTools(
   return scoped;
 }
 
+function assertAutomaticToolsAvailable(
+  automaticToolNames: string[],
+  availableToolNames: string[]
+): void {
+  const available = new Set(availableToolNames);
+  if (automaticToolNames.some(toolName => !available.has(toolName))) {
+    throw new NexusSpecialistUnavailableError(
+      'web-search',
+      'Web search is not available for your account or the currently loaded skill. Ask an administrator to enable the Web Search tool.'
+    );
+  }
+}
+
+async function scopeRoutedEnabledTools(args: {
+  manuallyEnabledToolNames: string[];
+  automaticToolNames: string[];
+  userRoleNames: string[];
+  log: ReturnType<typeof createLogger>;
+}): Promise<string[]> {
+  const requested = mergeRoutedToolNames(
+    args.manuallyEnabledToolNames,
+    args.automaticToolNames
+  );
+  const scoped = await scopeFilterEnabledTools(requested, args.userRoleNames, args.log);
+  assertAutomaticToolsAvailable(args.automaticToolNames, scoped);
+  return scoped;
+}
+
 const NEXUS_BASE_SYSTEM_PROMPT = `You are a helpful AI assistant in the Nexus interface.
 
 When discussing hardware, networking equipment, or technical specifications, treat model numbers, part numbers, and product identifiers as publicly available product information. Do not suggest that such identifiers have been redacted or withheld.
@@ -1403,12 +1433,19 @@ export async function POST(req: Request) {
       nexusMode,
       modelFamily,
       manuallyEnabledConnectors,
+      manuallyEnabledTools: enabledTools,
       userId,
       sessionId: session.sub,
       existingConversationId: conversationIdValue,
     });
     const modelId = routing.modelId;
     const enabledConnectors = routing.connectorIds;
+    const catalogScopedEnabledTools = await scopeRoutedEnabledTools({
+      manuallyEnabledToolNames: enabledTools,
+      automaticToolNames: routing.automaticToolNames,
+      userRoleNames,
+      log,
+    });
 
     // 4a. Get selected model configuration
     const modelResult = await getValidatedModelConfig(modelId, log);
@@ -1493,12 +1530,13 @@ export async function POST(req: Request) {
     // then apply the bound skill's session binding (#925): allowed-tools pin over
     // built-in AND connector tools, plus SKILL.md instruction injection.
     const skillBinding = await applySkillSessionBinding({
-      scopedEnabledTools: await scopeFilterEnabledTools(enabledTools, userRoleNames, log),
+      scopedEnabledTools: catalogScopedEnabledTools,
       connectorToolResults,
       skillId,
       log,
     });
     const { scopedEnabledTools, effectiveConnectorToolResults, skillInstructions, skillName, skillAllowedTools } = skillBinding;
+    assertAutomaticToolsAvailable(routing.automaticToolNames, scopedEnabledTools);
 
     // 8c. Bind workspace content tools when a document/artifact is open beside the
     // chat (Atrium §1087). Server-built + canView/canEdit-gated; a bad/unviewable

@@ -34,6 +34,14 @@ describe("Nexus request classifier", () => {
     expect(deterministicClassify("Build a differentiated lesson plan")?.intent).toBe("instruction")
   })
 
+  it("routes explicit searches and time-sensitive facts to web search", () => {
+    expect(deterministicClassify("Search the web for the latest district guidance")?.intent)
+      .toBe("web-search")
+    expect(deterministicClassify("What is today's weather forecast for Tacoma?")?.intent)
+      .toBe("web-search")
+    expect(deterministicClassify("Improve the current paragraph in my draft")).toBeNull()
+  })
+
   it("recognizes an edit instruction when an image is attached", async () => {
     const decision = await classifyNexusRequest("Make this brighter", config, { hasImageInput: true })
     expect(decision).toMatchObject({ intent: "image", source: "deterministic" })

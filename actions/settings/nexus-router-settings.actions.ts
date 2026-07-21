@@ -86,7 +86,7 @@ export async function updateNexusRouterSettings(
       await tx.insert(settings).values({
         key: NEXUS_ROUTER_CONFIG_KEY,
         value: serializedConfig,
-        description: "Nexus classifier, tier, family, image, instruction, and PSD-data routing configuration",
+        description: "Nexus classifier, tier, family, web-search, image, instruction, and PSD-data routing configuration",
         category: "ai",
         isSecret: false,
         updatedAt: now,
@@ -94,7 +94,7 @@ export async function updateNexusRouterSettings(
         target: settings.key,
         set: {
           value: serializedConfig,
-          description: "Nexus classifier, tier, family, image, instruction, and PSD-data routing configuration",
+          description: "Nexus classifier, tier, family, web-search, image, instruction, and PSD-data routing configuration",
           category: "ai",
           isSecret: false,
           updatedAt: now,

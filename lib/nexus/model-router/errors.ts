@@ -1,9 +1,9 @@
 export class NexusSpecialistUnavailableError extends Error {
-  readonly specialist: "image" | "psd-data"
+  readonly specialist: "image" | "psd-data" | "web-search"
   readonly reconnectConnectorIds: string[]
 
   constructor(
-    specialist: "image" | "psd-data",
+    specialist: "image" | "psd-data" | "web-search",
     message: string,
     reconnectConnectorIds: string[] = []
   ) {

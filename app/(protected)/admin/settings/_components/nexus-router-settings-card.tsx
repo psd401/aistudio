@@ -47,6 +47,7 @@ export interface NexusRouterModelOption {
   family: Exclude<NexusModelFamily, "auto"> | null
   imageGeneration: boolean
   deepResearch: boolean
+  webSearch: boolean
 }
 
 export interface NexusRouterConnectorOption {
@@ -105,6 +106,14 @@ function replaceTierCandidate(
   }
 }
 
+function firstAvailableCandidate(
+  candidates: string[],
+  models: NexusRouterModelOption[]
+): string | undefined {
+  const available = new Set(models.map(model => model.modelId))
+  return candidates.find(candidate => available.has(candidate))
+}
+
 function RouterModelSelect({
   value,
   models,
@@ -161,6 +170,10 @@ export function NexusRouterSettingsCard({
   const googleTextModels = useMemo(
     () => textModels.filter(model => model.family === "google"),
     [textModels]
+  )
+  const googleWebSearchModels = useMemo(
+    () => googleTextModels.filter(model => model.webSearch),
+    [googleTextModels]
   )
 
   const save = async () => {
@@ -281,11 +294,11 @@ export function NexusRouterSettingsCard({
 
         <Separator />
 
-        <div className="grid gap-5 lg:grid-cols-3">
+        <div className="grid gap-5 lg:grid-cols-2 xl:grid-cols-4">
           <div className="space-y-2">
             <Label>Instructional questions</Label>
             <RouterModelSelect
-              value={config.specialists.instructionModels[0]}
+              value={firstAvailableCandidate(config.specialists.instructionModels, googleTextModels)}
               models={googleTextModels}
               automaticLabel="Automatic Gemini"
               testId="nexus-router-instruction-model"
@@ -300,9 +313,26 @@ export function NexusRouterSettingsCard({
             <p className="text-xs text-muted-foreground">Lesson plans, rubrics, curriculum, and pedagogy.</p>
           </div>
           <div className="space-y-2">
+            <Label>Web search</Label>
+            <RouterModelSelect
+              value={firstAvailableCandidate(config.specialists.webSearchModels, googleWebSearchModels)}
+              models={googleWebSearchModels}
+              automaticLabel="Automatic Gemini"
+              testId="nexus-router-web-search-model"
+              onChange={modelId => setConfig(current => ({
+                ...current,
+                specialists: {
+                  ...current.specialists,
+                  webSearchModels: modelId === AUTOMATIC ? [] : [modelId],
+                },
+              }))}
+            />
+            <p className="text-xs text-muted-foreground">Current information, news, prices, schedules, and explicit web lookups.</p>
+          </div>
+          <div className="space-y-2">
             <Label>Image generation</Label>
             <RouterModelSelect
-              value={config.specialists.imageModels[0]}
+              value={firstAvailableCandidate(config.specialists.imageModels, imageModels)}
               models={imageModels}
               automaticLabel="Automatic image model"
               testId="nexus-router-image-model"
