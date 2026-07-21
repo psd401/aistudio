@@ -108,6 +108,41 @@ describe("UnifiedContentProcessing", () => {
     });
   });
 
+  test("grants the worker valid least-privilege access to canonical repository objects", () => {
+    type PolicyStatement = {
+      Sid?: string;
+      Effect?: string;
+      Action?: string[];
+      Resource?: unknown;
+      Condition?: unknown;
+    };
+    const statements = Object.values(
+      template.findResources("AWS::IAM::Role")
+    ).flatMap((role) =>
+      (role.Properties?.Policies ?? []).flatMap(
+        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+          policy.PolicyDocument?.Statement ?? []
+      )
+    );
+    const repositoryAccess = statements.find(
+      (statement) => statement.Sid === "CanonicalRepositoryObjectAccess"
+    );
+
+    expect(repositoryAccess).toMatchObject({
+      Effect: "Allow",
+      Action: [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:GetObjectTagging",
+        "s3:PutObject",
+      ],
+    });
+    expect(JSON.stringify(repositoryAccess?.Resource)).toContain(
+      ":s3:::aistudio-dev-documents/repositories/*"
+    );
+    expect(repositoryAccess?.Condition).toBeUndefined();
+  });
+
   test("grants only the documented wildcard APIs", () => {
     const policies = template.findResources("AWS::IAM::Policy");
     const roles = template.findResources("AWS::IAM::Role");

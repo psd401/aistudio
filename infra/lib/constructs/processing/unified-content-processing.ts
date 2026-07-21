@@ -169,7 +169,6 @@ export class UnifiedContentProcessing extends Construct {
         region: stack.region,
         account: stack.account,
         vpcEnabled: true,
-        s3Buckets: [props.documentsBucket.bucketName],
         // ServiceRoleFactory accepts physical queue names; unresolved ARN
         // tokens would be prefixed a second time and synthesize an invalid ARN.
         sqsQueues: [this.queue.queueName, props.embeddingQueue.queueName],
@@ -182,8 +181,17 @@ export class UnifiedContentProcessing extends Construct {
                 resources: [props.databaseSecretArn],
               }),
               new iam.PolicyStatement({
-                sid: "ReadGuardDutyObjectScanTag",
-                actions: ["s3:GetObjectTagging"],
+                // Do not use ServiceRoleFactory's generic s3Buckets grant here.
+                // Its bucket-tag condition is not evaluated for S3 object ARNs,
+                // so GetObject fails closed even when the bucket is tagged. This
+                // explicit prefix is both narrower and valid for object access.
+                sid: "CanonicalRepositoryObjectAccess",
+                actions: [
+                  "s3:GetObject",
+                  "s3:GetObjectVersion",
+                  "s3:GetObjectTagging",
+                  "s3:PutObject",
+                ],
                 resources: [
                   `${props.documentsBucket.bucketArn}/repositories/*`,
                 ],
