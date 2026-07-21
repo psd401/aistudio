@@ -89,8 +89,9 @@ describe("AuroraCostDashboard", () => {
 
       const metric = dashboard.metrics.capacity
       expect(metric).toBeDefined()
-      // IMetric interface doesn't expose namespace/metricName, but we can verify the metric exists
-      expect(metric.toString()).toContain("ServerlessDatabaseCapacity")
+      expect(metric.toMetricConfig().metricStat?.metricName).toBe(
+        "ServerlessDatabaseCapacity"
+      )
     })
 
     test("estimated cost metric is defined", () => {

@@ -3,6 +3,10 @@ import { z } from 'zod'
 import { getServerSession } from '@/lib/auth/server-session'
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { generateUploadPresignedUrl } from '@/lib/aws/s3-client'
+import { generateUploadUrl as generateRepositoryUploadUrl } from '@/lib/services/file-processing-service'
+import { canModifyRepository } from '@/actions/repositories/repository-permissions'
+import { assertNotSystemManagedRepository } from '@/lib/repositories/repository-access-guard'
+import { hasCapabilityAccess } from '@/utils/roles'
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
 import { withActionState, unauthorized } from '@/lib/api-utils'
 import { handleError } from '@/lib/error-utils'
@@ -23,7 +27,8 @@ const PresignedUrlRequestSchema = z.object({
     (type): type is typeof ALLOWED_MIME_TYPES[number] => ALLOWED_MIME_TYPES.includes(type as typeof ALLOWED_MIME_TYPES[number]),
     { message: `Unsupported file type. Allowed types: ${ALLOWED_MIME_TYPES.join(', ')}` }
   ),
-  fileSize: z.number().positive()
+  fileSize: z.number().positive(),
+  repositoryId: z.number().int().positive().optional()
 })
 
 interface PresignedUrlResponse {
@@ -71,7 +76,7 @@ export async function POST(request: NextRequest) {
         return { isSuccess: false, message: errorMessage }
       }
 
-      const { fileName, fileType, fileSize } = validation.data
+      const { fileName, fileType, fileSize, repositoryId } = validation.data
 
       // Get max file size and validate
       const maxFileSize = await getMaxFileSize()
@@ -101,18 +106,45 @@ export async function POST(request: NextRequest) {
         userId: String(userId)
       })
 
-      // Generate presigned URL
-      const presignedData = await generateUploadPresignedUrl({
-        userId: String(userId),
-        fileName,
-        contentType: fileType,
-        fileSize,
-        metadata: {
-          originalName: fileName,
-          uploadedBy: String(userId),
-        },
-        expiresIn: 3600 // 1 hour
-      })
+      // Repository uploads use a repository-bound key. The prior generic user
+      // prefix could never pass addDocumentWithPresignedUrl's namespace check,
+      // leaving the Repository UI upload path broken and creating orphaned S3
+      // objects. Authorization happens before a URL is minted.
+      let presignedData: { url: string; key: string; fields: Record<string, string> }
+      if (repositoryId != null) {
+        const canUseRepositories = await hasCapabilityAccess("knowledge-repositories")
+        if (!canUseRepositories) {
+          return { isSuccess: false, message: "Repository access is required" }
+        }
+        await assertNotSystemManagedRepository(repositoryId)
+        if (!(await canModifyRepository(repositoryId, userId))) {
+          return { isSuccess: false, message: "Repository owner access is required" }
+        }
+        const repositoryUpload = await generateRepositoryUploadUrl(
+          fileName,
+          fileType,
+          repositoryId
+        )
+        presignedData = {
+          url: repositoryUpload.uploadUrl,
+          key: repositoryUpload.fileKey,
+          fields: {
+            "Content-Type": fileType,
+          },
+        }
+      } else {
+        presignedData = await generateUploadPresignedUrl({
+          userId: String(userId),
+          fileName,
+          contentType: fileType,
+          fileSize,
+          metadata: {
+            originalName: fileName,
+            uploadedBy: String(userId),
+          },
+          expiresIn: 3600 // 1 hour
+        })
+      }
 
       log.info("Presigned URL generated successfully", { key: presignedData.key });
       timer({ status: "success" });

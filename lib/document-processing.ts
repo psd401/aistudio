@@ -5,6 +5,7 @@
 // context of our API route, so it won't break the build.
 
 import logger from "@/lib/logger"
+import { extractPdfText } from "@/lib/repositories/content-platform/pdf-processing"
 import { sanitizeTextWithMetrics } from "@/lib/utils/text-sanitizer"
 
 /**
@@ -19,16 +20,14 @@ import { sanitizeTextWithMetrics } from "@/lib/utils/text-sanitizer"
  */
 export async function extractTextFromPDF(buffer: Buffer): Promise<{ text: string, metadata: Record<string, unknown> }> {
   try {
-    // Import the library without executing its top-level debug routine that
-    // exists in `index.js`.  We jump directly to the core implementation
-    // found in `lib/pdf-parse.js`, which exports the same function without
-    // side-effects that attempt to read test files.
-    const pdfParse = (await import('pdf-parse/lib/pdf-parse.js')).default;
-    const pdfData = await pdfParse(buffer);
+    // Reuse the canonical parser so legacy callers and repository ingestion do
+    // not drift onto incompatible pdf-parse entry points or extraction rules.
+    const pdfData = await extractPdfText(new Uint8Array(buffer));
+    const extractedText = pdfData.pages.map((page) => page.text).join('\n\n');
 
     // Sanitize the extracted text to remove null bytes and invalid UTF-8 sequences
     // that PostgreSQL cannot store (fixes issue #347)
-    const sanitizationResult = sanitizeTextWithMetrics(pdfData.text);
+    const sanitizationResult = sanitizeTextWithMetrics(extractedText);
 
     // Log if significant content was removed during sanitization
     if (sanitizationResult.bytesRemoved > 0) {
@@ -43,13 +42,13 @@ export async function extractTextFromPDF(buffer: Buffer): Promise<{ text: string
     return {
       text: sanitizationResult.sanitized,
       metadata: {
-        pageCount: pdfData.numpages,
-        info: pdfData.info,
+        pageCount: pdfData.pageCount,
+        needsOcrPages: pdfData.needsOcrPages,
       }
     };
   } catch (error) {
     logger.error('Error extracting text from PDF with pdf-parse', { error })
-    throw new Error('Failed to extract text from PDF');
+    throw new Error('Failed to extract text from PDF', { cause: error });
   }
 }
 
@@ -215,4 +214,4 @@ export function getFileTypeFromFileName(fileName: string): string {
     default:
       return extension;
   }
-} 
+}

@@ -29,10 +29,18 @@ import {
   startTimer
 } from "@/lib/logger"
 import { revalidatePath } from "next/cache"
-import { uploadDocument, deleteDocument } from "@/lib/aws/s3-client"
+import {
+  uploadDocument,
+  deleteDocument,
+  getDocumentObjectMetadata,
+} from "@/lib/aws/s3-client"
 import { queueFileForProcessing, processUrl } from "@/lib/services/file-processing-service"
 import { canModifyRepository, getUserIdFromSession } from "./repository-permissions"
 import { toContentDispositionValue } from "@/lib/repositories/content-disposition"
+import {
+  dispatchContentProcessingJob,
+  registerCanonicalUploadIfEnabled,
+} from "@/lib/repositories/content-platform"
 
 // Runtime-validated processing-status union (REV-COR-068): actions are network
 // endpoints, so the TS parameter type is not enforced on the wire.
@@ -411,6 +419,31 @@ export async function addDocumentWithPresignedUrl(
       return { isSuccess: false, message: "Invalid S3 key for this repository" }
     }
 
+    // The client supplied size/type before the PUT. Verify the object that
+    // actually landed in S3 before persisting or queueing it. This closes the
+    // gap where a caller could request a small allowed upload, PUT different
+    // bytes, then register misleading metadata.
+    const objectMetadata = await getDocumentObjectMetadata(input.s3Key)
+    if (objectMetadata.contentLength !== input.metadata.size) {
+      log.warn("Presigned upload size mismatch", {
+        repositoryId: input.repository_id,
+        expectedSize: input.metadata.size,
+        actualSize: objectMetadata.contentLength,
+      })
+      return { isSuccess: false, message: "Uploaded file size did not match the request" }
+    }
+    if (
+      objectMetadata.contentType &&
+      objectMetadata.contentType !== input.metadata.contentType
+    ) {
+      log.warn("Presigned upload content type mismatch", {
+        repositoryId: input.repository_id,
+        expectedContentType: input.metadata.contentType,
+        actualContentType: objectMetadata.contentType,
+      })
+      return { isSuccess: false, message: "Uploaded file type did not match the request" }
+    }
+
     // Create repository item with S3 key reference via Drizzle
     log.info("Creating repository item in database", {
       repositoryId: input.repository_id,
@@ -427,7 +460,8 @@ export async function addDocumentWithPresignedUrl(
         contentType: input.metadata.contentType,
         size: input.metadata.size,
         originalFileName: input.metadata.originalFileName,
-        uploadedAt: new Date().toISOString()
+        uploadedAt: new Date().toISOString(),
+        eTag: objectMetadata.eTag,
       },
       processingStatus: 'pending'
     })
@@ -444,6 +478,51 @@ export async function addDocumentWithPresignedUrl(
       processingError: itemRaw.processingError,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
+    }
+
+    // Controlled migration path (#1265): when the platform and dual-write
+    // switches are enabled, record the immutable quarantined source version and
+    // its durable inspection job. The legacy queue remains authoritative until
+    // CONTENT_READ_V2_ENABLED is separately enabled. A shadow-write failure is
+    // observable but does not make the existing upload disappear from the user;
+    // the pending repository item can be reconciled and replayed safely.
+    try {
+      const canonical = await registerCanonicalUploadIfEnabled({
+        itemId: item.id,
+        userId,
+        objectKey: input.s3Key,
+        originalFileName: input.metadata.originalFileName,
+        declaredContentType: input.metadata.contentType,
+        byteSize: input.metadata.size,
+        traceId: requestId,
+      })
+      if (canonical) {
+        log.info("Canonical repository version registered", {
+          itemId: item.id,
+          versionId: canonical.version.id,
+          processingJobId: canonical.inspectJob.id,
+          created: canonical.created,
+        })
+        try {
+          await dispatchContentProcessingJob({
+            jobId: canonical.inspectJob.id,
+            itemVersionId: canonical.version.id,
+          })
+        } catch (dispatchError) {
+          log.warn("Canonical processing is pending scheduled dispatch", {
+            processingJobId: canonical.inspectJob.id,
+            error:
+              dispatchError instanceof Error
+                ? dispatchError.message
+                : "Unknown error",
+          })
+        }
+      }
+    } catch (error) {
+      log.error("Canonical repository shadow write failed", {
+        itemId: item.id,
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
     }
 
     // Queue for processing (embedding generation, etc.)

@@ -108,8 +108,11 @@ export function FileUploadModal({
   
   // Get max file size from environment variable or use default
   // Note: MAX_FILE_SIZE_MB is a server-side env var, so we need to hardcode or pass it from server
-  const maxFileSizeMB = 25 // Default 25MB - matches server default
-  const maxFileSize = maxFileSizeMB * 1024 * 1024
+  // The server applies the administrator-configured limit (default 10 GiB,
+  // hard configuration ceiling 50 GiB). Keep the browser guard at that ceiling
+  // so it never contradicts a valid admin policy.
+  const maxFileSizeGB = 50
+  const maxFileSize = maxFileSizeGB * 1024 * 1024 * 1024
 
   // Use presigned URL method to bypass Amplify 1MB limit
   const USE_PRESIGNED_URL = true // Always use presigned URL for repository uploads for consistency
@@ -127,7 +130,7 @@ export function FileUploadModal({
           if (!file) return false
           return file.size <= MAX_FILE_SIZE
         },
-        `File size must be less than ${USE_PRESIGNED_URL ? `${MAX_FILE_SIZE / 1024 / 1024}MB` : `${MAX_FILE_SIZE / 1024}KB`}`
+        `File size must be less than ${USE_PRESIGNED_URL ? `${maxFileSizeGB} GB` : `${MAX_FILE_SIZE / 1024}KB`}`
       )
       .refine(
         (files) => {
@@ -183,7 +186,97 @@ export function FileUploadModal({
       let result
       
       if (USE_PRESIGNED_URL) {
-        // New method: Upload directly to S3
+        // Ask the unified repository endpoint first. With rollout flags off (or
+        // for a file type not migrated yet) it explicitly returns legacy mode.
+        const canonicalResponse = await fetch(
+          `/api/repositories/${repositoryId}/uploads`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              itemName: data.name,
+              fileName: file.name,
+              contentType: file.type,
+              byteSize: file.size,
+            }),
+          }
+        )
+        if (!canonicalResponse.ok) {
+          const error = await canonicalResponse.json()
+          throw new Error(error.error || 'Failed to initiate upload')
+        }
+        const canonical = await canonicalResponse.json()
+
+        if (canonical.mode === 'canonical') {
+          const upload = canonical.upload as {
+            sessionId: string
+            uploadMethod: 'single' | 'multipart'
+            uploadUrl?: string
+            partSize?: number
+            partUrls?: Array<{ partNumber: number; uploadUrl: string }>
+          }
+          const completedParts: Array<{ ETag: string; PartNumber: number }> = []
+
+          if (upload.uploadMethod === 'single') {
+            if (!upload.uploadUrl) throw new Error('Upload URL was not provided')
+            const uploadResponse = await fetch(upload.uploadUrl, {
+              method: 'PUT',
+              headers: { 'Content-Type': file.type },
+              body: file,
+            })
+            if (!uploadResponse.ok) throw new Error('Failed to upload file to storage')
+          } else {
+            if (!upload.partSize || !upload.partUrls?.length) {
+              throw new Error('Multipart upload configuration was incomplete')
+            }
+            // Four concurrent parts balances throughput and memory use. Each
+            // worker claims the next Blob slice without reading the whole file.
+            let nextPart = 0
+            const workers = Array.from(
+              { length: Math.min(4, upload.partUrls.length) },
+              async () => {
+                while (nextPart < upload.partUrls!.length) {
+                  const index = nextPart
+                  nextPart += 1
+                  const part = upload.partUrls![index]
+                  const start = (part.partNumber - 1) * upload.partSize!
+                  const body = file.slice(start, Math.min(start + upload.partSize!, file.size))
+                  const partResponse = await fetch(part.uploadUrl, {
+                    method: 'PUT',
+                    body,
+                  })
+                  if (!partResponse.ok) {
+                    throw new Error(`Failed to upload part ${part.partNumber}`)
+                  }
+                  const ETag = partResponse.headers.get('ETag')
+                  if (!ETag) throw new Error('Storage did not return a multipart ETag')
+                  completedParts.push({ ETag, PartNumber: part.partNumber })
+                }
+              }
+            )
+            await Promise.all(workers)
+          }
+
+          const completionResponse = await fetch(
+            `/api/repositories/${repositoryId}/uploads/${upload.sessionId}/complete`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                parts:
+                  upload.uploadMethod === 'multipart'
+                    ? completedParts.sort((a, b) => a.PartNumber - b.PartNumber)
+                    : undefined,
+              }),
+            }
+          )
+          if (!completionResponse.ok) {
+            const error = await completionResponse.json()
+            throw new Error(error.error || 'Failed to complete upload')
+          }
+          result = { isSuccess: true, message: 'Document uploaded successfully' }
+        } else {
+        // Existing single-object flow remains unchanged until canonical cutover.
         // Step 1: Get presigned URL
         const presignedResponse = await fetch('/api/documents/presigned-url', {
           method: 'POST',
@@ -194,6 +287,7 @@ export function FileUploadModal({
             fileName: file.name,
             fileType: file.type,
             fileSize: file.size,
+            repositoryId,
           }),
         })
 
@@ -229,6 +323,7 @@ export function FileUploadModal({
             originalFileName: file.name,
           },
         })
+        }
       } else {
         // Old method: Upload through server
         const buffer = await file.arrayBuffer()

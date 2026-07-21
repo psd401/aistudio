@@ -11,6 +11,7 @@ import * as XLSX from '@e965/xlsx';
 import { parse as csvParse } from 'csv-parse/sync';
 import { marked } from 'marked';
 import { TextractUsageTracker } from './textract-usage';
+import { validateRepositoryProcessingKey } from './storage-key';
 
 const s3Client = new S3Client({});
 const rdsClient = new RDSDataClient({});
@@ -554,22 +555,6 @@ async function processFile(job: ProcessingJob) {
   }
 }
 
-// Validate S3 key to prevent path traversal attacks
-function validateS3Key(key: string): boolean {
-  // Reject keys with path traversal patterns
-  if (key.includes('../') || key.includes('..\\') || key.startsWith('/')) {
-    return false;
-  }
-
-  // Accept two valid patterns:
-  // 1. New format: repositories/{repoId}/{itemId}/{filename}
-  // 2. Legacy format: {userId}/{timestamp}-{filename} (tightened to safe filename chars)
-  const newFormatPattern = /^repositories\/\d+\/\d+\/[^/]+$/;
-  const legacyFormatPattern = /^\d+\/\d+-[\w.\-]+$/;
-
-  return newFormatPattern.test(key) || legacyFormatPattern.test(key);
-}
-
 // Validate S3 bucket name against the expected environment bucket
 function validateBucketName(bucketName: string): boolean {
   return bucketName === DOCUMENTS_BUCKET;
@@ -591,7 +576,7 @@ export async function handler(event: SQSEvent) {
       }
 
       // Validate file key before processing
-      if (!validateS3Key(job.fileKey)) {
+      if (!validateRepositoryProcessingKey(job.fileKey)) {
         console.error(`Invalid S3 key detected: ${job.fileKey}`);
         throw new Error(`Invalid S3 key: ${job.fileKey}`);
       }

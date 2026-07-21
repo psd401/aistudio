@@ -254,14 +254,10 @@ export class ServiceRoleFactory {
             "ec2:AssignPrivateIpAddresses",
             "ec2:UnassignPrivateIpAddresses",
           ],
-          resources: ["*"], // VPC ENI operations require wildcard, but we add conditions
-          conditions: {
-            StringEquals: {
-              "ec2:Subnet": [
-                `arn:aws:ec2:${props.region}:${props.account}:subnet/*`,
-              ],
-            },
-          },
+          // Lambda's VPC ENI operations do not support useful resource-level
+          // scoping. Keep this exception isolated to the five AWS-documented
+          // actions and validate it explicitly in PolicyValidator.
+          resources: ["*"],
         }),
       ],
     })

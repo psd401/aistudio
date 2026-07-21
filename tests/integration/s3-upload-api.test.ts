@@ -9,6 +9,18 @@ import { POST as processHandler } from '@/app/api/documents/process/route'
 jest.mock('@/lib/auth/server-session')
 jest.mock('@/actions/db/get-current-user-action')
 jest.mock('@/lib/aws/s3-client')
+jest.mock('@/lib/services/file-processing-service', () => ({
+  generateUploadUrl: jest.fn(),
+}))
+jest.mock('@/actions/repositories/repository-permissions', () => ({
+  canModifyRepository: jest.fn(),
+}))
+jest.mock('@/lib/repositories/repository-access-guard', () => ({
+  assertNotSystemManagedRepository: jest.fn(),
+}))
+jest.mock('@/utils/roles', () => ({
+  hasCapabilityAccess: jest.fn(),
+}))
 jest.mock('@/lib/db/queries/documents')
 jest.mock('@/lib/document-processing')
 jest.mock('@/lib/logger', () => ({
@@ -40,6 +52,10 @@ import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { generateUploadPresignedUrl, getObjectStream, documentExists } from '@/lib/aws/s3-client'
 import { saveDocument, batchInsertDocumentChunks } from '@/lib/db/queries/documents'
 import { extractTextFromDocument, chunkText } from '@/lib/document-processing'
+import { generateUploadUrl } from '@/lib/services/file-processing-service'
+import { canModifyRepository } from '@/actions/repositories/repository-permissions'
+import { assertNotSystemManagedRepository } from '@/lib/repositories/repository-access-guard'
+import { hasCapabilityAccess } from '@/utils/roles'
 
 const mockGetServerSession = getServerSession as jest.MockedFunction<typeof getServerSession>
 const mockGetCurrentUserAction = getCurrentUserAction as jest.MockedFunction<typeof getCurrentUserAction>
@@ -50,10 +66,17 @@ const mockExtractTextFromDocument = extractTextFromDocument as jest.MockedFuncti
 const mockChunkText = chunkText as jest.MockedFunction<typeof chunkText>
 const mockSaveDocument = saveDocument as jest.MockedFunction<typeof saveDocument>
 const mockBatchInsertDocumentChunks = batchInsertDocumentChunks as jest.MockedFunction<typeof batchInsertDocumentChunks>
+const mockGenerateRepositoryUploadUrl = generateUploadUrl as jest.MockedFunction<typeof generateUploadUrl>
+const mockCanModifyRepository = canModifyRepository as jest.MockedFunction<typeof canModifyRepository>
+const mockAssertNotSystemManagedRepository = assertNotSystemManagedRepository as jest.MockedFunction<typeof assertNotSystemManagedRepository>
+const mockHasCapabilityAccess = hasCapabilityAccess as jest.MockedFunction<typeof hasCapabilityAccess>
 
 describe('S3 Upload API Integration Tests', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    mockCanModifyRepository.mockResolvedValue(true)
+    mockAssertNotSystemManagedRepository.mockResolvedValue(undefined)
+    mockHasCapabilityAccess.mockResolvedValue(true)
   })
 
   describe('POST /api/documents/presigned-url', () => {
@@ -147,6 +170,72 @@ describe('S3 Upload API Integration Tests', () => {
         isSuccess: false,
         message: expect.any(String)
       })
+    })
+
+    it('mints a repository-bound key only after repository authorization', async () => {
+      mockGetServerSession.mockResolvedValue({
+        sub: 'test-cognito-sub',
+        email: 'test@example.com',
+        exp: 1234567890,
+        iat: 1234567890
+      })
+      mockGetCurrentUserAction.mockResolvedValue({
+        isSuccess: true,
+        message: 'Success',
+        data: {
+          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date(), oldClerkId: null, roleVersion: null, jobTitle: null, department: null, building: null, gradeLevels: null, bio: null, profile: null },
+          roles: [{ id: 1, name: 'staff', description: 'Staff role' }]
+        }
+      })
+      mockGenerateRepositoryUploadUrl.mockResolvedValue({
+        uploadUrl: 'https://s3.amazonaws.com/test-bucket/repositories/7/file/test.pdf',
+        fileKey: 'repositories/7/file/test.pdf',
+      })
+
+      const request = new NextRequest('http://localhost:3000/api/documents/presigned-url', {
+        method: 'POST',
+        body: JSON.stringify({
+          fileName: 'test.pdf',
+          fileType: 'application/pdf',
+          fileSize: 1024,
+          repositoryId: 7,
+        })
+      })
+
+      const response = await presignedUrlHandler(request)
+      const data = await response.json()
+
+      expect(data.data.key).toBe('repositories/7/file/test.pdf')
+      expect(mockAssertNotSystemManagedRepository).toHaveBeenCalledWith(7)
+      expect(mockCanModifyRepository).toHaveBeenCalledWith(7, 123)
+      expect(mockGenerateUploadPresignedUrl).not.toHaveBeenCalled()
+    })
+
+    it('does not mint a repository upload URL for a non-owner', async () => {
+      mockGetServerSession.mockResolvedValue({
+        sub: 'test-cognito-sub', email: 'test@example.com', exp: 1, iat: 1
+      })
+      mockGetCurrentUserAction.mockResolvedValue({
+        isSuccess: true,
+        message: 'Success',
+        data: {
+          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date(), oldClerkId: null, roleVersion: null, jobTitle: null, department: null, building: null, gradeLevels: null, bio: null, profile: null },
+          roles: [{ id: 1, name: 'staff', description: 'Staff role' }]
+        }
+      })
+      mockCanModifyRepository.mockResolvedValue(false)
+
+      const request = new NextRequest('http://localhost:3000/api/documents/presigned-url', {
+        method: 'POST',
+        body: JSON.stringify({
+          fileName: 'test.pdf', fileType: 'application/pdf', fileSize: 1024, repositoryId: 7,
+        })
+      })
+      const response = await presignedUrlHandler(request)
+      const data = await response.json()
+
+      expect(data.isSuccess).toBe(false)
+      expect(mockGenerateRepositoryUploadUrl).not.toHaveBeenCalled()
     })
   })
 

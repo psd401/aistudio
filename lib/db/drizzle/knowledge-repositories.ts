@@ -260,6 +260,12 @@ export async function getAllRepositoriesWithOwner(): Promise<
           description: knowledgeRepositories.description,
           ownerId: knowledgeRepositories.ownerId,
           isPublic: knowledgeRepositories.isPublic,
+          repositoryKind: knowledgeRepositories.repositoryKind,
+          lifecycleStatus: knowledgeRepositories.lifecycleStatus,
+          retentionDays: knowledgeRepositories.retentionDays,
+          expiresAt: knowledgeRepositories.expiresAt,
+          activeIndexGenerationId:
+            knowledgeRepositories.activeIndexGenerationId,
           metadata: knowledgeRepositories.metadata,
           createdAt: knowledgeRepositories.createdAt,
           updatedAt: knowledgeRepositories.updatedAt,

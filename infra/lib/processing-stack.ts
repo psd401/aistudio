@@ -2,7 +2,6 @@ import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-// import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -19,6 +18,7 @@ import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import { execSync } from 'child_process';
 import { ServiceRoleFactory } from './constructs/security';
 import { VPCProvider, EnvironmentConfig } from './constructs';
+import { UnifiedContentProcessing } from './constructs/processing/unified-content-processing';
 
 export interface ProcessingStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
@@ -36,6 +36,7 @@ export interface ProcessingStackProps extends cdk.StackProps {
 export class ProcessingStack extends cdk.Stack {
   public readonly fileProcessingQueue: sqs.Queue;
   public readonly embeddingQueue: sqs.Queue;
+  public readonly contentProcessingQueue: sqs.Queue;
   public readonly jobStatusTable: dynamodb.Table;
   public readonly textractCompletionTopic: sns.Topic;
 
@@ -114,6 +115,16 @@ export class ProcessingStack extends cdk.Stack {
         maxReceiveCount: 3,
       },
     });
+
+    const unifiedContent = new UnifiedContentProcessing(this, 'UnifiedContent', {
+      environment: props.environment,
+      documentsBucket,
+      databaseHost,
+      databaseSecretArn,
+      embeddingQueue: this.embeddingQueue,
+      vpc,
+    });
+    this.contentProcessingQueue = unifiedContent.queue;
 
     // SNS Topic for Textract completion notifications
     this.textractCompletionTopic = new sns.Topic(this, 'TextractCompletionTopic', {
@@ -707,6 +718,18 @@ export class ProcessingStack extends cdk.Stack {
       value: this.embeddingQueue.queueArn,
       description: 'ARN of the embedding generation queue',
       exportName: `${props.environment}-EmbeddingQueueArn`,
+    });
+
+    new cdk.CfnOutput(this, 'ContentProcessingQueueUrl', {
+      value: this.contentProcessingQueue.queueUrl,
+      description: 'URL of the unified repository content processing queue',
+      exportName: `${props.environment}-ContentProcessingQueueUrl`,
+    });
+
+    new cdk.CfnOutput(this, 'ContentProcessingQueueArn', {
+      value: this.contentProcessingQueue.queueArn,
+      description: 'ARN of the unified repository content processing queue',
+      exportName: `${props.environment}-ContentProcessingQueueArn`,
     });
 
     new cdk.CfnOutput(this, 'EmbeddingGeneratorFunctionName', {

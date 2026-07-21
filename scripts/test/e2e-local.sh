@@ -145,6 +145,11 @@ if docker exec -i aistudio-postgres pg_isready -U postgres >/dev/null 2>&1; then
     echo "❌ e2e-local: failed to seed resource-grants fixture"
     exit 1
   fi
+  if ! docker exec -i aistudio-postgres psql -U postgres -d aistudio -v ON_ERROR_STOP=1 -q \
+    < tests/e2e/fixtures/unified-content-repository-seed.sql >/dev/null; then
+    echo "❌ e2e-local: failed to seed unified-content repository fixture"
+    exit 1
+  fi
   DATABASE_URL="postgresql://postgres:postgres@localhost:5432/aistudio" DB_SSL=false \
     bun run scripts/dev/seed-atrium-doc-state.ts >/dev/null 2>&1 || true
 else

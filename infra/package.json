@@ -5,12 +5,13 @@
     "infra": "bin/infra.js"
   },
   "scripts": {
-    "build": "tsc && bun run test:lambdas",
+    "build": "tsc && bun run typecheck:unified-content && bun run test:lambdas",
     "build:lambdas": "./build-lambdas.sh",
     "build:all": "bun run build && bun run build:lambdas",
     "watch": "tsc -w",
     "test": "jest",
     "test:lambdas": "cd lambdas/agent-skill-builder && bun install && bun run test",
+    "typecheck:unified-content": "tsc --project lambdas/unified-content-processor/tsconfig.json",
     "cdk": "cdk"
   },
   "devDependencies": {
@@ -18,6 +19,7 @@
     "@types/jest": "^30.0.0",
     "@types/node": "26.1.0",
     "@types/pdf-parse": "^1.1.5",
+    "@types/xml2js": "^0.4.14",
     "aws-cdk": "^2.1104.0",
     "jest": "^30.2.0",
     "ts-jest": "^29.4.6",
@@ -35,15 +37,18 @@
     "@aws-cdk/aws-s3": "^1.203.0",
     "@aws-cdk/aws-secretsmanager": "^1.203.0",
     "@aws-sdk/client-dynamodb": "^3.981.0",
+    "@aws-sdk/client-textract": "^3.982.0",
+    "@e965/xlsx": "^0.20.3",
     "@types/node-fetch": "^2.6.12",
     "aws-cdk-lib": "^2.237.1",
     "cheerio": "^1.2.0",
     "constructs": "^10.4.5",
     "csv-parse": "^7.0.0",
+    "hash-wasm": "4.12.0",
     "mammoth": "^1.11.0",
-    "marked": "^18.0.5",
+    "marked": "^9.0.0",
     "node-fetch": "^3.3.2",
     "pdf-parse": "^2.4.5",
-    "@e965/xlsx": "^0.20.3"
+    "xml2js": "^0.6.2"
   }
 }
