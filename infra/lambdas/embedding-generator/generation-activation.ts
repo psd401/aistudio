@@ -73,6 +73,9 @@ export async function activateCompletedGeneration(
           SELECT target.repository_id FROM (${eligibleTarget}) target
         )
     `,
+    // Defense in depth: the preceding statement already supersedes the current
+    // generation under the repository lock, but retain this invariant check if
+    // the ordered activation plan is ever reused by another executor.
     activateTarget: sql`
       UPDATE repository_index_generations generation
       SET status = 'active',
