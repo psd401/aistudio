@@ -7,8 +7,10 @@ import {
   repositoryItemChunks,
   repositoryItems,
   repositoryItemVersions,
+  type RepositoryArtifactKind,
   type RepositoryInspectionStatus,
   type RepositorySourceLocator,
+  type RepositorySourceRegion,
 } from "@/lib/db/schema";
 import type { PdfSegment } from "./pdf-processing";
 
@@ -18,6 +20,17 @@ export interface PublishableSegment {
   chunkIndex: number;
   tokens: number;
   sourceLocator: RepositorySourceLocator;
+  modality?: "text" | "image" | "audio" | "video" | "table";
+}
+
+export interface PublishableArtifact {
+  kind: Exclude<RepositoryArtifactKind, "canonical_text">;
+  mediaType: string;
+  objectKey?: string;
+  textInline?: string;
+  sha256?: string;
+  sourceRegions?: RepositorySourceRegion[];
+  metadata?: Record<string, unknown>;
 }
 
 export interface PublishDocumentVersionInput {
@@ -35,6 +48,7 @@ export interface PublishDocumentVersionInput {
   canonicalTextObjectKey?: string;
   segments: PublishableSegment[];
   artifactMetadata?: Record<string, unknown>;
+  additionalArtifacts?: PublishableArtifact[];
   embeddingModel?: string;
   embeddingDimensions?: number;
 }
@@ -57,6 +71,13 @@ export const MAX_INLINE_ARTIFACT_CHARACTERS = 1_000_000;
 
 function artifactKey(input: PublishDocumentVersionInput): string {
   return `${input.itemVersionId}:canonical_text:${input.processorVersion}`;
+}
+
+function additionalArtifactKey(
+  input: PublishDocumentVersionInput,
+  artifact: PublishableArtifact
+): string {
+  return `${input.itemVersionId}:${artifact.kind}:${input.processorVersion}`;
 }
 
 function validatePublicationInput(input: PublishDocumentVersionInput): void {
@@ -88,6 +109,28 @@ function validatePublicationInput(input: PublishDocumentVersionInput): void {
     }
     if (Object.keys(segment.sourceLocator).length === 0) {
       throw new Error("Every segment requires a source citation");
+    }
+  }
+  const artifactKinds = new Set<RepositoryArtifactKind>();
+  for (const artifact of input.additionalArtifacts ?? []) {
+    if (artifactKinds.has(artifact.kind)) {
+      throw new Error("Additional artifact kinds must be unique per publication");
+    }
+    artifactKinds.add(artifact.kind);
+    if (!artifact.mediaType.trim()) {
+      throw new Error("Every additional artifact requires a media type");
+    }
+    if (!artifact.objectKey && !artifact.textInline) {
+      throw new Error("Every additional artifact requires an object or inline text");
+    }
+    if (
+      artifact.textInline &&
+      artifact.textInline.length > MAX_INLINE_ARTIFACT_CHARACTERS
+    ) {
+      throw new Error("Large additional artifact text must be stored as an object");
+    }
+    if (artifact.sha256 && !/^[0-9a-f]{64}$/.test(artifact.sha256)) {
+      throw new Error("Additional artifact SHA-256 values must be lowercase hex");
     }
   }
 }
@@ -200,6 +243,29 @@ export async function publishDocumentVersion(
             .returning({ id: repositoryArtifacts.id });
       if (!createdArtifact) throw new Error("Failed to create canonical artifact");
 
+      for (const artifact of input.additionalArtifacts ?? []) {
+        const key = additionalArtifactKey(input, artifact);
+        const [existing] = await tx
+          .select({ id: repositoryArtifacts.id })
+          .from(repositoryArtifacts)
+          .where(eq(repositoryArtifacts.artifactKey, key))
+          .limit(1);
+        if (existing) continue;
+        await tx.insert(repositoryArtifacts).values({
+          itemVersionId: input.itemVersionId,
+          artifactKey: key,
+          kind: artifact.kind,
+          mediaType: artifact.mediaType,
+          objectKey: artifact.objectKey,
+          textInline: artifact.textInline,
+          sha256: artifact.sha256,
+          sourceRegions: artifact.sourceRegions ?? [],
+          processorName: input.processorName,
+          processorVersion: input.processorVersion,
+          metadata: artifact.metadata ?? {},
+        });
+      }
+
       const [generation] = await tx
         .insert(repositoryIndexGenerations)
         .values({
@@ -238,7 +304,7 @@ export async function publishDocumentVersion(
           content: segment.content,
           chunkIndex: segment.chunkIndex,
           metadata: { processorVersion: input.processorVersion },
-          modality: "text" as const,
+          modality: segment.modality ?? "text",
           contentHash: segment.contentHash,
           sourceLocator: segment.sourceLocator,
           tokens: segment.tokens,

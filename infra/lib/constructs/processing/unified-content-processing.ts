@@ -205,6 +205,17 @@ export class UnifiedContentProcessing extends Construct {
                 ],
                 resources: ["*"],
               }),
+              new iam.PolicyStatement({
+                sid: "CanonicalImageCaptioning",
+                actions: ["bedrock:InvokeModel"],
+                resources: [
+                  `arn:${stack.partition}:bedrock:${stack.region}:${stack.account}:inference-profile/us.amazon.nova-*-v1:0`,
+                  ...["us-east-1", "us-east-2", "us-west-2"].map(
+                    (region) =>
+                      `arn:${stack.partition}:bedrock:${region}::foundation-model/amazon.nova-*-v1:0`
+                  ),
+                ],
+              }),
             ],
           }),
         ],
@@ -253,6 +264,23 @@ export class UnifiedContentProcessing extends Construct {
         sourceMap: true,
         minify: false,
         externalModules: ["@aws-sdk/*"],
+        nodeModules: ["sharp"],
+        // CDK's local bundler installs native modules for the synth host. Re-run
+        // the pinned install for the Lambda target so macOS and x64 synths both
+        // package Sharp's Linux ARM64 libvips binary without requiring Docker.
+        commandHooks: {
+          afterBundling(_inputDir, outputDir) {
+            return [
+              `cd "${outputDir}" && bun install --frozen-lockfile --os linux --cpu arm64 --backend copyfile`,
+            ];
+          },
+          beforeBundling() {
+            return [];
+          },
+          beforeInstall() {
+            return [];
+          },
+        },
         banner:
           'import { createRequire } from "module"; const require = createRequire(import.meta.url);',
       },

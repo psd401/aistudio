@@ -210,4 +210,79 @@ test.describe('Unified repository upload contract (authenticated)', () => {
       contentType,
     })
   })
+
+  test('uses the canonical upload contract for an image', async ({ page }) => {
+    let initiation: Record<string, unknown> | null = null
+    let completed = false
+    const sessionId = '33333333-4444-4555-8666-777777777777'
+
+    await page.route(/\/api\/repositories\/\d+\/uploads$/, async (route) => {
+      initiation = route.request().postDataJSON() as Record<string, unknown>
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          mode: 'canonical',
+          upload: {
+            sessionId,
+            objectKey: `repositories/7/${sessionId}/evacuation-map.png`,
+            uploadMethod: 'single',
+            uploadUrl: '/__e2e-storage/unified-image',
+            expiresAt: '2026-07-21T12:00:00.000Z',
+          },
+          requestId: 'e2e-image-initiate',
+        }),
+      })
+    })
+    await page.route('**/__e2e-storage/unified-image', async (route) => {
+      expect(route.request().headers()['content-type']).toBe('image/png')
+      await route.fulfill({ status: 200, headers: { ETag: '"image-etag"' } })
+    })
+    await page.route(
+      new RegExp(`/api/repositories/\\d+/uploads/${sessionId}/complete$`),
+      async (route) => {
+        completed = true
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            completed: {
+              itemId: 11,
+              itemVersionId: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa',
+              processingJobId: 'bbbbbbbb-3333-4444-8555-666666666666',
+              replayed: false,
+            },
+            requestId: 'e2e-image-complete',
+          }),
+        })
+      }
+    )
+    await page.route('**/api/documents/presigned-url', async (route) => {
+      await route.fulfill({ status: 500, body: 'Legacy upload must not run' })
+    })
+
+    await page.goto('/repositories')
+    const repositoryRow = page
+      .getByRole('row')
+      .filter({ hasText: 'E2E Unified Content Repository' })
+    await repositoryRow.getByRole('button').first().click()
+    await page.getByRole('button', { name: /Add (Item|your first item)/i }).first().click()
+    await page.getByLabel('Name').fill('Canonical evacuation map')
+    await page.locator('input[type="file"]').setInputFiles({
+      name: 'evacuation-map.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=',
+        'base64'
+      ),
+    })
+    await page.getByRole('dialog').getByRole('button', { name: /Upload File/i }).click()
+
+    await expect.poll(() => completed).toBe(true)
+    expect(initiation).toMatchObject({
+      itemName: 'Canonical evacuation map',
+      fileName: 'evacuation-map.png',
+      contentType: 'image/png',
+    })
+  })
 })

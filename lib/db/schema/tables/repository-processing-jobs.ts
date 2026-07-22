@@ -39,6 +39,14 @@ export interface RepositoryProcessingMetrics {
   provider?: string;
   modelId?: string;
   textractJobId?: string;
+  textractObjectKey?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  captionLatencyMs?: number;
+  imageWidth?: number;
+  imageHeight?: number;
+  thumbnailBytes?: number;
+  ocrLines?: number;
   estimatedCostUsd?: number;
 }
 

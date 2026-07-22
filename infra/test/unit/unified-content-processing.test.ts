@@ -184,4 +184,35 @@ describe("UnifiedContentProcessing", () => {
       "xray:PutTraceSegments",
     ]);
   });
+
+  test("grants image captioning only to US Amazon Nova resources", () => {
+    type PolicyStatement = {
+      Sid?: string;
+      Action?: string | string[];
+      Resource?: string | string[];
+    };
+    const statements = Object.values(
+      template.findResources("AWS::IAM::Role")
+    ).flatMap((role) =>
+      (role.Properties?.Policies ?? []).flatMap(
+        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+          policy.PolicyDocument?.Statement ?? []
+      )
+    );
+    const captioning = statements.find(
+      (statement) => statement.Sid === "CanonicalImageCaptioning"
+    );
+    expect(captioning?.Action).toEqual("bedrock:InvokeModel");
+    const resources = Array.isArray(captioning?.Resource)
+      ? captioning.Resource
+      : [captioning?.Resource];
+    const resourcesJson = JSON.stringify(resources);
+    expect(resourcesJson).toContain(
+      ":bedrock:us-east-1:123456789012:inference-profile/us.amazon.nova-"
+    );
+    expect(resourcesJson).toContain(
+      ":bedrock:us-west-2::foundation-model/amazon.nova-"
+    );
+    expect(resources).not.toContain("*");
+  });
 });

@@ -111,6 +111,7 @@
     "114-assistant-architect-model-routing.sql",
     "115-graph-decision-lifecycle.sql",
     "116-unified-repository-content.sql",
-    "117-unified-content-office-ingestion.sql"
+    "117-unified-content-office-ingestion.sql",
+    "118-unified-content-image-ingestion.sql"
   ]
 }

@@ -7,6 +7,19 @@ export interface TextractLineBlock {
   BlockType?: string;
   Text?: string;
   Page?: number;
+  Geometry?: {
+    BoundingBox?: {
+      Left?: number;
+      Top?: number;
+      Width?: number;
+      Height?: number;
+    };
+  };
+}
+
+export interface TextractImageLine {
+  text: string;
+  region?: { x: number; y: number; width: number; height: number };
 }
 
 export interface PageText {
@@ -92,6 +105,32 @@ export function pagesFromTextract(
     page: index + 1,
     text: (lines.get(index + 1) ?? []).join("\n"),
   }));
+}
+
+export function imageLinesFromTextract(
+  blocks: readonly TextractLineBlock[]
+): TextractImageLine[] {
+  return blocks.flatMap((block) => {
+    if (block.BlockType !== "LINE" || !block.Text?.trim()) return [];
+    const box = block.Geometry?.BoundingBox;
+    const values = [box?.Left, box?.Top, box?.Width, box?.Height];
+    const hasRegion = values.every(
+      (value): value is number => typeof value === "number" && Number.isFinite(value)
+    );
+    return [
+      {
+        text: block.Text.trim(),
+        region: hasRegion
+          ? {
+              x: Math.max(0, Math.min(1, values[0])),
+              y: Math.max(0, Math.min(1, values[1])),
+              width: Math.max(0, Math.min(1, values[2])),
+              height: Math.max(0, Math.min(1, values[3])),
+            }
+          : undefined,
+      },
+    ];
+  });
 }
 
 export function canonicalTextArtifactObjectKey(

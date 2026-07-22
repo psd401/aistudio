@@ -24,6 +24,7 @@ import {
   CONTENT_PROCESSOR_CONTRACT_VERSION,
 } from "./job-state";
 import { sourceRevisionForObjectKey } from "./ingestion-service";
+import { isImageContentType } from "./image-processing";
 import { isOfficeContentType } from "./office-processing";
 
 export interface InitiateRepositoryUploadInput {
@@ -100,9 +101,16 @@ const MIN_MULTIPART_PART_SIZE = 5 * 1024 * 1024;
 const MAX_MULTIPART_PARTS = 100;
 const UPLOAD_EXPIRY_SECONDS = 60 * 60;
 
-export function isCanonicalDocumentContentType(contentType: string): boolean {
-  return contentType === "application/pdf" || isOfficeContentType(contentType);
+export function isCanonicalUploadContentType(contentType: string): boolean {
+  return (
+    contentType === "application/pdf" ||
+    isOfficeContentType(contentType) ||
+    isImageContentType(contentType)
+  );
 }
+
+/** Backwards-compatible name for callers compiled before image ingestion. */
+export const isCanonicalDocumentContentType = isCanonicalUploadContentType;
 
 function getDocumentsBucket(): string {
   const bucket = process.env.DOCUMENTS_BUCKET_NAME;
@@ -134,13 +142,17 @@ function validateInitiation(
   if (!input.fileName.trim() || input.fileName.length > 500) {
     throw new Error("A valid file name is required");
   }
-  if (!isCanonicalDocumentContentType(input.contentType)) {
-    throw new Error("The canonical processor accepts PDF, DOCX, XLSX, and PPTX files only");
+  if (!isCanonicalUploadContentType(input.contentType)) {
+    throw new Error(
+      "The canonical processor accepts PDF, Office, JPEG, PNG, WebP, GIF, and TIFF files only"
+    );
   }
   const processorLimitMb =
     input.contentType === "application/pdf"
       ? config.maxPdfSizeMb
-      : config.maxOfficeSizeMb;
+      : isImageContentType(input.contentType)
+        ? config.maxImageSizeMb
+        : config.maxOfficeSizeMb;
   const maximumBytes = Math.min(
     config.maxFileSizeGb * 1024 ** 3,
     processorLimitMb * 1024 ** 2
@@ -151,7 +163,7 @@ function validateInitiation(
     input.byteSize > maximumBytes
   ) {
     throw new Error(
-      `Document size must not exceed ${processorLimitMb} MiB for this processor`
+      `File size must not exceed ${processorLimitMb} MiB for this processor`
     );
   }
 }
@@ -449,7 +461,9 @@ export async function completeRepositoryUpload(
         .insert(repositoryItems)
         .values({
           repositoryId: locked.repositoryId,
-          type: "document",
+          type: isImageContentType(locked.declaredContentType)
+            ? "image"
+            : "document",
           name: locked.itemName,
           source: locked.objectKey,
           metadata: {

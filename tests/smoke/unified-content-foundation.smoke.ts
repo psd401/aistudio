@@ -18,6 +18,7 @@ import * as XLSX from "@e965/xlsx";
 import { closeDatabase, executeQuery } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
+  repositoryArtifacts,
   repositoryIndexGenerations,
   repositoryItemChunks,
   repositoryItems,
@@ -29,11 +30,13 @@ import {
 import {
   extractPdfText,
   extractOfficeDocument,
+  buildImageSearchDocument,
   DEFAULT_CONTENT_PLATFORM_CONFIG,
   completeRepositoryUpload,
   initiateRepositoryUpload,
   PDF_PROCESSOR_VERSION,
   OFFICE_CONTENT_TYPES,
+  IMAGE_PROCESSOR_VERSION,
   publishDocumentVersion,
   publishPdfVersion,
   registerCanonicalUpload,
@@ -350,6 +353,103 @@ try {
   assert.equal(carriedForwardPdfResults.length, 1);
   assert.equal(carriedForwardPdfResults[0]?.citation?.sourceLocator.page, 1);
 
+  const [imageItem] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItems)
+        .values({
+          repositoryId: repository.id,
+          type: "image",
+          name: "evacuation-map.png",
+          source: `repositories/${repository.id}/fixture/evacuation-map.png`,
+          processingStatus: "pending",
+        })
+        .returning({ id: repositoryItems.id }),
+    "smoke.unifiedContent.createImageItem"
+  );
+  assert.ok(imageItem);
+  const imageRegistration = await registerCanonicalUpload({
+    itemId: imageItem.id,
+    userId: owner.id,
+    objectKey: `repositories/${repository.id}/fixture/evacuation-map.png`,
+    originalFileName: "evacuation-map.png",
+    declaredContentType: "image/png",
+    byteSize: 1024,
+    traceId: "unified-content-image-smoke",
+  });
+  const imageDocument = buildImageSearchDocument({
+    caption: "A school evacuation map with a marked assembly area.",
+    ocrLines: [
+      {
+        text: "ASSEMBLY AREA",
+        region: { x: 0.55, y: 0.65, width: 0.3, height: 0.1 },
+      },
+    ],
+    width: 1600,
+    height: 900,
+    detectedContentType: "image/png",
+  });
+  const imagePublicationInput = {
+    itemVersionId: imageRegistration.version.id,
+    processorVersion: IMAGE_PROCESSOR_VERSION,
+    processorName: "aistudio-image",
+    detectedContentType: "image/png",
+    inspectionStatus: "clean" as const,
+    malwareScanRequired: true,
+    canonicalText: imageDocument.canonicalText,
+    segments: imageDocument.segments,
+    additionalArtifacts: [
+      {
+        kind: "image" as const,
+        mediaType: "image/png",
+        objectKey: `repositories/${repository.id}/fixture/evacuation-map.png`,
+        sha256: "a".repeat(64),
+      },
+      {
+        kind: "thumbnail" as const,
+        mediaType: "image/jpeg",
+        objectKey: `repositories/${repository.id}/artifacts/${imageRegistration.version.id}/thumbnail.jpg`,
+        sha256: "b".repeat(64),
+      },
+      {
+        kind: "caption" as const,
+        mediaType: "text/plain",
+        textInline: "A school evacuation map with a marked assembly area.",
+      },
+      {
+        kind: "layout" as const,
+        mediaType: "text/plain",
+        textInline: imageDocument.ocrText,
+        sourceRegions: imageDocument.ocrRegions,
+      },
+    ],
+  };
+  const imagePublication = await publishDocumentVersion(imagePublicationInput);
+  const imageReplay = await publishDocumentVersion(imagePublicationInput);
+  assert.equal(imagePublication.replayed, false);
+  assert.equal(imageReplay.replayed, true);
+  assert.equal(imageReplay.generationId, imagePublication.generationId);
+  const imageArtifacts = await executeQuery(
+    (db) =>
+      db
+        .select({ kind: repositoryArtifacts.kind })
+        .from(repositoryArtifacts)
+        .where(
+          eq(repositoryArtifacts.itemVersionId, imageRegistration.version.id)
+        ),
+    "smoke.unifiedContent.imageArtifacts"
+  );
+  assert.deepEqual(
+    imageArtifacts.map((artifact) => artifact.kind).sort(),
+    ["canonical_text", "caption", "image", "layout", "thumbnail"]
+  );
+  const imageResults = await keywordSearch("marked assembly", {
+    repositoryId: repository.id,
+    canonicalOnly: true,
+  });
+  assert.equal(imageResults.length, 1);
+  assert.equal(imageResults[0]?.citation?.sourceLocator.regions?.[0]?.x, 0);
+
   await assert.rejects(
     executeQuery(
       (db) =>
@@ -364,7 +464,7 @@ try {
   );
 
   process.stdout.write(
-    "unified-content-foundation smoke: PDF and Office extraction, citations, idempotency, quarantine, and generation guards passed\n"
+    "unified-content-foundation smoke: PDF, Office, and image publication, citations, idempotency, quarantine, artifacts, and generation guards passed\n"
   );
 } finally {
   await executeQuery(

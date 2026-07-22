@@ -232,10 +232,12 @@ The settings UI will validate and explain these database-first settings:
 | `CONTENT_MAX_FILE_SIZE_GB` | `10` | Maximum single-source upload |
 | `CONTENT_MAX_PDF_SIZE_MB` | `500` | Canonical PDF/Textract ceiling |
 | `CONTENT_MAX_OFFICE_SIZE_MB` | `100` | In-memory DOCX/XLSX/PPTX processor ceiling |
+| `CONTENT_MAX_IMAGE_SIZE_MB` | `50` | In-memory image normalizer ceiling |
 | `CONTENT_MAX_MEDIA_HOURS` | `4` | Maximum audio/video duration |
 | `CONTENT_ALLOWED_MIME_TYPES` | managed allowlist | Accepted source formats |
 | `CONTENT_MALWARE_SCAN_REQUIRED` | `true` | Quarantine release policy |
 | `CONTENT_OCR_STRATEGY` | `auto` | Managed/fallback OCR policy |
+| `CONTENT_IMAGE_CAPTION_MODEL_ID` | `us.amazon.nova-2-lite-v1:0` | Bedrock Nova image-description model |
 | `CONTENT_VISUAL_INDEX_ENABLED` | `false` | Visual embeddings rollout |
 | `GOOGLE_CONTENT_SYNC_ENABLED` | `false` | Workspace connector rollout |
 | `GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES` | `15` | Reconciliation cadence |
@@ -355,11 +357,11 @@ scheduled dev-environment suite validates the real services.
 
 ## Worktree and branch model
 
-The active multimodal branch is `codex/unified-content-office-ingestion` in the
+The active multimodal branch is `codex/unified-content-image-ingestion` in the
 ignored worktree:
 
 ```text
-/Users/hagelk/non-ic-code/aistudio/.claude/worktrees/unified-content-office-ingestion
+/Users/hagelk/non-ic-code/aistudio/.claude/worktrees/unified-content-image-ingestion
 ```
 
 The main checkout stays on `dev`, so other agents or projects can use separate
@@ -377,7 +379,7 @@ two worktrees should edit the same migration or contract file concurrently.
 - [x] Repository PDF dual-write/canonical-upload walking skeleton
 - [x] Foundation unit/integration/E2E tests
 - [ ] Dev deployment and observability validation
-- [ ] Multimodal processing (Office slice implemented; images/media remain)
+- [ ] Multimodal processing (Office and image implemented; audio/video remain)
 - [ ] Retrieval v2 and visual search
 - [ ] Google Workspace sync
 - [ ] Universal product UI migration
@@ -477,3 +479,45 @@ Verification evidence so far:
   citation resolution.
 - All-stack CDK synthesis produced 31 CloudFormation stack artifacts with the
   real Office-capable worker bundle.
+
+### Image ingestion checkpoint (2026-07-21)
+
+Implemented on `codex/unified-content-image-ingestion`:
+
+- The canonical repository upload contract and file picker accept JPEG, PNG,
+  WebP, GIF, and TIFF. Source signatures are verified with Sharp, animated
+  sources use a deterministic first frame, orientation is normalized, and the
+  processor rejects decompression beyond its 100-megapixel safety ceiling.
+- The worker produces bounded JPEG derivatives for previews, Amazon Nova image
+  descriptions, and Textract OCR. It indexes caption and visible-text segments
+  with normalized image-region citations and persists source, thumbnail,
+  caption, layout/OCR, and canonical-text artifacts atomically.
+- Image captioning defaults to the US cross-region Nova 2 Lite inference profile.
+  The model and independent 50 MiB image ceiling are database-first admin
+  settings. The Lambda role can invoke only US Amazon Nova profiles/models, and
+  the Linux ARM64 Sharp/libvips package is pinned into the Lambda asset.
+- Migration 118 adds the image repository-item type and seeds the two image
+  settings. Processing telemetry records the caption model, token usage,
+  latency, dimensions, thumbnail size, OCR job/object identity, and OCR lines.
+- Legacy attachment storage no longer reads the documents bucket during module
+  import. It resolves `S3_BUCKET` from the settings table at request time and
+  falls back to `DOCUMENTS_BUCKET_NAME`, so production builds and live requests
+  use the same database-first storage configuration.
+
+Verification evidence:
+
+- The full application CI suite passes (255 suites, 3,006 tests; 5 suites and
+  60 tests intentionally skipped). Lint has zero errors and the application,
+  infrastructure, and dedicated worker typechecks pass.
+- The infrastructure suite passes (29 suites, 327 tests), the full infra build
+  passes, and all-stack dev/prod CDK synthesis packages the real Linux ARM64
+  Sharp worker with the bounded Bedrock IAM policy.
+- The production Next.js build completes without a placeholder bucket
+  environment variable, proving route imports no longer bypass the settings
+  table.
+- Authenticated Playwright passes 245 tests with 58 intentional skips. Two
+  unrelated live-collaboration/graph UI tests passed on retry; the canonical
+  PDF, Office, and image upload browser contracts all passed.
+- Real PostgreSQL smoke passed PDF, Office, and image publication, image
+  artifacts, caption/OCR retrieval and citations, replay idempotency,
+  quarantine, carry-forward, and active-generation guards.
