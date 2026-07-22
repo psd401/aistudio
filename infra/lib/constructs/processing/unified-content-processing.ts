@@ -171,7 +171,11 @@ export class UnifiedContentProcessing extends Construct {
         vpcEnabled: true,
         // ServiceRoleFactory accepts physical queue names; unresolved ARN
         // tokens would be prefixed a second time and synthesize an invalid ARN.
-        sqsQueues: [this.queue.queueName, props.embeddingQueue.queueName],
+        // This queue is owned and tagged by this construct, so the factory's
+        // resource-tag conditions are guaranteed to match. Embedding dispatch
+        // uses an explicit queue-ARN grant below because shared queues may have
+        // stack-level tags whose values do not match those conditions.
+        sqsQueues: [this.queue.queueName],
         additionalPolicies: [
           new iam.PolicyDocument({
             statements: [
@@ -179,6 +183,11 @@ export class UnifiedContentProcessing extends Construct {
                 sid: "AuroraSecretAccess",
                 actions: ["secretsmanager:GetSecretValue"],
                 resources: [props.databaseSecretArn],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalEmbeddingDispatch",
+                actions: ["sqs:SendMessage"],
+                resources: [props.embeddingQueue.queueArn],
               }),
               new iam.PolicyStatement({
                 // Do not use ServiceRoleFactory's generic s3Buckets grant here.
