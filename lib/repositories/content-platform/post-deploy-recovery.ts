@@ -32,11 +32,10 @@ export interface ReleasePostDeployRecoveryOptions {
  *
  * The migration deliberately stores these jobs as `cancelled`, which every old
  * worker treats as terminal even if a stale SQS delivery arrives between stack
- * updates. After a drain window longer than the old Lambda timeout, this function
- * also recovers a marked row whose status was overwritten by an invocation that
- * was already running when the migration committed. It ships with the replacement
- * worker and is therefore the only automatic path that can atomically restore the
- * job/version/item to pending.
+ * updates. A dedicated marker and database constraint prevent an invocation that
+ * was already running from making the row claimable again. After a drain window
+ * longer than the old Lambda timeout, this replacement-worker path atomically
+ * clears that marker while restoring the job/version/item to pending.
  */
 export async function releasePostDeployRecoveryJobs(
   options: ReleasePostDeployRecoveryOptions = {}
