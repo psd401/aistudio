@@ -71,6 +71,24 @@ const postDeployHandoffSql = readFileSync(
   ),
   "utf8"
 );
+const postDeployHandoffStatements = postDeployHandoffSql
+  .split(/;\s*(?:\r?\n|$)/)
+  .map((statement) => statement.trim())
+  .filter((statement) => statement.length > 0);
+
+async function applyPostDeployHandoff(context: string): Promise<void> {
+  for (const [index, statement] of postDeployHandoffStatements.entries()) {
+    await executeQuery(
+      (db) => db.execute(sql.raw(statement)),
+      `${context}.${index + 1}`
+    );
+  }
+}
+
+// The deployment always migrates the database before the application or worker
+// loads the expanded Drizzle schema. Reproduce that order in the standalone
+// smoke, whose local database may predate this branch.
+await applyPostDeployHandoff("smoke.unifiedContent.ensurePostDeploySchema");
 const font = await pdf.embedFont(StandardFonts.Helvetica);
 for (const text of [
   "Page one contains the district emergency procedure and contact instructions.",
@@ -325,8 +343,7 @@ try {
 
   // Migration 123 must not replay an unrelated terminal user failure merely
   // because it is a current canonical inspect job.
-  await executeQuery(
-    (db) => db.execute(sql.raw(postDeployHandoffSql)),
+  await applyPostDeployHandoff(
     "smoke.unifiedContent.applyPostDeployHandoff"
   );
   const [untouchedFailure] = await executeQuery(
@@ -337,6 +354,7 @@ try {
           attempt: repositoryProcessingJobs.attempt,
           maxAttempts: repositoryProcessingJobs.maxAttempts,
           errorCode: repositoryProcessingJobs.lastErrorCode,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
           metrics: repositoryProcessingJobs.metrics,
           versionStatus: repositoryItemVersions.processingStatus,
           itemStatus: repositoryItems.processingStatus,
@@ -359,6 +377,7 @@ try {
     attempt: 1,
     maxAttempts: 20,
     errorCode: "PROCESSING_ERROR",
+    postDeployRecovery: null,
     metrics: {
       textractJobId: "stale-provider-job",
       waitReason: "AWAITING_OCR",
@@ -401,8 +420,7 @@ try {
       `),
     "smoke.unifiedContent.createKnownPostDeployFailure"
   );
-  await executeQuery(
-    (db) => db.execute(sql.raw(postDeployHandoffSql)),
+  await applyPostDeployHandoff(
     "smoke.unifiedContent.reapplyPostDeployHandoff"
   );
   const [quarantinedState] = await executeQuery(
@@ -412,6 +430,7 @@ try {
           jobStatus: repositoryProcessingJobs.status,
           attempt: repositoryProcessingJobs.attempt,
           maxAttempts: repositoryProcessingJobs.maxAttempts,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
           metrics: repositoryProcessingJobs.metrics,
           availableAt: sql<string>`${repositoryProcessingJobs.availableAt}::text`,
           versionStatus: repositoryItemVersions.processingStatus,
@@ -439,6 +458,10 @@ try {
   assert.deepEqual(quarantinedState?.metrics, {
     postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER,
   });
+  assert.equal(
+    quarantinedState?.postDeployRecovery,
+    POST_DEPLOY_RECOVERY_MARKER
+  );
   assert.equal(quarantinedState?.availableAt, "infinity");
   assert.equal(quarantinedState?.versionStatus, "pending");
   assert.equal(quarantinedState?.itemStatus, "pending");
@@ -456,6 +479,59 @@ try {
     "smoke.unifiedContent.oldWorkerSweep"
   );
   assert.equal(oldWorkerSweep?.count, 0);
+
+  // A worker invocation that claimed the job before the migration may replace
+  // the complete metrics object after the migration commits. The durable column
+  // survives because old code does not know about it.
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryProcessingJobs)
+        .set({
+          metrics: { waitReason: "CONTENT_PLATFORM_DISABLED" },
+          updatedAt: new Date(),
+        })
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id)),
+    "smoke.unifiedContent.simulateStaleWorkerMetricsOverwrite"
+  );
+
+  // Every actual stale completion/defer path also tries to move the status. The
+  // database invariant rejects that entire write, so old code cannot make the
+  // quarantined row claimable again before the replacement runtime releases it.
+  await assert.rejects(
+    executeQuery(
+      (db) =>
+        db
+          .update(repositoryProcessingJobs)
+          .set({
+            status: "queued",
+            lastErrorCode: "CONTENT_PLATFORM_DISABLED",
+            lastErrorMessage: "stale worker deferred after the migration",
+            metrics: { waitReason: "CONTENT_PLATFORM_DISABLED" },
+            updatedAt: new Date(),
+          })
+          .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id)),
+      "smoke.unifiedContent.rejectStaleWorkerStatusOverwrite"
+    )
+  );
+  const [staleWriteState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          status: repositoryProcessingJobs.status,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
+          metrics: repositoryProcessingJobs.metrics,
+        })
+        .from(repositoryProcessingJobs)
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readStaleWorkerOverwrite"
+  );
+  assert.deepEqual(staleWriteState, {
+    status: "cancelled",
+    postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER,
+    metrics: { waitReason: "CONTENT_PLATFORM_DISABLED" },
+  });
 
   // The replacement runtime must wait longer than the old Lambda's maximum
   // execution time before releasing a marked row.
@@ -477,6 +553,7 @@ try {
           jobStatus: repositoryProcessingJobs.status,
           attempt: repositoryProcessingJobs.attempt,
           maxAttempts: repositoryProcessingJobs.maxAttempts,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
           metrics: repositoryProcessingJobs.metrics,
           versionStatus: repositoryItemVersions.processingStatus,
           inspectionStatus: repositoryItemVersions.inspectionStatus,
@@ -499,6 +576,7 @@ try {
     jobStatus: "pending",
     attempt: 0,
     maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
+    postDeployRecovery: null,
     metrics: {},
     versionStatus: "pending",
     inspectionStatus: "pending",
@@ -513,6 +591,7 @@ try {
         .set({
           status: "cancelled",
           availableAt: sql`'infinity'::timestamptz`,
+          postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER,
           metrics: { postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER },
         })
         .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id));
@@ -597,6 +676,7 @@ try {
           jobStatus: repositoryProcessingJobs.status,
           attempt: repositoryProcessingJobs.attempt,
           maxAttempts: repositoryProcessingJobs.maxAttempts,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
           metrics: repositoryProcessingJobs.metrics,
           startedAt: repositoryProcessingJobs.startedAt,
           versionStatus: repositoryItemVersions.processingStatus,
@@ -619,6 +699,7 @@ try {
   assert.equal(restartedState?.jobStatus, "pending");
   assert.equal(restartedState?.attempt, 0);
   assert.equal(restartedState?.maxAttempts, CONTENT_PROCESSING_MAX_ATTEMPTS);
+  assert.equal(restartedState?.postDeployRecovery, null);
   assert.deepEqual(restartedState?.metrics, {});
   assert.equal(restartedState?.startedAt, null);
   assert.equal(restartedState?.versionStatus, "pending");

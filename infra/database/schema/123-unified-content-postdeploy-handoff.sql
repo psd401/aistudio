@@ -3,8 +3,21 @@
 -- Database migrations deploy before the processing Lambda during a full-stack
 -- rollout. Never make recovery jobs runnable here: the previous Lambda version
 -- could consume them with stale code. Instead mark a carefully bounded set as
--- cancelled/inert. The replacement worker recognizes the metrics marker and
+-- cancelled/inert. The replacement worker recognizes the durable marker and
 -- atomically releases batches only after its own deployment is complete.
+
+-- Keep the handoff marker outside `metrics`: an invocation of the previous
+-- worker may still finish after this migration and replace the metrics object it
+-- read before the migration. Old code does not know about this dedicated column
+-- and therefore cannot erase the handoff.
+ALTER TABLE repository_processing_jobs
+  ADD COLUMN IF NOT EXISTS post_deploy_recovery VARCHAR(64)
+    CONSTRAINT ck_repository_processing_postdeploy_cancelled
+    CHECK (post_deploy_recovery IS NULL OR status = 'cancelled');
+
+CREATE INDEX IF NOT EXISTS idx_repository_processing_postdeploy_recovery
+  ON repository_processing_jobs (updated_at, id)
+  WHERE post_deploy_recovery IS NOT NULL;
 
 UPDATE repository_processing_jobs job
 SET status = 'cancelled',
@@ -15,13 +28,15 @@ SET status = 'cancelled',
     lease_expires_at = NULL,
     last_error_code = 'POST_DEPLOY_RECOVERY_QUARANTINED',
     last_error_message = 'Awaiting the unified-content runtime v2 deployment',
+    post_deploy_recovery = 'unified-content-runtime-v2',
     metrics = '{"postDeployRecovery":"unified-content-runtime-v2"}'::jsonb,
     started_at = NULL,
     finished_at = now(),
     updated_at = now()
 WHERE job.stage = 'inspect'
   AND (
-    job.metrics ->> 'postDeployRecovery' = 'unified-content-runtime-v2'
+    job.post_deploy_recovery = 'unified-content-runtime-v2'
+    OR job.metrics ->> 'postDeployRecovery' = 'unified-content-runtime-v2'
     OR (
       job.status IN ('pending', 'queued', 'running', 'cancelled')
       AND job.last_error_code IN (

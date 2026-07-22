@@ -269,6 +269,7 @@ export async function retryCanonicalRepositoryItem(
           traceId: traceId ?? job.traceId,
           lastErrorCode: null,
           lastErrorMessage: null,
+          postDeployRecovery: null,
           metrics: {},
           startedAt: null,
           finishedAt: null,

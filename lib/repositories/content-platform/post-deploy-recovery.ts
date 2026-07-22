@@ -58,7 +58,7 @@ export async function releasePostDeployRecoveryJobs(
             ON item.current_version_id = version.id
           WHERE job.stage = 'inspect'
             AND job.status IN ('cancelled', 'failed', 'pending', 'queued', 'running')
-            AND job.metrics ->> 'postDeployRecovery' = ${POST_DEPLOY_RECOVERY_MARKER}
+            AND job.post_deploy_recovery = ${POST_DEPLOY_RECOVERY_MARKER}
             AND job.updated_at <= ${eligibleBefore}::timestamptz
             AND item.lifecycle_status = 'active'
             AND version.storage_status <> 'blocked'
@@ -88,6 +88,7 @@ export async function releasePostDeployRecoveryJobs(
             lease_expires_at = NULL,
             last_error_code = NULL,
             last_error_message = NULL,
+            post_deploy_recovery = NULL,
             metrics = '{}'::jsonb,
             started_at = NULL,
             finished_at = NULL,

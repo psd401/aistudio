@@ -1,6 +1,8 @@
 /** Durable, idempotent processing-stage jobs for repository item versions. */
 
+import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   jsonb,
@@ -31,7 +33,7 @@ export type RepositoryProcessingJobStatus =
   | "cancelled";
 
 export interface RepositoryProcessingMetrics {
-  /** One-time deployment handoff; only the matching worker runtime may release it. */
+  /** Transitional migration-122 handoff copied into the durable column by migration 123. */
   postDeployRecovery?: "unified-content-runtime-v2";
   /** Current managed-service wait, used to enforce a bounded deadline. */
   waitReason?:
@@ -100,6 +102,10 @@ export const repositoryProcessingJobs = pgTable(
     traceId: varchar("trace_id", { length: 128 }),
     lastErrorCode: varchar("last_error_code", { length: 128 }),
     lastErrorMessage: text("last_error_message"),
+    /** Durable across stale worker writes; only the replacement runtime clears it. */
+    postDeployRecovery: varchar("post_deploy_recovery", { length: 64 }).$type<
+      "unified-content-runtime-v2"
+    >(),
     metrics: jsonb("metrics")
       .$type<RepositoryProcessingMetrics>()
       .default({})
@@ -112,6 +118,13 @@ export const repositoryProcessingJobs = pgTable(
   (t) => [
     unique("uq_repository_processing_idempotency").on(t.idempotencyKey),
     index("idx_repository_processing_version").on(t.itemVersionId, t.createdAt),
+    check(
+      "ck_repository_processing_postdeploy_cancelled",
+      sql`${t.postDeployRecovery} IS NULL OR ${t.status} = 'cancelled'`
+    ),
+    index("idx_repository_processing_postdeploy_recovery")
+      .on(t.updatedAt, t.id)
+      .where(sql`${t.postDeployRecovery} IS NOT NULL`),
   ]
 );
 

@@ -773,7 +773,11 @@ partial-unique-index conflict during generation activation. This hardening slice
 closes the complete set before another deployment:
 
 - Migrations 122 and 123 now quarantine eligible current inspect jobs as
-  `cancelled` with an infinite availability time and a versioned handoff marker.
+  `cancelled` with an infinite availability time and a versioned handoff marker
+  in a dedicated column that stale worker writes cannot erase. A database check
+  constraint prevents any runtime from moving a marked row out of `cancelled`;
+  the replacement worker must clear the marker in the same atomic update that
+  returns it to `pending`.
   Migration 123 safely repairs environments where the earlier form of migration
   122 already ran, but only for its marker, its explicit recovery error, the
   observed deployment-disabled state, or the legacy embedding-failure state.
@@ -782,12 +786,12 @@ closes the complete set before another deployment:
   reprocessed.
 - The new unified-content worker releases quarantined jobs in bounded,
   transactionally claimed batches during its scheduled sweep, after a 20-minute
-  drain window longer than the previous Lambda's maximum execution time. It can
-  reclaim a marked row whose status was overwritten by an invocation already in
-  flight when the migration committed. Release resets attempts, leases,
-  timestamps, errors, and provider metrics before normal dispatch, so the
-  previous worker cannot win the migration-to-code deployment gap and stale
-  Textract/BDA state cannot influence the retry.
+  drain window longer than the previous Lambda's maximum execution time. A
+  metrics overwrite cannot erase eligibility, and the database rejects a stale
+  invocation's attempt to change the marked row's status or error. Release
+  resets attempts, leases, timestamps, errors, and provider metrics before
+  normal dispatch, so the previous worker cannot win the migration-to-code
+  deployment gap and stale Textract/BDA state cannot influence the retry.
 - Failed and cancelled inspect jobs are terminal in repository status
   projection. Authorized manual retry accepts either state and creates a fresh
   five-attempt budget with cleared inspection/provider state; only genuinely
@@ -812,11 +816,12 @@ Verification evidence for the handoff hardening slice:
   text, PDF, Office, image, audio, video, terminal failure visibility, and
   Failed/Cancelled -> Retry -> Pending recovery.
 - Real PostgreSQL smoke passed the exact migration-before-worker handoff,
-  preservation of unrelated terminal failures, old-worker exclusion, the
-  20-minute drain guard, bounded new-worker release, noncanonical-source
-  exclusion, retry-state reset, PDF/Office/image publication and citations,
-  ordered generation activation, duplicate activation, the single-active-
-  generation constraint, and cleanup.
+  preservation of unrelated terminal failures, old-worker exclusion, survival
+  of a stale metrics overwrite, database rejection of a stale status/error
+  transition, the 20-minute drain guard, bounded new-worker release,
+  noncanonical-source exclusion, retry-state reset, PDF/Office/image publication
+  and citations, ordered generation activation, duplicate activation, the
+  single-active-generation constraint, and cleanup.
 - Full lint completed with zero errors. Application, infrastructure,
   unified-content worker, and embedding-worker typechecks pass. The production
   Next.js build, complete infrastructure build, and all-stack no-lookup CDK

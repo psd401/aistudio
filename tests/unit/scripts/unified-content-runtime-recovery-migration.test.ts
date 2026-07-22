@@ -44,6 +44,15 @@ describe("unified-content post-deployment handoff migration", () => {
   );
 
   it("quarantines recovery work so the old worker cannot claim it", () => {
+    expect(migration).toContain(
+      "ADD COLUMN IF NOT EXISTS post_deploy_recovery VARCHAR(64)"
+    );
+    expect(migration).toContain(
+      "CHECK (post_deploy_recovery IS NULL OR status = 'cancelled')"
+    );
+    expect(migration).toContain(
+      "post_deploy_recovery = 'unified-content-runtime-v2'"
+    );
     expect(migration).toContain("SET status = 'cancelled'");
     expect(migration).toContain("max_attempts = 5");
     expect(migration).toContain("available_at = 'infinity'::timestamptz");
