@@ -28,6 +28,8 @@
         "ecr:GetDownloadUrlForLayer",
         "ecr:BatchGetImage",
         "ecs:*",
+        "textract:StartDocumentTextDetection",
+        "textract:GetDocumentTextDetection",
         "bedrock:InvokeModel",
         "bedrock:InvokeModelWithResponseStream",
         "bedrock:CallWithBearerToken",
