@@ -12,10 +12,16 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { eq, sql, type SQL } from "drizzle-orm";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import * as XLSX from "@e965/xlsx";
-import { closeDatabase, executeQuery } from "@/lib/db/drizzle-client";
+import {
+  closeDatabase,
+  executeQuery,
+  executeTransaction,
+} from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
   repositoryArtifacts,
@@ -41,6 +47,8 @@ import {
   IMAGE_PROCESSOR_VERSION,
   publishDocumentVersion,
   publishPdfVersion,
+  POST_DEPLOY_RECOVERY_MARKER,
+  releasePostDeployRecoveryJobs,
   getCanonicalRepositoryItemStatuses,
   registerCanonicalUpload,
   retryCanonicalRepositoryItem,
@@ -56,6 +64,31 @@ import {
 } from "../../infra/lambdas/embedding-generator/generation-activation";
 
 const pdf = await PDFDocument.create();
+const postDeployHandoffSql = readFileSync(
+  resolve(
+    process.cwd(),
+    "infra/database/schema/123-unified-content-postdeploy-handoff.sql"
+  ),
+  "utf8"
+);
+const postDeployHandoffStatements = postDeployHandoffSql
+  .split(/;\s*(?:\r?\n|$)/)
+  .map((statement) => statement.trim())
+  .filter((statement) => statement.length > 0);
+
+async function applyPostDeployHandoff(context: string): Promise<void> {
+  for (const [index, statement] of postDeployHandoffStatements.entries()) {
+    await executeQuery(
+      (db) => db.execute(sql.raw(statement)),
+      `${context}.${index + 1}`
+    );
+  }
+}
+
+// The deployment always migrates the database before the application or worker
+// loads the expanded Drizzle schema. Reproduce that order in the standalone
+// smoke, whose local database may predate this branch.
+await applyPostDeployHandoff("smoke.unifiedContent.ensurePostDeploySchema");
 const font = await pdf.embedFont(StandardFonts.Helvetica);
 for (const text of [
   "Page one contains the district emergency procedure and contact instructions.",
@@ -246,6 +279,8 @@ try {
     waitStartedAt: "2026-07-22T12:00:00.000Z",
   });
 
+  const retryObjectKey =
+    `repositories/${repository.id}/22222222-3333-4444-8555-666666666666/retry-reference.pdf`;
   const [retryItem] = await executeQuery(
     (db) =>
       db
@@ -254,7 +289,7 @@ try {
           repositoryId: repository.id,
           type: "document",
           name: "retry-reference.pdf",
-          source: `repositories/${repository.id}/22222222-3333-4444-8555-666666666666/retry-reference.pdf`,
+          source: retryObjectKey,
           processingStatus: "pending",
         })
         .returning({ id: repositoryItems.id }),
@@ -264,7 +299,7 @@ try {
   const retryRegistration = await registerCanonicalUpload({
     itemId: retryItem.id,
     userId: owner.id,
-    objectKey: `repositories/${repository.id}/22222222-3333-4444-8555-666666666666/retry-reference.pdf`,
+    objectKey: retryObjectKey,
     originalFileName: "retry-reference.pdf",
     declaredContentType: "application/pdf",
     byteSize: 4096,
@@ -276,8 +311,12 @@ try {
         WITH failed_job AS (
           UPDATE repository_processing_jobs
           SET status = 'failed',
-              attempt = max_attempts,
+              attempt = 1,
+              max_attempts = 20,
+              last_error_code = 'PROCESSING_ERROR',
               last_error_message = 'simulated terminal processing failure',
+              metrics = '{"textractJobId":"stale-provider-job","waitReason":"AWAITING_OCR"}'::jsonb,
+              started_at = now(),
               finished_at = now()
           WHERE id = ${retryRegistration.inspectJob.id}::uuid
           RETURNING item_version_id
@@ -301,6 +340,378 @@ try {
     processingError: "simulated terminal processing failure",
     canRetry: true,
   });
+
+  // Migration 123 must not replay an unrelated terminal user failure merely
+  // because it is a current canonical inspect job.
+  await applyPostDeployHandoff(
+    "smoke.unifiedContent.applyPostDeployHandoff"
+  );
+  const [untouchedFailure] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          jobStatus: repositoryProcessingJobs.status,
+          attempt: repositoryProcessingJobs.attempt,
+          maxAttempts: repositoryProcessingJobs.maxAttempts,
+          errorCode: repositoryProcessingJobs.lastErrorCode,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
+          metrics: repositoryProcessingJobs.metrics,
+          versionStatus: repositoryItemVersions.processingStatus,
+          itemStatus: repositoryItems.processingStatus,
+        })
+        .from(repositoryProcessingJobs)
+        .innerJoin(
+          repositoryItemVersions,
+          eq(repositoryItemVersions.id, repositoryProcessingJobs.itemVersionId)
+        )
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.currentVersionId, repositoryItemVersions.id)
+        )
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readUnrelatedTerminalFailure"
+  );
+  assert.deepEqual(untouchedFailure, {
+    jobStatus: "failed",
+    attempt: 1,
+    maxAttempts: 20,
+    errorCode: "PROCESSING_ERROR",
+    postDeployRecovery: null,
+    metrics: {
+      textractJobId: "stale-provider-job",
+      waitReason: "AWAITING_OCR",
+    },
+    versionStatus: "failed",
+    itemStatus: "failed",
+  });
+
+  // Reproduce the exact live post-migration state that requires the handoff:
+  // the old runtime cancelled a migration-122 replay while content processing
+  // was unavailable during deployment.
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        WITH cancelled_job AS (
+          UPDATE repository_processing_jobs
+          SET status = 'cancelled',
+              attempt = 2,
+              max_attempts = 20,
+              last_error_code = 'CONTENT_PLATFORM_DISABLED',
+              last_error_message = 'old runtime could not read the canonical source',
+              metrics = '{}'::jsonb,
+              started_at = now(),
+              finished_at = now(),
+              updated_at = now()
+          WHERE id = ${retryRegistration.inspectJob.id}::uuid
+          RETURNING item_version_id
+        ), pending_version AS (
+          UPDATE repository_item_versions
+          SET storage_status = 'quarantined',
+              inspection_status = 'pending',
+              processing_status = 'pending'
+          WHERE id IN (SELECT item_version_id FROM cancelled_job)
+          RETURNING item_id
+        )
+        UPDATE repository_items
+        SET processing_status = 'pending',
+            processing_error = NULL
+        WHERE id IN (SELECT item_id FROM pending_version)
+      `),
+    "smoke.unifiedContent.createKnownPostDeployFailure"
+  );
+  await applyPostDeployHandoff(
+    "smoke.unifiedContent.reapplyPostDeployHandoff"
+  );
+  const [quarantinedState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          jobStatus: repositoryProcessingJobs.status,
+          attempt: repositoryProcessingJobs.attempt,
+          maxAttempts: repositoryProcessingJobs.maxAttempts,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
+          metrics: repositoryProcessingJobs.metrics,
+          availableAt: sql<string>`${repositoryProcessingJobs.availableAt}::text`,
+          versionStatus: repositoryItemVersions.processingStatus,
+          itemStatus: repositoryItems.processingStatus,
+        })
+        .from(repositoryProcessingJobs)
+        .innerJoin(
+          repositoryItemVersions,
+          eq(repositoryItemVersions.id, repositoryProcessingJobs.itemVersionId)
+        )
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.currentVersionId, repositoryItemVersions.id)
+        )
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readQuarantinedHandoff"
+  );
+  assert.equal(quarantinedState?.jobStatus, "cancelled");
+  assert.equal(quarantinedState?.attempt, 0);
+  assert.equal(
+    quarantinedState?.maxAttempts,
+    CONTENT_PROCESSING_MAX_ATTEMPTS
+  );
+  assert.deepEqual(quarantinedState?.metrics, {
+    postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER,
+  });
+  assert.equal(
+    quarantinedState?.postDeployRecovery,
+    POST_DEPLOY_RECOVERY_MARKER
+  );
+  assert.equal(quarantinedState?.availableAt, "infinity");
+  assert.equal(quarantinedState?.versionStatus, "pending");
+  assert.equal(quarantinedState?.itemStatus, "pending");
+
+  const quarantinedStatuses = await getCanonicalRepositoryItemStatuses(
+    repository.id
+  );
+  assert.deepEqual(quarantinedStatuses.get(retryItem.id), {
+    itemId: retryItem.id,
+    processingStatus: "retrying",
+    processingError: null,
+    canRetry: false,
+  });
+  await assert.rejects(
+    retryCanonicalRepositoryItem(
+      retryItem.id,
+      "unified-content-smoke-quarantined-retry"
+    ),
+    /awaiting automatic post-deployment recovery/
+  );
+  const [blockedRetryState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          status: repositoryProcessingJobs.status,
+          attempt: repositoryProcessingJobs.attempt,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
+          availableAt: sql<string>`${repositoryProcessingJobs.availableAt}::text`,
+        })
+        .from(repositoryProcessingJobs)
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readBlockedQuarantineRetry"
+  );
+  assert.deepEqual(blockedRetryState, {
+    status: "cancelled",
+    attempt: 0,
+    postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER,
+    availableAt: "infinity",
+  });
+
+  const [oldWorkerSweep] = await executeQuery(
+    (db) =>
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(repositoryProcessingJobs)
+        .where(
+          sql`${repositoryProcessingJobs.id} = ${retryRegistration.inspectJob.id}::uuid
+            AND ${repositoryProcessingJobs.status} = 'pending'
+            AND ${repositoryProcessingJobs.availableAt} <= now()`
+        ),
+    "smoke.unifiedContent.oldWorkerSweep"
+  );
+  assert.equal(oldWorkerSweep?.count, 0);
+
+  // A worker invocation that claimed the job before the migration may replace
+  // the complete metrics object after the migration commits. The durable column
+  // survives because old code does not know about it.
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryProcessingJobs)
+        .set({
+          metrics: { waitReason: "CONTENT_PLATFORM_DISABLED" },
+          updatedAt: new Date(),
+        })
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id)),
+    "smoke.unifiedContent.simulateStaleWorkerMetricsOverwrite"
+  );
+
+  // Every actual stale completion/defer path also tries to move the status. The
+  // database invariant rejects that entire write, so old code cannot make the
+  // quarantined row claimable again before the replacement runtime releases it.
+  await assert.rejects(
+    executeQuery(
+      (db) =>
+        db
+          .update(repositoryProcessingJobs)
+          .set({
+            status: "queued",
+            lastErrorCode: "CONTENT_PLATFORM_DISABLED",
+            lastErrorMessage: "stale worker deferred after the migration",
+            metrics: { waitReason: "CONTENT_PLATFORM_DISABLED" },
+            updatedAt: new Date(),
+          })
+          .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id)),
+      "smoke.unifiedContent.rejectStaleWorkerStatusOverwrite"
+    )
+  );
+  const [staleWriteState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          status: repositoryProcessingJobs.status,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
+          metrics: repositoryProcessingJobs.metrics,
+        })
+        .from(repositoryProcessingJobs)
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readStaleWorkerOverwrite"
+  );
+  assert.deepEqual(staleWriteState, {
+    status: "cancelled",
+    postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER,
+    metrics: { waitReason: "CONTENT_PLATFORM_DISABLED" },
+  });
+
+  // The replacement runtime must wait longer than the old Lambda's maximum
+  // execution time before releasing a marked row.
+  assert.deepEqual(await releasePostDeployRecoveryJobs(), []);
+  const released = await releasePostDeployRecoveryJobs({
+    graceMinutes: 0,
+    now: new Date(Date.now() + 60_000),
+  });
+  assert.deepEqual(released, [
+    {
+      id: retryRegistration.inspectJob.id,
+      itemVersionId: retryRegistration.version.id,
+    },
+  ]);
+  const [releasedState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          jobStatus: repositoryProcessingJobs.status,
+          attempt: repositoryProcessingJobs.attempt,
+          maxAttempts: repositoryProcessingJobs.maxAttempts,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
+          metrics: repositoryProcessingJobs.metrics,
+          versionStatus: repositoryItemVersions.processingStatus,
+          inspectionStatus: repositoryItemVersions.inspectionStatus,
+          itemStatus: repositoryItems.processingStatus,
+        })
+        .from(repositoryProcessingJobs)
+        .innerJoin(
+          repositoryItemVersions,
+          eq(repositoryItemVersions.id, repositoryProcessingJobs.itemVersionId)
+        )
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.currentVersionId, repositoryItemVersions.id)
+        )
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readReleasedHandoff"
+  );
+  assert.deepEqual(releasedState, {
+    jobStatus: "pending",
+    attempt: 0,
+    maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
+    postDeployRecovery: null,
+    metrics: {},
+    versionStatus: "pending",
+    inspectionStatus: "pending",
+    itemStatus: "pending",
+  });
+
+  // Even a correctly marked row cannot bypass the canonical source namespace.
+  await executeTransaction(
+    async (tx) => {
+      await tx
+        .update(repositoryProcessingJobs)
+        .set({
+          status: "cancelled",
+          availableAt: sql`'infinity'::timestamptz`,
+          postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER,
+          metrics: { postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER },
+        })
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id));
+      await tx
+        .update(repositoryItemVersions)
+        .set({
+          objectKey: `repositories/${repository.id}/legacy/retry-reference.pdf`,
+        })
+        .where(eq(repositoryItemVersions.id, retryRegistration.version.id));
+    },
+    "smoke.unifiedContent.createNoncanonicalMarkedHandoff"
+  );
+  assert.deepEqual(
+    await releasePostDeployRecoveryJobs({
+      graceMinutes: 0,
+      now: new Date(Date.now() + 60_000),
+    }),
+    []
+  );
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryItemVersions)
+        .set({ objectKey: retryObjectKey })
+        .where(eq(repositoryItemVersions.id, retryRegistration.version.id)),
+    "smoke.unifiedContent.restoreCanonicalRetrySource"
+  );
+  assert.deepEqual(
+    await releasePostDeployRecoveryJobs({
+      graceMinutes: 0,
+      now: new Date(Date.now() + 60_000),
+    }),
+    [
+      {
+        id: retryRegistration.inspectJob.id,
+        itemVersionId: retryRegistration.version.id,
+      },
+    ]
+  );
+
+  // A user retry gets another clean bounded budget even when the terminal row
+  // was cancelled and still carried provider state from an earlier runtime.
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        WITH cancelled_job AS (
+          UPDATE repository_processing_jobs
+          SET status = 'cancelled',
+              attempt = 4,
+              max_attempts = 20,
+              metrics = '{"textractJobId":"stale-cancelled-job"}'::jsonb,
+              started_at = now(),
+              finished_at = now()
+          WHERE id = ${retryRegistration.inspectJob.id}::uuid
+          RETURNING item_version_id
+        ), cancelled_version AS (
+          UPDATE repository_item_versions
+          SET inspection_status = 'error', processing_status = 'cancelled'
+          WHERE id IN (SELECT item_version_id FROM cancelled_job)
+          RETURNING item_id
+        )
+        UPDATE repository_items
+        SET processing_status = 'failed',
+            processing_error = 'simulated cancelled deployment job'
+        WHERE id IN (SELECT item_id FROM cancelled_version)
+      `),
+    "smoke.unifiedContent.createCancelledRetryState"
+  );
+  const [newerDownstreamJob] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryProcessingJobs)
+        .values({
+          itemVersionId: retryRegistration.version.id,
+          stage: "normalize",
+          status: "succeeded",
+          idempotencyKey: `${retryRegistration.version.id}:normalize:smoke`,
+          finishedAt: new Date(),
+        })
+        .returning({ id: repositoryProcessingJobs.id }),
+    "smoke.unifiedContent.createNewerDownstreamJob"
+  );
+  assert.ok(newerDownstreamJob);
   const restarted = await retryCanonicalRepositoryItem(
     retryItem.id,
     "unified-content-smoke-manual-retry"
@@ -314,6 +725,9 @@ try {
           jobStatus: repositoryProcessingJobs.status,
           attempt: repositoryProcessingJobs.attempt,
           maxAttempts: repositoryProcessingJobs.maxAttempts,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
+          metrics: repositoryProcessingJobs.metrics,
+          startedAt: repositoryProcessingJobs.startedAt,
           versionStatus: repositoryItemVersions.processingStatus,
           storageStatus: repositoryItemVersions.storageStatus,
           itemStatus: repositoryItems.processingStatus,
@@ -332,14 +746,24 @@ try {
     "smoke.unifiedContent.readRestartedState"
   );
   assert.equal(restartedState?.jobStatus, "pending");
-  assert.equal(restartedState?.attempt, CONTENT_PROCESSING_MAX_ATTEMPTS);
-  assert.equal(
-    restartedState?.maxAttempts,
-    CONTENT_PROCESSING_MAX_ATTEMPTS * 2
-  );
+  assert.equal(restartedState?.attempt, 0);
+  assert.equal(restartedState?.maxAttempts, CONTENT_PROCESSING_MAX_ATTEMPTS);
+  assert.equal(restartedState?.postDeployRecovery, null);
+  assert.deepEqual(restartedState?.metrics, {});
+  assert.equal(restartedState?.startedAt, null);
   assert.equal(restartedState?.versionStatus, "pending");
   assert.equal(restartedState?.storageStatus, "quarantined");
   assert.equal(restartedState?.itemStatus, "pending");
+  const [downstreamState] = await executeQuery(
+    (db) =>
+      db
+        .select({ status: repositoryProcessingJobs.status })
+        .from(repositoryProcessingJobs)
+        .where(eq(repositoryProcessingJobs.id, newerDownstreamJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readUnchangedDownstreamJob"
+  );
+  assert.equal(downstreamState?.status, "succeeded");
 
   const publication = await publishPdfVersion({
     itemVersionId: first.version.id,
@@ -770,11 +1194,16 @@ try {
     canonicalOnly: true,
   });
   assert.equal(imageResultsBeforeActivation.length, 0);
-  const activationExecutor: GenerationActivationExecutor = async (query) => {
-    const rows = await executeQuery(
-      // The Lambda package has its own dependency boundary, so bridge its
-      // structurally identical Drizzle SQL object into the app workspace.
-      (db) => db.execute(query as unknown as SQL),
+  const activationExecutor: GenerationActivationExecutor = async (plan) => {
+    const rows = await executeTransaction(
+      async (tx) => {
+        // The Lambda package has its own dependency boundary, so bridge its
+        // structurally identical Drizzle SQL objects into the app workspace.
+        await tx.execute(plan.lockRepository as unknown as SQL);
+        await tx.execute(plan.supersedeCurrent as unknown as SQL);
+        await tx.execute(plan.activateTarget as unknown as SQL);
+        return tx.execute(plan.publishTarget as unknown as SQL);
+      },
       "smoke.unifiedContent.activateEmbeddedGeneration"
     );
     return rows as unknown as GenerationActivationResult[];
@@ -817,6 +1246,15 @@ try {
   );
   assert.equal(activation?.repository_id, repository.id);
   assert.ok((activation?.embedded_item_count ?? 0) >= 3);
+  const replayedActivation = await activateCompletedGeneration(
+    imagePublication.generationId,
+    activationExecutor
+  );
+  assert.equal(replayedActivation?.repository_id, repository.id);
+  assert.equal(
+    replayedActivation?.embedded_item_count,
+    activation?.embedded_item_count
+  );
   const imageResults = await keywordSearch("marked assembly", {
     repositoryId: repository.id,
     canonicalOnly: true,

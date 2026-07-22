@@ -15,6 +15,7 @@ function statusRow(
     jobAttempt: 0,
     jobMaxAttempts: 3,
     jobError: null,
+    postDeployRecovery: null,
     active: false,
     buildingGeneration: false,
     failedGeneration: false,
@@ -81,10 +82,61 @@ describe("canonical repository item status", () => {
     ).toBe(false);
   });
 
-  it("keeps transient failed attempts in a retrying state", () => {
+  it("exposes an early failed job as terminal instead of retrying forever", () => {
     expect(
       resolveCanonicalItemStatus(
-        statusRow({ jobStatus: "failed", jobAttempt: 1, jobMaxAttempts: 3 })
+        statusRow({
+          jobStatus: "failed",
+          jobAttempt: 1,
+          jobMaxAttempts: 20,
+          jobError: "Item version object key is outside its repository namespace",
+        })
+      )
+    ).toMatchObject({
+      processingStatus: "failed",
+      processingError: "Item version object key is outside its repository namespace",
+      canRetry: true,
+    });
+  });
+
+  it("exposes cancelled pre-deployment jobs as retryable failures", () => {
+    expect(
+      resolveCanonicalItemStatus(
+        statusRow({
+          versionStatus: "cancelled",
+          jobStatus: "cancelled",
+          jobError: "Content processing was disabled during deployment",
+        })
+      )
+    ).toMatchObject({
+      processingStatus: "failed",
+      processingError: "Content processing was disabled during deployment",
+      canRetry: true,
+    });
+  });
+
+  it("keeps post-deployment recovery quarantined and disables manual retry", () => {
+    expect(
+      resolveCanonicalItemStatus(
+        statusRow({
+          versionStatus: "cancelled",
+          jobStatus: "cancelled",
+          jobError: "Awaiting the replacement runtime",
+          postDeployRecovery: "unified-content-runtime-v2",
+        })
+      )
+    ).toEqual({
+      itemId: 7,
+      processingStatus: "retrying",
+      processingError: null,
+      canRetry: false,
+    });
+  });
+
+  it("shows pending work with a consumed attempt as retrying", () => {
+    expect(
+      resolveCanonicalItemStatus(
+        statusRow({ jobStatus: "pending", jobAttempt: 1, jobMaxAttempts: 5 })
       ).processingStatus
     ).toBe("retrying");
   });

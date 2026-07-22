@@ -39,6 +39,7 @@ import { queueFileForProcessing, processUrl } from "@/lib/services/file-processi
 import { canModifyRepository, getUserIdFromSession } from "./repository-permissions"
 import { toContentDispositionValue } from "@/lib/repositories/content-disposition"
 import {
+  assertCanonicalRetryNotQuarantined,
   deleteRepositoryItemStorage,
   dispatchContentProcessingJob,
   getCanonicalRepositoryItemStatuses,
@@ -1182,6 +1183,10 @@ async function prepareRepositoryItemRetry(
   userId: number,
   requestId: string
 ): Promise<RepositoryItemRetryTarget> {
+  if (item.currentVersionId) {
+    await assertCanonicalRetryNotQuarantined(item.currentVersionId)
+  }
+
   if (item.type === "text") {
     const canonical = await registerCanonicalTextIfEnabled({
       itemId: item.id,

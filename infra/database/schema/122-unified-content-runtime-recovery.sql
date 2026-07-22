@@ -3,9 +3,10 @@
 -- Earlier workers could leave deterministic processor failures in `failed`
 -- before their DB retry budget was exhausted, while embedding failures left a
 -- generation `building` forever and only changed the legacy item status. The
--- corrected workers never create either state. Requeue the affected current
--- versions once so the deployment heals existing data without an AWS CLI or
--- direct database runbook.
+-- corrected workers never create either state. Quarantine the affected current
+-- versions once so the replacement runtime, not a still-running old Lambda,
+-- releases them after the processing stack update. Migration 123 repeats this
+-- handoff for environments where the original migration 122 already ran.
 
 -- A pre-hardening embedding failure cannot be resumed in-place because its SQS
 -- record may already be in the DLQ. Retire only building generations that are
@@ -27,41 +28,61 @@ UPDATE repository_index_generations generation
         AND item.processing_status = 'embedding_failed'
    );
 
--- Replay the durable inspect job for those embedding failures. Reprocessing
--- creates a new generation under the current provider descriptor and preserves
--- the previous active generation until the replacement is fully embedded.
+-- Quarantine the durable inspect job for those embedding failures. `cancelled`
+-- is intentionally terminal to every old worker, including stale SQS receives.
 UPDATE repository_processing_jobs job
-   SET status = 'pending',
+   SET status = 'cancelled',
        attempt = 0,
-       max_attempts = GREATEST(job.max_attempts, 5),
-       available_at = now(),
+       max_attempts = 5,
+       available_at = 'infinity'::timestamptz,
        lease_owner = NULL,
        lease_expires_at = NULL,
-       last_error_code = 'RECOVERED_BY_MIGRATION_122',
-       last_error_message = NULL,
-       finished_at = NULL,
+       last_error_code = 'POST_DEPLOY_RECOVERY_QUARANTINED',
+       last_error_message = 'Awaiting the unified-content runtime v2 deployment',
+       metrics = '{"postDeployRecovery":"unified-content-runtime-v2"}'::jsonb,
+       started_at = NULL,
+       finished_at = now(),
        updated_at = now()
  WHERE job.status = 'succeeded'
    AND EXISTS (
      SELECT 1
        FROM repository_items item
-      WHERE item.current_version_id = job.item_version_id
+       JOIN repository_item_versions version
+         ON version.id = item.current_version_id
+      WHERE version.id = job.item_version_id
         AND item.processing_status = 'embedding_failed'
+        AND item.lifecycle_status = 'active'
+        AND version.storage_status <> 'blocked'
+        AND version.inspection_status <> 'blocked'
+        AND version.object_key ~ (
+          '^repositories/' || item.repository_id::text ||
+          '/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}/[^/]+$'
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM repository_item_chunks active_chunk
+          JOIN knowledge_repositories repository
+            ON repository.id = item.repository_id
+          WHERE active_chunk.item_version_id = version.id
+            AND active_chunk.index_generation_id = repository.active_index_generation_id
+        )
    );
 
--- Old processor failures were marked failed after each receive and therefore
--- were invisible to the pending-job sweep. Give current versions one fresh,
--- bounded budget; the corrected handler immediately closes permanent errors.
+-- Old processor failures were marked failed after each receive. Quarantine only
+-- canonical, current, non-serving sources; invalid legacy keys require the UI
+-- retry path to create a fresh immutable version in the corrected namespace.
 UPDATE repository_processing_jobs job
-   SET status = 'pending',
+   SET status = 'cancelled',
        attempt = 0,
-       max_attempts = GREATEST(job.max_attempts, 5),
-       available_at = now(),
+       max_attempts = 5,
+       available_at = 'infinity'::timestamptz,
        lease_owner = NULL,
        lease_expires_at = NULL,
-       last_error_code = 'RECOVERED_BY_MIGRATION_122',
-       last_error_message = NULL,
-       finished_at = NULL,
+       last_error_code = 'POST_DEPLOY_RECOVERY_QUARANTINED',
+       last_error_message = 'Awaiting the unified-content runtime v2 deployment',
+       metrics = '{"postDeployRecovery":"unified-content-runtime-v2"}'::jsonb,
+       started_at = NULL,
+       finished_at = now(),
        updated_at = now()
  WHERE job.status = 'failed'
    AND job.attempt < job.max_attempts
@@ -77,28 +98,16 @@ UPDATE repository_processing_jobs job
         -- require a new source version, not an automatic processing retry.
         AND version.storage_status <> 'blocked'
         AND version.inspection_status <> 'blocked'
+        AND version.object_key ~ (
+          '^repositories/' || item.repository_id::text ||
+          '/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}/[^/]+$'
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM repository_item_chunks active_chunk
+          JOIN knowledge_repositories repository
+            ON repository.id = item.repository_id
+          WHERE active_chunk.item_version_id = version.id
+            AND active_chunk.index_generation_id = repository.active_index_generation_id
+        )
    );
-
-UPDATE repository_item_versions version
-   SET storage_status = 'quarantined',
-       inspection_status = 'pending',
-       processing_status = 'pending'
- WHERE EXISTS (
-   SELECT 1
-     FROM repository_processing_jobs job
-    WHERE job.item_version_id = version.id
-      AND job.status = 'pending'
-      AND job.last_error_code = 'RECOVERED_BY_MIGRATION_122'
- );
-
-UPDATE repository_items item
-   SET processing_status = 'pending',
-       processing_error = NULL,
-       updated_at = now()
- WHERE EXISTS (
-   SELECT 1
-     FROM repository_processing_jobs job
-    WHERE job.item_version_id = item.current_version_id
-      AND job.status = 'pending'
-      AND job.last_error_code = 'RECOVERED_BY_MIGRATION_122'
- );

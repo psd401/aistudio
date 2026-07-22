@@ -46,6 +46,9 @@ const ALLOWED_TRANSITIONS: Record<
   running: ["succeeded", "failed", "cancelled"],
   succeeded: [],
   failed: ["pending", "cancelled"],
+  // Cancelled is terminal for the worker FSM. User retry and post-deploy
+  // release are separate, guarded transaction resets that also clear failure,
+  // lease, attempt, and provider state before returning the job to pending.
   cancelled: [],
 };
 

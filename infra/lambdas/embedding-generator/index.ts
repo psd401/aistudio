@@ -501,14 +501,18 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
       if (message.generationId) {
         await activateCompletedGeneration(
           message.generationId,
-          async (query) =>
-            (await db.execute<{
+          async (plan) => db.transaction(async (tx) => {
+            await tx.execute(plan.lockRepository);
+            await tx.execute(plan.supersedeCurrent);
+            await tx.execute(plan.activateTarget);
+            return (await tx.execute<{
               repository_id: number;
               embedded_item_count: number;
-            }>(query)) as Array<{
+            }>(plan.publishTarget)) as Array<{
               repository_id: number;
               embedded_item_count: number;
-            }>
+            }>;
+          })
         );
       } else {
         await db

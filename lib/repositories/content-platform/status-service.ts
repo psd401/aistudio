@@ -34,6 +34,7 @@ interface CanonicalStatusRow {
   jobAttempt: number | null;
   jobMaxAttempts: number | null;
   jobError: string | null;
+  postDeployRecovery: "unified-content-runtime-v2" | null;
   active: boolean;
   buildingGeneration: boolean;
   failedGeneration: boolean;
@@ -52,8 +53,18 @@ export function resolveCanonicalItemStatus(
     };
   }
 
+  if (row.postDeployRecovery !== null) {
+    return {
+      itemId: row.itemId,
+      processingStatus: "retrying",
+      processingError: null,
+      canRetry: false,
+    };
+  }
+
   const terminalFailure =
     row.versionStatus === "failed" ||
+    row.versionStatus === "cancelled" ||
     row.storageStatus === "blocked" ||
     row.inspectionStatus === "blocked" ||
     row.inspectionStatus === "error" ||
@@ -61,10 +72,8 @@ export function resolveCanonicalItemStatus(
       !row.buildingGeneration &&
       row.versionStatus === "completed" &&
       row.jobStatus === "succeeded") ||
-    (row.jobStatus === "failed" &&
-      row.jobAttempt !== null &&
-      row.jobMaxAttempts !== null &&
-      row.jobAttempt >= row.jobMaxAttempts);
+    row.jobStatus === "failed" ||
+    row.jobStatus === "cancelled";
   if (terminalFailure) {
     return {
       itemId: row.itemId,
@@ -88,7 +97,11 @@ export function resolveCanonicalItemStatus(
     };
   }
 
-  if (row.jobStatus === "failed") {
+  if (
+    (row.jobStatus === "pending" || row.jobStatus === "queued") &&
+    row.jobAttempt !== null &&
+    row.jobAttempt > 0
+  ) {
     return {
       itemId: row.itemId,
       processingStatus: "retrying",
@@ -127,6 +140,7 @@ export async function getCanonicalRepositoryItemStatuses(
           jobAttempt: repositoryProcessingJobs.attempt,
           jobMaxAttempts: repositoryProcessingJobs.maxAttempts,
           jobError: repositoryProcessingJobs.lastErrorMessage,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
           active: sql<boolean>`EXISTS (
             SELECT 1
             FROM ${repositoryItemChunks} active_chunk
@@ -193,6 +207,35 @@ export interface RetryCanonicalItemResult {
   processingJobId: string;
 }
 
+const POST_DEPLOY_RECOVERY_RETRY_MESSAGE =
+  "This item is awaiting automatic post-deployment recovery";
+
+/** Prevent alternate retry paths from superseding a quarantined current version. */
+export async function assertCanonicalRetryNotQuarantined(
+  itemVersionId: string
+): Promise<void> {
+  const [job] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
+        })
+        .from(repositoryProcessingJobs)
+        .where(
+          and(
+            eq(repositoryProcessingJobs.itemVersionId, itemVersionId),
+            eq(repositoryProcessingJobs.stage, "inspect")
+          )
+        )
+        .orderBy(desc(repositoryProcessingJobs.createdAt))
+        .limit(1),
+    "contentPlatform.assertCanonicalRetryNotQuarantined"
+  );
+  if (job && job.postDeployRecovery !== null) {
+    throw new Error(POST_DEPLOY_RECOVERY_RETRY_MESSAGE);
+  }
+}
+
 /** Reset a terminal current version to its durable inspect job for reprocessing. */
 export async function retryCanonicalRepositoryItem(
   itemId: number,
@@ -222,12 +265,24 @@ export async function retryCanonicalRepositoryItem(
       const [job] = await tx
         .select()
         .from(repositoryProcessingJobs)
-        .where(eq(repositoryProcessingJobs.itemVersionId, context.itemVersionId))
+        .where(
+          and(
+            eq(repositoryProcessingJobs.itemVersionId, context.itemVersionId),
+            eq(repositoryProcessingJobs.stage, "inspect")
+          )
+        )
         .orderBy(desc(repositoryProcessingJobs.createdAt))
         .limit(1)
         .for("update");
       if (!job) throw new Error("The item has no processing job to retry");
-      if (job.status !== "failed" && job.status !== "succeeded") {
+      if (job.postDeployRecovery !== null) {
+        throw new Error(POST_DEPLOY_RECOVERY_RETRY_MESSAGE);
+      }
+      if (
+        job.status !== "failed" &&
+        job.status !== "cancelled" &&
+        job.status !== "succeeded"
+      ) {
         throw new Error("The item is already being processed");
       }
 
@@ -249,16 +304,17 @@ export async function retryCanonicalRepositoryItem(
         .update(repositoryProcessingJobs)
         .set({
           status: "pending",
-          maxAttempts: Math.max(
-            job.maxAttempts,
-            job.attempt + CONTENT_PROCESSING_MAX_ATTEMPTS
-          ),
+          attempt: 0,
+          maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
           availableAt: now,
           leaseOwner: null,
           leaseExpiresAt: null,
           traceId: traceId ?? job.traceId,
           lastErrorCode: null,
           lastErrorMessage: null,
+          postDeployRecovery: null,
+          metrics: {},
+          startedAt: null,
           finishedAt: null,
           updatedAt: now,
         })
@@ -268,6 +324,7 @@ export async function retryCanonicalRepositoryItem(
         .set({
           storageStatus: "quarantined",
           inspectionStatus: "pending",
+          inspectionDetails: {},
           processingStatus: "pending",
         })
         .where(eq(repositoryItemVersions.id, context.itemVersionId));

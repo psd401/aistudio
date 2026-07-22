@@ -24,10 +24,10 @@ const Y_POSITION_TOLERANCE = 10 // px - tolerance for grouping nodes at same ver
 test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
 
 /**
- * Open the ReactFlow prompts editor of the first architect the current user owns.
- * Navigates list -> real architect card -> its /edit/prompts route. The card body
- * isn't a link and there is no "Prompts" tab, so we read the card's Edit href and
- * go to "<href>/prompts" directly. Returns false when the user owns no architect.
+ * Open the ReactFlow prompts editor for the deterministic parallel fixture.
+ * Other E2E fixtures also create assistants, so selecting the first Edit link
+ * makes this layout contract depend on database ordering and can silently open a
+ * standard serial assistant. Returns false when the fixture was not seeded.
  */
 async function openPromptsEditor(page: Page): Promise<boolean> {
   await page.goto('/utilities/assistant-architect')
@@ -37,11 +37,11 @@ async function openPromptsEditor(page: Page): Promise<boolean> {
   // found" card has no such link, so this skips cleanly when the user owns none
   // (avoids matching shadcn's bg-card on the empty card).
   const editLink = page.locator(
-    'a[href^="/utilities/assistant-architect/"][href$="/edit"]'
+    'a[href="/utilities/assistant-architect/9000/edit"]'
   )
   if ((await editLink.count()) === 0) return false
 
-  const editHref = await editLink.first().getAttribute('href')
+  const editHref = await editLink.getAttribute('href')
   if (!editHref) return false
 
   await page.goto(editHref.replace(/\/edit$/, '/edit/prompts'))
