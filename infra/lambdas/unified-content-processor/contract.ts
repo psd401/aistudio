@@ -1,3 +1,5 @@
+import { isRepositorySourceObjectKey } from "../../../lib/repositories/content-platform/object-key";
+
 export interface ContentProcessingMessage {
   jobId: string;
   itemVersionId: string;
@@ -74,16 +76,7 @@ export function isRepositoryObjectKey(
   repositoryId: number,
   objectKey: string
 ): boolean {
-  const prefix = `repositories/${repositoryId}/`;
-  if (!objectKey.startsWith(prefix) || objectKey.includes("..")) return false;
-  const pathParts = objectKey.slice(prefix.length).split("/");
-  return (
-    pathParts.length === 2 &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      pathParts[0] ?? ""
-    ) &&
-    (pathParts[1]?.length ?? 0) > 0
-  );
+  return isRepositorySourceObjectKey(repositoryId, objectKey);
 }
 
 export function decideMalwareInspection(

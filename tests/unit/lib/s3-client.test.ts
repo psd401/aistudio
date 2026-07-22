@@ -1,6 +1,7 @@
 import { 
   uploadDocument, 
   uploadRepositoryTextSource,
+  copyRepositorySourceToCanonicalNamespace,
   getDocumentSignedUrl, 
   deleteDocument,
   deleteRepositoryObjectsByPrefix,
@@ -16,7 +17,8 @@ import {
   DeleteObjectsCommand,
   HeadObjectCommand,
   HeadBucketCommand,
-  ListObjectsV2Command
+  ListObjectsV2Command,
+  CopyObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -128,6 +130,22 @@ describe('S3 Client', () => {
         expect.any(PutObjectCommand)
       );
     });
+
+    it('uses the canonical repository namespace for direct repository uploads', async () => {
+      mockS3Client.send.mockResolvedValue({});
+
+      const result = await uploadDocument({
+        userId: 'user-123',
+        repositoryId: 7,
+        fileName: 'handbook.pdf',
+        fileContent: Buffer.from('test content'),
+        contentType: 'application/pdf',
+      });
+
+      expect(result.key).toMatch(
+        /^repositories\/7\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/handbook\.pdf$/i
+      );
+    });
   });
 
   describe('uploadRepositoryTextSource', () => {
@@ -144,12 +162,49 @@ describe('S3 Client', () => {
 
       expect(result).toEqual({
         key: expect.stringMatching(
-          /^repositories\/7\/inline\/[0-9a-f-]{36}\/Quick_reference\.txt$/
+          /^repositories\/7\/[0-9a-f-]{36}\/Quick_reference\.txt$/
         ),
         byteSize: 11,
       });
       expect(mockS3Client.send).toHaveBeenCalledWith(
         expect.any(PutObjectCommand)
+      );
+    });
+  });
+
+  describe('copyRepositorySourceToCanonicalNamespace', () => {
+    it('copies a legacy source to a canonical key while preserving S3 metadata', async () => {
+      mockS3Client.send.mockResolvedValue({});
+
+      const result = await copyRepositorySourceToCanonicalNamespace({
+        repositoryId: 7,
+        sourceKey: 'user-1/1700000000-Emergency Plan.pdf',
+        fileName: 'Emergency Plan.pdf',
+      });
+
+      expect(result.key).toMatch(
+        /^repositories\/7\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/Emergency_Plan\.pdf$/i
+      );
+      expect(CopyObjectCommand).toHaveBeenCalledWith({
+        Bucket: 'test-bucket',
+        Key: result.key,
+        CopySource: '/test-bucket/user-1/1700000000-Emergency%20Plan.pdf',
+      });
+      expect(mockS3Client.send).toHaveBeenCalledWith(
+        expect.any(CopyObjectCommand)
+      );
+    });
+
+    it('rejects traversal-like legacy source keys before copying', async () => {
+      await expect(
+        copyRepositorySourceToCanonicalNamespace({
+          repositoryId: 7,
+          sourceKey: '../secret.pdf',
+          fileName: 'secret.pdf',
+        })
+      ).rejects.toThrow('safe source object key');
+      expect(mockS3Client.send).not.toHaveBeenCalledWith(
+        expect.any(CopyObjectCommand)
       );
     });
   });

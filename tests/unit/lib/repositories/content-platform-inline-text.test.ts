@@ -25,7 +25,7 @@ describe("canonical inline-text ingestion", () => {
     jest.clearAllMocks();
     mockGetSettings.mockResolvedValue({});
     mockUploadRepositoryTextSource.mockResolvedValue({
-      key: "repositories/7/inline/source.txt",
+      key: "repositories/7/11111111-2222-4333-8444-555555555555/source.txt",
       byteSize: 11,
     });
     mockRegisterCanonicalUpload.mockResolvedValue({
@@ -83,7 +83,8 @@ describe("canonical inline-text ingestion", () => {
     expect(mockRegisterCanonicalUpload).toHaveBeenCalledWith({
       itemId: 3,
       userId: 1,
-      objectKey: "repositories/7/inline/source.txt",
+      objectKey:
+        "repositories/7/11111111-2222-4333-8444-555555555555/source.txt",
       originalFileName: "Quick_reference_notes.txt",
       declaredContentType: "text/plain",
       byteSize: 11,

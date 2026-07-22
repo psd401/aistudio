@@ -77,9 +77,39 @@ test.describe('Unified repository upload contract (authenticated)', () => {
 
     await expect(dialog).toBeHidden()
     await expect(page.getByText(itemName, { exact: true })).toBeVisible()
-    await expect(
-      page.getByRole('row').filter({ hasText: itemName })
-    ).toContainText(/Processed|Completed/i)
+    const itemRow = page.getByRole('row').filter({ hasText: itemName })
+    await expect(itemRow).toContainText(
+      // Local E2E keeps rollout flags disabled to avoid writing to a real S3
+      // bucket. Enabled canonical state projection is covered below with the
+      // deterministic failed-job fixture and by the PostgreSQL smoke suite.
+      /Processed|Pending|Processing|Retrying|Generating Embeddings|Embedded/i
+    )
+  })
+
+  test.describe('terminal processing recovery', () => {
+    // This intentionally mutates the one deterministic failed job to pending.
+    // Retrying the test itself would no longer start from the seeded state.
+    test.describe.configure({ retries: 0 })
+
+    test('shows the canonical failure and restarts it from the item row', async ({ page }) => {
+      await page.goto('/repositories')
+      const repositoryRow = page
+        .getByRole('row')
+        .filter({ hasText: 'E2E Unified Content Repository' })
+      await repositoryRow.getByRole('button').first().click()
+
+      const itemName = 'E2E failed processing fixture'
+      const itemRow = page.getByRole('row').filter({ hasText: itemName })
+      await expect(itemRow).toContainText('Failed')
+      await expect(itemRow).toContainText('Simulated terminal processing failure')
+
+      await itemRow
+        .getByRole('button', { name: `Retry processing ${itemName}` })
+        .click()
+
+      await expect(itemRow).toContainText('Pending')
+      await expect(itemRow).not.toContainText('Simulated terminal processing failure')
+    })
   })
 
   test('uploads and completes a canonical PDF without invoking the legacy action', async ({ page }) => {

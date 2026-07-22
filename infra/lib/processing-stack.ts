@@ -412,6 +412,56 @@ export class ProcessingStack extends cdk.Stack {
     cdk.Tags.of(embeddingGenerator).add('Environment', props.environment);
     cdk.Tags.of(embeddingGenerator).add('ManagedBy', 'cdk');
 
+    const embeddingDlqAlarm = new cloudwatch.Alarm(this, 'EmbeddingDlqAlarm', {
+      alarmName: `aistudio-${props.environment}-embedding-dlq-visible`,
+      alarmDescription:
+        'Repository embedding records reached the DLQ and require diagnosis or retry',
+      metric: embeddingDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const embeddingAgeAlarm = new cloudwatch.Alarm(this, 'EmbeddingAgeAlarm', {
+      alarmName: `aistudio-${props.environment}-embedding-oldest-message`,
+      alarmDescription:
+        'Repository embedding work has not drained within 30 minutes',
+      metric: this.embeddingQueue.metricApproximateAgeOfOldestMessage({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: cdk.Duration.minutes(30).toSeconds(),
+      evaluationPeriods: 2,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const embeddingErrorAlarm = new cloudwatch.Alarm(this, 'EmbeddingErrorAlarm', {
+      alarmName: `aistudio-${props.environment}-embedding-worker-errors`,
+      alarmDescription: 'Repository embedding worker invocations are failing',
+      metric: embeddingGenerator.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    for (const alarm of [
+      embeddingDlqAlarm,
+      embeddingAgeAlarm,
+      embeddingErrorAlarm,
+    ]) {
+      cdk.Tags.of(alarm).add('Environment', props.environment);
+      cdk.Tags.of(alarm).add('ManagedBy', 'cdk');
+    }
+
     // Textract Processor Lambda
     const textractProcessorRole = ServiceRoleFactory.createLambdaRole(this, 'TextractProcessorRole', {
       functionName: 'textract-processor',

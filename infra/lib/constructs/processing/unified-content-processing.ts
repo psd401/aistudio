@@ -1,6 +1,7 @@
 import * as path from "path";
 import * as cdk from "aws-cdk-lib";
 import * as bedrock from "aws-cdk-lib/aws-bedrock";
+import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as events from "aws-cdk-lib/aws-events";
 import * as eventsTargets from "aws-cdk-lib/aws-events-targets";
@@ -106,11 +107,46 @@ export class UnifiedContentProcessing extends Construct {
       // AWS recommends at least six times the Lambda timeout for SQS event
       // sources so throttling/backoff cannot expose the same record mid-run.
       visibilityTimeout: cdk.Duration.minutes(90),
-      deadLetterQueue: { queue: this.deadLetterQueue, maxReceiveCount: 20 },
+      // The durable database job owns the five-attempt processing budget.
+      // Queue-level retries are reserved for malformed records or failure-state
+      // persistence outages and must not remain invisible for 30 hours.
+      deadLetterQueue: { queue: this.deadLetterQueue, maxReceiveCount: 5 },
     });
     for (const resource of [this.deadLetterQueue, this.queue]) {
       cdk.Tags.of(resource).add("Environment", props.environment);
       cdk.Tags.of(resource).add("ManagedBy", "cdk");
+    }
+    const deadLetterAlarm = new cloudwatch.Alarm(this, "DeadLetterQueueAlarm", {
+      alarmName: `aistudio-${props.environment}-content-processing-dlq-visible`,
+      alarmDescription:
+        "Unified repository content records reached the DLQ and require diagnosis/redrive",
+      metric: this.deadLetterQueue.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: "Maximum",
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const oldestMessageAlarm = new cloudwatch.Alarm(this, "OldestMessageAlarm", {
+      alarmName: `aistudio-${props.environment}-content-processing-oldest-message`,
+      alarmDescription:
+        "Unified repository content processing has not drained a message within 30 minutes",
+      metric: this.queue.metricApproximateAgeOfOldestMessage({
+        period: cdk.Duration.minutes(5),
+        statistic: "Maximum",
+      }),
+      threshold: cdk.Duration.minutes(30).toSeconds(),
+      evaluationPeriods: 2,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    for (const alarm of [deadLetterAlarm, oldestMessageAlarm]) {
+      cdk.Tags.of(alarm).add("Environment", props.environment);
+      cdk.Tags.of(alarm).add("ManagedBy", "cdk");
     }
 
     const malwareProtectionRole = new iam.Role(
@@ -387,6 +423,22 @@ export class UnifiedContentProcessing extends Construct {
     });
     cdk.Tags.of(this.worker).add("Environment", props.environment);
     cdk.Tags.of(this.worker).add("ManagedBy", "cdk");
+    const workerErrorAlarm = new cloudwatch.Alarm(this, "WorkerErrorAlarm", {
+      alarmName: `aistudio-${props.environment}-content-processing-worker-errors`,
+      alarmDescription:
+        "Unified repository content worker could not persist durable failure/retry state",
+      metric: this.worker.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: "Sum",
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    cdk.Tags.of(workerErrorAlarm).add("Environment", props.environment);
+    cdk.Tags.of(workerErrorAlarm).add("ManagedBy", "cdk");
 
     this.worker.addEventSource(
       new lambdaEventSources.SqsEventSource(this.queue, {

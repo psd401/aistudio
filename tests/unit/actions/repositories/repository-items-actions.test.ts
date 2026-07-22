@@ -28,8 +28,21 @@ const mockDispatchContentProcessingJob = jest.fn<(...a: unknown[]) => Promise<vo
 )
 const mockGetDocumentObjectMetadata = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 const mockGetDocumentSignedUrl = jest.fn<(...a: unknown[]) => Promise<string>>()
+const mockCopyRepositorySourceToCanonicalNamespace = jest.fn<
+  (...a: unknown[]) => Promise<{ key: string }>
+>()
 const mockDeleteRepositoryItem = jest.fn<(...a: unknown[]) => Promise<number>>()
 const mockDeleteRepositoryItemStorage = jest.fn<(...a: unknown[]) => Promise<unknown>>()
+const mockGetCanonicalRepositoryItemStatuses = jest.fn<
+  (...a: unknown[]) => Promise<Map<number, {
+    processingStatus: string
+    processingError: string | null
+    canRetry: boolean
+  }>>
+>(() => Promise.resolve(new Map()))
+const mockRetryCanonicalRepositoryItem = jest.fn<
+  (...a: unknown[]) => Promise<{ itemVersionId: string; processingJobId: string }>
+>()
 const mockRegisterCanonicalTextIfEnabled = jest.fn<
   (...a: unknown[]) => Promise<unknown>
 >(() => Promise.resolve(null))
@@ -70,6 +83,7 @@ jest.mock('@/lib/db/drizzle-client', () => ({
   repositoryItemChunks: mockRepositoryItemChunksTable,
 }))
 jest.mock('@/lib/aws/s3-client', () => ({
+  copyRepositorySourceToCanonicalNamespace: mockCopyRepositorySourceToCanonicalNamespace,
   uploadDocument: mockUploadDocument,
   deleteDocument: jest.fn(),
   getDocumentObjectMetadata: mockGetDocumentObjectMetadata,
@@ -86,10 +100,18 @@ jest.mock('@/lib/repositories/content-platform', () => ({
     'text/markdown',
     'text/csv',
   ].includes(contentType),
+  isRepositorySourceObjectKey: (repositoryId: number, objectKey: string) =>
+    new RegExp(
+      `^repositories/${repositoryId}/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/[^/]+$`,
+      'i'
+    ).test(objectKey) &&
+    !objectKey.includes('..'),
   registerCanonicalTextIfEnabled: mockRegisterCanonicalTextIfEnabled,
   registerCanonicalUploadIfEnabled: mockRegisterCanonicalUploadIfEnabled,
   dispatchContentProcessingJob: mockDispatchContentProcessingJob,
   deleteRepositoryItemStorage: mockDeleteRepositoryItemStorage,
+  getCanonicalRepositoryItemStatuses: mockGetCanonicalRepositoryItemStatuses,
+  retryCanonicalRepositoryItem: mockRetryCanonicalRepositoryItem,
 }))
 jest.mock('next/cache', () => ({ revalidatePath: jest.fn() }))
 jest.mock('@/lib/logger', () => ({
@@ -106,6 +128,7 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     mockHasCapabilityAccess.mockResolvedValue(true)
     mockGetUserIdFromSession.mockResolvedValue(1)
     mockCanModifyRepository.mockResolvedValue(true)
+    mockGetRepositoryItems.mockResolvedValue([])
     mockAssertRepositoryReadAccess.mockResolvedValue(undefined)
     mockAssertItemRepositoryReadAccess.mockResolvedValue(undefined)
     mockAssertNotSystemManagedRepository.mockResolvedValue(undefined)
@@ -113,9 +136,10 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     mockRegisterCanonicalTextIfEnabled.mockResolvedValue(null)
     mockExecuteTransaction.mockReset()
     mockDispatchContentProcessingJob.mockResolvedValue(undefined)
+    mockUpdateRepositoryItemStatus.mockResolvedValue(undefined)
     mockUploadDocument.mockResolvedValue({
-      key: 'repositories/7/direct/document.pdf',
-      url: 's3://documents/repositories/7/direct/document.pdf',
+      key: 'repositories/7/11111111-2222-4333-8444-555555555555/document.pdf',
+      url: 's3://documents/repositories/7/11111111-2222-4333-8444-555555555555/document.pdf',
     })
     mockQueueFileForProcessing.mockResolvedValue('legacy-job')
     mockGetDocumentObjectMetadata.mockResolvedValue({
@@ -125,10 +149,18 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
       metadata: {},
     })
     mockGetDocumentSignedUrl.mockResolvedValue('https://download')
+    mockCopyRepositorySourceToCanonicalNamespace.mockResolvedValue({
+      key: 'repositories/5/11111111-2222-4333-8444-555555555555/legacy.pdf',
+    })
     mockDeleteRepositoryItem.mockResolvedValue(1)
     mockDeleteRepositoryItemStorage.mockResolvedValue({
       sourceObjectCount: 1,
       artifactObjectCount: 3,
+    })
+    mockGetCanonicalRepositoryItemStatuses.mockResolvedValue(new Map())
+    mockRetryCanonicalRepositoryItem.mockResolvedValue({
+      itemVersionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      processingJobId: 'ffffffff-1111-4222-8333-444444444444',
     })
   })
 
@@ -143,6 +175,132 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     const res = await mod.listRepositoryItems(5)
     expect(res.isSuccess).toBe(true)
     expect(mockGetRepositoryItems).toHaveBeenCalledWith(5)
+  })
+
+  it('projects canonical failure state instead of a misleading legacy completion', async () => {
+    mockGetRepositoryItems.mockResolvedValue([{
+      id: 38,
+      repositoryId: 5,
+      type: 'text',
+      name: 'Inline notes',
+      source: 'content',
+      metadata: {},
+      processingStatus: 'completed',
+      processingError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }])
+    mockGetCanonicalRepositoryItemStatuses.mockResolvedValue(new Map([[38, {
+      processingStatus: 'failed',
+      processingError: 'Item version object key is outside its repository namespace',
+      canRetry: true,
+    }]]))
+
+    const result = await mod.listRepositoryItems(5)
+
+    expect(result.isSuccess).toBe(true)
+    expect(result.data).toEqual([
+      expect.objectContaining({
+        id: 38,
+        processingStatus: 'failed',
+        processingError: 'Item version object key is outside its repository namespace',
+        canRetry: true,
+      }),
+    ])
+  })
+
+  it('retries a failed canonical item through its durable job', async () => {
+    mockGetRepositoryItemById.mockResolvedValue({
+      id: 38,
+      repositoryId: 5,
+      type: 'document',
+      source: 'repositories/5/11111111-2222-4333-8444-555555555555/source.pdf',
+      currentVersionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    })
+
+    const result = await mod.retryRepositoryItemProcessing(38)
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockRetryCanonicalRepositoryItem).toHaveBeenCalledWith(38, 't')
+    expect(mockDispatchContentProcessingJob).toHaveBeenCalledWith({
+      jobId: 'ffffffff-1111-4222-8333-444444444444',
+      itemVersionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    })
+  })
+
+  it('repairs failed inline text by creating a fresh immutable source version', async () => {
+    mockGetRepositoryItemById.mockResolvedValue({
+      id: 38,
+      repositoryId: 5,
+      type: 'text',
+      name: 'Inline notes',
+      source: 'ORCHID-COMPASS-742',
+      currentVersionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    })
+    mockRegisterCanonicalTextIfEnabled.mockResolvedValue({
+      created: true,
+      version: { id: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' },
+      inspectJob: { id: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa' },
+    })
+
+    const result = await mod.retryRepositoryItemProcessing(38)
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockRegisterCanonicalTextIfEnabled).toHaveBeenCalledWith({
+      itemId: 38,
+      repositoryId: 5,
+      userId: 1,
+      name: 'Inline notes',
+      content: 'ORCHID-COMPASS-742',
+      traceId: 't',
+    })
+    expect(mockRetryCanonicalRepositoryItem).not.toHaveBeenCalled()
+    expect(mockDispatchContentProcessingJob).toHaveBeenCalledWith({
+      jobId: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa',
+      itemVersionId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
+    })
+  })
+
+  it('repairs a legacy file by copying it into the canonical source namespace', async () => {
+    mockGetRepositoryItemById.mockResolvedValue({
+      id: 39,
+      repositoryId: 5,
+      type: 'document',
+      name: 'Legacy document',
+      source: '1/1700000000-legacy.pdf',
+      metadata: {
+        originalFileName: 'legacy.pdf',
+        contentType: 'application/pdf',
+      },
+      currentVersionId: null,
+    })
+    mockRegisterCanonicalUploadIfEnabled.mockResolvedValue({
+      created: true,
+      version: { id: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' },
+      inspectJob: { id: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa' },
+    })
+
+    const result = await mod.retryRepositoryItemProcessing(39)
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockCopyRepositorySourceToCanonicalNamespace).toHaveBeenCalledWith({
+      repositoryId: 5,
+      sourceKey: '1/1700000000-legacy.pdf',
+      fileName: 'legacy.pdf',
+    })
+    expect(mockRegisterCanonicalUploadIfEnabled).toHaveBeenCalledWith({
+      itemId: 39,
+      userId: 1,
+      objectKey: 'repositories/5/11111111-2222-4333-8444-555555555555/legacy.pdf',
+      originalFileName: 'legacy.pdf',
+      declaredContentType: 'application/pdf',
+      byteSize: 1,
+      traceId: 't',
+    })
+    expect(mockDispatchContentProcessingJob).toHaveBeenCalledWith({
+      jobId: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa',
+      itemVersionId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
+    })
   })
 
   it('addDocumentWithPresignedUrl rejects an s3Key outside the repository namespace (REV-SEC-062)', async () => {
@@ -164,7 +322,7 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     const res = await mod.addDocumentWithPresignedUrl({
       repository_id: 7,
       name: 'doc',
-      s3Key: 'repositories/7/11111111-2222-3333-4444-555555555555/doc.pdf',
+      s3Key: 'repositories/7/11111111-2222-4333-8444-555555555555/doc.pdf',
       metadata: { contentType: 'application/pdf', size: 1, originalFileName: 'doc.pdf' },
     })
     expect(res.isSuccess).toBe(true)
@@ -172,12 +330,25 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     expect(mockRegisterCanonicalUploadIfEnabled).toHaveBeenCalledWith({
       itemId: 1,
       userId: 1,
-      objectKey: 'repositories/7/11111111-2222-3333-4444-555555555555/doc.pdf',
+      objectKey: 'repositories/7/11111111-2222-4333-8444-555555555555/doc.pdf',
       originalFileName: 'doc.pdf',
       declaredContentType: 'application/pdf',
       byteSize: 1,
       traceId: 't',
     })
+  })
+
+  it('rejects a nested repository key that the canonical worker cannot process', async () => {
+    const res = await mod.addDocumentWithPresignedUrl({
+      repository_id: 7,
+      name: 'doc',
+      s3Key: 'repositories/7/inline/11111111-2222-4333-8444-555555555555/doc.pdf',
+      metadata: { contentType: 'application/pdf', size: 1, originalFileName: 'doc.pdf' },
+    })
+
+    expect(res.isSuccess).toBe(false)
+    expect(mockGetDocumentObjectMetadata).not.toHaveBeenCalled()
+    expect(mockCreateRepositoryItem).not.toHaveBeenCalled()
   })
 
   it('dispatches a canonical shadow-write job without replacing the legacy flow', async () => {
@@ -211,7 +382,7 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
       repositoryId: 7,
       type: 'document',
       name: 'Direct document',
-      source: 'repositories/7/direct/document.pdf',
+      source: 'repositories/7/11111111-2222-4333-8444-555555555555/document.pdf',
       metadata: {},
       processingStatus: 'pending',
       processingError: null,
@@ -236,10 +407,14 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     })
 
     expect(result.isSuccess).toBe(true)
+    expect(mockUploadDocument).toHaveBeenCalledWith(expect.objectContaining({
+      repositoryId: 7,
+      fileName: 'document.pdf',
+    }))
     expect(mockRegisterCanonicalUploadIfEnabled).toHaveBeenCalledWith({
       itemId: 4,
       userId: 1,
-      objectKey: 'repositories/7/direct/document.pdf',
+      objectKey: 'repositories/7/11111111-2222-4333-8444-555555555555/document.pdf',
       originalFileName: 'document.pdf',
       declaredContentType: 'application/pdf',
       byteSize: 9,
@@ -251,7 +426,7 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     })
     expect(mockQueueFileForProcessing).toHaveBeenCalledWith(
       4,
-      'repositories/7/direct/document.pdf',
+      'repositories/7/11111111-2222-4333-8444-555555555555/document.pdf',
       'Direct document',
       'application/pdf'
     )
@@ -267,7 +442,7 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     const res = await mod.addDocumentWithPresignedUrl({
       repository_id: 7,
       name: 'doc',
-      s3Key: 'repositories/7/11111111-2222-3333-4444-555555555555/doc.pdf',
+      s3Key: 'repositories/7/11111111-2222-4333-8444-555555555555/doc.pdf',
       metadata: { contentType: 'application/pdf', size: 1, originalFileName: 'doc.pdf' },
     })
 
@@ -341,7 +516,7 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     const res = await mod.addDocumentWithPresignedUrl({
       repository_id: 7,
       name: 'doc',
-      s3Key: 'repositories/7/11111111-2222-3333-4444-555555555555/doc.pdf',
+      s3Key: 'repositories/7/11111111-2222-4333-8444-555555555555/doc.pdf',
       metadata: { contentType: 'application/pdf', size: 1, originalFileName: 'doc.pdf' },
     })
 
@@ -380,10 +555,58 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     const result = await mod.removeRepositoryItem(9)
 
     expect(result.isSuccess).toBe(true)
-    expect(mockDeleteRepositoryItemStorage).toHaveBeenCalledWith(image)
+    expect(mockDeleteRepositoryItemStorage).toHaveBeenCalledWith(
+      expect.objectContaining(image)
+    )
     expect(mockDeleteRepositoryItemStorage.mock.invocationCallOrder[0]).toBeLessThan(
       mockDeleteRepositoryItem.mock.invocationCallOrder[0]
     )
+  })
+
+  it('cleans canonical storage for inline text before deleting its manifest', async () => {
+    const textItem = {
+      id: 11,
+      repositoryId: 5,
+      type: 'text',
+      name: 'Emergency notes',
+      source: 'Inline text is not an S3 key',
+      metadata: {},
+      processingStatus: 'completed',
+      processingError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }
+    mockGetRepositoryItemById.mockResolvedValue(textItem)
+
+    const result = await mod.removeRepositoryItem(11)
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockDeleteRepositoryItemStorage).toHaveBeenCalledWith(
+      expect.objectContaining(textItem)
+    )
+  })
+
+  it('preserves the item manifest when storage cleanup fails', async () => {
+    mockGetRepositoryItemById.mockResolvedValue({
+      id: 12,
+      repositoryId: 5,
+      type: 'video',
+      name: 'Training video',
+      source: 'repositories/5/11111111-2222-4333-8444-555555555555/training.mp4',
+      metadata: {},
+      processingStatus: 'completed',
+      processingError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    mockDeleteRepositoryItemStorage.mockRejectedValueOnce(
+      new Error('storage unavailable')
+    )
+
+    const result = await mod.removeRepositoryItem(12)
+
+    expect(result.isSuccess).toBe(false)
+    expect(mockDeleteRepositoryItem).not.toHaveBeenCalled()
   })
 
   it('generates image download URLs through database-first S3 settings', async () => {

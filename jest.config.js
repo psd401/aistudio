@@ -39,6 +39,10 @@ const customJestConfig = {
   transformIgnorePatterns: [
     'node_modules/(?!(lucide-react|next-auth|@next-auth|nanoid)/)'
   ],
+  modulePathIgnorePatterns: [
+    '<rootDir>/infra/cdk.out/',
+    '<rootDir>/.next/',
+  ],
   testPathIgnorePatterns: [
     '/node_modules/',
     '/tests/e2e/',
@@ -49,4 +53,4 @@ const customJestConfig = {
   ]
 };
 
-module.exports = createJestConfig(customJestConfig); 
+module.exports = createJestConfig(customJestConfig);

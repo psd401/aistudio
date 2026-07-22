@@ -88,14 +88,30 @@ async function searchAccessibleRepositories(
         ? {}
         : { denseWeight: request.vectorWeight }),
     });
-    return retrieval.results.map((result) => ({
-      content: result.content,
-      itemName: result.itemName,
-      similarity: result.similarity,
-      chunkIndex: result.chunkIndex,
-      citation: result.citations[0],
-      context: result.context,
-    }));
+    return retrieval.results.map((result) => {
+      const primaryContext = result.context.find(
+        (segment) => segment.chunkId === result.chunkId
+      );
+      const primaryCitation = result.citations.find(
+        (citation) => citation.chunkId === result.chunkId
+      );
+      return {
+        // Retrieval v2 budgets context, while result.content is the unbounded
+        // candidate text. Returning the fitted primary segment keeps the tool
+        // payload bounded and pairs its text with the citation for that chunk.
+        content: primaryContext?.content ?? result.content,
+        itemName: result.itemName,
+        similarity: result.similarity,
+        chunkIndex: result.chunkIndex,
+        citation: primaryCitation ?? primaryContext?.citation,
+        // `content` already contains the fitted primary segment; return only
+        // its surrounding segments here so the model does not receive the same
+        // budgeted text twice.
+        context: result.context.filter(
+          (segment) => segment.chunkId !== result.chunkId
+        ),
+      };
+    });
   }
 
   const perRepositoryResults = await Promise.all(

@@ -6,6 +6,7 @@ import {
   listRepositoryItems,
   removeRepositoryItem,
   getDocumentDownloadUrl,
+  retryRepositoryItemProcessing,
 } from "@/actions/repositories/repository-items.actions"
 import { Button } from "@/components/ui/button"
 import {
@@ -37,7 +38,10 @@ import { Badge } from "@/components/ui/badge"
 import { useAction } from "@/lib/hooks/use-action"
 import {
   FileText,
+  Image as ImageIcon,
   Link,
+  Music,
+  RefreshCw,
   Type,
   Trash2,
   Loader2,
@@ -46,6 +50,7 @@ import {
   AlertCircle,
   CheckCircle,
   Clock,
+  Video,
 } from "lucide-react"
 import { format } from "date-fns"
 import { useToast } from "@/components/ui/use-toast"
@@ -68,6 +73,10 @@ export function RepositoryItemList({
   const { execute: executeRemove, isPending: isRemoving } = useAction(
     removeRepositoryItem
   )
+  const { execute: executeRetry, isPending: isRetrying } = useAction(
+    retryRepositoryItemProcessing
+  )
+  const [retryingItemId, setRetryingItemId] = useState<number | null>(null)
   const [refreshTrigger, setRefreshTrigger] = useState(0)
 
   useEffect(() => {
@@ -87,6 +96,7 @@ export function RepositoryItemList({
     const hasPendingItems = items.some(item => 
       item.processingStatus === 'pending' || 
       item.processingStatus === 'processing' ||
+      item.processingStatus === 'retrying' ||
       item.processingStatus === 'processing_embeddings' ||
       item.processingStatus === 'processing_ocr'
     )
@@ -121,7 +131,7 @@ export function RepositoryItemList({
   }
 
   async function handleDownload(item: RepositoryItem) {
-    if (item.type !== "document") return
+    if (!["document", "image", "audio", "video"].includes(item.type)) return
 
     const result = await getDocumentDownloadUrl(item.id)
     if (result.isSuccess && result.data) {
@@ -136,10 +146,35 @@ export function RepositoryItemList({
     }
   }
 
+  async function handleRetry(item: RepositoryItem) {
+    setRetryingItemId(item.id)
+    const result = await executeRetry(item.id)
+    if (result.isSuccess) {
+      toast({
+        title: "Processing restarted",
+        description: `${item.name} has been queued again.`,
+      })
+      setRefreshTrigger(prev => prev + 1)
+    } else {
+      toast({
+        title: "Retry failed",
+        description: result.message || "Failed to restart content processing",
+        variant: "destructive",
+      })
+    }
+    setRetryingItemId(null)
+  }
+
   function getItemIcon(type: string) {
     switch (type) {
       case "document":
         return <FileText className="h-4 w-4" />
+      case "image":
+        return <ImageIcon className="h-4 w-4" />
+      case "audio":
+        return <Music className="h-4 w-4" />
+      case "video":
+        return <Video className="h-4 w-4" />
       case "url":
         return <Link className="h-4 w-4" />
       case "text":
@@ -170,6 +205,13 @@ export function RepositoryItemList({
           <Badge variant="secondary" className="gap-1">
             <Clock className="h-3 w-3" />
             Processing
+          </Badge>
+        )
+      case "retrying":
+        return (
+          <Badge variant="secondary" className="gap-1">
+            <RefreshCw className="h-3 w-3" />
+            Retrying
           </Badge>
         )
       case "processing_embeddings":
@@ -279,13 +321,29 @@ export function RepositoryItemList({
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
-                        {item.type === "document" && (
+                        {["document", "image", "audio", "video"].includes(item.type) && (
                           <Button
                             variant="ghost"
                             size="sm"
                             onClick={() => handleDownload(item)}
+                            aria-label={`Download ${item.name}`}
                           >
                             <Download className="h-4 w-4" />
+                          </Button>
+                        )}
+                        {item.canRetry && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleRetry(item)}
+                            disabled={isRetrying && retryingItemId === item.id}
+                            aria-label={`Retry processing ${item.name}`}
+                          >
+                            {isRetrying && retryingItemId === item.id ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <RefreshCw className="h-4 w-4" />
+                            )}
                           </Button>
                         )}
                         {item.type === "url" && (

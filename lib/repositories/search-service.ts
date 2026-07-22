@@ -157,7 +157,6 @@ export async function vectorSearch(
           WHERE c.embedding IS NOT NULL
             AND i.repository_id = ${repositoryId}
             AND i.lifecycle_status = 'active'
-            AND i.current_version_id = c.item_version_id
             AND r.lifecycle_status = 'active'
             AND c.index_generation_id = ${embeddingTarget?.generationId ?? null}
             AND v.storage_status = 'available'
@@ -264,7 +263,6 @@ export async function keywordSearch(
           WHERE to_tsvector('english', c.content) @@ plainto_tsquery('english', ${query})
             AND i.repository_id = ${repositoryId}
             AND i.lifecycle_status = 'active'
-            AND i.current_version_id = c.item_version_id
             AND r.lifecycle_status = 'active'
             AND r.active_index_generation_id = c.index_generation_id
             AND v.storage_status = 'available'

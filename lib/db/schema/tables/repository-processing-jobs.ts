@@ -31,6 +31,14 @@ export type RepositoryProcessingJobStatus =
   | "cancelled";
 
 export interface RepositoryProcessingMetrics {
+  /** Current managed-service wait, used to enforce a bounded deadline. */
+  waitReason?:
+    | "CONTENT_PLATFORM_DISABLED"
+    | "AWAITING_SECURITY_SCAN"
+    | "AWAITING_OCR"
+    | "AWAITING_MEDIA_ANALYSIS";
+  /** ISO timestamp at which the current managed-service wait began. */
+  waitStartedAt?: string;
   durationMs?: number;
   inputBytes?: number;
   outputBytes?: number;

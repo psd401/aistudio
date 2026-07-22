@@ -22,6 +22,7 @@ import { Settings } from "@/lib/settings-manager";
 import type { ContentPlatformConfig } from "./config";
 import {
   buildProcessingIdempotencyKey,
+  CONTENT_PROCESSING_MAX_ATTEMPTS,
   CONTENT_PROCESSOR_CONTRACT_VERSION,
 } from "./job-state";
 import { sourceRevisionForObjectKey } from "./ingestion-service";
@@ -32,6 +33,7 @@ import {
 } from "./media-processing";
 import { isOfficeContentType } from "./office-processing";
 import { isCanonicalTextContentType } from "./text-processing";
+import { buildRepositorySourceObjectKey } from "./object-key";
 
 export interface InitiateRepositoryUploadInput {
   repositoryId: number;
@@ -279,12 +281,15 @@ export async function initiateRepositoryUpload(
   const resolvedStorage = storage ?? (await createS3UploadStorage());
   const sessionId = randomUUID();
   const safeFileName = sanitizeFileName(input.fileName);
-  const objectKey = `repositories/${input.repositoryId}/${sessionId}/${safeFileName}`;
+  const objectKey = buildRepositorySourceObjectKey(
+    input.repositoryId,
+    safeFileName,
+    sessionId
+  );
   const expiresAt = new Date(Date.now() + UPLOAD_EXPIRY_SECONDS * 1000);
   const metadata = {
     repositoryId: String(input.repositoryId),
     uploadSessionId: sessionId,
-    originalFileName: input.fileName,
   };
 
   let uploadId: string | undefined;
@@ -534,7 +539,7 @@ export async function completeRepositoryUpload(
           stage: "inspect",
           status: "pending",
           idempotencyKey: buildProcessingIdempotencyKey(version.id, "inspect"),
-          maxAttempts: 20,
+          maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
         })
         .returning({ id: repositoryProcessingJobs.id });
       if (!job) throw new Error("Failed to create repository processing job");

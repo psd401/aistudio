@@ -314,7 +314,6 @@ async function denseCandidates(
             sql`, `
           )})
           AND item.lifecycle_status = 'active'
-          AND item.current_version_id = version.id
           AND version.storage_status = 'available'
           AND version.inspection_status IN ('clean', 'not_required')
           AND version.processing_status = 'completed'
@@ -357,7 +356,6 @@ async function lexicalCandidates(
             sql`, `
           )})
           AND item.lifecycle_status = 'active'
-          AND item.current_version_id = version.id
           AND version.storage_status = 'available'
           AND version.inspection_status IN ('clean', 'not_required')
           AND version.processing_status = 'completed'
@@ -466,7 +464,6 @@ async function visualCandidates(
           AND chunk.visual_embedding IS NOT NULL
           AND chunk.modality IN ('image', 'video')
           AND item.lifecycle_status = 'active'
-          AND item.current_version_id = version.id
           AND version.storage_status = 'available'
           AND version.inspection_status IN ('clean', 'not_required')
           AND version.processing_status = 'completed'
@@ -518,7 +515,6 @@ async function expandCandidate(
             OR chunk.chunk_index = ${candidate.parentChunkIndex ?? -1}
           )
           AND item.lifecycle_status = 'active'
-          AND item.current_version_id = version.id
           AND version.storage_status = 'available'
           AND version.inspection_status IN ('clean', 'not_required')
           AND version.processing_status = 'completed'
@@ -527,7 +523,7 @@ async function expandCandidate(
       `),
     "retrievalV2.expandContext"
   );
-  return (rows as unknown as Array<Record<string, unknown>>).flatMap((row) => {
+  const expanded = (rows as unknown as Array<Record<string, unknown>>).flatMap((row) => {
     const contextCandidate = mapCandidate(row, "lexical");
     try {
       return [
@@ -545,6 +541,41 @@ async function expandCandidate(
       return [];
     }
   });
+
+  // The active generation is the serving snapshot. Keep its selected hit first
+  // even when the database returns a preceding neighbor (or a newly registered
+  // current version points at content that has not reached the active generation
+  // yet). This also guarantees a tight context budget cannot consume itself on a
+  // neighbor and omit the semantic/lexical hit that earned the result.
+  let primary: RetrievalContextSegment | null = null;
+  try {
+    primary = {
+      chunkId: candidate.chunkId,
+      chunkIndex: candidate.chunkIndex,
+      content: candidate.content,
+      contextPrefix: candidate.contextPrefix,
+      modality: candidate.modality,
+      tokens: candidate.tokens,
+      citation: resolveRetrievalCitation(candidate),
+    };
+  } catch {
+    // fitContextBudget applies the same citation guard and will omit this
+    // candidate. Preserve the previous fail-closed behavior for malformed rows.
+  }
+
+  const neighbors = expanded
+    .filter((segment) => segment.chunkId !== candidate.chunkId)
+    .sort((left, right) => {
+      const leftIsParent = left.chunkIndex === candidate.parentChunkIndex;
+      const rightIsParent = right.chunkIndex === candidate.parentChunkIndex;
+      if (leftIsParent !== rightIsParent) return leftIsParent ? -1 : 1;
+      const distance =
+        Math.abs(left.chunkIndex - candidate.chunkIndex) -
+        Math.abs(right.chunkIndex - candidate.chunkIndex);
+      return distance || left.chunkIndex - right.chunkIndex;
+    });
+
+  return primary ? [primary, ...neighbors] : neighbors;
 }
 
 function fitContextBudget(

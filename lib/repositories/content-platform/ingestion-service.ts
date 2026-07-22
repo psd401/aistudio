@@ -12,8 +12,10 @@ import { ErrorFactories } from "@/lib/error-utils";
 import { getContentPlatformConfig, isContentDualWriteActive } from "./config";
 import {
   buildProcessingIdempotencyKey,
+  CONTENT_PROCESSING_MAX_ATTEMPTS,
   CONTENT_PROCESSOR_CONTRACT_VERSION,
 } from "./job-state";
+import { isRepositorySourceObjectKey } from "./object-key";
 
 export interface RegisterCanonicalUploadInput {
   itemId: number;
@@ -78,7 +80,7 @@ async function ensureInspectJob(
       stage: "inspect",
       status: "pending",
       idempotencyKey,
-      maxAttempts: 20,
+      maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
       traceId,
     })
     .returning();
@@ -100,13 +102,19 @@ export async function registerCanonicalUpload(
   return executeTransaction(
     async (tx) => {
       const [item] = await tx
-        .select({ id: repositoryItems.id })
+        .select({
+          id: repositoryItems.id,
+          repositoryId: repositoryItems.repositoryId,
+        })
         .from(repositoryItems)
         .where(eq(repositoryItems.id, input.itemId))
         .limit(1)
         .for("update");
       if (!item) {
         throw ErrorFactories.dbRecordNotFound("repository_items", input.itemId);
+      }
+      if (!isRepositorySourceObjectKey(item.repositoryId, input.objectKey)) {
+        throw new Error("Object key is outside the repository source namespace");
       }
 
       const [existing] = await tx
@@ -157,6 +165,8 @@ export async function registerCanonicalUpload(
         .set({
           currentVersionId: version.id,
           lifecycleStatus: "active",
+          processingStatus: "pending",
+          processingError: null,
           updatedAt: new Date(),
         })
         .where(eq(repositoryItems.id, input.itemId));

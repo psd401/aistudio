@@ -6,9 +6,15 @@ import type {
 export const CONTENT_PROCESSOR_CONTRACT_VERSION = "unified-content-v1";
 
 /**
- * Only jobs that have never reached SQS are eligible for scheduled redispatch.
- * Failed Lambda records remain owned by SQS and are retried with its backoff;
- * sweeping them too creates a second live delivery for the same durable job.
+ * One automatic processing budget. A manual retry creates a fresh budget, while
+ * transient failures inside a budget use the worker's bounded exponential delay.
+ */
+export const CONTENT_PROCESSING_MAX_ATTEMPTS = 5;
+
+/**
+ * Pending is the durable outbox state. A transient worker failure is converted
+ * back to pending, explicitly requeued with a bounded delay, and then ACKed.
+ * The sweep recovers any pending job whose explicit SQS send was interrupted.
  */
 export const CONTENT_SWEEP_REDISPATCHABLE_STATUSES = ["pending"] as const satisfies
   readonly RepositoryProcessingJobStatus[];

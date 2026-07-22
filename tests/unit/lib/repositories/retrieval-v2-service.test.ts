@@ -1,6 +1,8 @@
 /** @jest-environment node */
 
 import type { RepositoryReranker } from "@/lib/repositories/retrieval-v2/bedrock-reranker";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 const mockExecuteQuery = jest.fn();
 const mockGetAccessibleRepositories = jest.fn();
@@ -197,6 +199,11 @@ describe("shared repository retrieval v2 service", () => {
   });
 
   it("never exceeds the tokenizer-counted context budget", async () => {
+    const longCandidate = {
+      ...row(1, 0.8, 0),
+      context_prefix: "Detailed section context ".repeat(50),
+      content: "Long policy text ".repeat(500),
+    };
     mockExecuteQuery
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
@@ -210,15 +217,9 @@ describe("shared repository retrieval v2 service", () => {
           visual_embedding_dimensions: null,
         },
       ])
-      .mockResolvedValueOnce([row(1, 0.8, 0)])
+      .mockResolvedValueOnce([longCandidate])
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
-        {
-          ...row(1, 0, 0),
-          context_prefix: "Detailed section context ".repeat(50),
-          content: "Long policy text ".repeat(500),
-        },
-      ]);
+      .mockResolvedValueOnce([{ ...longCandidate, score: 0 }]);
 
     const response = await retrieveRepositoryContent({
       query: "policy",
@@ -233,6 +234,108 @@ describe("shared repository retrieval v2 service", () => {
     expect(response.results[0]?.context[0]?.content).toContain(
       "truncated to retrieval budget",
     );
+  });
+
+  it("fits the selected hit before neighbors when the context budget is tight", async () => {
+    const selected = {
+      ...row(50, 0.9, 5),
+      content: "PRIMARY-ANSWER ".repeat(80),
+      context_prefix: "Selected page",
+      source_locator: { page: 6 },
+    };
+    const precedingNeighbor = {
+      ...row(49, 0, 4),
+      content: "UNRELATED-NEIGHBOR ".repeat(80),
+      context_prefix: "Previous page",
+      source_locator: { page: 5 },
+    };
+    mockExecuteQuery
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          repository_id: 7,
+          repository_name: "District Policies",
+          generation_id: generationId,
+          embedding_model: null,
+          embedding_dimensions: null,
+          visual_embedding_model: null,
+          visual_embedding_dimensions: null,
+        },
+      ])
+      .mockResolvedValueOnce([selected])
+      .mockResolvedValueOnce([])
+      // Reproduce PostgreSQL's former chunk-index ordering: neighbor first.
+      .mockResolvedValueOnce([precedingNeighbor, selected]);
+
+    const response = await retrieveRepositoryContent({
+      query: "primary answer",
+      repositoryIds: [7],
+      userCognitoSub: "user-sub",
+      mode: "keyword",
+      limit: 1,
+      tokenBudget: 100,
+    });
+
+    expect(response.results).toHaveLength(1);
+    expect(response.results[0]?.context[0]).toMatchObject({
+      chunkId: 50,
+      citation: { chunkId: 50, label: "Page 6" },
+    });
+    expect(response.results[0]?.context[0]?.content).toContain("PRIMARY-ANSWER");
+    expect(response.results[0]?.context[0]?.content).not.toContain(
+      "UNRELATED-NEIGHBOR"
+    );
+    expect(response.results[0]?.citations[0]?.chunkId).toBe(50);
+    expect(response.diagnostics.returnedTokens).toBeLessThanOrEqual(100);
+  });
+
+  it("serves the active generation without consulting the mutable current-version pointer", async () => {
+    const servingQueries: string[] = [];
+    const selected = row(70, 0.9, 0);
+    type RawQueryCallback = (db: {
+      execute(query: SQL): Promise<Array<Record<string, unknown>>>;
+    }) => Promise<Array<Record<string, unknown>>>;
+    const executeAndCapture = async (callbackValue: unknown) => {
+      const callback = callbackValue as RawQueryCallback;
+      return callback({
+        execute: async (query) => {
+          servingQueries.push(new PgDialect().sqlToQuery(query).sql);
+          return [selected];
+        },
+      });
+    };
+
+    mockExecuteQuery
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          repository_id: 7,
+          repository_name: "District Policies",
+          generation_id: generationId,
+          embedding_model: null,
+          embedding_dimensions: null,
+          visual_embedding_model: null,
+          visual_embedding_dimensions: null,
+        },
+      ])
+      .mockImplementationOnce(executeAndCapture)
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(executeAndCapture);
+
+    const response = await retrieveRepositoryContent({
+      query: "last published policy",
+      repositoryIds: [7],
+      userCognitoSub: "user-sub",
+      mode: "keyword",
+      limit: 1,
+    });
+
+    expect(response.results[0]?.chunkId).toBe(70);
+    expect(servingQueries).toHaveLength(2);
+    for (const query of servingQueries) {
+      expect(query).toContain("chunk.index_generation_id =");
+      expect(query).not.toContain("item.current_version_id = version.id");
+    }
   });
 
   it("retrieves image segments in the generation-pinned visual vector space", async () => {

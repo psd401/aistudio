@@ -48,12 +48,35 @@ describe("repository assistant tools use retrieval v2", () => {
     mockRetrieve.mockResolvedValue({
       results: [
         {
+          chunkId: 30,
           content: "Emergency procedure",
           itemName: "Handbook",
           similarity: 0.8,
           chunkIndex: 2,
-          citations: [{ itemVersionId: "version", label: "Page 3" }],
-          context: [{ content: "Neighbor context" }],
+          citations: [
+            { chunkId: 29, itemVersionId: "version", label: "Page 2" },
+            { chunkId: 30, itemVersionId: "version", label: "Page 3" },
+          ],
+          context: [
+            {
+              chunkId: 29,
+              content: "Neighbor context",
+              citation: {
+                chunkId: 29,
+                itemVersionId: "version",
+                label: "Page 2",
+              },
+            },
+            {
+              chunkId: 30,
+              content: "Budgeted emergency procedure",
+              citation: {
+                chunkId: 30,
+                itemVersionId: "version",
+                label: "Page 3",
+              },
+            },
+          ],
         },
       ],
     });
@@ -77,7 +100,17 @@ describe("repository assistant tools use retrieval v2", () => {
     });
     expect(result).toMatchObject({
       success: true,
-      results: [{ citation: { itemVersionId: "version", label: "Page 3" } }],
+      results: [
+        {
+          content: "Budgeted emergency procedure",
+          citation: {
+            chunkId: 30,
+            itemVersionId: "version",
+            label: "Page 3",
+          },
+          context: [{ chunkId: 29, content: "Neighbor context" }],
+        },
+      ],
     });
   });
 
