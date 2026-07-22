@@ -2,6 +2,8 @@ import { executeQuery } from "@/lib/db/drizzle-client"
 import { sql } from "drizzle-orm"
 import { generateEmbedding } from "@/lib/ai-helpers"
 import type { RepositorySourceLocator } from "@/lib/db/schema"
+import { createLogger } from "@/lib/logger"
+import { parseRepositoryEmbeddingDescriptor } from "@/lib/repositories/embedding-configuration"
 
 export interface SearchCitation {
   itemStableId: string
@@ -9,7 +11,6 @@ export interface SearchCitation {
   versionNumber: number
   sourceLocator: RepositorySourceLocator
 }
-
 export interface SearchResult {
   chunkId: number
   itemId: number
@@ -26,6 +27,40 @@ export interface SearchOptions {
   threshold?: number
   repositoryId?: number
   canonicalOnly?: boolean
+}
+
+async function getCanonicalEmbeddingOverride(
+  repositoryId: number | undefined,
+  canonicalOnly: boolean
+) {
+  if (!repositoryId || !canonicalOnly) return undefined
+  const result = await executeQuery(
+    (db) =>
+      db.execute(sql`
+        SELECT generation.embedding_model, generation.embedding_dimensions
+        FROM knowledge_repositories repository
+        JOIN repository_index_generations generation
+          ON generation.id = repository.active_index_generation_id
+        WHERE repository.id = ${repositoryId}
+        LIMIT 1
+      `),
+    "repositorySearch.embeddingConfiguration"
+  )
+  const [row] = result as unknown as Array<{
+    embedding_model: string | null
+    embedding_dimensions: number | null
+  }>
+  const config = parseRepositoryEmbeddingDescriptor(
+    row?.embedding_model,
+    row?.embedding_dimensions
+  )
+  return config
+    ? {
+        provider: config.provider,
+        modelId: config.modelId,
+        dimensions: config.dimensions,
+      }
+    : undefined
 }
 
 function parseJsonRecord(value: unknown): Record<string, unknown> {
@@ -69,8 +104,12 @@ export async function vectorSearch(
 ): Promise<SearchResult[]> {
   const { limit = 10, threshold = 0.7, repositoryId, canonicalOnly = false } = options
   
-  // Generate embedding for the query
-  const queryEmbedding = await generateEmbedding(query)
+  // Generate the query in the active index generation's vector space.
+  const embeddingOverride = await getCanonicalEmbeddingOverride(
+    repositoryId,
+    canonicalOnly
+  )
+  const queryEmbedding = await generateEmbedding(query, embeddingOverride)
   
   // Build the SQL query using pgvector
   // Convert embedding array to pgvector format string: '[1,2,3]'
@@ -250,11 +289,36 @@ export async function hybridSearch(
   const { limit = 10, vectorWeight = 0.7 } = options
   const keywordWeight = 1 - vectorWeight
   
-  // Perform both searches in parallel
-  const [vectorResults, keywordResults] = await Promise.all([
+  // Keep repository retrieval useful when an embedding provider is unavailable.
+  // Keyword failure is isolated in the same way; only a dual failure aborts.
+  const [vectorOutcome, keywordOutcome] = await Promise.allSettled([
     vectorSearch(query, { ...options, limit: limit * 2 }), // Get more results for merging
     keywordSearch(query, { ...options, limit: limit * 2 })
   ])
+  if (vectorOutcome.status === "rejected" && keywordOutcome.status === "rejected") {
+    throw vectorOutcome.reason
+  }
+  const log = createLogger({ module: "repository-search" })
+  if (vectorOutcome.status === "rejected") {
+    log.warn("Vector search unavailable; returning keyword results", {
+      error:
+        vectorOutcome.reason instanceof Error
+          ? vectorOutcome.reason.message
+          : String(vectorOutcome.reason),
+    })
+  }
+  if (keywordOutcome.status === "rejected") {
+    log.warn("Keyword search unavailable; returning vector results", {
+      error:
+        keywordOutcome.reason instanceof Error
+          ? keywordOutcome.reason.message
+          : String(keywordOutcome.reason),
+    })
+  }
+  const vectorResults =
+    vectorOutcome.status === "fulfilled" ? vectorOutcome.value : []
+  const keywordResults =
+    keywordOutcome.status === "fulfilled" ? keywordOutcome.value : []
   
   // Create a map to merge results by chunk ID
   const resultMap = new Map<number, SearchResult>()

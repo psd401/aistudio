@@ -45,4 +45,18 @@ describe("PermissionBoundaryConstruct", () => {
   test("prod permits the GuardDuty verdict lookup used before processing", () => {
     expect(allowedActions("prod")).toContain("s3:GetObjectTagging");
   });
+
+  test.each(["dev", "prod"] as const)(
+    "%s permits only the BDA runtime operations used by canonical media processing",
+    (environment) => {
+      const actions = allowedActions(environment);
+      expect(actions).toEqual(
+        expect.arrayContaining([
+          "bedrock:InvokeDataAutomationAsync",
+          "bedrock:GetDataAutomationStatus",
+        ])
+      );
+      expect(actions).not.toContain("bedrock:*");
+    }
+  );
 });

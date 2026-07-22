@@ -13,12 +13,14 @@ import {
   UIMessage
 } from 'ai'
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock'
+import { createAzure } from '@ai-sdk/azure'
 import { createOpenAI } from '@ai-sdk/openai'
 import { z } from 'zod'
 import logger from "@/lib/logger"
 import { createProviderModel } from '@/lib/ai/provider-factory'
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service'
 import type { StreamRequest } from '@/lib/streaming/types'
+import { repositoryEmbeddingConfigurationFromSettings } from '@/lib/repositories/embedding-configuration'
 
 interface ModelConfig {
   provider: string
@@ -241,22 +243,29 @@ export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
     'EMBEDDING_BATCH_SIZE'
   ])
   
-  if (!settings['EMBEDDING_MODEL_PROVIDER'] || !settings['EMBEDDING_MODEL_ID']) {
-    throw new Error('Embedding configuration not found in settings')
+  const repositoryConfig = repositoryEmbeddingConfigurationFromSettings(settings)
+  const maxTokens = Number.parseInt(settings['EMBEDDING_MAX_TOKENS'] || '8192', 10)
+  const batchSize = Number.parseInt(settings['EMBEDDING_BATCH_SIZE'] || '100', 10)
+  if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 100_000) {
+    throw new Error('EMBEDDING_MAX_TOKENS must be between 1 and 100000')
   }
-  
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 1_000) {
+    throw new Error('EMBEDDING_BATCH_SIZE must be between 1 and 1000')
+  }
+
   return {
-    provider: settings['EMBEDDING_MODEL_PROVIDER'],
-    modelId: settings['EMBEDDING_MODEL_ID'],
-    dimensions: Number.parseInt(settings['EMBEDDING_DIMENSIONS'] || '1536', 10),
-    maxTokens: Number.parseInt(settings['EMBEDDING_MAX_TOKENS'] || '8192', 10),
-    batchSize: Number.parseInt(settings['EMBEDDING_BATCH_SIZE'] || '100', 10)
+    provider: repositoryConfig.provider,
+    modelId: repositoryConfig.modelId,
+    dimensions: repositoryConfig.dimensions,
+    maxTokens,
+    batchSize
   }
 }
 
 // Get embedding model client
 // Note: Embedding models need special handling, so we keep some provider-specific logic here
 // But we reuse settings from the centralized settings-manager
+// eslint-disable-next-line complexity -- explicit provider branches keep credential handling isolated
 async function getEmbeddingModelClient(config: ModelConfig) {
   const { Settings } = await import('@/lib/settings-manager');
   
@@ -313,6 +322,20 @@ async function getEmbeddingModelClient(config: ModelConfig) {
         });
         throw error;
       }
+    }
+
+    case 'azure': {
+      const azureConfig = await Settings.getAzureOpenAI()
+      if (!azureConfig.key || (!azureConfig.resourceName && !azureConfig.endpoint)) {
+        throw new Error('Azure OpenAI not configured')
+      }
+      const azureOptions: Parameters<typeof createAzure>[0] = {
+        apiKey: azureConfig.key,
+        ...(azureConfig.resourceName
+          ? { resourceName: azureConfig.resourceName }
+          : { baseURL: azureConfig.endpoint?.replace(/\/$/, '') }),
+      }
+      return createAzure(azureOptions).embedding(config.modelId)
     }
     
     default:
@@ -426,4 +449,4 @@ export function findMostSimilar(
   return similarities
     .sort((a, b) => b.similarity - a.similarity)
     .slice(0, topK)
-} 
+}

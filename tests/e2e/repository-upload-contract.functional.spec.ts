@@ -285,4 +285,114 @@ test.describe('Unified repository upload contract (authenticated)', () => {
       contentType: 'image/png',
     })
   })
+  test('uses the canonical upload contract for audio and video', async ({ page }) => {
+    const initiations: Array<Record<string, unknown>> = []
+    const completions: string[] = []
+    const sessions = {
+      'audio/mpeg': '44444444-5555-4666-8777-888888888888',
+      'video/mp4': '55555555-6666-4777-8888-999999999999',
+    } as const
+
+    await page.route(/\/api\/repositories\/\d+\/uploads$/, async (route) => {
+      const initiation = route.request().postDataJSON() as Record<string, unknown>
+      initiations.push(initiation)
+      const contentType = initiation.contentType
+      if (contentType !== 'audio/mpeg' && contentType !== 'video/mp4') {
+        await route.fulfill({ status: 400, body: 'Unexpected media type' })
+        return
+      }
+      const sessionId = sessions[contentType]
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          mode: 'canonical',
+          upload: {
+            sessionId,
+            objectKey: `repositories/7/${sessionId}/${String(initiation.fileName)}`,
+            uploadMethod: 'single',
+            uploadUrl: `/__e2e-storage/unified-media-${contentType === 'audio/mpeg' ? 'audio' : 'video'}`,
+            expiresAt: '2026-07-21T12:00:00.000Z',
+          },
+          requestId: `e2e-media-${contentType}`,
+        }),
+      })
+    })
+    await page.route('**/__e2e-storage/unified-media-*', async (route) => {
+      expect(['audio/mpeg', 'video/mp4']).toContain(
+        route.request().headers()['content-type']
+      )
+      await route.fulfill({ status: 200, headers: { ETag: '"media-etag"' } })
+    })
+    await page.route(
+      /\/api\/repositories\/\d+\/uploads\/[0-9a-f-]+\/complete$/,
+      async (route) => {
+        completions.push(route.request().url())
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            completed: {
+              itemId: 12 + completions.length,
+              itemVersionId: 'dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb',
+              processingJobId: 'cccccccc-4444-4555-8666-777777777777',
+              replayed: false,
+            },
+            requestId: 'e2e-media-complete',
+          }),
+        })
+      }
+    )
+    await page.route('**/api/documents/presigned-url', async (route) => {
+      await route.fulfill({ status: 500, body: 'Legacy upload must not run' })
+    })
+
+    await page.goto('/repositories')
+    const repositoryRow = page
+      .getByRole('row')
+      .filter({ hasText: 'E2E Unified Content Repository' })
+    await repositoryRow.getByRole('button').first().click()
+
+    const uploadMedia = async (input: {
+      itemName: string
+      fileName: string
+      mimeType: string
+    }) => {
+      await page.getByRole('button', { name: /Add (Item|your first item)/i }).first().click()
+      await page.getByLabel('Name').fill(input.itemName)
+      await page.locator('input[type="file"]').setInputFiles({
+        name: input.fileName,
+        mimeType: input.mimeType,
+        buffer: Buffer.from('e2e-media-contract'),
+      })
+      await page.getByRole('dialog').getByRole('button', { name: /Upload File/i }).click()
+      await expect.poll(() => completions.length).toBe(initiations.length)
+      await expect(page.getByRole('dialog')).toBeHidden()
+    }
+
+    await uploadMedia({
+      itemName: 'Canonical meeting audio',
+      fileName: 'meeting.mp3',
+      mimeType: 'audio/mpeg',
+    })
+    await uploadMedia({
+      itemName: 'Canonical training video',
+      fileName: 'training.mp4',
+      mimeType: 'application/octet-stream',
+    })
+
+    expect(initiations).toEqual([
+      expect.objectContaining({
+        itemName: 'Canonical meeting audio',
+        fileName: 'meeting.mp3',
+        contentType: 'audio/mpeg',
+      }),
+      expect.objectContaining({
+        itemName: 'Canonical training video',
+        fileName: 'training.mp4',
+        contentType: 'video/mp4',
+      }),
+    ])
+    expect(completions).toHaveLength(2)
+  })
 })

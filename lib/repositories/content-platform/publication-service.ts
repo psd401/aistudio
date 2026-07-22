@@ -13,6 +13,7 @@ import {
   type RepositorySourceRegion,
 } from "@/lib/db/schema";
 import type { PdfSegment } from "./pdf-processing";
+import { canReuseRepositoryEmbeddings } from "@/lib/repositories/embedding-configuration";
 
 export interface PublishableSegment {
   content: string;
@@ -22,13 +23,14 @@ export interface PublishableSegment {
   sourceLocator: RepositorySourceLocator;
   modality?: "text" | "image" | "audio" | "video" | "table";
 }
-
 export interface PublishableArtifact {
   kind: Exclude<RepositoryArtifactKind, "canonical_text">;
   mediaType: string;
   objectKey?: string;
   textInline?: string;
   sha256?: string;
+  timeStartMs?: number;
+  timeEndMs?: number;
   sourceRegions?: RepositorySourceRegion[];
   metadata?: Record<string, unknown>;
 }
@@ -131,6 +133,19 @@ function validatePublicationInput(input: PublishDocumentVersionInput): void {
     }
     if (artifact.sha256 && !/^[0-9a-f]{64}$/.test(artifact.sha256)) {
       throw new Error("Additional artifact SHA-256 values must be lowercase hex");
+    }
+    const timeStartMs = artifact.timeStartMs;
+    const timeEndMs = artifact.timeEndMs;
+    if (
+      (timeStartMs == null) !== (timeEndMs == null) ||
+      (timeStartMs != null &&
+        timeEndMs != null &&
+        (!Number.isSafeInteger(timeStartMs) ||
+          !Number.isSafeInteger(timeEndMs) ||
+          timeStartMs < 0 ||
+          timeEndMs < timeStartMs))
+    ) {
+      throw new Error("Artifact time ranges must be complete non-negative milliseconds");
     }
   }
 }
@@ -243,6 +258,27 @@ export async function publishDocumentVersion(
             .returning({ id: repositoryArtifacts.id });
       if (!createdArtifact) throw new Error("Failed to create canonical artifact");
 
+      let reuseActiveEmbeddings = true;
+      if (context.activeGenerationId) {
+        const [activeGeneration] = await tx
+          .select({
+            embeddingModel: repositoryIndexGenerations.embeddingModel,
+            embeddingDimensions:
+              repositoryIndexGenerations.embeddingDimensions,
+          })
+          .from(repositoryIndexGenerations)
+          .where(
+            eq(repositoryIndexGenerations.id, context.activeGenerationId)
+          )
+          .limit(1);
+        reuseActiveEmbeddings = canReuseRepositoryEmbeddings(
+          activeGeneration?.embeddingModel,
+          activeGeneration?.embeddingDimensions,
+          input.embeddingModel,
+          input.embeddingDimensions
+        );
+      }
+
       for (const artifact of input.additionalArtifacts ?? []) {
         const key = additionalArtifactKey(input, artifact);
         const [existing] = await tx
@@ -259,6 +295,8 @@ export async function publishDocumentVersion(
           objectKey: artifact.objectKey,
           textInline: artifact.textInline,
           sha256: artifact.sha256,
+          timeStartMs: artifact.timeStartMs,
+          timeEndMs: artifact.timeEndMs,
           sourceRegions: artifact.sourceRegions ?? [],
           processorName: input.processorName,
           processorVersion: input.processorVersion,
@@ -288,7 +326,9 @@ export async function publishDocumentVersion(
           SELECT
             item_id, item_version_id, artifact_id, ${generation.id},
             content, chunk_index, metadata, modality, content_hash,
-            source_locator, embedding, tokens, now()
+            source_locator,
+            CASE WHEN ${reuseActiveEmbeddings} THEN embedding ELSE NULL END,
+            tokens, now()
           FROM repository_item_chunks
           WHERE index_generation_id = ${context.activeGenerationId}
             AND item_id <> ${context.itemId}

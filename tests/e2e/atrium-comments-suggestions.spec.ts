@@ -49,9 +49,20 @@ test.describe("Atrium comments + track-changes (authenticated)", () => {
       await page.keyboard.type(`${marker} comment-me here`);
       await expect(pm).toContainText(`${marker} comment-me here`);
 
-      // --- COMMENT: select the line (triple-click = deterministic paragraph
-      // selection that fires real selection events), add a comment via the sidebar ---
-      await pm.click({ clickCount: 3 });
+      // --- COMMENT: select text through real keyboard events. Clicking the
+      // ProseMirror container is ambiguous when the document is taller than the
+      // viewport and can place the caret in an unrelated paragraph. Anchor the
+      // caret in the paragraph we just created, then extend a non-empty editor
+      // selection from its end.
+      const markerParagraph = pm.locator("p").filter({ hasText: marker }).last();
+      await expect(markerParagraph).toBeVisible();
+      await markerParagraph.click();
+      await page.keyboard.press("End");
+      await page.keyboard.down("Shift");
+      for (let i = 0; i < "comment-me here".length; i++) {
+        await page.keyboard.press("ArrowLeft");
+      }
+      await page.keyboard.up("Shift");
       const sidebar = page.getByTestId("comment-sidebar");
       const composer = sidebar.getByLabel("New comment");
       await expect(composer).toBeEnabled({ timeout: 15000 }); // enabled by the selection

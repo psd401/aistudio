@@ -26,6 +26,10 @@ import {
 } from "./job-state";
 import { sourceRevisionForObjectKey } from "./ingestion-service";
 import { isImageContentType } from "./image-processing";
+import {
+  maximumMediaBytes,
+  mediaKindForContentType,
+} from "./media-processing";
 import { isOfficeContentType } from "./office-processing";
 
 export interface InitiateRepositoryUploadInput {
@@ -106,7 +110,8 @@ export function isCanonicalUploadContentType(contentType: string): boolean {
   return (
     contentType === "application/pdf" ||
     isOfficeContentType(contentType) ||
-    isImageContentType(contentType)
+    isImageContentType(contentType) ||
+    mediaKindForContentType(contentType) !== null
   );
 }
 
@@ -139,18 +144,22 @@ function validateInitiation(
   }
   if (!isCanonicalUploadContentType(input.contentType)) {
     throw new Error(
-      "The canonical processor accepts PDF, Office, JPEG, PNG, WebP, GIF, and TIFF files only"
+      "The canonical processor accepts PDF, Office, image, audio, and video files only"
     );
   }
-  const processorLimitMb =
+  const mediaKind = mediaKindForContentType(input.contentType);
+  const processorLimitBytes = mediaKind
+    ? maximumMediaBytes(mediaKind)
+    : (
     input.contentType === "application/pdf"
       ? config.maxPdfSizeMb
       : isImageContentType(input.contentType)
         ? config.maxImageSizeMb
-        : config.maxOfficeSizeMb;
+        : config.maxOfficeSizeMb
+      ) * 1024 ** 2;
   const maximumBytes = Math.min(
     config.maxFileSizeGb * 1024 ** 3,
-    processorLimitMb * 1024 ** 2
+    processorLimitBytes
   );
   if (
     !Number.isSafeInteger(input.byteSize) ||
@@ -158,7 +167,7 @@ function validateInitiation(
     input.byteSize > maximumBytes
   ) {
     throw new Error(
-      `File size must not exceed ${processorLimitMb} MiB for this processor`
+      `File size must not exceed ${Math.floor(maximumBytes / 1024 ** 2)} MiB for this processor`
     );
   }
 }
@@ -470,13 +479,16 @@ export async function completeRepositoryUpload(
       }
 
       const now = new Date();
+      const mediaKind = mediaKindForContentType(locked.declaredContentType);
       const [item] = await tx
         .insert(repositoryItems)
         .values({
           repositoryId: locked.repositoryId,
-          type: isImageContentType(locked.declaredContentType)
-            ? "image"
-            : "document",
+          type:
+            mediaKind ??
+            (isImageContentType(locked.declaredContentType)
+              ? "image"
+              : "document"),
           name: locked.itemName,
           source: locked.objectKey,
           metadata: {

@@ -63,7 +63,9 @@ test.describe('Decision graph admin view (#1251)', () => {
     await expect(page.getByRole('heading', { name: 'Context Graph' })).toBeVisible({ timeout: 20000 })
 
     // Search the node list for the shared tag.
-    const search = page.getByLabel('Search nodes')
+    // Radix keeps the inactive tab panel mounted and hidden, so target the
+    // currently visible filter instead of matching both tab-panel copies.
+    const search = page.locator('input[aria-label="Search nodes"]:visible')
     await expect(search).toBeVisible({ timeout: 15000 })
     await search.fill(tag)
 

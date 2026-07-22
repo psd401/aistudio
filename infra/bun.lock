@@ -13,6 +13,7 @@
         "@aws-cdk/aws-route53": "^1.203.0",
         "@aws-cdk/aws-s3": "^1.203.0",
         "@aws-cdk/aws-secretsmanager": "^1.203.0",
+        "@aws-sdk/client-bedrock-data-automation-runtime": "^3.982.0",
         "@aws-sdk/client-bedrock-runtime": "^3.982.0",
         "@aws-sdk/client-dynamodb": "^3.981.0",
         "@aws-sdk/client-textract": "^3.982.0",
@@ -134,6 +135,8 @@
     "@aws-crypto/supports-web-crypto": ["@aws-crypto/supports-web-crypto@5.2.0", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-iAvUotm021kM33eCdNfwIN//F77/IADDSs58i+MDaOqFrVjZo9bAal0NK7HurRuWLLpF1iLX7gbWrjHjeo+YFg=="],
 
     "@aws-crypto/util": ["@aws-crypto/util@5.2.0", "", { "dependencies": { "@aws-sdk/types": "^3.222.0", "@smithy/util-utf8": "^2.0.0", "tslib": "^2.6.2" } }, "sha512-4RkU9EsI6ZpBve5fseQlGNUWKMa1RLPQ1dnjnQoe07ldfIzcsGb5hC5W0Dm7u423KWzawlrpbjXBrXCEv9zazQ=="],
+
+    "@aws-sdk/client-bedrock-data-automation-runtime": ["@aws-sdk/client-bedrock-data-automation-runtime@3.1092.0", "", { "dependencies": { "@aws-sdk/core": "^3.976.0", "@aws-sdk/credential-provider-node": "^3.972.71", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.4", "@smithy/fetch-http-handler": "^5.6.6", "@smithy/node-http-handler": "^4.9.6", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-suZ68brAtknBt32S2tv7hWq6wDr2EHOcuMZ5btFKIErnlWXZ+iVb5Q5ULfLn8+vQ4aqRLKXz7KrBzWZhncOedA=="],
 
     "@aws-sdk/client-bedrock-runtime": ["@aws-sdk/client-bedrock-runtime@3.1092.0", "", { "dependencies": { "@aws-sdk/core": "^3.976.0", "@aws-sdk/credential-provider-node": "^3.972.71", "@aws-sdk/eventstream-handler-node": "^3.972.29", "@aws-sdk/middleware-eventstream": "^3.972.24", "@aws-sdk/middleware-websocket": "^3.972.42", "@aws-sdk/token-providers": "3.1092.0", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.4", "@smithy/fetch-http-handler": "^5.6.6", "@smithy/node-http-handler": "^4.9.6", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-BzG4OlvT8fAdJfL4/krIsg6/ek9CF0MI65nzV2D1JtFYGehuWpsc1IT39LfZzqaqLE86plWCXvk4+sLS8HtXzg=="],
 

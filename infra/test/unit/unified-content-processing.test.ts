@@ -93,6 +93,8 @@ describe("UnifiedContentProcessing", () => {
           DOCUMENTS_BUCKET_NAME: "aistudio-dev-documents",
           DATABASE_HOST: "database.example.test",
           DATABASE_NAME: "aistudio",
+          BDA_DATA_AUTOMATION_PROJECT_ARN: Match.anyValue(),
+          BDA_DATA_AUTOMATION_PROFILE_ARN: Match.anyValue(),
         }),
       },
       VpcConfig: Match.objectLike({ SecurityGroupIds: Match.anyValue() }),
@@ -108,6 +110,50 @@ describe("UnifiedContentProcessing", () => {
     });
   });
 
+  test("configures one tagged Bedrock Data Automation project for rich media", () => {
+    template.hasResourceProperties("AWS::Bedrock::DataAutomationProject", {
+      ProjectName: "aistudio-dev-repository-media",
+      ProjectType: "ASYNC",
+      StandardOutputConfiguration: {
+        Audio: {
+          Extraction: {
+            Category: {
+              State: "ENABLED",
+              Types: ["TRANSCRIPT"],
+              TypeConfiguration: {
+                Transcript: {
+                  SpeakerLabeling: { State: "ENABLED" },
+                  ChannelLabeling: { State: "ENABLED" },
+                },
+              },
+            },
+          },
+          GenerativeField: {
+            State: "ENABLED",
+            Types: ["AUDIO_SUMMARY", "TOPIC_SUMMARY"],
+          },
+        },
+        Video: {
+          Extraction: {
+            Category: {
+              State: "ENABLED",
+              Types: ["TRANSCRIPT", "TEXT_DETECTION"],
+            },
+            BoundingBox: { State: "ENABLED" },
+          },
+          GenerativeField: {
+            State: "ENABLED",
+            Types: ["VIDEO_SUMMARY", "CHAPTER_SUMMARY"],
+          },
+        },
+      },
+      Tags: Match.arrayWith([
+        { Key: "Environment", Value: "dev" },
+        { Key: "ManagedBy", Value: "cdk" },
+      ]),
+    });
+  });
+
   test("grants the worker valid least-privilege access to canonical repository objects", () => {
     type PolicyStatement = {
       Sid?: string;
@@ -116,14 +162,19 @@ describe("UnifiedContentProcessing", () => {
       Resource?: unknown;
       Condition?: unknown;
     };
-    const statements = Object.values(
-      template.findResources("AWS::IAM::Role")
-    ).flatMap((role) =>
+    const workerRoles = template.findResources("AWS::IAM::Role", {
+      Properties: {
+        RoleName:
+          "aistudio-dev-unified-content-processor-execution-role-dev",
+      },
+    });
+    const statements = Object.values(workerRoles).flatMap((role) =>
       (role.Properties?.Policies ?? []).flatMap(
         (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
           policy.PolicyDocument?.Statement ?? []
       )
     );
+    expect(Object.keys(workerRoles)).toHaveLength(1);
     const repositoryAccess = statements.find(
       (statement) => statement.Sid === "CanonicalRepositoryObjectAccess"
     );
@@ -151,14 +202,19 @@ describe("UnifiedContentProcessing", () => {
       Resource?: unknown;
       Condition?: unknown;
     };
-    const statements = Object.values(
-      template.findResources("AWS::IAM::Role")
-    ).flatMap((role) =>
+    const workerRoles = template.findResources("AWS::IAM::Role", {
+      Properties: {
+        RoleName:
+          "aistudio-dev-unified-content-processor-execution-role-dev",
+      },
+    });
+    const statements = Object.values(workerRoles).flatMap((role) =>
       (role.Properties?.Policies ?? []).flatMap(
         (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
           policy.PolicyDocument?.Statement ?? []
       )
     );
+    expect(Object.keys(workerRoles)).toHaveLength(1);
     const embeddingDispatch = statements.find(
       (statement) => statement.Sid === "CanonicalEmbeddingDispatch"
     );
@@ -245,5 +301,50 @@ describe("UnifiedContentProcessing", () => {
       ":bedrock:us-west-2::foundation-model/amazon.nova-"
     );
     expect(resources).not.toContain("*");
+  });
+
+  test("grants BDA media processing only to the project, US profile, and invocation", () => {
+    type PolicyStatement = {
+      Sid?: string;
+      Action?: string | string[];
+      Resource?: unknown;
+      Condition?: unknown;
+    };
+    const workerRoles = template.findResources("AWS::IAM::Role", {
+      Properties: {
+        RoleName:
+          "aistudio-dev-unified-content-processor-execution-role-dev",
+      },
+    });
+    const statements = Object.values(workerRoles).flatMap((role) =>
+      (role.Properties?.Policies ?? []).flatMap(
+        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+          policy.PolicyDocument?.Statement ?? []
+      )
+    );
+    expect(Object.keys(workerRoles)).toHaveLength(1);
+    const invoke = statements.find(
+      (statement) => statement.Sid === "CanonicalMediaAnalysis"
+    );
+    const status = statements.find(
+      (statement) => statement.Sid === "CanonicalMediaAnalysisStatus"
+    );
+    const discovery = statements.find(
+      (statement) => statement.Sid === "CanonicalRepositoryArtifactDiscovery"
+    );
+
+    expect(invoke?.Action).toBe("bedrock:InvokeDataAutomationAsync");
+    expect(JSON.stringify(invoke?.Resource)).toContain(
+      "data-automation-profile/us.data-automation-v1"
+    );
+    expect(JSON.stringify(invoke?.Resource)).toContain("ProjectArn");
+    expect(status?.Action).toBe("bedrock:GetDataAutomationStatus");
+    expect(JSON.stringify(status?.Resource)).toContain(
+      "data-automation-invocation/*"
+    );
+    expect(discovery).toMatchObject({
+      Action: "s3:ListBucket",
+      Condition: { StringLike: { "s3:prefix": ["repositories/*"] } },
+    });
   });
 });

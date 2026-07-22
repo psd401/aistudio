@@ -112,6 +112,8 @@
     "115-graph-decision-lifecycle.sql",
     "116-unified-repository-content.sql",
     "117-unified-content-office-ingestion.sql",
-    "118-unified-content-image-ingestion.sql"
+    "118-unified-content-image-ingestion.sql",
+    "119-unified-content-media-ingestion.sql",
+    "120-bedrock-repository-embeddings.sql"
   ]
 }

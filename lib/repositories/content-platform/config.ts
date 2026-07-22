@@ -155,7 +155,7 @@ export function parseContentPlatformConfig(
       raw[keys.maxMediaHours],
       DEFAULT_CONTENT_PLATFORM_CONFIG.maxMediaHours,
       1,
-      24
+      4
     ),
     malwareScanRequired: parseBoolean(
       raw[keys.malwareScanRequired],

@@ -32,7 +32,6 @@ export interface ProcessingStackProps extends cdk.StackProps {
   // notification target.
   alertEmail?: string;
 }
-
 export class ProcessingStack extends cdk.Stack {
   public readonly fileProcessingQueue: sqs.Queue;
   public readonly embeddingQueue: sqs.Queue;
@@ -296,12 +295,35 @@ export class ProcessingStack extends cdk.Stack {
       // Add an explicit statement without tag conditions instead (same as AgentHealthDailyRole).
       additionalPolicies: [
         new iam.PolicyDocument({
-          statements: [new iam.PolicyStatement({
-            sid: 'AuroraSecretAccess',
-            effect: iam.Effect.ALLOW,
-            actions: ['secretsmanager:GetSecretValue'],
-            resources: [databaseSecretArn],
-          })],
+          statements: [
+            new iam.PolicyStatement({
+              sid: 'AuroraSecretAccess',
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [databaseSecretArn],
+            }),
+            new iam.PolicyStatement({
+              sid: 'RepositoryTitanEmbeddingAccess',
+              effect: iam.Effect.ALLOW,
+              actions: ['bedrock:InvokeModel'],
+              resources: [
+                this.formatArn({
+                  service: 'bedrock',
+                  region: this.region,
+                  account: '',
+                  resource: 'foundation-model',
+                  resourceName: 'amazon.titan-embed-text-v1',
+                }),
+                this.formatArn({
+                  service: 'bedrock',
+                  region: this.region,
+                  account: '',
+                  resource: 'foundation-model',
+                  resourceName: 'amazon.titan-embed-text-v2:0',
+                }),
+              ],
+            }),
+          ],
         }),
       ],
     });

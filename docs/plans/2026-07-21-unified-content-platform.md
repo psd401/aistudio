@@ -357,11 +357,11 @@ scheduled dev-environment suite validates the real services.
 
 ## Worktree and branch model
 
-The active multimodal branch is `codex/unified-content-image-ingestion` in the
-ignored worktree:
+The active multimodal branch is `codex/unified-content-media-ingestion` in the
+isolated worktree:
 
 ```text
-/Users/hagelk/non-ic-code/aistudio/.claude/worktrees/unified-content-image-ingestion
+/private/tmp/aistudio-unified-content-media-ingestion
 ```
 
 The main checkout stays on `dev`, so other agents or projects can use separate
@@ -378,8 +378,9 @@ two worktrees should edit the same migration or contract file concurrently.
 - [x] Foundation schema and typed contracts
 - [x] Repository PDF dual-write/canonical-upload walking skeleton
 - [x] Foundation unit/integration/E2E tests
-- [ ] Dev deployment and observability validation
-- [ ] Multimodal processing (Office and image implemented; audio/video remain)
+- [x] Foundation/Office/image dev deployment and observability validation
+- [ ] Multimodal processing (Office/image deployed; audio/video implementation
+      and local verification complete, dev managed-service validation pending)
 - [ ] Retrieval v2 and visual search
 - [ ] Google Workspace sync
 - [ ] Universal product UI migration
@@ -530,3 +531,61 @@ Verification evidence:
 - Real PostgreSQL smoke passed PDF, Office, and image publication, image
   artifacts, caption/OCR retrieval and citations, replay idempotency,
   quarantine, carry-forward, and active-generation guards.
+
+### Media ingestion and embedding resilience checkpoint (2026-07-22)
+
+Implemented on `codex/unified-content-media-ingestion`:
+
+- The canonical upload contract and Repository Manager picker accept bounded
+  audio (AMR, FLAC, M4A, MP3, Ogg, WAV) and video (MP4, MOV, AVI, MKV, WebM).
+- One tagged Amazon Bedrock Data Automation project asynchronously produces
+  transcripts, speaker/channel labels, topics, summaries, chapters, frame OCR,
+  and exact timestamp/bounding-box citations. Large source media never enters
+  Lambda memory, and deferred BDA polling does not consume the job retry budget.
+- Canonical media publication persists source, BDA layout, transcript, summary,
+  and searchable time-range segments. The upload contract enforces both the
+  administrator storage policy and BDA's modality-specific byte ceilings.
+- Repository embeddings default to IAM-authenticated Bedrock Titan Embeddings
+  G1 so the existing `vector(1536)` schema remains nondestructively compatible.
+  Migration 120 repairs only the broken legacy OpenAI default and exposes the
+  provider/model/dimension settings in the admin UI.
+- Index generations record a provider-qualified embedding descriptor. A model
+  change clears carried-forward vectors in the new generation and queues every
+  missing chunk, preventing mixed semantic spaces. Hybrid retrieval degrades to
+  lexical results when an embedding provider is unavailable.
+- The migration automatically replays one completed publication per affected
+  repository when its active generation contains only null vectors. Embedding
+  messages resolve the immutable generation descriptor before invocation, so an
+  administrator changing the global setting cannot mix vector spaces in flight.
+- Browser uploads normalize blank or generic `application/octet-stream` media
+  declarations from the file extension before signing and persistence. BDA
+  output discovery is paginated and namespace-bound, and the worker has only
+  repository-prefix list access in addition to object-level access.
+- The dev and prod permission boundaries allow only the two BDA runtime calls
+  used by the worker (`InvokeDataAutomationAsync` and
+  `GetDataAutomationStatus`); the worker policy further restricts invocation to
+  its project, US cross-region profile, and generated invocation ARNs.
+
+Local verification evidence:
+
+- Application CI-safe suite: 260 suites and 3,029 tests passed; 5 suites and 60
+  tests intentionally skipped. The unfiltered Jest command additionally proved
+  why `test:ci` excludes live performance specs: those require a running server.
+- Infrastructure/Lambda suite: 31 suites and 339 tests passed, including the
+  real ARM64 worker bundle and BDA/IAM assertions.
+- Authenticated Playwright upload contract: 5/5 workflows passed, including
+  canonical audio and video plus generic-MIME MP4 normalization. Migrations 119
+  and 120 applied successfully to a real local PostgreSQL database.
+- Full lint has zero errors, and application, infrastructure worker, and
+  standalone embedding-worker typechecks pass. The production Next.js build
+  and all-stack dev/prod CDK synthesis also pass.
+
+Live validation of the previously deployed image slice confirmed that the PNG
+source reached canonical publication and embedding dispatch. The embedding
+worker then received a provider `403` because the configured OpenAI project did
+not have access to `text-embedding-3-small`; the Bedrock default, immutable
+generation routing, lexical fallback, and automatic replay in this slice close
+that observed failure mode.
+
+The remaining checkpoint gate is a dev deployment and real BDA audio/video
+validation.

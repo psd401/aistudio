@@ -45,53 +45,67 @@ const ACCEPTED_FILE_TYPES = [
   "image/webp",
   "image/gif",
   "image/tiff",
+  "audio/amr",
+  "audio/flac",
+  "audio/mp4",
+  "audio/mpeg",
+  "audio/ogg",
+  "audio/wav",
+  "audio/x-flac",
+  "audio/x-m4a",
+  "audio/x-wav",
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+  "video/x-matroska",
+  "video/x-msvideo",
   "text/plain",
   "text/markdown",
   "text/csv",
 ]
 
-// Helper function to validate file type
-function isValidFileType(file: File): boolean {
-  const mimeType = file.type.toLowerCase()
-  const fileName = file.name.toLowerCase()
-  
-  // Check exact MIME type match
-  if (ACCEPTED_FILE_TYPES.includes(mimeType)) {
-    return true
-  }
-  
-  // Check partial MIME type match (e.g., "text/plain; charset=UTF-8" matches "text/plain")
-  if (ACCEPTED_FILE_TYPES.some(type => mimeType.startsWith(type))) {
-    return true
-  }
-  
-  // Fallback to file extension check
-  const extensionMap: Record<string, string[]> = {
-    '.pdf': ['application/pdf'],
-    '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/octet-stream'],
-    '.xlsx': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/octet-stream'],
-    '.pptx': ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/octet-stream'],
-    '.jpg': ['image/jpeg'],
-    '.jpeg': ['image/jpeg'],
-    '.png': ['image/png'],
-    '.webp': ['image/webp'],
-    '.gif': ['image/gif'],
-    '.tif': ['image/tiff'],
-    '.tiff': ['image/tiff'],
-    '.txt': ['text/plain'],
-    '.md': ['text/markdown', 'text/plain'],
-    '.csv': ['text/csv', 'text/plain'],
-  }
-  
-  for (const [ext] of Object.entries(extensionMap)) {
-    if (fileName.endsWith(ext)) {
-      return true
-    }
-  }
-  
-  return false
+const FILE_TYPE_BY_EXTENSION: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+  '.amr': 'audio/amr',
+  '.flac': 'audio/flac',
+  '.m4a': 'audio/mp4',
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.wav': 'audio/wav',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.avi': 'video/x-msvideo',
+  '.mkv': 'video/x-matroska',
+  '.webm': 'video/webm',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.csv': 'text/csv',
 }
 
+function contentTypeForFile(file: File): string {
+  const declared = file.type.toLowerCase().split(';', 1)[0]?.trim() ?? ''
+  if (ACCEPTED_FILE_TYPES.includes(declared)) return declared
+  const fileName = file.name.toLowerCase()
+  const extension = Object.keys(FILE_TYPE_BY_EXTENSION).find((candidate) =>
+    fileName.endsWith(candidate)
+  )
+  return extension ? FILE_TYPE_BY_EXTENSION[extension] : declared
+}
+
+// Helper function to validate file type
+function isValidFileType(file: File): boolean {
+  return ACCEPTED_FILE_TYPES.includes(contentTypeForFile(file))
+}
 const urlSchema = z.object({
   name: z.string().min(1, "Name is required"),
   url: z.string().url("Must be a valid URL"),
@@ -193,6 +207,7 @@ export function FileUploadModal({
 
   async function onDocumentSubmit(data: z.infer<typeof dynamicDocumentSchema>) {
     const file = data.file[0]
+    const contentType = contentTypeForFile(file)
     
     try {
       let result
@@ -208,7 +223,7 @@ export function FileUploadModal({
             body: JSON.stringify({
               itemName: data.name,
               fileName: file.name,
-              contentType: file.type,
+              contentType,
               byteSize: file.size,
             }),
           }
@@ -233,7 +248,7 @@ export function FileUploadModal({
             if (!upload.uploadUrl) throw new Error('Upload URL was not provided')
             const uploadResponse = await fetch(upload.uploadUrl, {
               method: 'PUT',
-              headers: { 'Content-Type': file.type },
+              headers: { 'Content-Type': contentType },
               body: file,
             })
             if (!uploadResponse.ok) throw new Error('Failed to upload file to storage')
@@ -297,7 +312,7 @@ export function FileUploadModal({
           },
           body: JSON.stringify({
             fileName: file.name,
-            fileType: file.type,
+            fileType: contentType,
             fileSize: file.size,
             repositoryId,
           }),
@@ -315,7 +330,7 @@ export function FileUploadModal({
         const uploadResponse = await fetch(url, {
           method: 'PUT',
           headers: {
-            'Content-Type': file.type,
+            'Content-Type': contentType,
           },
           body: file,
         })
@@ -330,7 +345,7 @@ export function FileUploadModal({
           name: data.name,
           s3Key: key,
           metadata: {
-            contentType: file.type,
+            contentType,
             size: file.size,
             originalFileName: file.name,
           },
@@ -355,7 +370,7 @@ export function FileUploadModal({
           name: data.name,
           file: {
             content: base64,
-            contentType: file.type,
+            contentType,
             size: file.size,
             fileName: file.name,
           },
@@ -495,14 +510,15 @@ export function FileUploadModal({
                           {...field}
                           value={undefined}
                           type="file"
-                          accept=".pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp,.gif,.tif,.tiff,.txt,.md,.csv"
+                          accept=".pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp,.gif,.tif,.tiff,.amr,.flac,.m4a,.mp3,.ogg,.wav,.mp4,.mov,.avi,.mkv,.webm,.txt,.md,.csv"
                           onChange={(e) => onChange(e.target.files)}
                         />
                       </FormControl>
                       <FormDescription>
                         Supported: PDF, Word, Excel, PowerPoint, JPEG, PNG,
-                        WebP, GIF, TIFF, Text, Markdown, CSV (max server policy;
-                        browser ceiling {maxFileSizeGB} GB)
+                        WebP, GIF, TIFF, MP3, M4A, WAV, FLAC, Ogg, AMR, MP4,
+                        MOV, AVI, MKV, WebM, Text, Markdown, CSV (max server
+                        policy; browser ceiling {maxFileSizeGB} GB)
                       </FormDescription>
                       <FormMessage />
                     </FormItem>
