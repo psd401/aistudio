@@ -47,6 +47,9 @@ describe('canonical embedding generation lifecycle', () => {
     expect(normalizedSql).toContain("processing_status = 'embedding_failed'");
     expect(normalizedSql).toContain('chunk.index_generation_id =');
     expect(normalizedSql).toContain('chunk.item_id = item.id');
+    expect(normalizedSql).toContain(
+      'serving_chunk.index_generation_id = serving_repository.active_index_generation_id'
+    );
   });
 
   test('treats a superseded-generation failure update as a no-op', async () => {

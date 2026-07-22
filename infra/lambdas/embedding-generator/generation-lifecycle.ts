@@ -68,6 +68,14 @@ export async function failBuildingGeneration(
         WHERE chunk.index_generation_id = ${input.generationId}::uuid
           AND chunk.item_id = item.id
       )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM repository_item_chunks serving_chunk
+        JOIN knowledge_repositories serving_repository
+          ON serving_repository.id = item.repository_id
+        WHERE serving_chunk.item_id = item.id
+          AND serving_chunk.index_generation_id = serving_repository.active_index_generation_id
+      )
     RETURNING item.id::integer AS item_id
   `);
   return rows.length > 0;

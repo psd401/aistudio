@@ -12,12 +12,23 @@ describe("unified content processor contract", () => {
   test("validates durable queue messages", () => {
     expect(
       parseContentProcessingMessage(
-        JSON.stringify({ jobId: "job-1", itemVersionId: "version-1" })
+        JSON.stringify({
+          jobId: "11111111-2222-4333-8444-555555555555",
+          itemVersionId: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+        })
       )
-    ).toEqual({ jobId: "job-1", itemVersionId: "version-1" });
+    ).toEqual({
+      jobId: "11111111-2222-4333-8444-555555555555",
+      itemVersionId: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+    });
 
     expect(() => parseContentProcessingMessage("{}"))
       .toThrow("missing jobId or itemVersionId");
+    expect(() =>
+      parseContentProcessingMessage(
+        JSON.stringify({ jobId: "job-1", itemVersionId: "version-1" })
+      )
+    ).toThrow("missing jobId or itemVersionId");
     expect(() => parseContentProcessingMessage("not-json")).toThrow();
   });
 

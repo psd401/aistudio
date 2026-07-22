@@ -66,14 +66,6 @@ export async function releasePostDeployRecoveryJobs(
               '^repositories/' || item.repository_id::text ||
               '/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}/[^/]+$'
             )
-            AND NOT EXISTS (
-              SELECT 1
-              FROM repository_item_chunks active_chunk
-              JOIN knowledge_repositories repository
-                ON repository.id = item.repository_id
-              WHERE active_chunk.item_version_id = version.id
-                AND active_chunk.index_generation_id = repository.active_index_generation_id
-            )
           ORDER BY job.updated_at, job.id
           FOR UPDATE OF job SKIP LOCKED
           LIMIT ${POST_DEPLOY_RECOVERY_BATCH_SIZE}
@@ -110,7 +102,23 @@ export async function releasePostDeployRecoveryJobs(
           inspectionDetails: {},
           processingStatus: "pending",
         })
-        .where(inArray(repositoryItemVersions.id, itemVersionIds));
+        .where(
+          and(
+            inArray(repositoryItemVersions.id, itemVersionIds),
+            sql`NOT EXISTS (
+              SELECT 1
+              FROM repository_item_chunks active_chunk
+              JOIN repository_items active_item
+                ON active_item.id = active_chunk.item_id
+              JOIN knowledge_repositories active_repository
+                ON active_repository.id = active_item.repository_id
+              WHERE active_chunk.item_version_id = ${repositoryItemVersions.id}
+                AND active_chunk.index_generation_id = active_repository.active_index_generation_id
+                AND active_item.current_version_id = ${repositoryItemVersions.id}
+                AND active_item.lifecycle_status = 'active'
+            )`
+          )
+        );
       await tx
         .update(repositoryItems)
         .set({
@@ -121,7 +129,16 @@ export async function releasePostDeployRecoveryJobs(
         .where(
           and(
             eq(repositoryItems.lifecycleStatus, "active"),
-            inArray(repositoryItems.currentVersionId, itemVersionIds)
+            inArray(repositoryItems.currentVersionId, itemVersionIds),
+            sql`NOT EXISTS (
+              SELECT 1
+              FROM repository_item_chunks active_chunk
+              JOIN knowledge_repositories active_repository
+                ON active_repository.id = ${repositoryItems.repositoryId}
+              WHERE active_chunk.item_id = ${repositoryItems.id}
+                AND active_chunk.item_version_id = ${repositoryItems.currentVersionId}
+                AND active_chunk.index_generation_id = active_repository.active_index_generation_id
+            )`
           )
         );
 

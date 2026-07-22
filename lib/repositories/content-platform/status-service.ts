@@ -248,6 +248,16 @@ export async function retryCanonicalRepositoryItem(
           itemVersionId: repositoryItemVersions.id,
           storageStatus: repositoryItemVersions.storageStatus,
           inspectionStatus: repositoryItemVersions.inspectionStatus,
+          active: sql<boolean>`EXISTS (
+            SELECT 1
+            FROM ${repositoryItemChunks} active_chunk
+            JOIN ${knowledgeRepositories} active_repository
+              ON active_repository.id = ${repositoryItems.repositoryId}
+            WHERE active_chunk.item_version_id = ${repositoryItemVersions.id}
+              AND active_chunk.index_generation_id = active_repository.active_index_generation_id
+              AND ${repositoryItems.currentVersionId} = ${repositoryItemVersions.id}
+              AND ${repositoryItems.lifecycleStatus} = 'active'
+          )`,
         })
         .from(repositoryItems)
         .innerJoin(
@@ -319,19 +329,25 @@ export async function retryCanonicalRepositoryItem(
           updatedAt: now,
         })
         .where(eq(repositoryProcessingJobs.id, job.id));
-      await tx
-        .update(repositoryItemVersions)
-        .set({
-          storageStatus: "quarantined",
-          inspectionStatus: "pending",
-          inspectionDetails: {},
-          processingStatus: "pending",
-        })
-        .where(eq(repositoryItemVersions.id, context.itemVersionId));
-      await tx
-        .update(repositoryItems)
-        .set({ processingStatus: "pending", processingError: null, updatedAt: now })
-        .where(eq(repositoryItems.id, itemId));
+      if (!context.active) {
+        await tx
+          .update(repositoryItemVersions)
+          .set({
+            storageStatus: "quarantined",
+            inspectionStatus: "pending",
+            inspectionDetails: {},
+            processingStatus: "pending",
+          })
+          .where(eq(repositoryItemVersions.id, context.itemVersionId));
+        await tx
+          .update(repositoryItems)
+          .set({
+            processingStatus: "pending",
+            processingError: null,
+            updatedAt: now,
+          })
+          .where(eq(repositoryItems.id, itemId));
+      }
 
       return { itemVersionId: context.itemVersionId, processingJobId: job.id };
     },

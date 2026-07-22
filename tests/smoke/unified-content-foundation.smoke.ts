@@ -38,6 +38,14 @@ import {
   extractOfficeDocument,
   extractCanonicalTextDocument,
   buildImageSearchDocument,
+  buildRepositorySourceObjectKey,
+  canAcknowledgeCanonicalEmbeddingDlqMessage,
+  canAcknowledgeRepositoryProcessingDlqMessage,
+  claimLegacyInlineTextRecoveries,
+  claimIncompleteEmbeddingGenerations,
+  claimRepositoryProcessingJob,
+  completeLegacyInlineTextRecovery,
+  failLegacyInlineTextRecovery,
   CONTENT_PROCESSING_MAX_ATTEMPTS,
   DEFAULT_CONTENT_PLATFORM_CONFIG,
   completeRepositoryUpload,
@@ -48,11 +56,16 @@ import {
   publishDocumentVersion,
   publishPdfVersion,
   POST_DEPLOY_RECOVERY_MARKER,
+  recordRepositoryProcessingFailure,
+  recordRepositorySecurityBlock,
+  reconcileRepositoryProcessingDlqMessage,
+  releaseIncompleteEmbeddingGenerationClaim,
   releasePostDeployRecoveryJobs,
   getCanonicalRepositoryItemStatuses,
   registerCanonicalUpload,
   retryCanonicalRepositoryItem,
   segmentPdfPages,
+  sourceRevisionForObjectKey,
   type RepositoryUploadStorage,
 } from "@/lib/repositories/content-platform";
 import { keywordSearch } from "@/lib/repositories/search-service";
@@ -62,6 +75,7 @@ import {
   type GenerationActivationExecutor,
   type GenerationActivationResult,
 } from "../../infra/lambdas/embedding-generator/generation-activation";
+import { failBuildingGeneration } from "../../infra/lambdas/embedding-generator/generation-lifecycle";
 
 const pdf = await PDFDocument.create();
 const postDeployHandoffSql = readFileSync(
@@ -75,9 +89,29 @@ const postDeployHandoffStatements = postDeployHandoffSql
   .split(/;\s*(?:\r?\n|$)/)
   .map((statement) => statement.trim())
   .filter((statement) => statement.length > 0);
+const artifactStateRecoverySql = readFileSync(
+  resolve(
+    process.cwd(),
+    "infra/database/schema/124-unified-content-artifact-state-recovery.sql"
+  ),
+  "utf8"
+);
+const artifactStateRecoveryStatements = artifactStateRecoverySql
+  .split(/;\s*(?:\r?\n|$)/)
+  .map((statement) => statement.trim())
+  .filter((statement) => statement.length > 0);
 
 async function applyPostDeployHandoff(context: string): Promise<void> {
   for (const [index, statement] of postDeployHandoffStatements.entries()) {
+    await executeQuery(
+      (db) => db.execute(sql.raw(statement)),
+      `${context}.${index + 1}`
+    );
+  }
+}
+
+async function applyArtifactStateRecovery(context: string): Promise<void> {
+  for (const [index, statement] of artifactStateRecoveryStatements.entries()) {
     await executeQuery(
       (db) => db.execute(sql.raw(statement)),
       `${context}.${index + 1}`
@@ -89,6 +123,9 @@ async function applyPostDeployHandoff(context: string): Promise<void> {
 // loads the expanded Drizzle schema. Reproduce that order in the standalone
 // smoke, whose local database may predate this branch.
 await applyPostDeployHandoff("smoke.unifiedContent.ensurePostDeploySchema");
+await applyArtifactStateRecovery(
+  "smoke.unifiedContent.ensureArtifactRecoverySchema"
+);
 const font = await pdf.embedFont(StandardFonts.Helvetica);
 for (const text of [
   "Page one contains the district emergency procedure and contact instructions.",
@@ -218,6 +255,103 @@ try {
   assert.equal(replay.created, false);
   assert.equal(replay.version.id, first.version.id);
   assert.equal(replay.inspectJob.id, first.inspectJob.id);
+  assert.equal(
+    await canAcknowledgeRepositoryProcessingDlqMessage({
+      jobId: first.inspectJob.id,
+      itemVersionId: first.version.id,
+    }),
+    true
+  );
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryProcessingJobs)
+        .set({ status: "queued" })
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id)),
+    "smoke.unifiedContent.simulateQueuedProcessingDlq"
+  );
+  assert.equal(
+    await canAcknowledgeRepositoryProcessingDlqMessage({
+      jobId: first.inspectJob.id,
+      itemVersionId: first.version.id,
+    }),
+    false
+  );
+  const processingDlqRecoveredAt = new Date();
+  assert.deepEqual(
+    await reconcileRepositoryProcessingDlqMessage(
+      { jobId: first.inspectJob.id, itemVersionId: first.version.id },
+      processingDlqRecoveredAt
+    ),
+    { acknowledge: true, recovered: true }
+  );
+  const [processingDlqRecoveredJob] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          status: repositoryProcessingJobs.status,
+          availableAt: repositoryProcessingJobs.availableAt,
+          lastErrorCode: repositoryProcessingJobs.lastErrorCode,
+        })
+        .from(repositoryProcessingJobs)
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readRecoveredProcessingDlqJob"
+  );
+  assert.equal(processingDlqRecoveredJob?.status, "pending");
+  assert.equal(
+    processingDlqRecoveredJob?.availableAt.getTime(),
+    processingDlqRecoveredAt.getTime()
+  );
+  assert.equal(
+    processingDlqRecoveredJob?.lastErrorCode,
+    "PROCESSING_DLQ_RECOVERED"
+  );
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryProcessingJobs)
+        .set({
+          status: "failed",
+          attempt: CONTENT_PROCESSING_MAX_ATTEMPTS,
+        })
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id)),
+    "smoke.unifiedContent.simulateTerminalProcessingDlq"
+  );
+  assert.deepEqual(
+    await reconcileRepositoryProcessingDlqMessage({
+      jobId: first.inspectJob.id,
+      itemVersionId: first.version.id,
+    }),
+    { acknowledge: false, recovered: false }
+  );
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryProcessingJobs)
+        .set({
+          status: "pending",
+          attempt: 0,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+        })
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id)),
+    "smoke.unifiedContent.restoreProcessingJobAfterDlqContract"
+  );
+  assert.equal(
+    await canAcknowledgeRepositoryProcessingDlqMessage({
+      jobId: first.inspectJob.id,
+      itemVersionId: "11111111-2222-4333-8444-555555555555",
+    }),
+    false
+  );
+  assert.equal(
+    await canAcknowledgeRepositoryProcessingDlqMessage({
+      jobId: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      itemVersionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+    }),
+    true
+  );
 
   const versions = await executeQuery(
     (db) =>
@@ -251,6 +385,157 @@ try {
   assert.equal(first.inspectJob.status, "pending");
   assert.equal(first.inspectJob.maxAttempts, CONTENT_PROCESSING_MAX_ATTEMPTS);
   assert.equal(updatedItem?.currentVersionId, first.version.id);
+
+  const [legacyTextItem] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItems)
+        .values({
+          repositoryId: repository.id,
+          type: "text",
+          name: "Legacy inline policy",
+          source: "Legacy inline source recovery keeps this content.",
+          processingStatus: "failed",
+          processingError: "Processing job exhausted its retry budget",
+        })
+        .returning({ id: repositoryItems.id }),
+    "smoke.unifiedContent.createLegacyInlineItem"
+  );
+  assert.ok(legacyTextItem);
+  const [legacyTextVersion] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItemVersions)
+        .values({
+          itemId: legacyTextItem.id,
+          versionNumber: 1,
+          sourceKind: "upload",
+          sourceRevision: "s3:legacy-inline-smoke",
+          objectKey: `repositories/${repository.id}/legacy/inline.txt`,
+          declaredContentType: "text/plain",
+          byteSize: 48,
+          storageStatus: "quarantined",
+          inspectionStatus: "error",
+          processingStatus: "failed",
+          processorVersion: "unified-content-v1",
+          createdBy: owner.id,
+        })
+        .returning({ id: repositoryItemVersions.id }),
+    "smoke.unifiedContent.createLegacyInlineVersion"
+  );
+  assert.ok(legacyTextVersion);
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryItems)
+        .set({ currentVersionId: legacyTextVersion.id })
+        .where(eq(repositoryItems.id, legacyTextItem.id)),
+    "smoke.unifiedContent.attachLegacyInlineVersion"
+  );
+  const [legacyTextJob] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryProcessingJobs)
+        .values({
+          itemVersionId: legacyTextVersion.id,
+          stage: "inspect",
+          status: "failed",
+          idempotencyKey: `${legacyTextVersion.id}:inspect:unified-content-v1`,
+          attempt: CONTENT_PROCESSING_MAX_ATTEMPTS,
+          maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
+          lastErrorCode: "RETRY_BUDGET_EXHAUSTED",
+          lastErrorMessage: "Processing job exhausted its retry budget",
+        })
+        .returning({ id: repositoryProcessingJobs.id }),
+    "smoke.unifiedContent.createLegacyInlineJob"
+  );
+  assert.ok(legacyTextJob);
+  const legacyRecoveryNow = new Date();
+  const legacyClaims = await claimLegacyInlineTextRecoveries({
+    repositoryId: repository.id,
+    now: legacyRecoveryNow,
+  });
+  const firstLegacyClaim = legacyClaims.find(
+    (claim) => claim.jobId === legacyTextJob.id
+  );
+  assert.ok(firstLegacyClaim);
+  await failLegacyInlineTextRecovery(
+    firstLegacyClaim,
+    "simulated S3 recovery outage",
+    legacyRecoveryNow
+  );
+  assert.equal(
+    (
+      await claimLegacyInlineTextRecoveries({
+        repositoryId: repository.id,
+        now: new Date(legacyRecoveryNow.getTime() + 30_000),
+      })
+    ).some((claim) => claim.jobId === legacyTextJob.id),
+    false
+  );
+  const retriedLegacyClaims = await claimLegacyInlineTextRecoveries({
+    repositoryId: repository.id,
+    now: new Date(legacyRecoveryNow.getTime() + 61_000),
+  });
+  const legacyClaim = retriedLegacyClaims.find(
+    (claim) => claim.jobId === legacyTextJob.id
+  );
+  assert.ok(legacyClaim);
+  const recoveredInlineKey = buildRepositorySourceObjectKey(
+    repository.id,
+    `inline-${legacyTextItem.id}.txt`,
+    legacyTextVersion.id
+  );
+  assert.equal(
+    await completeLegacyInlineTextRecovery({
+      claim: legacyClaim,
+      objectKey: recoveredInlineKey,
+      byteSize: Buffer.byteLength(legacyClaim.content, "utf8"),
+      sha256: "d".repeat(64),
+      now: new Date(legacyRecoveryNow.getTime() + 62_000),
+    }),
+    true
+  );
+  const [recoveredInlineState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          sourceKind: repositoryItemVersions.sourceKind,
+          sourceRevision: repositoryItemVersions.sourceRevision,
+          objectKey: repositoryItemVersions.objectKey,
+          versionStatus: repositoryItemVersions.processingStatus,
+          inspectionStatus: repositoryItemVersions.inspectionStatus,
+          jobStatus: repositoryProcessingJobs.status,
+          jobAttempt: repositoryProcessingJobs.attempt,
+          itemSource: repositoryItems.source,
+          itemStatus: repositoryItems.processingStatus,
+          itemError: repositoryItems.processingError,
+        })
+        .from(repositoryItemVersions)
+        .innerJoin(
+          repositoryProcessingJobs,
+          eq(repositoryProcessingJobs.itemVersionId, repositoryItemVersions.id)
+        )
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.currentVersionId, repositoryItemVersions.id)
+        )
+        .where(eq(repositoryItemVersions.id, legacyTextVersion.id))
+        .limit(1),
+    "smoke.unifiedContent.readRecoveredLegacyInlineState"
+  );
+  assert.deepEqual(recoveredInlineState, {
+    sourceKind: "text",
+    sourceRevision: sourceRevisionForObjectKey(recoveredInlineKey),
+    objectKey: recoveredInlineKey,
+    versionStatus: "pending",
+    inspectionStatus: "pending",
+    jobStatus: "pending",
+    jobAttempt: 0,
+    itemSource: recoveredInlineKey,
+    itemStatus: "pending",
+    itemError: null,
+  });
 
   await executeQuery(
     (db) =>
@@ -808,6 +1093,536 @@ try {
     )
   );
 
+  // Reproduce the deployed image failure shape: a searchable current version
+  // has an intentional v1 -> v2 background rebuild carrying a v1 Textract
+  // artifact key. Active chunks keep the old generation serving, but must not
+  // make the durable upgrade job look complete.
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        WITH stale_job AS (
+          UPDATE repository_processing_jobs
+          SET status = 'queued',
+              attempt = 16,
+              max_attempts = 20,
+              last_error_code = 'TRANSIENT_PROCESSING_ERROR',
+              last_error_message = 'Textract job does not match the normalized image artifact',
+              metrics = '{"textractJobId":"v1-job","textractObjectKey":"repositories/7/artifacts/version/image-normalize-v1/ocr-source.jpg","waitReason":"AWAITING_OCR"}'::jsonb,
+              finished_at = NULL,
+              updated_at = now()
+          WHERE id = ${first.inspectJob.id}::uuid
+          RETURNING item_version_id
+        ), stale_version AS (
+          UPDATE repository_item_versions
+          SET storage_status = 'quarantined',
+              inspection_status = 'pending',
+              processing_status = 'processing'
+          WHERE id IN (SELECT item_version_id FROM stale_job)
+          RETURNING item_id
+        )
+        UPDATE repository_items
+        SET processing_status = 'processing',
+            processing_error = 'stale worker state'
+        WHERE id IN (SELECT item_id FROM stale_version)
+      `),
+    "smoke.unifiedContent.createActiveStaleWorkerState"
+  );
+  const activeUpgradeClaim = await claimRepositoryProcessingJob(
+    {
+      jobId: first.inspectJob.id,
+      itemVersionId: first.version.id,
+    },
+    "unified-content-smoke-worker",
+    { now: new Date("2026-07-22T21:00:00.000Z") }
+  );
+  assert.equal(activeUpgradeClaim?.status, "running");
+  assert.equal(activeUpgradeClaim?.attempt, 17);
+  const [workerClaimed] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          jobStatus: repositoryProcessingJobs.status,
+          jobError: repositoryProcessingJobs.lastErrorMessage,
+          versionStatus: repositoryItemVersions.processingStatus,
+          storageStatus: repositoryItemVersions.storageStatus,
+          inspectionStatus: repositoryItemVersions.inspectionStatus,
+          itemStatus: repositoryItems.processingStatus,
+          itemError: repositoryItems.processingError,
+        })
+        .from(repositoryProcessingJobs)
+        .innerJoin(
+          repositoryItemVersions,
+          eq(repositoryItemVersions.id, repositoryProcessingJobs.itemVersionId)
+        )
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.currentVersionId, repositoryItemVersions.id)
+        )
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readWorkerClaimedActiveUpgrade"
+  );
+  assert.deepEqual(workerClaimed, {
+    jobStatus: "running",
+    jobError: "Textract job does not match the normalized image artifact",
+    versionStatus: "processing",
+    storageStatus: "quarantined",
+    inspectionStatus: "pending",
+    itemStatus: "processing",
+    itemError: "stale worker state",
+  });
+  assert.equal(
+    (await getCanonicalRepositoryItemStatuses(repository.id)).get(first.version.itemId)
+      ?.processingStatus,
+    "embedded"
+  );
+
+  // Execute migration 124 against the in-flight active upgrade. This covers the
+  // database-first deployment window: the known-bad artifact runtime is fenced
+  // until old invocations drain, while the old generation remains searchable.
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        WITH stale_job AS (
+          UPDATE repository_processing_jobs
+          SET status = 'queued',
+              attempt = 16,
+              max_attempts = 20,
+              last_error_code = 'TRANSIENT_PROCESSING_ERROR',
+              last_error_message = 'Textract job does not match the normalized image artifact',
+              metrics = '{"textractJobId":"v1-job","textractObjectKey":"repositories/7/artifacts/version/image-normalize-v1/ocr-source.jpg"}'::jsonb,
+              finished_at = NULL,
+              updated_at = now()
+          WHERE id = ${first.inspectJob.id}::uuid
+          RETURNING item_version_id
+        ), stale_version AS (
+          UPDATE repository_item_versions
+          SET storage_status = 'quarantined',
+              inspection_status = 'pending',
+              processing_status = 'processing'
+          WHERE id IN (SELECT item_version_id FROM stale_job)
+          RETURNING item_id
+        )
+        UPDATE repository_items
+        SET processing_status = 'processing',
+            processing_error = 'stale migration state'
+        WHERE id IN (SELECT item_id FROM stale_version)
+      `),
+    "smoke.unifiedContent.recreateActiveStaleMigrationState"
+  );
+  await applyArtifactStateRecovery(
+    "smoke.unifiedContent.applyActiveArtifactRecovery"
+  );
+  const [migrationQuarantined] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          jobStatus: repositoryProcessingJobs.status,
+          versionStatus: repositoryItemVersions.processingStatus,
+          storageStatus: repositoryItemVersions.storageStatus,
+          inspectionStatus: repositoryItemVersions.inspectionStatus,
+          itemStatus: repositoryItems.processingStatus,
+          itemError: repositoryItems.processingError,
+        })
+        .from(repositoryProcessingJobs)
+        .innerJoin(
+          repositoryItemVersions,
+          eq(repositoryItemVersions.id, repositoryProcessingJobs.itemVersionId)
+        )
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.currentVersionId, repositoryItemVersions.id)
+        )
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readMigrationQuarantinedActiveUpgrade"
+  );
+  assert.deepEqual(migrationQuarantined, {
+    jobStatus: "cancelled",
+    versionStatus: "completed",
+    storageStatus: "available",
+    inspectionStatus: "clean",
+    itemStatus: "embedded",
+    itemError: null,
+  });
+  assert.equal(
+    (await getCanonicalRepositoryItemStatuses(repository.id)).get(first.version.itemId)
+      ?.processingStatus,
+    "embedded"
+  );
+  const releasedActiveUpgrade = await releasePostDeployRecoveryJobs({
+    graceMinutes: 0,
+    now: new Date(Date.now() + 60_000),
+  });
+  assert.deepEqual(releasedActiveUpgrade, [
+    { id: first.inspectJob.id, itemVersionId: first.version.id },
+  ]);
+  const reclaimedActiveUpgrade = await claimRepositoryProcessingJob(
+    {
+      jobId: first.inspectJob.id,
+      itemVersionId: first.version.id,
+    },
+    "unified-content-smoke-replacement-worker",
+    { now: new Date(Date.now() + 120_000) }
+  );
+  assert.equal(reclaimedActiveUpgrade?.status, "running");
+  assert.equal(reclaimedActiveUpgrade?.attempt, 1);
+  assert.deepEqual(reclaimedActiveUpgrade?.metrics, {});
+  const activeUpgradeSourceObjectKey = first.version.objectKey;
+  assert.ok(activeUpgradeSourceObjectKey);
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryProcessingJobs)
+        .set({
+          metrics: {
+            provider: "amazon-bedrock-data-automation",
+            bdaInvocationArn: "arn:aws:bedrock:failed-invocation",
+            bdaSourceObjectKey: activeUpgradeSourceObjectKey,
+            bdaOutputPrefix: "repositories/1/artifacts/version/bda/runs/old/",
+            bdaResultObjectKey: "repositories/1/artifacts/version/bda/partial.json",
+            waitReason: "AWAITING_MEDIA_ANALYSIS",
+            waitStartedAt: "2026-07-22T12:00:00.000Z",
+          },
+        })
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id)),
+    "smoke.unifiedContent.seedFailedManagedServiceState"
+  );
+  const providerFailureAt = new Date(Date.now() + 180_000);
+  assert.deepEqual(
+    await recordRepositoryProcessingFailure(
+      {
+        jobId: first.inspectJob.id,
+        itemVersionId: first.version.id,
+      },
+      {
+        terminal: false,
+        code: "BDA_JOB_FAILED",
+        message: "simulated failed BDA invocation",
+        resetManagedService: "bedrock-data-automation",
+      },
+      { now: providerFailureAt, retryDelaySeconds: () => 5 }
+    ),
+    { action: "retry", delaySeconds: 5 }
+  );
+  const [resetProviderRun] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          status: repositoryProcessingJobs.status,
+          metrics: repositoryProcessingJobs.metrics,
+          startedAt: repositoryProcessingJobs.startedAt,
+        })
+        .from(repositoryProcessingJobs)
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readResetManagedServiceState"
+  );
+  assert.equal(resetProviderRun?.status, "pending");
+  assert.deepEqual(resetProviderRun?.metrics, {
+    provider: "amazon-bedrock-data-automation",
+  });
+  assert.equal(resetProviderRun?.startedAt?.toISOString(), providerFailureAt.toISOString());
+  const reclaimedAfterProviderFailure = await claimRepositoryProcessingJob(
+    {
+      jobId: first.inspectJob.id,
+      itemVersionId: first.version.id,
+    },
+    "unified-content-smoke-provider-retry",
+    { now: new Date(providerFailureAt.getTime() + 6_000) }
+  );
+  assert.equal(reclaimedAfterProviderFailure?.status, "running");
+  assert.equal(reclaimedAfterProviderFailure?.attempt, 2);
+  assert.deepEqual(
+    await recordRepositoryProcessingFailure(
+      {
+        jobId: first.inspectJob.id,
+        itemVersionId: first.version.id,
+      },
+      {
+        terminal: true,
+        code: "INVALID_SOURCE_CONTENT",
+        message: "simulated terminal background-upgrade failure",
+      },
+      { now: new Date(), retryDelaySeconds: () => 5 }
+    ),
+    { action: "terminal", code: "INVALID_SOURCE_CONTENT" }
+  );
+  const [activeFailureState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          jobStatus: repositoryProcessingJobs.status,
+          versionStatus: repositoryItemVersions.processingStatus,
+          storageStatus: repositoryItemVersions.storageStatus,
+          inspectionStatus: repositoryItemVersions.inspectionStatus,
+          itemStatus: repositoryItems.processingStatus,
+          itemError: repositoryItems.processingError,
+        })
+        .from(repositoryProcessingJobs)
+        .innerJoin(
+          repositoryItemVersions,
+          eq(repositoryItemVersions.id, repositoryProcessingJobs.itemVersionId)
+        )
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.currentVersionId, repositoryItemVersions.id)
+        )
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readActiveUpgradeFailureState"
+  );
+  assert.deepEqual(activeFailureState, {
+    jobStatus: "failed",
+    versionStatus: "completed",
+    storageStatus: "available",
+    inspectionStatus: "clean",
+    itemStatus: "embedded",
+    itemError: null,
+  });
+  assert.equal(
+    await claimRepositoryProcessingJob(
+      {
+        jobId: first.inspectJob.id,
+        itemVersionId: first.version.id,
+      },
+      "unified-content-smoke-stale-terminal-delivery",
+      { now: new Date(Date.now() + 24 * 60 * 60_000) }
+    ),
+    null
+  );
+  assert.equal(
+    (
+      await keywordSearch("district emergency", {
+        repositoryId: repository.id,
+        canonicalOnly: true,
+      })
+    ).length,
+    1
+  );
+  const activeRetry = await retryCanonicalRepositoryItem(
+    item.id,
+    "unified-content-smoke-active-retry"
+  );
+  assert.equal(activeRetry.itemVersionId, first.version.id);
+  const [activeRetryState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          jobStatus: repositoryProcessingJobs.status,
+          jobAttempt: repositoryProcessingJobs.attempt,
+          versionStatus: repositoryItemVersions.processingStatus,
+          storageStatus: repositoryItemVersions.storageStatus,
+          inspectionStatus: repositoryItemVersions.inspectionStatus,
+          itemStatus: repositoryItems.processingStatus,
+          itemError: repositoryItems.processingError,
+        })
+        .from(repositoryProcessingJobs)
+        .innerJoin(
+          repositoryItemVersions,
+          eq(repositoryItemVersions.id, repositoryProcessingJobs.itemVersionId)
+        )
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.currentVersionId, repositoryItemVersions.id)
+        )
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readActiveRetryState"
+  );
+  assert.deepEqual(activeRetryState, {
+    jobStatus: "pending",
+    jobAttempt: 0,
+    versionStatus: "completed",
+    storageStatus: "available",
+    inspectionStatus: "clean",
+    itemStatus: "embedded",
+    itemError: null,
+  });
+
+  const [supersededUnsafeVersion] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItemVersions)
+        .values({
+          itemId: item.id,
+          versionNumber: 2,
+          sourceKind: "upload",
+          sourceRevision: "s3:superseded-security-smoke",
+          objectKey: `repositories/${repository.id}/44444444-5555-4666-8777-888888888888/unsafe-old.pdf`,
+          declaredContentType: "application/pdf",
+          byteSize: 4096,
+          storageStatus: "quarantined",
+          inspectionStatus: "pending",
+          processingStatus: "processing",
+          processorVersion: "unified-content-v1",
+          createdBy: owner.id,
+        })
+        .returning({ id: repositoryItemVersions.id }),
+    "smoke.unifiedContent.createSupersededUnsafeVersion"
+  );
+  assert.ok(supersededUnsafeVersion);
+  const [supersededUnsafeJob] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryProcessingJobs)
+        .values({
+          itemVersionId: supersededUnsafeVersion.id,
+          stage: "inspect",
+          status: "running",
+          idempotencyKey: `${supersededUnsafeVersion.id}:inspect:security-smoke`,
+          attempt: 1,
+          maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
+        })
+        .returning({ id: repositoryProcessingJobs.id }),
+    "smoke.unifiedContent.createSupersededUnsafeJob"
+  );
+  assert.ok(supersededUnsafeJob);
+  await assert.rejects(
+    recordRepositorySecurityBlock(
+      {
+        jobId: first.inspectJob.id,
+        itemVersionId: supersededUnsafeVersion.id,
+      },
+      "THREATS_FOUND"
+    ),
+    /does not match its item version/
+  );
+  await recordRepositorySecurityBlock(
+    {
+      jobId: supersededUnsafeJob.id,
+      itemVersionId: supersededUnsafeVersion.id,
+    },
+    "THREATS_FOUND",
+    new Date("2026-07-22T22:00:00.000Z")
+  );
+  const [supersededSecurityState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          itemLifecycle: repositoryItems.lifecycleStatus,
+          itemStatus: repositoryItems.processingStatus,
+          currentVersionId: repositoryItems.currentVersionId,
+          unsafeStorage: repositoryItemVersions.storageStatus,
+          unsafeInspection: repositoryItemVersions.inspectionStatus,
+          jobStatus: repositoryProcessingJobs.status,
+          jobErrorCode: repositoryProcessingJobs.lastErrorCode,
+        })
+        .from(repositoryItems)
+        .innerJoin(
+          repositoryItemVersions,
+          eq(repositoryItemVersions.id, supersededUnsafeVersion.id)
+        )
+        .innerJoin(
+          repositoryProcessingJobs,
+          eq(repositoryProcessingJobs.id, supersededUnsafeJob.id)
+        )
+        .where(eq(repositoryItems.id, item.id))
+        .limit(1),
+    "smoke.unifiedContent.readSupersededSecurityState"
+  );
+  assert.deepEqual(supersededSecurityState, {
+    itemLifecycle: "active",
+    itemStatus: "embedded",
+    currentVersionId: first.version.id,
+    unsafeStorage: "blocked",
+    unsafeInspection: "blocked",
+    jobStatus: "failed",
+    jobErrorCode: "SECURITY_INSPECTION_BLOCKED",
+  });
+
+  const [runtimeFailureItem] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItems)
+        .values({
+          repositoryId: repository.id,
+          type: "document",
+          name: "Bundled PDF runtime recovery smoke",
+          source: `repositories/${repository.id}/33333333-4444-4555-8666-777777777777/runtime.pdf`,
+          processingStatus: "pending",
+        })
+        .returning({ id: repositoryItems.id }),
+    "smoke.unifiedContent.createBundledPdfFailureItem"
+  );
+  assert.ok(runtimeFailureItem);
+  const runtimeFailure = await registerCanonicalUpload({
+    itemId: runtimeFailureItem.id,
+    userId: owner.id,
+    objectKey: `repositories/${repository.id}/33333333-4444-4555-8666-777777777777/runtime.pdf`,
+    originalFileName: "runtime.pdf",
+    declaredContentType: "application/pdf",
+    byteSize: 4096,
+    traceId: "unified-content-bundled-pdf-failure",
+  });
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        WITH failed_job AS (
+          UPDATE repository_processing_jobs
+          SET status = 'failed',
+              attempt = 5,
+              max_attempts = 5,
+              last_error_code = 'RETRY_BUDGET_EXHAUSTED',
+              last_error_message = 'PDFParse2 is not a constructor',
+              metrics = '{}'::jsonb,
+              finished_at = now(),
+              updated_at = now()
+          WHERE id = ${runtimeFailure.inspectJob.id}::uuid
+          RETURNING item_version_id
+        ), failed_version AS (
+          UPDATE repository_item_versions
+          SET inspection_status = 'error', processing_status = 'failed'
+          WHERE id IN (SELECT item_version_id FROM failed_job)
+          RETURNING item_id
+        )
+        UPDATE repository_items
+        SET processing_status = 'failed',
+            processing_error = 'PDFParse2 is not a constructor'
+        WHERE id IN (SELECT item_id FROM failed_version)
+      `),
+    "smoke.unifiedContent.createBundledPdfFailureState"
+  );
+  await applyArtifactStateRecovery(
+    "smoke.unifiedContent.applyBundledPdfArtifactRecovery"
+  );
+  const [quarantinedPdfFailure] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          status: repositoryProcessingJobs.status,
+          attempt: repositoryProcessingJobs.attempt,
+          maxAttempts: repositoryProcessingJobs.maxAttempts,
+          availableAt: sql<string>`${repositoryProcessingJobs.availableAt}::text`,
+          marker: repositoryProcessingJobs.postDeployRecovery,
+          metrics: repositoryProcessingJobs.metrics,
+        })
+        .from(repositoryProcessingJobs)
+        .where(eq(repositoryProcessingJobs.id, runtimeFailure.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readBundledPdfQuarantine"
+  );
+  assert.deepEqual(quarantinedPdfFailure, {
+    status: "cancelled",
+    attempt: 0,
+    maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
+    availableAt: "infinity",
+    marker: POST_DEPLOY_RECOVERY_MARKER,
+    metrics: { postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER },
+  });
+  assert.deepEqual(
+    await releasePostDeployRecoveryJobs({
+      graceMinutes: 0,
+      now: new Date(Date.now() + 60_000),
+    }),
+    [
+      {
+        id: runtimeFailure.inspectJob.id,
+        itemVersionId: runtimeFailure.version.id,
+      },
+    ]
+  );
+
   const retrievalV2Result = await retrieveRepositoryContent({
     query: "district emergency",
     repositoryIds: [repository.id],
@@ -1213,6 +2028,25 @@ try {
     activationExecutor
   );
   assert.equal(incompleteActivation, null);
+  const firstEmbeddingRecoveryClaim =
+    await claimIncompleteEmbeddingGenerations({
+      now: new Date(Date.now() + 11 * 60_000),
+    });
+  assert.ok(
+    firstEmbeddingRecoveryClaim.some(
+      (generation) => generation.id === imagePublication.generationId
+    )
+  );
+  const duplicateEmbeddingRecoveryClaim =
+    await claimIncompleteEmbeddingGenerations({
+      now: new Date(Date.now() + 12 * 60_000),
+    });
+  assert.equal(
+    duplicateEmbeddingRecoveryClaim.some(
+      (generation) => generation.id === imagePublication.generationId
+    ),
+    false
+  );
 
   const smokeVector = `[${Array.from({ length: 1536 }, () => "0.001").join(",")}]`;
   await executeQuery(
@@ -1255,6 +2089,556 @@ try {
     replayedActivation?.embedded_item_count,
     activation?.embedded_item_count
   );
+  const [activeLegacyItem] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItems)
+        .values({
+          repositoryId: repository.id,
+          type: "text",
+          name: "Active legacy inline policy",
+          source: "Active legacy source remains searchable during recovery.",
+          processingStatus: "embedded",
+        })
+        .returning({ id: repositoryItems.id }),
+    "smoke.unifiedContent.createActiveLegacyInlineItem"
+  );
+  assert.ok(activeLegacyItem);
+  const [activeLegacyVersion] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItemVersions)
+        .values({
+          itemId: activeLegacyItem.id,
+          versionNumber: 1,
+          sourceKind: "text",
+          sourceRevision: "inline:active-legacy-smoke",
+          objectKey: `repositories/${repository.id}/legacy/active-inline.txt`,
+          declaredContentType: "text/plain",
+          byteSize: 56,
+          storageStatus: "available",
+          inspectionStatus: "clean",
+          processingStatus: "completed",
+          processorVersion: "structured-text-v1",
+          createdBy: owner.id,
+        })
+        .returning({ id: repositoryItemVersions.id }),
+    "smoke.unifiedContent.createActiveLegacyInlineVersion"
+  );
+  assert.ok(activeLegacyVersion);
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryItems)
+        .set({ currentVersionId: activeLegacyVersion.id })
+        .where(eq(repositoryItems.id, activeLegacyItem.id)),
+    "smoke.unifiedContent.attachActiveLegacyInlineVersion"
+  );
+  const [activeLegacyJob] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryProcessingJobs)
+        .values({
+          itemVersionId: activeLegacyVersion.id,
+          stage: "inspect",
+          status: "failed",
+          idempotencyKey: `${activeLegacyVersion.id}:inspect:active-legacy-smoke`,
+          attempt: CONTENT_PROCESSING_MAX_ATTEMPTS,
+          maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
+          lastErrorCode: "LEGACY_INLINE_SOURCE",
+        })
+        .returning({ id: repositoryProcessingJobs.id }),
+    "smoke.unifiedContent.createActiveLegacyInlineJob"
+  );
+  assert.ok(activeLegacyJob);
+  const [activeLegacyChunk] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItemChunks)
+        .values({
+          itemId: activeLegacyItem.id,
+          itemVersionId: activeLegacyVersion.id,
+          indexGenerationId: imagePublication.generationId,
+          content: "Active legacy source remains searchable during recovery.",
+          chunkIndex: 0,
+          metadata: {},
+          modality: "text",
+          contentHash: "f".repeat(64),
+          sourceLocator: { headingPath: ["Active legacy inline policy"] },
+          contextPrefix: "Active legacy inline policy",
+          segmentLevel: "section",
+          accessScope: {},
+          tokens: 8,
+        })
+        .returning({ id: repositoryItemChunks.id }),
+    "smoke.unifiedContent.createActiveLegacyInlineChunk"
+  );
+  assert.ok(activeLegacyChunk);
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_item_chunks
+        SET embedding = ${smokeVector}::vector
+        WHERE id = ${activeLegacyChunk.id}
+      `),
+    "smoke.unifiedContent.embedActiveLegacyInlineChunk"
+  );
+  const activeLegacyClaim = (
+    await claimLegacyInlineTextRecoveries({
+      repositoryId: repository.id,
+      now: new Date(Date.now() + 60_000),
+    })
+  ).find((claim) => claim.jobId === activeLegacyJob.id);
+  assert.ok(activeLegacyClaim);
+  const activeLegacyObjectKey = buildRepositorySourceObjectKey(
+    repository.id,
+    `inline-${activeLegacyItem.id}.txt`,
+    activeLegacyVersion.id
+  );
+  assert.equal(
+    await completeLegacyInlineTextRecovery({
+      claim: activeLegacyClaim,
+      objectKey: activeLegacyObjectKey,
+      byteSize: Buffer.byteLength(activeLegacyClaim.content, "utf8"),
+      sha256: "b".repeat(64),
+    }),
+    true
+  );
+  const [activeLegacyRecoveryState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          itemSource: repositoryItems.source,
+          itemStatus: repositoryItems.processingStatus,
+          versionStorage: repositoryItemVersions.storageStatus,
+          versionInspection: repositoryItemVersions.inspectionStatus,
+          versionStatus: repositoryItemVersions.processingStatus,
+          jobStatus: repositoryProcessingJobs.status,
+        })
+        .from(repositoryItems)
+        .innerJoin(
+          repositoryItemVersions,
+          eq(repositoryItemVersions.id, repositoryItems.currentVersionId)
+        )
+        .innerJoin(
+          repositoryProcessingJobs,
+          eq(repositoryProcessingJobs.itemVersionId, repositoryItemVersions.id)
+        )
+        .where(eq(repositoryItems.id, activeLegacyItem.id))
+        .limit(1),
+    "smoke.unifiedContent.readActiveLegacyRecoveryState"
+  );
+  assert.deepEqual(activeLegacyRecoveryState, {
+    itemSource: activeLegacyObjectKey,
+    itemStatus: "embedded",
+    versionStorage: "available",
+    versionInspection: "clean",
+    versionStatus: "completed",
+    jobStatus: "pending",
+  });
+  assert.equal(
+    (
+      await keywordSearch("active legacy source", {
+        repositoryId: repository.id,
+        canonicalOnly: true,
+      })
+    ).some((result) => result.itemId === activeLegacyItem.id),
+    true
+  );
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_item_chunks
+        SET embedding = NULL
+        WHERE id = (
+          SELECT min(chunk.id)
+          FROM repository_item_chunks chunk
+          WHERE chunk.index_generation_id = ${imagePublication.generationId}::uuid
+        )
+      `),
+    "smoke.unifiedContent.createIncompleteActiveGeneration"
+  );
+  const activeEmbeddingRecoveryClaim =
+    await claimIncompleteEmbeddingGenerations({
+      now: new Date(Date.now() + 22 * 60_000),
+    });
+  assert.ok(
+    activeEmbeddingRecoveryClaim.some(
+      (generation) => generation.id === imagePublication.generationId
+    )
+  );
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_item_chunks
+        SET embedding = ${smokeVector}::vector
+        WHERE index_generation_id = ${imagePublication.generationId}::uuid
+          AND embedding IS NULL
+      `),
+    "smoke.unifiedContent.restoreActiveGenerationEmbeddings"
+  );
+  assert.equal(
+    await canAcknowledgeCanonicalEmbeddingDlqMessage(
+      imagePublication.generationId
+    ),
+    true
+  );
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_item_chunks
+        SET embedding = NULL
+        WHERE id = (
+          SELECT min(chunk.id)
+          FROM repository_item_chunks chunk
+          WHERE chunk.index_generation_id = ${imagePublication.generationId}::uuid
+        )
+      `),
+    "smoke.unifiedContent.recreateIncompleteActiveGeneration"
+  );
+  const finalActiveEmbeddingRecoveryClaim =
+    await claimIncompleteEmbeddingGenerations({
+      now: new Date(Date.now() + 33 * 60_000),
+    });
+  assert.ok(
+    finalActiveEmbeddingRecoveryClaim.some(
+      (generation) => generation.id === imagePublication.generationId
+    )
+  );
+  const exhaustedActiveEmbeddingRecoveryClaim =
+    await claimIncompleteEmbeddingGenerations({
+      now: new Date(Date.now() + 44 * 60_000),
+    });
+  assert.equal(
+    exhaustedActiveEmbeddingRecoveryClaim.some(
+      (generation) => generation.id === imagePublication.generationId
+    ),
+    false
+  );
+  assert.equal(
+    await canAcknowledgeCanonicalEmbeddingDlqMessage(
+      imagePublication.generationId
+    ),
+    false
+  );
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_item_chunks
+        SET embedding = ${smokeVector}::vector
+        WHERE index_generation_id = ${imagePublication.generationId}::uuid
+          AND embedding IS NULL
+      `),
+    "smoke.unifiedContent.restoreExhaustedActiveGeneration"
+  );
+  assert.equal(
+    await canAcknowledgeCanonicalEmbeddingDlqMessage(
+      imagePublication.generationId
+    ),
+    true
+  );
+  const [activationOnlyGeneration] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryIndexGenerations)
+        .values({
+          repositoryId: repository.id,
+          status: "failed",
+          embeddingModel: "amazon-bedrock:amazon.titan-embed-text-v1",
+          embeddingDimensions: 1536,
+          processorVersion: "activation-only-recovery-smoke",
+          errorMessage: "simulated activation transaction failure",
+        })
+        .returning({ id: repositoryIndexGenerations.id }),
+    "smoke.unifiedContent.createActivationOnlyGeneration"
+  );
+  assert.ok(activationOnlyGeneration);
+  const [activationOnlyChunk] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItemChunks)
+        .values({
+          itemId: imageItem.id,
+          itemVersionId: imageRegistration.version.id,
+          indexGenerationId: activationOnlyGeneration.id,
+          content: "fully embedded activation recovery sentinel",
+          chunkIndex: 0,
+          metadata: {},
+          modality: "text",
+          contentHash: "a".repeat(64),
+          sourceLocator: {},
+          contextPrefix: "",
+          segmentLevel: "chunk",
+          accessScope: {},
+          tokens: 5,
+        })
+        .returning({ id: repositoryItemChunks.id }),
+    "smoke.unifiedContent.createActivationOnlyChunk"
+  );
+  assert.ok(activationOnlyChunk);
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_item_chunks
+        SET embedding = ${smokeVector}::vector
+        WHERE id = ${activationOnlyChunk.id}
+      `),
+    "smoke.unifiedContent.completeActivationOnlyEmbedding"
+  );
+  assert.equal(
+    await canAcknowledgeCanonicalEmbeddingDlqMessage(
+      activationOnlyGeneration.id
+    ),
+    false
+  );
+  const activationOnlyClaims = await claimIncompleteEmbeddingGenerations({
+    now: new Date(Date.now() + 55 * 60_000),
+  });
+  assert.deepEqual(
+    activationOnlyClaims.find(
+      (generation) => generation.id === activationOnlyGeneration.id
+    ),
+    {
+      id: activationOnlyGeneration.id,
+      visualEmbeddingEnabled: false,
+      activationOnly: true,
+    }
+  );
+  assert.equal(
+    await canAcknowledgeCanonicalEmbeddingDlqMessage(
+      activationOnlyGeneration.id
+    ),
+    true
+  );
+  await releaseIncompleteEmbeddingGenerationClaim(
+    activationOnlyGeneration.id
+  );
+  assert.equal(
+    await canAcknowledgeCanonicalEmbeddingDlqMessage(
+      activationOnlyGeneration.id
+    ),
+    false
+  );
+  const reclaimedActivationOnly = await claimIncompleteEmbeddingGenerations({
+    now: new Date(Date.now() + 56 * 60_000),
+  });
+  assert.deepEqual(
+    reclaimedActivationOnly.find(
+      (generation) => generation.id === activationOnlyGeneration.id
+    ),
+    {
+      id: activationOnlyGeneration.id,
+      visualEmbeddingEnabled: false,
+      activationOnly: true,
+    }
+  );
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryIndexGenerations)
+        .set({ status: "superseded" })
+        .where(eq(repositoryIndexGenerations.id, activationOnlyGeneration.id)),
+    "smoke.unifiedContent.finishActivationOnlyContract"
+  );
+  const [failedEmbeddingGeneration] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryIndexGenerations)
+        .values({
+          repositoryId: repository.id,
+          status: "failed",
+          embeddingModel: "amazon-bedrock:amazon.titan-embed-text-v1",
+          embeddingDimensions: 1536,
+          processorVersion: "embedding-recovery-smoke",
+          errorMessage: "simulated provider outage",
+        })
+        .returning({ id: repositoryIndexGenerations.id }),
+    "smoke.unifiedContent.createFailedEmbeddingGeneration"
+  );
+  assert.ok(failedEmbeddingGeneration);
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryItemChunks).values({
+        itemId: imageItem.id,
+        itemVersionId: imageRegistration.version.id,
+        indexGenerationId: failedEmbeddingGeneration.id,
+        content: "failed embedding recovery sentinel",
+        chunkIndex: 0,
+        metadata: {},
+        modality: "text",
+        contentHash: "c".repeat(64),
+        sourceLocator: {},
+        contextPrefix: "",
+        segmentLevel: "chunk",
+        accessScope: {},
+        tokens: 4,
+      }),
+    "smoke.unifiedContent.createFailedEmbeddingChunk"
+  );
+  const failedEmbeddingRecoveryClaim =
+    await claimIncompleteEmbeddingGenerations({
+      now: new Date(Date.now() + 33 * 60_000),
+    });
+  assert.ok(
+    failedEmbeddingRecoveryClaim.some(
+      (generation) => generation.id === failedEmbeddingGeneration.id
+    )
+  );
+  const [reopenedEmbeddingGeneration] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          status: repositoryIndexGenerations.status,
+          attempts: repositoryIndexGenerations.embeddingRecoveryAttempts,
+          errorMessage: repositoryIndexGenerations.errorMessage,
+        })
+        .from(repositoryIndexGenerations)
+        .where(eq(repositoryIndexGenerations.id, failedEmbeddingGeneration.id))
+        .limit(1),
+    "smoke.unifiedContent.readReopenedEmbeddingGeneration"
+  );
+  assert.deepEqual(reopenedEmbeddingGeneration, {
+    status: "building",
+    attempts: 1,
+    errorMessage: null,
+  });
+  await releaseIncompleteEmbeddingGenerationClaim(
+    failedEmbeddingGeneration.id
+  );
+  // A repeated release is a no-op and cannot consume another attempt.
+  await releaseIncompleteEmbeddingGenerationClaim(
+    failedEmbeddingGeneration.id
+  );
+  const [releasedEmbeddingRecoveryClaim] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          attempts: repositoryIndexGenerations.embeddingRecoveryAttempts,
+          queuedAt: repositoryIndexGenerations.embeddingRecoveryQueuedAt,
+        })
+        .from(repositoryIndexGenerations)
+        .where(eq(repositoryIndexGenerations.id, failedEmbeddingGeneration.id))
+        .limit(1),
+    "smoke.unifiedContent.readReleasedEmbeddingRecoveryClaim"
+  );
+  assert.deepEqual(releasedEmbeddingRecoveryClaim, {
+    attempts: 0,
+    queuedAt: null,
+  });
+  const reclaimedEmbeddingRecovery =
+    await claimIncompleteEmbeddingGenerations({
+      now: new Date(Date.now() + 34 * 60_000),
+    });
+  assert.ok(
+    reclaimedEmbeddingRecovery.some(
+      (generation) => generation.id === failedEmbeddingGeneration.id
+    )
+  );
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryIndexGenerations)
+        .set({
+          status: "failed",
+          embeddingRecoveryAttempts: 3,
+          embeddingRecoveryQueuedAt: new Date(Date.now() - 20 * 60_000),
+          errorMessage: "persistent provider failure",
+        })
+        .where(eq(repositoryIndexGenerations.id, failedEmbeddingGeneration.id)),
+    "smoke.unifiedContent.exhaustEmbeddingRecovery"
+  );
+  const exhaustedEmbeddingRecoveryClaim =
+    await claimIncompleteEmbeddingGenerations({
+      now: new Date(Date.now() + 44 * 60_000),
+    });
+  assert.equal(
+    exhaustedEmbeddingRecoveryClaim.some(
+      (generation) => generation.id === failedEmbeddingGeneration.id
+    ),
+    false
+  );
+  assert.equal(
+    await canAcknowledgeCanonicalEmbeddingDlqMessage(
+      failedEmbeddingGeneration.id
+    ),
+    false
+  );
+  assert.equal(
+    await canAcknowledgeCanonicalEmbeddingDlqMessage(
+      "11111111-2222-4333-8444-555555555555"
+    ),
+    true
+  );
+
+  const [backgroundEmbeddingGeneration] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryIndexGenerations)
+        .values({
+          repositoryId: repository.id,
+          status: "building",
+          embeddingModel: "amazon-bedrock:amazon.titan-embed-text-v1",
+          embeddingDimensions: 1536,
+          processorVersion: "background-embedding-failure-smoke",
+        })
+        .returning({ id: repositoryIndexGenerations.id }),
+    "smoke.unifiedContent.createBackgroundEmbeddingGeneration"
+  );
+  assert.ok(backgroundEmbeddingGeneration);
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryItemChunks).values({
+        itemId: imageItem.id,
+        itemVersionId: imageRegistration.version.id,
+        indexGenerationId: backgroundEmbeddingGeneration.id,
+        content: "background embedding failure sentinel",
+        chunkIndex: 0,
+        metadata: {},
+        modality: "text",
+        contentHash: "e".repeat(64),
+        sourceLocator: {},
+        contextPrefix: "",
+        segmentLevel: "chunk",
+        accessScope: {},
+        tokens: 4,
+      }),
+    "smoke.unifiedContent.createBackgroundEmbeddingChunk"
+  );
+  assert.equal(
+    await failBuildingGeneration(
+      {
+        generationId: backgroundEmbeddingGeneration.id,
+        itemId: imageItem.id,
+        errorMessage: "simulated terminal background embedding failure",
+      },
+      async (query) =>
+        (await executeQuery(
+          (db) => db.execute(query as unknown as SQL),
+          "smoke.unifiedContent.failBackgroundEmbeddingGeneration"
+        )) as unknown as Array<{ item_id: number }>
+    ),
+    false
+  );
+  const [preservedEmbeddedItem] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          itemStatus: repositoryItems.processingStatus,
+          generationStatus: repositoryIndexGenerations.status,
+        })
+        .from(repositoryItems)
+        .innerJoin(
+          repositoryIndexGenerations,
+          eq(repositoryIndexGenerations.id, backgroundEmbeddingGeneration.id)
+        )
+        .where(eq(repositoryItems.id, imageItem.id))
+        .limit(1),
+    "smoke.unifiedContent.readPreservedBackgroundEmbeddingFailure"
+  );
+  assert.deepEqual(preservedEmbeddedItem, {
+    itemStatus: "embedded",
+    generationStatus: "failed",
+  });
   const imageResults = await keywordSearch("marked assembly", {
     repositoryId: repository.id,
     canonicalOnly: true,

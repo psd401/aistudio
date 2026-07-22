@@ -26,7 +26,7 @@ export function isRepositorySourceObjectKey(
 export function buildRepositorySourceObjectKey(
   repositoryId: number,
   fileName: string,
-  sourceId = randomUUID()
+  sourceId: string = randomUUID()
 ): string {
   if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0) {
     throw new Error("A valid repository id is required for a source object key");

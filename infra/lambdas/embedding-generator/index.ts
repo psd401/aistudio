@@ -26,6 +26,12 @@ import {
   parseEmbeddingDescriptor,
   parseEmbeddingVector,
 } from './embedding-provider';
+export {
+  buildBedrockEmbeddingBody as buildBedrockEmbeddingBodyForRuntimeSmoke,
+  buildCohereMultimodalEmbeddingBody as buildCohereMultimodalEmbeddingBodyForRuntimeSmoke,
+  normalizeEmbeddingProvider as normalizeEmbeddingProviderForRuntimeSmoke,
+  parseEmbeddingVector as parseEmbeddingVectorForRuntimeSmoke,
+} from './embedding-provider';
 import { activateCompletedGeneration } from './generation-activation';
 import {
   failBuildingGeneration,
@@ -253,6 +259,29 @@ interface EmbeddingMessage {
     objectKey: string;
     mediaType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
   } | null>;
+  activationOnly?: boolean;
+}
+
+async function activateCanonicalGeneration(
+  db: Awaited<ReturnType<typeof getDb>>,
+  generationId: string
+) {
+  return activateCompletedGeneration(
+    generationId,
+    async (plan) =>
+      db.transaction(async (tx) => {
+        await tx.execute(plan.lockRepository);
+        await tx.execute(plan.supersedeCurrent);
+        await tx.execute(plan.activateTarget);
+        return (await tx.execute<{
+          repository_id: number;
+          embedded_item_count: number;
+        }>(plan.publishTarget)) as Array<{
+          repository_id: number;
+          embedded_item_count: number;
+        }>;
+      })
+  );
 }
 
 async function loadVisualDataUri(
@@ -309,7 +338,7 @@ async function retryWithBackoff<T>(
   throw lastError ?? new Error('retryWithBackoff: exhausted retries with no captured error');
 }
 
-async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings): Promise<void> {
+async function processRecord(record: SQSRecord): Promise<void> {
   const message = JSON.parse(record.body) as EmbeddingMessage;
   log.info(`Processing embeddings for item ${message.itemId} with ${message.chunkIds.length} chunks`);
 
@@ -327,7 +356,10 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
     ) {
       throw new Error('Embedding message has invalid or mismatched chunk data');
     }
-    let effectiveSettings = embSettings;
+    if (message.activationOnly && !message.generationId) {
+      throw new Error('Embedding activation message requires a generation id');
+    }
+    let effectiveSettings: EmbeddingSettings;
     if (message.generationId) {
       const [generation] = await db.execute<{
         status: CanonicalGenerationStatus;
@@ -351,6 +383,23 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
         });
         return;
       }
+      if (message.activationOnly) {
+        const activated = await activateCanonicalGeneration(
+          db,
+          message.generationId
+        );
+        if (!activated) {
+          throw new Error(
+            `Generation ${message.generationId} is not complete enough to activate`
+          );
+        }
+        log.info(`Activated recovered generation ${message.generationId}`, {
+          repositoryId: activated.repository_id,
+          embeddedItemCount: activated.embedded_item_count,
+        });
+        return;
+      }
+      const embSettings = await getEmbeddingSettings();
       const descriptor = parseEmbeddingDescriptor(
         generation.embedding_model,
         generation.embedding_dimensions
@@ -418,6 +467,8 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
           }
         }
       }
+    } else {
+      effectiveSettings = await getEmbeddingSettings();
     }
 
     const embeddings = await retryWithBackoff(
@@ -499,21 +550,7 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
     );
     if (generationComplete) {
       if (message.generationId) {
-        await activateCompletedGeneration(
-          message.generationId,
-          async (plan) => db.transaction(async (tx) => {
-            await tx.execute(plan.lockRepository);
-            await tx.execute(plan.supersedeCurrent);
-            await tx.execute(plan.activateTarget);
-            return (await tx.execute<{
-              repository_id: number;
-              embedded_item_count: number;
-            }>(plan.publishTarget)) as Array<{
-              repository_id: number;
-              embedded_item_count: number;
-            }>;
-          })
-        );
+        await activateCanonicalGeneration(db, message.generationId);
       } else {
         await db
           .update(repositoryItems)
@@ -592,9 +629,8 @@ export async function handler(event: SQSEvent): Promise<void> {
   log.info(`Processing embedding requests: ${event.Records.length}`);
 
   try {
-    const embSettings = await getEmbeddingSettings();
     for (const record of event.Records) {
-      await processRecord(record, embSettings);
+      await processRecord(record);
     }
   } finally {
     // Swallow closeDb errors — they must not mask the original processing error.

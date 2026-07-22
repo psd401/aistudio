@@ -836,3 +836,62 @@ inline-text/PDF/image matrix and verification that migration 123 jobs are
 released only by the new scheduled worker after the drain window. Recovery can
 therefore remain visibly quarantined for up to 20 minutes after the migration.
 No manual AWS CLI or database mutation is part of the rollout.
+
+### Artifact-runtime and autonomous-recovery checkpoint (2026-07-22)
+
+Repeated dev failures showed that source-level extraction tests were not enough:
+the deployed Lambda artifact, durable provider state, queue/DLQ ownership, and
+active retrieval snapshot must be verified as one state machine. This hardening
+slice closes those cross-boundary failure modes before another deployment:
+
+- Migration 124 quarantines only canonical current versions matching known
+  broken artifact-runtime signatures, behind the existing old-worker drain
+  marker. If the affected version is already in the active generation, its
+  version and item remain available/embedded while the replacement worker
+  builds a new snapshot. The migration also adds bounded embedding-recovery
+  claim state and its partial scheduler index.
+- The unified-content scheduler isolates post-deploy release, legacy inline
+  source migration, the processing outbox, processing DLQ reconciliation,
+  incomplete embedding recovery, and embedding DLQ reconciliation. Every stage
+  runs even if another stage fails, while the aggregate invocation still fails
+  for EventBridge retry and observability.
+- Processing and embedding DLQ records are validated before deletion. Malformed,
+  mismatched, terminal, and exhausted records remain visible. A queued
+  processing row is atomically returned to the durable database outbox before
+  its old DLQ record is acknowledged; an embedding DLQ record is acknowledged
+  only after completion/supersession or a durable bounded redispatch claim.
+- Failed and incomplete embedding generations are recovered in bounded batches.
+  Fully embedded building/failed generations receive activation-only messages,
+  including after an SQS dispatch failure, so a crash between vector writes and
+  atomic activation cannot strand a repository. Failed background generations
+  never take the previous active generation or item offline.
+- Legacy inline text is copied into the immutable repository source namespace
+  with a deterministic version-scoped key, hash, and atomic source/job update.
+  S3 failures retain the legacy source for retry, and already-serving versions
+  remain searchable throughout migration.
+- Textract and Bedrock Data Automation state is reusable only for the exact
+  immutable source and durable processing run. A provider job that finishes in
+  a retryable failed state clears every provider identifier, rotates the
+  idempotency token, and starts a fresh run. BDA output is isolated in a
+  run-specific artifact prefix so partial output from a failed invocation cannot
+  be published by its replacement. Deterministic BDA client errors are terminal.
+- CDK bundles `pdf-parse` as a real Node dependency for the ARM64 worker, grants
+  exact queue/DLQ and embedding-model resources, and alarms on content and
+  embedding worker errors, oldest-message stalls, and terminal DLQ records.
+  Two artifact smokes load the exact synthesized ARM64/x64 Lambda bundles in
+  Node 20 Linux containers and exercise PDF, DOCX, XLSX, PPTX, text, Markdown,
+  CSV, PNG/JPEG/WebP/GIF/TIFF, BDA audio/video normalization, Bedrock provider
+  selection, Titan payloads, and Cohere multimodal payload/response contracts.
+
+Pre-merge verification for this checkpoint passes 28 focused application
+repository suites (128 tests), eight unified-content/embedding Lambda suites
+(39 tests), the real PostgreSQL migration/lifecycle smoke, and both exact Linux
+Lambda artifact smokes. The complete application CI suite passes 276 suites and
+3,120 tests with 60 intentional skips; the complete infrastructure/Lambda suite
+passes 37 suites and 370 tests. Full lint has zero errors, and application,
+infrastructure, unified-content worker, and embedding-worker typechecks pass.
+The production Next.js build, infrastructure build, dev Processing stack synth,
+and all-stack synthesis of 29 dev/prod/shared templates pass. The broad Jest
+gate also uncovered and fixed an unrelated polling-session-cache interval that
+kept Node/test processes alive; the full suite now exits normally without
+`--forceExit`. Live dev validation remains required after deployment.

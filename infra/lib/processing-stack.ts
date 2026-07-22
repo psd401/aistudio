@@ -121,6 +121,7 @@ export class ProcessingStack extends cdk.Stack {
       databaseHost,
       databaseSecretArn,
       embeddingQueue: this.embeddingQueue,
+      embeddingDeadLetterQueue: embeddingDlq,
       vpc,
     });
     this.contentProcessingQueue = unifiedContent.queue;

@@ -60,6 +60,7 @@ export interface RepositoryProcessingMetrics {
   thumbnailBytes?: number;
   ocrLines?: number;
   bdaInvocationArn?: string;
+  bdaSourceObjectKey?: string;
   bdaOutputPrefix?: string;
   bdaResultObjectKey?: string;
   mediaDurationMs?: number;
