@@ -94,6 +94,7 @@ describe("shared repository retrieval v2 service", () => {
       ])
       .mockResolvedValueOnce([row(1, 0.9, 0)])
       .mockResolvedValueOnce([row(1, 0.7, 0), row(2, 0.6, 1)])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([row(1, 0, 0)]);
 
     const response = await retrieveRepositoryContent(
@@ -172,6 +173,7 @@ describe("shared repository retrieval v2 service", () => {
         },
       ])
       .mockResolvedValueOnce([row(1, 0.8, 0), row(2, 0.7, 1)])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([row(1, 0, 0)])
       .mockResolvedValueOnce([row(2, 0, 1)]);
 
@@ -209,6 +211,7 @@ describe("shared repository retrieval v2 service", () => {
         },
       ])
       .mockResolvedValueOnce([row(1, 0.8, 0)])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
         {
           ...row(1, 0, 0),
@@ -259,6 +262,7 @@ describe("shared repository retrieval v2 service", () => {
           visual_embedding_dimensions: 1536,
         },
       ])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([imageRow])
       .mockResolvedValueOnce([imageRow]);
 
@@ -285,5 +289,56 @@ describe("shared repository retrieval v2 service", () => {
       citations: [{ label: "Image region" }],
     });
     expect(response.diagnostics.visualCandidates).toBe(1);
+  });
+
+  it("keeps legacy-only chunks visible until their canonical item is published", async () => {
+    mockExecuteQuery
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          chunk_id: 91,
+          repository_id: 7,
+          repository_name: "District Policies",
+          item_id: 37,
+          item_stable_id: "44444444-5555-4666-8777-888888888888",
+          item_name: "Live validation",
+          content: "ORCHID-COMPASS-742 uses the silver lighthouse protocol",
+          chunk_index: 0,
+          modality: "text",
+          source_locator: {},
+          tokens: 10,
+          metadata: { source: "text_input" },
+          score: 0.83,
+        },
+      ]);
+
+    const response = await retrieveRepositoryContent({
+      query: "ORCHID-COMPASS-742",
+      repositoryIds: [7],
+      userCognitoSub: "user-sub",
+      mode: "keyword",
+      limit: 1,
+    });
+
+    expect(response.results).toHaveLength(1);
+    expect(response.results[0]).toMatchObject({
+      chunkId: 91,
+      generationId: "legacy:7",
+      itemVersionId: "legacy:37",
+      versionNumber: 0,
+      citations: [
+        {
+          itemName: "Live validation",
+          label: "Live validation",
+        },
+      ],
+      metadata: { retrievalCompatibility: "legacy-v1" },
+    });
+    expect(response.diagnostics).toMatchObject({
+      repositoriesAuthorized: 1,
+      lexicalCandidates: 1,
+      returnedResults: 1,
+    });
   });
 });

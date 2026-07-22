@@ -657,3 +657,49 @@ Verification evidence:
 
 The remaining rollout check is a dev deployment followed by real Bedrock Cohere
 rerank/visual-embedding validation before visual indexing is enabled broadly.
+
+### Retrieval v2 live-hardening checkpoint (2026-07-22)
+
+The first dev cutover exposed two migration gaps that were not reproducible with
+new canonical file uploads alone: pre-cutover URL/text chunks disappeared when
+the v2 read flag was enabled, and newly created inline text still wrote only the
+legacy item/chunk rows. The hardening slice closes both gaps without weakening
+the single read-cutover boundary:
+
+- Completed legacy-only chunks remain available through an explicit,
+  repository-authorized lexical compatibility query until the same item appears
+  in the repository's active canonical generation. Canonical content then wins
+  automatically, so stale duplicate chunks cannot leak into results.
+- Inline text is stored as an immutable repository-scoped S3 source, registered
+  as a canonical version/job, and dispatched through the unified processor.
+  Plain text, Markdown, and CSV now receive strict UTF-8 validation,
+  tokenizer-aware segmentation, stable hashes, heading-aware locators, normal
+  publication, embedding, generation activation, and exact citations.
+- Both the direct legacy upload action and the presigned upload action now use
+  the same fail-open canonical shadow-write helper for every supported canonical
+  content type. A dispatch outage leaves an observable pending job for scheduled
+  recovery instead of hiding the user's successful legacy upload.
+- Retrieval diagnostics count repositories authorized by ACL even while they
+  have no active canonical generation, making the compatibility window visible
+  rather than reporting those repositories as unauthorized.
+
+Verification evidence for the hardening slice:
+
+- Application CI suite: 270 suites passed, 5 skipped; 3,070 tests passed and 60
+  intentionally skipped. Infrastructure/Lambda suite: 33 suites and 348 tests
+  passed.
+- The real PostgreSQL unified-content smoke passed canonical inline-text
+  publication/retrieval/citation and legacy compatibility, including automatic
+  legacy suppression after canonical activation and cleanup.
+- Full authenticated Playwright passed 248 tests with 58 environment-gated
+  skips. The new inline-text workflow and canonical PDF, Office, image, audio,
+  and video upload contracts all passed. One unrelated Atrium editor timing test
+  passed on retry 2 and was reported as flaky; there were no genuine failures.
+- Full lint completed with zero errors; root and worker typechecks, the complete
+  infrastructure build, the production Next.js build, and all-stack no-lookup
+  CDK synthesis passed.
+
+The remaining rollout check is deployment of this hardening slice, followed by
+live confirmation that the pre-cutover marker is searchable and that a new
+inline-text item advances through version, job, generation, embedding, and
+citation state in dev.

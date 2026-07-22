@@ -29,7 +29,9 @@ function ResultCitation({ result }: { result: SearchResult }) {
       <MapPin className="ml-2 h-3 w-3" />
       {label}
       <span className="sr-only">
-        , source version {result.citation.versionNumber}
+        {result.citation.versionNumber > 0
+          ? `, source version ${result.citation.versionNumber}`
+          : ", legacy source pending canonical backfill"}
       </span>
     </>
   )

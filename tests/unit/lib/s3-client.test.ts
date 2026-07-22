@@ -1,5 +1,6 @@
 import { 
   uploadDocument, 
+  uploadRepositoryTextSource,
   getDocumentSignedUrl, 
   deleteDocument,
   deleteRepositoryObjectsByPrefix,
@@ -123,6 +124,30 @@ describe('S3 Client', () => {
       await uploadDocument(params);
 
       // Just verify the upload succeeded and the right command was called
+      expect(mockS3Client.send).toHaveBeenCalledWith(
+        expect.any(PutObjectCommand)
+      );
+    });
+  });
+
+  describe('uploadRepositoryTextSource', () => {
+    it('stores inline text under the canonical repository namespace', async () => {
+      mockS3Client.send.mockResolvedValue({});
+
+      const result = await uploadRepositoryTextSource({
+        repositoryId: 7,
+        itemId: 37,
+        userId: 1,
+        fileName: 'Quick_reference.txt',
+        content: 'hello world',
+      });
+
+      expect(result).toEqual({
+        key: expect.stringMatching(
+          /^repositories\/7\/inline\/[0-9a-f-]{36}\/Quick_reference\.txt$/
+        ),
+        byteSize: 11,
+      });
       expect(mockS3Client.send).toHaveBeenCalledWith(
         expect.any(PutObjectCommand)
       );

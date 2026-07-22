@@ -15,6 +15,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
 import { createError } from "@/lib/error-utils"
 import { Settings } from "@/lib/settings-manager"
 import { Readable } from "node:stream"
+import { randomUUID } from "node:crypto"
 
 // Cache S3 config to avoid repeated async calls
 let s3ConfigCache: { bucket: string | null; region: string | null } | null = null
@@ -78,6 +79,14 @@ export interface PresignedUploadUrlParams {
   fileSize: number
   metadata?: Record<string, string>
   expiresIn?: number // seconds, default 3600 (1 hour)
+}
+
+export interface UploadRepositoryTextSourceParams {
+  repositoryId: number
+  itemId: number
+  userId: number
+  fileName: string
+  content: string
 }
 
 // Ensure the documents bucket exists
@@ -191,6 +200,44 @@ export async function uploadDocument({
       }
     })
   }
+}
+
+/**
+ * Persist inline repository text as an immutable canonical source object.
+ * Keeping it in the repository namespace lets the unified processor and
+ * storage cleanup use the same lifecycle as browser-uploaded files.
+ */
+export async function uploadRepositoryTextSource({
+  repositoryId,
+  itemId,
+  userId,
+  fileName,
+  content,
+}: UploadRepositoryTextSourceParams): Promise<{ key: string; byteSize: number }> {
+  await ensureDocumentsBucket()
+
+  const s3Client = await getS3Client()
+  const config = await getS3Config()
+  const body = Buffer.from(content, "utf8")
+  const key = `repositories/${repositoryId}/inline/${randomUUID()}/${fileName}`
+
+  await s3Client.send(
+    new PutObjectCommand({
+      Bucket: config.bucket!,
+      Key: key,
+      Body: body,
+      ContentType: "text/plain",
+      Metadata: {
+        repositoryId: repositoryId.toString(),
+        itemId: itemId.toString(),
+        userId: userId.toString(),
+        sourceKind: "text",
+        uploadedAt: new Date().toISOString(),
+      },
+    })
+  )
+
+  return { key, byteSize: body.byteLength }
 }
 
 // Get a signed URL for a document

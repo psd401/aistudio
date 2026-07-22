@@ -103,6 +103,64 @@ function mapCandidate(
   };
 }
 
+function positiveInteger(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function legacySourceLocator(
+  row: Record<string, unknown>
+): RepositorySourceLocator {
+  const sourceLocator = parseRecord(row.source_locator) as RepositorySourceLocator;
+  if (Object.keys(sourceLocator).length > 0) return sourceLocator;
+
+  const metadata = parseRecord(row.metadata);
+  const page = positiveInteger(metadata.page ?? metadata.pageNumber);
+  if (page) return { page };
+  const paragraph = positiveInteger(metadata.paragraph ?? metadata.paragraphNumber);
+  if (paragraph) return { paragraph };
+  const slide = positiveInteger(metadata.slide ?? metadata.slideNumber);
+  if (slide) return { slide };
+
+  return { headingPath: [String(row.item_name ?? "Legacy repository source")] };
+}
+
+function mapLegacyCandidate(row: Record<string, unknown>): RetrievalCandidate {
+  const rawScore = Number(row.score) || 0;
+  const itemId = Number(row.item_id);
+  return {
+    chunkId: Number(row.chunk_id),
+    repositoryId: Number(row.repository_id),
+    repositoryName: String(row.repository_name ?? ""),
+    generationId: `legacy:${row.repository_id}`,
+    itemId,
+    itemStableId: String(row.item_stable_id),
+    itemName: String(row.item_name ?? ""),
+    itemVersionId: `legacy:${itemId}`,
+    versionNumber: 0,
+    artifactId: null,
+    content: String(row.content ?? ""),
+    contextPrefix: "",
+    chunkIndex: Number(row.chunk_index),
+    parentChunkIndex: null,
+    segmentLevel: "chunk",
+    modality: ALL_MODALITIES.includes(row.modality as RetrievalModality)
+      ? (row.modality as RetrievalModality)
+      : "text",
+    sourceLocator: legacySourceLocator(row),
+    tokens: Math.max(
+      1,
+      Number(row.tokens) || countRepositoryTokens(String(row.content ?? ""))
+    ),
+    metadata: {
+      ...parseRecord(row.metadata),
+      retrievalCompatibility: "legacy-v1",
+    },
+    fusedScore: 0,
+    lexicalScore: rawScore,
+  };
+}
+
 async function resolvePrincipal(cognitoSub: string): Promise<RetrievalPrincipal | null> {
   const user = await getUserByCognitoSub(cognitoSub);
   if (!user) return null;
@@ -315,6 +373,77 @@ async function lexicalCandidates(
   );
 }
 
+/**
+ * Keep pre-migration repository content searchable during the dual-write and
+ * backfill window. A legacy chunk is omitted as soon as that item has a chunk
+ * in the repository's active canonical generation, preventing stale duplicate
+ * disclosure while avoiding a read-cutover hole for URL/text items.
+ */
+async function legacyCompatibilityCandidates(
+  repositoryIds: number[],
+  principal: RetrievalPrincipal,
+  query: string,
+  modalities: RetrievalModality[],
+  limit: number
+): Promise<RetrievalCandidate[]> {
+  if (repositoryIds.length === 0) return [];
+  const rows = await executeQuery(
+    (db) =>
+      db.execute(sql`
+        SELECT
+          chunk.id AS chunk_id,
+          repository.id AS repository_id,
+          repository.name AS repository_name,
+          item.id AS item_id,
+          item.stable_id AS item_stable_id,
+          item.name AS item_name,
+          chunk.content,
+          chunk.chunk_index,
+          chunk.modality,
+          chunk.source_locator,
+          chunk.tokens,
+          chunk.metadata,
+          ts_rank_cd(
+            chunk.search_vector,
+            websearch_to_tsquery('english', ${query}),
+            32
+          ) AS score
+        FROM repository_item_chunks chunk
+        JOIN repository_items item ON item.id = chunk.item_id
+        JOIN knowledge_repositories repository ON repository.id = item.repository_id
+        WHERE repository.id IN (${sql.join(
+          repositoryIds.map((repositoryId) => sql`${repositoryId}`),
+          sql`, `
+        )})
+          AND chunk.item_version_id IS NULL
+          AND chunk.index_generation_id IS NULL
+          AND chunk.modality IN (${sql.join(
+            modalities.map((modality) => sql`${modality}`),
+            sql`, `
+          )})
+          AND item.lifecycle_status = 'active'
+          AND item.processing_status = 'completed'
+          AND repository.lifecycle_status = 'active'
+          AND (repository.metadata->>'systemManaged') IS DISTINCT FROM 'true'
+          AND ${accessFilter(principal)}
+          AND chunk.search_vector @@ websearch_to_tsquery('english', ${query})
+          AND NOT EXISTS (
+            SELECT 1
+            FROM repository_item_chunks current_chunk
+            WHERE current_chunk.item_id = item.id
+              AND current_chunk.item_version_id IS NOT NULL
+              AND current_chunk.index_generation_id = repository.active_index_generation_id
+          )
+        ORDER BY score DESC, chunk.id
+        LIMIT ${limit}
+      `),
+    "retrievalV2.legacyCompatibilityCandidates"
+  );
+  return (rows as unknown as Array<Record<string, unknown>>).map(
+    mapLegacyCandidate
+  );
+}
+
 async function visualCandidates(
   snapshot: RetrievalGenerationSnapshot,
   principal: RetrievalPrincipal,
@@ -358,6 +487,19 @@ async function expandCandidate(
   principal: RetrievalPrincipal,
   neighborCount: number
 ): Promise<RetrievalContextSegment[]> {
+  if (candidate.versionNumber === 0) {
+    return [
+      {
+        chunkId: candidate.chunkId,
+        chunkIndex: candidate.chunkIndex,
+        content: candidate.content,
+        contextPrefix: candidate.contextPrefix,
+        modality: candidate.modality,
+        tokens: candidate.tokens,
+        citation: resolveRetrievalCitation(candidate),
+      },
+    ];
+  }
   const lower = Math.max(0, candidate.chunkIndex - neighborCount);
   const upper = candidate.chunkIndex + neighborCount;
   const rows = await executeQuery(
@@ -603,6 +745,14 @@ export async function retrieveRepositoryContent(
             )
           )
         ).flat();
+  const legacyCompatibility = await legacyCompatibilityCandidates(
+    authorizedIds,
+    principal,
+    query,
+    modalities,
+    candidateLimit
+  );
+  lexical.push(...legacyCompatibility);
 
   const visual: RetrievalCandidate[] = [];
   if (config.visualIndexEnabled && mode !== "keyword") {
@@ -720,7 +870,7 @@ export async function retrieveRepositoryContent(
     diagnostics: {
       durationMs: Date.now() - startedAt,
       repositoriesRequested: repositoryIds.length,
-      repositoriesAuthorized: snapshots.length,
+      repositoriesAuthorized: authorizedIds.length,
       denseCandidates: dense.length,
       lexicalCandidates: lexical.length,
       visualCandidates: visual.length,

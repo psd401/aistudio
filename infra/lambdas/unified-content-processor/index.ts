@@ -58,6 +58,10 @@ import {
   isOfficeContentType,
 } from "../../../lib/repositories/content-platform/office-processing";
 import {
+  extractCanonicalTextDocument,
+  isCanonicalTextContentType,
+} from "../../../lib/repositories/content-platform/text-processing";
+import {
   MAX_INLINE_ARTIFACT_CHARACTERS,
   publishDocumentVersion,
   type PublishableArtifact,
@@ -663,6 +667,7 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
           objectKey: repositoryItemVersions.objectKey,
           declaredContentType: repositoryItemVersions.declaredContentType,
           byteSize: repositoryItemVersions.byteSize,
+          metadata: repositoryItemVersions.metadata,
           repositoryId: repositoryItems.repositoryId,
         })
         .from(repositoryItemVersions)
@@ -681,8 +686,15 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
   }
   const isPdf = declaredContentType === "application/pdf";
   const isImage = isImageContentType(declaredContentType);
+  const isText = isCanonicalTextContentType(declaredContentType);
   const mediaKind = mediaKindForContentType(declaredContentType);
-  if (!isPdf && !isImage && !mediaKind && !isOfficeContentType(declaredContentType)) {
+  if (
+    !isPdf &&
+    !isImage &&
+    !isText &&
+    !mediaKind &&
+    !isOfficeContentType(declaredContentType)
+  ) {
     throw new Error("Unified content worker received an unsupported content type");
   }
 
@@ -693,7 +705,11 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
   }
   const processingLimitBytes = mediaKind
     ? Math.min(maximumMediaBytes(mediaKind), config.maxFileSizeGb * 1024 ** 3)
-    : (isPdf ? config.maxPdfSizeMb : isImage ? config.maxImageSizeMb : config.maxOfficeSizeMb) * 1024 ** 2;
+    : (isPdf
+        ? config.maxPdfSizeMb
+        : isImage
+          ? config.maxImageSizeMb
+          : config.maxOfficeSizeMb) * 1024 ** 2;
   if (context.byteSize != null && context.byteSize > processingLimitBytes) {
     throw new Error(`File exceeds the configured ${Math.floor(processingLimitBytes / 1024 ** 2)} MiB processing limit`);
   }
@@ -869,6 +885,22 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
       canonicalText = extracted.canonicalText;
       processorVersion = extracted.processorVersion;
       processorName = "aistudio-office";
+      artifactMetadata = extracted.metadata;
+    } else if (isText) {
+      const metadata = (context.metadata ?? {}) as Record<string, unknown>;
+      const originalFileName =
+        typeof metadata.originalFileName === "string"
+          ? metadata.originalFileName
+          : undefined;
+      const extracted = extractCanonicalTextDocument(
+        source,
+        declaredContentType,
+        originalFileName
+      );
+      segments = extracted.segments;
+      canonicalText = extracted.canonicalText;
+      processorVersion = extracted.processorVersion;
+      processorName = "aistudio-text";
       artifactMetadata = extracted.metadata;
     } else {
       const prepared = await prepareRepositoryImage(source, declaredContentType);
