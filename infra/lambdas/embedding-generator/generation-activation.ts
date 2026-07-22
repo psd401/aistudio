@@ -5,87 +5,122 @@ export interface GenerationActivationResult {
   embedded_item_count: number;
 }
 
+export interface GenerationActivationPlan {
+  lockRepository: SQL;
+  supersedeCurrent: SQL;
+  activateTarget: SQL;
+  publishTarget: SQL;
+}
+
 export type GenerationActivationExecutor = (
-  query: SQL,
+  plan: GenerationActivationPlan,
 ) => Promise<GenerationActivationResult[]>;
 
 /**
  * Atomically supersede the serving generation, activate the fully embedded
  * generation, move the repository pointer, and mark every included item ready.
  * A stale superseded generation is a safe no-op.
+ *
+ * The statements must run sequentially in one transaction. PostgreSQL's partial
+ * unique index for one active generation is immediate, so a single multi-row
+ * CASE update can nondeterministically activate the target before it supersedes
+ * the old row. The repository lock also serializes duplicate final SQS records.
  */
 export async function activateCompletedGeneration(
   generationId: string,
   execute: GenerationActivationExecutor,
 ): Promise<GenerationActivationResult | null> {
-  const rows = await execute(sql`
-    WITH target AS (
-      SELECT id, repository_id
-      FROM repository_index_generations generation
+  const eligibleTarget = sql`
+    SELECT generation.id, generation.repository_id
+    FROM repository_index_generations generation
+    WHERE generation.id = ${generationId}::uuid
+      AND generation.status IN ('building', 'active')
+      AND EXISTS (
+        SELECT 1
+        FROM repository_item_chunks chunk
+        WHERE chunk.index_generation_id = generation.id
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM repository_item_chunks chunk
+        WHERE chunk.index_generation_id = generation.id
+          AND (
+            chunk.embedding IS NULL
+            OR (
+              generation.visual_embedding_model IS NOT NULL
+              AND chunk.modality IN ('image', 'video')
+              AND chunk.visual_embedding IS NULL
+            )
+          )
+      )
+  `;
+
+  const rows = await execute({
+    lockRepository: sql`
+      SELECT repository.id
+      FROM knowledge_repositories repository
+      JOIN repository_index_generations generation
+        ON generation.repository_id = repository.id
       WHERE generation.id = ${generationId}::uuid
-        AND generation.status IN ('building', 'active')
+      FOR UPDATE OF repository
+    `,
+    supersedeCurrent: sql`
+      UPDATE repository_index_generations generation
+      SET status = 'superseded'
+      WHERE generation.status = 'active'
+        AND generation.id <> ${generationId}::uuid
+        AND generation.repository_id = (
+          SELECT target.repository_id FROM (${eligibleTarget}) target
+        )
+    `,
+    activateTarget: sql`
+      UPDATE repository_index_generations generation
+      SET status = 'active',
+          published_at = COALESCE(generation.published_at, now())
+      WHERE generation.id = ${generationId}::uuid
         AND EXISTS (
-          SELECT 1
-          FROM repository_item_chunks chunk
-          WHERE chunk.index_generation_id = generation.id
+          SELECT 1 FROM (${eligibleTarget}) target
+          WHERE target.id = generation.id
         )
         AND NOT EXISTS (
           SELECT 1
+          FROM repository_index_generations active_generation
+          WHERE active_generation.repository_id = generation.repository_id
+            AND active_generation.status = 'active'
+            AND active_generation.id <> generation.id
+        )
+    `,
+    publishTarget: sql`
+      WITH repository_switch AS (
+        UPDATE knowledge_repositories repository
+        SET active_index_generation_id = ${generationId}::uuid,
+            updated_at = now()
+        WHERE repository.id = (
+          SELECT generation.repository_id
+          FROM (${eligibleTarget}) target
+          JOIN repository_index_generations generation
+            ON generation.id = target.id
+          WHERE generation.status = 'active'
+        )
+        RETURNING repository.id
+      ), embedded_items AS (
+        UPDATE repository_items item
+        SET processing_status = 'embedded',
+            processing_error = NULL,
+            updated_at = now()
+        WHERE item.id IN (
+          SELECT DISTINCT chunk.item_id
           FROM repository_item_chunks chunk
-          WHERE chunk.index_generation_id = generation.id
-            AND (
-              chunk.embedding IS NULL
-              OR (
-                generation.visual_embedding_model IS NOT NULL
-                AND chunk.modality IN ('image', 'video')
-                AND chunk.visual_embedding IS NULL
-              )
-            )
+          WHERE chunk.index_generation_id = ${generationId}::uuid
         )
-    ), switched AS (
-      UPDATE repository_index_generations generation
-      SET
-        status = CASE
-          WHEN generation.id = ${generationId}::uuid THEN 'active'
-          ELSE 'superseded'
-        END,
-        published_at = CASE
-          WHEN generation.id = ${generationId}::uuid THEN now()
-          ELSE generation.published_at
-        END
-      FROM target
-      WHERE generation.repository_id = target.repository_id
-        AND (
-          generation.id = ${generationId}::uuid
-          OR generation.status = 'active'
-        )
-      RETURNING target.repository_id, generation.id
-    ), repository_switch AS (
-      UPDATE knowledge_repositories repository
-      SET active_index_generation_id = ${generationId}::uuid,
-          updated_at = now()
-      WHERE repository.id = (SELECT repository_id FROM target)
-        AND EXISTS (
-          SELECT 1 FROM switched WHERE id = ${generationId}::uuid
-        )
-      RETURNING repository.id
-    ), embedded_items AS (
-      UPDATE repository_items item
-      SET processing_status = 'embedded',
-          processing_error = NULL,
-          updated_at = now()
-      WHERE item.id IN (
-        SELECT DISTINCT chunk.item_id
-        FROM repository_item_chunks chunk
-        WHERE chunk.index_generation_id = ${generationId}::uuid
+          AND EXISTS (SELECT 1 FROM repository_switch)
+        RETURNING item.id
       )
-        AND EXISTS (SELECT 1 FROM repository_switch)
-      RETURNING item.id
-    )
-    SELECT
-      repository_switch.id::integer AS repository_id,
-      (SELECT count(*)::integer FROM embedded_items) AS embedded_item_count
-    FROM repository_switch
-  `);
+      SELECT
+        repository_switch.id::integer AS repository_id,
+        (SELECT count(*)::integer FROM embedded_items) AS embedded_item_count
+      FROM repository_switch
+    `,
+  });
   return rows[0] ?? null;
 }

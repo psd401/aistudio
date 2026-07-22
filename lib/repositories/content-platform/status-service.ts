@@ -54,6 +54,7 @@ export function resolveCanonicalItemStatus(
 
   const terminalFailure =
     row.versionStatus === "failed" ||
+    row.versionStatus === "cancelled" ||
     row.storageStatus === "blocked" ||
     row.inspectionStatus === "blocked" ||
     row.inspectionStatus === "error" ||
@@ -61,10 +62,8 @@ export function resolveCanonicalItemStatus(
       !row.buildingGeneration &&
       row.versionStatus === "completed" &&
       row.jobStatus === "succeeded") ||
-    (row.jobStatus === "failed" &&
-      row.jobAttempt !== null &&
-      row.jobMaxAttempts !== null &&
-      row.jobAttempt >= row.jobMaxAttempts);
+    row.jobStatus === "failed" ||
+    row.jobStatus === "cancelled";
   if (terminalFailure) {
     return {
       itemId: row.itemId,
@@ -88,7 +87,11 @@ export function resolveCanonicalItemStatus(
     };
   }
 
-  if (row.jobStatus === "failed") {
+  if (
+    (row.jobStatus === "pending" || row.jobStatus === "queued") &&
+    row.jobAttempt !== null &&
+    row.jobAttempt > 0
+  ) {
     return {
       itemId: row.itemId,
       processingStatus: "retrying",
@@ -227,7 +230,11 @@ export async function retryCanonicalRepositoryItem(
         .limit(1)
         .for("update");
       if (!job) throw new Error("The item has no processing job to retry");
-      if (job.status !== "failed" && job.status !== "succeeded") {
+      if (
+        job.status !== "failed" &&
+        job.status !== "cancelled" &&
+        job.status !== "succeeded"
+      ) {
         throw new Error("The item is already being processed");
       }
 
@@ -249,16 +256,16 @@ export async function retryCanonicalRepositoryItem(
         .update(repositoryProcessingJobs)
         .set({
           status: "pending",
-          maxAttempts: Math.max(
-            job.maxAttempts,
-            job.attempt + CONTENT_PROCESSING_MAX_ATTEMPTS
-          ),
+          attempt: 0,
+          maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
           availableAt: now,
           leaseOwner: null,
           leaseExpiresAt: null,
           traceId: traceId ?? job.traceId,
           lastErrorCode: null,
           lastErrorMessage: null,
+          metrics: {},
+          startedAt: null,
           finishedAt: null,
           updatedAt: now,
         })
@@ -268,6 +275,7 @@ export async function retryCanonicalRepositoryItem(
         .set({
           storageStatus: "quarantined",
           inspectionStatus: "pending",
+          inspectionDetails: {},
           processingStatus: "pending",
         })
         .where(eq(repositoryItemVersions.id, context.itemVersionId));

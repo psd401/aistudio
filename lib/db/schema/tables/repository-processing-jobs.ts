@@ -31,6 +31,8 @@ export type RepositoryProcessingJobStatus =
   | "cancelled";
 
 export interface RepositoryProcessingMetrics {
+  /** One-time deployment handoff; only the matching worker runtime may release it. */
+  postDeployRecovery?: "unified-content-runtime-v2";
   /** Current managed-service wait, used to enforce a bounded deadline. */
   waitReason?:
     | "CONTENT_PLATFORM_DISABLED"

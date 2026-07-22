@@ -82,6 +82,7 @@ import {
   type ContentProcessingMessage,
 } from "./contract";
 import { CONTENT_SWEEP_REDISPATCHABLE_STATUSES } from "../../../lib/repositories/content-platform/job-state";
+import { releasePostDeployRecoveryJobs } from "../../../lib/repositories/content-platform/post-deploy-recovery";
 import {
   classifyContentProcessingError,
   PermanentContentProcessingError,
@@ -1368,6 +1369,12 @@ function isSqsEvent(event: SQSEvent | EventBridgeEvent<string, unknown>): event 
 export async function handler(event: SQSEvent | EventBridgeEvent<string, unknown>): Promise<SQSBatchResponse | void> {
   await ensureDatabaseCredentials();
   if (!isSqsEvent(event)) {
+    const released = await releasePostDeployRecoveryJobs();
+    if (released.length > 0) {
+      log.info("Released post-deployment unified content recovery jobs", {
+        count: released.length,
+      });
+    }
     await dispatchPendingJobs();
     return;
   }

@@ -1,10 +1,9 @@
 import { activateCompletedGeneration } from '../generation-activation';
-import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 
 describe('atomic generation activation', () => {
   test('returns the switched repository and all embedded items', async () => {
-    const execute = jest.fn(async (_query: SQL) => [
+    const execute = jest.fn(async () => [
       { repository_id: 7, embedded_item_count: 3 },
     ]);
 
@@ -16,10 +15,16 @@ describe('atomic generation activation', () => {
     ).resolves.toEqual({ repository_id: 7, embedded_item_count: 3 });
     expect(execute).toHaveBeenCalledTimes(1);
 
-    const activationQuery = execute.mock.calls[0]?.[0];
-    expect(activationQuery).toBeDefined();
-    const query = new PgDialect().sqlToQuery(activationQuery as SQL);
-    const normalizedSql = query.sql.replace(/\s+/g, ' ');
+    const plan = execute.mock.calls[0]?.[0];
+    expect(plan).toBeDefined();
+    const dialect = new PgDialect();
+    const normalizedSql = Object.values(plan ?? {})
+      .map((query) => dialect.sqlToQuery(query).sql)
+      .join(' ')
+      .replace(/\s+/g, ' ');
+    expect(normalizedSql).toContain('FOR UPDATE OF repository');
+    expect(normalizedSql).toContain("SET status = 'superseded'");
+    expect(normalizedSql).toContain("SET status = 'active'");
     expect(normalizedSql).toContain(
       'AND EXISTS ( SELECT 1 FROM repository_item_chunks chunk'
     );

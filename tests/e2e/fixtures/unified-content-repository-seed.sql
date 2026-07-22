@@ -129,20 +129,22 @@ VALUES (
   'inspect',
   'failed',
   'e2e-terminal-retry:inspect',
-  5,
-  5,
+  1,
+  20,
   'E2E_TERMINAL_FAILURE',
   'Simulated terminal processing failure',
   now()
 )
 ON CONFLICT (id) DO UPDATE
 SET status = 'failed',
-    attempt = 5,
-    max_attempts = 5,
+    attempt = 1,
+    max_attempts = 20,
     available_at = now(),
     lease_owner = NULL,
     lease_expires_at = NULL,
     last_error_code = 'E2E_TERMINAL_FAILURE',
     last_error_message = 'Simulated terminal processing failure',
+    metrics = '{"textractJobId":"stale-e2e-job","waitReason":"AWAITING_OCR"}'::jsonb,
+    started_at = now(),
     finished_at = now(),
     updated_at = now();

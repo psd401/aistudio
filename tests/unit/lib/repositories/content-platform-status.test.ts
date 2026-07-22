@@ -81,10 +81,43 @@ describe("canonical repository item status", () => {
     ).toBe(false);
   });
 
-  it("keeps transient failed attempts in a retrying state", () => {
+  it("exposes an early failed job as terminal instead of retrying forever", () => {
     expect(
       resolveCanonicalItemStatus(
-        statusRow({ jobStatus: "failed", jobAttempt: 1, jobMaxAttempts: 3 })
+        statusRow({
+          jobStatus: "failed",
+          jobAttempt: 1,
+          jobMaxAttempts: 20,
+          jobError: "Item version object key is outside its repository namespace",
+        })
+      )
+    ).toMatchObject({
+      processingStatus: "failed",
+      processingError: "Item version object key is outside its repository namespace",
+      canRetry: true,
+    });
+  });
+
+  it("exposes cancelled pre-deployment jobs as retryable failures", () => {
+    expect(
+      resolveCanonicalItemStatus(
+        statusRow({
+          versionStatus: "cancelled",
+          jobStatus: "cancelled",
+          jobError: "Content processing was disabled during deployment",
+        })
+      )
+    ).toMatchObject({
+      processingStatus: "failed",
+      processingError: "Content processing was disabled during deployment",
+      canRetry: true,
+    });
+  });
+
+  it("shows pending work with a consumed attempt as retrying", () => {
+    expect(
+      resolveCanonicalItemStatus(
+        statusRow({ jobStatus: "pending", jobAttempt: 1, jobMaxAttempts: 5 })
       ).processingStatus
     ).toBe("retrying");
   });
