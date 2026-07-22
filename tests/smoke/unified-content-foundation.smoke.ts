@@ -30,6 +30,7 @@ import {
 import {
   extractPdfText,
   extractOfficeDocument,
+  extractCanonicalTextDocument,
   buildImageSearchDocument,
   DEFAULT_CONTENT_PLATFORM_CONFIG,
   completeRepositoryUpload,
@@ -325,6 +326,128 @@ try {
     canonicalOnly: true,
   });
   assert.equal(isolatedResults.length, 0);
+
+  const [legacyOnlyItem] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItems)
+        .values({
+          repositoryId: repository.id,
+          type: "text",
+          name: "Legacy compatibility smoke",
+          source: "text_input",
+          processingStatus: "completed",
+        })
+        .returning({ id: repositoryItems.id }),
+    "smoke.unifiedContent.createLegacyOnlyItem"
+  );
+  assert.ok(legacyOnlyItem);
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryItemChunks).values({
+        itemId: legacyOnlyItem.id,
+        content:
+          "ORCHID-COMPASS-SMOKE uses the silver lighthouse protocol",
+        chunkIndex: 0,
+        metadata: { source: "text_input" },
+      }),
+    "smoke.unifiedContent.createLegacyOnlyChunk"
+  );
+  const compatibilityResults = await retrieveRepositoryContent({
+    query: "ORCHID-COMPASS-SMOKE",
+    repositoryIds: [repository.id],
+    userCognitoSub: "e2e-test-user",
+    mode: "keyword",
+    rerank: false,
+  });
+  assert.equal(compatibilityResults.results.length, 1);
+  assert.equal(compatibilityResults.results[0]?.itemId, legacyOnlyItem.id);
+  assert.equal(compatibilityResults.results[0]?.versionNumber, 0);
+  assert.equal(
+    compatibilityResults.results[0]?.citations[0]?.label,
+    "Legacy compatibility smoke"
+  );
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryItemChunks)
+        .set({ accessScope: { userIds: [] } })
+        .where(eq(repositoryItemChunks.itemId, legacyOnlyItem.id)),
+    "smoke.unifiedContent.restrictLegacyCompatibilitySegment"
+  );
+  const deniedCompatibilityResults = await retrieveRepositoryContent({
+    query: "ORCHID-COMPASS-SMOKE",
+    repositoryIds: [repository.id],
+    userCognitoSub: "e2e-test-user",
+    mode: "keyword",
+    rerank: false,
+  });
+  assert.equal(deniedCompatibilityResults.results.length, 0);
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryItemChunks)
+        .set({ accessScope: {} })
+        .where(eq(repositoryItemChunks.itemId, legacyOnlyItem.id)),
+    "smoke.unifiedContent.restoreLegacyCompatibilitySegment"
+  );
+
+  const [textItem] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItems)
+        .values({
+          repositoryId: repository.id,
+          type: "text",
+          name: "Canonical text smoke",
+          source: `repositories/${repository.id}/fixture/reference.txt`,
+          processingStatus: "pending",
+        })
+        .returning({ id: repositoryItems.id }),
+    "smoke.unifiedContent.createTextItem"
+  );
+  assert.ok(textItem);
+  const textRegistration = await registerCanonicalUpload({
+    itemId: textItem.id,
+    userId: owner.id,
+    objectKey: `repositories/${repository.id}/fixture/reference.txt`,
+    originalFileName: "reference.txt",
+    declaredContentType: "text/plain",
+    byteSize: 64,
+    traceId: "unified-content-text-smoke",
+  });
+  const textExtraction = extractCanonicalTextDocument(
+    Buffer.from("MOONLIT-HARBOR-SMOKE uses the indigo compass procedure."),
+    "text/plain",
+    "reference.txt"
+  );
+  const textPublication = await publishDocumentVersion({
+    itemVersionId: textRegistration.version.id,
+    processorVersion: textExtraction.processorVersion,
+    processorName: "aistudio-text",
+    detectedContentType: textExtraction.detectedContentType,
+    inspectionStatus: "clean",
+    malwareScanRequired: true,
+    canonicalText: textExtraction.canonicalText,
+    segments: textExtraction.segments,
+    artifactMetadata: textExtraction.metadata,
+  });
+  const canonicalTextResults = await retrieveRepositoryContent({
+    query: "MOONLIT-HARBOR-SMOKE",
+    repositoryIds: [repository.id],
+    userCognitoSub: "e2e-test-user",
+    mode: "keyword",
+    rerank: false,
+  });
+  assert.equal(canonicalTextResults.results.length, 1);
+  assert.equal(
+    canonicalTextResults.results[0]?.generationId,
+    textPublication.generationId
+  );
+  assert.equal(
+    canonicalTextResults.results[0]?.citations[0]?.label,
+    "reference.txt"
+  );
 
   const [officeItem] = await executeQuery(
     (db) =>

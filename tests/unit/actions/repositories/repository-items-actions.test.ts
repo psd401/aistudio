@@ -18,6 +18,8 @@ const mockGetRepositoryItems = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(
 const mockGetRepositoryItemById = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 const mockCreateRepositoryItem = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 const mockUpdateRepositoryItemStatus = jest.fn<(...a: unknown[]) => Promise<unknown>>()
+const mockUploadDocument = jest.fn<(...a: unknown[]) => Promise<unknown>>()
+const mockQueueFileForProcessing = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 const mockRegisterCanonicalUploadIfEnabled = jest.fn<(...a: unknown[]) => Promise<unknown>>(
   () => Promise.resolve(null)
 )
@@ -28,6 +30,14 @@ const mockGetDocumentObjectMetadata = jest.fn<(...a: unknown[]) => Promise<unkno
 const mockGetDocumentSignedUrl = jest.fn<(...a: unknown[]) => Promise<string>>()
 const mockDeleteRepositoryItem = jest.fn<(...a: unknown[]) => Promise<number>>()
 const mockDeleteRepositoryItemStorage = jest.fn<(...a: unknown[]) => Promise<unknown>>()
+const mockRegisterCanonicalTextIfEnabled = jest.fn<
+  (...a: unknown[]) => Promise<unknown>
+>(() => Promise.resolve(null))
+const mockExecuteTransaction = jest.fn<
+  (...a: unknown[]) => Promise<unknown>
+>()
+const mockRepositoryItemsTable = { table: 'repository_items' }
+const mockRepositoryItemChunksTable = { table: 'repository_item_chunks' }
 
 jest.mock('@/lib/auth/server-session', () => ({ getServerSession: mockGetServerSession }))
 jest.mock('@/utils/roles', () => ({ hasCapabilityAccess: mockHasCapabilityAccess }))
@@ -55,17 +65,28 @@ jest.mock('@/lib/db/drizzle', () => ({
 }))
 jest.mock('@/lib/db/drizzle-client', () => ({
   executeQuery: jest.fn(() => Promise.resolve([])),
-  executeTransaction: jest.fn(),
-  repositoryItems: {}, repositoryItemChunks: {},
+  executeTransaction: mockExecuteTransaction,
+  repositoryItems: mockRepositoryItemsTable,
+  repositoryItemChunks: mockRepositoryItemChunksTable,
 }))
 jest.mock('@/lib/aws/s3-client', () => ({
-  uploadDocument: jest.fn(),
+  uploadDocument: mockUploadDocument,
   deleteDocument: jest.fn(),
   getDocumentObjectMetadata: mockGetDocumentObjectMetadata,
   getDocumentSignedUrl: mockGetDocumentSignedUrl,
 }))
-jest.mock('@/lib/services/file-processing-service', () => ({ queueFileForProcessing: jest.fn(), processUrl: jest.fn() }))
+jest.mock('@/lib/services/file-processing-service', () => ({
+  queueFileForProcessing: mockQueueFileForProcessing,
+  processUrl: jest.fn(),
+}))
 jest.mock('@/lib/repositories/content-platform', () => ({
+  isCanonicalUploadContentType: (contentType: string) => [
+    'application/pdf',
+    'text/plain',
+    'text/markdown',
+    'text/csv',
+  ].includes(contentType),
+  registerCanonicalTextIfEnabled: mockRegisterCanonicalTextIfEnabled,
   registerCanonicalUploadIfEnabled: mockRegisterCanonicalUploadIfEnabled,
   dispatchContentProcessingJob: mockDispatchContentProcessingJob,
   deleteRepositoryItemStorage: mockDeleteRepositoryItemStorage,
@@ -89,7 +110,14 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     mockAssertItemRepositoryReadAccess.mockResolvedValue(undefined)
     mockAssertNotSystemManagedRepository.mockResolvedValue(undefined)
     mockRegisterCanonicalUploadIfEnabled.mockResolvedValue(null)
+    mockRegisterCanonicalTextIfEnabled.mockResolvedValue(null)
+    mockExecuteTransaction.mockReset()
     mockDispatchContentProcessingJob.mockResolvedValue(undefined)
+    mockUploadDocument.mockResolvedValue({
+      key: 'repositories/7/direct/document.pdf',
+      url: 's3://documents/repositories/7/direct/document.pdf',
+    })
+    mockQueueFileForProcessing.mockResolvedValue('legacy-job')
     mockGetDocumentObjectMetadata.mockResolvedValue({
       contentLength: 1,
       contentType: 'application/pdf',
@@ -177,6 +205,58 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     })
   })
 
+  it('registers direct document uploads with the canonical pipeline', async () => {
+    mockCreateRepositoryItem.mockResolvedValue({
+      id: 4,
+      repositoryId: 7,
+      type: 'document',
+      name: 'Direct document',
+      source: 'repositories/7/direct/document.pdf',
+      metadata: {},
+      processingStatus: 'pending',
+      processingError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    mockRegisterCanonicalUploadIfEnabled.mockResolvedValue({
+      created: true,
+      version: { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' },
+      inspectJob: { id: 'ffffffff-1111-4222-8333-444444444444' },
+    })
+
+    const result = await mod.addDocumentItem({
+      repository_id: 7,
+      name: 'Direct document',
+      file: {
+        content: Buffer.from('pdf-bytes'),
+        contentType: 'application/pdf',
+        size: 9,
+        fileName: 'document.pdf',
+      },
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockRegisterCanonicalUploadIfEnabled).toHaveBeenCalledWith({
+      itemId: 4,
+      userId: 1,
+      objectKey: 'repositories/7/direct/document.pdf',
+      originalFileName: 'document.pdf',
+      declaredContentType: 'application/pdf',
+      byteSize: 9,
+      traceId: 't',
+    })
+    expect(mockDispatchContentProcessingJob).toHaveBeenCalledWith({
+      jobId: 'ffffffff-1111-4222-8333-444444444444',
+      itemVersionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    })
+    expect(mockQueueFileForProcessing).toHaveBeenCalledWith(
+      4,
+      'repositories/7/direct/document.pdf',
+      'Direct document',
+      'application/pdf'
+    )
+  })
+
   it('keeps the legacy upload available when the canonical shadow write fails', async () => {
     mockCreateRepositoryItem.mockResolvedValue({
       id: 2, repositoryId: 7, type: 'document', name: 'doc', source: 'repositories/7/abc/doc.pdf',
@@ -192,6 +272,62 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     })
 
     expect(res.isSuccess).toBe(true)
+  })
+
+  it('dispatches inline text through the canonical processing pipeline', async () => {
+    const itemValues = jest.fn(() => ({
+      returning: jest.fn(() => Promise.resolve([{ id: 37 }])),
+    }))
+    const chunkValues = jest.fn(() => Promise.resolve())
+    const insert = jest.fn((table: unknown) =>
+      table === mockRepositoryItemsTable
+        ? { values: itemValues }
+        : { values: chunkValues }
+    )
+    mockExecuteTransaction.mockImplementation(async (...args: unknown[]) => {
+      const operation = args[0]
+      if (typeof operation !== 'function') {
+        throw new Error('Expected a transaction callback')
+      }
+      return (operation as (tx: unknown) => Promise<unknown>)({ insert })
+    })
+    mockGetRepositoryItemById.mockResolvedValue({
+      id: 37,
+      repositoryId: 7,
+      type: 'text',
+      name: 'Live validation',
+      source: 'ORCHID-COMPASS-742',
+      metadata: {},
+      processingStatus: 'completed',
+      processingError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    mockRegisterCanonicalTextIfEnabled.mockResolvedValue({
+      created: true,
+      version: { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' },
+      inspectJob: { id: 'ffffffff-1111-4222-8333-444444444444' },
+    })
+
+    const result = await mod.addTextItem({
+      repository_id: 7,
+      name: 'Live validation',
+      content: 'ORCHID-COMPASS-742',
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockRegisterCanonicalTextIfEnabled).toHaveBeenCalledWith({
+      itemId: 37,
+      repositoryId: 7,
+      userId: 1,
+      name: 'Live validation',
+      content: 'ORCHID-COMPASS-742',
+      traceId: 't',
+    })
+    expect(mockDispatchContentProcessingJob).toHaveBeenCalledWith({
+      jobId: 'ffffffff-1111-4222-8333-444444444444',
+      itemVersionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    })
   })
 
   it('rejects a presigned upload when the stored object size differs', async () => {

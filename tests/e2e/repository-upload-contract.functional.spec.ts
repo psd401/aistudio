@@ -56,6 +56,32 @@ test.describe('Unified repository upload contract (authenticated)', () => {
     })
   })
 
+  test('adds inline text through the repository item workflow', async ({ page }) => {
+    const itemName = `E2E inline retrieval ${Date.now()}`
+
+    await page.goto('/repositories')
+    const repositoryRow = page
+      .getByRole('row')
+      .filter({ hasText: 'E2E Unified Content Repository' })
+    await repositoryRow.getByRole('button').first().click()
+    await expect(page).toHaveURL(/\/repositories\/\d+$/)
+
+    await page.getByRole('button', { name: /Add (Item|your first item)/i }).first().click()
+    const dialog = page.getByRole('dialog')
+    await dialog.getByRole('tab', { name: 'Text' }).click()
+    await dialog.getByLabel('Name').fill(itemName)
+    await dialog
+      .getByLabel('Content')
+      .fill('ORCHID-COMPASS-E2E uses the silver lighthouse protocol.')
+    await dialog.getByRole('button', { name: 'Add Text' }).click()
+
+    await expect(dialog).toBeHidden()
+    await expect(page.getByText(itemName, { exact: true })).toBeVisible()
+    await expect(
+      page.getByRole('row').filter({ hasText: itemName })
+    ).toContainText(/Processed|Completed/i)
+  })
+
   test('uploads and completes a canonical PDF without invoking the legacy action', async ({ page }) => {
     let initiation: Record<string, unknown> | null = null
     let completion: Record<string, unknown> | null = null

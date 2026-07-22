@@ -31,6 +31,7 @@ import {
   mediaKindForContentType,
 } from "./media-processing";
 import { isOfficeContentType } from "./office-processing";
+import { isCanonicalTextContentType } from "./text-processing";
 
 export interface InitiateRepositoryUploadInput {
   repositoryId: number;
@@ -110,6 +111,7 @@ export function isCanonicalUploadContentType(contentType: string): boolean {
   return (
     contentType === "application/pdf" ||
     isOfficeContentType(contentType) ||
+    isCanonicalTextContentType(contentType) ||
     isImageContentType(contentType) ||
     mediaKindForContentType(contentType) !== null
   );
@@ -144,7 +146,7 @@ function validateInitiation(
   }
   if (!isCanonicalUploadContentType(input.contentType)) {
     throw new Error(
-      "The canonical processor accepts PDF, Office, image, audio, and video files only"
+      "The canonical processor accepts PDF, Office, text, image, audio, and video files only"
     );
   }
   const mediaKind = mediaKindForContentType(input.contentType);

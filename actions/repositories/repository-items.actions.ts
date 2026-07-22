@@ -40,6 +40,8 @@ import { toContentDispositionValue } from "@/lib/repositories/content-dispositio
 import {
   deleteRepositoryItemStorage,
   dispatchContentProcessingJob,
+  isCanonicalUploadContentType,
+  registerCanonicalTextIfEnabled,
   registerCanonicalUploadIfEnabled,
 } from "@/lib/repositories/content-platform"
 
@@ -106,6 +108,94 @@ export interface AddDocumentWithPresignedUrlInput {
     contentType: string
     size: number
     originalFileName: string
+  }
+}
+
+async function shadowWriteCanonicalText(
+  input: {
+    itemId: number
+    repositoryId: number
+    userId: number
+    name: string
+    content: string
+    traceId: string
+  },
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  try {
+    const canonical = await registerCanonicalTextIfEnabled(input)
+    if (!canonical) return
+
+    log.info("Canonical inline text version registered", {
+      itemId: input.itemId,
+      versionId: canonical.version.id,
+      processingJobId: canonical.inspectJob.id,
+      created: canonical.created,
+    })
+    try {
+      await dispatchContentProcessingJob({
+        jobId: canonical.inspectJob.id,
+        itemVersionId: canonical.version.id,
+      })
+    } catch (dispatchError) {
+      log.warn("Canonical inline text processing is pending scheduled dispatch", {
+        processingJobId: canonical.inspectJob.id,
+        error:
+          dispatchError instanceof Error
+            ? dispatchError.message
+            : "Unknown error",
+      })
+    }
+  } catch (error) {
+    log.error("Canonical inline text shadow write failed", {
+      itemId: input.itemId,
+      error: error instanceof Error ? error.message : "Unknown error",
+    })
+  }
+}
+
+async function shadowWriteCanonicalUpload(
+  input: {
+    itemId: number
+    userId: number
+    objectKey: string
+    originalFileName: string
+    declaredContentType: string
+    byteSize: number
+    traceId: string
+  },
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  if (!isCanonicalUploadContentType(input.declaredContentType)) return
+  try {
+    const canonical = await registerCanonicalUploadIfEnabled(input)
+    if (!canonical) return
+
+    log.info("Canonical repository version registered", {
+      itemId: input.itemId,
+      versionId: canonical.version.id,
+      processingJobId: canonical.inspectJob.id,
+      created: canonical.created,
+    })
+    try {
+      await dispatchContentProcessingJob({
+        jobId: canonical.inspectJob.id,
+        itemVersionId: canonical.version.id,
+      })
+    } catch (dispatchError) {
+      log.warn("Canonical processing is pending scheduled dispatch", {
+        processingJobId: canonical.inspectJob.id,
+        error:
+          dispatchError instanceof Error
+            ? dispatchError.message
+            : "Unknown error",
+      })
+    }
+  } catch (error) {
+    log.error("Canonical repository shadow write failed", {
+      itemId: input.itemId,
+      error: error instanceof Error ? error.message : "Unknown error",
+    })
   }
 }
 
@@ -234,7 +324,7 @@ export async function addDocumentItem(
       })
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
-    
+
     // Validate and sanitize inputs
     const validationError = validateAddDocumentInput(input)
     if (validationError) {
@@ -310,6 +400,19 @@ export async function addDocumentItem(
 
     // Convert to action type
     const item: RepositoryItem = mapToRepositoryItem(itemRaw)
+
+    await shadowWriteCanonicalUpload(
+      {
+        itemId: item.id,
+        userId,
+        objectKey: key,
+        originalFileName: sanitizedFilename,
+        declaredContentType: input.file.contentType,
+        byteSize: fileContent.byteLength,
+        traceId: requestId,
+      },
+      log
+    )
 
     // Queue the document for processing
     log.info("Queueing document for processing", {
@@ -487,8 +590,8 @@ export async function addDocumentWithPresignedUrl(
     // CONTENT_READ_V2_ENABLED is separately enabled. A shadow-write failure is
     // observable but does not make the existing upload disappear from the user;
     // the pending repository item can be reconciled and replayed safely.
-    try {
-      const canonical = await registerCanonicalUploadIfEnabled({
+    await shadowWriteCanonicalUpload(
+      {
         itemId: item.id,
         userId,
         objectKey: input.s3Key,
@@ -496,35 +599,9 @@ export async function addDocumentWithPresignedUrl(
         declaredContentType: input.metadata.contentType,
         byteSize: input.metadata.size,
         traceId: requestId,
-      })
-      if (canonical) {
-        log.info("Canonical repository version registered", {
-          itemId: item.id,
-          versionId: canonical.version.id,
-          processingJobId: canonical.inspectJob.id,
-          created: canonical.created,
-        })
-        try {
-          await dispatchContentProcessingJob({
-            jobId: canonical.inspectJob.id,
-            itemVersionId: canonical.version.id,
-          })
-        } catch (dispatchError) {
-          log.warn("Canonical processing is pending scheduled dispatch", {
-            processingJobId: canonical.inspectJob.id,
-            error:
-              dispatchError instanceof Error
-                ? dispatchError.message
-                : "Unknown error",
-          })
-        }
-      }
-    } catch (error) {
-      log.error("Canonical repository shadow write failed", {
-        itemId: item.id,
-        error: error instanceof Error ? error.message : "Unknown error",
-      })
-    }
+      },
+      log
+    )
 
     // Queue for processing (embedding generation, etc.)
     log.info("Queueing document for processing", {
@@ -739,6 +816,13 @@ export async function addTextItem(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    if (!input.name.trim()) {
+      return { isSuccess: false, message: "Name is required" }
+    }
+    if (!input.content.trim()) {
+      return { isSuccess: false, message: "Text content is required" }
+    }
+
     // Get the user ID from the cognito_sub
     log.debug("Getting user ID from session")
     const userId = await getUserIdFromSession(session.sub)
@@ -796,6 +880,22 @@ export async function addTextItem(
         return newItem.id;
       },
       'addTextItem'
+    )
+
+    // Inline text previously bypassed the canonical pipeline entirely. Keep
+    // the legacy row for rollback, but shadow-write a repository-scoped text
+    // object so Retrieval v2 receives an immutable version, generation,
+    // embeddings, and exact citation through the same worker as file uploads.
+    await shadowWriteCanonicalText(
+      {
+        itemId,
+        repositoryId: input.repository_id,
+        userId,
+        name: input.name,
+        content: input.content,
+        traceId: requestId,
+      },
+      log
     )
 
     // Fetch the created item via Drizzle

@@ -120,11 +120,11 @@ describe("canonical repository upload initiation", () => {
 
     await expect(
       initiateRepositoryUpload(
-        { ...baseInput, contentType: "text/plain" },
+        { ...baseInput, contentType: "application/zip" },
         DEFAULT_CONTENT_PLATFORM_CONFIG,
         storage
       )
-    ).rejects.toThrow("PDF, Office, image, audio, and video files only");
+    ).rejects.toThrow("PDF, Office, text, image, audio, and video files only");
     await expect(
       initiateRepositoryUpload(
         { ...baseInput, byteSize: 500 * 1024 ** 2 + 1 },
@@ -134,6 +134,39 @@ describe("canonical repository upload initiation", () => {
     ).rejects.toThrow("500 MiB");
     expect(storage.createSingleUpload).not.toHaveBeenCalled();
     expect(storage.createMultipartUpload).not.toHaveBeenCalled();
+  });
+
+  it("accepts UTF-8 text formats using the bounded in-memory processor limit", async () => {
+    const storage = createStorage();
+
+    await expect(
+      initiateRepositoryUpload(
+        {
+          ...baseInput,
+          itemName: "Quick reference",
+          fileName: "quick-reference.txt",
+          contentType: "text/plain",
+          byteSize: 1024,
+        },
+        DEFAULT_CONTENT_PLATFORM_CONFIG,
+        storage
+      )
+    ).resolves.toMatchObject({ uploadMethod: "single" });
+    expect(storage.createSingleUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ contentType: "text/plain" })
+    );
+    await expect(
+      initiateRepositoryUpload(
+        {
+          ...baseInput,
+          fileName: "oversized.csv",
+          contentType: "text/csv",
+          byteSize: 100 * 1024 ** 2 + 1,
+        },
+        DEFAULT_CONTENT_PLATFORM_CONFIG,
+        storage
+      )
+    ).rejects.toThrow("100 MiB");
   });
 
   it("accepts Office documents and enforces their independent size limit", async () => {
