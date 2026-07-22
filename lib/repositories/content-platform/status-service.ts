@@ -225,7 +225,12 @@ export async function retryCanonicalRepositoryItem(
       const [job] = await tx
         .select()
         .from(repositoryProcessingJobs)
-        .where(eq(repositoryProcessingJobs.itemVersionId, context.itemVersionId))
+        .where(
+          and(
+            eq(repositoryProcessingJobs.itemVersionId, context.itemVersionId),
+            eq(repositoryProcessingJobs.stage, "inspect")
+          )
+        )
         .orderBy(desc(repositoryProcessingJobs.createdAt))
         .limit(1)
         .for("update");

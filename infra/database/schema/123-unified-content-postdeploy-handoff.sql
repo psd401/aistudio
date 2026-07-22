@@ -22,10 +22,12 @@ SET status = 'cancelled',
 WHERE job.stage = 'inspect'
   AND (
     job.metrics ->> 'postDeployRecovery' = 'unified-content-runtime-v2'
-    OR job.status IN ('failed', 'cancelled')
     OR (
-      job.status = 'pending'
-      AND job.last_error_code = 'RECOVERED_BY_MIGRATION_122'
+      job.status IN ('pending', 'queued', 'running', 'cancelled')
+      AND job.last_error_code IN (
+        'RECOVERED_BY_MIGRATION_122',
+        'CONTENT_PLATFORM_DISABLED'
+      )
     )
     OR (
       job.status = 'succeeded'

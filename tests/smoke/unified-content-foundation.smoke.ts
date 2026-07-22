@@ -323,11 +323,87 @@ try {
     canRetry: true,
   });
 
-  // Reproduce the real CDK order: the migration runs while the old worker is
-  // still deployed. It must leave the recovery job terminal and unavailable.
+  // Migration 123 must not replay an unrelated terminal user failure merely
+  // because it is a current canonical inspect job.
   await executeQuery(
     (db) => db.execute(sql.raw(postDeployHandoffSql)),
     "smoke.unifiedContent.applyPostDeployHandoff"
+  );
+  const [untouchedFailure] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          jobStatus: repositoryProcessingJobs.status,
+          attempt: repositoryProcessingJobs.attempt,
+          maxAttempts: repositoryProcessingJobs.maxAttempts,
+          errorCode: repositoryProcessingJobs.lastErrorCode,
+          metrics: repositoryProcessingJobs.metrics,
+          versionStatus: repositoryItemVersions.processingStatus,
+          itemStatus: repositoryItems.processingStatus,
+        })
+        .from(repositoryProcessingJobs)
+        .innerJoin(
+          repositoryItemVersions,
+          eq(repositoryItemVersions.id, repositoryProcessingJobs.itemVersionId)
+        )
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.currentVersionId, repositoryItemVersions.id)
+        )
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readUnrelatedTerminalFailure"
+  );
+  assert.deepEqual(untouchedFailure, {
+    jobStatus: "failed",
+    attempt: 1,
+    maxAttempts: 20,
+    errorCode: "PROCESSING_ERROR",
+    metrics: {
+      textractJobId: "stale-provider-job",
+      waitReason: "AWAITING_OCR",
+    },
+    versionStatus: "failed",
+    itemStatus: "failed",
+  });
+
+  // Reproduce the exact live post-migration state that requires the handoff:
+  // the old runtime cancelled a migration-122 replay while content processing
+  // was unavailable during deployment.
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        WITH cancelled_job AS (
+          UPDATE repository_processing_jobs
+          SET status = 'cancelled',
+              attempt = 2,
+              max_attempts = 20,
+              last_error_code = 'CONTENT_PLATFORM_DISABLED',
+              last_error_message = 'old runtime could not read the canonical source',
+              metrics = '{}'::jsonb,
+              started_at = now(),
+              finished_at = now(),
+              updated_at = now()
+          WHERE id = ${retryRegistration.inspectJob.id}::uuid
+          RETURNING item_version_id
+        ), pending_version AS (
+          UPDATE repository_item_versions
+          SET storage_status = 'quarantined',
+              inspection_status = 'pending',
+              processing_status = 'pending'
+          WHERE id IN (SELECT item_version_id FROM cancelled_job)
+          RETURNING item_id
+        )
+        UPDATE repository_items
+        SET processing_status = 'pending',
+            processing_error = NULL
+        WHERE id IN (SELECT item_id FROM pending_version)
+      `),
+    "smoke.unifiedContent.createKnownPostDeployFailure"
+  );
+  await executeQuery(
+    (db) => db.execute(sql.raw(postDeployHandoffSql)),
+    "smoke.unifiedContent.reapplyPostDeployHandoff"
   );
   const [quarantinedState] = await executeQuery(
     (db) =>
@@ -364,8 +440,8 @@ try {
     postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER,
   });
   assert.equal(quarantinedState?.availableAt, "infinity");
-  assert.equal(quarantinedState?.versionStatus, "failed");
-  assert.equal(quarantinedState?.itemStatus, "failed");
+  assert.equal(quarantinedState?.versionStatus, "pending");
+  assert.equal(quarantinedState?.itemStatus, "pending");
 
   const [oldWorkerSweep] = await executeQuery(
     (db) =>
@@ -381,7 +457,13 @@ try {
   );
   assert.equal(oldWorkerSweep?.count, 0);
 
-  const released = await releasePostDeployRecoveryJobs();
+  // The replacement runtime must wait longer than the old Lambda's maximum
+  // execution time before releasing a marked row.
+  assert.deepEqual(await releasePostDeployRecoveryJobs(), []);
+  const released = await releasePostDeployRecoveryJobs({
+    graceMinutes: 0,
+    now: new Date(Date.now() + 60_000),
+  });
   assert.deepEqual(released, [
     {
       id: retryRegistration.inspectJob.id,
@@ -443,7 +525,13 @@ try {
     },
     "smoke.unifiedContent.createNoncanonicalMarkedHandoff"
   );
-  assert.deepEqual(await releasePostDeployRecoveryJobs(), []);
+  assert.deepEqual(
+    await releasePostDeployRecoveryJobs({
+      graceMinutes: 0,
+      now: new Date(Date.now() + 60_000),
+    }),
+    []
+  );
   await executeQuery(
     (db) =>
       db
@@ -481,6 +569,21 @@ try {
       `),
     "smoke.unifiedContent.createCancelledRetryState"
   );
+  const [newerDownstreamJob] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryProcessingJobs)
+        .values({
+          itemVersionId: retryRegistration.version.id,
+          stage: "normalize",
+          status: "succeeded",
+          idempotencyKey: `${retryRegistration.version.id}:normalize:smoke`,
+          finishedAt: new Date(),
+        })
+        .returning({ id: repositoryProcessingJobs.id }),
+    "smoke.unifiedContent.createNewerDownstreamJob"
+  );
+  assert.ok(newerDownstreamJob);
   const restarted = await retryCanonicalRepositoryItem(
     retryItem.id,
     "unified-content-smoke-manual-retry"
@@ -521,6 +624,16 @@ try {
   assert.equal(restartedState?.versionStatus, "pending");
   assert.equal(restartedState?.storageStatus, "quarantined");
   assert.equal(restartedState?.itemStatus, "pending");
+  const [downstreamState] = await executeQuery(
+    (db) =>
+      db
+        .select({ status: repositoryProcessingJobs.status })
+        .from(repositoryProcessingJobs)
+        .where(eq(repositoryProcessingJobs.id, newerDownstreamJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readUnchangedDownstreamJob"
+  );
+  assert.equal(downstreamState?.status, "succeeded");
 
   const publication = await publishPdfVersion({
     itemVersionId: first.version.id,

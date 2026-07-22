@@ -53,6 +53,13 @@ describe("unified-content post-deployment handoff migration", () => {
     expect(migration).not.toContain("SET status = 'pending'");
   });
 
+  it("matches only known migration-122 and deployment-runtime signatures", () => {
+    expect(migration).toContain("'RECOVERED_BY_MIGRATION_122'");
+    expect(migration).toContain("'CONTENT_PLATFORM_DISABLED'");
+    expect(migration).toContain("item.processing_status = 'embedding_failed'");
+    expect(migration).not.toContain("job.status IN ('failed', 'cancelled')");
+  });
+
   it("excludes blocked, noncanonical, inactive, and already-serving versions", () => {
     expect(migration).toContain(
       "job.last_error_code IS DISTINCT FROM 'SECURITY_INSPECTION_BLOCKED'"

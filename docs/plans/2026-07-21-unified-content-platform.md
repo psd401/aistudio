@@ -775,13 +775,19 @@ closes the complete set before another deployment:
 - Migrations 122 and 123 now quarantine eligible current inspect jobs as
   `cancelled` with an infinite availability time and a versioned handoff marker.
   Migration 123 safely repairs environments where the earlier form of migration
-  122 already ran. Already-serving generations, noncanonical source keys,
-  superseded versions, and security-blocked content are never reprocessed.
+  122 already ran, but only for its marker, its explicit recovery error, the
+  observed deployment-disabled state, or the legacy embedding-failure state.
+  Unrelated terminal user failures, already-serving generations, noncanonical
+  source keys, superseded versions, and security-blocked content are never
+  reprocessed.
 - The new unified-content worker releases quarantined jobs in bounded,
-  transactionally claimed batches during its scheduled sweep. Release resets
-  attempts, leases, timestamps, errors, and provider metrics before normal
-  dispatch, so the previous worker cannot win the migration-to-code deployment
-  gap and stale Textract/BDA state cannot influence the retry.
+  transactionally claimed batches during its scheduled sweep, after a 20-minute
+  drain window longer than the previous Lambda's maximum execution time. It can
+  reclaim a marked row whose status was overwritten by an invocation already in
+  flight when the migration committed. Release resets attempts, leases,
+  timestamps, errors, and provider metrics before normal dispatch, so the
+  previous worker cannot win the migration-to-code deployment gap and stale
+  Textract/BDA state cannot influence the retry.
 - Failed and cancelled inspect jobs are terminal in repository status
   projection. Authorized manual retry accepts either state and creates a fresh
   five-attempt budget with cleared inspection/provider state; only genuinely
@@ -798,17 +804,19 @@ closes the complete set before another deployment:
 
 Verification evidence for the handoff hardening slice:
 
-- Application CI suite: 275 suites passed, 5 skipped; 3,107 tests passed and 60
+- Application CI suite: 275 suites passed, 5 skipped; 3,108 tests passed and 60
   intentionally skipped. Infrastructure/Lambda suite: 35 suites and 359 tests
   passed, including the real ARM64 worker bundle.
 - Full authenticated Playwright passed 257 tests with 51 intentional
   environment-gated skips and zero failures. The repository matrix covers inline
   text, PDF, Office, image, audio, video, terminal failure visibility, and
   Failed/Cancelled -> Retry -> Pending recovery.
-- Real PostgreSQL smoke passed the exact migration-before-worker handoff, old
-  worker exclusion, bounded new-worker release, retry-state reset, PDF/Office/
-  image publication and citations, ordered generation activation, duplicate
-  activation, the single-active-generation constraint, and cleanup.
+- Real PostgreSQL smoke passed the exact migration-before-worker handoff,
+  preservation of unrelated terminal failures, old-worker exclusion, the
+  20-minute drain guard, bounded new-worker release, noncanonical-source
+  exclusion, retry-state reset, PDF/Office/image publication and citations,
+  ordered generation activation, duplicate activation, the single-active-
+  generation constraint, and cleanup.
 - Full lint completed with zero errors. Application, infrastructure,
   unified-content worker, and embedding-worker typechecks pass. The production
   Next.js build, complete infrastructure build, and all-stack no-lookup CDK
@@ -816,5 +824,6 @@ Verification evidence for the handoff hardening slice:
 
 The remaining rollout check is one dev deployment followed by a single live
 inline-text/PDF/image matrix and verification that migration 123 jobs are
-released only by the new scheduled worker. No manual AWS CLI or database
-mutation is part of the rollout.
+released only by the new scheduled worker after the drain window. Recovery can
+therefore remain visibly quarantined for up to 20 minutes after the migration.
+No manual AWS CLI or database mutation is part of the rollout.

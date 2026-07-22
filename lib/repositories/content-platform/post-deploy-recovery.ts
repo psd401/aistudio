@@ -12,10 +12,19 @@ import { CONTENT_PROCESSING_MAX_ATTEMPTS } from "./job-state";
 export const POST_DEPLOY_RECOVERY_MARKER =
   "unified-content-runtime-v2" as const;
 export const POST_DEPLOY_RECOVERY_BATCH_SIZE = 25;
+/** Let every invocation of the previous 15-minute Lambda runtime drain first. */
+export const POST_DEPLOY_RECOVERY_GRACE_MINUTES = 20;
 
 export interface ReleasedPostDeployRecoveryJob {
   id: string;
   itemVersionId: string;
+}
+
+export interface ReleasePostDeployRecoveryOptions {
+  /** Testable clock; production always uses the current time. */
+  now?: Date;
+  /** Test override; production always uses the exported drain window. */
+  graceMinutes?: number;
 }
 
 /**
@@ -23,12 +32,20 @@ export interface ReleasedPostDeployRecoveryJob {
  *
  * The migration deliberately stores these jobs as `cancelled`, which every old
  * worker treats as terminal even if a stale SQS delivery arrives between stack
- * updates. This function ships with the replacement worker and is therefore the
- * only code path that can atomically restore the job/version/item to pending.
+ * updates. After a drain window longer than the old Lambda timeout, this function
+ * also recovers a marked row whose status was overwritten by an invocation that
+ * was already running when the migration committed. It ships with the replacement
+ * worker and is therefore the only automatic path that can atomically restore the
+ * job/version/item to pending.
  */
-export async function releasePostDeployRecoveryJobs(): Promise<
-  ReleasedPostDeployRecoveryJob[]
-> {
+export async function releasePostDeployRecoveryJobs(
+  options: ReleasePostDeployRecoveryOptions = {}
+): Promise<ReleasedPostDeployRecoveryJob[]> {
+  const graceMinutes =
+    options.graceMinutes ?? POST_DEPLOY_RECOVERY_GRACE_MINUTES;
+  const eligibleBefore = new Date(
+    (options.now ?? new Date()).getTime() - graceMinutes * 60_000
+  ).toISOString();
   return executeTransaction(
     async (tx) => {
       const releasedResult = await tx.execute(sql`
@@ -40,8 +57,9 @@ export async function releasePostDeployRecoveryJobs(): Promise<
           JOIN repository_items item
             ON item.current_version_id = version.id
           WHERE job.stage = 'inspect'
-            AND job.status = 'cancelled'
+            AND job.status IN ('cancelled', 'failed', 'pending', 'queued', 'running')
             AND job.metrics ->> 'postDeployRecovery' = ${POST_DEPLOY_RECOVERY_MARKER}
+            AND job.updated_at <= ${eligibleBefore}::timestamptz
             AND item.lifecycle_status = 'active'
             AND version.storage_status <> 'blocked'
             AND version.inspection_status <> 'blocked'
