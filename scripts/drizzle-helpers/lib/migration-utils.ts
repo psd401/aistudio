@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 // Constants
-const DB_INIT_HANDLER_PATH = "./infra/database/lambda/db-init-handler.ts";
+const MIGRATIONS_MANIFEST_PATH = "./infra/database/migrations.json";
 
 /**
  * Get project root directory (absolute path)
@@ -39,30 +39,29 @@ export function getAbsolutePath(relativePath: string): string {
 
 /**
  * Get the next migration number based on existing migrations
- * Reads from MIGRATION_FILES array in db-init-handler.ts
+ * Reads from the migrations.json manifest shared by local and AWS runners.
  */
 export function getNextMigrationNumber(): number {
-  const handlerPath = getAbsolutePath(DB_INIT_HANDLER_PATH);
-  const handlerContent = fs.readFileSync(handlerPath, "utf-8");
-
-  // Extract MIGRATION_FILES array
-  const arrayMatch = handlerContent.match(
-    /const\s+MIGRATION_FILES\s*=\s*\[([\S\s]*?)];/
-  );
-  if (!arrayMatch) {
+  const manifestPath = getAbsolutePath(MIGRATIONS_MANIFEST_PATH);
+  const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as unknown;
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("migrationFiles" in parsed) ||
+    !Array.isArray(parsed.migrationFiles) ||
+    !parsed.migrationFiles.every((filename) => typeof filename === "string")
+  ) {
     throw new Error(
-      `Could not find MIGRATION_FILES array in ${DB_INIT_HANDLER_PATH}`
+      `Invalid migrationFiles array in ${MIGRATIONS_MANIFEST_PATH}`
     );
   }
-
-  // Extract all migration filenames
-  const filenames = arrayMatch[1].match(/'([^']+\.sql)'/g) || [];
+  const filenames = parsed.migrationFiles as string[];
 
   // Find highest migration number
   let maxNumber = 9; // Start at 009 so first migration is 010
 
   for (const filename of filenames) {
-    const match = filename.match(/'(\d+)/);
+    const match = filename.match(/^(\d+)/);
     if (match) {
       const num = Number.parseInt(match[1], 10);
       if (num > maxNumber) {

@@ -3,6 +3,7 @@
 import {
   buildProcessingIdempotencyKey,
   canTransitionProcessingJob,
+  CONTENT_PROCESSING_MAX_ATTEMPTS,
   CONTENT_SWEEP_REDISPATCHABLE_STATUSES,
   transitionProcessingJob,
   type ProcessingJobState,
@@ -24,6 +25,10 @@ function pendingState(): ProcessingJobState {
 }
 
 describe("repository processing job state", () => {
+  it("bounds one automatic processing budget to five attempts", () => {
+    expect(CONTENT_PROCESSING_MAX_ATTEMPTS).toBe(5);
+  });
+
   it("runs the happy-path state machine with a bounded lease", () => {
     const queued = transitionProcessingJob(pendingState(), { type: "queue" }, now);
     const running = transitionProcessingJob(

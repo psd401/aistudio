@@ -12,7 +12,7 @@
  */
 
 import assert from "node:assert/strict";
-import { eq, type SQL } from "drizzle-orm";
+import { eq, sql, type SQL } from "drizzle-orm";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import * as XLSX from "@e965/xlsx";
 import { closeDatabase, executeQuery } from "@/lib/db/drizzle-client";
@@ -32,6 +32,7 @@ import {
   extractOfficeDocument,
   extractCanonicalTextDocument,
   buildImageSearchDocument,
+  CONTENT_PROCESSING_MAX_ATTEMPTS,
   DEFAULT_CONTENT_PLATFORM_CONFIG,
   completeRepositoryUpload,
   initiateRepositoryUpload,
@@ -40,7 +41,9 @@ import {
   IMAGE_PROCESSOR_VERSION,
   publishDocumentVersion,
   publishPdfVersion,
+  getCanonicalRepositoryItemStatuses,
   registerCanonicalUpload,
+  retryCanonicalRepositoryItem,
   segmentPdfPages,
   type RepositoryUploadStorage,
 } from "@/lib/repositories/content-platform";
@@ -48,6 +51,7 @@ import { keywordSearch } from "@/lib/repositories/search-service";
 import { retrieveRepositoryContent } from "@/lib/repositories/retrieval-v2/service";
 import {
   activateCompletedGeneration,
+  type GenerationActivationExecutor,
   type GenerationActivationResult,
 } from "../../infra/lambdas/embedding-generator/generation-activation";
 
@@ -157,7 +161,7 @@ try {
           repositoryId: repository.id,
           type: "document",
           name: "reference.pdf",
-          source: `repositories/${repository.id}/fixture/reference.pdf`,
+          source: `repositories/${repository.id}/11111111-2222-4333-8444-555555555555/reference.pdf`,
           processingStatus: "pending",
         })
         .returning({ id: repositoryItems.id }),
@@ -168,7 +172,7 @@ try {
   const input = {
     itemId: item.id,
     userId: owner.id,
-    objectKey: `repositories/${repository.id}/fixture/reference.pdf`,
+    objectKey: `repositories/${repository.id}/11111111-2222-4333-8444-555555555555/reference.pdf`,
     originalFileName: "reference.pdf",
     declaredContentType: "application/pdf",
     byteSize: 4096,
@@ -212,7 +216,130 @@ try {
   assert.equal(jobs.length, 1);
   assert.equal(first.version.storageStatus, "quarantined");
   assert.equal(first.inspectJob.status, "pending");
+  assert.equal(first.inspectJob.maxAttempts, CONTENT_PROCESSING_MAX_ATTEMPTS);
   assert.equal(updatedItem?.currentVersionId, first.version.id);
+
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryProcessingJobs)
+        .set({
+          metrics: {
+            waitReason: "AWAITING_SECURITY_SCAN",
+            waitStartedAt: "2026-07-22T12:00:00.000Z",
+          },
+        })
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id)),
+    "smoke.unifiedContent.persistWaitDeadline"
+  );
+  const [waitingJob] = await executeQuery(
+    (db) =>
+      db
+        .select({ metrics: repositoryProcessingJobs.metrics })
+        .from(repositoryProcessingJobs)
+        .where(eq(repositoryProcessingJobs.id, first.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readWaitDeadline"
+  );
+  assert.deepEqual(waitingJob?.metrics, {
+    waitReason: "AWAITING_SECURITY_SCAN",
+    waitStartedAt: "2026-07-22T12:00:00.000Z",
+  });
+
+  const [retryItem] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItems)
+        .values({
+          repositoryId: repository.id,
+          type: "document",
+          name: "retry-reference.pdf",
+          source: `repositories/${repository.id}/22222222-3333-4444-8555-666666666666/retry-reference.pdf`,
+          processingStatus: "pending",
+        })
+        .returning({ id: repositoryItems.id }),
+    "smoke.unifiedContent.createRetryItem"
+  );
+  assert.ok(retryItem);
+  const retryRegistration = await registerCanonicalUpload({
+    itemId: retryItem.id,
+    userId: owner.id,
+    objectKey: `repositories/${repository.id}/22222222-3333-4444-8555-666666666666/retry-reference.pdf`,
+    originalFileName: "retry-reference.pdf",
+    declaredContentType: "application/pdf",
+    byteSize: 4096,
+    traceId: "unified-content-smoke-retry",
+  });
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        WITH failed_job AS (
+          UPDATE repository_processing_jobs
+          SET status = 'failed',
+              attempt = max_attempts,
+              last_error_message = 'simulated terminal processing failure',
+              finished_at = now()
+          WHERE id = ${retryRegistration.inspectJob.id}::uuid
+          RETURNING item_version_id
+        ), failed_version AS (
+          UPDATE repository_item_versions
+          SET inspection_status = 'error', processing_status = 'failed'
+          WHERE id IN (SELECT item_version_id FROM failed_job)
+          RETURNING item_id
+        )
+        UPDATE repository_items
+        SET processing_status = 'failed',
+            processing_error = 'simulated terminal processing failure'
+        WHERE id IN (SELECT item_id FROM failed_version)
+      `),
+    "smoke.unifiedContent.createTerminalRetryState"
+  );
+  const failedStatuses = await getCanonicalRepositoryItemStatuses(repository.id);
+  assert.deepEqual(failedStatuses.get(retryItem.id), {
+    itemId: retryItem.id,
+    processingStatus: "failed",
+    processingError: "simulated terminal processing failure",
+    canRetry: true,
+  });
+  const restarted = await retryCanonicalRepositoryItem(
+    retryItem.id,
+    "unified-content-smoke-manual-retry"
+  );
+  assert.equal(restarted.itemVersionId, retryRegistration.version.id);
+  assert.equal(restarted.processingJobId, retryRegistration.inspectJob.id);
+  const [restartedState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          jobStatus: repositoryProcessingJobs.status,
+          attempt: repositoryProcessingJobs.attempt,
+          maxAttempts: repositoryProcessingJobs.maxAttempts,
+          versionStatus: repositoryItemVersions.processingStatus,
+          storageStatus: repositoryItemVersions.storageStatus,
+          itemStatus: repositoryItems.processingStatus,
+        })
+        .from(repositoryProcessingJobs)
+        .innerJoin(
+          repositoryItemVersions,
+          eq(repositoryItemVersions.id, repositoryProcessingJobs.itemVersionId)
+        )
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.id, repositoryItemVersions.itemId)
+        )
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readRestartedState"
+  );
+  assert.equal(restartedState?.jobStatus, "pending");
+  assert.equal(restartedState?.attempt, CONTENT_PROCESSING_MAX_ATTEMPTS);
+  assert.equal(
+    restartedState?.maxAttempts,
+    CONTENT_PROCESSING_MAX_ATTEMPTS * 2
+  );
+  assert.equal(restartedState?.versionStatus, "pending");
+  assert.equal(restartedState?.storageStatus, "quarantined");
+  assert.equal(restartedState?.itemStatus, "pending");
 
   const publication = await publishPdfVersion({
     itemVersionId: first.version.id,
@@ -400,7 +527,7 @@ try {
           repositoryId: repository.id,
           type: "text",
           name: "Canonical text smoke",
-          source: `repositories/${repository.id}/fixture/reference.txt`,
+          source: `repositories/${repository.id}/11111111-2222-4333-8444-555555555555/reference.txt`,
           processingStatus: "pending",
         })
         .returning({ id: repositoryItems.id }),
@@ -410,7 +537,7 @@ try {
   const textRegistration = await registerCanonicalUpload({
     itemId: textItem.id,
     userId: owner.id,
-    objectKey: `repositories/${repository.id}/fixture/reference.txt`,
+    objectKey: `repositories/${repository.id}/11111111-2222-4333-8444-555555555555/reference.txt`,
     originalFileName: "reference.txt",
     declaredContentType: "text/plain",
     byteSize: 64,
@@ -457,7 +584,7 @@ try {
           repositoryId: repository.id,
           type: "document",
           name: "directory.xlsx",
-          source: `repositories/${repository.id}/fixture/directory.xlsx`,
+          source: `repositories/${repository.id}/11111111-2222-4333-8444-555555555555/directory.xlsx`,
           processingStatus: "pending",
         })
         .returning({ id: repositoryItems.id }),
@@ -467,7 +594,7 @@ try {
   const officeRegistration = await registerCanonicalUpload({
     itemId: officeItem.id,
     userId: owner.id,
-    objectKey: `repositories/${repository.id}/fixture/directory.xlsx`,
+    objectKey: `repositories/${repository.id}/11111111-2222-4333-8444-555555555555/directory.xlsx`,
     originalFileName: "directory.xlsx",
     declaredContentType: OFFICE_CONTENT_TYPES.xlsx,
     byteSize: 4096,
@@ -536,7 +663,7 @@ try {
           repositoryId: repository.id,
           type: "image",
           name: "evacuation-map.png",
-          source: `repositories/${repository.id}/fixture/evacuation-map.png`,
+          source: `repositories/${repository.id}/11111111-2222-4333-8444-555555555555/evacuation-map.png`,
           processingStatus: "pending",
         })
         .returning({ id: repositoryItems.id }),
@@ -546,7 +673,7 @@ try {
   const imageRegistration = await registerCanonicalUpload({
     itemId: imageItem.id,
     userId: owner.id,
-    objectKey: `repositories/${repository.id}/fixture/evacuation-map.png`,
+    objectKey: `repositories/${repository.id}/11111111-2222-4333-8444-555555555555/evacuation-map.png`,
     originalFileName: "evacuation-map.png",
     declaredContentType: "image/png",
     byteSize: 1024,
@@ -577,7 +704,7 @@ try {
       {
         kind: "image" as const,
         mediaType: "image/png",
-        objectKey: `repositories/${repository.id}/fixture/evacuation-map.png`,
+        objectKey: `repositories/${repository.id}/11111111-2222-4333-8444-555555555555/evacuation-map.png`,
         sha256: "a".repeat(64),
       },
       {
@@ -600,6 +727,8 @@ try {
     ],
     embeddingModel: "amazon-bedrock:amazon.titan-embed-text-v1",
     embeddingDimensions: 1536,
+    visualEmbeddingModel: "amazon-bedrock:cohere.embed-v4:0",
+    visualEmbeddingDimensions: 1536,
     segmentationVersion: "retrieval-v2",
   };
   const imagePublication = await publishDocumentVersion(imagePublicationInput);
@@ -641,17 +770,50 @@ try {
     canonicalOnly: true,
   });
   assert.equal(imageResultsBeforeActivation.length, 0);
+  const activationExecutor: GenerationActivationExecutor = async (query) => {
+    const rows = await executeQuery(
+      // The Lambda package has its own dependency boundary, so bridge its
+      // structurally identical Drizzle SQL object into the app workspace.
+      (db) => db.execute(query as unknown as SQL),
+      "smoke.unifiedContent.activateEmbeddedGeneration"
+    );
+    return rows as unknown as GenerationActivationResult[];
+  };
+  const incompleteActivation = await activateCompletedGeneration(
+    imagePublication.generationId,
+    activationExecutor
+  );
+  assert.equal(incompleteActivation, null);
+
+  const smokeVector = `[${Array.from({ length: 1536 }, () => "0.001").join(",")}]`;
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_item_chunks
+        SET embedding = ${smokeVector}::vector
+        WHERE index_generation_id = ${imagePublication.generationId}::uuid
+      `),
+    "smoke.unifiedContent.completeTextEmbeddings"
+  );
+  const missingVisualActivation = await activateCompletedGeneration(
+    imagePublication.generationId,
+    activationExecutor
+  );
+  assert.equal(missingVisualActivation, null);
+
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_item_chunks
+        SET visual_embedding = ${smokeVector}::vector
+        WHERE index_generation_id = ${imagePublication.generationId}::uuid
+          AND modality IN ('image', 'video')
+      `),
+    "smoke.unifiedContent.completeVisualEmbeddings"
+  );
   const activation = await activateCompletedGeneration(
     imagePublication.generationId,
-    async (query) => {
-      const rows = await executeQuery(
-        // The Lambda package has its own dependency boundary, so bridge its
-        // structurally identical Drizzle SQL object into the app workspace.
-        (db) => db.execute(query as unknown as SQL),
-        "smoke.unifiedContent.activateEmbeddedGeneration"
-      );
-      return rows as unknown as GenerationActivationResult[];
-    }
+    activationExecutor
   );
   assert.equal(activation?.repository_id, repository.id);
   assert.ok((activation?.embedded_item_count ?? 0) >= 3);

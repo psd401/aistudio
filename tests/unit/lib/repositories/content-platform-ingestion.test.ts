@@ -22,6 +22,7 @@ describe("canonical upload registration rollout", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockExecuteTransaction.mockReset();
     mockGetSettings.mockResolvedValue({});
   });
 
@@ -70,5 +71,40 @@ describe("canonical upload registration rollout", () => {
       })
     ).rejects.toThrow("SHA-256");
     expect(mockExecuteTransaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects an object key owned by a different repository", async () => {
+    const forUpdate = jest.fn(() =>
+      Promise.resolve([{ id: 1, repositoryId: 3 }])
+    );
+    const tx = {
+      select: jest.fn(() => ({
+        from: jest.fn(() => ({
+          where: jest.fn(() => ({
+            limit: jest.fn(() => ({ for: forUpdate })),
+          })),
+        })),
+      })),
+    };
+    mockExecuteTransaction.mockImplementation(async (...args: unknown[]) => {
+      const operation = args[0];
+      if (typeof operation !== "function") {
+        throw new Error("Expected a transaction callback");
+      }
+      return (operation as (transaction: unknown) => Promise<unknown>)(tx);
+    });
+
+    await expect(
+      registerCanonicalUpload({
+        itemId: 1,
+        userId: 2,
+        objectKey:
+          "repositories/4/11111111-2222-4333-8444-555555555555/document.pdf",
+        originalFileName: "document.pdf",
+        declaredContentType: "application/pdf",
+        byteSize: 1024,
+      })
+    ).rejects.toThrow("outside the repository source namespace");
+    expect(forUpdate).toHaveBeenCalledWith("update");
   });
 });

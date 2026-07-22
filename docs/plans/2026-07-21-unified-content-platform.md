@@ -703,3 +703,61 @@ The remaining rollout check is deployment of this hardening slice, followed by
 live confirmation that the pre-cutover marker is searchable and that a new
 inline-text item advances through version, job, generation, embedding, and
 citation state in dev.
+
+### Unified-content runtime recovery checkpoint (2026-07-22)
+
+The first live hardening deployment exposed several related runtime gaps rather
+than one isolated upload bug: inline text used a source namespace the worker
+rejected, legacy completion could mask canonical failure, processor retries
+could remain failed or invisible for hours, embedding failures could strand a
+building generation, and Retrieval v2 could stop serving the last active
+version while its replacement was still indexing. This corrective slice treats
+the entire upload-to-retrieval lifecycle as one recoverable state machine:
+
+- Every direct, multipart, and inline source now uses the single strict
+  `repositories/{repositoryId}/{uuid}/{filename}` contract. Registration rejects
+  cross-repository, nested, traversal-like, and artifact keys before a job is
+  created. A bounded retry action copies legacy files into that namespace and
+  creates a fresh immutable version for legacy inline text.
+- Repository Manager projects the current canonical version, inspect job, and
+  index generation instead of trusting legacy item status. Users see Pending,
+  Processing, Retrying, Generating Embeddings, Embedded, or a terminal Failed
+  state with its reason and an authorized Retry control.
+- The processor distinguishes permanent source/contract failures from transient
+  service failures, uses a five-attempt exponential retry budget, persists a
+  pending database outbox before every SQS send, recovers pending and expired
+  leases on the minute sweep, and bounds external security/OCR/media waits.
+- Embedding work acknowledges stale generations, exposes a failure only on its
+  terminal SQS receive, fails only the current building generation, and leaves
+  the previous active generation serving. Activation requires all required text
+  and visual vectors.
+- Retrieval treats the repository's active generation as the immutable serving
+  snapshot, fits the selected hit before neighbors, keeps text/citations paired,
+  and bounds assistant tool payloads. Deletion now fails closed until source and
+  derivative cleanup succeeds for documents, images, audio, video, and inline
+  text.
+- Migration 122 automatically retires pre-hardening stranded embedding
+  generations and requeues recoverable current processor jobs. Content and
+  embedding DLQ, oldest-message, and worker-error alarms make future stalls
+  visible; queue-level processor redrive is bounded to five receives.
+
+Verification evidence for the runtime recovery slice:
+
+- Application CI suite: 275 suites passed, 5 skipped; 3,103 tests passed and 60
+  intentionally skipped. Full lint has zero errors, and application,
+  infrastructure, unified-content worker, and embedding-worker typechecks pass.
+- Infrastructure/Lambda suite: 35 suites and 359 tests passed. The production
+  Next.js build, complete infrastructure build, and synthesis of all 29 dev/prod
+  stacks pass with the real ARM64 worker bundles and migration asset.
+- Real PostgreSQL migration and smoke tests pass canonical status projection,
+  terminal failure, a fresh manual retry budget, managed-service wait metadata,
+  text/visual activation guards, active-generation retrieval/citations, and
+  cleanup.
+- Authenticated Playwright passed 255 tests with 53 intentional environment
+  skips, covering the full application and the repository contract for direct,
+  PDF, Office, image, audio, video, inline-text, canonical failure visibility,
+  and Failed → Retry → Pending recovery.
+
+The remaining rollout check is deployment of migration 122 and the corrected
+workers, followed by a fresh live PDF/image/inline-text matrix through Embedded
+and cited retrieval. No manual AWS CLI or database mutation is required.

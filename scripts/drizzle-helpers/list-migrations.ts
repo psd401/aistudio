@@ -2,7 +2,7 @@
 /**
  * List Migrations Script
  *
- * Lists all migrations in the MIGRATION_FILES array and their status
+ * Lists all migrations in the shared migrations.json manifest and their status
  * (whether file exists in schema directory).
  *
  * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
@@ -19,7 +19,11 @@ import { getAbsolutePath, getNextMigrationNumber } from "./lib/migration-utils";
 
 // Constants
 const LAMBDA_SCHEMA_DIR = "./infra/database/schema";
-const DB_INIT_HANDLER_PATH = "./infra/database/lambda/db-init-handler.ts";
+const MIGRATIONS_MANIFEST_PATH = "./infra/database/migrations.json";
+
+interface MigrationManifest {
+  migrationFiles: string[];
+}
 
 interface MigrationInfo {
   filename: string;
@@ -30,28 +34,30 @@ interface MigrationInfo {
 }
 
 /**
- * Get all migrations from MIGRATION_FILES array
+ * Get all migrations from the same manifest used by the database Lambda and
+ * local migration runner. The old handler-source parser broke when the Lambda
+ * moved to this single source of truth.
  */
 function getMigrations(): MigrationInfo[] {
-  const handlerPath = getAbsolutePath(DB_INIT_HANDLER_PATH);
-  const handlerContent = fs.readFileSync(handlerPath, "utf-8");
-
-  // Extract MIGRATION_FILES array
-  const arrayMatch = handlerContent.match(
-    /const\s+MIGRATION_FILES\s*=\s*\[([\S\s]*?)];/
-  );
-  if (!arrayMatch) {
+  const manifestPath = getAbsolutePath(MIGRATIONS_MANIFEST_PATH);
+  const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as unknown;
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("migrationFiles" in parsed) ||
+    !Array.isArray(parsed.migrationFiles) ||
+    !parsed.migrationFiles.every(
+      (filename) => typeof filename === "string" && filename.endsWith(".sql")
+    )
+  ) {
     throw new Error(
-      `Could not find MIGRATION_FILES array in ${DB_INIT_HANDLER_PATH}`
+      `Invalid migrationFiles array in ${MIGRATIONS_MANIFEST_PATH}`
     );
   }
-
-  // Extract all migration filenames
-  const filenameMatches = arrayMatch[1].match(/'([^']+\.sql)'/g) || [];
+  const manifest = parsed as MigrationManifest;
   const migrations: MigrationInfo[] = [];
 
-  for (const match of filenameMatches) {
-    const filename = match.replace(/'/g, "");
+  for (const filename of manifest.migrationFiles) {
     const numberMatch = filename.match(/^(\d+)/);
     const number = numberMatch ? Number.parseInt(numberMatch[1], 10) : 0;
 
@@ -100,7 +106,7 @@ function main(): void {
   const migrations = getMigrations();
   const nextNumber = getNextMigrationNumber();
 
-  console.log(`Source: ${DB_INIT_HANDLER_PATH}`);
+  console.log(`Source: ${MIGRATIONS_MANIFEST_PATH}`);
   console.log(`Schema dir: ${LAMBDA_SCHEMA_DIR}`);
   console.log(`Total migrations: ${migrations.length}`);
   console.log(`Next number: ${String(nextNumber).padStart(3, "0")}`);

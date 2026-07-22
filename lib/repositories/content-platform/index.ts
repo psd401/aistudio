@@ -10,3 +10,5 @@ export * from "./upload-service";
 export * from "./dispatch-service";
 export * from "./inline-text-ingestion";
 export * from "./text-processing";
+export * from "./status-service";
+export * from "./object-key";

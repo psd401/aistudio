@@ -83,6 +83,13 @@ import {
 } from "./contract";
 import { CONTENT_SWEEP_REDISPATCHABLE_STATUSES } from "../../../lib/repositories/content-platform/job-state";
 import {
+  classifyContentProcessingError,
+  PermanentContentProcessingError,
+  prepareDeferredProcessingMetrics,
+  processingRetryDelaySeconds,
+  type DeferredProcessingReason,
+} from "./lifecycle";
+import {
   repositoryEmbeddingConfigurationFromSettings,
   repositoryVisualEmbeddingConfiguration,
 } from "../../../lib/repositories/embedding-configuration";
@@ -210,12 +217,48 @@ async function claimJob(message: ContentProcessingMessage, workerId: string) {
     if (job.status === "running" && job.leaseExpiresAt && job.leaseExpiresAt.getTime() > Date.now()) {
       return null;
     }
+    if (job.status === "pending" && job.availableAt.getTime() > Date.now()) {
+      return null;
+    }
     if (job.attempt >= job.maxAttempts) {
+      const errorMessage = "Processing job exhausted its retry budget";
       await tx
         .update(repositoryItemVersions)
-        .set({ processingStatus: "failed" })
+        .set({ inspectionStatus: "error", processingStatus: "failed" })
         .where(eq(repositoryItemVersions.id, message.itemVersionId));
-      throw new Error("Processing job exhausted its retry budget");
+      const [version] = await tx
+        .select({ itemId: repositoryItemVersions.itemId })
+        .from(repositoryItemVersions)
+        .where(eq(repositoryItemVersions.id, message.itemVersionId))
+        .limit(1);
+      if (version) {
+        await tx
+          .update(repositoryItems)
+          .set({
+            processingStatus: "failed",
+            processingError: errorMessage,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(repositoryItems.id, version.itemId),
+              eq(repositoryItems.currentVersionId, message.itemVersionId)
+            )
+          );
+      }
+      await tx
+        .update(repositoryProcessingJobs)
+        .set({
+          status: "failed",
+          lastErrorCode: "RETRY_BUDGET_EXHAUSTED",
+          lastErrorMessage: errorMessage,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          finishedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(repositoryProcessingJobs.id, job.id));
+      return null;
     }
     const now = new Date();
     const [claimed] = await tx
@@ -231,6 +274,32 @@ async function claimJob(message: ContentProcessingMessage, workerId: string) {
       })
       .where(eq(repositoryProcessingJobs.id, job.id))
       .returning();
+    if (claimed && job.stage === "inspect") {
+      await tx
+        .update(repositoryItemVersions)
+        .set({ processingStatus: "processing" })
+        .where(eq(repositoryItemVersions.id, message.itemVersionId));
+      const [version] = await tx
+        .select({ itemId: repositoryItemVersions.itemId })
+        .from(repositoryItemVersions)
+        .where(eq(repositoryItemVersions.id, message.itemVersionId))
+        .limit(1);
+      if (version) {
+        await tx
+          .update(repositoryItems)
+          .set({
+            processingStatus: "processing",
+            processingError: null,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(repositoryItems.id, version.itemId),
+              eq(repositoryItems.currentVersionId, message.itemVersionId)
+            )
+          );
+      }
+    }
     return claimed ?? null;
   }, "contentProcessor.claimJob");
 }
@@ -238,9 +307,10 @@ async function claimJob(message: ContentProcessingMessage, workerId: string) {
 async function deferJob(
   message: ContentProcessingMessage,
   metrics: JobMetrics,
-  reason: string,
+  reason: DeferredProcessingReason,
   claimedAttempt: number,
 ): Promise<void> {
+  const deferredMetrics = prepareDeferredProcessingMetrics(metrics, reason);
   await executeQuery(
     (db) =>
       db
@@ -253,7 +323,7 @@ async function deferJob(
           // Waiting for an external policy/service is not a processing failure
           // and must not consume the finite retry budget.
           attempt: Math.max(0, claimedAttempt - 1),
-          metrics,
+          metrics: deferredMetrics,
           leaseOwner: null,
           leaseExpiresAt: null,
           lastErrorCode: reason,
@@ -275,7 +345,12 @@ async function deferJob(
       db
         .update(repositoryProcessingJobs)
         .set({ status: "queued", updatedAt: new Date() })
-        .where(eq(repositoryProcessingJobs.id, message.jobId)),
+        .where(
+          and(
+            eq(repositoryProcessingJobs.id, message.jobId),
+            eq(repositoryProcessingJobs.status, "pending")
+          )
+        ),
     "contentProcessor.markDeferredJobDispatched",
   );
 }
@@ -316,6 +391,7 @@ async function blockVersion(message: ContentProcessingMessage, status: string): 
       .update(repositoryProcessingJobs)
       .set({
         status: "failed",
+        attempt: sql`${repositoryProcessingJobs.maxAttempts}`,
         lastErrorCode: "SECURITY_INSPECTION_BLOCKED",
         lastErrorMessage: status,
         leaseOwner: null,
@@ -676,13 +752,24 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
         .limit(1),
     "contentProcessor.getVersion",
   );
-  if (!context?.objectKey) throw new Error("Item version has no S3 object key");
+  if (!context?.objectKey) {
+    throw new PermanentContentProcessingError(
+      "SOURCE_OBJECT_MISSING",
+      "Item version has no S3 object key"
+    );
+  }
   if (!isRepositoryObjectKey(context.repositoryId, context.objectKey)) {
-    throw new Error("Item version object key is outside its repository namespace");
+    throw new PermanentContentProcessingError(
+      "SOURCE_NAMESPACE_INVALID",
+      "Item version object key is outside its repository namespace"
+    );
   }
   const declaredContentType = context.declaredContentType;
   if (!declaredContentType) {
-    throw new Error("Item version has no declared content type");
+    throw new PermanentContentProcessingError(
+      "SOURCE_CONTENT_TYPE_MISSING",
+      "Item version has no declared content type"
+    );
   }
   const isPdf = declaredContentType === "application/pdf";
   const isImage = isImageContentType(declaredContentType);
@@ -695,7 +782,10 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
     !mediaKind &&
     !isOfficeContentType(declaredContentType)
   ) {
-    throw new Error("Unified content worker received an unsupported content type");
+    throw new PermanentContentProcessingError(
+      "SOURCE_CONTENT_TYPE_UNSUPPORTED",
+      "Unified content worker received an unsupported content type"
+    );
   }
 
   const config = await getConfig();
@@ -711,7 +801,10 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
           ? config.maxImageSizeMb
           : config.maxOfficeSizeMb) * 1024 ** 2;
   if (context.byteSize != null && context.byteSize > processingLimitBytes) {
-    throw new Error(`File exceeds the configured ${Math.floor(processingLimitBytes / 1024 ** 2)} MiB processing limit`);
+    throw new PermanentContentProcessingError(
+      "SOURCE_SIZE_LIMIT_EXCEEDED",
+      `File exceeds the configured ${Math.floor(processingLimitBytes / 1024 ** 2)} MiB processing limit`
+    );
   }
   let inspectionStatus: "clean" | "not_required" = "not_required";
   let inspectionDetails: Record<string, unknown> = { provider: "disabled" };
@@ -1070,24 +1163,136 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
   );
 }
 
-async function markFailed(message: ContentProcessingMessage, error: unknown): Promise<void> {
-  const errorMessage = error instanceof Error ? error.message : String(error);
-  await executeQuery(
-    (db) =>
-      db
+async function handleProcessingFailure(
+  message: ContentProcessingMessage,
+  error: unknown
+): Promise<void> {
+  const decision = classifyContentProcessingError(error);
+  const failure = await executeTransaction(async (tx) => {
+    const [job] = await tx
+      .select()
+      .from(repositoryProcessingJobs)
+      .where(eq(repositoryProcessingJobs.id, message.jobId))
+      .limit(1)
+      .for("update");
+    if (!job) return { action: "ignore" as const };
+    if (job.itemVersionId !== message.itemVersionId) {
+      log.error("Ignoring processing message with a mismatched item version", {
+        jobId: message.jobId,
+      });
+      return { action: "ignore" as const };
+    }
+    if (job.status === "succeeded" || job.status === "cancelled") {
+      return { action: "ignore" as const };
+    }
+
+    const terminal = decision.terminal || job.attempt >= job.maxAttempts;
+    const now = new Date();
+    if (terminal) {
+      const code = decision.terminal
+        ? decision.code
+        : "RETRY_BUDGET_EXHAUSTED";
+      await tx
         .update(repositoryProcessingJobs)
         .set({
           status: "failed",
+          // Close the budget so a stale/duplicate queue delivery cannot revive a
+          // deterministic or exhausted failure.
+          attempt: job.maxAttempts,
           leaseOwner: null,
           leaseExpiresAt: null,
-          lastErrorCode: "PROCESSING_ERROR",
-          lastErrorMessage: errorMessage.slice(0, 4000),
-          finishedAt: new Date(),
-          updatedAt: new Date(),
+          lastErrorCode: code,
+          lastErrorMessage: decision.message,
+          finishedAt: now,
+          updatedAt: now,
         })
-        .where(eq(repositoryProcessingJobs.id, message.jobId)),
-    "contentProcessor.failJob",
-  );
+        .where(eq(repositoryProcessingJobs.id, job.id));
+      await tx
+        .update(repositoryItemVersions)
+        .set({ inspectionStatus: "error", processingStatus: "failed" })
+        .where(eq(repositoryItemVersions.id, message.itemVersionId));
+      const [version] = await tx
+        .select({ itemId: repositoryItemVersions.itemId })
+        .from(repositoryItemVersions)
+        .where(eq(repositoryItemVersions.id, message.itemVersionId))
+        .limit(1);
+      if (version) {
+        await tx
+          .update(repositoryItems)
+          .set({
+            processingStatus: "failed",
+            processingError: decision.message,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(repositoryItems.id, version.itemId),
+              eq(repositoryItems.currentVersionId, message.itemVersionId)
+            )
+          );
+      }
+      return { action: "terminal" as const, code };
+    }
+
+    const delaySeconds = processingRetryDelaySeconds(job.attempt);
+    await tx
+      .update(repositoryProcessingJobs)
+      .set({
+        status: "pending",
+        availableAt: new Date(now.getTime() + delaySeconds * 1_000),
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        lastErrorCode: decision.code,
+        lastErrorMessage: decision.message,
+        finishedAt: null,
+        updatedAt: now,
+      })
+      .where(eq(repositoryProcessingJobs.id, job.id));
+    return { action: "retry" as const, delaySeconds };
+  }, "contentProcessor.handleProcessingFailure");
+
+  if (failure.action !== "retry") {
+    log.info("Unified content failure recorded", {
+      jobId: message.jobId,
+      action: failure.action,
+      code: failure.action === "terminal" ? failure.code : undefined,
+    });
+    return;
+  }
+
+  try {
+    await sqs.send(
+      new SendMessageCommand({
+        QueueUrl: queueUrl,
+        MessageBody: JSON.stringify(message),
+        DelaySeconds: failure.delaySeconds,
+      })
+    );
+    const dispatchCutoff = new Date();
+    await executeQuery(
+      (db) =>
+        db
+          .update(repositoryProcessingJobs)
+          .set({ status: "queued", updatedAt: dispatchCutoff })
+          .where(
+            and(
+              eq(repositoryProcessingJobs.id, message.jobId),
+              eq(repositoryProcessingJobs.status, "pending")
+            )
+          ),
+      "contentProcessor.markRetryDispatched"
+    );
+  } catch (dispatchError) {
+    // The pending DB row is the outbox. The minute sweep will retry this send;
+    // acknowledging the current record avoids the 90-minute queue visibility gap.
+    log.error("Retry enqueue failed; pending sweep will recover the job", {
+      jobId: message.jobId,
+      error:
+        dispatchError instanceof Error
+          ? dispatchError.message
+          : String(dispatchError),
+    });
+  }
 }
 
 async function dispatchPendingJobs(): Promise<void> {
@@ -1133,7 +1338,23 @@ async function dispatchPendingJobs(): Promise<void> {
             leaseExpiresAt: null,
             updatedAt: new Date(),
           })
-          .where(eq(repositoryProcessingJobs.id, job.id)),
+          .where(
+            and(
+              eq(repositoryProcessingJobs.id, job.id),
+              or(
+                eq(repositoryProcessingJobs.status, "pending"),
+                and(
+                  eq(repositoryProcessingJobs.status, "running"),
+                  lte(repositoryProcessingJobs.leaseExpiresAt, now)
+                )
+              ),
+              lte(repositoryProcessingJobs.availableAt, now),
+              lt(
+                repositoryProcessingJobs.attempt,
+                repositoryProcessingJobs.maxAttempts
+              )
+            )
+          ),
       "contentProcessor.markDispatched",
     );
   }
@@ -1162,8 +1383,26 @@ export async function handler(event: SQSEvent | EventBridgeEvent<string, unknown
         messageId: record.messageId,
         error: error instanceof Error ? error.message : String(error),
       });
-      if (message) await markFailed(message, error).catch(() => undefined);
-      failures.push({ itemIdentifier: record.messageId });
+      if (message) {
+        try {
+          await handleProcessingFailure(message, error);
+        } catch (failureError) {
+          log.error("Failed to persist unified content failure state", {
+            messageId: record.messageId,
+            error:
+              failureError instanceof Error
+                ? failureError.message
+                : String(failureError),
+          });
+          // Only failure-state persistence errors rely on the queue's long
+          // visibility retry. Ordinary processing failures use the bounded DB
+          // outbox retry above.
+          failures.push({ itemIdentifier: record.messageId });
+        }
+      } else {
+        // Malformed records are retained in the DLQ for diagnosis.
+        failures.push({ itemIdentifier: record.messageId });
+      }
     }
   }
   return { batchItemFailures: failures };

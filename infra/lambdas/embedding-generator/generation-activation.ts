@@ -21,9 +21,27 @@ export async function activateCompletedGeneration(
   const rows = await execute(sql`
     WITH target AS (
       SELECT id, repository_id
-      FROM repository_index_generations
-      WHERE id = ${generationId}::uuid
-        AND status IN ('building', 'active')
+      FROM repository_index_generations generation
+      WHERE generation.id = ${generationId}::uuid
+        AND generation.status IN ('building', 'active')
+        AND EXISTS (
+          SELECT 1
+          FROM repository_item_chunks chunk
+          WHERE chunk.index_generation_id = generation.id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM repository_item_chunks chunk
+          WHERE chunk.index_generation_id = generation.id
+            AND (
+              chunk.embedding IS NULL
+              OR (
+                generation.visual_embedding_model IS NOT NULL
+                AND chunk.modality IN ('image', 'video')
+                AND chunk.visual_embedding IS NULL
+              )
+            )
+        )
     ), switched AS (
       UPDATE repository_index_generations generation
       SET

@@ -9,6 +9,7 @@ import {
   CreateBucketCommand,
   HeadBucketCommand,
   PutBucketCorsCommand,
+  CopyObjectCommand,
   BucketLocationConstraint,
 } from "@aws-sdk/client-s3"
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
@@ -16,6 +17,8 @@ import { createError } from "@/lib/error-utils"
 import { Settings } from "@/lib/settings-manager"
 import { Readable } from "node:stream"
 import { randomUUID } from "node:crypto"
+import { buildRepositorySourceObjectKey } from "@/lib/repositories/content-platform/object-key"
+import { sanitizeFileName } from "@/lib/aws/document-upload"
 
 // Cache S3 config to avoid repeated async calls
 let s3ConfigCache: { bucket: string | null; region: string | null } | null = null
@@ -60,6 +63,7 @@ export function clearS3Cache() {
 
 export interface UploadDocumentParams {
   userId: string
+  repositoryId?: number
   fileName: string
   fileContent: Buffer | Uint8Array | string
   contentType: string
@@ -87,6 +91,12 @@ export interface UploadRepositoryTextSourceParams {
   userId: number
   fileName: string
   content: string
+}
+
+export interface CopyRepositorySourceToCanonicalNamespaceParams {
+  repositoryId: number
+  sourceKey: string
+  fileName: string
 }
 
 // Ensure the documents bucket exists
@@ -155,6 +165,7 @@ export async function ensureDocumentsBucket(): Promise<void> {
 // Upload a document to S3
 export async function uploadDocument({
   userId,
+  repositoryId,
   fileName,
   fileContent,
   contentType,
@@ -167,7 +178,9 @@ export async function uploadDocument({
   const bucketName = config.bucket!
 
   const timestamp = Date.now()
-  const key = `${userId}/${timestamp}-${fileName}`
+  const key = repositoryId == null
+    ? `${userId}/${timestamp}-${fileName}`
+    : buildRepositorySourceObjectKey(repositoryId, fileName)
 
   try {
     const command = new PutObjectCommand({
@@ -219,7 +232,7 @@ export async function uploadRepositoryTextSource({
   const s3Client = await getS3Client()
   const config = await getS3Config()
   const body = Buffer.from(content, "utf8")
-  const key = `repositories/${repositoryId}/inline/${randomUUID()}/${fileName}`
+  const key = buildRepositorySourceObjectKey(repositoryId, fileName, randomUUID())
 
   await s3Client.send(
     new PutObjectCommand({
@@ -238,6 +251,42 @@ export async function uploadRepositoryTextSource({
   )
 
   return { key, byteSize: body.byteLength }
+}
+
+/**
+ * Copy a legacy repository source into the immutable namespace accepted by the
+ * unified processor. S3 preserves source metadata, content type, and tags by
+ * default because this request supplies no replacement directives.
+ */
+export async function copyRepositorySourceToCanonicalNamespace({
+  repositoryId,
+  sourceKey,
+  fileName,
+}: CopyRepositorySourceToCanonicalNamespaceParams): Promise<{ key: string }> {
+  if (!sourceKey.trim() || sourceKey.includes("..")) {
+    throw new Error("A safe source object key is required")
+  }
+  await ensureDocumentsBucket()
+
+  const s3Client = await getS3Client()
+  const config = await getS3Config()
+  const bucketName = config.bucket!
+  const safeFileName = sanitizeFileName(fileName)
+  const key = buildRepositorySourceObjectKey(repositoryId, safeFileName)
+  const encodedSourceKey = sourceKey
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/")
+
+  await s3Client.send(
+    new CopyObjectCommand({
+      Bucket: bucketName,
+      Key: key,
+      CopySource: `/${bucketName}/${encodedSourceKey}`,
+    })
+  )
+
+  return { key }
 }
 
 // Get a signed URL for a document

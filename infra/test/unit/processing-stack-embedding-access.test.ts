@@ -64,4 +64,35 @@ describe('ProcessingStack embedding visual-artifact access', () => {
       expect.arrayContaining(['s3:PutObject', 's3:DeleteObject']),
     );
   });
+
+  it('alarms on embedding backlog, terminal DLQ records, and worker failures', () => {
+    const app = new cdk.App();
+    const stack = new ProcessingStack(app, 'ProcessingAlarmTest', {
+      env: { account: '123456789012', region: 'us-east-1' },
+      environment: 'dev',
+      documentsBucketName: 'aistudio-dev-documents',
+      databaseResourceArn:
+        'arn:aws:rds:us-east-1:123456789012:cluster:aistudio-dev',
+      databaseSecretArn:
+        'arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio-dev',
+    });
+    const template = Template.fromStack(stack);
+
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'aistudio-dev-embedding-dlq-visible',
+      Threshold: 1,
+      TreatMissingData: 'notBreaching',
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'aistudio-dev-embedding-oldest-message',
+      Threshold: 1_800,
+      EvaluationPeriods: 2,
+      TreatMissingData: 'notBreaching',
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'aistudio-dev-embedding-worker-errors',
+      Threshold: 1,
+      TreatMissingData: 'notBreaching',
+    });
+  });
 });

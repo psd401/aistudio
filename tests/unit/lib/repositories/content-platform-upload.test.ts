@@ -78,9 +78,31 @@ describe("canonical repository upload initiation", () => {
       /^repositories\/7\/[0-9a-f-]{36}\/Emergency_handbook\.pdf$/
     );
     expect(storage.createSingleUpload).toHaveBeenCalledWith(
-      expect.objectContaining({ contentType: "application/pdf" })
+      expect.objectContaining({
+        contentType: "application/pdf",
+        metadata: {
+          repositoryId: "7",
+          uploadSessionId: expect.any(String),
+        },
+      })
     );
     expect(mockExecuteQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Unicode original names in the database instead of S3 headers", async () => {
+    const storage = createStorage();
+
+    await initiateRepositoryUpload(
+      { ...baseInput, fileName: "Plan 🗺️.pdf" },
+      DEFAULT_CONTENT_PLATFORM_CONFIG,
+      storage
+    );
+
+    expect(storage.createSingleUpload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.not.objectContaining({ originalFileName: expect.anything() }),
+      })
+    );
   });
 
   it("bounds the maximum 500 MiB PDF to at most 100 signed parts", async () => {

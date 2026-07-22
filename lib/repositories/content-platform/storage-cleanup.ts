@@ -55,14 +55,19 @@ export async function deleteRepositoryItemStorage(
   item: RepositoryStorageItem,
   dependencies: RepositoryStorageCleanupDependencies = defaultDependencies
 ): Promise<RepositoryStorageCleanupResult> {
-  if (item.type !== "document" && item.type !== "image") {
-    return { sourceObjectCount: 0, artifactObjectCount: 0 };
-  }
-
   const versions = await dependencies.getVersions(item.id);
 
   const sourceKeys = new Set<string>();
-  if (item.source.trim()) sourceKeys.add(item.source);
+  // URL and inline-text sources are user content, not object keys. Canonical
+  // text still has an immutable version object below and is cleaned through the
+  // version rows. File-backed legacy items may not have canonical versions yet,
+  // so retain their stored source key as a fallback.
+  if (
+    ["document", "image", "audio", "video"].includes(item.type) &&
+    item.source.trim()
+  ) {
+    sourceKeys.add(item.source);
+  }
   for (const version of versions) {
     if (version.objectKey?.trim()) sourceKeys.add(version.objectKey);
   }

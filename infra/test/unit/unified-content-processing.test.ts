@@ -42,7 +42,7 @@ describe("UnifiedContentProcessing", () => {
       QueueName: "aistudio-dev-content-processing-queue",
       SqsManagedSseEnabled: true,
       VisibilityTimeout: 5_400,
-      RedrivePolicy: Match.objectLike({ maxReceiveCount: 20 }),
+      RedrivePolicy: Match.objectLike({ maxReceiveCount: 5 }),
       Tags: Match.arrayWith([
         { Key: "Environment", Value: "dev" },
         { Key: "ManagedBy", Value: "cdk" },
@@ -52,6 +52,25 @@ describe("UnifiedContentProcessing", () => {
       QueueName: "aistudio-dev-content-processing-dlq",
       SqsManagedSseEnabled: true,
       MessageRetentionPeriod: 1_209_600,
+    });
+  });
+
+  test("alarms on stalled work, DLQ records, and worker persistence errors", () => {
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "aistudio-dev-content-processing-dlq-visible",
+      Threshold: 1,
+      TreatMissingData: "notBreaching",
+    });
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "aistudio-dev-content-processing-oldest-message",
+      Threshold: 1_800,
+      EvaluationPeriods: 2,
+      TreatMissingData: "notBreaching",
+    });
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "aistudio-dev-content-processing-worker-errors",
+      Threshold: 1,
+      TreatMissingData: "notBreaching",
     });
   });
 

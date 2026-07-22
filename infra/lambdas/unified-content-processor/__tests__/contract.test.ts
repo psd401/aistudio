@@ -34,6 +34,12 @@ describe("unified content processor contract", () => {
     ).toBe(false);
     expect(isRepositoryObjectKey(7, "repositories/7/not-a-uuid/file.pdf"))
       .toBe(false);
+    expect(
+      isRepositoryObjectKey(
+        7,
+        "repositories/7/inline/11111111-2222-4333-8444-555555555555/notes.txt"
+      )
+    ).toBe(false);
   });
 
   test("fails closed while malware inspection is required", () => {

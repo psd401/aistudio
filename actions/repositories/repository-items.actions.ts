@@ -30,6 +30,7 @@ import {
 } from "@/lib/logger"
 import { revalidatePath } from "next/cache"
 import {
+  copyRepositorySourceToCanonicalNamespace,
   uploadDocument,
   getDocumentObjectMetadata,
   getDocumentSignedUrl,
@@ -40,9 +41,12 @@ import { toContentDispositionValue } from "@/lib/repositories/content-dispositio
 import {
   deleteRepositoryItemStorage,
   dispatchContentProcessingJob,
+  getCanonicalRepositoryItemStatuses,
   isCanonicalUploadContentType,
+  isRepositorySourceObjectKey,
   registerCanonicalTextIfEnabled,
   registerCanonicalUploadIfEnabled,
+  retryCanonicalRepositoryItem,
 } from "@/lib/repositories/content-platform"
 
 // Runtime-validated processing-status union (REV-COR-068): actions are network
@@ -53,15 +57,24 @@ function isProcessingStatus(s: string): s is ProcessingStatus {
   return (VALID_PROCESSING_STATUSES as readonly string[]).includes(s)
 }
 
+type RepositoryItemType =
+  | 'document'
+  | 'image'
+  | 'audio'
+  | 'video'
+  | 'url'
+  | 'text'
+
 export interface RepositoryItem {
   id: number
   repositoryId: number
-  type: 'document' | 'image' | 'url' | 'text'
+  type: RepositoryItemType
   name: string
   source: string
   metadata: Record<string, unknown>
   processingStatus: string
   processingError: string | null
+  canRetry?: boolean
   createdAt: Date
   updatedAt: Date
 }
@@ -132,6 +145,7 @@ async function shadowWriteCanonicalText(
       processingJobId: canonical.inspectJob.id,
       created: canonical.created,
     })
+    await updateRepositoryItemStatus(input.itemId, "pending", null)
     try {
       await dispatchContentProcessingJob({
         jobId: canonical.inspectJob.id,
@@ -147,6 +161,16 @@ async function shadowWriteCanonicalText(
       })
     }
   } catch (error) {
+    await updateRepositoryItemStatus(
+      input.itemId,
+      "failed",
+      "Canonical content registration failed. Retry this item."
+    ).catch((statusError) => {
+      log.error("Failed to expose canonical inline text registration failure", {
+        itemId: input.itemId,
+        error: statusError instanceof Error ? statusError.message : "Unknown error",
+      })
+    })
     log.error("Canonical inline text shadow write failed", {
       itemId: input.itemId,
       error: error instanceof Error ? error.message : "Unknown error",
@@ -177,6 +201,7 @@ async function shadowWriteCanonicalUpload(
       processingJobId: canonical.inspectJob.id,
       created: canonical.created,
     })
+    await updateRepositoryItemStatus(input.itemId, "pending", null)
     try {
       await dispatchContentProcessingJob({
         jobId: canonical.inspectJob.id,
@@ -192,6 +217,16 @@ async function shadowWriteCanonicalUpload(
       })
     }
   } catch (error) {
+    await updateRepositoryItemStatus(
+      input.itemId,
+      "failed",
+      "Canonical content registration failed. Retry this item."
+    ).catch((statusError) => {
+      log.error("Failed to expose canonical repository registration failure", {
+        itemId: input.itemId,
+        error: statusError instanceof Error ? statusError.message : "Unknown error",
+      })
+    })
     log.error("Canonical repository shadow write failed", {
       itemId: input.itemId,
       error: error instanceof Error ? error.message : "Unknown error",
@@ -202,11 +237,12 @@ async function shadowWriteCanonicalUpload(
 // Sanitize filename to prevent directory traversal and other security issues
 function sanitizeFilename(filename: string): string {
   // Remove any directory components and special characters
-  return filename
+  const sanitized = filename
     .replace(/[^\d.A-Za-z-]/g, '_') // Replace special chars with underscore
     .replace(/\.{2,}/g, '.') // Replace multiple dots with single dot
     .replace(/^\.+|\.+$/g, '') // Remove leading/trailing dots
     .slice(0, 255); // Limit length
+  return sanitized || "file"
 }
 
 // Raw repository item row shape returned by the Drizzle accessors
@@ -217,12 +253,13 @@ function mapToRepositoryItem(itemRaw: RawRepositoryItem): RepositoryItem {
   return {
     id: itemRaw.id,
     repositoryId: itemRaw.repositoryId,
-    type: itemRaw.type as 'document' | 'image' | 'url' | 'text',
+    type: itemRaw.type as RepositoryItemType,
     name: itemRaw.name,
     source: itemRaw.source,
     metadata: itemRaw.metadata ?? {},
     processingStatus: itemRaw.processingStatus ?? 'pending',
     processingError: itemRaw.processingError,
+    canRetry: false,
     createdAt: itemRaw.createdAt ?? new Date(),
     updatedAt: itemRaw.updatedAt ?? new Date()
   }
@@ -366,6 +403,7 @@ export async function addDocumentItem(
     
     const { key, url } = await uploadDocument({
       userId: userId.toString(),
+      repositoryId: input.repository_id,
       fileName: sanitizedFilename,
       fileContent,
       contentType: input.file.contentType,
@@ -514,8 +552,7 @@ export async function addDocumentWithPresignedUrl(
     // legitimate upload flow (generateUploadUrl) only ever mints keys under
     // repositories/${repositoryId}/. Reject any other key so a user cannot register
     // an arbitrary documents-bucket object onto their repo and presign-download it.
-    const expectedKeyPrefix = `repositories/${input.repository_id}/`
-    if (!input.s3Key.startsWith(expectedKeyPrefix)) {
+    if (!isRepositorySourceObjectKey(input.repository_id, input.s3Key)) {
       log.warn("Presigned upload denied - s3Key outside repository namespace", {
         userId,
         repositoryId: input.repository_id
@@ -574,12 +611,13 @@ export async function addDocumentWithPresignedUrl(
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'image' | 'url' | 'text',
+      type: itemRaw.type as RepositoryItemType,
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
+      canRetry: false,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -733,12 +771,13 @@ export async function addUrlItem(
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'image' | 'url' | 'text',
+      type: itemRaw.type as RepositoryItemType,
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
+      canRetry: false,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -910,12 +949,13 @@ export async function addTextItem(
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'image' | 'url' | 'text',
+      type: itemRaw.type as RepositoryItemType,
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
+      canRetry: false,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -987,12 +1027,13 @@ export async function removeRepositoryItem(
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'image' | 'url' | 'text',
+      type: itemRaw.type as RepositoryItemType,
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
+      canRetry: false,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -1009,25 +1050,16 @@ export async function removeRepositoryItem(
       throw ErrorFactories.authzOwnerRequired("remove items from repository")
     }
 
-    // Delete stored source and canonical derivatives before cascading DB rows.
-    if (item.type === 'document' || item.type === 'image') {
-      log.info("Deleting repository item objects from S3", {
-        itemId,
-        s3Key: item.source
-      })
-      
-      try {
-        const cleanup = await deleteRepositoryItemStorage(item)
-        log.info("Repository item objects deleted from S3 successfully", cleanup)
-      } catch (error) {
-        // Log error but continue with database deletion
-        log.error("Failed to delete from S3", {
-          itemId,
-          s3Key: item.source,
-          error: error instanceof Error ? error.message : "Unknown error"
-        })
-      }
-    }
+    // Clean every item type before cascading its version rows. The cleanup
+    // service distinguishes stored S3 sources from inline text/URLs and always
+    // removes canonical version artifacts. If cleanup fails, preserve the DB
+    // rows so the operation can be retried without losing the object manifest.
+    log.info("Deleting repository item objects from S3", {
+      itemId,
+      s3Key: item.source
+    })
+    const cleanup = await deleteRepositoryItemStorage(item)
+    log.info("Repository item objects deleted from S3 successfully", cleanup)
 
     // Delete from database via Drizzle (cascades to chunks)
     log.info("Deleting item from database", { itemId })
@@ -1093,21 +1125,32 @@ export async function listRepositoryItems(
 
     // Fetch repository items via Drizzle
     log.debug("Fetching repository items from database", { repositoryId })
-    const itemsRaw = await getRepositoryItems(repositoryId)
+    const [itemsRaw, canonicalStatuses] = await Promise.all([
+      getRepositoryItems(repositoryId),
+      getCanonicalRepositoryItemStatuses(repositoryId),
+    ])
 
     // Convert to action type
-    const items: RepositoryItem[] = itemsRaw.map(item => ({
-      id: item.id,
-      repositoryId: item.repositoryId,
-      type: item.type as 'document' | 'image' | 'url' | 'text',
-      name: item.name,
-      source: item.source,
-      metadata: item.metadata ?? {},
-      processingStatus: item.processingStatus ?? 'pending',
-      processingError: item.processingError,
-      createdAt: item.createdAt ?? new Date(),
-      updatedAt: item.updatedAt ?? new Date()
-    }))
+    const items: RepositoryItem[] = itemsRaw.map(item => {
+      const canonical = canonicalStatuses.get(item.id)
+      return {
+        id: item.id,
+        repositoryId: item.repositoryId,
+        type: item.type as RepositoryItemType,
+        name: item.name,
+        source: item.source,
+        metadata: item.metadata ?? {},
+        processingStatus:
+          canonical?.processingStatus ?? item.processingStatus ?? 'pending',
+        processingError: canonical?.processingError ?? item.processingError,
+        canRetry:
+          canonical?.canRetry ??
+          (item.processingStatus === "failed" &&
+            item.processingError?.startsWith("Canonical content registration failed") === true),
+        createdAt: item.createdAt ?? new Date(),
+        updatedAt: item.updatedAt ?? new Date()
+      }
+    })
 
     log.info("Repository items fetched successfully", {
       repositoryId,
@@ -1125,6 +1168,144 @@ export async function listRepositoryItems(
       requestId,
       operation: "listRepositoryItems",
       metadata: { repositoryId }
+    })
+  }
+}
+
+interface RepositoryItemRetryTarget {
+  itemVersionId: string
+  processingJobId: string
+}
+
+async function prepareRepositoryItemRetry(
+  item: RawRepositoryItem,
+  userId: number,
+  requestId: string
+): Promise<RepositoryItemRetryTarget> {
+  if (item.type === "text") {
+    const canonical = await registerCanonicalTextIfEnabled({
+      itemId: item.id,
+      repositoryId: item.repositoryId,
+      userId,
+      name: item.name,
+      content: item.source,
+      traceId: requestId,
+    })
+    if (!canonical) {
+      throw ErrorFactories.sysConfigurationError(
+        "Canonical content processing is disabled"
+      )
+    }
+    return {
+      itemVersionId: canonical.version.id,
+      processingJobId: canonical.inspectJob.id,
+    }
+  }
+
+  if (
+    item.currentVersionId &&
+    isRepositorySourceObjectKey(item.repositoryId, item.source)
+  ) {
+    return retryCanonicalRepositoryItem(item.id, requestId)
+  }
+
+  if (!["document", "image", "audio", "video"].includes(item.type)) {
+    throw ErrorFactories.invalidInput(
+      "item.type",
+      item.type,
+      "Only stored files and inline text can be reprocessed"
+    )
+  }
+
+  const metadata = item.metadata ?? {}
+  const originalFileName =
+    typeof metadata.originalFileName === "string"
+      ? metadata.originalFileName
+      : item.name
+  const copied = await copyRepositorySourceToCanonicalNamespace({
+    repositoryId: item.repositoryId,
+    sourceKey: item.source,
+    fileName: originalFileName,
+  })
+  const copiedMetadata = await getDocumentObjectMetadata(copied.key)
+  const declaredContentType =
+    copiedMetadata.contentType ??
+    (typeof metadata.contentType === "string" ? metadata.contentType : null)
+  if (!declaredContentType || copiedMetadata.contentLength <= 0) {
+    throw ErrorFactories.invalidInput(
+      "storedSourceMetadata",
+      copiedMetadata,
+      "A positive content length and content type are required"
+    )
+  }
+  const canonical = await registerCanonicalUploadIfEnabled({
+    itemId: item.id,
+    userId,
+    objectKey: copied.key,
+    originalFileName,
+    declaredContentType,
+    byteSize: copiedMetadata.contentLength,
+    traceId: requestId,
+  })
+  if (!canonical) {
+    throw ErrorFactories.sysConfigurationError(
+      "Canonical content processing is disabled"
+    )
+  }
+  return {
+    itemVersionId: canonical.version.id,
+    processingJobId: canonical.inspectJob.id,
+  }
+}
+
+export async function retryRepositoryItemProcessing(
+  itemId: number
+): Promise<ActionState<void>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("retryRepositoryItemProcessing")
+  const log = createLogger({ requestId, action: "retryRepositoryItemProcessing" })
+
+  try {
+    const session = await getServerSession()
+    if (!session) throw ErrorFactories.authNoSession()
+    if (!(await hasCapabilityAccess("knowledge-repositories"))) {
+      throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
+    }
+
+    const item = await getRepositoryItemById(itemId)
+    if (!item) throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+    await assertNotSystemManagedRepository(item.repositoryId)
+    const userId = await getUserIdFromSession(session.sub)
+    if (!(await canModifyRepository(item.repositoryId, userId))) {
+      throw ErrorFactories.authzOwnerRequired("retry repository processing")
+    }
+
+    const retry = await prepareRepositoryItemRetry(item, userId, requestId)
+    try {
+      await dispatchContentProcessingJob({
+        jobId: retry.processingJobId,
+        itemVersionId: retry.itemVersionId,
+      })
+    } catch (dispatchError) {
+      // The durable pending job remains eligible for scheduled dispatch.
+      log.warn("Retried content is pending scheduled dispatch", {
+        itemId,
+        processingJobId: retry.processingJobId,
+        error:
+          dispatchError instanceof Error ? dispatchError.message : "Unknown error",
+      })
+    }
+
+    revalidatePath(`/repositories/${item.repositoryId}`)
+    timer({ status: "success", itemId })
+    return createSuccess(undefined as void, "Content processing restarted")
+  } catch (error) {
+    timer({ status: "error", itemId })
+    return handleError(error, "Failed to retry content processing.", {
+      context: "retryRepositoryItemProcessing",
+      requestId,
+      operation: "retryRepositoryItemProcessing",
+      metadata: { itemId },
     })
   }
 }
@@ -1188,12 +1369,13 @@ export async function searchRepositoryItems(
     const items: RepositoryItem[] = itemsRaw.map(item => ({
       id: item.id,
       repositoryId: item.repositoryId,
-      type: item.type as 'document' | 'image' | 'url' | 'text',
+      type: item.type as RepositoryItemType,
       name: item.name,
       source: item.source,
       metadata: item.metadata ?? {},
       processingStatus: item.processingStatus ?? 'pending',
       processingError: item.processingError,
+      canRetry: false,
       createdAt: item.createdAt ?? new Date(),
       updatedAt: item.updatedAt ?? new Date()
     }))
@@ -1465,7 +1647,12 @@ export async function getDocumentDownloadUrl(
     // Convert to action type
     const item: RepositoryItem = mapToRepositoryItem(itemRaw)
 
-    if (item.type !== 'document' && item.type !== 'image') {
+    if (
+      item.type !== 'document' &&
+      item.type !== 'image' &&
+      item.type !== 'audio' &&
+      item.type !== 'video'
+    ) {
       log.warn("Download URL requested for non-file item", {
         itemId,
         itemType: item.type

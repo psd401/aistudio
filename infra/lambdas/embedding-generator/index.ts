@@ -27,6 +27,12 @@ import {
   parseEmbeddingVector,
 } from './embedding-provider';
 import { activateCompletedGeneration } from './generation-activation';
+import {
+  failBuildingGeneration,
+  isTerminalEmbeddingAttempt,
+  shouldSkipCanonicalGeneration,
+  type CanonicalGenerationStatus,
+} from './generation-lifecycle';
 
 const log = {
   info: (msg: string, meta?: Record<string, unknown>) =>
@@ -324,12 +330,13 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
     let effectiveSettings = embSettings;
     if (message.generationId) {
       const [generation] = await db.execute<{
+        status: CanonicalGenerationStatus;
         embedding_model: string | null;
         embedding_dimensions: number | null;
         visual_embedding_model: string | null;
         visual_embedding_dimensions: number | null;
       }>(sql`
-        SELECT embedding_model, embedding_dimensions,
+        SELECT status, embedding_model, embedding_dimensions,
                visual_embedding_model, visual_embedding_dimensions
         FROM repository_index_generations
         WHERE id = ${message.generationId}::uuid
@@ -337,6 +344,12 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
       `);
       if (!generation) {
         throw new Error(`Index generation ${message.generationId} was not found`);
+      }
+      if (shouldSkipCanonicalGeneration(generation.status)) {
+        log.info(`Skipping stale embedding generation ${message.generationId}`, {
+          status: generation.status,
+        });
+        return;
       }
       const descriptor = parseEmbeddingDescriptor(
         generation.embedding_model,
@@ -513,13 +526,52 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
     const errorMessage = error instanceof Error ? error.message : String(error);
     log.error(`Failed to generate embeddings for item ${message.itemId}`, { error: errorMessage });
 
-    try {
-      await db
-        .update(repositoryItems)
-        .set({ processingStatus: 'embedding_failed', processingError: errorMessage, updatedAt: new Date() })
-        .where(eq(repositoryItems.id, message.itemId));
-    } catch (dbError) {
-      log.error(`Failed to mark item ${message.itemId} as embedding_failed`, { error: String(dbError) });
+    const terminalAttempt = isTerminalEmbeddingAttempt(
+      record.attributes.ApproximateReceiveCount
+    );
+    if (terminalAttempt) {
+      try {
+        if (message.generationId) {
+          const failed = await failBuildingGeneration(
+            {
+              generationId: message.generationId,
+              itemId: message.itemId,
+              errorMessage,
+            },
+            async (query) =>
+              (await db.execute<{ item_id: number }>(query)) as Array<{
+                item_id: number;
+              }>
+          );
+          log.info(`Canonical embedding generation terminal failure handled`, {
+            generationId: message.generationId,
+            itemId: message.itemId,
+            failedCurrentGeneration: failed,
+          });
+        } else {
+          await db
+            .update(repositoryItems)
+            .set({
+              processingStatus: 'embedding_failed',
+              processingError: errorMessage,
+              updatedAt: new Date(),
+            })
+            .where(eq(repositoryItems.id, message.itemId));
+        }
+      } catch (dbError) {
+        log.error(`Failed to record terminal embedding failure`, {
+          itemId: message.itemId,
+          generationId: message.generationId,
+          error: String(dbError),
+        });
+      }
+    } else {
+      log.info(`Embedding failure remains retryable`, {
+        itemId: message.itemId,
+        generationId: message.generationId,
+        approximateReceiveCount:
+          record.attributes.ApproximateReceiveCount ?? '1',
+      });
     }
 
     throw error;
