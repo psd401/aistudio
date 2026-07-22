@@ -143,6 +143,37 @@ describe("UnifiedContentProcessing", () => {
     expect(repositoryAccess?.Condition).toBeUndefined();
   });
 
+  test("dispatches embeddings through an exact queue ARN without tag conditions", () => {
+    type PolicyStatement = {
+      Sid?: string;
+      Effect?: string;
+      Action?: string | string[];
+      Resource?: unknown;
+      Condition?: unknown;
+    };
+    const statements = Object.values(
+      template.findResources("AWS::IAM::Role")
+    ).flatMap((role) =>
+      (role.Properties?.Policies ?? []).flatMap(
+        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+          policy.PolicyDocument?.Statement ?? []
+      )
+    );
+    const embeddingDispatch = statements.find(
+      (statement) => statement.Sid === "CanonicalEmbeddingDispatch"
+    );
+
+    expect(embeddingDispatch).toMatchObject({
+      Effect: "Allow",
+      Action: "sqs:SendMessage",
+    });
+    expect(embeddingDispatch?.Resource).toEqual({
+      "Fn::GetAtt": [expect.stringMatching(/^EmbeddingQueue/), "Arn"],
+    });
+    expect(JSON.stringify(embeddingDispatch?.Resource)).not.toContain("*");
+    expect(embeddingDispatch?.Condition).toBeUndefined();
+  });
+
   test("grants only the documented wildcard APIs", () => {
     const policies = template.findResources("AWS::IAM::Policy");
     const roles = template.findResources("AWS::IAM::Role");
