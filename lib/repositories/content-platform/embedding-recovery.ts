@@ -4,7 +4,10 @@ import {
   executeTransaction,
   toPgRows,
 } from "@/lib/db/drizzle-client";
-import { repositoryIndexGenerations } from "@/lib/db/schema";
+import {
+  repositoryIndexGenerations,
+  type RepositoryIndexGenerationStatus,
+} from "@/lib/db/schema";
 
 export const INCOMPLETE_EMBEDDING_RECOVERY_BATCH_SIZE = 10;
 export const INCOMPLETE_EMBEDDING_RECOVERY_INTERVAL_MINUTES = 10;
@@ -14,6 +17,10 @@ export interface IncompleteEmbeddingGeneration {
   id: string;
   visualEmbeddingEnabled: boolean;
   activationOnly: boolean;
+  claimedAt: Date;
+  recoveryAttempt: number;
+  previousStatus: Exclude<RepositoryIndexGenerationStatus, "superseded">;
+  previousErrorMessage: string | null;
 }
 
 export interface ClaimIncompleteEmbeddingGenerationOptions {
@@ -38,17 +45,20 @@ export function parseCanonicalEmbeddingDlqMessage(
     const generationId = value.generationId;
     const chunkIds = value.chunkIds;
     const texts = value.texts;
+    const activationOnly = value.activationOnly === true;
     if (
       !Number.isSafeInteger(itemId) ||
       Number(itemId) <= 0 ||
       typeof generationId !== "string" ||
       !UUID_PATTERN.test(generationId) ||
       !Array.isArray(chunkIds) ||
-      chunkIds.length === 0 ||
+      (!activationOnly && chunkIds.length === 0) ||
+      (activationOnly && chunkIds.length !== 0) ||
       !chunkIds.every(
         (chunkId) => Number.isSafeInteger(chunkId) && Number(chunkId) > 0
       ) ||
       !Array.isArray(texts) ||
+      (activationOnly && texts.length !== 0) ||
       texts.length !== chunkIds.length ||
       !texts.every((text) => typeof text === "string")
     ) {
@@ -131,7 +141,9 @@ export async function claimIncompleteEmbeddingGenerations(
     (tx) =>
       tx.execute(sql`
         WITH selected AS (
-          SELECT generation.id
+          SELECT generation.id,
+                 generation.status AS previous_status,
+                 generation.error_message AS previous_error_message
           FROM repository_index_generations generation
           WHERE generation.status IN ('building', 'active', 'failed')
             AND generation.embedding_model IS NOT NULL
@@ -206,6 +218,9 @@ export async function claimIncompleteEmbeddingGenerations(
         WHERE generation.id = selected.id
         RETURNING
           generation.id,
+          generation.embedding_recovery_attempts,
+          selected.previous_status,
+          selected.previous_error_message,
           (generation.visual_embedding_model IS NOT NULL) AS visual_embedding_enabled,
           NOT EXISTS (
             SELECT 1
@@ -225,39 +240,59 @@ export async function claimIncompleteEmbeddingGenerations(
   );
   return toPgRows<{
     id: string;
+    embedding_recovery_attempts: number;
+    previous_status: Exclude<RepositoryIndexGenerationStatus, "superseded">;
+    previous_error_message: string | null;
     visual_embedding_enabled: boolean;
     activation_only: boolean;
   }>(claimed).map((row) => ({
     id: row.id,
+    claimedAt: now,
+    recoveryAttempt: row.embedding_recovery_attempts,
+    previousStatus: row.previous_status,
+    previousErrorMessage: row.previous_error_message,
     visualEmbeddingEnabled: row.visual_embedding_enabled,
     activationOnly: row.activation_only,
   }));
 }
 
-/** Release a scheduler claim when SQS dispatch failed before it could drain. */
+/**
+ * Release a scheduler claim only when no SQS message was durably dispatched.
+ *
+ * The attempt remains consumed so a persistent queue/configuration outage is
+ * bounded and eventually leaves an actionable exhausted state. Failed
+ * generations are restored to their pre-claim state so a zero-dispatch error
+ * cannot masquerade as active embedding work. The claim timestamp fences a
+ * stale invocation from releasing a newer scheduler claim.
+ */
 export async function releaseIncompleteEmbeddingGenerationClaim(
-  generationId: string
-): Promise<void> {
-  await executeQuery(
+  claim: IncompleteEmbeddingGeneration
+): Promise<boolean> {
+  const released = await executeQuery(
     (db) =>
       db
         .update(repositoryIndexGenerations)
         .set({
           embeddingRecoveryQueuedAt: null,
-          // Dispatch never reached SQS, so no embedding work consumed this
-          // bounded recovery attempt. The non-null guard makes release
-          // idempotent if error handling itself is retried.
-          embeddingRecoveryAttempts: sql`GREATEST(
-            ${repositoryIndexGenerations.embeddingRecoveryAttempts} - 1,
-            0
-          )`,
+          status: claim.previousStatus,
+          errorMessage: claim.previousErrorMessage,
         })
         .where(
           and(
-            eq(repositoryIndexGenerations.id, generationId),
-            isNotNull(repositoryIndexGenerations.embeddingRecoveryQueuedAt)
+            eq(repositoryIndexGenerations.id, claim.id),
+            isNotNull(repositoryIndexGenerations.embeddingRecoveryQueuedAt),
+            eq(
+              repositoryIndexGenerations.embeddingRecoveryQueuedAt,
+              claim.claimedAt
+            ),
+            eq(
+              repositoryIndexGenerations.embeddingRecoveryAttempts,
+              claim.recoveryAttempt
+            )
           )
-        ),
+        )
+        .returning({ id: repositoryIndexGenerations.id }),
     "contentPlatform.releaseIncompleteEmbeddingGenerationClaim"
   );
+  return released.length === 1;
 }

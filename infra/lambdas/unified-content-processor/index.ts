@@ -1,4 +1,4 @@
-import type { EventBridgeEvent, SQSBatchItemFailure, SQSBatchResponse, SQSEvent, SQSRecord } from "aws-lambda";
+import type { Context, EventBridgeEvent, SQSBatchItemFailure, SQSBatchResponse, SQSEvent, SQSRecord } from "aws-lambda";
 import { createHash } from "node:crypto";
 import {
   GetObjectCommand,
@@ -138,6 +138,10 @@ import {
   reconcileTextractState,
 } from "./provider-state";
 import { runScheduledMaintenance } from "./scheduled-maintenance";
+import {
+  dispatchClaimedEmbeddingGeneration,
+  EmbeddingRecoveryDispatchError,
+} from "./embedding-recovery-dispatch";
 import {
   repositoryEmbeddingConfigurationFromSettings,
   repositoryVisualEmbeddingConfiguration,
@@ -568,6 +572,7 @@ async function captionImage(
 async function queueEmbeddings(
   generationId: string,
   visualEnabled: boolean,
+  onMessageSent: () => void = () => undefined,
 ): Promise<void> {
   let lastChunkId = 0;
   for (;;) {
@@ -636,6 +641,7 @@ async function queueEmbeddings(
             MessageBody: JSON.stringify(message),
           }),
         );
+        onMessageSent();
       }
     }
     const lastChunk = chunks.at(-1);
@@ -645,7 +651,8 @@ async function queueEmbeddings(
 }
 
 async function queueGenerationActivation(
-  generationId: string
+  generationId: string,
+  onMessageSent: () => void = () => undefined
 ): Promise<void> {
   const [chunk] = await executeQuery(
     (db) =>
@@ -653,7 +660,6 @@ async function queueGenerationActivation(
         .select({
           id: repositoryItemChunks.id,
           itemId: repositoryItemChunks.itemId,
-          content: repositoryItemChunks.content,
         })
         .from(repositoryItemChunks)
         .where(eq(repositoryItemChunks.indexGenerationId, generationId))
@@ -670,14 +676,15 @@ async function queueGenerationActivation(
       MessageBody: JSON.stringify({
         itemId: chunk.itemId,
         generationId,
-        chunkIds: [chunk.id],
-        texts: [chunk.content],
-        modalities: ["text"],
-        visualSources: [null],
+        chunkIds: [],
+        texts: [],
+        modalities: [],
+        visualSources: [],
         activationOnly: true,
       }),
     })
   );
+  onMessageSent();
 }
 
 async function dispatchIncompleteGenerationEmbeddings(): Promise<void> {
@@ -685,19 +692,28 @@ async function dispatchIncompleteGenerationEmbeddings(): Promise<void> {
   let firstError: unknown = null;
   for (const generation of generations) {
     try {
-      if (generation.activationOnly) {
-        await queueGenerationActivation(generation.id);
-      } else {
-        await queueEmbeddings(
-          generation.id,
-          generation.visualEmbeddingEnabled
-        );
-      }
+      await dispatchClaimedEmbeddingGeneration(
+        (recordDurableDispatch) =>
+          generation.activationOnly
+            ? queueGenerationActivation(
+                generation.id,
+                recordDurableDispatch
+              )
+            : queueEmbeddings(
+                generation.id,
+                generation.visualEmbeddingEnabled,
+                recordDurableDispatch
+              ),
+        () => releaseIncompleteEmbeddingGenerationClaim(generation)
+      );
     } catch (error) {
-      await releaseIncompleteEmbeddingGenerationClaim(generation.id);
       firstError ??= error;
       log.error("Incomplete embedding generation redispatch failed", {
         generationId: generation.id,
+        dispatchedMessages:
+          error instanceof EmbeddingRecoveryDispatchError
+            ? error.dispatchedMessages
+            : 0,
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -808,8 +824,8 @@ async function drainRecoveredProcessingDlq(): Promise<void> {
   });
 }
 
-async function recoverLegacyInlineTextSources(): Promise<void> {
-  const claims = await claimLegacyInlineTextRecoveries();
+async function recoverLegacyInlineTextSources(leaseOwner: string): Promise<void> {
+  const claims = await claimLegacyInlineTextRecoveries({ leaseOwner });
   for (const claim of claims) {
     try {
       const body = Buffer.from(claim.content, "utf8");
@@ -1502,7 +1518,10 @@ function isSqsEvent(event: SQSEvent | EventBridgeEvent<string, unknown>): event 
   return "Records" in event;
 }
 
-export async function handler(event: SQSEvent | EventBridgeEvent<string, unknown>): Promise<SQSBatchResponse | void> {
+export async function handler(
+  event: SQSEvent | EventBridgeEvent<string, unknown>,
+  context: Context
+): Promise<SQSBatchResponse | void> {
   await ensureDatabaseCredentials();
   if (!isSqsEvent(event)) {
     await runScheduledMaintenance(
@@ -1518,12 +1537,18 @@ export async function handler(event: SQSEvent | EventBridgeEvent<string, unknown
             }
           },
         },
-        { name: "legacy-source-recovery", run: recoverLegacyInlineTextSources },
-        { name: "processing-outbox", run: dispatchPendingJobs },
+        {
+          name: "legacy-source-recovery",
+          run: () =>
+            recoverLegacyInlineTextSources(
+              `legacy-inline-source-recovery:${context.awsRequestId}`
+            ),
+        },
         {
           name: "processing-dlq-reconciliation",
           run: drainRecoveredProcessingDlq,
         },
+        { name: "processing-outbox", run: dispatchPendingJobs },
         {
           name: "embedding-recovery",
           run: dispatchIncompleteGenerationEmbeddings,

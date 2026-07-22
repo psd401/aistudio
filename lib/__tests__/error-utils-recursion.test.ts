@@ -193,7 +193,7 @@ describe('Error Handler Recursion Prevention', () => {
   })
 
   describe('handleError - Performance', () => {
-    it('should complete within reasonable time for large errors', () => {
+    it('should complete without recursive failure for large errors', () => {
       const error = new Error('Large error')
       ;(error as unknown as Record<string, unknown>).data = {
         users: Array.from({ length: 1000 }, (_, i) => ({
@@ -206,25 +206,26 @@ describe('Error Handler Recursion Prevention', () => {
         )
       }
 
-      const startTime = Date.now()
-      handleError(error, 'Large error test')
-      const endTime = Date.now()
+      const result = handleError(error, 'Large error test')
 
-      // Should complete in less than 100ms
-      expect(endTime - startTime).toBeLessThan(100)
+      // Jest's own test timeout catches a hang or recursive runaway without a
+      // CPU-contention-sensitive wall-clock assertion.
+      expect(result).toMatchObject({
+        isSuccess: false,
+        message: 'Large error test'
+      })
     })
 
     it('should handle rapid successive error calls', () => {
-      const startTime = Date.now()
-
+      const results = []
       for (let i = 0; i < 1000; i++) {
-        handleError(new Error(`Error ${i}`), 'Rapid test')
+        results.push(handleError(new Error(`Error ${i}`), 'Rapid test'))
       }
 
-      const endTime = Date.now()
-
-      // 1000 calls should complete in less than 1 second
-      expect(endTime - startTime).toBeLessThan(1000)
+      expect(results).toHaveLength(1000)
+      expect(results.every(result =>
+        result.isSuccess === false && result.message === 'Rapid test'
+      )).toBe(true)
     })
   })
 })

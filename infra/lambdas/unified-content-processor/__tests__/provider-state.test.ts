@@ -161,4 +161,28 @@ describe("unified content managed-service state", () => {
       reset: true,
     });
   });
+
+  test("drops BDA state when the immutable source object changes", () => {
+    expect(
+      reconcileBdaState(
+        {
+          bdaInvocationArn: "arn:aws:bedrock:invocation/old-source",
+          bdaSourceObjectKey: "repositories/7/version/old.mp4",
+          bdaOutputPrefix: "repositories/7/artifacts/version/bda/runs/token/",
+          bdaResultObjectKey:
+            "repositories/7/artifacts/version/bda/runs/token/result.json",
+          waitReason: "AWAITING_MEDIA_ANALYSIS",
+          waitStartedAt: "2026-07-22T12:00:00.000Z",
+        },
+        "repositories/7/version/new.mp4",
+        "repositories/7/artifacts/version/bda/",
+        "token"
+      )
+    ).toEqual({
+      metrics: {},
+      invocationArn: null,
+      outputPrefix: "repositories/7/artifacts/version/bda/runs/token/",
+      reset: true,
+    });
+  });
 });

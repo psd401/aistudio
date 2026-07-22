@@ -34,7 +34,10 @@ interface CanonicalStatusRow {
   jobAttempt: number | null;
   jobMaxAttempts: number | null;
   jobError: string | null;
-  postDeployRecovery: "unified-content-runtime-v2" | null;
+  postDeployRecovery:
+    | "unified-content-runtime-v2"
+    | "unified-content-artifact-v3"
+    | null;
   active: boolean;
   buildingGeneration: boolean;
   failedGeneration: boolean;

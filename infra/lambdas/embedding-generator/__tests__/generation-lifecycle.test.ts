@@ -1,12 +1,46 @@
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import {
+  assertValidEmbeddingMessage,
   failBuildingGeneration,
   isTerminalEmbeddingAttempt,
   shouldSkipCanonicalGeneration,
 } from '../generation-lifecycle';
 
 describe('canonical embedding generation lifecycle', () => {
+  test('accepts activation-only work without fabricated chunk inputs', () => {
+    expect(() =>
+      assertValidEmbeddingMessage({
+        itemId: 42,
+        generationId: '11111111-2222-4333-8444-555555555555',
+        chunkIds: [],
+        texts: [],
+        modalities: [],
+        visualSources: [],
+        activationOnly: true,
+      })
+    ).not.toThrow();
+
+    expect(() =>
+      assertValidEmbeddingMessage({
+        itemId: 42,
+        chunkIds: [],
+        texts: [],
+        activationOnly: true,
+      })
+    ).toThrow('requires a generation id');
+  });
+
+  test('rejects malformed normal embedding batches before model work', () => {
+    expect(() =>
+      assertValidEmbeddingMessage({
+        itemId: 42,
+        chunkIds: [1, 2],
+        texts: ['only one'],
+      })
+    ).toThrow('invalid or mismatched chunk data');
+  });
+
   test('acknowledges superseded and failed generations as stale', () => {
     expect(shouldSkipCanonicalGeneration('superseded')).toBe(true);
     expect(shouldSkipCanonicalGeneration('failed')).toBe(true);

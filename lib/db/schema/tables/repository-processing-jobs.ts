@@ -33,8 +33,10 @@ export type RepositoryProcessingJobStatus =
   | "cancelled";
 
 export interface RepositoryProcessingMetrics {
-  /** Transitional migration-122 handoff copied into the durable column by migration 123. */
-  postDeployRecovery?: "unified-content-runtime-v2";
+  /** Transitional deployment handoff mirrored in the durable marker column. */
+  postDeployRecovery?:
+    | "unified-content-runtime-v2"
+    | "unified-content-artifact-v3";
   /** Current managed-service wait, used to enforce a bounded deadline. */
   waitReason?:
     | "CONTENT_PLATFORM_DISABLED"
@@ -105,7 +107,7 @@ export const repositoryProcessingJobs = pgTable(
     lastErrorMessage: text("last_error_message"),
     /** Durable across stale worker writes; only the replacement runtime clears it. */
     postDeployRecovery: varchar("post_deploy_recovery", { length: 64 }).$type<
-      "unified-content-runtime-v2"
+      "unified-content-runtime-v2" | "unified-content-artifact-v3"
     >(),
     metrics: jsonb("metrics")
       .$type<RepositoryProcessingMetrics>()

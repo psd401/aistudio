@@ -34,8 +34,8 @@ SET status = 'cancelled',
     lease_expires_at = NULL,
     last_error_code = 'POST_DEPLOY_RECOVERY_QUARANTINED',
     last_error_message = 'Awaiting the corrected unified-content artifact runtime',
-    post_deploy_recovery = 'unified-content-runtime-v2',
-    metrics = '{"postDeployRecovery":"unified-content-runtime-v2"}'::jsonb,
+    post_deploy_recovery = 'unified-content-artifact-v3',
+    metrics = '{"postDeployRecovery":"unified-content-artifact-v3"}'::jsonb,
     started_at = NULL,
     finished_at = now(),
     updated_at = now()
@@ -86,7 +86,7 @@ WHERE EXISTS (
    AND active_chunk.index_generation_id = repository.active_index_generation_id
   WHERE job.item_version_id = version.id
     AND job.stage = 'inspect'
-    AND job.post_deploy_recovery = 'unified-content-runtime-v2'
+    AND job.post_deploy_recovery = 'unified-content-artifact-v3'
     AND item.lifecycle_status = 'active'
     AND version.storage_status <> 'blocked'
     AND version.inspection_status <> 'blocked'
@@ -109,7 +109,7 @@ WHERE item.lifecycle_status = 'active'
       ON active_chunk.item_version_id = version.id
      AND active_chunk.index_generation_id = repository.active_index_generation_id
     WHERE job.stage = 'inspect'
-      AND job.post_deploy_recovery = 'unified-content-runtime-v2'
+      AND job.post_deploy_recovery = 'unified-content-artifact-v3'
       AND version.storage_status <> 'blocked'
       AND version.inspection_status <> 'blocked'
   );

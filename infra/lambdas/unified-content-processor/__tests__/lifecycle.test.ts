@@ -59,6 +59,23 @@ describe("unified content lifecycle policy", () => {
     });
   });
 
+  test("restarts a failed Textract run with a fresh provider token", () => {
+    expect(
+      classifyContentProcessingError(
+        new RetryableManagedServiceJobError(
+          "textract",
+          "TEXTRACT_JOB_FAILED",
+          "Textract returned FAILED"
+        )
+      )
+    ).toEqual({
+      terminal: false,
+      code: "TEXTRACT_JOB_FAILED",
+      message: "Textract returned FAILED",
+      resetManagedService: "textract",
+    });
+  });
+
   test("uses a short exponential retry with bounded jitter", () => {
     expect(processingRetryDelaySeconds(1, () => 0)).toBe(4);
     expect(processingRetryDelaySeconds(2, () => 0.5)).toBe(10);

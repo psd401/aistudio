@@ -845,8 +845,11 @@ active retrieval snapshot must be verified as one state machine. This hardening
 slice closes those cross-boundary failure modes before another deployment:
 
 - Migration 124 quarantines only canonical current versions matching known
-  broken artifact-runtime signatures, behind the existing old-worker drain
-  marker. If the affected version is already in the active generation, its
+  broken artifact-runtime signatures, behind its own
+  `unified-content-artifact-v3` old-worker drain marker. The replacement worker
+  releases both supported marker versions, but migration-124 restore queries
+  cannot accidentally select jobs owned by migrations 122/123. If the affected
+  version is already in the active generation, its
   version and item remain available/embedded while the replacement worker
   builds a new snapshot. The migration also adds bounded embedding-recovery
   claim state and its partial scheduler index.
@@ -865,10 +868,19 @@ slice closes those cross-boundary failure modes before another deployment:
   including after an SQS dispatch failure, so a crash between vector writes and
   atomic activation cannot strand a repository. Failed background generations
   never take the previous active generation or item offline.
+- Recovery dispatch now tracks the durable SQS boundary message by message. A
+  zero-message failure restores the generation's previous status/error while
+  still consuming one of three bounded attempts; a partial dispatch retains its
+  claim because real SQS work exists. Timestamp plus attempt fencing prevents a
+  late scheduler invocation from releasing a newer claim. Activation-only
+  messages carry no fabricated chunk/vector inputs and are validated separately
+  by the embedding worker.
 - Legacy inline text is copied into the immutable repository source namespace
   with a deterministic version-scoped key, hash, and atomic source/job update.
   S3 failures retain the legacy source for retry, and already-serving versions
-  remain searchable throughout migration.
+  remain searchable throughout migration. Every scheduled Lambda invocation now
+  supplies a request-specific lease owner, so an invocation that finishes after
+  lease expiry cannot commit over a newer recovery owner.
 - Textract and Bedrock Data Automation state is reusable only for the exact
   immutable source and durable processing run. A provider job that finishes in
   a retryable failed state clears every provider identifier, rotates the
@@ -882,16 +894,28 @@ slice closes those cross-boundary failure modes before another deployment:
   Node 20 Linux containers and exercise PDF, DOCX, XLSX, PPTX, text, Markdown,
   CSV, PNG/JPEG/WebP/GIF/TIFF, BDA audio/video normalization, Bedrock provider
   selection, Titan payloads, and Cohere multimodal payload/response contracts.
+- CI now runs the full unified-content lifecycle against a fresh pgvector
+  PostgreSQL service, including migrations and the standard seed, and executes
+  both exact synthesized Lambda artifacts (with ARM64 emulation) after CDK
+  synthesis. Recovery correctness and packaging regressions are therefore PR
+  gates rather than manual pre-deployment checks.
 
 Pre-merge verification for this checkpoint passes 28 focused application
 repository suites (128 tests), eight unified-content/embedding Lambda suites
 (39 tests), the real PostgreSQL migration/lifecycle smoke, and both exact Linux
-Lambda artifact smokes. The complete application CI suite passes 276 suites and
-3,120 tests with 60 intentional skips; the complete infrastructure/Lambda suite
-passes 37 suites and 370 tests. Full lint has zero errors, and application,
+Lambda artifact smokes. The complete application CI suite passes 278 suites and
+3,125 tests with 60 intentional skips; the complete infrastructure/Lambda suite
+passes 38 suites and 377 tests. Full lint has zero errors, and application,
 infrastructure, unified-content worker, and embedding-worker typechecks pass.
 The production Next.js build, infrastructure build, dev Processing stack synth,
 and all-stack synthesis of 29 dev/prod/shared templates pass. The broad Jest
 gate also uncovered and fixed an unrelated polling-session-cache interval that
 kept Node/test processes alive; the full suite now exits normally without
 `--forceExit`. Live dev validation remains required after deployment.
+
+The final automated review findings are closed: bounded embedding attempts now
+survive zero/partial SQS failures, legacy recovery has per-invocation lease
+fencing, migration 124 owns a distinct handoff marker, Textract and BDA reset
+asymmetries have direct tests, activation-only messages use an explicit empty
+work contract, and processing-DLQ reconciliation precedes the outbox so recovered
+jobs can redispatch in the same maintenance cycle.

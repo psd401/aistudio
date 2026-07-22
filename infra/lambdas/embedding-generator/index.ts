@@ -34,9 +34,11 @@ export {
 } from './embedding-provider';
 import { activateCompletedGeneration } from './generation-activation';
 import {
+  assertValidEmbeddingMessage,
   failBuildingGeneration,
   isTerminalEmbeddingAttempt,
   shouldSkipCanonicalGeneration,
+  type EmbeddingMessage,
   type CanonicalGenerationStatus,
 } from './generation-lifecycle';
 
@@ -248,20 +250,6 @@ async function generateVisualEmbeddings(
   return embeddings;
 }
 
-interface EmbeddingMessage {
-  itemId: number;
-  /** Present for canonical index-generation batches. */
-  generationId?: string;
-  chunkIds: number[];
-  texts: string[];
-  modalities?: Array<'text' | 'image' | 'audio' | 'video' | 'table'>;
-  visualSources?: Array<{
-    objectKey: string;
-    mediaType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
-  } | null>;
-  activationOnly?: boolean;
-}
-
 async function activateCanonicalGeneration(
   db: Awaited<ReturnType<typeof getDb>>,
   generationId: string
@@ -339,26 +327,12 @@ async function retryWithBackoff<T>(
 }
 
 async function processRecord(record: SQSRecord): Promise<void> {
-  const message = JSON.parse(record.body) as EmbeddingMessage;
-  log.info(`Processing embeddings for item ${message.itemId} with ${message.chunkIds.length} chunks`);
-
+  const message: unknown = JSON.parse(record.body);
+  assertValidEmbeddingMessage(message);
   const db = await getDb();
 
   try {
-    if (
-      message.chunkIds.length === 0 ||
-      message.chunkIds.length !== message.texts.length ||
-      (message.modalities != null &&
-        message.modalities.length !== message.chunkIds.length) ||
-      (message.visualSources != null &&
-        message.visualSources.length !== message.chunkIds.length) ||
-      !message.chunkIds.every((chunkId) => Number.isSafeInteger(chunkId) && chunkId > 0)
-    ) {
-      throw new Error('Embedding message has invalid or mismatched chunk data');
-    }
-    if (message.activationOnly && !message.generationId) {
-      throw new Error('Embedding activation message requires a generation id');
-    }
+    log.info(`Processing embeddings for item ${message.itemId} with ${message.chunkIds.length} chunks`);
     let effectiveSettings: EmbeddingSettings;
     if (message.generationId) {
       const [generation] = await db.execute<{

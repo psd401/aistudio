@@ -98,12 +98,21 @@ describe("unified-content artifact and embedding recovery migration", () => {
       "%Textract job does not match the normalized image artifact%"
     );
     expect(migration).toContain(
-      "post_deploy_recovery = 'unified-content-runtime-v2'"
+      "post_deploy_recovery = 'unified-content-artifact-v3'"
+    );
+    expect(migration).toContain(
+      "'{\"postDeployRecovery\":\"unified-content-artifact-v3\"}'::jsonb"
     );
     expect(migration).toContain("available_at = 'infinity'::timestamptz");
   });
 
   it("preserves active searchable snapshots while rebuilding them", () => {
+    expect(migration).toContain(
+      "job.post_deploy_recovery = 'unified-content-artifact-v3'"
+    );
+    expect(migration).not.toContain(
+      "job.post_deploy_recovery = 'unified-content-runtime-v2'"
+    );
     expect(migration).toContain(
       "active_chunk.index_generation_id = repository.active_index_generation_id"
     );

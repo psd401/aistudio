@@ -28,18 +28,22 @@ export interface LegacyInlineTextRecoveryClaim {
 }
 
 export interface ClaimLegacyInlineTextRecoveryOptions {
+  /** Unique per Lambda invocation; fences a late completion after lease expiry. */
+  leaseOwner: string;
   now?: Date;
-  leaseOwner?: string;
   /** Test/operations scope; production scheduled recovery scans all repositories. */
   repositoryId?: number;
 }
 
 /** Claim old inline-text versions whose source was never put in the immutable namespace. */
 export async function claimLegacyInlineTextRecoveries(
-  options: ClaimLegacyInlineTextRecoveryOptions = {}
+  options: ClaimLegacyInlineTextRecoveryOptions
 ): Promise<LegacyInlineTextRecoveryClaim[]> {
   const now = options.now ?? new Date();
-  const leaseOwner = options.leaseOwner ?? "legacy-inline-source-recovery";
+  const leaseOwner = options.leaseOwner.trim();
+  if (!leaseOwner) {
+    throw new Error("Legacy inline recovery requires a unique lease owner");
+  }
   const claimed = await executeTransaction(
     (tx) =>
       tx.execute(sql`
@@ -126,7 +130,6 @@ export async function claimLegacyInlineTextRecoveries(
 
 export interface CompleteLegacyInlineTextRecoveryInput {
   claim: LegacyInlineTextRecoveryClaim;
-  leaseOwner?: string;
   objectKey: string;
   byteSize: number;
   sha256: string;
@@ -137,7 +140,7 @@ export interface CompleteLegacyInlineTextRecoveryInput {
 export async function completeLegacyInlineTextRecovery(
   input: CompleteLegacyInlineTextRecoveryInput
 ): Promise<boolean> {
-  const leaseOwner = input.leaseOwner ?? input.claim.leaseOwner;
+  const leaseOwner = input.claim.leaseOwner;
   const now = input.now ?? new Date();
   return executeTransaction(async (tx) => {
     const [job] = await tx

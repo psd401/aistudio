@@ -14,6 +14,20 @@ describe("canonical embedding recovery", () => {
     ).toEqual({ generationId: "11111111-2222-4333-8444-555555555555" });
   });
 
+  it("recognizes activation-only DLQ records without fabricated chunks", () => {
+    expect(
+      parseCanonicalEmbeddingDlqMessage(
+        JSON.stringify({
+          itemId: 9,
+          generationId: "11111111-2222-4333-8444-555555555555",
+          chunkIds: [],
+          texts: [],
+          activationOnly: true,
+        })
+      )
+    ).toEqual({ generationId: "11111111-2222-4333-8444-555555555555" });
+  });
+
   it.each([
     "not-json",
     JSON.stringify({ itemId: 1, chunkIds: [1], texts: ["legacy"] }),

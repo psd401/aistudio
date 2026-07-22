@@ -11,6 +11,8 @@ import { CONTENT_PROCESSING_MAX_ATTEMPTS } from "./job-state";
 
 export const POST_DEPLOY_RECOVERY_MARKER =
   "unified-content-runtime-v2" as const;
+export const POST_DEPLOY_ARTIFACT_RECOVERY_MARKER =
+  "unified-content-artifact-v3" as const;
 export const POST_DEPLOY_RECOVERY_BATCH_SIZE = 25;
 /** Let every invocation of the previous 15-minute Lambda runtime drain first. */
 export const POST_DEPLOY_RECOVERY_GRACE_MINUTES = 20;
@@ -57,7 +59,10 @@ export async function releasePostDeployRecoveryJobs(
             ON item.current_version_id = version.id
           WHERE job.stage = 'inspect'
             AND job.status IN ('cancelled', 'failed', 'pending', 'queued', 'running')
-            AND job.post_deploy_recovery = ${POST_DEPLOY_RECOVERY_MARKER}
+            AND job.post_deploy_recovery IN (
+              ${POST_DEPLOY_RECOVERY_MARKER},
+              ${POST_DEPLOY_ARTIFACT_RECOVERY_MARKER}
+            )
             AND job.updated_at <= ${eligibleBefore}::timestamptz
             AND item.lifecycle_status = 'active'
             AND version.storage_status <> 'blocked'

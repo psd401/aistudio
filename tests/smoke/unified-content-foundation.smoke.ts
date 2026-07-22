@@ -53,6 +53,7 @@ import {
   PDF_PROCESSOR_VERSION,
   OFFICE_CONTENT_TYPES,
   IMAGE_PROCESSOR_VERSION,
+  POST_DEPLOY_ARTIFACT_RECOVERY_MARKER,
   publishDocumentVersion,
   publishPdfVersion,
   POST_DEPLOY_RECOVERY_MARKER,
@@ -452,6 +453,7 @@ try {
   assert.ok(legacyTextJob);
   const legacyRecoveryNow = new Date();
   const legacyClaims = await claimLegacyInlineTextRecoveries({
+    leaseOwner: "legacy-inline-smoke:first",
     repositoryId: repository.id,
     now: legacyRecoveryNow,
   });
@@ -467,6 +469,7 @@ try {
   assert.equal(
     (
       await claimLegacyInlineTextRecoveries({
+        leaseOwner: "legacy-inline-smoke:too-early",
         repositoryId: repository.id,
         now: new Date(legacyRecoveryNow.getTime() + 30_000),
       })
@@ -474,6 +477,7 @@ try {
     false
   );
   const retriedLegacyClaims = await claimLegacyInlineTextRecoveries({
+    leaseOwner: "legacy-inline-smoke:retry",
     repositoryId: repository.id,
     now: new Date(legacyRecoveryNow.getTime() + 61_000),
   });
@@ -481,6 +485,21 @@ try {
     (claim) => claim.jobId === legacyTextJob.id
   );
   assert.ok(legacyClaim);
+  assert.equal(
+    await completeLegacyInlineTextRecovery({
+      claim: firstLegacyClaim,
+      objectKey: buildRepositorySourceObjectKey(
+        repository.id,
+        `stale-inline-${legacyTextItem.id}.txt`,
+        legacyTextVersion.id
+      ),
+      byteSize: Buffer.byteLength(firstLegacyClaim.content, "utf8"),
+      sha256: "e".repeat(64),
+      now: new Date(legacyRecoveryNow.getTime() + 61_500),
+    }),
+    false,
+    "a stale recovery owner must not complete after a new invocation claims the job"
+  );
   const recoveredInlineKey = buildRepositorySourceObjectKey(
     repository.id,
     `inline-${legacyTextItem.id}.txt`,
@@ -1607,8 +1626,10 @@ try {
     attempt: 0,
     maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
     availableAt: "infinity",
-    marker: POST_DEPLOY_RECOVERY_MARKER,
-    metrics: { postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER },
+    marker: POST_DEPLOY_ARTIFACT_RECOVERY_MARKER,
+    metrics: {
+      postDeployRecovery: POST_DEPLOY_ARTIFACT_RECOVERY_MARKER,
+    },
   });
   assert.deepEqual(
     await releasePostDeployRecoveryJobs({
@@ -2185,6 +2206,7 @@ try {
   );
   const activeLegacyClaim = (
     await claimLegacyInlineTextRecoveries({
+      leaseOwner: "legacy-inline-smoke:active",
       repositoryId: repository.id,
       now: new Date(Date.now() + 60_000),
     })
@@ -2394,15 +2416,16 @@ try {
   const activationOnlyClaims = await claimIncompleteEmbeddingGenerations({
     now: new Date(Date.now() + 55 * 60_000),
   });
-  assert.deepEqual(
-    activationOnlyClaims.find(
-      (generation) => generation.id === activationOnlyGeneration.id
-    ),
-    {
-      id: activationOnlyGeneration.id,
-      visualEmbeddingEnabled: false,
-      activationOnly: true,
-    }
+  const activationOnlyClaim = activationOnlyClaims.find(
+    (generation) => generation.id === activationOnlyGeneration.id
+  );
+  assert.ok(activationOnlyClaim);
+  assert.equal(activationOnlyClaim.visualEmbeddingEnabled, false);
+  assert.equal(activationOnlyClaim.activationOnly, true);
+  assert.equal(activationOnlyClaim.previousStatus, "failed");
+  assert.equal(
+    activationOnlyClaim.previousErrorMessage,
+    "simulated activation transaction failure"
   );
   assert.equal(
     await canAcknowledgeCanonicalEmbeddingDlqMessage(
@@ -2411,7 +2434,7 @@ try {
     true
   );
   await releaseIncompleteEmbeddingGenerationClaim(
-    activationOnlyGeneration.id
+    activationOnlyClaim
   );
   assert.equal(
     await canAcknowledgeCanonicalEmbeddingDlqMessage(
@@ -2422,16 +2445,13 @@ try {
   const reclaimedActivationOnly = await claimIncompleteEmbeddingGenerations({
     now: new Date(Date.now() + 56 * 60_000),
   });
-  assert.deepEqual(
-    reclaimedActivationOnly.find(
-      (generation) => generation.id === activationOnlyGeneration.id
-    ),
-    {
-      id: activationOnlyGeneration.id,
-      visualEmbeddingEnabled: false,
-      activationOnly: true,
-    }
+  const reclaimedActivationOnlyClaim = reclaimedActivationOnly.find(
+    (generation) => generation.id === activationOnlyGeneration.id
   );
+  assert.ok(reclaimedActivationOnlyClaim);
+  assert.equal(reclaimedActivationOnlyClaim.visualEmbeddingEnabled, false);
+  assert.equal(reclaimedActivationOnlyClaim.activationOnly, true);
+  assert.equal(reclaimedActivationOnlyClaim.previousStatus, "failed");
   await executeQuery(
     (db) =>
       db
@@ -2502,19 +2522,24 @@ try {
     attempts: 1,
     errorMessage: null,
   });
-  await releaseIncompleteEmbeddingGenerationClaim(
-    failedEmbeddingGeneration.id
+  const claimedFailedEmbeddingGeneration = failedEmbeddingRecoveryClaim.find(
+    (generation) => generation.id === failedEmbeddingGeneration.id
   );
-  // A repeated release is a no-op and cannot consume another attempt.
-  await releaseIncompleteEmbeddingGenerationClaim(
-    failedEmbeddingGeneration.id
+  assert.ok(claimedFailedEmbeddingGeneration);
+  assert.equal(
+    await releaseIncompleteEmbeddingGenerationClaim(
+      claimedFailedEmbeddingGeneration
+    ),
+    true
   );
   const [releasedEmbeddingRecoveryClaim] = await executeQuery(
     (db) =>
       db
         .select({
+          status: repositoryIndexGenerations.status,
           attempts: repositoryIndexGenerations.embeddingRecoveryAttempts,
           queuedAt: repositoryIndexGenerations.embeddingRecoveryQueuedAt,
+          errorMessage: repositoryIndexGenerations.errorMessage,
         })
         .from(repositoryIndexGenerations)
         .where(eq(repositoryIndexGenerations.id, failedEmbeddingGeneration.id))
@@ -2522,34 +2547,49 @@ try {
     "smoke.unifiedContent.readReleasedEmbeddingRecoveryClaim"
   );
   assert.deepEqual(releasedEmbeddingRecoveryClaim, {
-    attempts: 0,
+    status: "failed",
+    attempts: 1,
     queuedAt: null,
+    errorMessage: "simulated provider outage",
   });
   const reclaimedEmbeddingRecovery =
     await claimIncompleteEmbeddingGenerations({
       now: new Date(Date.now() + 34 * 60_000),
     });
-  assert.ok(
-    reclaimedEmbeddingRecovery.some(
-      (generation) => generation.id === failedEmbeddingGeneration.id
-    )
+  const reclaimedFailedEmbeddingGeneration = reclaimedEmbeddingRecovery.find(
+    (generation) => generation.id === failedEmbeddingGeneration.id
   );
-  await executeQuery(
-    (db) =>
-      db
-        .update(repositoryIndexGenerations)
-        .set({
-          status: "failed",
-          embeddingRecoveryAttempts: 3,
-          embeddingRecoveryQueuedAt: new Date(Date.now() - 20 * 60_000),
-          errorMessage: "persistent provider failure",
-        })
-        .where(eq(repositoryIndexGenerations.id, failedEmbeddingGeneration.id)),
-    "smoke.unifiedContent.exhaustEmbeddingRecovery"
+  assert.ok(reclaimedFailedEmbeddingGeneration);
+  assert.equal(reclaimedFailedEmbeddingGeneration.previousStatus, "failed");
+  // The previous invocation cannot release this newer timestamp-fenced claim.
+  assert.equal(
+    await releaseIncompleteEmbeddingGenerationClaim(
+      claimedFailedEmbeddingGeneration
+    ),
+    false
+  );
+  assert.equal(
+    await releaseIncompleteEmbeddingGenerationClaim(
+      reclaimedFailedEmbeddingGeneration
+    ),
+    true
+  );
+  const finalFailedEmbeddingRecovery = await claimIncompleteEmbeddingGenerations({
+    now: new Date(Date.now() + 35 * 60_000),
+  });
+  const finalFailedEmbeddingGeneration = finalFailedEmbeddingRecovery.find(
+    (generation) => generation.id === failedEmbeddingGeneration.id
+  );
+  assert.ok(finalFailedEmbeddingGeneration);
+  assert.equal(
+    await releaseIncompleteEmbeddingGenerationClaim(
+      finalFailedEmbeddingGeneration
+    ),
+    true
   );
   const exhaustedEmbeddingRecoveryClaim =
     await claimIncompleteEmbeddingGenerations({
-      now: new Date(Date.now() + 44 * 60_000),
+      now: new Date(Date.now() + 36 * 60_000),
     });
   assert.equal(
     exhaustedEmbeddingRecoveryClaim.some(
