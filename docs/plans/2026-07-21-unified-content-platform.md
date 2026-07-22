@@ -503,10 +503,16 @@ Implemented on `codex/unified-content-image-ingestion`:
   import. It resolves `S3_BUCKET` from the settings table at request time and
   falls back to `DOCUMENTS_BUCKET_NAME`, so production builds and live requests
   use the same database-first storage configuration.
+- Canonical upload signing and repository image downloads now use that same
+  database-first `S3_BUCKET` resolution instead of reading the infrastructure
+  environment directly. Removing a document, image, or entire repository also
+  deletes every source version and paginates through each canonical artifact
+  namespace; non-current S3 versions remain governed by the bucket retention
+  lifecycle.
 
 Verification evidence:
 
-- The full application CI suite passes (255 suites, 3,006 tests; 5 suites and
+- The full application CI suite passes (257 suites, 3,016 tests; 5 suites and
   60 tests intentionally skipped). Lint has zero errors and the application,
   infrastructure, and dedicated worker typechecks pass.
 - The infrastructure suite passes (29 suites, 327 tests), the full infra build
@@ -515,6 +521,9 @@ Verification evidence:
 - The production Next.js build completes without a placeholder bucket
   environment variable, proving route imports no longer bypass the settings
   table.
+- Focused lifecycle and configuration coverage verifies paginated artifact
+  deletion, single-item and whole-repository image cleanup, image downloads,
+  and canonical upload resolution through `Settings.getS3()`.
 - Authenticated Playwright passes 245 tests with 58 intentional skips. Two
   unrelated live-collaboration/graph UI tests passed on retry; the canonical
   PDF, Office, and image upload browser contracts all passed.

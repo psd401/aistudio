@@ -31,13 +31,14 @@ import {
 import { revalidatePath } from "next/cache"
 import {
   uploadDocument,
-  deleteDocument,
   getDocumentObjectMetadata,
+  getDocumentSignedUrl,
 } from "@/lib/aws/s3-client"
 import { queueFileForProcessing, processUrl } from "@/lib/services/file-processing-service"
 import { canModifyRepository, getUserIdFromSession } from "./repository-permissions"
 import { toContentDispositionValue } from "@/lib/repositories/content-disposition"
 import {
+  deleteRepositoryItemStorage,
   dispatchContentProcessingJob,
   registerCanonicalUploadIfEnabled,
 } from "@/lib/repositories/content-platform"
@@ -53,7 +54,7 @@ function isProcessingStatus(s: string): s is ProcessingStatus {
 export interface RepositoryItem {
   id: number
   repositoryId: number
-  type: 'document' | 'url' | 'text'
+  type: 'document' | 'image' | 'url' | 'text'
   name: string
   source: string
   metadata: Record<string, unknown>
@@ -126,7 +127,7 @@ function mapToRepositoryItem(itemRaw: RawRepositoryItem): RepositoryItem {
   return {
     id: itemRaw.id,
     repositoryId: itemRaw.repositoryId,
-    type: itemRaw.type as 'document' | 'url' | 'text',
+    type: itemRaw.type as 'document' | 'image' | 'url' | 'text',
     name: itemRaw.name,
     source: itemRaw.source,
     metadata: itemRaw.metadata ?? {},
@@ -470,7 +471,7 @@ export async function addDocumentWithPresignedUrl(
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
+      type: itemRaw.type as 'document' | 'image' | 'url' | 'text',
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
@@ -655,7 +656,7 @@ export async function addUrlItem(
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
+      type: itemRaw.type as 'document' | 'image' | 'url' | 'text',
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
@@ -809,7 +810,7 @@ export async function addTextItem(
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
+      type: itemRaw.type as 'document' | 'image' | 'url' | 'text',
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
@@ -886,7 +887,7 @@ export async function removeRepositoryItem(
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
+      type: itemRaw.type as 'document' | 'image' | 'url' | 'text',
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
@@ -908,16 +909,16 @@ export async function removeRepositoryItem(
       throw ErrorFactories.authzOwnerRequired("remove items from repository")
     }
 
-    // Delete from S3 if it's a document
-    if (item.type === 'document') {
-      log.info("Deleting document from S3", {
+    // Delete stored source and canonical derivatives before cascading DB rows.
+    if (item.type === 'document' || item.type === 'image') {
+      log.info("Deleting repository item objects from S3", {
         itemId,
         s3Key: item.source
       })
       
       try {
-        await deleteDocument(item.source)
-        log.info("Document deleted from S3 successfully")
+        const cleanup = await deleteRepositoryItemStorage(item)
+        log.info("Repository item objects deleted from S3 successfully", cleanup)
       } catch (error) {
         // Log error but continue with database deletion
         log.error("Failed to delete from S3", {
@@ -998,7 +999,7 @@ export async function listRepositoryItems(
     const items: RepositoryItem[] = itemsRaw.map(item => ({
       id: item.id,
       repositoryId: item.repositoryId,
-      type: item.type as 'document' | 'url' | 'text',
+      type: item.type as 'document' | 'image' | 'url' | 'text',
       name: item.name,
       source: item.source,
       metadata: item.metadata ?? {},
@@ -1087,7 +1088,7 @@ export async function searchRepositoryItems(
     const items: RepositoryItem[] = itemsRaw.map(item => ({
       id: item.id,
       repositoryId: item.repositoryId,
-      type: item.type as 'document' | 'url' | 'text',
+      type: item.type as 'document' | 'image' | 'url' | 'text',
       name: item.name,
       source: item.source,
       metadata: item.metadata ?? {},
@@ -1364,12 +1365,12 @@ export async function getDocumentDownloadUrl(
     // Convert to action type
     const item: RepositoryItem = mapToRepositoryItem(itemRaw)
 
-    if (item.type !== 'document') {
-      log.warn("Download URL requested for non-document item", {
+    if (item.type !== 'document' && item.type !== 'image') {
+      log.warn("Download URL requested for non-file item", {
         itemId,
         itemType: item.type
       })
-      return { isSuccess: false, message: "Item is not a document" }
+      return { isSuccess: false, message: "Item is not a downloadable file" }
     }
 
     // Defense in depth (REV-SEC-062): never presign a stored source outside this
@@ -1384,26 +1385,9 @@ export async function getDocumentDownloadUrl(
       return { isSuccess: false, message: "Item is not available for download" }
     }
 
-    // Generate a presigned URL for download
-    const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner')
-    const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3')
-
-    const s3Client = new S3Client({})
-    const bucketName = process.env.DOCUMENTS_BUCKET_NAME
-
-    if (!bucketName) {
-      return { isSuccess: false, message: "Storage not configured" }
-    }
-
     // Sanitize/encode the display filename before it lands in the reflected
     // Content-Disposition header (REV-COR-071).
     const contentDisposition = toContentDispositionValue(resolveDownloadFilename(item))
-
-    const command = new GetObjectCommand({
-      Bucket: bucketName,
-      Key: item.source,
-      ResponseContentDisposition: contentDisposition
-    })
 
     log.info("Generating presigned download URL", {
       itemId,
@@ -1411,7 +1395,11 @@ export async function getDocumentDownloadUrl(
       contentDisposition
     })
     
-    const downloadUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 }) // 1 hour
+    const downloadUrl = await getDocumentSignedUrl({
+      key: item.source,
+      expiresIn: 3600,
+      responseContentDisposition: contentDisposition,
+    })
 
     log.info("Download URL generated successfully", {
       itemId,

@@ -2,6 +2,7 @@ import {
   uploadDocument, 
   getDocumentSignedUrl, 
   deleteDocument,
+  deleteRepositoryObjectsByPrefix,
   documentExists,
   listUserDocuments,
   extractKeyFromUrl
@@ -11,6 +12,7 @@ import {
   PutObjectCommand, 
   GetObjectCommand, 
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   HeadObjectCommand,
   HeadBucketCommand,
   ListObjectsV2Command
@@ -154,6 +156,70 @@ describe('S3 Client', () => {
       mockS3Client.send.mockRejectedValue(new Error('S3 Error'));
 
       await expect(deleteDocument(key)).rejects.toThrow('Failed to delete document');
+    });
+  });
+
+  describe('deleteRepositoryObjectsByPrefix', () => {
+    it('paginates and deletes every object below the artifact prefix', async () => {
+      let listCall = 0;
+      mockS3Client.send.mockImplementation((command: unknown) => {
+        if (command instanceof ListObjectsV2Command) {
+          listCall += 1;
+          return Promise.resolve(
+            listCall === 1
+              ? {
+                  Contents: [{ Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/thumbnail.jpg' }],
+                  IsTruncated: true,
+                  NextContinuationToken: 'page-2',
+                }
+              : {
+                  Contents: [{ Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/ocr.txt' }],
+                  IsTruncated: false,
+                }
+          );
+        }
+        return Promise.resolve({});
+      });
+
+      await expect(
+        deleteRepositoryObjectsByPrefix(
+          'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/'
+        )
+      ).resolves.toBe(2);
+      expect(mockS3Client.send).toHaveBeenCalledWith(
+        expect.any(DeleteObjectsCommand)
+      );
+      expect(listCall).toBe(2);
+    });
+
+    it('rejects prefixes outside the repository namespace', async () => {
+      await expect(
+        deleteRepositoryObjectsByPrefix('atrium/objects/')
+      ).rejects.toThrow('Invalid repository object prefix');
+      expect(mockS3Client.send).not.toHaveBeenCalled();
+    });
+
+    it('surfaces partial multi-object deletion failures', async () => {
+      mockS3Client.send.mockImplementation((command: unknown) => {
+        if (command instanceof ListObjectsV2Command) {
+          return Promise.resolve({
+            Contents: [{
+              Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/ocr.txt',
+            }],
+            IsTruncated: false,
+          });
+        }
+        if (command instanceof DeleteObjectsCommand) {
+          return Promise.resolve({ Errors: [{ Key: 'failed-object' }] });
+        }
+        return Promise.resolve({});
+      });
+
+      await expect(
+        deleteRepositoryObjectsByPrefix(
+          'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/'
+        )
+      ).rejects.toThrow('Failed to delete repository objects from S3');
     });
   });
 

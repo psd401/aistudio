@@ -5,5 +5,6 @@ export * from "./image-processing";
 export * from "./office-processing";
 export * from "./pdf-processing";
 export * from "./publication-service";
+export * from "./storage-cleanup";
 export * from "./upload-service";
 export * from "./dispatch-service";

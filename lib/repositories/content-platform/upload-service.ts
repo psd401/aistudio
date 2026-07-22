@@ -18,6 +18,7 @@ import {
   repositoryUploadSessions,
 } from "@/lib/db/schema";
 import { sanitizeFileName } from "@/lib/aws/document-upload";
+import { Settings } from "@/lib/settings-manager";
 import type { ContentPlatformConfig } from "./config";
 import {
   buildProcessingIdempotencyKey,
@@ -112,12 +113,6 @@ export function isCanonicalUploadContentType(contentType: string): boolean {
 /** Backwards-compatible name for callers compiled before image ingestion. */
 export const isCanonicalDocumentContentType = isCanonicalUploadContentType;
 
-function getDocumentsBucket(): string {
-  const bucket = process.env.DOCUMENTS_BUCKET_NAME;
-  if (!bucket) throw new Error("DOCUMENTS_BUCKET_NAME is not configured");
-  return bucket;
-}
-
 function partLayout(byteSize: number): { partSize: number; partCount: number } {
   const partSize = Math.max(
     MIN_MULTIPART_PART_SIZE,
@@ -168,9 +163,19 @@ function validateInitiation(
   }
 }
 
-function createS3UploadStorage(): RepositoryUploadStorage {
-  const client = new S3Client({});
-  const bucket = getDocumentsBucket();
+export async function resolveRepositoryUploadStorageConfig(): Promise<{
+  bucket: string;
+  region: string | undefined;
+}> {
+  const config = await Settings.getS3();
+  const bucket = config.bucket?.trim();
+  if (!bucket) throw new Error("S3_BUCKET is not configured");
+  return { bucket, region: config.region ?? undefined };
+}
+
+async function createS3UploadStorage(): Promise<RepositoryUploadStorage> {
+  const { bucket, region } = await resolveRepositoryUploadStorageConfig();
+  const client = new S3Client({ region });
   return {
     async createSingleUpload(input) {
       const command = new PutObjectCommand({
@@ -257,9 +262,10 @@ function createS3UploadStorage(): RepositoryUploadStorage {
 export async function initiateRepositoryUpload(
   input: InitiateRepositoryUploadInput,
   config: ContentPlatformConfig,
-  storage: RepositoryUploadStorage = createS3UploadStorage()
+  storage?: RepositoryUploadStorage
 ): Promise<InitiatedRepositoryUpload> {
   validateInitiation(input, config);
+  const resolvedStorage = storage ?? (await createS3UploadStorage());
   const sessionId = randomUUID();
   const safeFileName = sanitizeFileName(input.fileName);
   const objectKey = `repositories/${input.repositoryId}/${sessionId}/${safeFileName}`;
@@ -273,7 +279,7 @@ export async function initiateRepositoryUpload(
   let uploadId: string | undefined;
   try {
     if (input.byteSize <= SINGLE_UPLOAD_LIMIT) {
-      const created = await storage.createSingleUpload({
+      const created = await resolvedStorage.createSingleUpload({
         objectKey,
         contentType: input.contentType,
         metadata,
@@ -305,7 +311,7 @@ export async function initiateRepositoryUpload(
     }
 
     const layout = partLayout(input.byteSize);
-    const created = await storage.createMultipartUpload({
+    const created = await resolvedStorage.createMultipartUpload({
       objectKey,
       contentType: input.contentType,
       partCount: layout.partCount,
@@ -342,7 +348,9 @@ export async function initiateRepositoryUpload(
     };
   } catch (error) {
     if (uploadId) {
-      await storage.abortMultipartUpload({ objectKey, uploadId }).catch(() => undefined);
+      await resolvedStorage
+        .abortMultipartUpload({ objectKey, uploadId })
+        .catch(() => undefined);
     }
     throw error;
   }
@@ -371,11 +379,8 @@ function validateParts(
   return parts;
 }
 
-export async function completeRepositoryUpload(
-  input: CompleteRepositoryUploadInput,
-  storage: RepositoryUploadStorage = createS3UploadStorage()
-): Promise<CompletedRepositoryUpload> {
-  const [session] = await executeQuery(
+function getRepositoryUploadSession(input: CompleteRepositoryUploadInput) {
+  return executeQuery(
     (db) =>
       db
         .select()
@@ -390,6 +395,14 @@ export async function completeRepositoryUpload(
         .limit(1),
     "contentPlatform.getUploadSession"
   );
+}
+
+export async function completeRepositoryUpload(
+  input: CompleteRepositoryUploadInput,
+  storage?: RepositoryUploadStorage
+): Promise<CompletedRepositoryUpload> {
+  const resolvedStorage = storage ?? (await createS3UploadStorage());
+  const [session] = await getRepositoryUploadSession(input);
   if (!session) throw new Error("Upload session was not found");
   if (session.expiresAt.getTime() <= Date.now()) throw new Error("Upload session expired");
   if (session.status === "aborted" || session.status === "expired") {
@@ -401,7 +414,7 @@ export async function completeRepositoryUpload(
       throw new Error("Multipart upload session is incomplete");
     }
     try {
-      await storage.completeMultipartUpload({
+      await resolvedStorage.completeMultipartUpload({
         objectKey: session.objectKey,
         uploadId: session.multipartUploadId,
         parts: validateParts(input.parts, session.partCount),
@@ -410,13 +423,13 @@ export async function completeRepositoryUpload(
       // S3 completion can succeed even when its response is lost. A successful
       // HEAD below proves the object exists and makes completion safely
       // retryable; otherwise preserve the original, more useful S3 error.
-      await storage.headObject(session.objectKey).catch(() => {
+      await resolvedStorage.headObject(session.objectKey).catch(() => {
         throw completionError;
       });
     }
   }
 
-  const object = await storage.headObject(session.objectKey);
+  const object = await resolvedStorage.headObject(session.objectKey);
   if (object.byteSize !== session.expectedByteSize) {
     throw new Error("Uploaded object size does not match the initiated upload");
   }

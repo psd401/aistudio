@@ -3,6 +3,7 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   CreateBucketCommand,
@@ -67,6 +68,7 @@ export interface UploadDocumentParams {
 export interface DocumentUrlParams {
   key: string
   expiresIn?: number // seconds, default 3600 (1 hour)
+  responseContentDisposition?: string
 }
 
 export interface PresignedUploadUrlParams {
@@ -195,6 +197,7 @@ export async function uploadDocument({
 export async function getDocumentSignedUrl({
   key,
   expiresIn = 3600,
+  responseContentDisposition,
 }: DocumentUrlParams): Promise<string> {
   const s3Client = await getS3Client()
   const config = await getS3Config()
@@ -204,6 +207,7 @@ export async function getDocumentSignedUrl({
     const command = new GetObjectCommand({
       Bucket: bucketName,
       Key: key,
+      ResponseContentDisposition: responseContentDisposition,
     })
 
     const url = await getSignedUrl(s3Client, command, { expiresIn })
@@ -239,6 +243,92 @@ export async function deleteDocument(key: string): Promise<void> {
         error: error instanceof Error ? error.message : String(error),
         key,
       }
+    })
+  }
+}
+
+/**
+ * Delete every current object below a repository-owned prefix. The documents
+ * bucket is versioned, so S3 retains non-current versions according to the
+ * bucket lifecycle policy while the application-visible objects disappear
+ * immediately. Pagination is required because one item can accumulate more
+ * than 1,000 processor artifacts across versions.
+ */
+export async function deleteRepositoryObjectsByPrefix(
+  prefix: string
+): Promise<number> {
+  const repositoryArtifactPrefix =
+    /^repositories\/[1-9]\d*\/artifacts\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/$/i
+  if (!repositoryArtifactPrefix.test(prefix)) {
+    throw createError("Invalid repository object prefix", {
+      code: "S3_PREFIX_VALIDATION_ERROR",
+      details: { prefix },
+    })
+  }
+
+  const s3Client = await getS3Client()
+  const config = await getS3Config()
+  const bucketName = config.bucket!
+  let deleted = 0
+  let continuationToken: string | undefined
+
+  try {
+    do {
+      const listed = await s3Client.send(
+        new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        })
+      )
+      const keys = (listed.Contents ?? [])
+        .map((object) => object.Key)
+        .filter((key): key is string => typeof key === "string")
+
+      for (let index = 0; index < keys.length; index += 1000) {
+        const batch = keys.slice(index, index + 1000)
+        const removed = await s3Client.send(
+          new DeleteObjectsCommand({
+            Bucket: bucketName,
+            Delete: {
+              Objects: batch.map((Key) => ({ Key })),
+              Quiet: true,
+            },
+          })
+        )
+        if ((removed.Errors?.length ?? 0) > 0) {
+          throw createError("S3 rejected one or more repository object deletions", {
+            code: "S3_PREFIX_DELETE_PARTIAL_ERROR",
+            details: {
+              prefix,
+              failedKeys: removed.Errors?.flatMap((failure) =>
+                failure.Key ? [failure.Key] : []
+              ),
+            },
+          })
+        }
+        deleted += batch.length
+      }
+
+      if (listed.IsTruncated && !listed.NextContinuationToken) {
+        throw createError("S3 returned a truncated repository listing without a cursor", {
+          code: "S3_PREFIX_LIST_CURSOR_ERROR",
+          details: { prefix },
+        })
+      }
+      continuationToken = listed.IsTruncated
+        ? listed.NextContinuationToken
+        : undefined
+    } while (continuationToken)
+
+    return deleted
+  } catch (error) {
+    throw createError("Failed to delete repository objects from S3", {
+      code: "S3_PREFIX_DELETE_ERROR",
+      details: {
+        error: error instanceof Error ? error.message : String(error),
+        prefix,
+      },
     })
   }
 }
