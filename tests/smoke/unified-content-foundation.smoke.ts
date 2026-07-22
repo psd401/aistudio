@@ -466,6 +466,43 @@ try {
   assert.equal(quarantinedState?.versionStatus, "pending");
   assert.equal(quarantinedState?.itemStatus, "pending");
 
+  const quarantinedStatuses = await getCanonicalRepositoryItemStatuses(
+    repository.id
+  );
+  assert.deepEqual(quarantinedStatuses.get(retryItem.id), {
+    itemId: retryItem.id,
+    processingStatus: "retrying",
+    processingError: null,
+    canRetry: false,
+  });
+  await assert.rejects(
+    retryCanonicalRepositoryItem(
+      retryItem.id,
+      "unified-content-smoke-quarantined-retry"
+    ),
+    /awaiting automatic post-deployment recovery/
+  );
+  const [blockedRetryState] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          status: repositoryProcessingJobs.status,
+          attempt: repositoryProcessingJobs.attempt,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
+          availableAt: sql<string>`${repositoryProcessingJobs.availableAt}::text`,
+        })
+        .from(repositoryProcessingJobs)
+        .where(eq(repositoryProcessingJobs.id, retryRegistration.inspectJob.id))
+        .limit(1),
+    "smoke.unifiedContent.readBlockedQuarantineRetry"
+  );
+  assert.deepEqual(blockedRetryState, {
+    status: "cancelled",
+    attempt: 0,
+    postDeployRecovery: POST_DEPLOY_RECOVERY_MARKER,
+    availableAt: "infinity",
+  });
+
   const [oldWorkerSweep] = await executeQuery(
     (db) =>
       db
@@ -618,6 +655,18 @@ try {
         .set({ objectKey: retryObjectKey })
         .where(eq(repositoryItemVersions.id, retryRegistration.version.id)),
     "smoke.unifiedContent.restoreCanonicalRetrySource"
+  );
+  assert.deepEqual(
+    await releasePostDeployRecoveryJobs({
+      graceMinutes: 0,
+      now: new Date(Date.now() + 60_000),
+    }),
+    [
+      {
+        id: retryRegistration.inspectJob.id,
+        itemVersionId: retryRegistration.version.id,
+      },
+    ]
   );
 
   // A user retry gets another clean bounded budget even when the terminal row

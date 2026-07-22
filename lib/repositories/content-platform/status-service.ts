@@ -34,6 +34,7 @@ interface CanonicalStatusRow {
   jobAttempt: number | null;
   jobMaxAttempts: number | null;
   jobError: string | null;
+  postDeployRecovery: "unified-content-runtime-v2" | null;
   active: boolean;
   buildingGeneration: boolean;
   failedGeneration: boolean;
@@ -47,6 +48,15 @@ export function resolveCanonicalItemStatus(
     return {
       itemId: row.itemId,
       processingStatus: "embedded",
+      processingError: null,
+      canRetry: false,
+    };
+  }
+
+  if (row.postDeployRecovery !== null) {
+    return {
+      itemId: row.itemId,
+      processingStatus: "retrying",
       processingError: null,
       canRetry: false,
     };
@@ -130,6 +140,7 @@ export async function getCanonicalRepositoryItemStatuses(
           jobAttempt: repositoryProcessingJobs.attempt,
           jobMaxAttempts: repositoryProcessingJobs.maxAttempts,
           jobError: repositoryProcessingJobs.lastErrorMessage,
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
           active: sql<boolean>`EXISTS (
             SELECT 1
             FROM ${repositoryItemChunks} active_chunk
@@ -196,6 +207,35 @@ export interface RetryCanonicalItemResult {
   processingJobId: string;
 }
 
+const POST_DEPLOY_RECOVERY_RETRY_MESSAGE =
+  "This item is awaiting automatic post-deployment recovery";
+
+/** Prevent alternate retry paths from superseding a quarantined current version. */
+export async function assertCanonicalRetryNotQuarantined(
+  itemVersionId: string
+): Promise<void> {
+  const [job] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          postDeployRecovery: repositoryProcessingJobs.postDeployRecovery,
+        })
+        .from(repositoryProcessingJobs)
+        .where(
+          and(
+            eq(repositoryProcessingJobs.itemVersionId, itemVersionId),
+            eq(repositoryProcessingJobs.stage, "inspect")
+          )
+        )
+        .orderBy(desc(repositoryProcessingJobs.createdAt))
+        .limit(1),
+    "contentPlatform.assertCanonicalRetryNotQuarantined"
+  );
+  if (job && job.postDeployRecovery !== null) {
+    throw new Error(POST_DEPLOY_RECOVERY_RETRY_MESSAGE);
+  }
+}
+
 /** Reset a terminal current version to its durable inspect job for reprocessing. */
 export async function retryCanonicalRepositoryItem(
   itemId: number,
@@ -235,6 +275,9 @@ export async function retryCanonicalRepositoryItem(
         .limit(1)
         .for("update");
       if (!job) throw new Error("The item has no processing job to retry");
+      if (job.postDeployRecovery !== null) {
+        throw new Error(POST_DEPLOY_RECOVERY_RETRY_MESSAGE);
+      }
       if (
         job.status !== "failed" &&
         job.status !== "cancelled" &&

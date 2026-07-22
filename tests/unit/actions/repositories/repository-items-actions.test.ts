@@ -43,6 +43,9 @@ const mockGetCanonicalRepositoryItemStatuses = jest.fn<
 const mockRetryCanonicalRepositoryItem = jest.fn<
   (...a: unknown[]) => Promise<{ itemVersionId: string; processingJobId: string }>
 >()
+const mockAssertCanonicalRetryNotQuarantined = jest.fn<
+  (...a: unknown[]) => Promise<void>
+>(() => Promise.resolve())
 const mockRegisterCanonicalTextIfEnabled = jest.fn<
   (...a: unknown[]) => Promise<unknown>
 >(() => Promise.resolve(null))
@@ -112,6 +115,7 @@ jest.mock('@/lib/repositories/content-platform', () => ({
   deleteRepositoryItemStorage: mockDeleteRepositoryItemStorage,
   getCanonicalRepositoryItemStatuses: mockGetCanonicalRepositoryItemStatuses,
   retryCanonicalRepositoryItem: mockRetryCanonicalRepositoryItem,
+  assertCanonicalRetryNotQuarantined: mockAssertCanonicalRetryNotQuarantined,
 }))
 jest.mock('next/cache', () => ({ revalidatePath: jest.fn() }))
 jest.mock('@/lib/logger', () => ({
@@ -162,6 +166,7 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
       itemVersionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
       processingJobId: 'ffffffff-1111-4222-8333-444444444444',
     })
+    mockAssertCanonicalRetryNotQuarantined.mockResolvedValue(undefined)
   })
 
   it('listRepositoryItems denies a caller without read access (REV-COR-061)', async () => {
@@ -222,6 +227,9 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
 
     expect(result.isSuccess).toBe(true)
     expect(mockRetryCanonicalRepositoryItem).toHaveBeenCalledWith(38, 't')
+    expect(mockAssertCanonicalRetryNotQuarantined).toHaveBeenCalledWith(
+      'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    )
     expect(mockDispatchContentProcessingJob).toHaveBeenCalledWith({
       jobId: 'ffffffff-1111-4222-8333-444444444444',
       itemVersionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
@@ -254,11 +262,35 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
       content: 'ORCHID-COMPASS-742',
       traceId: 't',
     })
+    expect(mockAssertCanonicalRetryNotQuarantined).toHaveBeenCalledWith(
+      'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    )
     expect(mockRetryCanonicalRepositoryItem).not.toHaveBeenCalled()
     expect(mockDispatchContentProcessingJob).toHaveBeenCalledWith({
       jobId: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa',
       itemVersionId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
     })
+  })
+
+  it('does not let inline text supersede a post-deployment recovery quarantine', async () => {
+    mockGetRepositoryItemById.mockResolvedValue({
+      id: 38,
+      repositoryId: 5,
+      type: 'text',
+      name: 'Inline notes',
+      source: 'ORCHID-COMPASS-742',
+      currentVersionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    })
+    mockAssertCanonicalRetryNotQuarantined.mockRejectedValue(
+      new Error('This item is awaiting automatic post-deployment recovery')
+    )
+
+    const result = await mod.retryRepositoryItemProcessing(38)
+
+    expect(result.isSuccess).toBe(false)
+    expect(mockRegisterCanonicalTextIfEnabled).not.toHaveBeenCalled()
+    expect(mockRetryCanonicalRepositoryItem).not.toHaveBeenCalled()
+    expect(mockDispatchContentProcessingJob).not.toHaveBeenCalled()
   })
 
   it('repairs a legacy file by copying it into the canonical source namespace', async () => {

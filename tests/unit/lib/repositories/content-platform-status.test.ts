@@ -15,6 +15,7 @@ function statusRow(
     jobAttempt: 0,
     jobMaxAttempts: 3,
     jobError: null,
+    postDeployRecovery: null,
     active: false,
     buildingGeneration: false,
     failedGeneration: false,
@@ -111,6 +112,24 @@ describe("canonical repository item status", () => {
       processingStatus: "failed",
       processingError: "Content processing was disabled during deployment",
       canRetry: true,
+    });
+  });
+
+  it("keeps post-deployment recovery quarantined and disables manual retry", () => {
+    expect(
+      resolveCanonicalItemStatus(
+        statusRow({
+          versionStatus: "cancelled",
+          jobStatus: "cancelled",
+          jobError: "Awaiting the replacement runtime",
+          postDeployRecovery: "unified-content-runtime-v2",
+        })
+      )
+    ).toEqual({
+      itemId: 7,
+      processingStatus: "retrying",
+      processingError: null,
+      canRetry: false,
     });
   });
 

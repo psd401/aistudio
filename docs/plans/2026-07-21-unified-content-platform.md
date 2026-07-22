@@ -794,8 +794,11 @@ closes the complete set before another deployment:
   deployment gap and stale Textract/BDA state cannot influence the retry.
 - Failed and cancelled inspect jobs are terminal in repository status
   projection. Authorized manual retry accepts either state and creates a fresh
-  five-attempt budget with cleared inspection/provider state; only genuinely
-  pending work with prior attempts is shown as Retrying.
+  five-attempt budget with cleared inspection/provider state. The sole exception
+  is a job carrying the durable post-deploy marker: it remains visibly Retrying,
+  exposes no manual Retry control, and every canonical or inline-text server
+  retry path rejects it until the replacement worker atomically releases the
+  quarantine after the drain window.
 - Generation activation now uses an ordered four-statement transaction: lock the
   repository, supersede its current generation, activate the fully embedded
   target, then publish the repository pointer and included items. The target is
@@ -808,7 +811,7 @@ closes the complete set before another deployment:
 
 Verification evidence for the handoff hardening slice:
 
-- Application CI suite: 275 suites passed, 5 skipped; 3,108 tests passed and 60
+- Application CI suite: 275 suites passed, 5 skipped; 3,110 tests passed and 60
   intentionally skipped. Infrastructure/Lambda suite: 35 suites and 359 tests
   passed, including the real ARM64 worker bundle.
 - Full authenticated Playwright passed 257 tests with 51 intentional
@@ -818,9 +821,10 @@ Verification evidence for the handoff hardening slice:
 - Real PostgreSQL smoke passed the exact migration-before-worker handoff,
   preservation of unrelated terminal failures, old-worker exclusion, survival
   of a stale metrics overwrite, database rejection of a stale status/error
-  transition, the 20-minute drain guard, bounded new-worker release,
-  noncanonical-source exclusion, retry-state reset, PDF/Office/image publication
-  and citations, ordered generation activation, duplicate activation, the
+  transition, UI suppression and server rejection of manual retry while marked,
+  the 20-minute drain guard, bounded new-worker release, noncanonical-source
+  exclusion, retry-state reset after release, PDF/Office/image publication and
+  citations, ordered generation activation, duplicate activation, the
   single-active-generation constraint, and cleanup.
 - Full lint completed with zero errors. Application, infrastructure,
   unified-content worker, and embedding-worker typechecks pass. The production
