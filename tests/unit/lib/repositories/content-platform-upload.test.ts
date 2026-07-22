@@ -124,7 +124,7 @@ describe("canonical repository upload initiation", () => {
         DEFAULT_CONTENT_PLATFORM_CONFIG,
         storage
       )
-    ).rejects.toThrow("PDF, DOCX, XLSX, and PPTX files only");
+    ).rejects.toThrow("PDF, Office, JPEG, PNG, WebP, GIF, and TIFF files only");
     await expect(
       initiateRepositoryUpload(
         { ...baseInput, byteSize: 500 * 1024 ** 2 + 1 },
@@ -168,5 +168,38 @@ describe("canonical repository upload initiation", () => {
         storage
       )
     ).rejects.toThrow("100 MiB");
+  });
+
+  it("accepts images and enforces their independent size limit", async () => {
+    const storage = createStorage();
+    const result = await initiateRepositoryUpload(
+      {
+        ...baseInput,
+        itemName: "Evacuation map",
+        fileName: "evacuation-map.png",
+        contentType: "image/png",
+        byteSize: 5 * 1024 ** 2,
+      },
+      DEFAULT_CONTENT_PLATFORM_CONFIG,
+      storage
+    );
+
+    expect(result.uploadMethod).toBe("single");
+    expect(storage.createSingleUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ contentType: "image/png" })
+    );
+    await expect(
+      initiateRepositoryUpload(
+        {
+          ...baseInput,
+          itemName: "Oversized image",
+          fileName: "oversized.png",
+          contentType: "image/png",
+          byteSize: 50 * 1024 ** 2 + 1,
+        },
+        DEFAULT_CONTENT_PLATFORM_CONFIG,
+        storage
+      )
+    ).rejects.toThrow("50 MiB");
   });
 });

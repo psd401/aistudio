@@ -33,6 +33,8 @@ test.describe('Admin Nexus router settings', () => {
     await expect(contentPlatformTab).toBeVisible()
     await contentPlatformTab.click()
     await expect(page.getByText('CONTENT_PLATFORM_ENABLED')).toBeVisible()
+    await expect(page.getByText('CONTENT_MAX_IMAGE_SIZE_MB')).toBeVisible()
+    await expect(page.getByText('CONTENT_IMAGE_CAPTION_MODEL_ID')).toBeVisible()
 
     await page.getByRole('button', { name: 'Add Setting' }).click()
     const addSettingDialog = page.getByRole('dialog', { name: 'Add Setting' })

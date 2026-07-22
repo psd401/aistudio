@@ -2,6 +2,7 @@ import {
   batchEmbeddingMessages,
   canonicalTextArtifactObjectKey,
   decideMalwareInspection,
+  imageLinesFromTextract,
   isRepositoryObjectKey,
   pagesFromTextract,
   parseContentProcessingMessage,
@@ -69,6 +70,28 @@ describe("unified content processor contract", () => {
       { page: 1, text: "First line\nSecond line" },
       { page: 2, text: "Second page" },
       { page: 3, text: "" },
+    ]);
+  });
+
+  test("preserves bounded Textract image regions for exact OCR citations", () => {
+    expect(
+      imageLinesFromTextract([
+        { BlockType: "WORD", Text: "ignore" },
+        {
+          BlockType: "LINE",
+          Text: " Evacuation route ",
+          Geometry: {
+            BoundingBox: { Left: -0.1, Top: 0.2, Width: 1.2, Height: 0.1 },
+          },
+        },
+        { BlockType: "LINE", Text: "No geometry" },
+      ])
+    ).toEqual([
+      {
+        text: "Evacuation route",
+        region: { x: 0, y: 0.2, width: 1, height: 0.1 },
+      },
+      { text: "No geometry", region: undefined },
     ]);
   });
 

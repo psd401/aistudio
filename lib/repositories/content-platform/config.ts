@@ -9,9 +9,11 @@ export const CONTENT_PLATFORM_SETTING_KEYS = {
   maxFileSizeGb: "CONTENT_MAX_FILE_SIZE_GB",
   maxPdfSizeMb: "CONTENT_MAX_PDF_SIZE_MB",
   maxOfficeSizeMb: "CONTENT_MAX_OFFICE_SIZE_MB",
+  maxImageSizeMb: "CONTENT_MAX_IMAGE_SIZE_MB",
   maxMediaHours: "CONTENT_MAX_MEDIA_HOURS",
   malwareScanRequired: "CONTENT_MALWARE_SCAN_REQUIRED",
   ocrStrategy: "CONTENT_OCR_STRATEGY",
+  imageCaptionModelId: "CONTENT_IMAGE_CAPTION_MODEL_ID",
   visualIndexEnabled: "CONTENT_VISUAL_INDEX_ENABLED",
   googleSyncEnabled: "GOOGLE_CONTENT_SYNC_ENABLED",
   googleSyncIntervalMinutes: "GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES",
@@ -28,9 +30,11 @@ export interface ContentPlatformConfig {
   maxFileSizeGb: number;
   maxPdfSizeMb: number;
   maxOfficeSizeMb: number;
+  maxImageSizeMb: number;
   maxMediaHours: number;
   malwareScanRequired: boolean;
   ocrStrategy: ContentOcrStrategy;
+  imageCaptionModelId: string;
   visualIndexEnabled: boolean;
   googleSyncEnabled: boolean;
   googleSyncIntervalMinutes: number;
@@ -45,9 +49,11 @@ export const DEFAULT_CONTENT_PLATFORM_CONFIG: Readonly<ContentPlatformConfig> = 
   maxFileSizeGb: 10,
   maxPdfSizeMb: 500,
   maxOfficeSizeMb: 100,
+  maxImageSizeMb: 50,
   maxMediaHours: 4,
   malwareScanRequired: true,
   ocrStrategy: "auto",
+  imageCaptionModelId: "us.amazon.nova-2-lite-v1:0",
   visualIndexEnabled: false,
   googleSyncEnabled: false,
   googleSyncIntervalMinutes: 15,
@@ -78,6 +84,21 @@ function parseOcrStrategy(value: string | null | undefined): ContentOcrStrategy 
     value === "disabled"
     ? value
     : DEFAULT_CONTENT_PLATFORM_CONFIG.ocrStrategy;
+}
+
+function parseImageCaptionModelId(value: string | null | undefined): string {
+  const candidate = value?.trim();
+  if (!candidate) return DEFAULT_CONTENT_PLATFORM_CONFIG.imageCaptionModelId;
+  // Keep image bytes inside the US geography and restrict this worker to
+  // Amazon's multimodal Nova understanding family. IAM applies the same bound.
+  if (
+    /^(?:us\.)?amazon\.nova-(?:(?:2-)?lite|pro|premier)-v\d+:\d+$/.test(
+      candidate
+    )
+  ) {
+    return candidate;
+  }
+  return DEFAULT_CONTENT_PLATFORM_CONFIG.imageCaptionModelId;
 }
 
 export function parseContentPlatformConfig(
@@ -124,6 +145,12 @@ export function parseContentPlatformConfig(
       1,
       500
     ),
+    maxImageSizeMb: parseBoundedInteger(
+      raw[keys.maxImageSizeMb],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.maxImageSizeMb,
+      1,
+      500
+    ),
     maxMediaHours: parseBoundedInteger(
       raw[keys.maxMediaHours],
       DEFAULT_CONTENT_PLATFORM_CONFIG.maxMediaHours,
@@ -135,6 +162,7 @@ export function parseContentPlatformConfig(
       DEFAULT_CONTENT_PLATFORM_CONFIG.malwareScanRequired
     ),
     ocrStrategy: parseOcrStrategy(raw[keys.ocrStrategy]),
+    imageCaptionModelId: parseImageCaptionModelId(raw[keys.imageCaptionModelId]),
     visualIndexEnabled: parseBoolean(
       raw[keys.visualIndexEnabled],
       DEFAULT_CONTENT_PLATFORM_CONFIG.visualIndexEnabled

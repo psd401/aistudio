@@ -13,6 +13,11 @@ const officeMigrationPath = path.join(
   "infra/database/schema/117-unified-content-office-ingestion.sql"
 );
 const officeSql = fs.readFileSync(officeMigrationPath, "utf8");
+const imageMigrationPath = path.join(
+  process.cwd(),
+  "infra/database/schema/118-unified-content-image-ingestion.sql"
+);
+const imageSql = fs.readFileSync(imageMigrationPath, "utf8");
 
 describe("migration 116 unified repository content", () => {
   it.each([
@@ -50,5 +55,16 @@ describe("migration 116 unified repository content", () => {
     expect(officeSql).toContain("('CONTENT_MAX_OFFICE_SIZE_MB', '100'");
     expect(officeSql).toContain("ON CONFLICT (key) DO NOTHING");
     expect(officeSql).not.toMatch(/^\s*DO \$\$/mu);
+  });
+
+  it("seeds bounded image processing and a Bedrock Nova captioner", () => {
+    expect(imageSql).toContain("DROP CONSTRAINT IF EXISTS repository_items_type_check");
+    expect(imageSql).toContain("CHECK (type IN ('document', 'url', 'text', 'image'))");
+    expect(imageSql).toContain("('CONTENT_MAX_IMAGE_SIZE_MB', '50'");
+    expect(imageSql).toContain(
+      "('CONTENT_IMAGE_CAPTION_MODEL_ID', 'us.amazon.nova-2-lite-v1:0'"
+    );
+    expect(imageSql).toContain("ON CONFLICT (key) DO NOTHING");
+    expect(imageSql).not.toMatch(/^\s*DO \$\$/mu);
   });
 });

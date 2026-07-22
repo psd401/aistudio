@@ -16,6 +16,9 @@ const mockAssertNotSystemManagedRepository = jest.fn<(...a: unknown[]) => Promis
 const mockGetRepositoryById = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 const mockGetRepositoryAccessList = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promise.resolve([]))
 const mockExecuteQuery = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promise.resolve([]))
+const mockGetRepositoryItems = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promise.resolve([]))
+const mockDeleteRepository = jest.fn<(...a: unknown[]) => Promise<number>>()
+const mockDeleteRepositoryItemStorage = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 
 jest.mock('@/lib/auth/server-session', () => ({ getServerSession: mockGetServerSession }))
 jest.mock('@/utils/roles', () => ({ hasCapabilityAccess: mockHasCapabilityAccess }))
@@ -30,14 +33,17 @@ jest.mock('@/lib/repositories/repository-access-guard', () => ({
 jest.mock('@/lib/db/drizzle', () => ({
   getRepositoryById: mockGetRepositoryById,
   getRepositoryAccessList: mockGetRepositoryAccessList,
-  createRepository: jest.fn(), updateRepository: jest.fn(), deleteRepository: jest.fn(),
+  createRepository: jest.fn(), updateRepository: jest.fn(), deleteRepository: mockDeleteRepository,
   getRepositoriesByOwnerId: jest.fn(() => Promise.resolve([])),
-  getRepositoryItems: jest.fn(() => Promise.resolve([])),
+  getRepositoryItems: mockGetRepositoryItems,
   grantUserAccess: jest.fn(), grantRoleAccess: jest.fn(), revokeAccessById: jest.fn(),
   getUserAccessibleRepositories: jest.fn(() => Promise.resolve([])),
 }))
 jest.mock('@/lib/db/drizzle-client', () => ({ executeQuery: mockExecuteQuery }))
 jest.mock('@/lib/db/schema', () => ({ repositoryAccess: {}, repositoryItems: { repositoryId: 'repository_id' } }))
+jest.mock('@/lib/repositories/content-platform/storage-cleanup', () => ({
+  deleteRepositoryItemStorage: mockDeleteRepositoryItemStorage,
+}))
 jest.mock('next/cache', () => ({ revalidatePath: jest.fn() }))
 jest.mock('@/lib/logger', () => ({
   createLogger: () => ({ info: jest.fn(), debug: jest.fn(), warn: jest.fn(), error: jest.fn() }),
@@ -58,6 +64,12 @@ describe('repository.actions authorization (REV-SEC-082 / REV-SEC-083 / REV-COR-
     mockAssertRepositoryReadAccess.mockResolvedValue(undefined)
     mockAssertNotSystemManagedRepository.mockResolvedValue(undefined)
     mockExecuteQuery.mockResolvedValue([])
+    mockGetRepositoryItems.mockResolvedValue([])
+    mockDeleteRepository.mockResolvedValue(1)
+    mockDeleteRepositoryItemStorage.mockResolvedValue({
+      sourceObjectCount: 1,
+      artifactObjectCount: 3,
+    })
   })
 
   it('getRepository returns not-found when the caller lacks read access (REV-SEC-082)', async () => {
@@ -93,5 +105,24 @@ describe('repository.actions authorization (REV-SEC-082 / REV-SEC-083 / REV-COR-
     expect(res.isSuccess).toBe(true)
     expect(res.data).not.toBeNull()
     expect(res.data?.id).toBe(5)
+  })
+
+  it('cleans image storage before deleting a repository', async () => {
+    const image = {
+      id: 19,
+      repositoryId: 5,
+      type: 'image',
+      name: 'Map',
+      source: 'repositories/5/upload/map.png',
+    }
+    mockGetRepositoryItems.mockResolvedValue([image])
+
+    const res = await mod.deleteRepository(5)
+
+    expect(res.isSuccess).toBe(true)
+    expect(mockDeleteRepositoryItemStorage).toHaveBeenCalledWith(image)
+    expect(mockDeleteRepositoryItemStorage.mock.invocationCallOrder[0]).toBeLessThan(
+      mockDeleteRepository.mock.invocationCallOrder[0]
+    )
   })
 })

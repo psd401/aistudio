@@ -27,6 +27,7 @@ import {
 import { revalidatePath } from "next/cache"
 import type { Repository } from "@/actions/repositories/repository.actions"
 import type { RepositoryItem } from "@/actions/repositories/repository-items.actions"
+import { deleteRepositoryItemStorage } from "@/lib/repositories/content-platform/storage-cleanup"
 
 export interface RepositoryWithOwner extends Repository {
   ownerEmail: string | null
@@ -228,27 +229,27 @@ export async function adminDeleteRepository(
     // generic admin path — it would destroy the retrieval index out-of-band.
     await assertNotSystemManagedRepository(id)
 
-    // First, get all document items to delete from S3
-    log.debug("Fetching document items for S3 deletion")
+    // First, get all stored items so source and canonical artifacts are removed.
+    log.debug("Fetching stored repository items for S3 deletion")
     const items = await getRepositoryItems(id)
 
-    // Filter for document types
-    const documents = items.filter(item => item.type === 'document')
+    const storedItems = items.filter(
+      item => item.type === 'document' || item.type === 'image'
+    )
 
-    log.info("Found documents to delete from S3", {
-      documentCount: documents.length,
+    log.info("Found repository item objects to delete from S3", {
+      itemCount: storedItems.length,
       repositoryId: id
     })
 
-    // Delete all documents from S3 in parallel
-    if (documents.length > 0) {
-      const { deleteDocument } = await import("@/lib/aws/s3-client")
-
-      log.info("Deleting documents from S3", { count: documents.length })
-      const deletePromises = documents.map(item =>
-        deleteDocument(item.source).catch(error => {
+    if (storedItems.length > 0) {
+      log.info("Deleting repository item objects from S3", {
+        count: storedItems.length,
+      })
+      const deletePromises = storedItems.map(item =>
+        deleteRepositoryItemStorage(item).catch(error => {
           // Log error but continue with deletion
-          log.error("Failed to delete S3 file", {
+          log.error("Failed to delete repository item objects from S3", {
             file: item.source,
             itemId: item.id,
             error: error instanceof Error ? error.message : "Unknown error"
@@ -256,7 +257,7 @@ export async function adminDeleteRepository(
         })
       )
       await Promise.all(deletePromises)
-      log.info("S3 document cleanup completed")
+      log.info("S3 repository item cleanup completed")
     }
 
     // Now delete the repository (this will cascade delete all items and chunks)
@@ -378,17 +379,16 @@ export async function adminRemoveRepositoryItem(
       repositoryId: item.repositoryId
     })
 
-    // Delete from S3 if it's a document
-    if (item.type === 'document') {
-      log.info("Deleting document from S3 (admin)", {
+    // Delete stored source and canonical derivatives before cascading DB rows.
+    if (item.type === 'document' || item.type === 'image') {
+      log.info("Deleting repository item objects from S3 (admin)", {
         itemId,
         s3Key: item.source
       })
 
       try {
-        const { deleteDocument } = await import("@/lib/aws/s3-client")
-        await deleteDocument(item.source)
-        log.info("Document deleted from S3 successfully")
+        const cleanup = await deleteRepositoryItemStorage(item)
+        log.info("Repository item objects deleted from S3 successfully", cleanup)
       } catch (error) {
         // Log error but continue with database deletion
         log.error("Failed to delete from S3", {

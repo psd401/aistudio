@@ -12,6 +12,10 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import {
+  BedrockRuntimeClient,
+  ConverseCommand,
+} from "@aws-sdk/client-bedrock-runtime";
+import {
   GetDocumentTextDetectionCommand,
   StartDocumentTextDetectionCommand,
   TextractClient,
@@ -30,6 +34,13 @@ import {
   type RepositoryProcessingMetrics,
 } from "../../../lib/db/schema";
 import {
+  buildImageSearchDocument,
+  IMAGE_PROCESSOR_VERSION,
+  imageArtifactObjectKey,
+  isImageContentType,
+  prepareRepositoryImage,
+} from "../../../lib/repositories/content-platform/image-processing";
+import {
   PDF_PROCESSOR_VERSION,
   extractPdfText,
   segmentPdfPages,
@@ -41,6 +52,7 @@ import {
 import {
   MAX_INLINE_ARTIFACT_CHARACTERS,
   publishDocumentVersion,
+  type PublishableArtifact,
   type PublishableSegment,
 } from "../../../lib/repositories/content-platform/publication-service";
 import {
@@ -51,6 +63,7 @@ import {
   batchEmbeddingMessages,
   canonicalTextArtifactObjectKey,
   decideMalwareInspection,
+  imageLinesFromTextract,
   isRepositoryObjectKey,
   pagesFromTextract,
   parseContentProcessingMessage,
@@ -72,6 +85,7 @@ const log = {
 const s3 = new S3Client({});
 const sqs = new SQSClient({});
 const textract = new TextractClient({});
+const bedrock = new BedrockRuntimeClient({});
 const secrets = new SecretsManagerClient({});
 const bucket = requiredEnvironment("DOCUMENTS_BUCKET_NAME");
 const queueUrl = requiredEnvironment("CONTENT_PROCESSING_QUEUE_URL");
@@ -135,9 +149,11 @@ async function getConfig(): Promise<ContentPlatformConfig> {
             "CONTENT_MAX_FILE_SIZE_GB",
             "CONTENT_MAX_PDF_SIZE_MB",
             "CONTENT_MAX_OFFICE_SIZE_MB",
+            "CONTENT_MAX_IMAGE_SIZE_MB",
             "CONTENT_MAX_MEDIA_HOURS",
             "CONTENT_MALWARE_SCAN_REQUIRED",
             "CONTENT_OCR_STRATEGY",
+            "CONTENT_IMAGE_CAPTION_MODEL_ID",
             "CONTENT_VISUAL_INDEX_ENABLED",
             "GOOGLE_CONTENT_SYNC_ENABLED",
             "GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES",
@@ -339,6 +355,87 @@ async function startTextract(objectKey: string): Promise<string> {
   return result.JobId;
 }
 
+async function storeImageDerivative(
+  objectKey: string,
+  body: Uint8Array
+): Promise<void> {
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: objectKey,
+      Body: body,
+      ContentType: "image/jpeg",
+      CacheControl: "private, max-age=31536000, immutable",
+    })
+  );
+}
+
+async function storeTextDerivative(
+  objectKey: string,
+  body: string
+): Promise<void> {
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: objectKey,
+      Body: body,
+      ContentType: "text/plain; charset=utf-8",
+      CacheControl: "private, max-age=31536000, immutable",
+    })
+  );
+}
+
+async function captionImage(
+  image: Uint8Array,
+  modelId: string
+): Promise<{
+  caption: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  latencyMs?: number;
+  stopReason?: string;
+}> {
+  const result = await bedrock.send(
+    new ConverseCommand({
+      modelId,
+      system: [
+        {
+          text:
+            "Create concise, factual image descriptions for enterprise search. " +
+            "Describe the visible subject, setting, diagram relationships, and important labels. " +
+            "Do not speculate about identity, intent, or facts that are not visible. Return plain text only.",
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [
+            { image: { format: "jpeg", source: { bytes: image } } },
+            {
+              text:
+                "Describe this image for search and accessibility in no more than 120 words. " +
+                "Textract handles verbatim OCR separately, so focus on visual meaning and structure.",
+            },
+          ],
+        },
+      ],
+      inferenceConfig: { maxTokens: 300, temperature: 0.1, topP: 0.9 },
+    })
+  );
+  const caption = (result.output?.message?.content ?? [])
+    .flatMap((block) => (typeof block.text === "string" ? [block.text] : []))
+    .join("\n")
+    .trim();
+  if (!caption) throw new Error("Image caption model returned no text");
+  return {
+    caption,
+    inputTokens: result.usage?.inputTokens,
+    outputTokens: result.usage?.outputTokens,
+    latencyMs: result.metrics?.latencyMs,
+    stopReason: result.stopReason,
+  };
+}
+
 async function queueEmbeddings(
   itemVersionId: string,
   generationId: string,
@@ -426,7 +523,8 @@ async function processMessage(
     throw new Error("Item version has no declared content type");
   }
   const isPdf = declaredContentType === "application/pdf";
-  if (!isPdf && !isOfficeContentType(declaredContentType)) {
+  const isImage = isImageContentType(declaredContentType);
+  if (!isPdf && !isImage && !isOfficeContentType(declaredContentType)) {
     throw new Error("Unified content worker received an unsupported content type");
   }
 
@@ -437,10 +535,12 @@ async function processMessage(
   }
   const processingLimitMb = isPdf
     ? config.maxPdfSizeMb
-    : config.maxOfficeSizeMb;
+    : isImage
+      ? config.maxImageSizeMb
+      : config.maxOfficeSizeMb;
   if (context.byteSize != null && context.byteSize > processingLimitMb * 1024 ** 2) {
     throw new Error(
-      `Document exceeds the configured ${processingLimitMb} MiB processing limit`
+      `File exceeds the configured ${processingLimitMb} MiB processing limit`
     );
   }
   let inspectionStatus: "clean" | "not_required" = "not_required";
@@ -473,7 +573,9 @@ async function processMessage(
   let canonicalText: string;
   let processorVersion: string;
   let processorName: string;
+  let detectedContentType = declaredContentType;
   let artifactMetadata: Record<string, unknown>;
+  let additionalArtifacts: PublishableArtifact[] | undefined;
   if (isPdf) {
     const extracted = await extractPdfText(source);
     let pages = extracted.pages;
@@ -504,7 +606,7 @@ async function processMessage(
     processorVersion = PDF_PROCESSOR_VERSION;
     processorName = "aistudio-pdf";
     artifactMetadata = { pageCount: pages.length };
-  } else {
+  } else if (isOfficeContentType(declaredContentType)) {
     const extracted = await extractOfficeDocument(
       source,
       declaredContentType
@@ -514,6 +616,137 @@ async function processMessage(
     processorVersion = extracted.processorVersion;
     processorName = "aistudio-office";
     artifactMetadata = extracted.metadata;
+  } else {
+    const prepared = await prepareRepositoryImage(source, declaredContentType);
+    const thumbnailObjectKey = imageArtifactObjectKey(
+      context.repositoryId,
+      message.itemVersionId,
+      "thumbnail.jpg"
+    );
+    const ocrSourceObjectKey = imageArtifactObjectKey(
+      context.repositoryId,
+      message.itemVersionId,
+      "ocr-source.jpg"
+    );
+    await Promise.all([
+      storeImageDerivative(thumbnailObjectKey, prepared.thumbnail),
+      storeImageDerivative(ocrSourceObjectKey, prepared.ocrImage),
+    ]);
+
+    let ocrBlocks: Block[] = [];
+    if (config.ocrStrategy !== "disabled") {
+      if (!metrics.textractJobId) {
+        metrics.textractObjectKey = ocrSourceObjectKey;
+        metrics.textractJobId = await startTextract(ocrSourceObjectKey);
+        await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
+        return;
+      }
+      if (
+        metrics.textractObjectKey &&
+        metrics.textractObjectKey !== ocrSourceObjectKey
+      ) {
+        throw new Error("Textract job does not match the normalized image artifact");
+      }
+      const ocr = await pollTextract(metrics.textractJobId);
+      if (ocr.status === "pending") {
+        await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
+        return;
+      }
+      ocrBlocks = ocr.blocks;
+    }
+
+    const ocrLines = imageLinesFromTextract(ocrBlocks);
+    const caption = await captionImage(
+      prepared.captionImage,
+      config.imageCaptionModelId
+    );
+    const searchable = buildImageSearchDocument({
+      caption: caption.caption,
+      ocrLines,
+      width: prepared.width,
+      height: prepared.height,
+      detectedContentType: prepared.detectedContentType,
+    });
+    const ocrArtifactObjectKey = imageArtifactObjectKey(
+      context.repositoryId,
+      message.itemVersionId,
+      "ocr.txt"
+    );
+    const largeOcrText =
+      searchable.ocrText.length > MAX_INLINE_ARTIFACT_CHARACTERS;
+    if (largeOcrText) {
+      await storeTextDerivative(ocrArtifactObjectKey, searchable.ocrText);
+    }
+
+    metrics.provider = "amazon-bedrock";
+    metrics.modelId = config.imageCaptionModelId;
+    metrics.inputTokens = caption.inputTokens;
+    metrics.outputTokens = caption.outputTokens;
+    metrics.captionLatencyMs = caption.latencyMs;
+    metrics.imageWidth = prepared.width;
+    metrics.imageHeight = prepared.height;
+    metrics.thumbnailBytes = prepared.thumbnail.byteLength;
+    metrics.ocrLines = ocrLines.length;
+    segments = searchable.segments;
+    canonicalText = searchable.canonicalText;
+    processorVersion = IMAGE_PROCESSOR_VERSION;
+    processorName = "aistudio-image";
+    detectedContentType = prepared.detectedContentType;
+    artifactMetadata = {
+      ...prepared.metadata,
+      captionModelId: config.imageCaptionModelId,
+      captionStopReason: caption.stopReason,
+      ocrStrategy: config.ocrStrategy,
+      ocrLineCount: ocrLines.length,
+      visualIndexEligible: true,
+      visualIndexEnabled: config.visualIndexEnabled,
+    };
+    additionalArtifacts = [
+      {
+        kind: "image",
+        mediaType: prepared.detectedContentType,
+        objectKey: context.objectKey,
+        sha256: prepared.sourceSha256,
+        metadata: prepared.metadata,
+      },
+      {
+        kind: "thumbnail",
+        mediaType: "image/jpeg",
+        objectKey: thumbnailObjectKey,
+        sha256: prepared.thumbnailSha256,
+        metadata: {
+          sourceWidth: prepared.width,
+          sourceHeight: prepared.height,
+        },
+      },
+      {
+        kind: "caption",
+        mediaType: "text/plain",
+        textInline: caption.caption,
+        sourceRegions: [{ x: 0, y: 0, width: 1, height: 1 }],
+        metadata: {
+          provider: "amazon-bedrock",
+          modelId: config.imageCaptionModelId,
+          stopReason: caption.stopReason,
+        },
+      },
+      ...(searchable.ocrText
+        ? [
+            {
+              kind: "layout" as const,
+              mediaType: "text/plain",
+              textInline: largeOcrText ? undefined : searchable.ocrText,
+              objectKey: largeOcrText ? ocrArtifactObjectKey : undefined,
+              sourceRegions: searchable.ocrRegions.slice(0, 1_000),
+              metadata: {
+                provider: "amazon-textract",
+                lineCount: ocrLines.length,
+                regionCount: searchable.ocrRegions.length,
+              },
+            },
+          ]
+        : []),
+    ];
   }
   const canonicalArtifact = await storeCanonicalText(
     context.repositoryId,
@@ -525,11 +758,12 @@ async function processMessage(
     itemVersionId: message.itemVersionId,
     processorVersion,
     processorName,
-    detectedContentType: declaredContentType,
+    detectedContentType,
     inspectionStatus,
     inspectionDetails,
     malwareScanRequired: config.malwareScanRequired,
     artifactMetadata,
+    additionalArtifacts,
     ...canonicalArtifact,
     segments,
   });

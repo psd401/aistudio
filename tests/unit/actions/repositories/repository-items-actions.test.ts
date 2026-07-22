@@ -25,6 +25,9 @@ const mockDispatchContentProcessingJob = jest.fn<(...a: unknown[]) => Promise<vo
   () => Promise.resolve()
 )
 const mockGetDocumentObjectMetadata = jest.fn<(...a: unknown[]) => Promise<unknown>>()
+const mockGetDocumentSignedUrl = jest.fn<(...a: unknown[]) => Promise<string>>()
+const mockDeleteRepositoryItem = jest.fn<(...a: unknown[]) => Promise<number>>()
+const mockDeleteRepositoryItemStorage = jest.fn<(...a: unknown[]) => Promise<unknown>>()
 
 jest.mock('@/lib/auth/server-session', () => ({ getServerSession: mockGetServerSession }))
 jest.mock('@/utils/roles', () => ({ hasCapabilityAccess: mockHasCapabilityAccess }))
@@ -47,7 +50,7 @@ jest.mock('@/lib/db/drizzle', () => ({
   getRepositoryItemById: mockGetRepositoryItemById,
   getRepositoryItems: mockGetRepositoryItems,
   getRepositoryItemChunks: jest.fn(() => Promise.resolve([])),
-  deleteRepositoryItem: jest.fn(),
+  deleteRepositoryItem: mockDeleteRepositoryItem,
   updateRepositoryItemStatus: mockUpdateRepositoryItemStatus,
 }))
 jest.mock('@/lib/db/drizzle-client', () => ({
@@ -59,11 +62,13 @@ jest.mock('@/lib/aws/s3-client', () => ({
   uploadDocument: jest.fn(),
   deleteDocument: jest.fn(),
   getDocumentObjectMetadata: mockGetDocumentObjectMetadata,
+  getDocumentSignedUrl: mockGetDocumentSignedUrl,
 }))
 jest.mock('@/lib/services/file-processing-service', () => ({ queueFileForProcessing: jest.fn(), processUrl: jest.fn() }))
 jest.mock('@/lib/repositories/content-platform', () => ({
   registerCanonicalUploadIfEnabled: mockRegisterCanonicalUploadIfEnabled,
   dispatchContentProcessingJob: mockDispatchContentProcessingJob,
+  deleteRepositoryItemStorage: mockDeleteRepositoryItemStorage,
 }))
 jest.mock('next/cache', () => ({ revalidatePath: jest.fn() }))
 jest.mock('@/lib/logger', () => ({
@@ -90,6 +95,12 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
       contentType: 'application/pdf',
       eTag: 'etag-1',
       metadata: {},
+    })
+    mockGetDocumentSignedUrl.mockResolvedValue('https://download')
+    mockDeleteRepositoryItem.mockResolvedValue(1)
+    mockDeleteRepositoryItemStorage.mockResolvedValue({
+      sourceObjectCount: 1,
+      artifactObjectCount: 3,
     })
   })
 
@@ -213,5 +224,51 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     const res = await mod.updateItemProcessingStatus(1, 'completed')
     expect(res.isSuccess).toBe(true)
     expect(mockUpdateRepositoryItemStatus).toHaveBeenCalledWith(1, 'completed', null)
+  })
+
+  it('removes image source and derivative storage before deleting the item row', async () => {
+    const image = {
+      id: 9,
+      repositoryId: 5,
+      type: 'image',
+      name: 'Evacuation map',
+      source: 'repositories/5/upload/map.png',
+      metadata: {},
+      processingStatus: 'completed',
+      processingError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }
+    mockGetRepositoryItemById.mockResolvedValue(image)
+
+    const result = await mod.removeRepositoryItem(9)
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockDeleteRepositoryItemStorage).toHaveBeenCalledWith(image)
+    expect(mockDeleteRepositoryItemStorage.mock.invocationCallOrder[0]).toBeLessThan(
+      mockDeleteRepositoryItem.mock.invocationCallOrder[0]
+    )
+  })
+
+  it('generates image download URLs through database-first S3 settings', async () => {
+    mockGetRepositoryItemById.mockResolvedValue({
+      id: 10,
+      repositoryId: 5,
+      type: 'image',
+      name: 'Evacuation map',
+      source: 'repositories/5/upload/map.png',
+      metadata: { originalFileName: 'map.png' },
+      processingStatus: 'completed',
+      processingError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+
+    const result = await mod.getDocumentDownloadUrl(10)
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockGetDocumentSignedUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ key: 'repositories/5/upload/map.png' })
+    )
   })
 })

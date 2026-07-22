@@ -2,24 +2,20 @@ import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3
 import { createLogger } from '@/lib/logger';
 import type { UIMessage } from 'ai';
 import { generateUUID } from '@/lib/utils/uuid';
+import { Settings } from '@/lib/settings-manager';
 
 const s3Client = new S3Client({});
 const log = createLogger({ service: 'attachment-storage' });
 
-// Environment validation with test environment support
-function getDocumentsBucket(): string {
-  if (process.env.NODE_ENV === 'test') {
-    return process.env.DOCUMENTS_BUCKET_NAME || 'test-documents-bucket';
+// Resolve at request time so the database-first admin setting remains the source
+// of truth and importing a route never requires infrastructure configuration.
+async function getDocumentsBucket(): Promise<string> {
+  const { bucket } = await Settings.getS3();
+  if (!bucket) {
+    throw new Error('S3_BUCKET setting or DOCUMENTS_BUCKET_NAME environment variable is required');
   }
-  
-  if (!process.env.DOCUMENTS_BUCKET_NAME) {
-    throw new Error('DOCUMENTS_BUCKET_NAME environment variable is required but not configured');
-  }
-  
-  return process.env.DOCUMENTS_BUCKET_NAME;
+  return bucket;
 }
-
-const DOCUMENTS_BUCKET = getDocumentsBucket();
 
 // Use the proper UIMessage structure with parts array
 
@@ -92,7 +88,7 @@ export async function storeAttachmentInS3(
     
     // Store in S3
     await s3Client.send(new PutObjectCommand({
-      Bucket: DOCUMENTS_BUCKET,
+      Bucket: await getDocumentsBucket(),
       Key: s3Key,
       Body: JSON.stringify(contentToStore),
       ContentType: contentType,
@@ -137,7 +133,7 @@ export async function storeAttachmentInS3(
 export async function getAttachmentFromS3(s3Key: string): Promise<AttachmentContent> {
   try {
     const response = await s3Client.send(new GetObjectCommand({
-      Bucket: DOCUMENTS_BUCKET,
+      Bucket: await getDocumentsBucket(),
       Key: s3Key,
     }));
     

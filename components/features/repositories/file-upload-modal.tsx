@@ -40,6 +40,11 @@ const ACCEPTED_FILE_TYPES = [
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "image/tiff",
   "text/plain",
   "text/markdown",
   "text/csv",
@@ -66,6 +71,13 @@ function isValidFileType(file: File): boolean {
     '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/octet-stream'],
     '.xlsx': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/octet-stream'],
     '.pptx': ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/octet-stream'],
+    '.jpg': ['image/jpeg'],
+    '.jpeg': ['image/jpeg'],
+    '.png': ['image/png'],
+    '.webp': ['image/webp'],
+    '.gif': ['image/gif'],
+    '.tif': ['image/tiff'],
+    '.tiff': ['image/tiff'],
     '.txt': ['text/plain'],
     '.md': ['text/markdown', 'text/plain'],
     '.csv': ['text/csv', 'text/plain'],
@@ -274,7 +286,7 @@ export function FileUploadModal({
             const error = await completionResponse.json()
             throw new Error(error.error || 'Failed to complete upload')
           }
-          result = { isSuccess: true, message: 'Document uploaded successfully' }
+          result = { isSuccess: true, message: 'File uploaded successfully' }
         } else {
         // Existing single-object flow remains unchanged until canonical cutover.
         // Step 1: Get presigned URL
@@ -352,8 +364,8 @@ export function FileUploadModal({
 
       if (result.isSuccess) {
         toast({
-          title: "Document uploaded",
-          description: "The document has been added to the repository.",
+          title: "File uploaded",
+          description: "The file has been added to the repository.",
         })
         documentForm.reset()
         onSuccess()
@@ -428,7 +440,7 @@ export function FileUploadModal({
         <DialogHeader>
           <DialogTitle>Add Item to Repository</DialogTitle>
           <DialogDescription>
-            Add documents, URLs, or text content to your knowledge repository.
+            Add files, URLs, or text content to your knowledge repository.
           </DialogDescription>
         </DialogHeader>
 
@@ -436,7 +448,7 @@ export function FileUploadModal({
           <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="document">
               <FileText className="mr-2 h-4 w-4" />
-              Document
+              File
             </TabsTrigger>
             <TabsTrigger value="url">
               <Link className="mr-2 h-4 w-4" />
@@ -483,13 +495,14 @@ export function FileUploadModal({
                           {...field}
                           value={undefined}
                           type="file"
-                          accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.csv"
+                          accept=".pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp,.gif,.tif,.tiff,.txt,.md,.csv"
                           onChange={(e) => onChange(e.target.files)}
                         />
                       </FormControl>
                       <FormDescription>
-                        Supported: PDF, Word, Excel, PowerPoint, Text, Markdown,
-                        CSV (max {maxFileSize / 1024 / 1024}MB)
+                        Supported: PDF, Word, Excel, PowerPoint, JPEG, PNG,
+                        WebP, GIF, TIFF, Text, Markdown, CSV (max server policy;
+                        browser ceiling {maxFileSizeGB} GB)
                       </FormDescription>
                       <FormMessage />
                     </FormItem>
@@ -509,7 +522,7 @@ export function FileUploadModal({
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     )}
                     <Upload className="mr-2 h-4 w-4" />
-                    Upload Document
+                    Upload File
                   </Button>
                 </div>
               </form>

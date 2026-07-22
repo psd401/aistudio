@@ -17,7 +17,7 @@ jest.mock("@/lib/repositories/repository-access-guard", () => ({
 }));
 jest.mock("@/lib/repositories/content-platform", () => ({
   getContentPlatformConfig: jest.fn(),
-  isCanonicalDocumentContentType: jest.fn(),
+  isCanonicalUploadContentType: jest.fn(),
   isCanonicalRepositoryUploadActive: jest.fn(),
   initiateRepositoryUpload: jest.fn(),
   completeRepositoryUpload: jest.fn(),
@@ -41,7 +41,7 @@ import {
   dispatchContentProcessingJob,
   getContentPlatformConfig,
   initiateRepositoryUpload,
-  isCanonicalDocumentContentType,
+  isCanonicalUploadContentType,
   isCanonicalRepositoryUploadActive,
 } from "@/lib/repositories/content-platform";
 import { createLogger } from "@/lib/logger";
@@ -61,8 +61,8 @@ const mockGetContentPlatformConfig = jest.mocked(getContentPlatformConfig);
 const mockIsCanonicalRepositoryUploadActive = jest.mocked(
   isCanonicalRepositoryUploadActive
 );
-const mockIsCanonicalDocumentContentType = jest.mocked(
-  isCanonicalDocumentContentType
+const mockIsCanonicalUploadContentType = jest.mocked(
+  isCanonicalUploadContentType
 );
 const mockInitiateRepositoryUpload = jest.mocked(initiateRepositoryUpload);
 const mockCompleteRepositoryUpload = jest.mocked(completeRepositoryUpload);
@@ -101,9 +101,10 @@ describe("canonical repository upload routes", () => {
       enabled: true,
     });
     mockIsCanonicalRepositoryUploadActive.mockReturnValue(true);
-    mockIsCanonicalDocumentContentType.mockImplementation(
+    mockIsCanonicalUploadContentType.mockImplementation(
       (contentType) =>
         contentType === "application/pdf" ||
+        contentType.startsWith("image/") ||
         contentType.startsWith(
           "application/vnd.openxmlformats-officedocument."
         )
@@ -229,6 +230,28 @@ describe("canonical repository upload routes", () => {
     expect(response.status).toBe(200);
     expect(mockInitiateRepositoryUpload).toHaveBeenCalledWith(
       expect.objectContaining({ fileName: "handbook.docx", contentType }),
+      expect.objectContaining({ enabled: true })
+    );
+  });
+
+  test("initiates a repository-scoped canonical image upload", async () => {
+    const response = await initiateUpload(
+      request("http://localhost/api/repositories/7/uploads", {
+        itemName: "Evacuation map",
+        fileName: "evacuation-map.png",
+        contentType: "image/png",
+        byteSize: 4096,
+      }),
+      { params: Promise.resolve({ repositoryId: "7" }) }
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockInitiateRepositoryUpload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemName: "Evacuation map",
+        fileName: "evacuation-map.png",
+        contentType: "image/png",
+      }),
       expect.objectContaining({ enabled: true })
     );
   });

@@ -33,6 +33,7 @@ import {
   sanitizeForLogging
 } from "@/lib/logger"
 import { revalidatePath } from "next/cache"
+import { deleteRepositoryItemStorage } from "@/lib/repositories/content-platform/storage-cleanup"
 
 export interface Repository {
   id: number
@@ -337,26 +338,24 @@ export async function deleteRepository(
     // generic API — it would destroy the retrieval index out-of-band.
     await assertNotSystemManagedRepository(id)
 
-    // First, get all document items to delete from S3
-    log.debug("Fetching document items for deletion")
+    // First, get all stored items so source and canonical artifacts are removed.
+    log.debug("Fetching stored repository items for deletion")
     const items = await getRepositoryItems(id)
 
-    // Filter for document types
-    const documents = items.filter(item => item.type === 'document')
+    const storedItems = items.filter(
+      item => item.type === 'document' || item.type === 'image'
+    )
 
-    log.info("Found documents to delete from S3", {
-      documentCount: documents.length,
+    log.info("Found repository item objects to delete from S3", {
+      itemCount: storedItems.length,
       repositoryId: id
     })
 
-    // Delete all documents from S3 in parallel
-    if (documents.length > 0) {
-      const { deleteDocument } = await import("@/lib/aws/s3-client")
-
-      const deletePromises = documents.map(item =>
-        deleteDocument(item.source).catch(error => {
+    if (storedItems.length > 0) {
+      const deletePromises = storedItems.map(item =>
+        deleteRepositoryItemStorage(item).catch(error => {
           // Log error but continue with deletion
-          log.error("Failed to delete S3 file", {
+          log.error("Failed to delete repository item objects from S3", {
             file: item.source,
             itemId: item.id,
             error: error instanceof Error ? error.message : "Unknown error"
@@ -364,7 +363,7 @@ export async function deleteRepository(
         })
       )
       await Promise.all(deletePromises)
-      log.info("S3 document cleanup completed")
+      log.info("S3 repository item cleanup completed")
     }
 
     // Now delete the repository (this will cascade delete all items and chunks)

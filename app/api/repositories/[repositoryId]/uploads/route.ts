@@ -10,7 +10,7 @@ import { assertNotSystemManagedRepository } from "@/lib/repositories/repository-
 import {
   getContentPlatformConfig,
   initiateRepositoryUpload,
-  isCanonicalDocumentContentType,
+  isCanonicalUploadContentType,
   isCanonicalRepositoryUploadActive,
 } from "@/lib/repositories/content-platform";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
@@ -73,7 +73,7 @@ export async function POST(
       timer({ status: "success", mode: "legacy" });
       return NextResponse.json({ mode: "legacy", requestId });
     }
-    if (!isCanonicalDocumentContentType(parsed.data.contentType)) {
+    if (!isCanonicalUploadContentType(parsed.data.contentType)) {
       timer({ status: "success", mode: "legacy", reason: "file_type" });
       return NextResponse.json({ mode: "legacy", requestId });
     }
