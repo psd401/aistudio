@@ -23,6 +23,8 @@ import { repositoryIndexGenerations } from "./repository-index-generations";
 export interface RepositorySourceLocator {
   page?: number;
   pageEnd?: number;
+  paragraph?: number;
+  paragraphEnd?: number;
   slide?: number;
   sheet?: string;
   cellRange?: string;

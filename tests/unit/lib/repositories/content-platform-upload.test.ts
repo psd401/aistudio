@@ -124,7 +124,7 @@ describe("canonical repository upload initiation", () => {
         DEFAULT_CONTENT_PLATFORM_CONFIG,
         storage
       )
-    ).rejects.toThrow("PDF files only");
+    ).rejects.toThrow("PDF, DOCX, XLSX, and PPTX files only");
     await expect(
       initiateRepositoryUpload(
         { ...baseInput, byteSize: 500 * 1024 ** 2 + 1 },
@@ -134,5 +134,39 @@ describe("canonical repository upload initiation", () => {
     ).rejects.toThrow("500 MiB");
     expect(storage.createSingleUpload).not.toHaveBeenCalled();
     expect(storage.createMultipartUpload).not.toHaveBeenCalled();
+  });
+
+  it("accepts Office documents and enforces their independent size limit", async () => {
+    const storage = createStorage();
+    const contentType =
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+    const result = await initiateRepositoryUpload(
+      {
+        ...baseInput,
+        fileName: "handbook.docx",
+        contentType,
+        byteSize: 5 * 1024 ** 2,
+      },
+      DEFAULT_CONTENT_PLATFORM_CONFIG,
+      storage
+    );
+
+    expect(result.uploadMethod).toBe("single");
+    expect(storage.createSingleUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ contentType })
+    );
+    await expect(
+      initiateRepositoryUpload(
+        {
+          ...baseInput,
+          fileName: "oversized.docx",
+          contentType,
+          byteSize: 100 * 1024 ** 2 + 1,
+        },
+        DEFAULT_CONTENT_PLATFORM_CONFIG,
+        storage
+      )
+    ).rejects.toThrow("100 MiB");
   });
 });

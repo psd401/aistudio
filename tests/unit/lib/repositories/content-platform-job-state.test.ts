@@ -3,6 +3,7 @@
 import {
   buildProcessingIdempotencyKey,
   canTransitionProcessingJob,
+  CONTENT_SWEEP_REDISPATCHABLE_STATUSES,
   transitionProcessingJob,
   type ProcessingJobState,
 } from "@/lib/repositories/content-platform/job-state";
@@ -98,5 +99,10 @@ describe("repository processing job state", () => {
     expect(buildProcessingIdempotencyKey("version-1", "inspect", "pdf-v2")).toBe(
       "version-1:inspect:pdf-v2"
     );
+  });
+
+  it("leaves failed-delivery retry ownership with SQS", () => {
+    expect(CONTENT_SWEEP_REDISPATCHABLE_STATUSES).toEqual(["pending"]);
+    expect(CONTENT_SWEEP_REDISPATCHABLE_STATUSES).not.toContain("failed");
   });
 });

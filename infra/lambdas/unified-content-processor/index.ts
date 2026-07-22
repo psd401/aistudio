@@ -35,8 +35,13 @@ import {
   segmentPdfPages,
 } from "../../../lib/repositories/content-platform/pdf-processing";
 import {
+  extractOfficeDocument,
+  isOfficeContentType,
+} from "../../../lib/repositories/content-platform/office-processing";
+import {
   MAX_INLINE_ARTIFACT_CHARACTERS,
-  publishPdfVersion,
+  publishDocumentVersion,
+  type PublishableSegment,
 } from "../../../lib/repositories/content-platform/publication-service";
 import {
   parseContentPlatformConfig,
@@ -51,6 +56,7 @@ import {
   parseContentProcessingMessage,
   type ContentProcessingMessage,
 } from "./contract";
+import { CONTENT_SWEEP_REDISPATCHABLE_STATUSES } from "../../../lib/repositories/content-platform/job-state";
 
 type JobMetrics = RepositoryProcessingMetrics;
 
@@ -128,6 +134,7 @@ async function getConfig(): Promise<ContentPlatformConfig> {
             "CONTENT_DELETION_GRACE_DAYS",
             "CONTENT_MAX_FILE_SIZE_GB",
             "CONTENT_MAX_PDF_SIZE_MB",
+            "CONTENT_MAX_OFFICE_SIZE_MB",
             "CONTENT_MAX_MEDIA_HOURS",
             "CONTENT_MALWARE_SCAN_REQUIRED",
             "CONTENT_OCR_STRATEGY",
@@ -364,7 +371,8 @@ async function queueEmbeddings(
 async function storeCanonicalText(
   repositoryId: number,
   itemVersionId: string,
-  canonicalText: string
+  canonicalText: string,
+  processorVersion: string
 ): Promise<{ canonicalText?: string; canonicalTextObjectKey?: string }> {
   if (canonicalText.length <= MAX_INLINE_ARTIFACT_CHARACTERS) {
     return { canonicalText };
@@ -372,7 +380,7 @@ async function storeCanonicalText(
   const objectKey = canonicalTextArtifactObjectKey(
     repositoryId,
     itemVersionId,
-    PDF_PROCESSOR_VERSION
+    processorVersion
   );
   await s3.send(
     new PutObjectCommand({
@@ -413,8 +421,13 @@ async function processMessage(
   if (!isRepositoryObjectKey(context.repositoryId, context.objectKey)) {
     throw new Error("Item version object key is outside its repository namespace");
   }
-  if (context.declaredContentType !== "application/pdf") {
-    throw new Error("Unified content PDF worker received an unsupported content type");
+  const declaredContentType = context.declaredContentType;
+  if (!declaredContentType) {
+    throw new Error("Item version has no declared content type");
+  }
+  const isPdf = declaredContentType === "application/pdf";
+  if (!isPdf && !isOfficeContentType(declaredContentType)) {
+    throw new Error("Unified content worker received an unsupported content type");
   }
 
   const config = await getConfig();
@@ -422,12 +435,12 @@ async function processMessage(
     await deferJob(message, metrics, "CONTENT_PLATFORM_DISABLED", job.attempt);
     return;
   }
-  if (
-    context.byteSize != null &&
-    context.byteSize > config.maxPdfSizeMb * 1024 ** 2
-  ) {
+  const processingLimitMb = isPdf
+    ? config.maxPdfSizeMb
+    : config.maxOfficeSizeMb;
+  if (context.byteSize != null && context.byteSize > processingLimitMb * 1024 ** 2) {
     throw new Error(
-      `PDF exceeds the configured ${config.maxPdfSizeMb} MiB processing limit`
+      `Document exceeds the configured ${processingLimitMb} MiB processing limit`
     );
   }
   let inspectionStatus: "clean" | "not_required" = "not_required";
@@ -455,44 +468,68 @@ async function processMessage(
     };
   }
 
-  const extracted = await extractPdfText(await downloadObject(context.objectKey));
-  let pages = extracted.pages;
-  if (extracted.needsOcrPages.length > 0) {
-    if (config.ocrStrategy === "disabled") {
-      throw new Error("PDF contains scanned pages but OCR is disabled");
+  const source = await downloadObject(context.objectKey);
+  let segments: PublishableSegment[];
+  let canonicalText: string;
+  let processorVersion: string;
+  let processorName: string;
+  let artifactMetadata: Record<string, unknown>;
+  if (isPdf) {
+    const extracted = await extractPdfText(source);
+    let pages = extracted.pages;
+    if (extracted.needsOcrPages.length > 0) {
+      if (config.ocrStrategy === "disabled") {
+        throw new Error("PDF contains scanned pages but OCR is disabled");
+      }
+      if (!metrics.textractJobId) {
+        metrics.textractJobId = await startTextract(context.objectKey);
+        await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
+        return;
+      }
+      const ocr = await pollTextract(metrics.textractJobId);
+      if (ocr.status === "pending") {
+        await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
+        return;
+      }
+      const ocrPages = pagesFromTextract(ocr.blocks, extracted.pageCount);
+      const needsOcr = new Set(extracted.needsOcrPages);
+      pages = pages.map((page) =>
+        needsOcr.has(page.page) ? ocrPages[page.page - 1] ?? page : page
+      );
     }
-    if (!metrics.textractJobId) {
-      metrics.textractJobId = await startTextract(context.objectKey);
-      await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
-      return;
-    }
-    const ocr = await pollTextract(metrics.textractJobId);
-    if (ocr.status === "pending") {
-      await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
-      return;
-    }
-    const ocrPages = pagesFromTextract(ocr.blocks, extracted.pageCount);
-    const needsOcr = new Set(extracted.needsOcrPages);
-    pages = pages.map((page) =>
-      needsOcr.has(page.page) ? ocrPages[page.page - 1] ?? page : page
+    segments = segmentPdfPages(pages);
+    canonicalText = pages
+      .map((page) => `<!-- page:${page.page} -->\n${page.text}`)
+      .join("\n\n");
+    processorVersion = PDF_PROCESSOR_VERSION;
+    processorName = "aistudio-pdf";
+    artifactMetadata = { pageCount: pages.length };
+  } else {
+    const extracted = await extractOfficeDocument(
+      source,
+      declaredContentType
     );
+    segments = extracted.segments;
+    canonicalText = extracted.canonicalText;
+    processorVersion = extracted.processorVersion;
+    processorName = "aistudio-office";
+    artifactMetadata = extracted.metadata;
   }
-
-  const segments = segmentPdfPages(pages);
-  const canonicalText = pages
-    .map((page) => `<!-- page:${page.page} -->\n${page.text}`)
-    .join("\n\n");
   const canonicalArtifact = await storeCanonicalText(
     context.repositoryId,
     message.itemVersionId,
-    canonicalText
+    canonicalText,
+    processorVersion
   );
-  const published = await publishPdfVersion({
+  const published = await publishDocumentVersion({
     itemVersionId: message.itemVersionId,
-    processorVersion: PDF_PROCESSOR_VERSION,
+    processorVersion,
+    processorName,
+    detectedContentType: declaredContentType,
     inspectionStatus,
     inspectionDetails,
     malwareScanRequired: config.malwareScanRequired,
+    artifactMetadata,
     ...canonicalArtifact,
     segments,
   });
@@ -553,8 +590,9 @@ async function dispatchPendingJobs(): Promise<void> {
         .where(
           and(
             or(
-              eq(repositoryProcessingJobs.status, "pending"),
-              eq(repositoryProcessingJobs.status, "failed"),
+              inArray(repositoryProcessingJobs.status, [
+                ...CONTENT_SWEEP_REDISPATCHABLE_STATUSES,
+              ]),
               and(
                 eq(repositoryProcessingJobs.status, "running"),
                 lte(repositoryProcessingJobs.leaseExpiresAt, now)

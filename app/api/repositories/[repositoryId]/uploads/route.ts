@@ -10,6 +10,7 @@ import { assertNotSystemManagedRepository } from "@/lib/repositories/repository-
 import {
   getContentPlatformConfig,
   initiateRepositoryUpload,
+  isCanonicalDocumentContentType,
   isCanonicalRepositoryUploadActive,
 } from "@/lib/repositories/content-platform";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
@@ -72,10 +73,7 @@ export async function POST(
       timer({ status: "success", mode: "legacy" });
       return NextResponse.json({ mode: "legacy", requestId });
     }
-    // The walking skeleton cuts PDF over first. Other existing repository file
-    // types remain on the proven legacy processor until their canonical
-    // normalizers are enabled in the multimodal milestone.
-    if (parsed.data.contentType !== "application/pdf") {
+    if (!isCanonicalDocumentContentType(parsed.data.contentType)) {
       timer({ status: "success", mode: "legacy", reason: "file_type" });
       return NextResponse.json({ mode: "legacy", requestId });
     }

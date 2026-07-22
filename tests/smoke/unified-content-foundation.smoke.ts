@@ -14,6 +14,7 @@
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 import { PDFDocument, StandardFonts } from "pdf-lib";
+import * as XLSX from "@e965/xlsx";
 import { closeDatabase, executeQuery } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
@@ -27,10 +28,13 @@ import {
 } from "@/lib/db/schema";
 import {
   extractPdfText,
+  extractOfficeDocument,
   DEFAULT_CONTENT_PLATFORM_CONFIG,
   completeRepositoryUpload,
   initiateRepositoryUpload,
   PDF_PROCESSOR_VERSION,
+  OFFICE_CONTENT_TYPES,
+  publishDocumentVersion,
   publishPdfVersion,
   registerCanonicalUpload,
   segmentPdfPages,
@@ -267,6 +271,85 @@ try {
   });
   assert.equal(isolatedResults.length, 0);
 
+  const [officeItem] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItems)
+        .values({
+          repositoryId: repository.id,
+          type: "document",
+          name: "directory.xlsx",
+          source: `repositories/${repository.id}/fixture/directory.xlsx`,
+          processingStatus: "pending",
+        })
+        .returning({ id: repositoryItems.id }),
+    "smoke.unifiedContent.createOfficeItem"
+  );
+  assert.ok(officeItem);
+  const officeRegistration = await registerCanonicalUpload({
+    itemId: officeItem.id,
+    userId: owner.id,
+    objectKey: `repositories/${repository.id}/fixture/directory.xlsx`,
+    originalFileName: "directory.xlsx",
+    declaredContentType: OFFICE_CONTENT_TYPES.xlsx,
+    byteSize: 4096,
+    traceId: "unified-content-office-smoke",
+  });
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.aoa_to_sheet([
+      ["School", "Emergency Extension"],
+      ["Harbor Heights", "4100"],
+    ]),
+    "Directory"
+  );
+  const workbookBytes = XLSX.write(workbook, {
+    type: "buffer",
+    bookType: "xlsx",
+  }) as Uint8Array;
+  const officeExtraction = await extractOfficeDocument(
+    workbookBytes,
+    OFFICE_CONTENT_TYPES.xlsx
+  );
+  const officePublication = await publishDocumentVersion({
+    itemVersionId: officeRegistration.version.id,
+    processorVersion: officeExtraction.processorVersion,
+    processorName: "aistudio-office",
+    detectedContentType: officeExtraction.detectedContentType,
+    inspectionStatus: "clean",
+    malwareScanRequired: true,
+    canonicalText: officeExtraction.canonicalText,
+    segments: officeExtraction.segments,
+    artifactMetadata: officeExtraction.metadata,
+  });
+  const officePublicationReplay = await publishDocumentVersion({
+    itemVersionId: officeRegistration.version.id,
+    processorVersion: officeExtraction.processorVersion,
+    processorName: "aistudio-office",
+    detectedContentType: officeExtraction.detectedContentType,
+    inspectionStatus: "clean",
+    malwareScanRequired: true,
+    canonicalText: officeExtraction.canonicalText,
+    segments: officeExtraction.segments,
+  });
+  assert.equal(officePublication.replayed, false);
+  assert.equal(officePublicationReplay.replayed, true);
+  assert.equal(officePublicationReplay.generationId, officePublication.generationId);
+  const officeResults = await keywordSearch("Harbor Heights", {
+    repositoryId: repository.id,
+    canonicalOnly: true,
+  });
+  assert.equal(officeResults.length, 1);
+  assert.equal(officeResults[0]?.citation?.sourceLocator.sheet, "Directory");
+  assert.equal(officeResults[0]?.citation?.sourceLocator.cellRange, "A1:B2");
+  const carriedForwardPdfResults = await keywordSearch("district emergency", {
+    repositoryId: repository.id,
+    canonicalOnly: true,
+  });
+  assert.equal(carriedForwardPdfResults.length, 1);
+  assert.equal(carriedForwardPdfResults[0]?.citation?.sourceLocator.page, 1);
+
   await assert.rejects(
     executeQuery(
       (db) =>
@@ -281,7 +364,7 @@ try {
   );
 
   process.stdout.write(
-    "unified-content-foundation smoke: PDF extraction, citations, idempotency, quarantine, and generation guards passed\n"
+    "unified-content-foundation smoke: PDF and Office extraction, citations, idempotency, quarantine, and generation guards passed\n"
   );
 } finally {
   await executeQuery(

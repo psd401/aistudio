@@ -11,11 +11,28 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { FileText, Hash, MapPin } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { formatRepositorySourceLocator } from "@/lib/repositories/citation-label"
 
 interface SearchResultsProps {
   results: SearchResult[]
   query: string
   isLoading?: boolean
+}
+
+function ResultCitation({ result }: { result: SearchResult }) {
+  const label = result.citation
+    ? formatRepositorySourceLocator(result.citation.sourceLocator)
+    : null
+  if (!label || !result.citation) return null
+  return (
+    <>
+      <MapPin className="ml-2 h-3 w-3" />
+      {label}
+      <span className="sr-only">
+        , source version {result.citation.versionNumber}
+      </span>
+    </>
+  )
 }
 
 export function SearchResults({ results, query, isLoading }: SearchResultsProps) {
@@ -111,19 +128,7 @@ export function SearchResults({ results, query, isLoading }: SearchResultsProps)
                 <CardDescription className="flex items-center gap-2">
                   <Hash className="h-3 w-3" />
                   Chunk {typeof result.chunkIndex === 'number' ? result.chunkIndex + 1 : 1}
-                  {result.citation?.sourceLocator.page && (
-                    <>
-                      <MapPin className="ml-2 h-3 w-3" />
-                      Page {result.citation.sourceLocator.page}
-                      {result.citation.sourceLocator.pageEnd &&
-                        result.citation.sourceLocator.pageEnd !==
-                          result.citation.sourceLocator.page &&
-                        `–${result.citation.sourceLocator.pageEnd}`}
-                      <span className="sr-only">
-                        , source version {result.citation.versionNumber}
-                      </span>
-                    </>
-                  )}
+                  <ResultCitation result={result} />
                 </CardDescription>
               </div>
               <Badge 

@@ -29,6 +29,29 @@ test.describe('Admin Nexus router settings', () => {
     await expect(page.getByTestId('nexus-router-classifier-model')).toHaveValue('us.amazon.nova-micro-v1:0')
     await expect(page.getByTestId('nexus-router-admin-save')).toBeEnabled()
 
+    const contentPlatformTab = page.getByRole('tab', { name: /Content Platform/ })
+    await expect(contentPlatformTab).toBeVisible()
+    await contentPlatformTab.click()
+    await expect(page.getByText('CONTENT_PLATFORM_ENABLED')).toBeVisible()
+
+    await page.getByRole('button', { name: 'Add Setting' }).click()
+    const addSettingDialog = page.getByRole('dialog', { name: 'Add Setting' })
+    await expect(addSettingDialog).toBeVisible()
+    const dialogBox = await addSettingDialog.boundingBox()
+    const viewport = page.viewportSize()
+    expect(dialogBox).not.toBeNull()
+    expect(viewport).not.toBeNull()
+    if (!dialogBox || !viewport) {
+      throw new Error('Expected the add-setting dialog and Playwright viewport to be measurable')
+    }
+    expect(dialogBox.y).toBeGreaterThanOrEqual(0)
+    expect(dialogBox.y + dialogBox.height).toBeLessThanOrEqual(viewport.height)
+
+    const createSettingButton = addSettingDialog.getByRole('button', { name: 'Create' })
+    await createSettingButton.scrollIntoViewIfNeeded()
+    await expect(createSettingButton).toBeInViewport()
+    await addSettingDialog.getByRole('button', { name: 'Cancel' }).click()
+
     const [saveResponse] = await Promise.all([
       page.waitForResponse(response => (
         response.request().method() === 'POST'

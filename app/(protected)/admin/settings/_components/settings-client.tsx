@@ -22,6 +22,10 @@ const CATEGORY_INFO: Record<string, { title: string; description: string }> = {
   ai_providers: { title: "AI Providers", description: "API keys and configuration for AI model providers" },
   branding: { title: "Branding", description: "Organization name, logo, and brand colors" },
   storage: { title: "Storage", description: "Configuration for file storage services" },
+  "Content Platform": {
+    title: "Content Platform",
+    description: "Unified document ingestion, retention, processing, and connector rollout controls",
+  },
   external_services: { title: "External Services", description: "API keys and configuration for external integrations" },
   voice: { title: "Voice Mode", description: "Real-time voice conversation provider, model, and language settings" },
   embeddings: { title: "Embeddings", description: "Configuration for embedding generation and vector search" },
@@ -253,7 +257,7 @@ export function SettingsClient({
         </CardHeader>
         <CardContent>
           <Tabs defaultValue="ai_providers" className="space-y-4">
-            <TabsList>
+            <TabsList className="h-auto flex-wrap justify-start">
               {Object.entries(CATEGORY_INFO).map(([key, info]) => {
                 const count = settingsByCategory[key]?.length || 0
                 if (count === 0 && key !== 'uncategorized') return null

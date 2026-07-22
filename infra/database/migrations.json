@@ -110,6 +110,7 @@
     "113-drop-ai-models-allowed-roles.sql",
     "114-assistant-architect-model-routing.sql",
     "115-graph-decision-lifecycle.sql",
-    "116-unified-repository-content.sql"
+    "116-unified-repository-content.sql",
+    "117-unified-content-office-ingestion.sql"
   ]
 }

@@ -55,6 +55,7 @@ const categories = [
   { value: "ai_providers", label: "AI Providers" },
   { value: "branding", label: "Branding" },
   { value: "storage", label: "Storage" },
+  { value: "Content Platform", label: "Content Platform" },
   { value: "external_services", label: "External Services" },
   { value: "voice", label: "Voice Mode" },
 ]
@@ -74,6 +75,20 @@ const commonSettings = [
   { key: "NEXUS_ROUTER_CONFIG_V1", category: "ai", description: "JSON configuration for Nexus classifier, family/tier candidates, and web-search/image/PSD-data specialists", isSecret: false },
   { key: "S3_BUCKET", category: "storage", description: "AWS S3 bucket name for document storage", isSecret: false },
   { key: "AWS_REGION", category: "storage", description: "AWS region for S3 operations", isSecret: false },
+  { key: "CONTENT_PLATFORM_ENABLED", category: "Content Platform", description: "Enable the unified repository content platform", isSecret: false },
+  { key: "CONTENT_DUAL_WRITE_ENABLED", category: "Content Platform", description: "Write canonical content records alongside legacy repository processing", isSecret: false },
+  { key: "CONTENT_READ_V2_ENABLED", category: "Content Platform", description: "Read repository search results from active canonical index generations", isSecret: false },
+  { key: "NEXUS_ATTACHMENT_RETENTION_DAYS", category: "Content Platform", description: "Days to retain private one-off Nexus attachment repositories", isSecret: false },
+  { key: "CONTENT_DELETION_GRACE_DAYS", category: "Content Platform", description: "Recovery window before expired content is physically deleted", isSecret: false },
+  { key: "CONTENT_MAX_FILE_SIZE_GB", category: "Content Platform", description: "Maximum source upload size in GiB", isSecret: false },
+  { key: "CONTENT_MAX_PDF_SIZE_MB", category: "Content Platform", description: "Maximum PDF size for the canonical PDF processor", isSecret: false },
+  { key: "CONTENT_MAX_OFFICE_SIZE_MB", category: "Content Platform", description: "Maximum DOCX, XLSX, or PPTX size for the canonical Office processor", isSecret: false },
+  { key: "CONTENT_MAX_MEDIA_HOURS", category: "Content Platform", description: "Maximum audio or video duration in hours", isSecret: false },
+  { key: "CONTENT_MALWARE_SCAN_REQUIRED", category: "Content Platform", description: "Require a successful malware policy decision before quarantine release", isSecret: false },
+  { key: "CONTENT_OCR_STRATEGY", category: "Content Platform", description: "OCR strategy: auto, textract, or disabled", isSecret: false },
+  { key: "CONTENT_VISUAL_INDEX_ENABLED", category: "Content Platform", description: "Enable visual artifact embeddings in canonical index generations", isSecret: false },
+  { key: "GOOGLE_CONTENT_SYNC_ENABLED", category: "Content Platform", description: "Enable Google Workspace repository synchronization", isSecret: false },
+  { key: "GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES", category: "Content Platform", description: "Google Workspace reconciliation interval in minutes", isSecret: false },
   { key: "GITHUB_ISSUE_TOKEN", category: "external_services", description: "GitHub personal access token for creating issues", isSecret: true },
   { key: "BRANDING_ORG_NAME", category: "branding", description: "Organization name displayed across the application", isSecret: false },
   { key: "BRANDING_APP_NAME", category: "branding", description: "Application name displayed in titles and headers", isSecret: false },
@@ -154,7 +169,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[600px]" onInteractOutside={(e) => {
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[600px]" onInteractOutside={(e) => {
         if (isSubmitting) {
           e.preventDefault()
         }

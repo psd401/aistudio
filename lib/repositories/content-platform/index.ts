@@ -1,6 +1,7 @@
 export * from "./config";
 export * from "./ingestion-service";
 export * from "./job-state";
+export * from "./office-processing";
 export * from "./pdf-processing";
 export * from "./publication-service";
 export * from "./upload-service";
