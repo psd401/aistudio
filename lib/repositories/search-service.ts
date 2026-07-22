@@ -29,15 +29,26 @@ export interface SearchOptions {
   canonicalOnly?: boolean
 }
 
-async function getCanonicalEmbeddingOverride(
-  repositoryId: number | undefined,
-  canonicalOnly: boolean
-) {
-  if (!repositoryId || !canonicalOnly) return undefined
+interface RepositoryEmbeddingTarget {
+  generationId: string
+  override: {
+    provider: string
+    modelId: string
+    dimensions: number
+  }
+}
+
+async function getRepositoryEmbeddingTarget(
+  repositoryId: number | undefined
+): Promise<RepositoryEmbeddingTarget | undefined> {
+  if (!repositoryId) return undefined
   const result = await executeQuery(
     (db) =>
       db.execute(sql`
-        SELECT generation.embedding_model, generation.embedding_dimensions
+        SELECT
+          generation.id,
+          generation.embedding_model,
+          generation.embedding_dimensions
         FROM knowledge_repositories repository
         JOIN repository_index_generations generation
           ON generation.id = repository.active_index_generation_id
@@ -47,20 +58,28 @@ async function getCanonicalEmbeddingOverride(
     "repositorySearch.embeddingConfiguration"
   )
   const [row] = result as unknown as Array<{
+    id: string
     embedding_model: string | null
     embedding_dimensions: number | null
   }>
+  if (!row) return undefined
   const config = parseRepositoryEmbeddingDescriptor(
-    row?.embedding_model,
-    row?.embedding_dimensions
+    row.embedding_model,
+    row.embedding_dimensions
   )
-  return config
-    ? {
-        provider: config.provider,
-        modelId: config.modelId,
-        dimensions: config.dimensions,
-      }
-    : undefined
+  if (!config) {
+    throw new Error(
+      `Active repository index generation ${row.id} has no valid embedding descriptor`
+    )
+  }
+  return {
+    generationId: row.id,
+    override: {
+      provider: config.provider,
+      modelId: config.modelId,
+      dimensions: config.dimensions,
+    },
+  }
 }
 
 function parseJsonRecord(value: unknown): Record<string, unknown> {
@@ -104,12 +123,11 @@ export async function vectorSearch(
 ): Promise<SearchResult[]> {
   const { limit = 10, threshold = 0.7, repositoryId, canonicalOnly = false } = options
   
-  // Generate the query in the active index generation's vector space.
-  const embeddingOverride = await getCanonicalEmbeddingOverride(
-    repositoryId,
-    canonicalOnly
-  )
-  const queryEmbedding = await generateEmbedding(query, embeddingOverride)
+  // Pin both the query model and vector rows to the same active generation.
+  // This applies to every repository-scoped caller, including legacy callers
+  // that have not opted into canonical lifecycle filtering yet.
+  const embeddingTarget = await getRepositoryEmbeddingTarget(repositoryId)
+  const queryEmbedding = await generateEmbedding(query, embeddingTarget?.override)
   
   // Build the SQL query using pgvector
   // Convert embedding array to pgvector format string: '[1,2,3]'
@@ -141,10 +159,29 @@ export async function vectorSearch(
             AND i.lifecycle_status = 'active'
             AND i.current_version_id = c.item_version_id
             AND r.lifecycle_status = 'active'
-            AND r.active_index_generation_id = c.index_generation_id
+            AND c.index_generation_id = ${embeddingTarget?.generationId ?? null}
             AND v.storage_status = 'available'
             AND v.inspection_status IN ('clean', 'not_required')
             AND v.processing_status = 'completed'
+            AND 1 - (c.embedding <=> ${embeddingString}::vector) >= ${threshold}
+          ORDER BY similarity DESC
+          LIMIT ${limit}
+        `)
+      } else if (repositoryId && embeddingTarget) {
+        return db.execute(sql`
+          SELECT
+            c.id as chunk_id,
+            c.item_id,
+            i.name as item_name,
+            c.content,
+            c.chunk_index,
+            c.metadata,
+            1 - (c.embedding <=> ${embeddingString}::vector) as similarity
+          FROM repository_item_chunks c
+          JOIN repository_items i ON i.id = c.item_id
+          WHERE c.embedding IS NOT NULL
+            AND i.repository_id = ${repositoryId}
+            AND c.index_generation_id = ${embeddingTarget.generationId}
             AND 1 - (c.embedding <=> ${embeddingString}::vector) >= ${threshold}
           ORDER BY similarity DESC
           LIMIT ${limit}
