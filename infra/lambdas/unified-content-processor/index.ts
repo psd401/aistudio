@@ -20,10 +20,11 @@ import {
 } from "@aws-sdk/client-textract";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
-import { and, asc, eq, gt, inArray, isNull, lt, lte, or } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "../../../lib/db/drizzle-client";
 import {
   repositoryItemChunks,
+  repositoryArtifacts,
   repositoryItems,
   repositoryItemVersions,
   repositoryProcessingJobs,
@@ -77,7 +78,10 @@ import {
   type ContentProcessingMessage,
 } from "./contract";
 import { CONTENT_SWEEP_REDISPATCHABLE_STATUSES } from "../../../lib/repositories/content-platform/job-state";
-import { repositoryEmbeddingConfigurationFromSettings } from "../../../lib/repositories/embedding-configuration";
+import {
+  repositoryEmbeddingConfigurationFromSettings,
+  repositoryVisualEmbeddingConfiguration,
+} from "../../../lib/repositories/embedding-configuration";
 
 type JobMetrics = RepositoryProcessingMetrics;
 
@@ -164,6 +168,8 @@ async function getConfig(): Promise<ContentPlatformConfig> {
             "CONTENT_OCR_STRATEGY",
             "CONTENT_IMAGE_CAPTION_MODEL_ID",
             "CONTENT_VISUAL_INDEX_ENABLED",
+            "CONTENT_VISUAL_EMBEDDING_MODEL_ID",
+            "CONTENT_VISUAL_EMBEDDING_DIMENSIONS",
             "GOOGLE_CONTENT_SYNC_ENABLED",
             "GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES",
           ]),
@@ -556,7 +562,11 @@ async function captionImage(
   };
 }
 
-async function queueEmbeddings(generationId: string, itemId: number): Promise<void> {
+async function queueEmbeddings(
+  generationId: string,
+  itemId: number,
+  visualEnabled: boolean,
+): Promise<void> {
   let lastChunkId = 0;
   for (;;) {
     const chunks = await executeQuery(
@@ -565,12 +575,38 @@ async function queueEmbeddings(generationId: string, itemId: number): Promise<vo
           .select({
             id: repositoryItemChunks.id,
             content: repositoryItemChunks.content,
+            contextPrefix: repositoryItemChunks.contextPrefix,
+            modality: repositoryItemChunks.modality,
+            visualObjectKey: sql<string | null>`(
+              SELECT visual_artifact.object_key
+              FROM ${repositoryArtifacts} visual_artifact
+              WHERE visual_artifact.item_version_id = ${repositoryItemChunks.itemVersionId}
+                AND visual_artifact.kind = 'thumbnail'
+              ORDER BY visual_artifact.created_at DESC
+              LIMIT 1
+            )`,
+            visualMediaType: sql<"image/jpeg" | null>`(
+              SELECT visual_artifact.media_type
+              FROM ${repositoryArtifacts} visual_artifact
+              WHERE visual_artifact.item_version_id = ${repositoryItemChunks.itemVersionId}
+                AND visual_artifact.kind = 'thumbnail'
+              ORDER BY visual_artifact.created_at DESC
+              LIMIT 1
+            )`,
           })
           .from(repositoryItemChunks)
           .where(
             and(
               eq(repositoryItemChunks.indexGenerationId, generationId),
-              isNull(repositoryItemChunks.embedding),
+              visualEnabled
+                ? or(
+                    isNull(repositoryItemChunks.embedding),
+                    and(
+                      inArray(repositoryItemChunks.modality, ["image", "video"]),
+                      isNull(repositoryItemChunks.visualEmbedding),
+                    ),
+                  )
+                : isNull(repositoryItemChunks.embedding),
               gt(repositoryItemChunks.id, lastChunkId),
             ),
           )
@@ -955,6 +991,11 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
     processorVersion,
   );
   const embeddingConfiguration = await getEmbeddingConfiguration();
+  const visualEmbeddingConfiguration = repositoryVisualEmbeddingConfiguration(
+    config.visualIndexEnabled,
+    config.visualEmbeddingModelId,
+    config.visualEmbeddingDimensions,
+  );
   const published = await publishDocumentVersion({
     itemVersionId: message.itemVersionId,
     processorVersion,
@@ -967,10 +1008,17 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
     additionalArtifacts,
     embeddingModel: embeddingConfiguration.descriptor,
     embeddingDimensions: embeddingConfiguration.dimensions,
+    visualEmbeddingModel: visualEmbeddingConfiguration?.descriptor,
+    visualEmbeddingDimensions: visualEmbeddingConfiguration?.dimensions,
+    segmentationVersion: "retrieval-v2",
     ...canonicalArtifact,
     segments,
   });
-  await queueEmbeddings(published.generationId, context.itemId);
+  await queueEmbeddings(
+    published.generationId,
+    context.itemId,
+    visualEmbeddingConfiguration !== null,
+  );
   await executeQuery(
     (db) =>
       db

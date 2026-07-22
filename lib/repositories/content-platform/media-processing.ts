@@ -4,8 +4,9 @@ import type {
   RepositorySourceRegion,
 } from "@/lib/db/schema";
 import type { PublishableSegment } from "./publication-service";
+import { countRepositoryTokens } from "./token-segmentation";
 
-export const MEDIA_PROCESSOR_VERSION = "aistudio-media-bda-v1";
+export const MEDIA_PROCESSOR_VERSION = "aistudio-media-bda-v2";
 export const BDA_AUDIO_MAX_BYTES = 2 * 1024 ** 3;
 export const BDA_VIDEO_MAX_BYTES = 10 * 1024 ** 3;
 
@@ -150,10 +151,6 @@ function contentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-function estimatedTokens(content: string): number {
-  return Math.max(1, Math.ceil(content.length / 4));
-}
-
 function formatTimestamp(milliseconds: number): string {
   const totalMilliseconds = Math.max(0, Math.floor(milliseconds));
   const hours = Math.floor(totalMilliseconds / 3_600_000);
@@ -294,6 +291,8 @@ function addSegment(
   content: string,
   sourceLocator: RepositorySourceLocator,
   modality: MediaKind,
+  segmentLevel: "document" | "section" | "chunk" = "chunk",
+  parentChunkIndex?: number,
 ): void {
   const normalized = content.trim();
   if (!normalized) return;
@@ -301,10 +300,29 @@ function addSegment(
     content: normalized,
     contentHash: contentHash(normalized),
     chunkIndex: segments.length,
-    tokens: estimatedTokens(normalized),
+    tokens: countRepositoryTokens(normalized),
     sourceLocator,
     modality,
+    contextPrefix: `${modality === "audio" ? "Audio" : "Video"} ${Math.floor(
+      (sourceLocator.timeStartMs ?? 0) / 1000
+    )}s`,
+    segmentLevel,
+    parentChunkIndex,
   });
+}
+
+function parentForTime(
+  segments: PublishableSegment[],
+  startMs: number
+): number | undefined {
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const candidate = segments[index];
+    if (!candidate || candidate.segmentLevel === "chunk") continue;
+    const start = candidate.sourceLocator.timeStartMs ?? 0;
+    const end = candidate.sourceLocator.timeEndMs ?? Number.MAX_SAFE_INTEGER;
+    if (startMs >= start && startMs <= end) return candidate.chunkIndex;
+  }
+  return segments[0]?.chunkIndex;
 }
 
 function groupTranscript(items: TimedText[]): TimedText[] {
@@ -429,6 +447,7 @@ export function processBdaMediaOutput(
       summary,
       { timeStartMs: 0, timeEndMs: metadata.durationMs },
       expectedModality,
+      "document",
     );
   }
   for (const topic of topics) {
@@ -437,6 +456,8 @@ export function processBdaMediaOutput(
       `Topic summary: ${topic.text}`,
       locatorFor(topic),
       "audio",
+      "section",
+      segments[0]?.chunkIndex,
     );
   }
   for (const chapter of chapters) {
@@ -445,6 +466,8 @@ export function processBdaMediaOutput(
       `Chapter summary: ${chapter.text}`,
       locatorFor(chapter),
       "video",
+      "section",
+      segments[0]?.chunkIndex,
     );
   }
   for (const item of groupedTranscript) {
@@ -454,6 +477,8 @@ export function processBdaMediaOutput(
       `${label ? `${label}: ` : ""}${item.text}`,
       locatorFor(item),
       expectedModality,
+      "chunk",
+      parentForTime(segments, item.startMs),
     );
   }
   for (const frame of frames) {
@@ -462,6 +487,8 @@ export function processBdaMediaOutput(
       `On-screen text: ${frame.text}`,
       locatorFor(frame),
       "video",
+      "chunk",
+      parentForTime(segments, frame.startMs),
     );
   }
   if (segments.length === 0) {
@@ -470,6 +497,7 @@ export function processBdaMediaOutput(
       `${expectedModality === "audio" ? "Audio" : "Video"} with no detected speech or text`,
       { timeStartMs: 0, timeEndMs: metadata.durationMs },
       expectedModality,
+      "document",
     );
   }
 

@@ -43,7 +43,12 @@ export function parseEmbeddingDescriptor(
   };
 }
 
-export function buildBedrockEmbeddingBody(modelId: string, text: string, dimensions: number): string {
+export function buildBedrockEmbeddingBody(
+  modelId: string,
+  text: string,
+  dimensions: number,
+  inputType: 'search_document' | 'search_query' = 'search_document'
+): string {
   const trimmed = text.trim();
   if (!trimmed) throw new Error('Embedding input cannot be empty');
 
@@ -61,14 +66,89 @@ export function buildBedrockEmbeddingBody(modelId: string, text: string, dimensi
     return JSON.stringify({ inputText: trimmed });
   }
 
+  if (modelId === 'cohere.embed-v4:0') {
+    if (![256, 512, 1024, 1536].includes(dimensions)) {
+      throw new Error(`Cohere Embed v4 does not support ${dimensions} dimensions`);
+    }
+    return JSON.stringify({
+      texts: [trimmed],
+      input_type: inputType,
+      embedding_types: ['float'],
+      output_dimension: dimensions,
+      truncate: 'RIGHT',
+    });
+  }
+
   throw new Error(`Unsupported Bedrock embedding model: ${modelId}`);
+}
+
+export interface CohereMultimodalEmbeddingInput {
+  text: string;
+  imageDataUri?: string;
+}
+
+export function buildCohereMultimodalEmbeddingBody(
+  modelId: string,
+  input: CohereMultimodalEmbeddingInput,
+  dimensions: number,
+): string {
+  if (modelId !== 'cohere.embed-v4:0') {
+    throw new Error(`Unsupported multimodal embedding model: ${modelId}`);
+  }
+  if (![256, 512, 1024, 1536].includes(dimensions)) {
+    throw new Error(`Cohere Embed v4 does not support ${dimensions} dimensions`);
+  }
+  const text = input.text.trim();
+  if (!text) throw new Error('Multimodal embedding input cannot be empty');
+  if (
+    input.imageDataUri &&
+    !/^data:image\/(?:jpeg|png|webp|gif);base64,[A-Za-z0-9+/]+=*$/.test(
+      input.imageDataUri,
+    )
+  ) {
+    throw new Error('Cohere Embed v4 image input must be a supported base64 data URI');
+  }
+  return JSON.stringify({
+    inputs: [
+      {
+        content: [
+          { type: 'text', text },
+          ...(input.imageDataUri
+            ? [
+                {
+                  type: 'image_url',
+                  image_url: { url: input.imageDataUri },
+                },
+              ]
+            : []),
+        ],
+      },
+    ],
+    input_type: 'search_document',
+    embedding_types: ['float'],
+    output_dimension: dimensions,
+    truncate: 'RIGHT',
+  });
 }
 
 export function parseEmbeddingVector(value: unknown, expectedDimensions: number, modelId: string): number[] {
   if (!value || typeof value !== 'object') {
     throw new Error(`Embedding model ${modelId} returned an invalid response`);
   }
-  const embedding = (value as { embedding?: unknown }).embedding;
+  const record = value as {
+    embedding?: unknown;
+    embeddings?: unknown;
+  };
+  let embedding = record.embedding;
+  if (Array.isArray(record.embeddings)) {
+    embedding = record.embeddings[0];
+  } else if (
+    record.embeddings &&
+    typeof record.embeddings === 'object' &&
+    Array.isArray((record.embeddings as { float?: unknown }).float)
+  ) {
+    embedding = (record.embeddings as { float: unknown[] }).float[0];
+  }
   if (!Array.isArray(embedding) || embedding.length !== expectedDimensions) {
     throw new Error(
       `Embedding model ${modelId} returned ${Array.isArray(embedding) ? embedding.length : 0} dimensions; expected ${expectedDimensions}`,

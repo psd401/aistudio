@@ -1,0 +1,33 @@
+[
+  {
+    "id": "pdf-emergency-page",
+    "relevantChunkIds": [101, 102],
+    "returned": [
+      { "chunkId": 101, "authorized": true, "citationValid": true },
+      { "chunkId": 501, "authorized": true, "citationValid": true },
+      { "chunkId": 102, "authorized": true, "citationValid": true }
+    ],
+    "latencyMs": 310,
+    "estimatedCostUsd": 0.0007
+  },
+  {
+    "id": "image-evacuation-map",
+    "relevantChunkIds": [201],
+    "returned": [
+      { "chunkId": 201, "authorized": true, "citationValid": true },
+      { "chunkId": 601, "authorized": true, "citationValid": true }
+    ],
+    "latencyMs": 440,
+    "estimatedCostUsd": 0.0009
+  },
+  {
+    "id": "video-timestamp",
+    "relevantChunkIds": [301],
+    "returned": [
+      { "chunkId": 701, "authorized": true, "citationValid": true },
+      { "chunkId": 301, "authorized": true, "citationValid": true }
+    ],
+    "latencyMs": 390,
+    "estimatedCostUsd": 0.0008
+  }
+]

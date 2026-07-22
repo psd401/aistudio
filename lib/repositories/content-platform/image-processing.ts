@@ -4,8 +4,9 @@ import type {
   RepositorySourceLocator,
   RepositorySourceRegion,
 } from "@/lib/db/schema";
+import { countRepositoryTokens } from "./token-segmentation";
 
-export const IMAGE_PROCESSOR_VERSION = "image-normalize-v1";
+export const IMAGE_PROCESSOR_VERSION = "image-normalize-v2";
 
 export const IMAGE_CONTENT_TYPES = {
   jpeg: "image/jpeg",
@@ -44,6 +45,9 @@ export interface ImageSearchSegment {
   tokens: number;
   modality: "image";
   sourceLocator: RepositorySourceLocator;
+  contextPrefix: string;
+  segmentLevel: "section" | "chunk";
+  parentChunkIndex?: number;
 }
 
 export interface ImageSearchDocument {
@@ -243,15 +247,20 @@ function normalizedRegion(
 function segment(
   content: string,
   chunkIndex: number,
-  regions: RepositorySourceRegion[]
+  regions: RepositorySourceRegion[],
+  segmentLevel: "section" | "chunk",
+  parentChunkIndex?: number
 ): ImageSearchSegment {
   return {
     content,
     contentHash: createHash("sha256").update(content).digest("hex"),
     chunkIndex,
-    tokens: Math.ceil(content.length / 4),
+    tokens: countRepositoryTokens(content),
     modality: "image",
     sourceLocator: { regions: regions.length > 0 ? regions : [FULL_IMAGE_REGION] },
+    contextPrefix: "Image",
+    segmentLevel,
+    parentChunkIndex,
   };
 }
 
@@ -273,7 +282,12 @@ export function buildImageSearchDocument(input: {
   const segments: ImageSearchSegment[] = [];
   if (caption) {
     segments.push(
-      segment(`Image description: ${caption}`, segments.length, [FULL_IMAGE_REGION])
+      segment(
+        `Image description: ${caption}`,
+        segments.length,
+        [FULL_IMAGE_REGION],
+        "section"
+      )
     );
   }
 
@@ -285,7 +299,9 @@ export function buildImageSearchDocument(input: {
       segment(
         `Visible text:\n${pendingLines.join("\n")}`,
         segments.length,
-        pendingRegions
+        pendingRegions,
+        "chunk",
+        segments[0] ? 0 : undefined
       )
     );
     pendingLines = [];
@@ -310,7 +326,8 @@ export function buildImageSearchDocument(input: {
       segment(
         `Image (${input.detectedContentType}, ${input.width} by ${input.height} pixels)`,
         0,
-        [FULL_IMAGE_REGION]
+        [FULL_IMAGE_REGION],
+        "section"
       )
     );
   }

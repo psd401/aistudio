@@ -12,7 +12,7 @@
  */
 
 import assert from "node:assert/strict";
-import { eq } from "drizzle-orm";
+import { eq, type SQL } from "drizzle-orm";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import * as XLSX from "@e965/xlsx";
 import { closeDatabase, executeQuery } from "@/lib/db/drizzle-client";
@@ -44,6 +44,11 @@ import {
   type RepositoryUploadStorage,
 } from "@/lib/repositories/content-platform";
 import { keywordSearch } from "@/lib/repositories/search-service";
+import { retrieveRepositoryContent } from "@/lib/repositories/retrieval-v2/service";
+import {
+  activateCompletedGeneration,
+  type GenerationActivationResult,
+} from "../../infra/lambdas/embedding-generator/generation-activation";
 
 const pdf = await PDFDocument.create();
 const font = await pdf.embedFont(StandardFonts.Helvetica);
@@ -233,6 +238,7 @@ try {
     (db) =>
       db
         .select({
+          id: repositoryItemChunks.id,
           page: repositoryItemChunks.sourceLocator,
           generationId: repositoryItemChunks.indexGenerationId,
         })
@@ -248,6 +254,52 @@ try {
     publishedChunks.every(
       (chunk) => chunk.generationId === publication.generationId
     )
+  );
+
+  const retrievalV2Result = await retrieveRepositoryContent({
+    query: "district emergency",
+    repositoryIds: [repository.id],
+    userCognitoSub: "e2e-test-user",
+    mode: "keyword",
+    rerank: false,
+  });
+  assert.equal(retrievalV2Result.results.length, 1);
+  assert.equal(
+    retrievalV2Result.results[0]?.generationId,
+    publication.generationId
+  );
+  assert.equal(
+    retrievalV2Result.results[0]?.citations[0]?.itemVersionId,
+    first.version.id
+  );
+  assert.equal(
+    retrievalV2Result.results[0]?.citations[0]?.sourceLocator.page,
+    1
+  );
+
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryItemChunks)
+        .set({ accessScope: { userIds: [] } })
+        .where(eq(repositoryItemChunks.itemVersionId, first.version.id)),
+    "smoke.unifiedContent.restrictSegments"
+  );
+  const deniedSegmentResult = await retrieveRepositoryContent({
+    query: "district emergency",
+    repositoryIds: [repository.id],
+    userCognitoSub: "e2e-test-user",
+    mode: "keyword",
+    rerank: false,
+  });
+  assert.equal(deniedSegmentResult.results.length, 0);
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryItemChunks)
+        .set({ accessScope: {} })
+        .where(eq(repositoryItemChunks.itemVersionId, first.version.id)),
+    "smoke.unifiedContent.restoreSegmentAccess"
   );
 
   const citationResults = await keywordSearch("district emergency", {
@@ -423,12 +475,30 @@ try {
         sourceRegions: imageDocument.ocrRegions,
       },
     ],
+    embeddingModel: "amazon-bedrock:amazon.titan-embed-text-v1",
+    embeddingDimensions: 1536,
+    segmentationVersion: "retrieval-v2",
   };
   const imagePublication = await publishDocumentVersion(imagePublicationInput);
   const imageReplay = await publishDocumentVersion(imagePublicationInput);
   assert.equal(imagePublication.replayed, false);
   assert.equal(imageReplay.replayed, true);
   assert.equal(imageReplay.generationId, imagePublication.generationId);
+  const [beforeEmbeddingActivation] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          activeGenerationId: knowledgeRepositories.activeIndexGenerationId,
+        })
+        .from(knowledgeRepositories)
+        .where(eq(knowledgeRepositories.id, repository.id))
+        .limit(1),
+    "smoke.unifiedContent.beforeEmbeddingActivation"
+  );
+  assert.equal(
+    beforeEmbeddingActivation?.activeGenerationId,
+    officePublication.generationId
+  );
   const imageArtifacts = await executeQuery(
     (db) =>
       db
@@ -443,6 +513,25 @@ try {
     imageArtifacts.map((artifact) => artifact.kind).sort(),
     ["canonical_text", "caption", "image", "layout", "thumbnail"]
   );
+  const imageResultsBeforeActivation = await keywordSearch("marked assembly", {
+    repositoryId: repository.id,
+    canonicalOnly: true,
+  });
+  assert.equal(imageResultsBeforeActivation.length, 0);
+  const activation = await activateCompletedGeneration(
+    imagePublication.generationId,
+    async (query) => {
+      const rows = await executeQuery(
+        // The Lambda package has its own dependency boundary, so bridge its
+        // structurally identical Drizzle SQL object into the app workspace.
+        (db) => db.execute(query as unknown as SQL),
+        "smoke.unifiedContent.activateEmbeddedGeneration"
+      );
+      return rows as unknown as GenerationActivationResult[];
+    }
+  );
+  assert.equal(activation?.repository_id, repository.id);
+  assert.ok((activation?.embedded_item_count ?? 0) >= 3);
   const imageResults = await keywordSearch("marked assembly", {
     repositoryId: repository.id,
     canonicalOnly: true,

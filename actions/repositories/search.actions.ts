@@ -13,7 +13,9 @@ import {
   startTimer,
   sanitizeForLogging
 } from "@/lib/logger"
-import { vectorSearch, keywordSearch, hybridSearch, SearchResult } from "@/lib/repositories/search-service"
+import { vectorSearch, keywordSearch, hybridSearch, type SearchResult } from "@/lib/repositories/search-service"
+import { retrieveRepositoryContent } from "@/lib/repositories/retrieval-v2/service"
+import type { RetrievalResult } from "@/lib/repositories/retrieval-v2/types"
 import { hasCapabilityAccess } from "@/utils/roles"
 import { assertRepositoryReadAccess } from "@/lib/repositories/repository-access-guard"
 import {
@@ -48,6 +50,24 @@ async function dispatchSearch(
     case 'hybrid':
     default:
       return hybridSearch(query, { ...commonOptions, vectorWeight })
+  }
+}
+
+function toLegacySearchResult(result: RetrievalResult): SearchResult {
+  return {
+    chunkId: result.chunkId,
+    itemId: result.itemId,
+    itemName: result.itemName,
+    content: result.content,
+    similarity: result.similarity,
+    chunkIndex: result.chunkIndex,
+    metadata: result.metadata,
+    citation: {
+      itemStableId: result.itemStableId,
+      itemVersionId: result.itemVersionId,
+      versionNumber: result.versionNumber,
+      sourceLocator: result.sourceLocator,
+    },
   }
 }
 
@@ -122,14 +142,26 @@ export async function searchRepository(
     const canonicalOnly = isContentReadV2Active(
       await getContentPlatformConfig()
     )
-    const results = await dispatchSearch(
-      searchType,
-      query,
-      repositoryId,
-      safeLimit,
-      safeVectorWeight,
-      canonicalOnly
-    )
+    const retrieval = canonicalOnly
+      ? await retrieveRepositoryContent({
+          query,
+          repositoryIds: [repositoryId],
+          userCognitoSub: session.sub,
+          mode: searchType,
+          limit: safeLimit,
+          denseWeight: safeVectorWeight,
+        })
+      : null
+    const results = retrieval
+      ? retrieval.results.map(toLegacySearchResult)
+      : await dispatchSearch(
+          searchType,
+          query,
+          repositoryId,
+          safeLimit,
+          safeVectorWeight,
+          canonicalOnly
+        )
 
     log.info("Search completed successfully", {
       repositoryId,
@@ -137,6 +169,7 @@ export async function searchRepository(
       resultCount: results.length,
       limit,
       canonicalOnly,
+      retrievalDiagnostics: retrieval?.diagnostics,
     })
     
     timer({ 

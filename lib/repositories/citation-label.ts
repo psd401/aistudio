@@ -31,5 +31,10 @@ export function formatRepositorySourceLocator(
       ? `${startSeconds}s–${endSeconds}s`
       : `${startSeconds}s`;
   }
+  if (locator.regions?.length) {
+    return locator.regions.length === 1
+      ? "Image region"
+      : `${locator.regions.length} image regions`;
+  }
   return null;
 }

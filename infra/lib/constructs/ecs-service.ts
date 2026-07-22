@@ -531,6 +531,13 @@ export class EcsServiceConstruct extends Construct {
                 'arn:aws:bedrock:*:*:provisioned-model/*',
               ],
             }),
+            // Bedrock does not support resource-level permissions for Rerank.
+            // The underlying model invocation remains scoped to the ARNs above.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['bedrock:Rerank'],
+              resources: ['*'],
+            }),
             // K-12 Content Safety: Bedrock Guardrails API access.
             // CROSS-REGION-INFERENCE GOTCHA (2026-07-06 prod outage): ApplyGuardrail
             // on a guardrail that uses a cross-region inference PROFILE authorizes

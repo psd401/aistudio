@@ -30,6 +30,11 @@ export const repositoryIndexGenerations = pgTable(
       .notNull(),
     embeddingModel: varchar("embedding_model", { length: 255 }),
     embeddingDimensions: integer("embedding_dimensions"),
+    visualEmbeddingModel: varchar("visual_embedding_model", { length: 255 }),
+    visualEmbeddingDimensions: integer("visual_embedding_dimensions"),
+    segmentationVersion: varchar("segmentation_version", { length: 128 })
+      .default("legacy-v1")
+      .notNull(),
     processorVersion: varchar("processor_version", { length: 128 }).notNull(),
     sourceVersionCount: integer("source_version_count").default(0).notNull(),
     segmentCount: integer("segment_count").default(0).notNull(),

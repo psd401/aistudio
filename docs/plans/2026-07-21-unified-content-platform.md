@@ -239,6 +239,15 @@ The settings UI will validate and explain these database-first settings:
 | `CONTENT_OCR_STRATEGY` | `auto` | Managed/fallback OCR policy |
 | `CONTENT_IMAGE_CAPTION_MODEL_ID` | `us.amazon.nova-2-lite-v1:0` | Bedrock Nova image-description model |
 | `CONTENT_VISUAL_INDEX_ENABLED` | `false` | Visual embeddings rollout |
+| `CONTENT_RETRIEVAL_RERANK_ENABLED` | `true` | Bedrock reranking after deterministic rank fusion; fails open to fusion |
+| `CONTENT_RETRIEVAL_RERANK_MODEL_ID` | `cohere.rerank-v3-5:0` | Bedrock reranking model |
+| `CONTENT_RETRIEVAL_CANDIDATE_LIMIT` | `40` | Lexical/dense/visual candidates considered before reranking |
+| `CONTENT_RETRIEVAL_NEIGHBOR_COUNT` | `1` | Adjacent segments expanded on each side of a selected result |
+| `CONTENT_RETRIEVAL_CONTEXT_TOKENS` | `4000` | Tokenizer-counted context budget per retrieval request |
+| `CONTENT_RETRIEVAL_RRF_K` | `60` | Reciprocal-rank-fusion smoothing constant |
+| `CONTENT_RETRIEVAL_MAX_PER_SOURCE` | `3` | Selected segments allowed per immutable source version |
+| `CONTENT_VISUAL_EMBEDDING_MODEL_ID` | `cohere.embed-v4:0` | Bedrock Cohere multimodal embedding model |
+| `CONTENT_VISUAL_EMBEDDING_DIMENSIONS` | `1536` | Visual vector width, fixed to the database schema |
 | `GOOGLE_CONTENT_SYNC_ENABLED` | `false` | Workspace connector rollout |
 | `GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES` | `15` | Reconciliation cadence |
 
@@ -357,11 +366,11 @@ scheduled dev-environment suite validates the real services.
 
 ## Worktree and branch model
 
-The active multimodal branch is `codex/unified-content-media-ingestion` in the
+The active Retrieval v2 branch is `codex/unified-content-retrieval-v2` in the
 isolated worktree:
 
 ```text
-/private/tmp/aistudio-unified-content-media-ingestion
+/private/tmp/aistudio-unified-content-retrieval-v2
 ```
 
 The main checkout stays on `dev`, so other agents or projects can use separate
@@ -381,7 +390,7 @@ two worktrees should edit the same migration or contract file concurrently.
 - [x] Foundation/Office/image dev deployment and observability validation
 - [ ] Multimodal processing (Office/image deployed; audio/video implementation
       and local verification complete, dev managed-service validation pending)
-- [ ] Retrieval v2 and visual search
+- [x] Retrieval v2 and visual search
 - [ ] Google Workspace sync
 - [ ] Universal product UI migration
 - [ ] OpenClaw and Projects integration
@@ -589,3 +598,62 @@ that observed failure mode.
 
 The remaining checkpoint gate is a dev deployment and real BDA audio/video
 validation.
+
+### Retrieval v2 checkpoint (2026-07-22)
+
+Implemented on `codex/unified-content-retrieval-v2`:
+
+- Migration 121 adds tokenizer-aware hierarchy/context fields, segment ACLs, a
+  generated PostgreSQL full-text index, optional `vector(1536)` visual
+  embeddings, immutable segmentation/embedding descriptors, and bounded
+  database-first retrieval settings.
+- The shared retrieval service resolves each repository's active generation
+  once, revalidates the executing user's repository and segment access, runs
+  lexical, dense, and visual retrieval without mixing embedding spaces, fuses
+  ranks deterministically, optionally reranks through Bedrock, diversifies by
+  source, expands parent/neighbor context, enforces tokenizer-counted budgets,
+  and emits exact immutable-version citations. Bedrock failures and the bounded
+  five-second reranker deadline fail open to reciprocal-rank fusion.
+- Repository Manager, Assistant Architect, and repository AI tools now share
+  the `CONTENT_READ_V2_ENABLED` cutover boundary. While it is off, all three
+  retain their legacy read path; while it is on, all three use Retrieval v2, so
+  rollout and rollback are a single settings change. Assistant ownership never
+  elevates the executing user's data access, and system-managed Atrium
+  repositories remain isolated behind their specialized retrieval path.
+- PDF, Office, image, and media processors emit structure-aware contextual
+  segments. Image chunks can use Cohere Embed v4 interleaved thumbnail +
+  caption/OCR inputs; media visual segments use BDA frame/on-screen semantics.
+  Visual indexing remains independently controlled by
+  `CONTENT_VISUAL_INDEX_ENABLED`.
+- Generations requiring embeddings stay non-serving until every required text
+  and visual vector exists. The embedding worker atomically supersedes the prior
+  active generation, swaps the repository pointer, and marks included items
+  embedded; late completion of a superseded generation is a safe no-op.
+- The frontend ECS role grants Bedrock model invocation only on Bedrock model,
+  inference-profile, and provisioned-model ARNs. The separate
+  `bedrock:Rerank` action uses `Resource: "*"` because AWS does not support
+  resource-level permissions for that API; a synthesis assertion guards both
+  halves of this contract.
+- A checked-in golden retrieval corpus measures recall@k, MRR, nDCG, citation
+  validity, authorization leakage, p95 latency, and estimated average cost.
+
+Verification evidence:
+
+- Application CI suite: 268 suites and 3,059 tests passed; 5 suites and 60 tests
+  intentionally skipped by the repository configuration.
+- Infrastructure/Lambda suite: 33 suites and 348 tests passed, including the
+  real ARM64 unified-content bundle, rerank IAM assertion, and read-only visual
+  artifact access assertion.
+- Authenticated Playwright: 248 tests passed and 58 intentionally skipped, with
+  no failures or flakes. Content settings and canonical PDF, Office, image,
+  audio, and video upload contracts passed through the real UI.
+- Real PostgreSQL smoke passed exact citations, current-version and inspection
+  filters, repository/segment ACLs, pre-activation invisibility, atomic
+  generation switching, the single-active-generation constraint, and cleanup.
+- Full lint completed with zero errors. Application, infrastructure,
+  unified-content worker, and embedding-worker typechecks passed. The production
+  Next.js build, complete infrastructure build, and all-stack synthesis of 29
+  dev/prod templates passed.
+
+The remaining rollout check is a dev deployment followed by real Bedrock Cohere
+rerank/visual-embedding validation before visual indexing is enabled broadly.

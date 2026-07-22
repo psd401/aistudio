@@ -13,6 +13,8 @@ const mediaMigrationPath = path.join(process.cwd(), "infra/database/schema/119-u
 const mediaSql = fs.readFileSync(mediaMigrationPath, "utf8");
 const embeddingMigrationPath = path.join(process.cwd(), "infra/database/schema/120-bedrock-repository-embeddings.sql");
 const embeddingSql = fs.readFileSync(embeddingMigrationPath, "utf8");
+const retrievalMigrationPath = path.join(process.cwd(), "infra/database/schema/121-unified-content-retrieval-v2.sql");
+const retrievalSql = fs.readFileSync(retrievalMigrationPath, "utf8");
 
 describe("migration 116 unified repository content", () => {
   it.each([
@@ -75,5 +77,16 @@ describe("migration 116 unified repository content", () => {
     expect(embeddingSql).toContain("candidate.status = 'succeeded'");
     expect(embeddingSql).not.toContain("BEDROCK_ACCESS_KEY_ID");
     expect(embeddingSql).not.toMatch(/^\s*DO \$\$/mu);
+  });
+
+  it("adds generation-pinned hybrid and visual retrieval fields", () => {
+    expect(retrievalSql).toContain("ADD COLUMN IF NOT EXISTS access_scope jsonb");
+    expect(retrievalSql).toContain("ADD COLUMN IF NOT EXISTS visual_embedding vector(1536)");
+    expect(retrievalSql).toContain("ADD COLUMN IF NOT EXISTS search_vector tsvector");
+    expect(retrievalSql).toContain("USING gin (search_vector)");
+    expect(retrievalSql).toContain("vector_cosine_ops");
+    expect(retrievalSql).toContain("'CONTENT_RETRIEVAL_RERANK_MODEL_ID', 'cohere.rerank-v3-5:0'");
+    expect(retrievalSql).toContain("'CONTENT_VISUAL_EMBEDDING_MODEL_ID', 'cohere.embed-v4:0'");
+    expect(retrievalSql).not.toMatch(/^\s*DO \$\$/mu);
   });
 });

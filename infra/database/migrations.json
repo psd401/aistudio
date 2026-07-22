@@ -114,6 +114,7 @@
     "117-unified-content-office-ingestion.sql",
     "118-unified-content-image-ingestion.sql",
     "119-unified-content-media-ingestion.sql",
-    "120-bedrock-repository-embeddings.sql"
+    "120-bedrock-repository-embeddings.sql",
+    "121-unified-content-retrieval-v2.sql"
   ]
 }

@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import type { RepositorySourceLocator } from "@/lib/db/schema";
+import {
+  countRepositoryTokens,
+  splitTokenizerAwareText,
+} from "./token-segmentation";
 
-export const PDF_PROCESSOR_VERSION = "pdf-text-v1";
+export const PDF_PROCESSOR_VERSION = "pdf-text-v2";
 
 export interface PdfPageText {
   page: number;
@@ -21,6 +25,9 @@ export interface PdfSegment {
   chunkIndex: number;
   tokens: number;
   sourceLocator: RepositorySourceLocator;
+  contextPrefix: string;
+  segmentLevel: "section" | "chunk";
+  parentChunkIndex?: number;
 }
 
 export interface PdfTextExtractor {
@@ -33,6 +40,8 @@ export interface PdfTextExtractor {
 export interface PdfSegmentOptions {
   maxCharacters?: number;
   overlapCharacters?: number;
+  maxTokens?: number;
+  overlapTokens?: number;
 }
 
 const PDF_MAGIC = "%PDF-";
@@ -186,17 +195,26 @@ export function segmentPdfPages(
   for (const page of pages) {
     const normalized = normalizePageText(page.text);
     if (!normalized) continue;
-    for (const content of pageSegments(
-      normalized,
-      maxCharacters,
-      overlapCharacters
-    )) {
+    const contents =
+      options.maxCharacters != null || options.overlapCharacters != null
+        ? pageSegments(normalized, maxCharacters, overlapCharacters)
+        : splitTokenizerAwareText(normalized, {
+            maximumTokens: options.maxTokens,
+            overlapTokens: options.overlapTokens,
+          });
+    const parentChunkIndex = segments.length;
+    for (const [pageChunkIndex, content] of contents.entries()) {
+      const contextPrefix = `Page ${page.page}`;
       segments.push({
         content,
         contentHash: createHash("sha256").update(content).digest("hex"),
         chunkIndex: segments.length,
-        tokens: Math.ceil(content.length / 4),
+        tokens: countRepositoryTokens(`${contextPrefix}\n${content}`),
         sourceLocator: { page: page.page, pageEnd: page.page },
+        contextPrefix,
+        segmentLevel: pageChunkIndex === 0 ? "section" : "chunk",
+        parentChunkIndex:
+          pageChunkIndex === 0 ? undefined : parentChunkIndex,
       });
     }
   }

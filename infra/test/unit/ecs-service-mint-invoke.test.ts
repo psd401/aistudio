@@ -119,4 +119,28 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     expect(mintEnv).toBeDefined();
     expect(mintEnv!.Value).toBe(MINT_FN);
   });
+
+  it('grants only bedrock:Rerank on wildcard while model invocation stays resource-scoped', () => {
+    const statements = allStatements(template);
+    const rerankStatement = statements.find((statement) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('bedrock:Rerank');
+    });
+    expect(rerankStatement).toMatchObject({
+      Effect: 'Allow',
+      Action: 'bedrock:Rerank',
+      Resource: '*',
+    });
+
+    const invokeStatement = statements.find((statement) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('bedrock:InvokeModel');
+    });
+    expect(invokeStatement).toBeDefined();
+    expect(invokeStatement!.Resource).not.toBe('*');
+  });
 });

@@ -133,6 +133,39 @@ describe("unified content processor contract", () => {
     ).toBe(true);
   });
 
+  test("adds retrieval context and modalities to embedding inputs", () => {
+    const [message] = batchEmbeddingMessages(
+      9,
+      "11111111-2222-4333-8444-555555555555",
+      [
+        {
+          id: 1,
+          content: "Evacuation route",
+          contextPrefix: "Campus map",
+          modality: "image",
+          visualObjectKey:
+            "repositories/7/artifacts/11111111-2222-4333-8444-555555555555/thumbnail.jpg",
+          visualMediaType: "image/jpeg",
+        },
+      ],
+    );
+
+    expect(message).toEqual({
+      itemId: 9,
+      generationId: "11111111-2222-4333-8444-555555555555",
+      chunkIds: [1],
+      texts: ["Campus map\nEvacuation route"],
+      modalities: ["image"],
+      visualSources: [
+        {
+          objectKey:
+            "repositories/7/artifacts/11111111-2222-4333-8444-555555555555/thumbnail.jpg",
+          mediaType: "image/jpeg",
+        },
+      ],
+    });
+  });
+
   test("rejects one embedding chunk that cannot fit in a bounded message", () => {
     expect(() =>
       batchEmbeddingMessages(

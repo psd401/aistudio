@@ -11,6 +11,7 @@
 import { SQSEvent, SQSRecord } from 'aws-lambda';
 import OpenAI from 'openai';
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { eq, inArray, or, sql } from 'drizzle-orm';
 import { getDb, closeDb } from './db-client';
 import { settings, repositoryItems } from './schema';
@@ -20,10 +21,12 @@ import {
   DEFAULT_EMBEDDING_MODEL_ID,
   DEFAULT_EMBEDDING_PROVIDER,
   buildBedrockEmbeddingBody,
+  buildCohereMultimodalEmbeddingBody,
   normalizeEmbeddingProvider,
   parseEmbeddingDescriptor,
   parseEmbeddingVector,
 } from './embedding-provider';
+import { activateCompletedGeneration } from './generation-activation';
 
 const log = {
   info: (msg: string, meta?: Record<string, unknown>) =>
@@ -44,6 +47,10 @@ const EMBEDDING_KEYS = [
   'AZURE_OPENAI_KEY',
   'AZURE_OPENAI_ENDPOINT',
 ] as const;
+
+const s3 = new S3Client({});
+const documentsBucket = process.env.DOCUMENTS_BUCKET_NAME;
+const MAX_VISUAL_SOURCE_BYTES = 5 * 1024 * 1024;
 
 interface EmbeddingSettings {
   provider: string;
@@ -186,12 +193,87 @@ async function generateEmbeddings(texts: string[], embSettings: EmbeddingSetting
   }
 }
 
+interface VisualEmbeddingInput {
+  text: string;
+  imageDataUri?: string;
+}
+
+async function generateVisualEmbeddings(
+  inputs: VisualEmbeddingInput[],
+  embSettings: EmbeddingSettings,
+): Promise<number[][]> {
+  if (
+    normalizeEmbeddingProvider(embSettings.provider) !== 'amazon-bedrock' ||
+    embSettings.modelId !== 'cohere.embed-v4:0'
+  ) {
+    throw new Error('Visual embeddings require Cohere Embed v4 on Amazon Bedrock');
+  }
+  const client = new BedrockRuntimeClient({
+    region: process.env.AWS_REGION ?? embSettings.bedrockRegion ?? 'us-east-1',
+  });
+  const embeddings: number[][] = [];
+  for (const input of inputs) {
+    const response = await client.send(
+      new InvokeModelCommand({
+        modelId: embSettings.modelId,
+        contentType: 'application/json',
+        accept: 'application/json',
+        body: buildCohereMultimodalEmbeddingBody(
+          embSettings.modelId,
+          input,
+          embSettings.dimensions,
+        ),
+      }),
+    );
+    embeddings.push(
+      parseEmbeddingVector(
+        JSON.parse(new TextDecoder().decode(response.body)) as unknown,
+        embSettings.dimensions,
+        embSettings.modelId,
+      ),
+    );
+  }
+  return embeddings;
+}
+
 interface EmbeddingMessage {
   itemId: number;
   /** Present for canonical index-generation batches. */
   generationId?: string;
   chunkIds: number[];
   texts: string[];
+  modalities?: Array<'text' | 'image' | 'audio' | 'video' | 'table'>;
+  visualSources?: Array<{
+    objectKey: string;
+    mediaType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+  } | null>;
+}
+
+async function loadVisualDataUri(
+  source: NonNullable<EmbeddingMessage['visualSources']>[number],
+  cache: Map<string, string>,
+): Promise<string | undefined> {
+  if (!source) return undefined;
+  const cached = cache.get(source.objectKey);
+  if (cached) return cached;
+  if (
+    !documentsBucket ||
+    !source.objectKey.startsWith('repositories/') ||
+    source.objectKey.includes('..')
+  ) {
+    throw new Error('Visual embedding source is outside the repository artifact namespace');
+  }
+  const response = await s3.send(
+    new GetObjectCommand({ Bucket: documentsBucket, Key: source.objectKey }),
+  );
+  if (!response.Body) throw new Error('Visual embedding source has no body');
+  const bytes = await response.Body.transformToByteArray();
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_VISUAL_SOURCE_BYTES) {
+    throw new Error('Visual embedding source exceeds Cohere image size limits');
+  }
+  const uri = `data:${source.mediaType};base64,${Buffer.from(bytes).toString('base64')}`;
+  cache.set(source.objectKey, uri);
+  return uri;
 }
 
 async function retryWithBackoff<T>(
@@ -231,6 +313,10 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
     if (
       message.chunkIds.length === 0 ||
       message.chunkIds.length !== message.texts.length ||
+      (message.modalities != null &&
+        message.modalities.length !== message.chunkIds.length) ||
+      (message.visualSources != null &&
+        message.visualSources.length !== message.chunkIds.length) ||
       !message.chunkIds.every((chunkId) => Number.isSafeInteger(chunkId) && chunkId > 0)
     ) {
       throw new Error('Embedding message has invalid or mismatched chunk data');
@@ -240,8 +326,11 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
       const [generation] = await db.execute<{
         embedding_model: string | null;
         embedding_dimensions: number | null;
+        visual_embedding_model: string | null;
+        visual_embedding_dimensions: number | null;
       }>(sql`
-        SELECT embedding_model, embedding_dimensions
+        SELECT embedding_model, embedding_dimensions,
+               visual_embedding_model, visual_embedding_dimensions
         FROM repository_index_generations
         WHERE id = ${message.generationId}::uuid
         LIMIT 1
@@ -259,6 +348,63 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
         modelId: descriptor.modelId,
         dimensions: descriptor.dimensions,
       };
+      const visualDescriptor = generation.visual_embedding_model
+        ? parseEmbeddingDescriptor(
+            generation.visual_embedding_model,
+            generation.visual_embedding_dimensions
+          )
+        : null;
+      if (visualDescriptor) {
+        const modalities =
+          message.modalities ?? message.chunkIds.map(() => 'text' as const);
+        const visualIndexes = modalities.flatMap((modality, index) =>
+          modality === 'image' || modality === 'video' ? [index] : []
+        );
+        if (visualIndexes.length > 0) {
+          const visualSettings: EmbeddingSettings = {
+            ...embSettings,
+            provider: visualDescriptor.provider,
+            modelId: visualDescriptor.modelId,
+            dimensions: visualDescriptor.dimensions,
+          };
+          const visualSourceCache = new Map<string, string>();
+          const visualInputs = await Promise.all(
+            visualIndexes.map(async (index) => ({
+              text: message.texts[index] ?? '',
+              imageDataUri: await loadVisualDataUri(
+                message.visualSources?.[index] ?? null,
+                visualSourceCache,
+              ),
+            })),
+          );
+          const visualEmbeddings = await retryWithBackoff(
+            () => generateVisualEmbeddings(visualInputs, visualSettings),
+            3,
+            2000
+          );
+          if (visualEmbeddings.length !== visualIndexes.length) {
+            throw new Error('Visual embedding provider returned a mismatched vector count');
+          }
+          for (const [position, messageIndex] of visualIndexes.entries()) {
+            const chunkId = message.chunkIds[messageIndex];
+            const visualEmbedding = visualEmbeddings[position];
+            if (!chunkId || !visualEmbedding) {
+              throw new Error('Visual embedding response could not be matched to a chunk');
+            }
+            const visualEmbeddingStr = `[${visualEmbedding.join(',')}]`;
+            const updated = await db.execute(sql`
+              UPDATE repository_item_chunks
+              SET visual_embedding = ${visualEmbeddingStr}::vector
+              WHERE id = ${chunkId}
+                AND index_generation_id = ${message.generationId}::uuid
+              RETURNING id
+            `);
+            if (updated.length !== 1) {
+              throw new Error(`Visual chunk ${chunkId} does not belong to generation ${message.generationId}`);
+            }
+          }
+        }
+      }
     }
 
     const embeddings = await retryWithBackoff(
@@ -312,11 +458,25 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
 
     let pendingGenerationChunks = 0;
     if (message.generationId) {
+      const [generation] = await db.execute<{
+        visual_embedding_model: string | null;
+      }>(sql`
+        SELECT visual_embedding_model
+        FROM repository_index_generations
+        WHERE id = ${message.generationId}::uuid
+      `);
       const [pending] = await db.execute<{ pending_count: number }>(sql`
         SELECT count(*)::integer AS pending_count
         FROM repository_item_chunks
         WHERE index_generation_id = ${message.generationId}::uuid
-          AND embedding IS NULL
+          AND (
+            embedding IS NULL
+            OR (
+              ${generation?.visual_embedding_model != null}
+              AND modality IN ('image', 'video')
+              AND visual_embedding IS NULL
+            )
+          )
       `);
       pendingGenerationChunks = pending?.pending_count ?? 0;
     }
@@ -325,10 +485,24 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
       pendingGenerationChunks
     );
     if (generationComplete) {
-      await db
-        .update(repositoryItems)
-        .set({ processingStatus: 'embedded', updatedAt: new Date() })
-        .where(eq(repositoryItems.id, message.itemId));
+      if (message.generationId) {
+        await activateCompletedGeneration(
+          message.generationId,
+          async (query) =>
+            (await db.execute<{
+              repository_id: number;
+              embedded_item_count: number;
+            }>(query)) as Array<{
+              repository_id: number;
+              embedded_item_count: number;
+            }>
+        );
+      } else {
+        await db
+          .update(repositoryItems)
+          .set({ processingStatus: 'embedded', updatedAt: new Date() })
+          .where(eq(repositoryItems.id, message.itemId));
+      }
     }
 
     log.info(`Successfully generated embeddings for item ${message.itemId}`, {

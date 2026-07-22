@@ -32,11 +32,19 @@ export interface EmbeddingQueueMessage {
   generationId: string;
   chunkIds: number[];
   texts: string[];
+  modalities: Array<"text" | "image" | "audio" | "video" | "table">;
+  visualSources: Array<
+    { objectKey: string; mediaType: "image/jpeg" | "image/png" | "image/webp" | "image/gif" } | null
+  >;
 }
 
 export interface EmbeddingChunk {
   id: number;
   content: string;
+  contextPrefix?: string;
+  modality?: "text" | "image" | "audio" | "video" | "table";
+  visualObjectKey?: string | null;
+  visualMediaType?: "image/jpeg" | "image/png" | "image/webp" | "image/gif" | null;
 }
 
 export const MAX_EMBEDDING_MESSAGE_BYTES = 220_000;
@@ -164,7 +172,18 @@ function embeddingMessage(
     itemId,
     generationId,
     chunkIds: chunks.map((chunk) => chunk.id),
-    texts: chunks.map((chunk) => chunk.content),
+    texts: chunks.map((chunk) =>
+      [chunk.contextPrefix?.trim(), chunk.content].filter(Boolean).join("\n")
+    ),
+    modalities: chunks.map((chunk) => chunk.modality ?? "text"),
+    visualSources: chunks.map((chunk) =>
+      chunk.visualObjectKey && chunk.visualMediaType
+        ? {
+            objectKey: chunk.visualObjectKey,
+            mediaType: chunk.visualMediaType,
+          }
+        : null
+    ),
   };
 }
 

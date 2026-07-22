@@ -303,6 +303,17 @@ export class ProcessingStack extends cdk.Stack {
               resources: [databaseSecretArn],
             }),
             new iam.PolicyStatement({
+              // ServiceRoleFactory's generic object grant has an S3 bucket-tag
+              // condition that does not resolve for object ARNs. Keep this
+              // read-only and limited to canonical repository artifacts.
+              sid: 'RepositoryVisualArtifactRead',
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:GetObject'],
+              resources: [
+                `arn:${this.partition}:s3:::${documentsBucketName}/repositories/*`,
+              ],
+            }),
+            new iam.PolicyStatement({
               sid: 'RepositoryTitanEmbeddingAccess',
               effect: iam.Effect.ALLOW,
               actions: ['bedrock:InvokeModel'],
@@ -320,6 +331,13 @@ export class ProcessingStack extends cdk.Stack {
                   account: '',
                   resource: 'foundation-model',
                   resourceName: 'amazon.titan-embed-text-v2:0',
+                }),
+                this.formatArn({
+                  service: 'bedrock',
+                  region: this.region,
+                  account: '',
+                  resource: 'foundation-model',
+                  resourceName: 'cohere.embed-v4:0',
                 }),
               ],
             }),
@@ -385,6 +403,7 @@ export class ProcessingStack extends cdk.Stack {
         DATABASE_SECRET_ARN: databaseSecretArn,
         DATABASE_NAME: 'aistudio',
         DATABASE_PORT: '5432',
+        DOCUMENTS_BUCKET_NAME: documentsBucketName,
         ENVIRONMENT: props.environment,
       },
       layers: [processingLayer],
