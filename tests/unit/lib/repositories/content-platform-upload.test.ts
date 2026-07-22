@@ -124,7 +124,7 @@ describe("canonical repository upload initiation", () => {
         DEFAULT_CONTENT_PLATFORM_CONFIG,
         storage
       )
-    ).rejects.toThrow("PDF, Office, JPEG, PNG, WebP, GIF, and TIFF files only");
+    ).rejects.toThrow("PDF, Office, image, audio, and video files only");
     await expect(
       initiateRepositoryUpload(
         { ...baseInput, byteSize: 500 * 1024 ** 2 + 1 },
@@ -201,5 +201,49 @@ describe("canonical repository upload initiation", () => {
         storage
       )
     ).rejects.toThrow("50 MiB");
+  });
+
+  it("accepts audio and video while enforcing BDA byte ceilings", async () => {
+    const storage = createStorage();
+
+    await expect(
+      initiateRepositoryUpload(
+        {
+          ...baseInput,
+          itemName: "Board meeting audio",
+          fileName: "board-meeting.mp3",
+          contentType: "audio/mpeg",
+          byteSize: 11 * 1024 ** 2,
+        },
+        DEFAULT_CONTENT_PLATFORM_CONFIG,
+        storage
+      )
+    ).resolves.toMatchObject({ uploadMethod: "multipart" });
+    await expect(
+      initiateRepositoryUpload(
+        {
+          ...baseInput,
+          itemName: "Training video",
+          fileName: "training.mp4",
+          contentType: "video/mp4",
+          byteSize: 11 * 1024 ** 2,
+        },
+        DEFAULT_CONTENT_PLATFORM_CONFIG,
+        storage
+      )
+    ).resolves.toMatchObject({ uploadMethod: "multipart" });
+    await expect(
+      initiateRepositoryUpload(
+        {
+          ...baseInput,
+          itemName: "Oversized audio",
+          fileName: "oversized.wav",
+          contentType: "audio/wav",
+          byteSize: 2 * 1024 ** 3 + 1,
+        },
+        DEFAULT_CONTENT_PLATFORM_CONFIG,
+        storage
+      )
+    ).rejects.toThrow("2048 MiB");
   });
 });

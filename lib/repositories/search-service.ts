@@ -2,6 +2,8 @@ import { executeQuery } from "@/lib/db/drizzle-client"
 import { sql } from "drizzle-orm"
 import { generateEmbedding } from "@/lib/ai-helpers"
 import type { RepositorySourceLocator } from "@/lib/db/schema"
+import { createLogger } from "@/lib/logger"
+import { parseRepositoryEmbeddingDescriptor } from "@/lib/repositories/embedding-configuration"
 
 export interface SearchCitation {
   itemStableId: string
@@ -9,7 +11,6 @@ export interface SearchCitation {
   versionNumber: number
   sourceLocator: RepositorySourceLocator
 }
-
 export interface SearchResult {
   chunkId: number
   itemId: number
@@ -26,6 +27,59 @@ export interface SearchOptions {
   threshold?: number
   repositoryId?: number
   canonicalOnly?: boolean
+}
+
+interface RepositoryEmbeddingTarget {
+  generationId: string
+  override: {
+    provider: string
+    modelId: string
+    dimensions: number
+  }
+}
+
+async function getRepositoryEmbeddingTarget(
+  repositoryId: number | undefined
+): Promise<RepositoryEmbeddingTarget | undefined> {
+  if (!repositoryId) return undefined
+  const result = await executeQuery(
+    (db) =>
+      db.execute(sql`
+        SELECT
+          generation.id,
+          generation.embedding_model,
+          generation.embedding_dimensions
+        FROM knowledge_repositories repository
+        JOIN repository_index_generations generation
+          ON generation.id = repository.active_index_generation_id
+        WHERE repository.id = ${repositoryId}
+        LIMIT 1
+      `),
+    "repositorySearch.embeddingConfiguration"
+  )
+  const [row] = result as unknown as Array<{
+    id: string
+    embedding_model: string | null
+    embedding_dimensions: number | null
+  }>
+  if (!row) return undefined
+  const config = parseRepositoryEmbeddingDescriptor(
+    row.embedding_model,
+    row.embedding_dimensions
+  )
+  if (!config) {
+    throw new Error(
+      `Active repository index generation ${row.id} has no valid embedding descriptor`
+    )
+  }
+  return {
+    generationId: row.id,
+    override: {
+      provider: config.provider,
+      modelId: config.modelId,
+      dimensions: config.dimensions,
+    },
+  }
 }
 
 function parseJsonRecord(value: unknown): Record<string, unknown> {
@@ -69,8 +123,11 @@ export async function vectorSearch(
 ): Promise<SearchResult[]> {
   const { limit = 10, threshold = 0.7, repositoryId, canonicalOnly = false } = options
   
-  // Generate embedding for the query
-  const queryEmbedding = await generateEmbedding(query)
+  // Pin both the query model and vector rows to the same active generation.
+  // This applies to every repository-scoped caller, including legacy callers
+  // that have not opted into canonical lifecycle filtering yet.
+  const embeddingTarget = await getRepositoryEmbeddingTarget(repositoryId)
+  const queryEmbedding = await generateEmbedding(query, embeddingTarget?.override)
   
   // Build the SQL query using pgvector
   // Convert embedding array to pgvector format string: '[1,2,3]'
@@ -102,10 +159,29 @@ export async function vectorSearch(
             AND i.lifecycle_status = 'active'
             AND i.current_version_id = c.item_version_id
             AND r.lifecycle_status = 'active'
-            AND r.active_index_generation_id = c.index_generation_id
+            AND c.index_generation_id = ${embeddingTarget?.generationId ?? null}
             AND v.storage_status = 'available'
             AND v.inspection_status IN ('clean', 'not_required')
             AND v.processing_status = 'completed'
+            AND 1 - (c.embedding <=> ${embeddingString}::vector) >= ${threshold}
+          ORDER BY similarity DESC
+          LIMIT ${limit}
+        `)
+      } else if (repositoryId && embeddingTarget) {
+        return db.execute(sql`
+          SELECT
+            c.id as chunk_id,
+            c.item_id,
+            i.name as item_name,
+            c.content,
+            c.chunk_index,
+            c.metadata,
+            1 - (c.embedding <=> ${embeddingString}::vector) as similarity
+          FROM repository_item_chunks c
+          JOIN repository_items i ON i.id = c.item_id
+          WHERE c.embedding IS NOT NULL
+            AND i.repository_id = ${repositoryId}
+            AND c.index_generation_id = ${embeddingTarget.generationId}
             AND 1 - (c.embedding <=> ${embeddingString}::vector) >= ${threshold}
           ORDER BY similarity DESC
           LIMIT ${limit}
@@ -250,11 +326,36 @@ export async function hybridSearch(
   const { limit = 10, vectorWeight = 0.7 } = options
   const keywordWeight = 1 - vectorWeight
   
-  // Perform both searches in parallel
-  const [vectorResults, keywordResults] = await Promise.all([
+  // Keep repository retrieval useful when an embedding provider is unavailable.
+  // Keyword failure is isolated in the same way; only a dual failure aborts.
+  const [vectorOutcome, keywordOutcome] = await Promise.allSettled([
     vectorSearch(query, { ...options, limit: limit * 2 }), // Get more results for merging
     keywordSearch(query, { ...options, limit: limit * 2 })
   ])
+  if (vectorOutcome.status === "rejected" && keywordOutcome.status === "rejected") {
+    throw vectorOutcome.reason
+  }
+  const log = createLogger({ module: "repository-search" })
+  if (vectorOutcome.status === "rejected") {
+    log.warn("Vector search unavailable; returning keyword results", {
+      error:
+        vectorOutcome.reason instanceof Error
+          ? vectorOutcome.reason.message
+          : String(vectorOutcome.reason),
+    })
+  }
+  if (keywordOutcome.status === "rejected") {
+    log.warn("Keyword search unavailable; returning vector results", {
+      error:
+        keywordOutcome.reason instanceof Error
+          ? keywordOutcome.reason.message
+          : String(keywordOutcome.reason),
+    })
+  }
+  const vectorResults =
+    vectorOutcome.status === "fulfilled" ? vectorOutcome.value : []
+  const keywordResults =
+    keywordOutcome.status === "fulfilled" ? keywordOutcome.value : []
   
   // Create a map to merge results by chunk ID
   const resultMap = new Map<number, SearchResult>()

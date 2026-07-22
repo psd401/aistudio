@@ -36,6 +36,7 @@
     "@aws-cdk/aws-route53": "^1.203.0",
     "@aws-cdk/aws-s3": "^1.203.0",
     "@aws-cdk/aws-secretsmanager": "^1.203.0",
+    "@aws-sdk/client-bedrock-data-automation-runtime": "^3.982.0",
     "@aws-sdk/client-bedrock-runtime": "^3.982.0",
     "@aws-sdk/client-dynamodb": "^3.981.0",
     "@aws-sdk/client-textract": "^3.982.0",

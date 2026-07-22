@@ -15,6 +15,15 @@ import { eq, inArray, or, sql } from 'drizzle-orm';
 import { getDb, closeDb } from './db-client';
 import { settings, repositoryItems } from './schema';
 import { shouldMarkItemEmbedded } from './completion-policy';
+import {
+  DEFAULT_EMBEDDING_DIMENSIONS,
+  DEFAULT_EMBEDDING_MODEL_ID,
+  DEFAULT_EMBEDDING_PROVIDER,
+  buildBedrockEmbeddingBody,
+  normalizeEmbeddingProvider,
+  parseEmbeddingDescriptor,
+  parseEmbeddingVector,
+} from './embedding-provider';
 
 const log = {
   info: (msg: string, meta?: Record<string, unknown>) =>
@@ -24,6 +33,10 @@ const log = {
 };
 
 const EMBEDDING_KEYS = [
+  'EMBEDDING_MODEL_PROVIDER',
+  'EMBEDDING_MODEL_ID',
+  'EMBEDDING_DIMENSIONS',
+  'EMBEDDING_BATCH_SIZE',
   'OPENAI_API_KEY',
   'BEDROCK_ACCESS_KEY_ID',
   'BEDROCK_SECRET_ACCESS_KEY',
@@ -44,7 +57,6 @@ interface EmbeddingSettings {
   azureKey?: string;
   azureEndpoint?: string;
 }
-
 async function getEmbeddingSettings(): Promise<EmbeddingSettings> {
   const db = await getDb();
 
@@ -63,11 +75,23 @@ async function getEmbeddingSettings(): Promise<EmbeddingSettings> {
     if (row.key && row.value) map[row.key] = row.value;
   }
 
+  const dimensions = Number.parseInt(
+    map['EMBEDDING_DIMENSIONS'] ?? String(DEFAULT_EMBEDDING_DIMENSIONS),
+    10
+  );
+  const batchSize = Number.parseInt(map['EMBEDDING_BATCH_SIZE'] ?? '100', 10);
+  if (!Number.isSafeInteger(dimensions) || dimensions <= 0) {
+    throw new Error('EMBEDDING_DIMENSIONS must be a positive integer');
+  }
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 1_000) {
+    throw new Error('EMBEDDING_BATCH_SIZE must be between 1 and 1000');
+  }
+
   return {
-    provider: map['EMBEDDING_MODEL_PROVIDER'] ?? 'openai',
-    modelId: map['EMBEDDING_MODEL_ID'] ?? 'text-embedding-3-small',
-    dimensions: parseInt(map['EMBEDDING_DIMENSIONS'] ?? '1536', 10),
-    batchSize: parseInt(map['EMBEDDING_BATCH_SIZE'] ?? '100', 10),
+    provider: map['EMBEDDING_MODEL_PROVIDER'] ?? DEFAULT_EMBEDDING_PROVIDER,
+    modelId: map['EMBEDDING_MODEL_ID'] ?? DEFAULT_EMBEDDING_MODEL_ID,
+    dimensions,
+    batchSize,
     openAIKey: map['OPENAI_API_KEY'],
     bedrockAccessKey: map['BEDROCK_ACCESS_KEY_ID'],
     bedrockSecretKey: map['BEDROCK_SECRET_ACCESS_KEY'],
@@ -78,7 +102,7 @@ async function getEmbeddingSettings(): Promise<EmbeddingSettings> {
 }
 
 async function generateEmbeddings(texts: string[], embSettings: EmbeddingSettings): Promise<number[][]> {
-  switch (embSettings.provider) {
+  switch (normalizeEmbeddingProvider(embSettings.provider)) {
     case 'openai': {
       if (!embSettings.openAIKey) throw new Error('OpenAI API key not configured');
       const openai = new OpenAI({ apiKey: embSettings.openAIKey });
@@ -91,28 +115,49 @@ async function generateEmbeddings(texts: string[], embSettings: EmbeddingSetting
       return embeddings;
     }
 
-    case 'bedrock': {
-      if (!embSettings.bedrockAccessKey || !embSettings.bedrockSecretKey) {
-        throw new Error('Bedrock credentials not configured');
+    case 'amazon-bedrock': {
+      const region =
+        process.env.AWS_REGION ?? embSettings.bedrockRegion ?? 'us-east-1';
+      let client: BedrockRuntimeClient;
+      if (
+        !process.env.AWS_LAMBDA_FUNCTION_NAME &&
+        embSettings.bedrockAccessKey &&
+        embSettings.bedrockSecretKey
+      ) {
+        client = new BedrockRuntimeClient({
+          region,
+          credentials: {
+            accessKeyId: embSettings.bedrockAccessKey,
+            secretAccessKey: embSettings.bedrockSecretKey,
+          },
+        });
+      } else {
+        // Lambda uses its workload role through the ambient AWS credential chain.
+        client = new BedrockRuntimeClient({ region });
       }
-      const client = new BedrockRuntimeClient({
-        region: embSettings.bedrockRegion ?? 'us-east-1',
-        credentials: {
-          accessKeyId: embSettings.bedrockAccessKey,
-          secretAccessKey: embSettings.bedrockSecretKey,
-        },
-      });
       const embeddings: number[][] = [];
       for (const text of texts) {
         const command = new InvokeModelCommand({
           modelId: embSettings.modelId,
           contentType: 'application/json',
           accept: 'application/json',
-          body: JSON.stringify({ inputText: text }),
+          body: buildBedrockEmbeddingBody(
+            embSettings.modelId,
+            text,
+            embSettings.dimensions
+          ),
         });
         const response = await client.send(command);
-        const result = JSON.parse(new TextDecoder().decode(response.body)) as { embedding: number[] };
-        embeddings.push(result.embedding);
+        const result = JSON.parse(
+          new TextDecoder().decode(response.body)
+        ) as unknown;
+        embeddings.push(
+          parseEmbeddingVector(
+            result,
+            embSettings.dimensions,
+            embSettings.modelId
+          )
+        );
       }
       return embeddings;
     }
@@ -183,8 +228,41 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
   const db = await getDb();
 
   try {
+    if (
+      message.chunkIds.length === 0 ||
+      message.chunkIds.length !== message.texts.length ||
+      !message.chunkIds.every((chunkId) => Number.isSafeInteger(chunkId) && chunkId > 0)
+    ) {
+      throw new Error('Embedding message has invalid or mismatched chunk data');
+    }
+    let effectiveSettings = embSettings;
+    if (message.generationId) {
+      const [generation] = await db.execute<{
+        embedding_model: string | null;
+        embedding_dimensions: number | null;
+      }>(sql`
+        SELECT embedding_model, embedding_dimensions
+        FROM repository_index_generations
+        WHERE id = ${message.generationId}::uuid
+        LIMIT 1
+      `);
+      if (!generation) {
+        throw new Error(`Index generation ${message.generationId} was not found`);
+      }
+      const descriptor = parseEmbeddingDescriptor(
+        generation.embedding_model,
+        generation.embedding_dimensions
+      );
+      effectiveSettings = {
+        ...embSettings,
+        provider: descriptor.provider,
+        modelId: descriptor.modelId,
+        dimensions: descriptor.dimensions,
+      };
+    }
+
     const embeddings = await retryWithBackoff(
-      () => generateEmbeddings(message.texts, embSettings),
+      () => generateEmbeddings(message.texts, effectiveSettings),
       3,
       2000
     );
@@ -199,8 +277,13 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
       const chunkId = message.chunkIds[i];
       const embedding = embeddings[i];
 
-      if (!embedding.every((v) => typeof v === 'number' && isFinite(v))) {
-        throw new Error(`Invalid embedding values for chunk ${chunkId}: contains NaN or Infinity`);
+      if (
+        embedding.length !== effectiveSettings.dimensions ||
+        !embedding.every((v) => typeof v === 'number' && Number.isFinite(v))
+      ) {
+        throw new Error(
+          `Invalid embedding for chunk ${chunkId}: expected ${effectiveSettings.dimensions} finite values`
+        );
       }
 
       const embeddingStr = `[${embedding.join(',')}]`;
@@ -209,9 +292,22 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
 
       // Use raw SQL for the vector cast — postgres.js parameterised queries
       // don't automatically coerce text to the vector column type.
-      await db.execute(
-        sql`UPDATE repository_item_chunks SET embedding = ${embeddingStr}::vector WHERE id = ${chunkId}`
-      );
+      if (message.generationId) {
+        const updated = await db.execute(sql`
+          UPDATE repository_item_chunks
+          SET embedding = ${embeddingStr}::vector
+          WHERE id = ${chunkId}
+            AND index_generation_id = ${message.generationId}::uuid
+          RETURNING id
+        `);
+        if (updated.length !== 1) {
+          throw new Error(`Chunk ${chunkId} does not belong to generation ${message.generationId}`);
+        }
+      } else {
+        await db.execute(
+          sql`UPDATE repository_item_chunks SET embedding = ${embeddingStr}::vector WHERE id = ${chunkId}`
+        );
+      }
     }
 
     let pendingGenerationChunks = 0;

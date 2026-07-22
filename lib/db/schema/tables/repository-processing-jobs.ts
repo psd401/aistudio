@@ -47,6 +47,21 @@ export interface RepositoryProcessingMetrics {
   imageHeight?: number;
   thumbnailBytes?: number;
   ocrLines?: number;
+  bdaInvocationArn?: string;
+  bdaOutputPrefix?: string;
+  bdaResultObjectKey?: string;
+  mediaDurationMs?: number;
+  mediaFormat?: string;
+  mediaCodec?: string;
+  mediaChannels?: number;
+  frameRate?: number;
+  frameWidth?: number;
+  frameHeight?: number;
+  wordCount?: number;
+  topicCount?: number;
+  shotCount?: number;
+  chapterCount?: number;
+  speakerCount?: number;
   estimatedCostUsd?: number;
 }
 

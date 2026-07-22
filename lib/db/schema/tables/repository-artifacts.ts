@@ -24,6 +24,7 @@ export type RepositoryArtifactKind =
   | "image"
   | "thumbnail"
   | "audio"
+  | "video"
   | "transcript"
   | "caption";
 

@@ -35,6 +35,8 @@
         "bedrock:CallWithBearerToken",
         "bedrock:ApplyGuardrail",
         "bedrock:GetGuardrail",
+        "bedrock:InvokeDataAutomationAsync",
+        "bedrock:GetDataAutomationStatus",
         "bedrock-agentcore:InvokeAgentRuntime",
         "bedrock-agentcore:InvokeAgentRuntimeForUser",
         "ssm:GetParameter",

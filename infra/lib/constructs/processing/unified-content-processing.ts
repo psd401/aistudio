@@ -1,5 +1,6 @@
 import * as path from "path";
 import * as cdk from "aws-cdk-lib";
+import * as bedrock from "aws-cdk-lib/aws-bedrock";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as events from "aws-cdk-lib/aws-events";
 import * as eventsTargets from "aws-cdk-lib/aws-events-targets";
@@ -42,6 +43,57 @@ export class UnifiedContentProcessing extends Construct {
     const stack = cdk.Stack.of(this);
     const functionName =
       `aistudio-${props.environment}-unified-content-processor`;
+    const dataAutomationProfileArn =
+      `arn:${stack.partition}:bedrock:${stack.region}:${stack.account}:` +
+      "data-automation-profile/us.data-automation-v1";
+
+    const mediaProject = new bedrock.CfnDataAutomationProject(
+      this,
+      "MediaDataAutomationProject",
+      {
+        projectName: `aistudio-${props.environment}-repository-media`,
+        projectDescription:
+          "Canonical repository audio transcripts and video scene intelligence",
+        projectType: "ASYNC",
+        standardOutputConfiguration: {
+          audio: {
+            extraction: {
+              category: {
+                state: "ENABLED",
+                types: ["TRANSCRIPT"],
+                typeConfiguration: {
+                  transcript: {
+                    speakerLabeling: { state: "ENABLED" },
+                    channelLabeling: { state: "ENABLED" },
+                  },
+                },
+              },
+            },
+            generativeField: {
+              state: "ENABLED",
+              types: ["AUDIO_SUMMARY", "TOPIC_SUMMARY"],
+            },
+          },
+          video: {
+            extraction: {
+              category: {
+                state: "ENABLED",
+                types: ["TRANSCRIPT", "TEXT_DETECTION"],
+              },
+              boundingBox: { state: "ENABLED" },
+            },
+            generativeField: {
+              state: "ENABLED",
+              types: ["VIDEO_SUMMARY", "CHAPTER_SUMMARY"],
+            },
+          },
+        },
+        tags: [
+          { key: "Environment", value: props.environment },
+          { key: "ManagedBy", value: "cdk" },
+        ],
+      }
+    );
 
     this.deadLetterQueue = new sqs.Queue(this, "DeadLetterQueue", {
       queueName: `aistudio-${props.environment}-content-processing-dlq`,
@@ -111,6 +163,14 @@ export class UnifiedContentProcessing extends Construct {
                 resources: [
                   `${props.documentsBucket.bucketArn}/repositories/*`,
                 ],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalRepositoryArtifactDiscovery",
+                actions: ["s3:ListBucket"],
+                resources: [props.documentsBucket.bucketArn],
+                conditions: {
+                  StringLike: { "s3:prefix": ["repositories/*"] },
+                },
               }),
               new iam.PolicyStatement({
                 sid: "AllowEnableS3EventBridgeEvents",
@@ -205,6 +265,14 @@ export class UnifiedContentProcessing extends Construct {
                   `${props.documentsBucket.bucketArn}/repositories/*`,
                 ],
               }),
+              new iam.PolicyStatement({
+                sid: "CanonicalRepositoryArtifactDiscovery",
+                actions: ["s3:ListBucket"],
+                resources: [props.documentsBucket.bucketArn],
+                conditions: {
+                  StringLike: { "s3:prefix": ["repositories/*"] },
+                },
+              }),
               // Textract asynchronous OCR does not support resource-level IAM.
               new iam.PolicyStatement({
                 sid: "CanonicalPdfOcr",
@@ -223,6 +291,24 @@ export class UnifiedContentProcessing extends Construct {
                     (region) =>
                       `arn:${stack.partition}:bedrock:${region}::foundation-model/amazon.nova-*-v1:0`
                   ),
+                ],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalMediaAnalysis",
+                actions: ["bedrock:InvokeDataAutomationAsync"],
+                resources: [
+                  mediaProject.attrProjectArn,
+                  ...["us-east-1", "us-east-2", "us-west-1", "us-west-2"].map(
+                    (region) =>
+                      `arn:${stack.partition}:bedrock:${region}:${stack.account}:data-automation-profile/us.data-automation-v1`
+                  ),
+                ],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalMediaAnalysisStatus",
+                actions: ["bedrock:GetDataAutomationStatus"],
+                resources: [
+                  `arn:${stack.partition}:bedrock:${stack.region}:${stack.account}:data-automation-invocation/*`,
                 ],
               }),
             ],
@@ -261,6 +347,8 @@ export class UnifiedContentProcessing extends Construct {
         DOCUMENTS_BUCKET_NAME: props.documentsBucket.bucketName,
         CONTENT_PROCESSING_QUEUE_URL: this.queue.queueUrl,
         EMBEDDING_QUEUE_URL: props.embeddingQueue.queueUrl,
+        BDA_DATA_AUTOMATION_PROJECT_ARN: mediaProject.attrProjectArn,
+        BDA_DATA_AUTOMATION_PROFILE_ARN: dataAutomationProfileArn,
         DATABASE_HOST: props.databaseHost,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
         DATABASE_NAME: "aistudio",
@@ -273,7 +361,10 @@ export class UnifiedContentProcessing extends Construct {
         sourceMap: true,
         minify: false,
         externalModules: ["@aws-sdk/*"],
-        nodeModules: ["sharp"],
+        nodeModules: [
+          "sharp",
+          "@aws-sdk/client-bedrock-data-automation-runtime",
+        ],
         // CDK's local bundler installs native modules for the synth host. Re-run
         // the pinned install for the Lambda target so macOS and x64 synths both
         // package Sharp's Linux ARM64 libvips binary without requiring Docker.

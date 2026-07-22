@@ -49,7 +49,6 @@ interface SettingsFormProps {
   onSave: (data: FormValues) => Promise<void>
   setting: Setting | null
 }
-
 const categories = [
   { value: "ai", label: "AI Configuration" },
   { value: "ai_providers", label: "AI Providers" },
@@ -57,6 +56,7 @@ const categories = [
   { value: "storage", label: "Storage" },
   { value: "Content Platform", label: "Content Platform" },
   { value: "external_services", label: "External Services" },
+  { value: "embeddings", label: "Embeddings" },
   { value: "voice", label: "Voice Mode" },
 ]
 
@@ -73,6 +73,11 @@ const commonSettings = [
   { key: "NEXUS_ROUTER_MODE", category: "ai", description: "Nexus model router mode: active, shadow, or off", isSecret: false },
   { key: "ASSISTANT_ARCHITECT_ROUTER_MODE", category: "ai", description: "Assistant Architect model router mode: active, shadow, or off", isSecret: false },
   { key: "NEXUS_ROUTER_CONFIG_V1", category: "ai", description: "JSON configuration for Nexus classifier, family/tier candidates, and web-search/image/PSD-data specialists", isSecret: false },
+  { key: "EMBEDDING_MODEL_PROVIDER", category: "embeddings", description: "Repository embedding provider: amazon-bedrock, openai, or azure", isSecret: false },
+  { key: "EMBEDDING_MODEL_ID", category: "embeddings", description: "Model ID used for repository indexing and semantic queries", isSecret: false },
+  { key: "EMBEDDING_DIMENSIONS", category: "embeddings", description: "Embedding dimensions; must match the selected model and database vector column", isSecret: false },
+  { key: "EMBEDDING_MAX_TOKENS", category: "embeddings", description: "Maximum embedding input tokens before segmentation", isSecret: false },
+  { key: "EMBEDDING_BATCH_SIZE", category: "embeddings", description: "Maximum texts per provider batch when batching is supported", isSecret: false },
   { key: "S3_BUCKET", category: "storage", description: "AWS S3 bucket name for document storage", isSecret: false },
   { key: "AWS_REGION", category: "storage", description: "AWS region for S3 operations", isSecret: false },
   { key: "CONTENT_PLATFORM_ENABLED", category: "Content Platform", description: "Enable the unified repository content platform", isSecret: false },
@@ -84,7 +89,7 @@ const commonSettings = [
   { key: "CONTENT_MAX_PDF_SIZE_MB", category: "Content Platform", description: "Maximum PDF size for the canonical PDF processor", isSecret: false },
   { key: "CONTENT_MAX_OFFICE_SIZE_MB", category: "Content Platform", description: "Maximum DOCX, XLSX, or PPTX size for the canonical Office processor", isSecret: false },
   { key: "CONTENT_MAX_IMAGE_SIZE_MB", category: "Content Platform", description: "Maximum JPEG, PNG, WebP, GIF, or TIFF size for the canonical image processor", isSecret: false },
-  { key: "CONTENT_MAX_MEDIA_HOURS", category: "Content Platform", description: "Maximum audio or video duration in hours", isSecret: false },
+  { key: "CONTENT_MAX_MEDIA_HOURS", category: "Content Platform", description: "Maximum audio or video duration in hours (1-4, matching Bedrock Data Automation)", isSecret: false },
   { key: "CONTENT_MALWARE_SCAN_REQUIRED", category: "Content Platform", description: "Require a successful malware policy decision before quarantine release", isSecret: false },
   { key: "CONTENT_OCR_STRATEGY", category: "Content Platform", description: "OCR strategy: auto, textract, or disabled", isSecret: false },
   { key: "CONTENT_IMAGE_CAPTION_MODEL_ID", category: "Content Platform", description: "Amazon Bedrock Nova model used for canonical image descriptions", isSecret: false },
