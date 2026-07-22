@@ -164,3 +164,12 @@ export function vector(columnName: string, dimensions: number = 1536) {
     },
   })(columnName);
 }
+
+/** PostgreSQL full-text-search vector. Generated columns are read-only. */
+export function tsvector(columnName: string) {
+  return customType<{ data: string; driverData: string }>({
+    dataType() {
+      return "tsvector";
+    },
+  })(columnName);
+}

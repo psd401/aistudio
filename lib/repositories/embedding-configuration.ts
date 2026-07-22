@@ -3,6 +3,8 @@ export const DEFAULT_REPOSITORY_EMBEDDING_MODEL_ID =
   "amazon.titan-embed-text-v1";
 export const DEFAULT_REPOSITORY_EMBEDDING_DIMENSIONS = 1536;
 export const REPOSITORY_VECTOR_DIMENSIONS = 1536;
+export const DEFAULT_REPOSITORY_VISUAL_EMBEDDING_MODEL_ID = "cohere.embed-v4:0";
+export const DEFAULT_REPOSITORY_VISUAL_EMBEDDING_DIMENSIONS = 1536;
 
 export interface RepositoryEmbeddingConfiguration {
   provider: string;
@@ -79,4 +81,26 @@ export function canReuseRepositoryEmbeddings(
 ): boolean {
   if (!nextModel || !nextDimensions) return true;
   return activeModel === nextModel && activeDimensions === nextDimensions;
+}
+
+export function repositoryVisualEmbeddingConfiguration(
+  enabled: boolean,
+  modelId = DEFAULT_REPOSITORY_VISUAL_EMBEDDING_MODEL_ID,
+  dimensions = DEFAULT_REPOSITORY_VISUAL_EMBEDDING_DIMENSIONS,
+): RepositoryEmbeddingConfiguration | null {
+  if (!enabled) return null;
+  if (modelId.trim() !== "cohere.embed-v4:0") {
+    throw new Error("Repository visual embeddings require Cohere Embed v4");
+  }
+  if (dimensions !== REPOSITORY_VECTOR_DIMENSIONS) {
+    throw new Error(
+      `Repository visual embeddings must use ${REPOSITORY_VECTOR_DIMENSIONS} dimensions`,
+    );
+  }
+  return {
+    provider: "amazon-bedrock",
+    modelId: modelId.trim(),
+    dimensions,
+    descriptor: repositoryEmbeddingDescriptor("amazon-bedrock", modelId),
+  };
 }

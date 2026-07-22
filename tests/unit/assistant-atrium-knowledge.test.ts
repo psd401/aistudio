@@ -30,10 +30,45 @@ jest.mock("drizzle-orm", () => ({
   eq: (...a: unknown[]) => a,
   sql: Object.assign((..._a: unknown[]) => ({}), {}),
 }));
-// The repository search path (vectorSearch/hybridSearch) is not under test.
+const retrieveRepositoryContentMock = jest.fn(
+  async (..._args: unknown[]): Promise<{
+    results: Array<Record<string, unknown>>;
+    diagnostics: Record<string, unknown>;
+  }> => ({
+    results: [],
+    diagnostics: {},
+  }),
+);
+jest.mock("@/lib/repositories/retrieval-v2/service", () => ({
+  retrieveRepositoryContent: (...args: unknown[]) =>
+    retrieveRepositoryContentMock(...args),
+}));
+const contentReadV2ActiveMock = jest.fn((_config: unknown) => true);
+jest.mock("@/lib/repositories/content-platform/config", () => ({
+  getContentPlatformConfig: jest.fn(async () => ({
+    enabled: true,
+    readV2Enabled: true,
+  })),
+  isContentReadV2Active: (config: unknown) => contentReadV2ActiveMock(config),
+}));
+const accessibleRepositoriesMock = jest.fn(
+  async (..._args: unknown[]): Promise<
+    Array<{ id: number; name: string; isAccessible: boolean }>
+  > => []
+);
+jest.mock("@/lib/db/drizzle", () => ({
+  getAccessibleRepositoriesByCognitoSub: (...args: unknown[]) =>
+    accessibleRepositoriesMock(...args),
+}));
+const hybridSearchMock = jest.fn(
+  async (..._args: unknown[]): Promise<Array<Record<string, unknown>>> => []
+);
+const vectorSearchMock = jest.fn(
+  async (..._args: unknown[]): Promise<Array<Record<string, unknown>>> => []
+);
 jest.mock("@/lib/repositories/search-service", () => ({
-  vectorSearch: jest.fn(async () => []),
-  hybridSearch: jest.fn(async () => []),
+  hybridSearch: (...args: unknown[]) => hybridSearchMock(...args),
+  vectorSearch: (...args: unknown[]) => vectorSearchMock(...args),
 }));
 // Deterministic ~4-chars-per-token tokenizer (mirrors countTokens' fallback).
 jest.mock("js-tiktoken", () => ({
@@ -64,6 +99,7 @@ jest.mock("@/lib/content/requester-from-auth", () => ({
 
 import {
   retrieveAtriumKnowledgeForPrompt,
+  retrieveKnowledgeForPrompt,
   formatAtriumKnowledgeContext,
   resolveScheduledAtriumRetrievalRequester,
 } from "@/lib/assistant-architect/knowledge-retrieval";
@@ -95,6 +131,107 @@ beforeEach(() => {
   executeQueryMock.mockClear();
   searchForAssistantMock.mockReset();
   searchForAssistantMock.mockResolvedValue([]);
+  retrieveRepositoryContentMock.mockReset();
+  retrieveRepositoryContentMock.mockResolvedValue({ results: [], diagnostics: {} });
+  contentReadV2ActiveMock.mockReset();
+  contentReadV2ActiveMock.mockReturnValue(true);
+  accessibleRepositoriesMock.mockReset();
+  accessibleRepositoriesMock.mockResolvedValue([]);
+  hybridSearchMock.mockReset();
+  hybridSearchMock.mockResolvedValue([]);
+  vectorSearchMock.mockReset();
+  vectorSearchMock.mockResolvedValue([]);
+});
+
+describe("retrieveKnowledgeForPrompt — shared repository retrieval", () => {
+  it("uses the executing user rather than the assistant owner and includes expanded context", async () => {
+    retrieveRepositoryContentMock.mockResolvedValue({
+      results: [
+        {
+          chunkId: 8,
+          itemId: 9,
+          itemName: "Handbook",
+          content: "primary",
+          similarity: 0.9,
+          repositoryId: 10,
+          repositoryName: "Policies",
+          context: [
+            {
+              contextPrefix: "Page 4",
+              content: "expanded policy context",
+            },
+          ],
+        },
+      ],
+      diagnostics: {},
+    });
+
+    const chunks = await retrieveKnowledgeForPrompt(
+      "what is the policy?",
+      [10],
+      "executing-user",
+      "assistant-owner",
+      { maxChunks: 4, maxTokens: 1200, vectorWeight: 0.65 },
+    );
+
+    expect(retrieveRepositoryContentMock).toHaveBeenCalledWith({
+      query: "what is the policy?",
+      repositoryIds: [10],
+      userCognitoSub: "executing-user",
+      mode: "hybrid",
+      limit: 4,
+      threshold: 0.7,
+      tokenBudget: 1200,
+      denseWeight: 0.65,
+    });
+    expect(chunks[0]?.content).toBe("Page 4\nexpanded policy context");
+  });
+
+  it("keeps legacy retrieval available behind the rollout flag without owner elevation", async () => {
+    contentReadV2ActiveMock.mockReturnValue(false);
+    accessibleRepositoriesMock.mockResolvedValue([
+      { id: 10, name: "Policies", isAccessible: true },
+      { id: 11, name: "Private", isAccessible: false },
+    ]);
+    hybridSearchMock.mockResolvedValue([
+      {
+        chunkId: 8,
+        itemId: 9,
+        itemName: "Handbook",
+        content: "legacy policy",
+        similarity: 0.8,
+        chunkIndex: 0,
+        metadata: {},
+      },
+    ]);
+
+    const chunks = await retrieveKnowledgeForPrompt(
+      "what is the policy?",
+      [10, 11],
+      "executing-user",
+      "assistant-owner",
+      { maxChunks: 4, maxTokens: 1200, vectorWeight: 0.65 },
+    );
+
+    expect(accessibleRepositoriesMock).toHaveBeenCalledWith(
+      [10, 11],
+      "executing-user",
+    );
+    expect(hybridSearchMock).toHaveBeenCalledWith("what is the policy?", {
+      repositoryId: 10,
+      limit: 4,
+      threshold: 0.7,
+      vectorWeight: 0.65,
+    });
+    expect(retrieveRepositoryContentMock).not.toHaveBeenCalled();
+    expect(chunks).toEqual([
+      expect.objectContaining({
+        content: "legacy policy",
+        repositoryId: 10,
+        repositoryName: "Policies",
+      }),
+    ]);
+  });
 });
 
 describe("retrieveAtriumKnowledgeForPrompt — gating", () => {

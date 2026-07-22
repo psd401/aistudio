@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import type JSZip from "jszip";
 import type { RepositorySourceLocator } from "@/lib/db/schema";
+import {
+  countRepositoryTokens,
+  splitTokenizerAwareText,
+} from "./token-segmentation";
 
 export const OFFICE_CONTENT_TYPES = {
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -14,9 +18,9 @@ export type OfficeContentType = (typeof OFFICE_CONTENT_TYPES)[OfficeDocumentType
 export const OFFICE_PROCESSOR_VERSIONS: Readonly<
   Record<OfficeDocumentType, string>
 > = {
-  docx: "office-docx-v1",
-  xlsx: "office-xlsx-v1",
-  pptx: "office-pptx-v1",
+  docx: "office-docx-v2",
+  xlsx: "office-xlsx-v2",
+  pptx: "office-pptx-v2",
 };
 
 export interface OfficeSheet {
@@ -43,6 +47,9 @@ export interface OfficeSegment {
   chunkIndex: number;
   tokens: number;
   sourceLocator: RepositorySourceLocator;
+  contextPrefix: string;
+  segmentLevel: "section" | "chunk";
+  parentChunkIndex?: number;
 }
 
 export interface OfficeExtractionResult {
@@ -133,16 +140,6 @@ export function isOfficeContentType(contentType: string): contentType is OfficeC
   return documentTypeForContentType(contentType) !== null;
 }
 
-function findSplitPoint(text: string): number {
-  if (text.length <= MAX_SEGMENT_CHARACTERS) return text.length;
-  const floor = Math.floor(MAX_SEGMENT_CHARACTERS * 0.6);
-  for (const separator of ["\n\n", "\n", ". ", "; ", ", ", " "]) {
-    const index = text.lastIndexOf(separator, MAX_SEGMENT_CHARACTERS);
-    if (index >= floor) return index + separator.length;
-  }
-  return MAX_SEGMENT_CHARACTERS;
-}
-
 function splitLocatedText(
   text: string,
   sourceLocator: RepositorySourceLocator
@@ -152,29 +149,51 @@ function splitLocatedText(
     content: string;
     sourceLocator: RepositorySourceLocator;
   }> = [];
-  let remaining = normalized;
-  while (remaining) {
-    const splitAt = findSplitPoint(remaining);
-    const content = remaining.slice(0, splitAt).trim();
-    if (content) output.push({ content, sourceLocator });
-    remaining = remaining.slice(splitAt).trimStart();
+  for (const content of splitTokenizerAwareText(normalized)) {
+    output.push({ content, sourceLocator });
   }
   return output;
+}
+
+function contextForLocator(locator: RepositorySourceLocator): string {
+  if (locator.slide) return `Slide ${locator.slide}`;
+  if (locator.paragraph) return `Paragraph ${locator.paragraph}`;
+  if (locator.sheet) {
+    return locator.cellRange
+      ? `${locator.sheet}!${locator.cellRange}`
+      : `Sheet ${locator.sheet}`;
+  }
+  if (locator.headingPath?.length) return locator.headingPath.join(" › ");
+  return "Document section";
 }
 
 function buildSegments(
   sections: Array<{ content: string; sourceLocator: RepositorySourceLocator }>
 ): OfficeSegment[] {
-  const located = sections.flatMap((section) =>
-    splitLocatedText(section.content, section.sourceLocator)
-  );
-  return located.map((section, chunkIndex) => ({
-    content: section.content,
-    contentHash: createHash("sha256").update(section.content).digest("hex"),
-    chunkIndex,
-    tokens: Math.ceil(section.content.length / 4),
-    sourceLocator: section.sourceLocator,
-  }));
+  const output: OfficeSegment[] = [];
+  for (const section of sections) {
+    const located = splitLocatedText(section.content, section.sourceLocator);
+    const parentChunkIndex = output.length;
+    const contextPrefix = contextForLocator(section.sourceLocator);
+    for (const [sectionChunkIndex, locatedChunk] of located.entries()) {
+      output.push({
+        content: locatedChunk.content,
+        contentHash: createHash("sha256")
+          .update(locatedChunk.content)
+          .digest("hex"),
+        chunkIndex: output.length,
+        tokens: countRepositoryTokens(
+          `${contextPrefix}\n${locatedChunk.content}`
+        ),
+        sourceLocator: locatedChunk.sourceLocator,
+        contextPrefix,
+        segmentLevel: sectionChunkIndex === 0 ? "section" : "chunk",
+        parentChunkIndex:
+          sectionChunkIndex === 0 ? undefined : parentChunkIndex,
+      });
+    }
+  }
+  return output;
 }
 
 function marker(locator: RepositorySourceLocator): string {

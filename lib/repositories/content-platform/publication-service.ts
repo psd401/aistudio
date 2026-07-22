@@ -1,4 +1,4 @@
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { executeTransaction } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
@@ -9,6 +9,7 @@ import {
   repositoryItemVersions,
   type RepositoryArtifactKind,
   type RepositoryInspectionStatus,
+  type RepositorySegmentAccessScope,
   type RepositorySourceLocator,
   type RepositorySourceRegion,
 } from "@/lib/db/schema";
@@ -22,6 +23,10 @@ export interface PublishableSegment {
   tokens: number;
   sourceLocator: RepositorySourceLocator;
   modality?: "text" | "image" | "audio" | "video" | "table";
+  contextPrefix?: string;
+  segmentLevel?: "document" | "section" | "chunk";
+  parentChunkIndex?: number;
+  accessScope?: RepositorySegmentAccessScope;
 }
 export interface PublishableArtifact {
   kind: Exclude<RepositoryArtifactKind, "canonical_text">;
@@ -53,6 +58,9 @@ export interface PublishDocumentVersionInput {
   additionalArtifacts?: PublishableArtifact[];
   embeddingModel?: string;
   embeddingDimensions?: number;
+  visualEmbeddingModel?: string;
+  visualEmbeddingDimensions?: number;
+  segmentationVersion?: string;
 }
 
 export type PublishPdfVersionInput = Omit<
@@ -152,9 +160,9 @@ function validatePublicationInput(input: PublishDocumentVersionInput): void {
 
 /**
  * Atomically publish one processed document into a new repository index generation.
- * The current generation is copied forward (excluding this logical item), new
- * segments are added, and only then is the generation pointer swapped. A crash
- * before commit leaves the prior active generation untouched.
+ * The newest building generation (or current active generation) is copied
+ * forward, excluding this logical item. Generations that require embeddings
+ * remain building until the embedding worker atomically swaps the pointer.
  */
 export async function publishDocumentVersion(
   input: PublishDocumentVersionInput
@@ -190,6 +198,21 @@ export async function publishDocumentVersion(
         throw new Error("A superseded item version cannot become searchable");
       }
 
+      const [buildingGeneration] = await tx
+        .select({ id: repositoryIndexGenerations.id })
+        .from(repositoryIndexGenerations)
+        .where(
+          and(
+            eq(repositoryIndexGenerations.repositoryId, context.repositoryId),
+            eq(repositoryIndexGenerations.status, "building")
+          )
+        )
+        .orderBy(desc(repositoryIndexGenerations.createdAt))
+        .limit(1)
+        .for("update");
+      const sourceGenerationId =
+        buildingGeneration?.id ?? context.activeGenerationId;
+
       const [existingArtifact] = await tx
         .select({ id: repositoryArtifacts.id })
         .from(repositoryArtifacts)
@@ -200,20 +223,25 @@ export async function publishDocumentVersion(
         existingArtifact &&
         context.processingStatus === "completed" &&
         context.storageStatus === "available" &&
-        context.activeGenerationId
+        sourceGenerationId
       ) {
         const [publishedChunk] = await tx
           .select({ generationId: repositoryItemChunks.indexGenerationId })
           .from(repositoryItemChunks)
+          .innerJoin(
+            repositoryIndexGenerations,
+            eq(
+              repositoryIndexGenerations.id,
+              repositoryItemChunks.indexGenerationId
+            )
+          )
           .where(
             and(
               eq(repositoryItemChunks.itemVersionId, input.itemVersionId),
-              eq(
-                repositoryItemChunks.indexGenerationId,
-                context.activeGenerationId
-              )
+              inArray(repositoryIndexGenerations.status, ["building", "active"])
             )
           )
+          .orderBy(desc(repositoryIndexGenerations.createdAt))
           .limit(1);
         if (publishedChunk?.generationId) {
           return {
@@ -259,16 +287,21 @@ export async function publishDocumentVersion(
       if (!createdArtifact) throw new Error("Failed to create canonical artifact");
 
       let reuseActiveEmbeddings = true;
-      if (context.activeGenerationId) {
+      let reuseActiveVisualEmbeddings = true;
+      if (sourceGenerationId) {
         const [activeGeneration] = await tx
           .select({
             embeddingModel: repositoryIndexGenerations.embeddingModel,
             embeddingDimensions:
               repositoryIndexGenerations.embeddingDimensions,
+            visualEmbeddingModel:
+              repositoryIndexGenerations.visualEmbeddingModel,
+            visualEmbeddingDimensions:
+              repositoryIndexGenerations.visualEmbeddingDimensions,
           })
           .from(repositoryIndexGenerations)
           .where(
-            eq(repositoryIndexGenerations.id, context.activeGenerationId)
+            eq(repositoryIndexGenerations.id, sourceGenerationId)
           )
           .limit(1);
         reuseActiveEmbeddings = canReuseRepositoryEmbeddings(
@@ -276,6 +309,12 @@ export async function publishDocumentVersion(
           activeGeneration?.embeddingDimensions,
           input.embeddingModel,
           input.embeddingDimensions
+        );
+        reuseActiveVisualEmbeddings = canReuseRepositoryEmbeddings(
+          activeGeneration?.visualEmbeddingModel,
+          activeGeneration?.visualEmbeddingDimensions,
+          input.visualEmbeddingModel,
+          input.visualEmbeddingDimensions
         );
       }
 
@@ -311,26 +350,32 @@ export async function publishDocumentVersion(
           status: "building",
           embeddingModel: input.embeddingModel,
           embeddingDimensions: input.embeddingDimensions,
+          visualEmbeddingModel: input.visualEmbeddingModel,
+          visualEmbeddingDimensions: input.visualEmbeddingDimensions,
+          segmentationVersion: input.segmentationVersion ?? "retrieval-v2",
           processorVersion: input.processorVersion,
         })
         .returning({ id: repositoryIndexGenerations.id });
       if (!generation) throw new Error("Failed to create index generation");
 
-      if (context.activeGenerationId) {
+      if (sourceGenerationId) {
         await tx.execute(sql`
           INSERT INTO repository_item_chunks (
             item_id, item_version_id, artifact_id, index_generation_id,
             content, chunk_index, metadata, modality, content_hash,
-            source_locator, embedding, tokens, created_at
+            source_locator, context_prefix, segment_level, parent_chunk_index,
+            access_scope, embedding, visual_embedding, tokens, created_at
           )
           SELECT
             item_id, item_version_id, artifact_id, ${generation.id},
             content, chunk_index, metadata, modality, content_hash,
-            source_locator,
+            source_locator, context_prefix, segment_level, parent_chunk_index,
+            access_scope,
             CASE WHEN ${reuseActiveEmbeddings} THEN embedding ELSE NULL END,
+            CASE WHEN ${reuseActiveVisualEmbeddings} THEN visual_embedding ELSE NULL END,
             tokens, now()
           FROM repository_item_chunks
-          WHERE index_generation_id = ${context.activeGenerationId}
+          WHERE index_generation_id = ${sourceGenerationId}
             AND item_id <> ${context.itemId}
         `);
       }
@@ -347,6 +392,10 @@ export async function publishDocumentVersion(
           modality: segment.modality ?? "text",
           contentHash: segment.contentHash,
           sourceLocator: segment.sourceLocator,
+          contextPrefix: segment.contextPrefix ?? "",
+          segmentLevel: segment.segmentLevel ?? "chunk",
+          parentChunkIndex: segment.parentChunkIndex,
+          accessScope: segment.accessScope ?? {},
           tokens: segment.tokens,
         }))
       );
@@ -362,32 +411,48 @@ export async function publishDocumentVersion(
         WHERE index_generation_id = ${generation.id}
       `);
 
-      if (context.activeGenerationId) {
+      if (buildingGeneration) {
         await tx
           .update(repositoryIndexGenerations)
           .set({ status: "superseded" })
           .where(
             and(
-              eq(repositoryIndexGenerations.id, context.activeGenerationId),
+              eq(repositoryIndexGenerations.id, buildingGeneration.id),
               ne(repositoryIndexGenerations.status, "superseded")
             )
           );
       }
 
       const publishedAt = new Date();
+      const requiresEmbedding = Boolean(
+        input.embeddingModel && input.embeddingDimensions
+      );
+      if (!requiresEmbedding && context.activeGenerationId) {
+        await tx
+          .update(repositoryIndexGenerations)
+          .set({ status: "superseded" })
+          .where(
+            and(
+              eq(repositoryIndexGenerations.id, context.activeGenerationId),
+              ne(repositoryIndexGenerations.id, generation.id)
+            )
+          );
+      }
       await tx
         .update(repositoryIndexGenerations)
         .set({
-          status: "active",
+          status: requiresEmbedding ? "building" : "active",
           sourceVersionCount: counts?.source_version_count ?? 1,
           segmentCount: counts?.segment_count ?? input.segments.length,
-          publishedAt,
+          publishedAt: requiresEmbedding ? null : publishedAt,
         })
         .where(eq(repositoryIndexGenerations.id, generation.id));
-      await tx
-        .update(knowledgeRepositories)
-        .set({ activeIndexGenerationId: generation.id, updatedAt: publishedAt })
-        .where(eq(knowledgeRepositories.id, context.repositoryId));
+      if (!requiresEmbedding) {
+        await tx
+          .update(knowledgeRepositories)
+          .set({ activeIndexGenerationId: generation.id, updatedAt: publishedAt })
+          .where(eq(knowledgeRepositories.id, context.repositoryId));
+      }
       await tx
         .update(repositoryItemVersions)
         .set({

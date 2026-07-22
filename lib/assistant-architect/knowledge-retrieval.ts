@@ -1,7 +1,13 @@
+import { retrieveRepositoryContent } from "@/lib/repositories/retrieval-v2/service"
 import { vectorSearch, hybridSearch } from "@/lib/repositories/search-service"
+import { getAccessibleRepositoriesByCognitoSub } from "@/lib/db/drizzle"
+import {
+  getContentPlatformConfig,
+  isContentReadV2Active,
+} from "@/lib/repositories/content-platform/config"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { assistantArchitects } from "@/lib/db/schema"
-import { eq, sql } from "drizzle-orm"
+import { eq } from "drizzle-orm"
 import { createLogger, generateRequestId } from "@/lib/logger"
 import { encodingForModel } from "js-tiktoken"
 // Import the requester builder from its concrete module (NOT the `@/lib/content`
@@ -65,6 +71,118 @@ function countTokens(text: string, requestId?: string): number {
   }
 }
 
+function applyKnowledgeTokenBudget(
+  chunks: KnowledgeChunk[],
+  maxTokens: number,
+  requestId?: string
+): KnowledgeChunk[] {
+  const limited: KnowledgeChunk[] = []
+  let totalTokens = 0
+
+  for (const chunk of chunks) {
+    const chunkTokens = countTokens(chunk.content, requestId)
+    if (totalTokens + chunkTokens <= maxTokens) {
+      limited.push(chunk)
+      totalTokens += chunkTokens
+      continue
+    }
+
+    const remainingTokens = maxTokens - totalTokens
+    if (remainingTokens > 100) {
+      limited.push({
+        ...chunk,
+        content:
+          truncateToTokenLimit(chunk.content, remainingTokens) +
+          "\n[... truncated for token limit]",
+      })
+    }
+    break
+  }
+
+  return limited
+}
+
+interface LegacyKnowledgeRequest {
+  promptContent: string
+  repositoryIds: number[]
+  userCognitoSub: string
+  opts: Required<KnowledgeRetrievalOptions>
+  requestId?: string
+  log: ReturnType<typeof createLogger>
+}
+
+function resolveKnowledgeOptions(
+  options: KnowledgeRetrievalOptions
+): Required<KnowledgeRetrievalOptions> {
+  return {
+    maxChunks: options.maxChunks ?? DEFAULT_OPTIONS.maxChunks ?? 10,
+    maxTokens: options.maxTokens ?? DEFAULT_OPTIONS.maxTokens ?? 4000,
+    similarityThreshold:
+      options.similarityThreshold ?? DEFAULT_OPTIONS.similarityThreshold ?? 0.7,
+    searchType: options.searchType ?? DEFAULT_OPTIONS.searchType ?? "hybrid",
+    vectorWeight: options.vectorWeight ?? DEFAULT_OPTIONS.vectorWeight ?? 0.8,
+  }
+}
+
+async function retrieveLegacyRepositoryKnowledge({
+  promptContent,
+  repositoryIds,
+  userCognitoSub,
+  opts,
+  requestId,
+  log,
+}: LegacyKnowledgeRequest): Promise<KnowledgeChunk[]> {
+  // The compatibility path deliberately checks only the executing user. An
+  // assistant owner's repository access configures bindings but must never
+  // elevate another user's access at execution time.
+  const repositories = (
+    await getAccessibleRepositoriesByCognitoSub(repositoryIds, userCognitoSub)
+  ).filter((repository) => repository.isAccessible)
+
+  const perRepositoryResults = await Promise.all(
+    repositories.map(async (repository): Promise<KnowledgeChunk[]> => {
+      try {
+        const results =
+          opts.searchType === "semantic"
+            ? await vectorSearch(promptContent, {
+                repositoryId: repository.id,
+                limit: opts.maxChunks,
+                threshold: opts.similarityThreshold,
+              })
+            : await hybridSearch(promptContent, {
+                repositoryId: repository.id,
+                limit: opts.maxChunks,
+                threshold: opts.similarityThreshold,
+                vectorWeight: opts.vectorWeight,
+              })
+
+        return results.map((result) => ({
+          chunkId: result.chunkId,
+          itemId: result.itemId,
+          itemName: result.itemName,
+          content: result.content,
+          similarity: result.similarity,
+          repositoryId: repository.id,
+          repositoryName: repository.name,
+        }))
+      } catch (error) {
+        log.error("Error searching legacy repository", {
+          repositoryId: repository.id,
+          error,
+        })
+        return []
+      }
+    })
+  )
+
+  const topResults = perRepositoryResults
+    .flat()
+    .sort((left, right) => right.similarity - left.similarity)
+    .slice(0, opts.maxChunks)
+
+  return applyKnowledgeTokenBudget(topResults, opts.maxTokens, requestId)
+}
+
 /**
  * Retrieve relevant knowledge chunks from specified repositories
  */
@@ -76,7 +194,7 @@ export async function retrieveKnowledgeForPrompt(
   options: KnowledgeRetrievalOptions = {},
   requestId?: string
 ): Promise<KnowledgeChunk[]> {
-  const opts = { ...DEFAULT_OPTIONS, ...options }
+  const opts = resolveKnowledgeOptions(options)
   const log = createLogger({
     requestId: requestId || generateRequestId(),
     module: 'knowledge-retrieval'
@@ -85,143 +203,50 @@ export async function retrieveKnowledgeForPrompt(
   if (!repositoryIds || repositoryIds.length === 0) {
     return []
   }
-
-  // Normalize optional assistant owner sub to handle null/undefined/empty string consistently
-  const ownerSub = assistantOwnerSub || null
-
+  // Assistant ownership configures bindings; it never grants the executing
+  // user data access. Both retrieval paths revalidate the current user.
+  void assistantOwnerSub
   try {
-    // First, verify user has access to all specified repositories
-    // NOTE: Uses CAST(... AS integer[]) instead of ::int[] shorthand because
-    // RDS Data API has parsing differences with PostgreSQL type cast shorthand. See Issue #583.
-    const accessibleRepos = await executeQuery(
-      (db) => db.execute(sql`
-        SELECT DISTINCT r.id, r.name
-        FROM knowledge_repositories r
-        WHERE r.id = ANY(CAST(${repositoryIds} AS integer[]))
-        -- Never RAG over system-managed repos (the Atrium retrieval index,
-        -- #1056): their content is governed by per-object canView, not
-        -- repository-level access. Atrium reads must go through retrievalService.
-        AND (r.metadata->>'systemManaged') IS DISTINCT FROM 'true'
-        AND (
-          r.is_public = true
-          OR r.owner_id = (SELECT id FROM users WHERE cognito_sub = ${userCognitoSub})
-          OR (${ownerSub} IS NOT NULL
-              AND r.owner_id = (SELECT id FROM users WHERE cognito_sub = ${ownerSub}))
-          OR EXISTS (
-            SELECT 1 FROM repository_access ra
-            JOIN users u ON u.id = ra.user_id
-            WHERE ra.repository_id = r.id AND u.cognito_sub = ${userCognitoSub}
-          )
-          OR EXISTS (
-            SELECT 1 FROM repository_access ra
-            JOIN user_roles ur ON ur.role_id = ra.role_id
-            JOIN users u ON u.id = ur.user_id
-            WHERE ra.repository_id = r.id AND u.cognito_sub = ${userCognitoSub}
-          )
-        )
-      `),
-      "getAccessibleRepositories"
-    )
-
-    // Runtime validation of query results
-    // postgres.js returns result directly as array-like object (no .rows property)
-    const rows = accessibleRepos as unknown as Array<Record<string, unknown>>
-    const repos: Array<{ id: number; name: string }> = []
-    for (const row of rows) {
-      // Validate row structure
-      if (typeof row === 'object' && row !== null && 'id' in row && 'name' in row) {
-        const id = row.id
-        const name = row.name
-        if (typeof id === 'number' && typeof name === 'string') {
-          repos.push({ id, name })
-        } else {
-          log.warn('Invalid row structure in repository query', { row })
-        }
-      } else {
-        log.warn('Invalid row in repository query results', { row })
-      }
-    }
-
-    if (repos.length !== repositoryIds.length) {
-      const accessibleIds = repos.map(r => r.id)
-      const inaccessibleIds = repositoryIds.filter(id => !accessibleIds.includes(id))
-      log.warn('User attempted to access repositories without permission', {
+    const config = await getContentPlatformConfig()
+    if (!isContentReadV2Active(config)) {
+      return retrieveLegacyRepositoryKnowledge({
+        promptContent,
+        repositoryIds,
         userCognitoSub,
-        inaccessibleIds
+        opts,
+        requestId,
+        log,
       })
-      // Continue with only accessible repositories
     }
 
-    if (repos.length === 0) {
-      return []
-    }
-
-    // Perform search across all accessible repositories
-    const searchPromises = repos.map(async (repo) => {
-      try {
-        let results
-        if (opts.searchType === "semantic") {
-          results = await vectorSearch(promptContent, {
-            repositoryId: repo.id,
-            limit: opts.maxChunks,
-            threshold: opts.similarityThreshold
-          })
-        } else {
-          results = await hybridSearch(promptContent, {
-            repositoryId: repo.id,
-            limit: opts.maxChunks,
-            threshold: opts.similarityThreshold,
-            vectorWeight: opts.vectorWeight
-          })
-        }
-        
-        // Add repository info to results
-        return results.map(result => ({
-          ...result,
-          repositoryId: repo.id,
-          repositoryName: repo.name
-        }))
-      } catch (error) {
-        log.error('Error searching repository', { repositoryId: repo.id, error })
-        return []
-      }
+    const response = await retrieveRepositoryContent({
+      query: promptContent,
+      repositoryIds,
+      userCognitoSub,
+      mode: opts.searchType === "semantic" ? "vector" : "hybrid",
+      limit: opts.maxChunks,
+      threshold: opts.similarityThreshold,
+      tokenBudget: opts.maxTokens,
+      denseWeight: opts.vectorWeight,
     })
-
-    const allResults = await Promise.all(searchPromises)
-    const flatResults = allResults.flat()
-
-    // Sort by similarity score and take top results
-    flatResults.sort((a, b) => b.similarity - a.similarity)
-    const topResults = flatResults.slice(0, opts.maxChunks)
-
-    // Apply token limit if specified
-    if (opts.maxTokens) {
-      const limitedResults: KnowledgeChunk[] = []
-      let totalTokens = 0
-
-      for (const chunk of topResults) {
-        const chunkTokens = countTokens(chunk.content)
-        if (totalTokens + chunkTokens <= opts.maxTokens) {
-          limitedResults.push(chunk)
-          totalTokens += chunkTokens
-        } else {
-          // If we can't fit the whole chunk, see if we can fit a truncated version
-          const remainingTokens = opts.maxTokens - totalTokens
-          if (remainingTokens > 100) { // Only include if we have reasonable space
-            const truncatedContent = truncateToTokenLimit(chunk.content, remainingTokens)
-            limitedResults.push({
-              ...chunk,
-              content: truncatedContent + "\n[... truncated for token limit]"
-            })
-          }
-          break
-        }
-      }
-
-      return limitedResults
-    }
-
-    return topResults
+    return response.results.map((result) => ({
+      chunkId: result.chunkId,
+      itemId: result.itemId,
+      itemName: result.itemName,
+      content:
+        result.context.length > 0
+          ? result.context
+              .map((segment) =>
+                [segment.contextPrefix, segment.content]
+                  .filter(Boolean)
+                  .join("\n")
+              )
+              .join("\n\n")
+          : result.content,
+      similarity: result.similarity,
+      repositoryId: result.repositoryId,
+      repositoryName: result.repositoryName,
+    }))
   } catch (error) {
     log.error('Error retrieving knowledge for prompt', { error })
     return []

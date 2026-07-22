@@ -33,7 +33,7 @@ describe("canonical Office processing", () => {
       })
     );
 
-    expect(extracted.processorVersion).toBe("office-docx-v1");
+    expect(extracted.processorVersion).toBe("office-docx-v2");
     expect(extracted.segments).toHaveLength(2);
     expect(extracted.segments.map((segment) => segment.sourceLocator)).toEqual([
       { paragraph: 1, paragraphEnd: 1 },
@@ -61,7 +61,7 @@ describe("canonical Office processing", () => {
       })
     );
 
-    expect(extracted.processorVersion).toBe("office-xlsx-v1");
+    expect(extracted.processorVersion).toBe("office-xlsx-v2");
     expect(extracted.segments).toHaveLength(1);
     expect(extracted.segments[0]?.sourceLocator).toEqual({
       sheet: "Contacts",

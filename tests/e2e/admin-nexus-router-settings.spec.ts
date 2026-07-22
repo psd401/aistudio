@@ -35,6 +35,12 @@ test.describe('Admin Nexus router settings', () => {
     await expect(page.getByText('CONTENT_PLATFORM_ENABLED')).toBeVisible()
     await expect(page.getByText('CONTENT_MAX_IMAGE_SIZE_MB')).toBeVisible()
     await expect(page.getByText('CONTENT_IMAGE_CAPTION_MODEL_ID')).toBeVisible()
+    await expect(page.getByText('CONTENT_RETRIEVAL_RERANK_ENABLED')).toBeVisible()
+    await expect(page.getByText('CONTENT_RETRIEVAL_RERANK_MODEL_ID')).toBeVisible()
+    await expect(page.getByText('CONTENT_RETRIEVAL_CANDIDATE_LIMIT')).toBeVisible()
+    await expect(page.getByText('CONTENT_RETRIEVAL_NEIGHBOR_COUNT')).toBeVisible()
+    await expect(page.getByText('CONTENT_RETRIEVAL_CONTEXT_TOKENS')).toBeVisible()
+    await expect(page.getByText('CONTENT_VISUAL_EMBEDDING_MODEL_ID')).toBeVisible()
 
     await page.getByRole('button', { name: 'Add Setting' }).click()
     const addSettingDialog = page.getByRole('dialog', { name: 'Add Setting' })

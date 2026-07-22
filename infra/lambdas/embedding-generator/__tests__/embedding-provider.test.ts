@@ -3,6 +3,7 @@ import {
   DEFAULT_EMBEDDING_MODEL_ID,
   DEFAULT_EMBEDDING_PROVIDER,
   buildBedrockEmbeddingBody,
+  buildCohereMultimodalEmbeddingBody,
   embeddingDescriptor,
   normalizeEmbeddingProvider,
   parseEmbeddingDescriptor,
@@ -56,8 +57,52 @@ describe('embedding provider contract', () => {
     );
   });
 
+  test('builds Cohere Embed v4 document requests for the visual index', () => {
+    expect(JSON.parse(buildBedrockEmbeddingBody('cohere.embed-v4:0', 'diagram', 1536))).toEqual({
+      texts: ['diagram'],
+      input_type: 'search_document',
+      embedding_types: ['float'],
+      output_dimension: 1536,
+      truncate: 'RIGHT',
+    });
+  });
+
+  test('builds interleaved image and context requests for visual documents', () => {
+    expect(
+      JSON.parse(
+        buildCohereMultimodalEmbeddingBody(
+          'cohere.embed-v4:0',
+          {
+            text: 'Campus map with evacuation route',
+            imageDataUri: 'data:image/jpeg;base64,AQID',
+          },
+          1536,
+        ),
+      ),
+    ).toEqual({
+      inputs: [
+        {
+          content: [
+            { type: 'text', text: 'Campus map with evacuation route' },
+            {
+              type: 'image_url',
+              image_url: { url: 'data:image/jpeg;base64,AQID' },
+            },
+          ],
+        },
+      ],
+      input_type: 'search_document',
+      embedding_types: ['float'],
+      output_dimension: 1536,
+      truncate: 'RIGHT',
+    });
+  });
+
   test('validates the provider response shape and values', () => {
     expect(parseEmbeddingVector({ embedding: [0.1, 0.2] }, 2, 'test-model')).toEqual([0.1, 0.2]);
+    expect(
+      parseEmbeddingVector({ embeddings: { float: [[0.1, 0.2]] } }, 2, 'cohere.embed-v4:0')
+    ).toEqual([0.1, 0.2]);
     expect(() => parseEmbeddingVector({ embedding: [Number.NaN] }, 1, 'test-model')).toThrow('non-finite');
   });
 });

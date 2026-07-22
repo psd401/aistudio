@@ -1,6 +1,21 @@
 import { tool } from 'ai';
 import { z } from 'zod';
-import { vectorSearch, keywordSearch, hybridSearch } from '@/lib/repositories/search-service';
+import { retrieveRepositoryContent } from '@/lib/repositories/retrieval-v2/service';
+import {
+  hybridSearch,
+  keywordSearch,
+  vectorSearch,
+} from '@/lib/repositories/search-service';
+import type { SearchCitation } from '@/lib/repositories/search-service';
+import type {
+  RetrievalCitation,
+  RetrievalContextSegment,
+  RetrievalMode,
+} from '@/lib/repositories/retrieval-v2/types';
+import {
+  getContentPlatformConfig,
+  isContentReadV2Active,
+} from '@/lib/repositories/content-platform/config';
 import { createLogger } from '@/lib/logger';
 import { getAccessibleRepositoriesByCognitoSub } from '@/lib/db/drizzle';
 
@@ -20,19 +35,36 @@ interface RepositoryToolOptions {
   assistantOwnerSub?: string;
 }
 
+interface RepositoryToolSearchHit {
+  content: string;
+  itemName: string;
+  similarity: number;
+  chunkIndex: number;
+  citation?: RetrievalCitation | SearchCitation;
+  context?: RetrievalContextSegment[];
+}
+
+interface RepositoryToolSearchRequest {
+  query: string;
+  repositoryIds: number[];
+  userCognitoSub: string;
+  mode: RetrievalMode;
+  limit: number;
+  threshold?: number;
+  vectorWeight?: number;
+}
+
 /**
  * Verify user has access to specified repositories
  * @throws Error if user has no access to any repositories
  */
 async function verifyRepositoryAccess(
   repositoryIds: number[],
-  userCognitoSub: string,
-  assistantOwnerSub?: string
+  userCognitoSub: string
 ): Promise<number[]> {
   const repositories = await getAccessibleRepositoriesByCognitoSub(
     repositoryIds,
-    userCognitoSub,
-    assistantOwnerSub
+    userCognitoSub
   );
 
   return repositories
@@ -40,11 +72,63 @@ async function verifyRepositoryAccess(
     .map(repo => repo.id);
 }
 
+async function searchAccessibleRepositories(
+  request: RepositoryToolSearchRequest
+): Promise<RepositoryToolSearchHit[]> {
+  const config = await getContentPlatformConfig();
+  if (isContentReadV2Active(config)) {
+    const retrieval = await retrieveRepositoryContent({
+      query: request.query,
+      repositoryIds: request.repositoryIds,
+      userCognitoSub: request.userCognitoSub,
+      mode: request.mode,
+      limit: request.limit,
+      ...(request.threshold == null ? {} : { threshold: request.threshold }),
+      ...(request.vectorWeight == null
+        ? {}
+        : { denseWeight: request.vectorWeight }),
+    });
+    return retrieval.results.map((result) => ({
+      content: result.content,
+      itemName: result.itemName,
+      similarity: result.similarity,
+      chunkIndex: result.chunkIndex,
+      citation: result.citations[0],
+      context: result.context,
+    }));
+  }
+
+  const perRepositoryResults = await Promise.all(
+    request.repositoryIds.map(async (repositoryId) => {
+      const options = {
+        repositoryId,
+        limit: request.limit,
+        ...(request.threshold == null ? {} : { threshold: request.threshold }),
+      };
+      if (request.mode === 'vector') {
+        return vectorSearch(request.query, options);
+      }
+      if (request.mode === 'keyword') {
+        return keywordSearch(request.query, options);
+      }
+      return hybridSearch(request.query, {
+        ...options,
+        vectorWeight: request.vectorWeight,
+      });
+    })
+  );
+
+  return perRepositoryResults
+    .flat()
+    .sort((left, right) => right.similarity - left.similarity)
+    .slice(0, request.limit);
+}
+
 /**
  * Create vector search tool for semantic similarity search
  */
 export function createVectorSearchTool(options: RepositoryToolOptions): unknown {
-  const { repositoryIds, userCognitoSub, assistantOwnerSub } = options;
+  const { repositoryIds, userCognitoSub } = options;
   const log = createLogger({ module: 'repository-tools', tool: 'vectorSearch' });
 
   return tool({
@@ -59,7 +143,7 @@ export function createVectorSearchTool(options: RepositoryToolOptions): unknown 
 
       try {
         // SECURITY: Verify user has access to repositories
-        const accessibleRepoIds = await verifyRepositoryAccess(repositoryIds, userCognitoSub, assistantOwnerSub);
+        const accessibleRepoIds = await verifyRepositoryAccess(repositoryIds, userCognitoSub);
 
         if (accessibleRepoIds.length === 0) {
           log.warn('No accessible repositories for vector search', { userCognitoSub, requestedRepos: repositoryIds });
@@ -70,22 +154,14 @@ export function createVectorSearchTool(options: RepositoryToolOptions): unknown 
           };
         }
 
-        const allResults = [];
-
-        // Search each accessible repository
-        for (const repoId of accessibleRepoIds) {
-          const results = await vectorSearch(query, {
-            repositoryId: repoId,
-            limit: limit || 5,
-            threshold: threshold || 0.7
-          });
-
-          allResults.push(...results);
-        }
-
-        // Sort by similarity and take top results
-        allResults.sort((a, b) => b.similarity - a.similarity);
-        const topResults = allResults.slice(0, limit || 5);
+        const topResults = await searchAccessibleRepositories({
+          query,
+          repositoryIds: accessibleRepoIds,
+          userCognitoSub,
+          mode: 'vector',
+          limit: limit ?? 5,
+          threshold: threshold ?? 0.7,
+        });
 
         if (topResults.length === 0) {
           return {
@@ -101,7 +177,9 @@ export function createVectorSearchTool(options: RepositoryToolOptions): unknown 
           content: result.content,
           source: result.itemName,
           similarity: Math.round(result.similarity * 100) / 100,
-          chunkIndex: result.chunkIndex
+          chunkIndex: result.chunkIndex,
+          citation: result.citation,
+          context: result.context,
         }));
 
         log.info('Vector search completed', { resultCount: formattedResults.length });
@@ -129,7 +207,7 @@ export function createVectorSearchTool(options: RepositoryToolOptions): unknown 
  * Create keyword search tool for exact text matching
  */
 export function createKeywordSearchTool(options: RepositoryToolOptions): unknown {
-  const { repositoryIds, userCognitoSub, assistantOwnerSub } = options;
+  const { repositoryIds, userCognitoSub } = options;
   const log = createLogger({ module: 'repository-tools', tool: 'keywordSearch' });
 
   return tool({
@@ -143,7 +221,7 @@ export function createKeywordSearchTool(options: RepositoryToolOptions): unknown
 
       try {
         // SECURITY: Verify user has access to repositories
-        const accessibleRepoIds = await verifyRepositoryAccess(repositoryIds, userCognitoSub, assistantOwnerSub);
+        const accessibleRepoIds = await verifyRepositoryAccess(repositoryIds, userCognitoSub);
 
         if (accessibleRepoIds.length === 0) {
           log.warn('No accessible repositories for keyword search', { userCognitoSub, requestedRepos: repositoryIds });
@@ -154,21 +232,13 @@ export function createKeywordSearchTool(options: RepositoryToolOptions): unknown
           };
         }
 
-        const allResults = [];
-
-        // Search each accessible repository
-        for (const repoId of accessibleRepoIds) {
-          const results = await keywordSearch(query, {
-            repositoryId: repoId,
-            limit: limit || 5
-          });
-
-          allResults.push(...results);
-        }
-
-        // Sort by rank and take top results
-        allResults.sort((a, b) => b.similarity - a.similarity);
-        const topResults = allResults.slice(0, limit || 5);
+        const topResults = await searchAccessibleRepositories({
+          query,
+          repositoryIds: accessibleRepoIds,
+          userCognitoSub,
+          mode: 'keyword',
+          limit: limit ?? 5,
+        });
 
         if (topResults.length === 0) {
           return {
@@ -184,7 +254,9 @@ export function createKeywordSearchTool(options: RepositoryToolOptions): unknown
           content: result.content,
           source: result.itemName,
           relevance: Math.round(result.similarity * 100) / 100,
-          chunkIndex: result.chunkIndex
+          chunkIndex: result.chunkIndex,
+          citation: result.citation,
+          context: result.context,
         }));
 
         log.info('Keyword search completed', { resultCount: formattedResults.length });
@@ -212,7 +284,7 @@ export function createKeywordSearchTool(options: RepositoryToolOptions): unknown
  * Create hybrid search tool combining vector and keyword search
  */
 export function createHybridSearchTool(options: RepositoryToolOptions): unknown {
-  const { repositoryIds, userCognitoSub, assistantOwnerSub } = options;
+  const { repositoryIds, userCognitoSub } = options;
   const log = createLogger({ module: 'repository-tools', tool: 'hybridSearch' });
 
   return tool({
@@ -228,7 +300,7 @@ export function createHybridSearchTool(options: RepositoryToolOptions): unknown 
 
       try {
         // SECURITY: Verify user has access to repositories
-        const accessibleRepoIds = await verifyRepositoryAccess(repositoryIds, userCognitoSub, assistantOwnerSub);
+        const accessibleRepoIds = await verifyRepositoryAccess(repositoryIds, userCognitoSub);
 
         if (accessibleRepoIds.length === 0) {
           log.warn('No accessible repositories for hybrid search', { userCognitoSub, requestedRepos: repositoryIds });
@@ -239,23 +311,15 @@ export function createHybridSearchTool(options: RepositoryToolOptions): unknown 
           };
         }
 
-        const allResults = [];
-
-        // Search each accessible repository
-        for (const repoId of accessibleRepoIds) {
-          const results = await hybridSearch(query, {
-            repositoryId: repoId,
-            limit: limit || 5,
-            threshold: threshold || 0.7,
-            vectorWeight: vectorWeight || 0.7
-          });
-
-          allResults.push(...results);
-        }
-
-        // Sort by combined score and take top results
-        allResults.sort((a, b) => b.similarity - a.similarity);
-        const topResults = allResults.slice(0, limit || 5);
+        const topResults = await searchAccessibleRepositories({
+          query,
+          repositoryIds: accessibleRepoIds,
+          userCognitoSub,
+          mode: 'hybrid',
+          limit: limit ?? 5,
+          threshold: threshold ?? 0.7,
+          vectorWeight: vectorWeight ?? 0.7,
+        });
 
         if (topResults.length === 0) {
           return {
@@ -271,7 +335,9 @@ export function createHybridSearchTool(options: RepositoryToolOptions): unknown 
           content: result.content,
           source: result.itemName,
           score: Math.round(result.similarity * 100) / 100,
-          chunkIndex: result.chunkIndex
+          chunkIndex: result.chunkIndex,
+          citation: result.citation,
+          context: result.context,
         }));
 
         log.info('Hybrid search completed', { resultCount: formattedResults.length });
@@ -281,7 +347,7 @@ export function createHybridSearchTool(options: RepositoryToolOptions): unknown 
           resultCount: formattedResults.length,
           query,
           searchType: 'hybrid',
-          vectorWeight: vectorWeight || 0.7,
+          vectorWeight: vectorWeight ?? 0.7,
           results: formattedResults
         };
       } catch (error) {

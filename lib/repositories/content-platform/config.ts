@@ -15,6 +15,15 @@ export const CONTENT_PLATFORM_SETTING_KEYS = {
   ocrStrategy: "CONTENT_OCR_STRATEGY",
   imageCaptionModelId: "CONTENT_IMAGE_CAPTION_MODEL_ID",
   visualIndexEnabled: "CONTENT_VISUAL_INDEX_ENABLED",
+  retrievalRerankEnabled: "CONTENT_RETRIEVAL_RERANK_ENABLED",
+  retrievalRerankModelId: "CONTENT_RETRIEVAL_RERANK_MODEL_ID",
+  retrievalCandidateLimit: "CONTENT_RETRIEVAL_CANDIDATE_LIMIT",
+  retrievalNeighborCount: "CONTENT_RETRIEVAL_NEIGHBOR_COUNT",
+  retrievalContextTokens: "CONTENT_RETRIEVAL_CONTEXT_TOKENS",
+  retrievalRrfK: "CONTENT_RETRIEVAL_RRF_K",
+  retrievalMaxPerSource: "CONTENT_RETRIEVAL_MAX_PER_SOURCE",
+  visualEmbeddingModelId: "CONTENT_VISUAL_EMBEDDING_MODEL_ID",
+  visualEmbeddingDimensions: "CONTENT_VISUAL_EMBEDDING_DIMENSIONS",
   googleSyncEnabled: "GOOGLE_CONTENT_SYNC_ENABLED",
   googleSyncIntervalMinutes: "GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES",
 } as const;
@@ -36,6 +45,15 @@ export interface ContentPlatformConfig {
   ocrStrategy: ContentOcrStrategy;
   imageCaptionModelId: string;
   visualIndexEnabled: boolean;
+  retrievalRerankEnabled: boolean;
+  retrievalRerankModelId: string;
+  retrievalCandidateLimit: number;
+  retrievalNeighborCount: number;
+  retrievalContextTokens: number;
+  retrievalRrfK: number;
+  retrievalMaxPerSource: number;
+  visualEmbeddingModelId: string;
+  visualEmbeddingDimensions: number;
   googleSyncEnabled: boolean;
   googleSyncIntervalMinutes: number;
 }
@@ -55,6 +73,15 @@ export const DEFAULT_CONTENT_PLATFORM_CONFIG: Readonly<ContentPlatformConfig> = 
   ocrStrategy: "auto",
   imageCaptionModelId: "us.amazon.nova-2-lite-v1:0",
   visualIndexEnabled: false,
+  retrievalRerankEnabled: true,
+  retrievalRerankModelId: "cohere.rerank-v3-5:0",
+  retrievalCandidateLimit: 40,
+  retrievalNeighborCount: 1,
+  retrievalContextTokens: 4000,
+  retrievalRrfK: 60,
+  retrievalMaxPerSource: 3,
+  visualEmbeddingModelId: "cohere.embed-v4:0",
+  visualEmbeddingDimensions: 1536,
   googleSyncEnabled: false,
   googleSyncIntervalMinutes: 15,
 };
@@ -99,6 +126,18 @@ function parseImageCaptionModelId(value: string | null | undefined): string {
     return candidate;
   }
   return DEFAULT_CONTENT_PLATFORM_CONFIG.imageCaptionModelId;
+}
+
+function parseRerankModelId(value: string | null | undefined): string {
+  return value?.trim() === "cohere.rerank-v3-5:0"
+    ? value.trim()
+    : DEFAULT_CONTENT_PLATFORM_CONFIG.retrievalRerankModelId;
+}
+
+function parseVisualEmbeddingModelId(value: string | null | undefined): string {
+  return value?.trim() === "cohere.embed-v4:0"
+    ? value.trim()
+    : DEFAULT_CONTENT_PLATFORM_CONFIG.visualEmbeddingModelId;
 }
 
 export function parseContentPlatformConfig(
@@ -166,6 +205,52 @@ export function parseContentPlatformConfig(
     visualIndexEnabled: parseBoolean(
       raw[keys.visualIndexEnabled],
       DEFAULT_CONTENT_PLATFORM_CONFIG.visualIndexEnabled
+    ),
+    retrievalRerankEnabled: parseBoolean(
+      raw[keys.retrievalRerankEnabled],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.retrievalRerankEnabled
+    ),
+    retrievalRerankModelId: parseRerankModelId(
+      raw[keys.retrievalRerankModelId]
+    ),
+    retrievalCandidateLimit: parseBoundedInteger(
+      raw[keys.retrievalCandidateLimit],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.retrievalCandidateLimit,
+      10,
+      100
+    ),
+    retrievalNeighborCount: parseBoundedInteger(
+      raw[keys.retrievalNeighborCount],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.retrievalNeighborCount,
+      0,
+      3
+    ),
+    retrievalContextTokens: parseBoundedInteger(
+      raw[keys.retrievalContextTokens],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.retrievalContextTokens,
+      500,
+      32_000
+    ),
+    retrievalRrfK: parseBoundedInteger(
+      raw[keys.retrievalRrfK],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.retrievalRrfK,
+      1,
+      200
+    ),
+    retrievalMaxPerSource: parseBoundedInteger(
+      raw[keys.retrievalMaxPerSource],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.retrievalMaxPerSource,
+      1,
+      20
+    ),
+    visualEmbeddingModelId: parseVisualEmbeddingModelId(
+      raw[keys.visualEmbeddingModelId]
+    ),
+    visualEmbeddingDimensions: parseBoundedInteger(
+      raw[keys.visualEmbeddingDimensions],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.visualEmbeddingDimensions,
+      1536,
+      1536
     ),
     googleSyncEnabled: parseBoolean(
       raw[keys.googleSyncEnabled],

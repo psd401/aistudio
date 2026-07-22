@@ -14,7 +14,7 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
-import { vector } from "../custom-types";
+import { tsvector, vector } from "../custom-types";
 import { repositoryItems } from "./repository-items";
 import { repositoryItemVersions } from "./repository-item-versions";
 import { repositoryArtifacts } from "./repository-artifacts";
@@ -38,6 +38,12 @@ export interface RepositorySourceLocator {
     width: number;
     height: number;
   }>;
+}
+
+export interface RepositorySegmentAccessScope {
+  /** Empty or absent arrays inherit repository access. Present empty arrays deny all. */
+  userIds?: number[];
+  roleIds?: number[];
 }
 
 export const repositoryItemChunks = pgTable("repository_item_chunks", {
@@ -68,7 +74,19 @@ export const repositoryItemChunks = pgTable("repository_item_chunks", {
     .$type<RepositorySourceLocator>()
     .default({})
     .notNull(),
+  contextPrefix: text("context_prefix").default("").notNull(),
+  segmentLevel: varchar("segment_level", { length: 16 })
+    .$type<"document" | "section" | "chunk">()
+    .default("chunk")
+    .notNull(),
+  parentChunkIndex: integer("parent_chunk_index"),
+  accessScope: jsonb("access_scope")
+    .$type<RepositorySegmentAccessScope>()
+    .default({})
+    .notNull(),
+  searchVector: tsvector("search_vector"),
   embedding: vector("embedding"),
+  visualEmbedding: vector("visual_embedding"),
   tokens: integer("tokens"),
   createdAt: timestamp("created_at").defaultNow(),
 });
