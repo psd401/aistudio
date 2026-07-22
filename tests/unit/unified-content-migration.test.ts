@@ -8,6 +8,11 @@ const migrationPath = path.join(
   "infra/database/schema/116-unified-repository-content.sql"
 );
 const sql = fs.readFileSync(migrationPath, "utf8");
+const officeMigrationPath = path.join(
+  process.cwd(),
+  "infra/database/schema/117-unified-content-office-ingestion.sql"
+);
+const officeSql = fs.readFileSync(officeMigrationPath, "utf8");
 
 describe("migration 116 unified repository content", () => {
   it.each([
@@ -39,5 +44,11 @@ describe("migration 116 unified repository content", () => {
 
   it("does not use an unsupported dollar-quoted migration block", () => {
     expect(sql).not.toMatch(/^\s*DO \$\$/mu);
+  });
+
+  it("seeds an independent administrator-controlled Office processing limit", () => {
+    expect(officeSql).toContain("('CONTENT_MAX_OFFICE_SIZE_MB', '100'");
+    expect(officeSql).toContain("ON CONFLICT (key) DO NOTHING");
+    expect(officeSql).not.toMatch(/^\s*DO \$\$/mu);
   });
 });

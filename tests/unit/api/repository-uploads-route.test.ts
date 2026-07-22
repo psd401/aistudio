@@ -17,6 +17,7 @@ jest.mock("@/lib/repositories/repository-access-guard", () => ({
 }));
 jest.mock("@/lib/repositories/content-platform", () => ({
   getContentPlatformConfig: jest.fn(),
+  isCanonicalDocumentContentType: jest.fn(),
   isCanonicalRepositoryUploadActive: jest.fn(),
   initiateRepositoryUpload: jest.fn(),
   completeRepositoryUpload: jest.fn(),
@@ -40,6 +41,7 @@ import {
   dispatchContentProcessingJob,
   getContentPlatformConfig,
   initiateRepositoryUpload,
+  isCanonicalDocumentContentType,
   isCanonicalRepositoryUploadActive,
 } from "@/lib/repositories/content-platform";
 import { createLogger } from "@/lib/logger";
@@ -58,6 +60,9 @@ const mockAssertNotSystemManagedRepository = jest.mocked(
 const mockGetContentPlatformConfig = jest.mocked(getContentPlatformConfig);
 const mockIsCanonicalRepositoryUploadActive = jest.mocked(
   isCanonicalRepositoryUploadActive
+);
+const mockIsCanonicalDocumentContentType = jest.mocked(
+  isCanonicalDocumentContentType
 );
 const mockInitiateRepositoryUpload = jest.mocked(initiateRepositoryUpload);
 const mockCompleteRepositoryUpload = jest.mocked(completeRepositoryUpload);
@@ -96,6 +101,13 @@ describe("canonical repository upload routes", () => {
       enabled: true,
     });
     mockIsCanonicalRepositoryUploadActive.mockReturnValue(true);
+    mockIsCanonicalDocumentContentType.mockImplementation(
+      (contentType) =>
+        contentType === "application/pdf" ||
+        contentType.startsWith(
+          "application/vnd.openxmlformats-officedocument."
+        )
+    );
     mockInitiateRepositoryUpload.mockResolvedValue({
       sessionId,
       objectKey: `repositories/7/${sessionId}/handbook.pdf`,
@@ -198,6 +210,26 @@ describe("canonical repository upload routes", () => {
         byteSize: 1024,
       },
       { ...DEFAULT_CONTENT_PLATFORM_CONFIG, enabled: true }
+    );
+  });
+
+  test("initiates a repository-scoped canonical Office upload", async () => {
+    const contentType =
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    const response = await initiateUpload(
+      request("http://localhost/api/repositories/7/uploads", {
+        itemName: "Handbook",
+        fileName: "handbook.docx",
+        contentType,
+        byteSize: 2048,
+      }),
+      { params: Promise.resolve({ repositoryId: "7" }) }
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockInitiateRepositoryUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ fileName: "handbook.docx", contentType }),
+      expect.objectContaining({ enabled: true })
     );
   });
 

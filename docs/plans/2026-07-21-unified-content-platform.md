@@ -231,6 +231,7 @@ The settings UI will validate and explain these database-first settings:
 | `CONTENT_DELETION_GRACE_DAYS` | `7` | Recovery window before physical deletion |
 | `CONTENT_MAX_FILE_SIZE_GB` | `10` | Maximum single-source upload |
 | `CONTENT_MAX_PDF_SIZE_MB` | `500` | Canonical PDF/Textract ceiling |
+| `CONTENT_MAX_OFFICE_SIZE_MB` | `100` | In-memory DOCX/XLSX/PPTX processor ceiling |
 | `CONTENT_MAX_MEDIA_HOURS` | `4` | Maximum audio/video duration |
 | `CONTENT_ALLOWED_MIME_TYPES` | managed allowlist | Accepted source formats |
 | `CONTENT_MALWARE_SCAN_REQUIRED` | `true` | Quarantine release policy |
@@ -354,10 +355,11 @@ scheduled dev-environment suite validates the real services.
 
 ## Worktree and branch model
 
-The active branch is `codex/unified-content-platform` in the ignored worktree:
+The active multimodal branch is `codex/unified-content-office-ingestion` in the
+ignored worktree:
 
 ```text
-/Users/hagelk/non-ic-code/aistudio/.claude/worktrees/unified-content
+/Users/hagelk/non-ic-code/aistudio/.claude/worktrees/unified-content-office-ingestion
 ```
 
 The main checkout stays on `dev`, so other agents or projects can use separate
@@ -375,7 +377,7 @@ two worktrees should edit the same migration or contract file concurrently.
 - [x] Repository PDF dual-write/canonical-upload walking skeleton
 - [x] Foundation unit/integration/E2E tests
 - [ ] Dev deployment and observability validation
-- [ ] Multimodal processing
+- [ ] Multimodal processing (Office slice implemented; images/media remain)
 - [ ] Retrieval v2 and visual search
 - [ ] Google Workspace sync
 - [ ] Universal product UI migration
@@ -432,3 +434,46 @@ Verification evidence at this checkpoint:
 The remaining foundation exit-gate item is a dev deployment with flags enabled
 for an allowlisted test repository, followed by CloudWatch/GuardDuty/Textract
 observability validation. Do not enable v2 reads broadly before that check.
+
+### Office ingestion checkpoint (2026-07-21)
+
+Implemented on `codex/unified-content-office-ingestion`:
+
+- The canonical upload contract accepts DOCX, XLSX, and PPTX in addition to PDF,
+  while unsupported formats continue through the legacy fallback.
+- A shared, provider-neutral Office normalizer produces deterministic text,
+  hashes, token estimates, and exact Word paragraph, Excel sheet/cell-range, and
+  PowerPoint slide locators. The default adapters parse real OOXML package bytes
+  and reject archive entry-count, per-entry expansion, and total-expansion bombs
+  before a document parser expands the package.
+- The worker applies the same S3 quarantine, GuardDuty decision, durable job,
+  artifact, atomic generation, and embedding flow to Office sources.
+- `CONTENT_MAX_OFFICE_SIZE_MB` is database-first, visible through the generic
+  Content Platform admin settings category, bounded to 1–500 MiB, and defaults
+  to 100 MiB independently of the 10 GiB object-storage ceiling.
+- The admin settings page now renders the migration-seeded `Content Platform`
+  category, exposes every content setting as a common preset, wraps the expanded
+  tab list, and keeps the add/edit form scrollable within a small viewport.
+- Failed SQS deliveries are no longer also selected by the scheduled pending-job
+  sweep. SQS remains the single retry owner for failed records, preventing the
+  duplicate delivery observed during the first live PDF validation.
+- Repository result citations now render PDF pages, Word paragraphs, Excel
+  ranges, PowerPoint slides, headings, and media time ranges through one labeler.
+
+Verification evidence so far:
+
+- The full application suite passes (252 suites, 2,994 tests; 5 suites and 60
+  tests intentionally skipped), including generated DOCX/XLSX/PPTX package
+  bytes, ZIP-expansion limits, admin visibility, and retry-ownership coverage.
+- The infrastructure suite passes (29 suites, 325 tests), both application and
+  dedicated worker typechecks pass, lint has zero errors, and the production
+  build completes successfully.
+- Authenticated Playwright repository upload contract: 3/3 workflows passed,
+  including the canonical DOCX browser flow. The full browser regression passed
+  246 tests with 58 intentional skips; the final Content Platform admin spec
+  also passes against the authenticated local application.
+- Real PostgreSQL smoke passed for PDF plus XLSX normalization, immutable
+  publication, generation carry-forward, retrieval, and `Directory!A1:B2`
+  citation resolution.
+- All-stack CDK synthesis produced 31 CloudFormation stack artifacts with the
+  real Office-capable worker bundle.

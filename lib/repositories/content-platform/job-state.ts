@@ -5,6 +5,14 @@ import type {
 
 export const CONTENT_PROCESSOR_CONTRACT_VERSION = "unified-content-v1";
 
+/**
+ * Only jobs that have never reached SQS are eligible for scheduled redispatch.
+ * Failed Lambda records remain owned by SQS and are retried with its backoff;
+ * sweeping them too creates a second live delivery for the same durable job.
+ */
+export const CONTENT_SWEEP_REDISPATCHABLE_STATUSES = ["pending"] as const satisfies
+  readonly RepositoryProcessingJobStatus[];
+
 export interface ProcessingJobState {
   status: RepositoryProcessingJobStatus;
   attempt: number;

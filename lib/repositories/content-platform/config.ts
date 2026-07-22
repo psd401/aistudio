@@ -8,6 +8,7 @@ export const CONTENT_PLATFORM_SETTING_KEYS = {
   deletionGraceDays: "CONTENT_DELETION_GRACE_DAYS",
   maxFileSizeGb: "CONTENT_MAX_FILE_SIZE_GB",
   maxPdfSizeMb: "CONTENT_MAX_PDF_SIZE_MB",
+  maxOfficeSizeMb: "CONTENT_MAX_OFFICE_SIZE_MB",
   maxMediaHours: "CONTENT_MAX_MEDIA_HOURS",
   malwareScanRequired: "CONTENT_MALWARE_SCAN_REQUIRED",
   ocrStrategy: "CONTENT_OCR_STRATEGY",
@@ -26,6 +27,7 @@ export interface ContentPlatformConfig {
   deletionGraceDays: number;
   maxFileSizeGb: number;
   maxPdfSizeMb: number;
+  maxOfficeSizeMb: number;
   maxMediaHours: number;
   malwareScanRequired: boolean;
   ocrStrategy: ContentOcrStrategy;
@@ -42,6 +44,7 @@ export const DEFAULT_CONTENT_PLATFORM_CONFIG: Readonly<ContentPlatformConfig> = 
   deletionGraceDays: 7,
   maxFileSizeGb: 10,
   maxPdfSizeMb: 500,
+  maxOfficeSizeMb: 100,
   maxMediaHours: 4,
   malwareScanRequired: true,
   ocrStrategy: "auto",
@@ -112,6 +115,12 @@ export function parseContentPlatformConfig(
     maxPdfSizeMb: parseBoundedInteger(
       raw[keys.maxPdfSizeMb],
       DEFAULT_CONTENT_PLATFORM_CONFIG.maxPdfSizeMb,
+      1,
+      500
+    ),
+    maxOfficeSizeMb: parseBoundedInteger(
+      raw[keys.maxOfficeSizeMb],
+      DEFAULT_CONTENT_PLATFORM_CONFIG.maxOfficeSizeMb,
       1,
       500
     ),

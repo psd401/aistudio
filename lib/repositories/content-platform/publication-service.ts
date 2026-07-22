@@ -8,12 +8,23 @@ import {
   repositoryItems,
   repositoryItemVersions,
   type RepositoryInspectionStatus,
+  type RepositorySourceLocator,
 } from "@/lib/db/schema";
 import type { PdfSegment } from "./pdf-processing";
 
-export interface PublishPdfVersionInput {
+export interface PublishableSegment {
+  content: string;
+  contentHash: string;
+  chunkIndex: number;
+  tokens: number;
+  sourceLocator: RepositorySourceLocator;
+}
+
+export interface PublishDocumentVersionInput {
   itemVersionId: string;
   processorVersion: string;
+  processorName: string;
+  detectedContentType: string;
   inspectionStatus: Extract<
     RepositoryInspectionStatus,
     "clean" | "not_required"
@@ -22,25 +33,33 @@ export interface PublishPdfVersionInput {
   malwareScanRequired: boolean;
   canonicalText?: string;
   canonicalTextObjectKey?: string;
-  segments: PdfSegment[];
+  segments: PublishableSegment[];
+  artifactMetadata?: Record<string, unknown>;
   embeddingModel?: string;
   embeddingDimensions?: number;
 }
 
-export interface PublishPdfVersionResult {
+export type PublishPdfVersionInput = Omit<
+  PublishDocumentVersionInput,
+  "processorName" | "detectedContentType" | "segments"
+> & { segments: PdfSegment[] };
+
+export interface PublishDocumentVersionResult {
   artifactId: string;
   generationId: string;
   segmentCount: number;
   replayed: boolean;
 }
 
+export type PublishPdfVersionResult = PublishDocumentVersionResult;
+
 export const MAX_INLINE_ARTIFACT_CHARACTERS = 1_000_000;
 
-function artifactKey(input: PublishPdfVersionInput): string {
+function artifactKey(input: PublishDocumentVersionInput): string {
   return `${input.itemVersionId}:canonical_text:${input.processorVersion}`;
 }
 
-function validatePublicationInput(input: PublishPdfVersionInput): void {
+function validatePublicationInput(input: PublishDocumentVersionInput): void {
   if (!input.itemVersionId.trim()) throw new Error("Item version id is required");
   if (!input.processorVersion.trim()) throw new Error("Processor version is required");
   if (input.malwareScanRequired && input.inspectionStatus !== "clean") {
@@ -67,21 +86,21 @@ function validatePublicationInput(input: PublishPdfVersionInput): void {
     if (!/^[0-9a-f]{64}$/.test(segment.contentHash)) {
       throw new Error("Every segment requires a lowercase SHA-256 content hash");
     }
-    if (!segment.sourceLocator.page) {
-      throw new Error("Every PDF segment requires a page citation");
+    if (Object.keys(segment.sourceLocator).length === 0) {
+      throw new Error("Every segment requires a source citation");
     }
   }
 }
 
 /**
- * Atomically publish one processed PDF into a new repository index generation.
+ * Atomically publish one processed document into a new repository index generation.
  * The current generation is copied forward (excluding this logical item), new
  * segments are added, and only then is the generation pointer swapped. A crash
  * before commit leaves the prior active generation untouched.
  */
-export async function publishPdfVersion(
-  input: PublishPdfVersionInput
-): Promise<PublishPdfVersionResult> {
+export async function publishDocumentVersion(
+  input: PublishDocumentVersionInput
+): Promise<PublishDocumentVersionResult> {
   validatePublicationInput(input);
   const key = artifactKey(input);
 
@@ -148,6 +167,11 @@ export async function publishPdfVersion(
         }
       }
 
+      const citedPages = input.segments.flatMap((segment) => {
+        const first = segment.sourceLocator.page;
+        if (!first) return [];
+        return [first, segment.sourceLocator.pageEnd ?? first];
+      });
       const [createdArtifact] = existingArtifact
         ? [existingArtifact]
         : await tx
@@ -163,19 +187,15 @@ export async function publishPdfVersion(
                 input.canonicalText.length <= MAX_INLINE_ARTIFACT_CHARACTERS
                   ? input.canonicalText
                   : undefined,
-              pageFrom: Math.min(
-                ...input.segments.map(
-                  (segment) => segment.sourceLocator.page ?? Number.MAX_SAFE_INTEGER
-                )
-              ),
-              pageTo: Math.max(
-                ...input.segments.map(
-                  (segment) => segment.sourceLocator.pageEnd ?? 0
-                )
-              ),
-              processorName: "aistudio-pdf",
+              pageFrom: citedPages.length > 0 ? Math.min(...citedPages) : undefined,
+              pageTo: citedPages.length > 0 ? Math.max(...citedPages) : undefined,
+              processorName: input.processorName,
               processorVersion: input.processorVersion,
-              metadata: { segmentCount: input.segments.length },
+              metadata: {
+                ...input.artifactMetadata,
+                segmentCount: input.segments.length,
+                detectedContentType: input.detectedContentType,
+              },
             })
             .returning({ id: repositoryArtifacts.id });
       if (!createdArtifact) throw new Error("Failed to create canonical artifact");
@@ -265,7 +285,7 @@ export async function publishPdfVersion(
       await tx
         .update(repositoryItemVersions)
         .set({
-          detectedContentType: "application/pdf",
+          detectedContentType: input.detectedContentType,
           inspectionStatus: input.inspectionStatus,
           inspectionDetails: input.inspectionDetails ?? {},
           storageStatus: "available",
@@ -285,7 +305,21 @@ export async function publishPdfVersion(
         replayed: false,
       };
     },
-    "contentPlatform.publishPdfVersion",
+    "contentPlatform.publishDocumentVersion",
     { isolationLevel: "serializable" }
   );
+}
+
+/** Backwards-compatible PDF entry point with a stricter page-citation guard. */
+export async function publishPdfVersion(
+  input: PublishPdfVersionInput
+): Promise<PublishPdfVersionResult> {
+  if (input.segments.some((segment) => !segment.sourceLocator.page)) {
+    throw new Error("Every PDF segment requires a page citation");
+  }
+  return publishDocumentVersion({
+    ...input,
+    processorName: "aistudio-pdf",
+    detectedContentType: "application/pdf",
+  });
 }

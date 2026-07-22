@@ -24,6 +24,7 @@ import {
   CONTENT_PROCESSOR_CONTRACT_VERSION,
 } from "./job-state";
 import { sourceRevisionForObjectKey } from "./ingestion-service";
+import { isOfficeContentType } from "./office-processing";
 
 export interface InitiateRepositoryUploadInput {
   repositoryId: number;
@@ -99,6 +100,10 @@ const MIN_MULTIPART_PART_SIZE = 5 * 1024 * 1024;
 const MAX_MULTIPART_PARTS = 100;
 const UPLOAD_EXPIRY_SECONDS = 60 * 60;
 
+export function isCanonicalDocumentContentType(contentType: string): boolean {
+  return contentType === "application/pdf" || isOfficeContentType(contentType);
+}
+
 function getDocumentsBucket(): string {
   const bucket = process.env.DOCUMENTS_BUCKET_NAME;
   if (!bucket) throw new Error("DOCUMENTS_BUCKET_NAME is not configured");
@@ -129,12 +134,16 @@ function validateInitiation(
   if (!input.fileName.trim() || input.fileName.length > 500) {
     throw new Error("A valid file name is required");
   }
-  if (input.contentType !== "application/pdf") {
-    throw new Error("The canonical PDF rollout currently accepts PDF files only");
+  if (!isCanonicalDocumentContentType(input.contentType)) {
+    throw new Error("The canonical processor accepts PDF, DOCX, XLSX, and PPTX files only");
   }
+  const processorLimitMb =
+    input.contentType === "application/pdf"
+      ? config.maxPdfSizeMb
+      : config.maxOfficeSizeMb;
   const maximumBytes = Math.min(
     config.maxFileSizeGb * 1024 ** 3,
-    config.maxPdfSizeMb * 1024 ** 2
+    processorLimitMb * 1024 ** 2
   );
   if (
     !Number.isSafeInteger(input.byteSize) ||
@@ -142,7 +151,7 @@ function validateInitiation(
     input.byteSize > maximumBytes
   ) {
     throw new Error(
-      `PDF size must not exceed ${config.maxPdfSizeMb} MiB for this processor`
+      `Document size must not exceed ${processorLimitMb} MiB for this processor`
     );
   }
 }
