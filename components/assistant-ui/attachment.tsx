@@ -2,7 +2,13 @@
 
 import { PropsWithChildren, useEffect, useMemo, useState, startTransition, type FC } from "react";
 import { createLogger } from "@/lib/client-logger";
-import { CircleXIcon, FileIcon, PaperclipIcon, Loader2, CheckCircle2 } from "lucide-react";
+import {
+  CheckCircle2,
+  CircleXIcon,
+  FileIcon,
+  Loader2,
+  PaperclipIcon,
+} from "lucide-react";
 import {
   AttachmentPrimitive,
   ComposerPrimitive,
@@ -25,6 +31,8 @@ import {
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { DialogContent as DialogPrimitiveContent } from "@radix-ui/react-dialog";
+import { temporaryAttachmentReferencesFromValue } from "@/lib/repositories/temporary-attachment-contract";
+import { RepositoryPromotionButton } from "@/components/assistant-ui/repository-attachment-message";
 
 const log = createLogger({ module: 'attachment' });
 
@@ -210,11 +218,32 @@ const AttachmentUI: FC<AttachmentUIProps> = ({ processingAttachments }) => {
           </TooltipTrigger>
         </AttachmentPreviewDialog>
         {canRemove && <AttachmentRemove />}
+        {!canRemove && <KeepRepositoryAttachment />}
       </AttachmentPrimitive.Root>
       <TooltipContent side="top">
         <AttachmentPrimitive.Name />
       </TooltipContent>
     </Tooltip>
+  );
+};
+
+const KeepRepositoryAttachment: FC = () => {
+  const attachmentContent = useAttachment((attachment) => attachment.content);
+  const reference = useMemo(
+    () =>
+      temporaryAttachmentReferencesFromValue(attachmentContent)[0] ?? null,
+    [attachmentContent]
+  );
+  const attachmentName = useAttachment((attachment) => attachment.name);
+  if (!reference) return null;
+
+  return (
+    <RepositoryPromotionButton
+      reference={reference}
+      attachmentName={attachmentName}
+      compact
+      className="text-muted-foreground absolute -bottom-3 -right-3"
+    />
   );
 };
 

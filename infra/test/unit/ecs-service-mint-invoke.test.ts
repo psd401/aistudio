@@ -50,7 +50,12 @@ function synthTemplate(): Template {
   return Template.fromStack(stack);
 }
 
-interface Statement { Effect?: string; Action?: unknown; Resource?: unknown }
+interface Statement {
+  Effect?: string;
+  Action?: unknown;
+  Resource?: unknown;
+  Condition?: unknown;
+}
 
 function allStatements(template: Template): Statement[] {
   const statements: Statement[] = [];
@@ -118,6 +123,96 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     const mintEnv = envPairs.find((e) => e.Name === 'AGENT_MINT_LAMBDA_NAME');
     expect(mintEnv).toBeDefined();
     expect(mintEnv!.Value).toBe(MINT_FN);
+  });
+
+  it('keeps legacy document storage permissions separate from permanent cleanup', () => {
+    const statements = allStatements(template);
+    const legacyDocumentStorage = statements.find((statement) => {
+      const resources = JSON.stringify(statement.Resource ?? '');
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return (
+        resources.includes(`aistudio-${ENV}-documents`) &&
+        actions.includes('s3:DeleteObject')
+      );
+    });
+
+    expect(legacyDocumentStorage).toBeDefined();
+    const actions = Array.isArray(legacyDocumentStorage!.Action)
+      ? legacyDocumentStorage!.Action
+      : [legacyDocumentStorage!.Action];
+    expect(actions).toEqual(expect.arrayContaining([
+      's3:GetObject',
+      's3:PutObject',
+      's3:DeleteObject',
+      's3:ListBucket',
+    ]));
+    expect(actions).not.toEqual(expect.arrayContaining([
+      's3:DeleteObjectVersion',
+      's3:PutObjectTagging',
+      's3:AbortMultipartUpload',
+      's3:ListBucketVersions',
+    ]));
+    // Historical uploads use owner/timestamp keys outside repositories/*.
+    // Their existing current-object deletion permission remains intentionally
+    // broad for backward compatibility, without granting broad version purge.
+    expect(JSON.stringify(legacyDocumentStorage!.Resource)).toContain(
+      `aistudio-${ENV}-documents/*`
+    );
+  });
+
+  it('scopes permanent object-version deletion to repositories/*', () => {
+    const statements = allStatements(template);
+    const versionDeletionStatements = statements.filter((statement) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('s3:DeleteObjectVersion');
+    });
+
+    expect(versionDeletionStatements).toHaveLength(1);
+    expect(versionDeletionStatements[0]).toMatchObject({
+      Effect: 'Allow',
+      Action: expect.arrayContaining([
+        's3:PutObjectTagging',
+        's3:DeleteObjectVersion',
+        's3:AbortMultipartUpload',
+      ]),
+    });
+    expect(JSON.stringify(versionDeletionStatements[0]!.Resource)).toContain(
+      `aistudio-${ENV}-documents/repositories/*`
+    );
+    expect(JSON.stringify(versionDeletionStatements[0]!.Resource)).not.toContain(
+      `aistudio-${ENV}-documents/*`
+    );
+  });
+
+  it('scopes ListBucketVersions to the repositories prefix', () => {
+    const statements = allStatements(template);
+    const versionListingStatements = statements.filter((statement) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('s3:ListBucketVersions');
+    });
+
+    expect(versionListingStatements).toHaveLength(1);
+    expect(versionListingStatements[0]).toMatchObject({
+      Effect: 'Allow',
+      Action: 's3:ListBucketVersions',
+      Condition: {
+        StringLike: {
+          's3:prefix': ['repositories/*'],
+        },
+      },
+    });
+    expect(JSON.stringify(versionListingStatements[0]!.Resource)).toContain(
+      `aistudio-${ENV}-documents`
+    );
+    expect(JSON.stringify(versionListingStatements[0]!.Resource)).not.toContain(
+      '/repositories/*'
+    );
   });
 
   it('grants only bedrock:Rerank on wildcard while model invocation stays resource-scoped', () => {

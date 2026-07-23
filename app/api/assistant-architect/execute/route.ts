@@ -31,6 +31,7 @@ import {
 } from '@/lib/agents';
 import type { ToolInvocationAudit } from '@/lib/agents';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
+import { createAssistantExecutionConversation } from '@/lib/assistant-architect/execution-conversation';
 import type {
   AssistantArchitectMode,
   AssistantModelFamily,
@@ -44,7 +45,13 @@ import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
 import { decodeMdxEditorEscapes } from '@/lib/utils/text-sanitizer';
-import { createConversation, updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
+import {
+  preflightAssistantRepositoryAccess,
+  REPOSITORY_ACCESS_CHANGED_MESSAGE,
+} from '@/lib/assistant-architect/repository-access-preflight';
+import { resolveAssistantRuntimeRepositoryInputs } from '@/lib/assistant-architect/runtime-repository-inputs';
+import { createAgenticRepositoryContext } from '@/lib/assistant-architect/agentic-repository-context';
+import { updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { createMessageWithStats, updateConversationStats } from '@/lib/db/drizzle/nexus-messages';
 import type { AssistantArchitectMessageMetadata } from '@/lib/db/types/jsonb';
 
@@ -116,6 +123,10 @@ interface PromptExecutionContext {
   userCognitoSub: string;
   assistantOwnerSub?: string;
   userId: number;
+  /** Ephemeral repositories resolved from opaque file-input references. */
+  runtimeRepositoryIds: number[];
+  /** Non-sensitive attachment labels that improve retrieval query relevance. */
+  runtimeRepositoryQuery: string;
   executionStartTime: number;
   /** The executing assistant's id, for the Atrium retrieval-scope gate (§16.4). */
   assistantId: number;
@@ -456,6 +467,30 @@ async function authorizeAndLoadArchitect(
     };
   }
 
+  // Repository bindings are author-selected, but execution is always bounded by
+  // the current principal. Check the complete chain before creating an execution
+  // record or invoking retrieval, tools, or a model. Assistant ownership is
+  // intentionally not an input to this check.
+  const repositoryAccess = await preflightAssistantRepositoryAccess(prompts, session.sub);
+  if (!repositoryAccess.isAllowed) {
+    log.warn('Assistant execution blocked because repository access changed', {
+      userId,
+      toolId,
+      repositoryCount: repositoryAccess.repositoryIds.length,
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Access denied',
+          message: REPOSITORY_ACCESS_CHANGED_MESSAGE,
+          requestId,
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      ),
+    };
+  }
+
   // SECURITY (#1206): per-resource MODEL enforcement on the assistant execution
   // path. Each prompt names a model chosen by the author; the EXECUTING user
   // must be able to access every one. Checked up-front (before any streaming)
@@ -599,71 +634,6 @@ async function createToolExecutionRecord(args: {
   const executionId = Number(rows[0].id);
   log.info('Tool execution created', { executionId, toolId });
   return { ok: true, value: { executionId } };
-}
-
-/**
- * Phase (d): create the nexus conversation for this execution and persist the
- * user inputs as the first message. Non-fatal: any failure is logged and
- * `undefined` is returned so the execution continues without conversation
- * tracking. Mirrors the pattern in
- * /api/v1/assistants/[id]/conversations/route.ts.
- */
-async function createNexusConversationForExecution(args: {
-  architect: LoadedArchitect;
-  toolId: number;
-  userId: number;
-  inputs: Record<string, unknown>;
-  executionId: number;
-  log: RouteLogger;
-}): Promise<string | undefined> {
-  const { architect, toolId, userId, inputs, executionId, log } = args;
-  try {
-    const conversation = await createConversation({
-      userId,
-      title: `${architect.name} — ${new Date().toLocaleDateString()}`,
-      provider: 'assistant-architect',
-      metadata: buildExecutionMetadata(toolId, architect.name, executionId, 'running'),
-    });
-
-    // Save user inputs as the first message
-    // Sanitize and truncate inputs for safe storage
-    const userContent = Object.keys(inputs).length > 0
-      ? Object.entries(inputs)
-          .map(([key, value]) => {
-            const safeKey = String(key).substring(0, 100);
-            const safeValue = typeof value === 'string'
-              ? value.substring(0, 5000)
-              : String(sanitizeForLogging(value)).substring(0, 5000);
-            return `${safeKey}: ${safeValue}`;
-          })
-          .join('\n')
-          .substring(0, 10000)
-      : '(Assistant executed with default inputs)';
-
-    await createMessageWithStats({
-      conversationId: conversation.id,
-      role: 'user',
-      content: userContent,
-      parts: [{ type: 'text', text: userContent }],
-      metadata: { inputs, source: 'app' },
-    });
-
-    log.info('Nexus conversation created for execution', {
-      conversationId: conversation.id,
-      executionId,
-      toolId,
-    });
-
-    return conversation.id;
-  } catch (conversationError) {
-    // Non-fatal: log and continue execution without conversation tracking
-    log.error('Failed to create nexus conversation for execution', {
-      error: conversationError instanceof Error ? conversationError.message : String(conversationError),
-      executionId,
-      toolId,
-    });
-    return undefined;
-  }
 }
 
 /**
@@ -832,8 +802,42 @@ export async function POST(req: Request) {
     if (!authorized.ok) return authorized.response;
     const { session, currentUserData, userId, architect, prompts } = authorized.value;
 
+    // Runtime file inputs are opaque references to caller-owned ephemeral
+    // repositories. Resolve them before creating an execution record so forged,
+    // expired, or cross-user references fail without invoking retrieval or a
+    // model. Static prompt bindings were already checked above.
+    let runtimeRepositoryInputs: Awaited<
+      ReturnType<typeof resolveAssistantRuntimeRepositoryInputs>
+    >;
+    try {
+      runtimeRepositoryInputs = await resolveAssistantRuntimeRepositoryInputs(inputs, userId);
+    } catch (error) {
+      log.warn('Assistant execution blocked by unavailable temporary repository input', {
+        userId,
+        toolId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return new Response(
+        JSON.stringify({
+          error: 'Access denied',
+          message: 'A temporary repository input is unavailable',
+          requestId,
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    const modelInputs = runtimeRepositoryInputs.modelInputs;
+
     // 6. Create the tool_execution record (rate-cap guarded for agentic mode)
-    const created = await createToolExecutionRecord({ architect, toolId, userId, inputs, requestId, log, timer });
+    const created = await createToolExecutionRecord({
+      architect,
+      toolId,
+      userId,
+      inputs: modelInputs,
+      requestId,
+      log,
+      timer,
+    });
     if (!created.ok) return created.response;
     const { executionId } = created.value;
 
@@ -845,8 +849,15 @@ export async function POST(req: Request) {
     });
 
     // 7.5. Create nexus conversation for this execution (non-fatal)
-    const nexusConversationId = await createNexusConversationForExecution({
-      architect, toolId, userId, inputs, executionId, log
+    const nexusConversationId = await createAssistantExecutionConversation({
+      assistantId: toolId,
+      assistantName: architect.name,
+      ownerId: userId,
+      inputs: modelInputs,
+      executionId,
+      runtimeRepositoryIds: runtimeRepositoryInputs.repositoryIds,
+      references: runtimeRepositoryInputs.references,
+      log,
     });
 
     // 7.6. Resolve the Atrium content Requester for permission-aware retrieval
@@ -877,6 +888,8 @@ export async function POST(req: Request) {
       userCognitoSub: session.sub,
       assistantOwnerSub,
       userId,
+      runtimeRepositoryIds: runtimeRepositoryInputs.repositoryIds,
+      runtimeRepositoryQuery: runtimeRepositoryInputs.queryContext,
       executionStartTime: Date.now(),
       assistantId: toolId,
       modelRoutingMode: architect.modelRoutingMode ?? 'legacy',
@@ -900,7 +913,7 @@ export async function POST(req: Request) {
     return await runExecutionAndBuildResponse({
       architect,
       prompts,
-      inputs,
+      inputs: modelInputs,
       context,
       executionId,
       toolId,
@@ -1568,16 +1581,33 @@ async function executeAgenticAssistant(args: {
     approveDestructive: approveDestructiveTools,
     onToolInvocation,
   });
+  const repositoryContext = createAgenticRepositoryContext({
+    prompts: orderedPrompts,
+    runtimeRepositoryIds: context.runtimeRepositoryIds,
+    userCognitoSub: context.userCognitoSub,
+  });
+  // Repository tools are mandatory data-input tools, not author-selectable
+  // catalog capabilities. Merge them after the catalog result so a same-named
+  // optional tool cannot override the executor-scoped repository boundary.
+  const effectiveTools: ToolSet = {
+    ...resolved.tools,
+    ...repositoryContext.tools,
+  };
 
   log.info('Agentic tools resolved', {
     executionId: context.executionId,
     granted: resolved.grantedToolIdentifiers.length,
     denied: resolved.deniedToolIdentifiers.length,
     connectorTools: resolved.connectorResults.length,
+    repositoryCount: repositoryContext.repositoryIds.length,
     maxSteps: config.maxSteps,
   });
 
   const { systemPrompt, userText } = buildAgenticInitialMessage(orderedPrompts, inputs);
+  const effectiveSystemPrompt = [
+    systemPrompt,
+    repositoryContext.systemGuidance,
+  ].filter(Boolean).join('\n\n') || undefined;
   // Image understanding (#926): attach any image-valued inputs (data:image URIs or
   // image URLs) as file parts so vision-capable models can see them. The author is
   // responsible for selecting a vision-capable model.
@@ -1601,7 +1631,7 @@ async function executeAgenticAssistant(args: {
     requestedFamily: context.modelRoutingFamily,
     requirements: {
       requiredTools: config.enabledToolIdentifiers,
-      requiresFunctionCalling: Object.keys(resolved.tools).length > 0,
+      requiresFunctionCalling: Object.keys(effectiveTools).length > 0,
       requiresVision: imageParts.length > 0,
     },
   });
@@ -1638,9 +1668,10 @@ async function executeAgenticAssistant(args: {
       userId: context.userId.toString(),
       sessionId: context.userCognitoSub,
       source: 'assistant_execution' as const,
-      systemPrompt,
-      // Pre-resolved tool set (catalog + connectors). maxSteps drives the loop.
-      tools: Object.keys(resolved.tools).length > 0 ? resolved.tools : undefined,
+      systemPrompt: effectiveSystemPrompt,
+      // Pre-resolved catalog/connector tools plus mandatory executor-scoped
+      // repository search. maxSteps drives the loop.
+      tools: Object.keys(effectiveTools).length > 0 ? effectiveTools : undefined,
       maxSteps: config.maxSteps,
       // Per-run cost cap (#926): the streaming adapter stops the loop once the
       // estimated cost reaches the cap. Rates come from the model row (per-1k →
@@ -1711,6 +1742,18 @@ interface SinglePromptOptions {
   isLastPrompt: boolean;
 }
 
+function getPromptRepositoryIds(
+  prompt: ChainPrompt,
+  context: PromptExecutionContext
+): number[] {
+  return [
+    ...new Set([
+      ...(prompt.repositoryIds ?? []),
+      ...context.runtimeRepositoryIds,
+    ]),
+  ];
+}
+
 /**
  * Steps 4-5: resolve the prompt's AI model row (throwing dbRecordNotFound when
  * missing/invalid) and build the per-prompt tool set (repository search tools
@@ -1728,16 +1771,17 @@ async function resolvePromptModelAndTools(
   // 4. Prepare tools and their capability requirements before routing.
   const enabledTools: string[] = [...(prompt.enabledTools || [])];
   let promptTools = {};
+  const repositoryIds = getPromptRepositoryIds(prompt, context);
 
   // Create repository search tools if repositories are configured
-  if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+  if (repositoryIds.length > 0) {
     log.debug('Creating repository search tools', {
       promptId: prompt.id,
-      repositoryIds: prompt.repositoryIds
+      repositoryIds
     });
 
     const repoTools = createRepositoryTools({
-      repositoryIds: prompt.repositoryIds,
+      repositoryIds,
       userCognitoSub: context.userCognitoSub,
       assistantOwnerSub: context.assistantOwnerSub
     });
@@ -1793,22 +1837,23 @@ async function injectRepositoryKnowledge(
   log: ReturnType<typeof createLogger>
 ): Promise<string> {
   let repositoryContext = '';
-  if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+  const repositoryIds = getPromptRepositoryIds(prompt, context);
+  if (repositoryIds.length > 0) {
     log.debug('Retrieving repository knowledge', {
       promptId: prompt.id,
-      repositoryIds: prompt.repositoryIds
+      repositoryIds
     });
 
     // Emit knowledge-retrieval-start event
     await storeExecutionEvent(context.executionId, 'knowledge-retrieval-start', {
       promptId: prompt.id,
-      repositories: prompt.repositoryIds,
+      repositories: repositoryIds,
       searchType: 'hybrid'
     });
 
     const knowledgeChunks = await retrieveKnowledgeForPrompt(
-      prompt.content,
-      prompt.repositoryIds,
+      [prompt.content, context.runtimeRepositoryQuery].filter(Boolean).join('\n'),
+      repositoryIds,
       context.userCognitoSub,
       context.assistantOwnerSub,
       {
@@ -2356,7 +2401,7 @@ async function executeSinglePromptWithCompletion(
     position: prompt.position,
     totalPrompts,
     modelId: String(prompt.modelId || 'unknown'),
-    hasKnowledge: !!(prompt.repositoryIds && prompt.repositoryIds.length > 0),
+    hasKnowledge: getPromptRepositoryIds(prompt, context).length > 0,
     hasTools: !!(prompt.enabledTools && prompt.enabledTools.length > 0)
   });
 

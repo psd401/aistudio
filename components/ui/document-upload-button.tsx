@@ -6,6 +6,11 @@ import { Loader2, FileUp, CheckCircle } from "lucide-react"
 import { toast } from "sonner"
 import { createLogger } from "@/lib/client-logger"
 import { useDocumentUploadPolling } from "./hooks/use-document-upload-polling"
+import { generateUUID } from "@/lib/utils/uuid"
+import {
+  uploadTemporaryAttachment,
+  waitForTemporaryAttachment,
+} from "@/lib/repositories/temporary-attachment-client"
 
 const log = createLogger({ component: 'DocumentUploadButton' })
 import {
@@ -22,6 +27,12 @@ interface DocumentUploadButtonProps {
   className?: string
   disabled?: boolean
   onError?: (err: { status?: number; message?: string }) => void
+  /**
+   * Repository-only mode for Assistant Architect runtime inputs. A flag-off
+   * response fails closed so this product never recreates its historical
+   * extracted-text store during rollback.
+   */
+  repositoryBacked?: boolean
 }
 
 export default function DocumentUploadButton({
@@ -29,7 +40,8 @@ export default function DocumentUploadButton({
   label = "Add Document for Knowledge",
   className = "",
   disabled = false,
-  onError
+  onError,
+  repositoryBacked = false,
 }: DocumentUploadButtonProps) {
   const [isLoading, setIsLoading] = useState(false)
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null)
@@ -68,6 +80,27 @@ export default function DocumentUploadButton({
     setProcessingStatus("Uploading...")
 
     try {
+      if (repositoryBacked) {
+        const repositoryUpload = await uploadTemporaryAttachment({
+          file,
+          draftKey: generateUUID(),
+          purpose: "assistant-architect",
+        })
+        if (repositoryUpload.mode === "canonical") {
+          setProcessingStatus("Indexing document...")
+          const marker = await waitForTemporaryAttachment(repositoryUpload)
+          onContent(marker)
+          setUploadedFileName(file.name)
+          toast.success("Document added as private temporary repository content.")
+          setIsLoading(false)
+          setProcessingStatus("")
+          return
+        }
+        throw new Error(
+          "Temporary repository uploads are unavailable. Add the source through Repository Manager and attach that repository instead."
+        )
+      }
+
       const { jobId } = await uploadViaServer(file)
       setProcessingStatus("Processing document...")
 
@@ -104,7 +137,13 @@ export default function DocumentUploadButton({
       setIsLoading(false)
       setProcessingStatus("")
     }
-  }, [onContent, onError, cancelPolling, startPolling])
+  }, [
+    onContent,
+    onError,
+    cancelPolling,
+    startPolling,
+    repositoryBacked,
+  ])
 
   const buttonText = getButtonText(processingStatus, isLoading, uploadedFileName, label)
   const acceptAttribute = SUPPORTED_FILE_TYPES.join(',')

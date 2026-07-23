@@ -35,6 +35,15 @@ import {
   type AssistantArchitectRoutingMetadata,
 } from "@/lib/assistant-architect/model-router"
 import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects"
+import {
+  preflightAssistantRepositoryAccess,
+  REPOSITORY_ACCESS_CHANGED_MESSAGE,
+} from "@/lib/assistant-architect/repository-access-preflight"
+import {
+  AssistantRuntimeRepositoryInputError,
+  resolveAssistantRuntimeRepositoryInputs,
+  type AssistantRuntimeRepositoryInputs,
+} from "@/lib/assistant-architect/runtime-repository-inputs"
 
 // ============================================
 // Constants
@@ -56,6 +65,12 @@ export interface ExecuteAssistantParams {
   userId: number
   cognitoSub: string
   requestId: string
+  /**
+   * A server-created preparation may be reused by entry points that must
+   * validate and sanitize inputs before creating their own durable records.
+   * Arbitrary caller-created objects are rejected by this module.
+   */
+  preparedInputs?: PreparedAssistantExecutionInputs
 }
 
 export interface ExecuteAssistantResult {
@@ -98,6 +113,10 @@ interface PromptExecutionContext {
    * entirely (fail closed to nothing) without failing the execution.
    */
   atriumRequester: Requester | null
+  /** Temporary repositories resolved from opaque runtime attachment markers. */
+  runtimeRepositoryIds: number[]
+  /** Authoritative item labels used to improve retrieval queries. */
+  runtimeRepositoryQuery: string
 }
 
 // ============================================
@@ -126,6 +145,67 @@ export function validateExecutionInputs(
   return result.error.issues
 }
 
+export function isAssistantRuntimeRepositoryInputError(
+  error: unknown
+): error is AssistantRuntimeRepositoryInputError {
+  return error instanceof AssistantRuntimeRepositoryInputError
+}
+
+export interface PreparedAssistantExecutionInputs {
+  /** Numeric owner identity used for the authoritative resolution. */
+  ownerId: number
+  /** Marker-free, authoritative-label inputs safe for persistence/providers. */
+  inputs: Record<string, unknown>
+  runtimeRepositoryIds: number[]
+  runtimeRepositoryQuery: string
+  references: AssistantRuntimeRepositoryInputs["references"]
+}
+
+// A WeakSet makes `preparedInputs` an opaque in-process capability. REST routes
+// can reuse one resolution across pre-persistence validation and execution, but
+// a future caller cannot bypass owner-bound resolution by constructing a
+// lookalike object.
+const preparedAssistantInputs = new WeakSet<PreparedAssistantExecutionInputs>()
+
+/**
+ * Resolve and sanitize canonical temporary repository markers as the executing
+ * owner. Entry points that persist a conversation/job should call this before
+ * those writes, then pass the returned object to the execution service.
+ */
+export async function prepareAssistantExecutionInputs(
+  inputs: Record<string, unknown>,
+  ownerId: number
+): Promise<PreparedAssistantExecutionInputs> {
+  const resolved = await resolveAssistantRuntimeRepositoryInputs(inputs, ownerId)
+  const prepared: PreparedAssistantExecutionInputs = {
+    ownerId,
+    inputs: resolved.modelInputs,
+    runtimeRepositoryIds: resolved.repositoryIds,
+    runtimeRepositoryQuery: resolved.queryContext,
+    references: resolved.references,
+  }
+  preparedAssistantInputs.add(prepared)
+  return prepared
+}
+
+async function resolvePreparedAssistantInputs(
+  params: ExecuteAssistantParams
+): Promise<PreparedAssistantExecutionInputs> {
+  if (params.preparedInputs) {
+    if (
+      !preparedAssistantInputs.has(params.preparedInputs) ||
+      params.preparedInputs.ownerId !== params.userId
+    ) {
+      throw ErrorFactories.validationFailed([{
+        field: "inputs",
+        message: "Prepared assistant inputs are invalid",
+      }])
+    }
+    return params.preparedInputs
+  }
+  return prepareAssistantExecutionInputs(params.inputs, params.userId)
+}
+
 // ============================================
 // Shared Execution Setup
 // ============================================
@@ -134,6 +214,7 @@ interface ExecutionSetup {
   prompts: ChainPrompt[]
   context: PromptExecutionContext
   executionId: number
+  inputs: Record<string, unknown>
   log: ReturnType<typeof createLogger>
 }
 
@@ -145,7 +226,7 @@ interface ExecutionSetup {
 async function prepareAssistantExecution(
   params: ExecuteAssistantParams
 ): Promise<ExecutionSetup> {
-  const { assistantId, inputs, userId, cognitoSub, requestId } = params
+  const { assistantId, userId, cognitoSub, requestId } = params
   const log = createLogger({ requestId, action: "executeAssistant" })
 
   log.info("Starting assistant execution", { assistantId, userId })
@@ -188,6 +269,31 @@ async function prepareAssistantExecution(
     }])
   }
 
+  // Runtime markers are owner-bound and must be resolved before the execution
+  // row/event writes below. Their repository IDs then join the normal
+  // executor-ACL preflight; ownership of an assistant never lends access.
+  const preparedInputs = await resolvePreparedAssistantInputs(params)
+  const repositoryAccess = await preflightAssistantRepositoryAccess(
+    preparedInputs.runtimeRepositoryIds.length > 0
+      ? [
+          ...prompts,
+          { repositoryIds: preparedInputs.runtimeRepositoryIds },
+        ]
+      : prompts,
+    cognitoSub
+  )
+  if (!repositoryAccess.isAllowed) {
+    log.warn("Assistant execution blocked because repository access changed", {
+      assistantId,
+      userId,
+      repositoryCount: repositoryAccess.repositoryIds.length,
+    })
+    throw ErrorFactories.authzToolAccessDenied("assistant repository access", {
+      userMessage: REPOSITORY_ACCESS_CHANGED_MESSAGE,
+      technicalMessage: "Executing principal cannot access every repository bound to the assistant",
+    })
+  }
+
   log.info("Assistant loaded", sanitizeForLogging({
     assistantId,
     modelRoutingMode: architect.modelRoutingMode ?? "legacy",
@@ -197,7 +303,10 @@ async function prepareAssistantExecution(
   }))
 
   // 2. Create tool_execution record
-  const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true }
+  const inputData =
+    Object.keys(preparedInputs.inputs).length > 0
+      ? preparedInputs.inputs
+      : { __no_inputs: true }
   const inputDataJson = JSON.stringify(inputData)
 
   const executionResult = await executeQuery(
@@ -258,9 +367,17 @@ async function prepareAssistantExecution(
     modelRoutingFamily: architect.modelRoutingFamily ?? null,
     modelRoutes: new Map(),
     atriumRequester: await requesterForUserId(userId),
+    runtimeRepositoryIds: preparedInputs.runtimeRepositoryIds,
+    runtimeRepositoryQuery: preparedInputs.runtimeRepositoryQuery,
   }
 
-  return { prompts: prompts as ChainPrompt[], context, executionId, log }
+  return {
+    prompts: prompts as ChainPrompt[],
+    context,
+    executionId,
+    inputs: preparedInputs.inputs,
+    log,
+  }
 }
 
 /**
@@ -304,12 +421,12 @@ export async function executeAssistant(
 ): Promise<ExecuteAssistantResult> {
   const timer = startTimer("assistantExecution")
   const setup = await prepareAssistantExecution(params)
-  const { prompts, context, executionId, log } = setup
+  const { prompts, context, executionId, inputs, log } = setup
 
   try {
     const streamResponse = await executePromptChain(
       prompts,
-      params.inputs,
+      inputs,
       context,
       params.requestId,
       log
@@ -347,12 +464,12 @@ export async function executeAssistantForJobCompletion(
   params: ExecuteAssistantParams
 ): Promise<{ text: string; executionId: number; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
   const setup = await prepareAssistantExecution(params)
-  const { prompts, context, executionId, log } = setup
+  const { prompts, context, executionId, inputs, log } = setup
 
   try {
     const result = await executePromptChainForText(
       prompts,
-      params.inputs,
+      inputs,
       context,
       params.requestId,
       log
@@ -504,9 +621,31 @@ async function executePromptChainForText(
 // Single Prompt Execution (Streaming)
 // ============================================
 
+function getPromptRepositoryIds(
+  prompt: ChainPrompt,
+  context: PromptExecutionContext
+): number[] {
+  return [
+    ...new Set([
+      ...(prompt.repositoryIds ?? []),
+      ...context.runtimeRepositoryIds,
+    ]),
+  ]
+}
+
+function getPromptRepositoryQuery(
+  prompt: ChainPrompt,
+  context: PromptExecutionContext
+): string {
+  return [prompt.content, context.runtimeRepositoryQuery]
+    .filter(Boolean)
+    .join("\n")
+}
+
 /**
  * Build the knowledge context injected ahead of a prompt: repository chunks
- * (hybrid search over the prompt's repositoryIds) plus Atrium content-as-context
+ * (hybrid search over the prompt's configured and runtime repository IDs) plus
+ * Atrium content-as-context
  * (Phase 6, #1056 — off unless the assistant has a retrieval_scope; skipped when
  * no requester resolved; bounded per hit by the caller's canView). Shared by the
  * streaming and collect-text execution paths; `withEvents` controls the
@@ -519,18 +658,19 @@ async function buildPromptKnowledgeContext(
   withEvents: boolean
 ): Promise<string> {
   let repositoryContext = ""
-  if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+  const repositoryIds = getPromptRepositoryIds(prompt, context)
+  if (repositoryIds.length > 0) {
     if (withEvents) {
       await storeExecutionEvent(context.executionId, "knowledge-retrieval-start", {
         promptId: prompt.id,
-        repositories: prompt.repositoryIds,
+        repositories: repositoryIds,
         searchType: "hybrid",
       })
     }
 
     const knowledgeChunks = await retrieveKnowledgeForPrompt(
-      prompt.content,
-      prompt.repositoryIds,
+      getPromptRepositoryQuery(prompt, context),
+      repositoryIds,
       context.userCognitoSub,
       context.assistantOwnerSub,
       {
@@ -592,7 +732,7 @@ async function executeSinglePromptWithCompletion(
     position: prompt.position,
     totalPrompts,
     modelId: String(prompt.modelId || "unknown"),
-    hasKnowledge: !!(prompt.repositoryIds && prompt.repositoryIds.length > 0),
+    hasKnowledge: getPromptRepositoryIds(prompt, context).length > 0,
     hasTools: !!(prompt.enabledTools && prompt.enabledTools.length > 0),
   })
 
@@ -636,9 +776,10 @@ async function executeSinglePromptWithCompletion(
     const enabledTools: string[] = [...(prompt.enabledTools || [])]
     let promptTools = {}
 
-    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+    const repositoryIds = getPromptRepositoryIds(prompt, context)
+    if (repositoryIds.length > 0) {
       const repoTools = createRepositoryTools({
-        repositoryIds: prompt.repositoryIds,
+        repositoryIds,
         userCognitoSub: context.userCognitoSub,
         assistantOwnerSub: context.assistantOwnerSub,
       })
@@ -830,7 +971,7 @@ async function executeSinglePromptCollectText(
     position: prompt.position,
     totalPrompts,
     modelId: String(prompt.modelId || "unknown"),
-    hasKnowledge: !!(prompt.repositoryIds && prompt.repositoryIds.length > 0),
+    hasKnowledge: getPromptRepositoryIds(prompt, context).length > 0,
     hasTools: !!(prompt.enabledTools && prompt.enabledTools.length > 0),
   })
 
@@ -874,9 +1015,10 @@ async function executeSinglePromptCollectText(
     // Prepare tools and route to a compatible model.
     const enabledTools: string[] = [...(prompt.enabledTools || [])]
     let promptTools = {}
-    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+    const repositoryIds = getPromptRepositoryIds(prompt, context)
+    if (repositoryIds.length > 0) {
       const repoTools = createRepositoryTools({
-        repositoryIds: prompt.repositoryIds,
+        repositoryIds,
         userCognitoSub: context.userCognitoSub,
         assistantOwnerSub: context.assistantOwnerSub,
       })

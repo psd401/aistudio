@@ -28,6 +28,7 @@ const models = [
   { id: 5, name: "Nano Banana", provider: "google", modelId: "gemini-3.1-flash-image", capabilities: '["image_generation"]', providerMetadata: { nexusRouterTier: "light" } },
   { id: 6, name: "Gemini Deep Research", provider: "google", modelId: "gemini-deep-research", capabilities: '["deep_research"]', providerMetadata: { nexusRouterTier: "high" } },
   { id: 7, name: "Amazon Nova Lite", provider: "amazon-bedrock", modelId: "us.amazon.nova-lite-v1:0", capabilities: "[]", providerMetadata: { nexusRouterTier: "light" } },
+  { id: 8, name: "No Tools", provider: "openai", modelId: "no-tools", capabilities: "[]", providerMetadata: { nexusRouterTier: "medium", supports_function_calling: false } },
 ]
 
 const config = nexusRouterConfigSchema.parse({
@@ -101,6 +102,112 @@ describe("Nexus model router", () => {
       requestedFamily: "anthropic", enabledConnectorIds: [], userId: 7,
     })
     expect(result.modelId).toBe("gemini-3.1-flash-image")
+  })
+
+  it("keeps attachment retrieval on a function-calling text model", async () => {
+    const attachmentConfig = nexusRouterConfigSchema.parse({
+      auto: {
+        light: [],
+        medium: ["no-tools", "gpt-terra"],
+        high: [],
+      },
+    })
+    mockGetConfig.mockResolvedValue({
+      config: attachmentConfig,
+      mode: "active",
+    })
+
+    const result = await routeNexusRequest({
+      text: "Summarize my attachment",
+      fallbackModelId: "no-tools",
+      experienceMode: "standard",
+      requestedFamily: "auto",
+      enabledConnectorIds: [],
+      enabledToolNames: ["searchNexusAttachments"],
+      userId: 7,
+    })
+
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
+  it("never selects the tool-bypassing Deep Research specialist for attachments", async () => {
+    const attachmentConfig = nexusRouterConfigSchema.parse({
+      auto: {
+        light: [],
+        medium: ["gemini-deep-research", "gpt-terra"],
+        high: [],
+      },
+    })
+    mockGetConfig.mockResolvedValue({
+      config: attachmentConfig,
+      mode: "active",
+    })
+
+    const result = await routeNexusRequest({
+      text: "Research my attachment",
+      fallbackModelId: "gemini-deep-research",
+      experienceMode: "standard",
+      requestedFamily: "auto",
+      enabledConnectorIds: [],
+      enabledToolNames: ["searchNexusAttachments"],
+      userId: 7,
+    })
+
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
+  it("enforces attachment tools when legacy routing is off", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "off" })
+
+    const result = await routeNexusRequest({
+      text: "Summarize my attachment",
+      fallbackModelId: "no-tools",
+      experienceMode: "standard",
+      requestedFamily: "auto",
+      enabledConnectorIds: [],
+      enabledToolNames: ["searchNexusAttachments"],
+      userId: 7,
+    })
+
+    expect(result.modelId).toBe("gpt-terra")
+    expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
+    expect(mockClassify).not.toHaveBeenCalled()
+  })
+
+  it("enforces attachment tools instead of an unsafe shadow fallback", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+
+    const result = await routeNexusRequest({
+      text: "Summarize my attachment",
+      fallbackModelId: "no-tools",
+      experienceMode: "standard",
+      requestedFamily: "auto",
+      enabledConnectorIds: [],
+      enabledToolNames: ["searchNexusAttachments"],
+      userId: 7,
+    })
+
+    expect(result.modelId).toBe("gpt-terra")
+    expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
+  })
+
+  it("does not route an attachment request to a specialist-only image model", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+
+    const result = await routeNexusRequest({
+      text: "Create an image based on my attachment",
+      fallbackModelId: "gpt-terra",
+      experienceMode: "standard",
+      requestedFamily: "auto",
+      enabledConnectorIds: [],
+      enabledToolNames: ["searchNexusAttachments"],
+      userId: 7,
+    })
+
+    expect(result.modelId).toBe("gpt-terra")
   })
 
   it("automatically attaches the database-backed PSD-data MCP server", async () => {

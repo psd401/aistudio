@@ -2,12 +2,20 @@
  * @jest-environment node
  */
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { Readable } from 'node:stream';
 
 // Use the global `jest` (not the @jest/globals import) so next/jest's SWC hoists
 // this jest.mock above the handler import.
 const mockGetAttachmentFromS3 = jest.fn();
 jest.mock('@/lib/services/attachment-storage-service', () => ({
   getAttachmentFromS3: (key: string) => mockGetAttachmentFromS3(key),
+}));
+
+const mockDeleteDocumentVersions = jest.fn();
+const mockGetObjectStream = jest.fn();
+jest.mock('@/lib/aws/s3-client', () => ({
+  deleteDocumentVersions: (key: string) => mockDeleteDocumentVersions(key),
+  getObjectStream: (key: string) => mockGetObjectStream(key),
 }));
 
 const mockExecuteQuery = jest.fn();
@@ -23,6 +31,8 @@ import {
   extractReferenceImages,
   getImageRoutingContext,
   persistImageExchange,
+  deleteUnpersistedGeneratedImage,
+  extractCanonicalRepositoryImages,
   handleImageGenerationError
 } from '@/app/api/nexus/chat/image-generation-handler';
 
@@ -315,6 +325,83 @@ describe('persistImageExchange (REV-DB-047 / REV-COR-220)', () => {
   });
 });
 
+describe('deleteUnpersistedGeneratedImage', () => {
+  beforeEach(() => {
+    mockDeleteDocumentVersions.mockReset();
+    mockDeleteDocumentVersions.mockResolvedValue(1);
+  });
+
+  it('deletes every version of the exact conversation-scoped generated key', async () => {
+    const key = 'v2/generated-images/conv-123/1234-model.png';
+
+    await expect(
+      deleteUnpersistedGeneratedImage({
+        conversationId: 'conv-123',
+        s3Key: key,
+      })
+    ).resolves.toBe(true);
+    expect(mockDeleteDocumentVersions).toHaveBeenCalledWith(key);
+  });
+
+  it('refuses to delete an object outside the generated-image conversation prefix', async () => {
+    await expect(
+      deleteUnpersistedGeneratedImage({
+        conversationId: 'conv-123',
+        s3Key: 'v2/generated-images/another-conversation/image.png',
+      })
+    ).resolves.toBe(false);
+    expect(mockDeleteDocumentVersions).not.toHaveBeenCalled();
+  });
+});
+
+describe('extractCanonicalRepositoryImages', () => {
+  beforeEach(() => {
+    mockGetObjectStream.mockReset();
+  });
+
+  const source = {
+    bindingId: '123e4567-e89b-42d3-a456-426614174000',
+    repositoryId: 77,
+    itemId: 88,
+    itemVersionId: '223e4567-e89b-42d3-a456-426614174000',
+    objectKey:
+      'repositories/77/323e4567-e89b-42d3-a456-426614174000/photo.png',
+    declaredContentType: 'image/png',
+    detectedContentType: 'image/png',
+    byteSize: 7,
+  };
+
+  it('loads the exact immutable canonical object instead of caller inline pixels', async () => {
+    mockGetObjectStream.mockResolvedValue({
+      stream: Readable.from([Buffer.from('IMAGE-A')]),
+      contentType: 'image/png',
+      contentLength: 7,
+    });
+
+    await expect(extractCanonicalRepositoryImages([source])).resolves.toEqual([
+      {
+        base64: `data:image/png;base64,${Buffer.from('IMAGE-A').toString('base64')}`,
+        mimeType: 'image/png',
+        role: 'reference',
+      },
+    ]);
+    expect(mockGetObjectStream).toHaveBeenCalledWith(source.objectKey);
+  });
+
+  it('rejects a cross-repository object key before reading storage', async () => {
+    await expect(
+      extractCanonicalRepositoryImages([
+        {
+          ...source,
+          objectKey:
+            'repositories/78/323e4567-e89b-42d3-a456-426614174000/photo.png',
+        },
+      ])
+    ).rejects.toMatchObject({ type: 'INVALID_ATTACHMENT' });
+    expect(mockGetObjectStream).not.toHaveBeenCalled();
+  });
+});
+
 describe('handleImageGenerationError', () => {
   // jest-environment-jsdom's Response polyfill lacks body-reading methods (.text(), .json()).
   // Spy on Response constructor to capture the body string argument directly.
@@ -380,5 +467,21 @@ describe('handleImageGenerationError', () => {
     expect(body.code).toBe('AUTH_ERROR');
     expect(String(body.error)).not.toContain('sk-proj-abc123');
     expect(body.requestId).toBe('req-456');
+  });
+
+  it('returns a bounded 400 for an invalid canonical image attachment', () => {
+    const error = Object.assign(new Error('private storage detail'), {
+      type: 'INVALID_ATTACHMENT',
+    });
+    const response = handleImageGenerationError(
+      error,
+      'conv-123',
+      'req-456'
+    );
+
+    expect(response.status).toBe(400);
+    const body = getLastBody();
+    expect(body.code).toBe('INVALID_ATTACHMENT');
+    expect(String(body.error)).not.toContain('private storage detail');
   });
 });

@@ -7,6 +7,9 @@
  * actual nexus_messages rows.
  */
 
+import type { SQL } from 'drizzle-orm'
+import { PgDialect } from 'drizzle-orm/pg-core'
+
 const mockExecuteQuery = jest.fn()
 const mockExecuteTransaction = jest.fn()
 jest.mock('@/lib/db/drizzle-client', () => ({
@@ -21,7 +24,11 @@ jest.mock('@/lib/logger', () => ({
   sanitizeForLogging: jest.fn((d: unknown) => d),
 }))
 
-import { saveUserMessage, saveAssistantMessage } from '../chat-helpers'
+import {
+  saveUserMessage,
+  saveAssistantMessage,
+  saveConversationSteps,
+} from '../chat-helpers'
 
 // A chainable fake `tx` recording which write builders were invoked.
 function makeTx() {
@@ -33,6 +40,60 @@ function makeTx() {
     update: jest.fn(() => ({ set: updateSet })),
   }
   return { tx, insertValues, updateWhere }
+}
+
+function jsonFromSql(value: unknown): unknown {
+  const query = new PgDialect().sqlToQuery(value as SQL)
+  return JSON.parse(String(query.params[0]))
+}
+
+const attachmentSearchResult = {
+  success: true,
+  query: 'attendance policy',
+  results: [{
+    content: 'RAW-REPOSITORY-CHUNK-MUST-NOT-BE-DURABLE',
+    source: 'handbook.pdf',
+    score: 0.88,
+    citations: [{
+      itemVersionId: '123e4567-e89b-42d3-a456-426614174000',
+      chunkId: 19,
+      label: 'Page 7',
+      sourceLocator: { page: 7 },
+    }],
+  }],
+}
+
+function expectCitationOnlyAttachmentResult(insertValues: jest.Mock): void {
+  const calls = insertValues.mock.calls as unknown as Array<[
+    { parts: unknown },
+  ]>
+  const parts = jsonFromSql(calls[0][0].parts) as Array<Record<string, unknown>>
+  expect(JSON.stringify(parts)).not.toContain(
+    'RAW-REPOSITORY-CHUNK-MUST-NOT-BE-DURABLE'
+  )
+  expect(parts).toEqual([
+    expect.objectContaining({
+      type: 'tool-call',
+      toolCallId: 'attachment-search-1',
+      toolName: 'searchNexusAttachments',
+      state: 'output-available',
+      input: { query: 'attendance policy' },
+      result: {
+        success: true,
+        query: 'attendance policy',
+        results: [{
+          source: 'handbook.pdf',
+          score: 0.88,
+          citations: [{
+            itemVersionId: '123e4567-e89b-42d3-a456-426614174000',
+            chunkId: 19,
+            label: 'Page 7',
+            sourceLocator: { page: 7 },
+          }],
+        }],
+      },
+    }),
+  ])
 }
 
 describe('nexus message saves are transactional (REV-DB-046 / REV-COR-220)', () => {
@@ -78,5 +139,54 @@ describe('nexus message saves are transactional (REV-DB-046 / REV-COR-220)', () 
     await expect(
       saveUserMessage({ conversationId: 'c1', content: 'hi', parts: [], dbModelId: 5 })
     ).rejects.toThrow('stats update failed')
+  })
+
+  it('persists citation-only Nexus attachment search results for a single-step response', async () => {
+    const { tx, insertValues } = makeTx()
+    mockExecuteTransaction.mockImplementation(async (cb: (t: unknown) => Promise<unknown>) => cb(tx))
+
+    await saveAssistantMessage({
+      conversationId: 'c1',
+      text: '',
+      dbModelId: 5,
+      toolCalls: [{
+        toolCallId: 'attachment-search-1',
+        toolName: 'searchNexusAttachments',
+        args: { query: 'attendance policy' },
+        result: attachmentSearchResult,
+      }],
+    })
+
+    expectCitationOnlyAttachmentResult(insertValues)
+  })
+
+  it('persists citation-only Nexus attachment search results for a multi-step response', async () => {
+    const { tx, insertValues } = makeTx()
+    mockExecuteTransaction.mockImplementation(async (cb: (t: unknown) => Promise<unknown>) => cb(tx))
+
+    await saveConversationSteps({
+      conversationId: 'c1',
+      dbModelId: 5,
+      steps: [
+        {
+          text: '',
+          finishReason: 'tool-calls',
+          toolCalls: [{
+            toolCallId: 'attachment-search-1',
+            toolName: 'searchNexusAttachments',
+            args: { query: 'attendance policy' },
+            result: attachmentSearchResult,
+          }],
+        },
+        {
+          text: 'The policy is on page 7.',
+          finishReason: 'stop',
+          toolCalls: [],
+        },
+      ],
+    })
+
+    expect(insertValues).toHaveBeenCalledTimes(2)
+    expectCitationOnlyAttachmentResult(insertValues)
   })
 })

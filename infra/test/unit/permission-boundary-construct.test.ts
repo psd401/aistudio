@@ -42,8 +42,16 @@ describe("PermissionBoundaryConstruct", () => {
     }
   );
 
-  test("prod permits the GuardDuty verdict lookup used before processing", () => {
-    expect(allowedActions("prod")).toContain("s3:GetObjectTagging");
+  test("prod permits the exact S3 lifecycle operations used by canonical uploads", () => {
+    expect(allowedActions("prod")).toEqual(
+      expect.arrayContaining([
+        "s3:GetObjectTagging",
+        "s3:PutObjectTagging",
+        "s3:DeleteObjectVersion",
+        "s3:AbortMultipartUpload",
+        "s3:ListBucketVersions",
+      ])
+    );
   });
 
   test.each(["dev", "prod"] as const)(

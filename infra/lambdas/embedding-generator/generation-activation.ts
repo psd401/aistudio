@@ -33,8 +33,15 @@ export async function activateCompletedGeneration(
   const eligibleTarget = sql`
     SELECT generation.id, generation.repository_id
     FROM repository_index_generations generation
+    JOIN knowledge_repositories target_repository
+      ON target_repository.id = generation.repository_id
     WHERE generation.id = ${generationId}::uuid
       AND generation.status IN ('building', 'active')
+      AND target_repository.lifecycle_status = 'active'
+      AND (
+        target_repository.expires_at IS NULL
+        OR target_repository.expires_at > now()
+      )
       AND EXISTS (
         SELECT 1
         FROM repository_item_chunks chunk
@@ -52,6 +59,13 @@ export async function activateCompletedGeneration(
               AND chunk.visual_embedding IS NULL
             )
           )
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM repository_item_chunks chunk
+        JOIN repository_items item ON item.id = chunk.item_id
+        WHERE chunk.index_generation_id = generation.id
+          AND item.lifecycle_status <> 'active'
       )
   `;
 
@@ -105,6 +119,11 @@ export async function activateCompletedGeneration(
             ON generation.id = target.id
           WHERE generation.status = 'active'
         )
+          AND repository.lifecycle_status = 'active'
+          AND (
+            repository.expires_at IS NULL
+            OR repository.expires_at > now()
+          )
         RETURNING repository.id
       ), embedded_items AS (
         UPDATE repository_items item
@@ -116,6 +135,7 @@ export async function activateCompletedGeneration(
           FROM repository_item_chunks chunk
           WHERE chunk.index_generation_id = ${generationId}::uuid
         )
+          AND item.lifecycle_status = 'active'
           AND EXISTS (SELECT 1 FROM repository_switch)
         RETURNING item.id
       )

@@ -1192,6 +1192,7 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
                         <DocumentUploadButton
                           label="Add Document for Knowledge"
                           onContent={doc => formField.onChange(doc)}
+                          repositoryBacked
                           disabled={isExecuting}
                           className="w-full"
                           onError={err => {

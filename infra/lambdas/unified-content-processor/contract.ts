@@ -87,12 +87,14 @@ export function decideMalwareInspection(
   required: boolean,
   providerStatus: string | null
 ): MalwareInspectionDecision {
-  if (!required) return { status: "not_required" };
-  if (!providerStatus) return { status: "awaiting" };
   if (providerStatus === "NO_THREATS_FOUND") {
     return { status: "clean", providerStatus };
   }
-  return { status: "blocked", providerStatus };
+  // A verdict already attached to the object remains authoritative even if an
+  // administrator subsequently disables mandatory scanning. In particular, a
+  // THREATS_FOUND tag must never become a configuration-dependent bypass.
+  if (providerStatus) return { status: "blocked", providerStatus };
+  return required ? { status: "awaiting" } : { status: "not_required" };
 }
 
 export function pagesFromTextract(

@@ -153,6 +153,11 @@ function DecisionRuntimeProvider({
       onProcessingStart: handleAttachmentProcessingStart,
       onProcessingComplete: handleAttachmentProcessingComplete,
       onError: handleAttachmentError,
+    }, {
+      // Decision Capture continues to send the extracted transcript to its
+      // specialized route. Its repository migration is intentionally separate
+      // from the Nexus chat cutover so changing the shared factory cannot break it.
+      repositoryBacked: false,
     })
   }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete, handleAttachmentError])
 

@@ -28,7 +28,7 @@ jest.mock("@/lib/auth/server-session", () => ({
 // (REV-COR-062); grant it so this suite keeps exercising the access guard.
 jest.mock("@/utils/roles", () => ({
   hasCapabilityAccess: jest.fn(async () => true),
-  hasRole: jest.fn(async () => true),
+  hasRole: jest.fn(async () => false),
 }));
 
 jest.mock("@/lib/repositories/content-platform/config", () => ({
@@ -52,9 +52,15 @@ jest.mock("@/lib/db/drizzle", () => ({
   getAccessibleRepositoriesByCognitoSub: jest.fn(async (ids: number[]) =>
     ids.map((id) => ({ id, name: "r", isAccessible: accessible }))
   ),
-  // imported by the guard module but not exercised on the read path
-  getRepositoryById: jest.fn(),
+  getRepositoryById: jest.fn(async (id: number) => ({
+    id,
+    repositoryKind: "durable",
+    lifecycleStatus: "active",
+    expiresAt: null,
+    metadata: null,
+  })),
   getRepositoryItemById: jest.fn(),
+  checkUserRoleByCognitoSub: jest.fn(async () => false),
   isSystemManagedRepository: jest.fn(() => false),
 }));
 

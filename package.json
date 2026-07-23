@@ -30,6 +30,8 @@
     "test:smoke:atrium-visibility": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/atrium-visibility-reference.smoke.ts",
     "test:smoke:resource-access": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/resource-access-grants.smoke.ts",
     "test:smoke:unified-content": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/unified-content-foundation.smoke.ts",
+    "test:smoke:nexus-ephemeral": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/nexus-ephemeral-repositories.smoke.ts",
+    "test:smoke:repository-upload-quota": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/repository-upload-quota.smoke.ts",
     "test:smoke:unified-content-lambda-artifact": "bun run scripts/test/unified-content-lambda-artifact.smoke.ts",
     "test:smoke:embedding-lambda-artifact": "bun run scripts/test/embedding-lambda-artifact.smoke.ts",
     "test:smoke:atrium": "bun run test:smoke:atrium-render && bun run test:smoke:atrium-collab && bun run test:smoke:atrium-collab-token && bun run test:smoke:atrium-agent-bridge && bun run test:smoke:atrium-agent-read && bun run test:smoke:atrium-html-sanitize && bun run test:smoke:atrium-provenance-rail && bun run test:smoke:atrium-collab-schema && bun run test:smoke:atrium-suggestions-resolve && bun run test:smoke:atrium-suggestion-mode && bun run test:smoke:atrium-sandbox-config && bun run test:smoke:atrium-sandbox-host",

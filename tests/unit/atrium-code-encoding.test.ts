@@ -62,15 +62,26 @@ describe("decodeContentBody", () => {
   it("throws on a wrong-length / non-canonical base64 string", () => {
     // Length not a multiple of 4.
     expect(() => decodeContentBody("YWJj YQ", "base64")).toThrow(ValidationError);
+    // Padding is only valid in the final one or two positions.
+    expect(() => decodeContentBody("YW=J", "base64")).toThrow(ValidationError);
     // All-padding degenerate input decodes to nothing.
     expect(() => decodeContentBody("====", "base64")).toThrow(ValidationError);
     // Empty / whitespace.
     expect(() => decodeContentBody("   ", "base64")).toThrow(ValidationError);
   });
 
-  it("enforces the decoded-size cap", () => {
+  it("enforces the decoded-size cap without regexp stack exhaustion", () => {
     const tooBig = b64("x".repeat(MAX_DECODED_BODY_BYTES + 1));
-    expect(() => decodeContentBody(tooBig, "base64")).toThrow(ValidationError);
+    let oversizedError: unknown;
+    try {
+      decodeContentBody(tooBig, "base64");
+    } catch (error) {
+      oversizedError = error;
+    }
+    expect(oversizedError).toBeInstanceOf(ValidationError);
+    expect(oversizedError).toMatchObject({
+      message: `Decoded content exceeds the ${MAX_DECODED_BODY_BYTES}-byte limit`,
+    });
     // A body exactly at the cap is accepted.
     const atCap = b64("x".repeat(MAX_DECODED_BODY_BYTES));
     expect(decodeContentBody(atCap, "base64")).toHaveLength(MAX_DECODED_BODY_BYTES);

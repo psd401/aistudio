@@ -1,5 +1,6 @@
 import type { UIMessage, LanguageModel, ModelMessage, ToolSet } from 'ai';
 import type { TokenMapping } from '@/lib/safety/types';
+import type { TokenMappingSink } from '@/lib/safety/token-mapping-sink';
 import type { SSEEventEmitter } from '@/types/sse-events';
 import type { SSEEvent } from './sse-event-types';
 
@@ -96,6 +97,14 @@ export interface StreamRequest {
    * reverse PII from both inline text and document attachments.
    */
   precomputedInputTokenMappings?: TokenMapping[];
+
+  /**
+   * Optional request-scoped sink for mappings created after streaming begins,
+   * such as PII tokens introduced by a repository retrieval tool. The response
+   * detokenizer reads this sink dynamically; callers must create a new sink for
+   * every request.
+   */
+  inputTokenMappingSink?: TokenMappingSink;
 }
 
 export interface StreamResponse {

@@ -33,6 +33,17 @@ const mockCopyRepositorySourceToCanonicalNamespace = jest.fn<
 >()
 const mockDeleteRepositoryItem = jest.fn<(...a: unknown[]) => Promise<number>>()
 const mockDeleteRepositoryItemStorage = jest.fn<(...a: unknown[]) => Promise<unknown>>()
+const mockBeginRepositoryItemDeletion = jest.fn<
+  (input: { repositoryId: number; itemId: number }) => Promise<{
+    id: number
+    repositoryId: number
+    type: string
+    source: string
+  }>
+>()
+const mockFinalizeRepositoryItemDeletion = jest.fn<
+  (...a: unknown[]) => Promise<boolean>
+>()
 const mockGetCanonicalRepositoryItemStatuses = jest.fn<
   (...a: unknown[]) => Promise<Map<number, {
     processingStatus: string
@@ -117,6 +128,10 @@ jest.mock('@/lib/repositories/content-platform', () => ({
   retryCanonicalRepositoryItem: mockRetryCanonicalRepositoryItem,
   assertCanonicalRetryNotQuarantined: mockAssertCanonicalRetryNotQuarantined,
 }))
+jest.mock('@/lib/repositories/content-platform/deletion-service', () => ({
+  beginRepositoryItemDeletion: mockBeginRepositoryItemDeletion,
+  finalizeRepositoryItemDeletion: mockFinalizeRepositoryItemDeletion,
+}))
 jest.mock('next/cache', () => ({ revalidatePath: jest.fn() }))
 jest.mock('@/lib/logger', () => ({
   createLogger: () => ({ info: jest.fn(), debug: jest.fn(), warn: jest.fn(), error: jest.fn() }),
@@ -157,6 +172,14 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
       key: 'repositories/5/11111111-2222-4333-8444-555555555555/legacy.pdf',
     })
     mockDeleteRepositoryItem.mockResolvedValue(1)
+    mockBeginRepositoryItemDeletion.mockImplementation(async ({ repositoryId, itemId }) => {
+      const item = await mockGetRepositoryItemById(itemId) as {
+        type: string
+        source: string
+      }
+      return { id: itemId, repositoryId, type: item.type, source: item.source }
+    })
+    mockFinalizeRepositoryItemDeletion.mockResolvedValue(true)
     mockDeleteRepositoryItemStorage.mockResolvedValue({
       sourceObjectCount: 1,
       artifactObjectCount: 3,
@@ -210,6 +233,39 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
         processingStatus: 'failed',
         processingError: 'Item version object key is outside its repository namespace',
         canRetry: true,
+      }),
+    ])
+  })
+
+  it('redacts internal processing failures and retry controls from shared readers', async () => {
+    mockCanModifyRepository.mockResolvedValue(false)
+    mockGetRepositoryItems.mockResolvedValue([{
+      id: 38,
+      repositoryId: 5,
+      type: 'text',
+      name: 'Inline notes',
+      source: 'content',
+      metadata: {},
+      processingStatus: 'completed',
+      processingError: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }])
+    mockGetCanonicalRepositoryItemStatuses.mockResolvedValue(new Map([[38, {
+      processingStatus: 'failed',
+      processingError: 's3://private-bucket/internal/source-key',
+      canRetry: true,
+    }]]))
+
+    const result = await mod.listRepositoryItems(5)
+
+    expect(result.isSuccess).toBe(true)
+    expect(result.data).toEqual([
+      expect.objectContaining({
+        id: 38,
+        processingStatus: 'failed',
+        processingError: null,
+        canRetry: false,
       }),
     ])
   })
@@ -591,7 +647,7 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
       expect.objectContaining(image)
     )
     expect(mockDeleteRepositoryItemStorage.mock.invocationCallOrder[0]).toBeLessThan(
-      mockDeleteRepositoryItem.mock.invocationCallOrder[0]
+      mockFinalizeRepositoryItemDeletion.mock.invocationCallOrder[0]
     )
   })
 
@@ -618,6 +674,35 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     )
   })
 
+  it.each(['document', 'audio', 'video'])(
+    'cleans canonical storage for %s before deleting its manifest',
+    async (type) => {
+      const item = {
+        id: 13,
+        repositoryId: 5,
+        type,
+        name: `Stored ${type}`,
+        source: `repositories/5/11111111-2222-4333-8444-555555555555/source.${type}`,
+        metadata: {},
+        processingStatus: 'completed',
+        processingError: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }
+      mockGetRepositoryItemById.mockResolvedValue(item)
+
+      const result = await mod.removeRepositoryItem(13)
+
+      expect(result.isSuccess).toBe(true)
+      expect(mockDeleteRepositoryItemStorage).toHaveBeenCalledWith(
+        expect.objectContaining(item)
+      )
+      expect(
+        mockDeleteRepositoryItemStorage.mock.invocationCallOrder[0]
+      ).toBeLessThan(mockFinalizeRepositoryItemDeletion.mock.invocationCallOrder[0])
+    }
+  )
+
   it('preserves the item manifest when storage cleanup fails', async () => {
     mockGetRepositoryItemById.mockResolvedValue({
       id: 12,
@@ -638,7 +723,7 @@ describe('repository-items.actions (REV-COR-061 / REV-SEC-062 / REV-COR-068)', (
     const result = await mod.removeRepositoryItem(12)
 
     expect(result.isSuccess).toBe(false)
-    expect(mockDeleteRepositoryItem).not.toHaveBeenCalled()
+    expect(mockFinalizeRepositoryItemDeletion).not.toHaveBeenCalled()
   })
 
   it('generates image download URLs through database-first S3 settings', async () => {

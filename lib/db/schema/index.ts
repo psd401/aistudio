@@ -57,6 +57,7 @@ export * from "./tables/nexus-shares";
 export * from "./tables/nexus-templates";
 export * from "./tables/nexus-user-preferences";
 export * from "./tables/nexus-provider-metrics";
+export * from "./tables/nexus-repository-bindings";
 
 // ============================================
 // Nexus MCP (Model Context Protocol)

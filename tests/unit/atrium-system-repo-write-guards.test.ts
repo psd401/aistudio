@@ -101,7 +101,13 @@ beforeEach(() => {
   canModifyResult = true;
   repoById = {
     [SYSTEM_REPO]: { id: SYSTEM_REPO, metadata: { systemManaged: true } },
-    [NORMAL_REPO]: { id: NORMAL_REPO, metadata: null },
+    [NORMAL_REPO]: {
+      id: NORMAL_REPO,
+      repositoryKind: "durable",
+      lifecycleStatus: "active",
+      expiresAt: null,
+      metadata: null,
+    },
   };
   itemById = {
     5: { id: 5, repositoryId: SYSTEM_REPO }, // an Atrium-index item

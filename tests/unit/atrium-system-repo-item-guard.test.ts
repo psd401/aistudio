@@ -16,6 +16,7 @@
 let accessibleRepoIds: Set<number> = new Set();
 let itemById: Record<number, unknown> = {};
 let repoById: Record<number, unknown> = {};
+let isAdministrator = false;
 
 jest.mock("@/lib/auth/server-session", () => ({
   getServerSession: jest.fn(async () => ({ sub: "user-1" })),
@@ -42,6 +43,7 @@ jest.mock("@/lib/db/drizzle", () => ({
   ),
   getRepositoryItemById: jest.fn(async (id: number) => itemById[id] ?? null),
   getRepositoryById: jest.fn(async (id: number) => repoById[id] ?? null),
+  checkUserRoleByCognitoSub: jest.fn(async () => isAdministrator),
   isSystemManagedRepository: (repo: { metadata?: unknown } | null | undefined) =>
     (repo?.metadata as Record<string, unknown> | null | undefined)?.systemManaged === true,
   getRepositoryItemChunks: jest.fn(async () => [
@@ -57,6 +59,7 @@ jest.mock("@/lib/db/drizzle", () => ({
 import {
   assertRepositoryReadAccess,
   assertItemRepositoryReadAccess,
+  assertUserManagedDurableRepository,
   assertNotSystemManagedRepository,
 } from "@/lib/repositories/repository-access-guard";
 import { getItemChunks } from "@/actions/repositories/repository-items.actions";
@@ -65,14 +68,48 @@ import { getRepositoryItemChunks } from "@/lib/db/drizzle";
 const getChunksMock = getRepositoryItemChunks as jest.Mock;
 
 beforeEach(() => {
-  accessibleRepoIds = new Set([3]); // repo 3 accessible; repo 9 not
+  accessibleRepoIds = new Set([3, 4]); // repo 4 is accessible but ephemeral
+  isAdministrator = false;
   itemById = {
     5: { id: 5, repositoryId: 9 }, // in an inaccessible repo
     6: { id: 6, repositoryId: 3 }, // in an accessible repo
   };
   repoById = {
-    9: { id: 9, metadata: { systemManaged: true } },
-    3: { id: 3, metadata: null },
+    9: {
+      id: 9,
+      repositoryKind: "system",
+      lifecycleStatus: "active",
+      expiresAt: null,
+      metadata: { systemManaged: true },
+    },
+    3: {
+      id: 3,
+      repositoryKind: "durable",
+      lifecycleStatus: "active",
+      expiresAt: null,
+      metadata: null,
+    },
+    4: {
+      id: 4,
+      repositoryKind: "ephemeral",
+      lifecycleStatus: "active",
+      expiresAt: new Date("2026-07-24T00:00:00Z"),
+      metadata: null,
+    },
+    7: {
+      id: 7,
+      repositoryKind: "durable",
+      lifecycleStatus: "active",
+      expiresAt: new Date("2020-01-01T00:00:00Z"),
+      metadata: null,
+    },
+    8: {
+      id: 8,
+      repositoryKind: "durable",
+      lifecycleStatus: "active",
+      expiresAt: null,
+      metadata: null,
+    },
   };
   getChunksMock.mockClear();
 });
@@ -83,13 +120,25 @@ describe("shared repository-access guards", () => {
     await expect(assertRepositoryReadAccess(9, "user-1")).rejects.toBeDefined();
   });
 
+  it("allows administrators to read private durable repositories only", async () => {
+    await expect(assertRepositoryReadAccess(8, "user-1")).rejects.toBeDefined();
+
+    isAdministrator = true;
+    await expect(assertRepositoryReadAccess(8, "user-1")).resolves.toBeUndefined();
+    await expect(assertRepositoryReadAccess(4, "user-1")).rejects.toBeDefined();
+    await expect(assertRepositoryReadAccess(9, "user-1")).rejects.toBeDefined();
+  });
+
   it("assertItemRepositoryReadAccess throws for an item in an inaccessible repo", async () => {
     await expect(assertItemRepositoryReadAccess(6, "user-1")).resolves.toBeUndefined(); // repo 3
     await expect(assertItemRepositoryReadAccess(5, "user-1")).rejects.toBeDefined();    // repo 9
     await expect(assertItemRepositoryReadAccess(404, "user-1")).rejects.toBeDefined();  // missing item
   });
 
-  it("assertNotSystemManagedRepository throws for a system repo, resolves for a normal one", async () => {
+  it("allows only active, unexpired, user-managed durable repositories", async () => {
+    await expect(assertUserManagedDurableRepository(3)).resolves.toBeUndefined();
+    await expect(assertUserManagedDurableRepository(4)).rejects.toBeDefined(); // ephemeral
+    await expect(assertUserManagedDurableRepository(7)).rejects.toBeDefined(); // expired
     await expect(assertNotSystemManagedRepository(9)).rejects.toBeDefined(); // system
     await expect(assertNotSystemManagedRepository(3)).resolves.toBeUndefined(); // normal
     await expect(assertNotSystemManagedRepository(404)).rejects.toBeDefined(); // missing

@@ -564,7 +564,8 @@
       "name": "Knowledge Repositories",
       "description": "Manage knowledge bases and document repositories for AI assistants.",
       "defaultRoles": [
-        "administrator"
+        "administrator",
+        "staff"
       ],
       "humanDriven": true
     },

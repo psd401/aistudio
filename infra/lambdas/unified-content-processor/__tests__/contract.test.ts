@@ -57,6 +57,14 @@ describe("unified content processor contract", () => {
     expect(decideMalwareInspection(false, null)).toEqual({
       status: "not_required",
     });
+    expect(decideMalwareInspection(false, "NO_THREATS_FOUND")).toEqual({
+      status: "clean",
+      providerStatus: "NO_THREATS_FOUND",
+    });
+    expect(decideMalwareInspection(false, "THREATS_FOUND")).toEqual({
+      status: "blocked",
+      providerStatus: "THREATS_FOUND",
+    });
     expect(decideMalwareInspection(true, null)).toEqual({ status: "awaiting" });
     expect(decideMalwareInspection(true, "NO_THREATS_FOUND")).toEqual({
       status: "clean",

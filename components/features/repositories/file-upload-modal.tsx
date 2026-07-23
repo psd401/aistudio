@@ -23,6 +23,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAction } from "@/lib/hooks/use-action"
 import {
@@ -31,8 +32,19 @@ import {
   addUrlItem,
   addTextItem,
 } from "@/actions/repositories/repository-items.actions"
-import { FileText, Link, Type, Upload, Loader2 } from "lucide-react"
+import {
+  Cloud,
+  FileText,
+  Link,
+  Type,
+  Upload,
+  Loader2,
+} from "lucide-react"
 import { useToast } from "@/components/ui/use-toast"
+import {
+  uploadFileToRepositoryStorage,
+  type BrowserRepositoryUpload,
+} from "@/lib/repositories/content-platform/browser-upload"
 
 // File size limits - will be loaded from environment
 const ACCEPTED_FILE_TYPES = [
@@ -131,6 +143,7 @@ export function FileUploadModal({
 }: FileUploadModalProps) {
   const { toast } = useToast()
   const [activeTab, setActiveTab] = useState("document")
+  const [isDocumentUploadPending, setIsDocumentUploadPending] = useState(false)
   
   // Get max file size from environment variable or use default
   // Note: MAX_FILE_SIZE_MB is a server-side env var, so we need to hardcode or pass it from server
@@ -200,14 +213,19 @@ export function FileUploadModal({
   const { execute: executeAddText, isPending: isAddingText } = useAction(addTextItem)
   
   // Select the appropriate loading state based on the flag
-  const isAddingDocument = USE_PRESIGNED_URL ? isAddingDocumentNew : isAddingDocumentOld
+  const isAddingDocument =
+    isDocumentUploadPending ||
+    (USE_PRESIGNED_URL ? isAddingDocumentNew : isAddingDocumentOld)
 
   const isLoading = isAddingDocument || isAddingUrl || isAddingText
   
 
   async function onDocumentSubmit(data: z.infer<typeof dynamicDocumentSchema>) {
+    if (isDocumentUploadPending) return
+
     const file = data.file[0]
     const contentType = contentTypeForFile(file)
+    setIsDocumentUploadPending(true)
     
     try {
       let result
@@ -235,54 +253,12 @@ export function FileUploadModal({
         const canonical = await canonicalResponse.json()
 
         if (canonical.mode === 'canonical') {
-          const upload = canonical.upload as {
-            sessionId: string
-            uploadMethod: 'single' | 'multipart'
-            uploadUrl?: string
-            partSize?: number
-            partUrls?: Array<{ partNumber: number; uploadUrl: string }>
-          }
-          const completedParts: Array<{ ETag: string; PartNumber: number }> = []
-
-          if (upload.uploadMethod === 'single') {
-            if (!upload.uploadUrl) throw new Error('Upload URL was not provided')
-            const uploadResponse = await fetch(upload.uploadUrl, {
-              method: 'PUT',
-              headers: { 'Content-Type': contentType },
-              body: file,
-            })
-            if (!uploadResponse.ok) throw new Error('Failed to upload file to storage')
-          } else {
-            if (!upload.partSize || !upload.partUrls?.length) {
-              throw new Error('Multipart upload configuration was incomplete')
-            }
-            // Four concurrent parts balances throughput and memory use. Each
-            // worker claims the next Blob slice without reading the whole file.
-            let nextPart = 0
-            const workers = Array.from(
-              { length: Math.min(4, upload.partUrls.length) },
-              async () => {
-                while (nextPart < upload.partUrls!.length) {
-                  const index = nextPart
-                  nextPart += 1
-                  const part = upload.partUrls![index]
-                  const start = (part.partNumber - 1) * upload.partSize!
-                  const body = file.slice(start, Math.min(start + upload.partSize!, file.size))
-                  const partResponse = await fetch(part.uploadUrl, {
-                    method: 'PUT',
-                    body,
-                  })
-                  if (!partResponse.ok) {
-                    throw new Error(`Failed to upload part ${part.partNumber}`)
-                  }
-                  const ETag = partResponse.headers.get('ETag')
-                  if (!ETag) throw new Error('Storage did not return a multipart ETag')
-                  completedParts.push({ ETag, PartNumber: part.partNumber })
-                }
-              }
-            )
-            await Promise.all(workers)
-          }
+          const upload = canonical.upload as BrowserRepositoryUpload
+          const completedParts = await uploadFileToRepositoryStorage(
+            file,
+            upload,
+            contentType
+          )
 
           const completionResponse = await fetch(
             `/api/repositories/${repositoryId}/uploads/${upload.sessionId}/complete`,
@@ -292,7 +268,7 @@ export function FileUploadModal({
               body: JSON.stringify({
                 parts:
                   upload.uploadMethod === 'multipart'
-                    ? completedParts.sort((a, b) => a.PartNumber - b.PartNumber)
+                    ? completedParts
                     : undefined,
               }),
             }
@@ -398,6 +374,8 @@ export function FileUploadModal({
         description: error instanceof Error ? error.message : "Failed to upload document",
         variant: "destructive",
       })
+    } finally {
+      setIsDocumentUploadPending(false)
     }
   }
 
@@ -450,7 +428,13 @@ export function FileUploadModal({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && isDocumentUploadPending) return
+        onOpenChange(nextOpen)
+      }}
+    >
       <DialogContent className="sm:max-w-[600px]">
         <DialogHeader>
           <DialogTitle>Add Item to Repository</DialogTitle>
@@ -460,18 +444,22 @@ export function FileUploadModal({
         </DialogHeader>
 
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="document">
+          <TabsList className="grid h-auto w-full grid-cols-2 sm:grid-cols-4">
+            <TabsTrigger value="document" disabled={isDocumentUploadPending}>
               <FileText className="mr-2 h-4 w-4" />
               File
             </TabsTrigger>
-            <TabsTrigger value="url">
+            <TabsTrigger value="url" disabled={isDocumentUploadPending}>
               <Link className="mr-2 h-4 w-4" />
               URL
             </TabsTrigger>
-            <TabsTrigger value="text">
+            <TabsTrigger value="text" disabled={isDocumentUploadPending}>
               <Type className="mr-2 h-4 w-4" />
               Text
+            </TabsTrigger>
+            <TabsTrigger value="google-drive" disabled={isDocumentUploadPending}>
+              <Cloud className="mr-2 h-4 w-4" />
+              Google Drive
             </TabsTrigger>
           </TabsList>
 
@@ -488,7 +476,11 @@ export function FileUploadModal({
                     <FormItem>
                       <FormLabel>Name</FormLabel>
                       <FormControl>
-                        <Input {...field} placeholder="e.g., User Manual" />
+                        <Input
+                          {...field}
+                          placeholder="e.g., User Manual"
+                          disabled={isDocumentUploadPending}
+                        />
                       </FormControl>
                       <FormDescription>
                         A descriptive name for the document
@@ -510,6 +502,7 @@ export function FileUploadModal({
                           {...field}
                           value={undefined}
                           type="file"
+                          disabled={isDocumentUploadPending}
                           accept=".pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp,.gif,.tif,.tiff,.amr,.flac,.m4a,.mp3,.ogg,.wav,.mp4,.mov,.avi,.mkv,.webm,.txt,.md,.csv"
                           onChange={(e) => onChange(e.target.files)}
                         />
@@ -530,6 +523,7 @@ export function FileUploadModal({
                     type="button"
                     variant="outline"
                     onClick={() => onOpenChange(false)}
+                    disabled={isDocumentUploadPending}
                   >
                     Cancel
                   </Button>
@@ -672,6 +666,33 @@ export function FileUploadModal({
                 </div>
               </form>
             </Form>
+          </TabsContent>
+
+          <TabsContent value="google-drive">
+            <Alert>
+              <Cloud className="h-4 w-4" />
+              <AlertTitle>Google Drive is not available yet</AlertTitle>
+              <AlertDescription className="space-y-2">
+                <p>
+                  Drive import and synchronization remain disabled until the
+                  connector boundary tracked in issue #1262 is implemented.
+                </p>
+                <p>
+                  Download the file from Drive and use the File tab in the
+                  meantime. No Drive permissions or credentials are requested
+                  by this screen.
+                </p>
+              </AlertDescription>
+            </Alert>
+            <div className="mt-4 flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+              >
+                Close
+              </Button>
+            </div>
           </TabsContent>
         </Tabs>
       </DialogContent>

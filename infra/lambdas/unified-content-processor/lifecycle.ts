@@ -14,6 +14,7 @@ export type DeferredProcessingReason =
 export interface DeferredProcessingMetrics {
   waitReason?: DeferredProcessingReason;
   waitStartedAt?: string;
+  waitDeadlineExceededAt?: string;
 }
 export interface ProcessingFailureDecision {
   terminal: boolean;
@@ -149,14 +150,21 @@ export function processingRetryDelaySeconds(
 }
 
 /**
- * Start or continue one managed-service wait and fail it after a service-specific
- * deadline. Changing wait reasons starts a new clock (for example scan -> OCR).
+ * Start or continue one managed-service wait. Most waits fail after their
+ * service-specific deadline. BDA is different: it has no cancellation API and
+ * may still be writing S3 output, so an overdue invocation enters an observable
+ * reconciliation state and remains pollable until AWS reports it terminal.
+ * Changing wait reasons starts a new clock (for example scan -> OCR).
  */
 export function prepareDeferredProcessingMetrics<T extends DeferredProcessingMetrics>(
   metrics: T,
   reason: DeferredProcessingReason,
   now = new Date()
-): T & Required<DeferredProcessingMetrics> {
+): T & {
+  waitReason: DeferredProcessingReason;
+  waitStartedAt: string;
+  waitDeadlineExceededAt?: string;
+} {
   const existingStartedAt =
     metrics.waitReason === reason && metrics.waitStartedAt
       ? Date.parse(metrics.waitStartedAt)
@@ -166,14 +174,33 @@ export function prepareDeferredProcessingMetrics<T extends DeferredProcessingMet
     : now.getTime();
   const deadlineMs = DEFER_DEADLINE_MS[reason];
   if (now.getTime() - startedAt >= deadlineMs) {
+    if (reason === "AWAITING_MEDIA_ANALYSIS") {
+      return {
+        ...metrics,
+        waitReason: reason,
+        waitStartedAt: new Date(startedAt).toISOString(),
+        waitDeadlineExceededAt:
+          metrics.waitReason === reason && metrics.waitDeadlineExceededAt
+            ? metrics.waitDeadlineExceededAt
+            : now.toISOString(),
+      };
+    }
     throw new PermanentContentProcessingError(
       `${reason}_TIMEOUT`,
       `Content processing timed out while ${reason.toLowerCase().replaceAll("_", " ")}`
     );
   }
+  const {
+    waitDeadlineExceededAt: _waitDeadlineExceededAt,
+    ...remainingMetrics
+  } = metrics;
   return {
-    ...metrics,
+    ...remainingMetrics,
     waitReason: reason,
     waitStartedAt: new Date(startedAt).toISOString(),
+  } as T & {
+    waitReason: DeferredProcessingReason;
+    waitStartedAt: string;
+    waitDeadlineExceededAt?: string;
   };
 }

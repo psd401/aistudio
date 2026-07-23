@@ -38,6 +38,7 @@ export function reconcileTextractState(
   if (remaining.waitReason === "AWAITING_OCR") {
     delete remaining.waitReason;
     delete remaining.waitStartedAt;
+    delete remaining.waitDeadlineExceededAt;
   }
 
   return {
@@ -92,6 +93,8 @@ export function reconcileBdaState(
   );
   const {
     bdaInvocationArn: _bdaInvocationArn,
+    bdaInvocationState: _bdaInvocationState,
+    bdaTerminalStatus: _bdaTerminalStatus,
     bdaSourceObjectKey: _bdaSourceObjectKey,
     bdaOutputPrefix: _bdaOutputPrefix,
     bdaResultObjectKey: _bdaResultObjectKey,
@@ -100,6 +103,7 @@ export function reconcileBdaState(
   if (remaining.waitReason === "AWAITING_MEDIA_ANALYSIS") {
     delete remaining.waitReason;
     delete remaining.waitStartedAt;
+    delete remaining.waitDeadlineExceededAt;
   }
   return { metrics: remaining, invocationArn: null, outputPrefix, reset };
 }
@@ -110,11 +114,37 @@ export function attachBdaInvocation(
   outputPrefix: string,
   invocationArn: string
 ): RepositoryProcessingMetrics {
+  const { bdaTerminalStatus: _bdaTerminalStatus, ...remaining } = source;
   return {
-    ...source,
+    ...remaining,
     bdaSourceObjectKey: sourceObjectKey,
     bdaOutputPrefix: outputPrefix,
     bdaInvocationArn: invocationArn,
+    bdaInvocationState: "active",
+  };
+}
+
+/**
+ * Mark an invocation terminal only after GetDataAutomationStatus returned a
+ * terminal provider state. Keeping the ARN allows completed output resolution
+ * to retry idempotently, while deletion can distinguish it from an AWS writer
+ * that may still publish objects.
+ */
+export function markBdaInvocationTerminal(
+  source: RepositoryProcessingMetrics,
+  invocationArn: string,
+  status: "Success" | "ServiceError" | "ClientError"
+): RepositoryProcessingMetrics {
+  if (
+    !source.bdaInvocationArn ||
+    source.bdaInvocationArn !== invocationArn
+  ) {
+    throw new Error("BDA terminal status does not match the durable invocation");
+  }
+  return {
+    ...source,
+    bdaInvocationState: "terminal",
+    bdaTerminalStatus: status,
   };
 }
 

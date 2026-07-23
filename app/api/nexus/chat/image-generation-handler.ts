@@ -7,10 +7,14 @@ import { sql, and, desc, eq } from 'drizzle-orm';
 import { executeQuery, executeTransaction } from '@/lib/db/drizzle-client';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
 import { getAttachmentFromS3 } from '@/lib/services/attachment-storage-service';
+import { getObjectStream } from '@/lib/aws/s3-client';
 import { sanitizeTextForDatabase } from '@/lib/utils/text-sanitizer';
 import { safeJsonbStringify } from '@/lib/db/json-utils';
 import { assertSafeFetchUrl } from '@/lib/agents/agent-tools/web-fetch';
+import { deleteDocumentVersions } from '@/lib/aws/s3-client';
 import { createLogger } from '@/lib/logger';
+import type { NexusAttachmentImageSource } from '@/lib/nexus/ephemeral-repository-service';
+import { isRepositorySourceObjectKey } from '@/lib/repositories/content-platform/object-key';
 
 /**
  * A client-supplied reference `s3Key` (or `s3://` URL) must live under the
@@ -44,12 +48,111 @@ export interface ImageGenerationParams {
   timer: (data: Record<string, unknown>) => void;
 }
 
+/**
+ * Remove a generated object when the subsequent durable message transaction
+ * fails. The key comes from the server-side image service, but still enforce
+ * the conversation-scoped generated-image prefix before deleting anything.
+ */
+export async function deleteUnpersistedGeneratedImage(params: {
+  conversationId: string;
+  s3Key?: string;
+}): Promise<boolean> {
+  const { conversationId, s3Key } = params;
+  if (
+    !s3Key ||
+    !s3Key.startsWith(`v2/generated-images/${conversationId}/`)
+  ) {
+    return false;
+  }
+  await deleteDocumentVersions(s3Key);
+  return true;
+}
+
 interface ReferenceImage {
   base64?: string;
   url?: string;
   s3Key?: string;
   mimeType?: string;
   role?: 'reference' | 'mask';
+}
+
+const MAX_CANONICAL_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
+// SVG intentionally excluded — it can embed scripts and event handlers.
+const ALLOWED_IMAGE_MIMES = new Set([
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
+  'image/avif', 'image/heic', 'image/heif'
+]);
+
+/**
+ * Load the exact immutable repository versions resolved for canonical markers.
+ * Caller-supplied inline pixels are deliberately ignored whenever markers are
+ * present, preventing marker A from being paired with unrelated image B.
+ */
+export async function extractCanonicalRepositoryImages(
+  sources: readonly NexusAttachmentImageSource[]
+): Promise<ReferenceImage[]> {
+  const images: ReferenceImage[] = [];
+  for (const source of sources) {
+    if (
+      !isRepositorySourceObjectKey(source.repositoryId, source.objectKey)
+    ) {
+      throw Object.assign(new Error('Canonical image source is invalid'), {
+        type: 'INVALID_ATTACHMENT',
+      });
+    }
+    if (
+      source.byteSize != null &&
+      source.byteSize > MAX_CANONICAL_REFERENCE_IMAGE_BYTES
+    ) {
+      throw Object.assign(new Error('Canonical image source is too large'), {
+        type: 'INVALID_ATTACHMENT',
+      });
+    }
+
+    const object = await getObjectStream(source.objectKey);
+    if (
+      object.contentLength != null &&
+      object.contentLength > MAX_CANONICAL_REFERENCE_IMAGE_BYTES
+    ) {
+      throw Object.assign(new Error('Canonical image source is too large'), {
+        type: 'INVALID_ATTACHMENT',
+      });
+    }
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    for await (const chunk of object.stream) {
+      const buffer =
+        typeof chunk === 'string'
+          ? Buffer.from(chunk)
+          : Buffer.from(chunk as Uint8Array);
+      totalBytes += buffer.byteLength;
+      if (totalBytes > MAX_CANONICAL_REFERENCE_IMAGE_BYTES) {
+        object.stream.destroy();
+        throw Object.assign(new Error('Canonical image source is too large'), {
+          type: 'INVALID_ATTACHMENT',
+        });
+      }
+      chunks.push(buffer);
+    }
+
+    const mimeType = (
+      source.detectedContentType ??
+      object.contentType ??
+      source.declaredContentType ??
+      ''
+    ).split(';', 1)[0]?.trim().toLowerCase();
+    if (!mimeType || !ALLOWED_IMAGE_MIMES.has(mimeType)) {
+      throw Object.assign(new Error('Canonical image source is not an image'), {
+        type: 'INVALID_ATTACHMENT',
+      });
+    }
+    images.push({
+      base64: `data:${mimeType};base64,${Buffer.concat(chunks).toString('base64')}`,
+      mimeType,
+      role: 'reference',
+    });
+  }
+  return images;
 }
 
 /**
@@ -212,6 +315,8 @@ export async function getOrCreateImageConversation(params: {
 export async function persistImageExchange(params: {
   conversationId: string;
   imagePrompt: string;
+  userContent?: string;
+  userParts?: unknown[];
   imageResult: {
     imageUrl: string;
     s3Key?: string;
@@ -224,7 +329,15 @@ export async function persistImageExchange(params: {
   dbModelId: number;
   routingMetadata?: Record<string, unknown>;
 }): Promise<void> {
-  const { conversationId, imagePrompt, imageResult, dbModelId, routingMetadata = {} } = params;
+  const {
+    conversationId,
+    imagePrompt,
+    userContent = imagePrompt,
+    userParts = [{ type: 'text', text: imagePrompt }],
+    imageResult,
+    dbModelId,
+    routingMetadata = {},
+  } = params;
 
   // Build assistant parts/content outside the transaction (pure computation).
   const messageParts: Array<{
@@ -261,8 +374,8 @@ export async function persistImageExchange(params: {
       id: crypto.randomUUID(),
       conversationId,
       role: 'user',
-      content: imagePrompt,
-      parts: sql`${safeJsonbStringify([{ type: 'text', text: imagePrompt }])}::jsonb`,
+      content: userContent,
+      parts: sql`${safeJsonbStringify(userParts)}::jsonb`,
       modelId: dbModelId,
       metadata: sql`${safeJsonbStringify({})}::jsonb`,
       createdAt: new Date()
@@ -427,12 +540,6 @@ async function handleS3FileImage(
     });
   }
 }
-
-// SVG intentionally excluded — can embed <script> tags and JS event handlers (XSS vector)
-const ALLOWED_IMAGE_MIMES = new Set([
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
-  'image/avif', 'image/heic', 'image/heif'
-]);
 
 async function handleFilePart(
   part: { mediaType?: string; mimeType?: string; s3Key?: string; url?: string; data?: string },
@@ -667,6 +774,23 @@ export function handleImageGenerationError(
     return new Response(
       JSON.stringify({ error: 'Image generation service authentication failed', code: 'AUTH_ERROR', requestId }),
       { status: 401, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  if (errorType === 'INVALID_ATTACHMENT') {
+    log.warn('Image generation canonical attachment rejected', {
+      conversationId,
+      errorMessage,
+      requestId,
+    });
+    return new Response(
+      JSON.stringify({
+        error:
+          'The attached repository image is unavailable for image generation.',
+        code: 'INVALID_ATTACHMENT',
+        requestId,
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
     );
   }
 

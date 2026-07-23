@@ -34,8 +34,16 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Badge } from "@/components/ui/badge"
 import { useAction } from "@/lib/hooks/use-action"
+import { RepositoryItemDetails } from "./repository-item-details"
 import {
   FileText,
   Image as ImageIcon,
@@ -50,6 +58,7 @@ import {
   AlertCircle,
   CheckCircle,
   Clock,
+  Eye,
   Video,
 } from "lucide-react"
 import { format } from "date-fns"
@@ -57,17 +66,20 @@ import { useToast } from "@/components/ui/use-toast"
 
 interface RepositoryItemListProps {
   repositoryId: number
-  onAddItem: () => void
+  canManage: boolean
+  onAddItem?: () => void
 }
 
 export function RepositoryItemList({
   repositoryId,
+  canManage,
   onAddItem,
 }: RepositoryItemListProps) {
   const { toast } = useToast()
   const [items, setItems] = useState<RepositoryItem[]>([])
   const [loading, setLoading] = useState(true)
   const [deleteTarget, setDeleteTarget] = useState<RepositoryItem | null>(null)
+  const [detailTarget, setDetailTarget] = useState<RepositoryItem | null>(null)
 
   const { execute: executeList } = useAction(listRepositoryItems)
   const { execute: executeRemove, isPending: isRemoving } = useAction(
@@ -111,7 +123,7 @@ export function RepositoryItemList({
   }, [items])
 
   async function handleDelete() {
-    if (!deleteTarget) return
+    if (!canManage || !deleteTarget) return
 
     const result = await executeRemove(deleteTarget.id)
     if (result.isSuccess) {
@@ -147,6 +159,7 @@ export function RepositoryItemList({
   }
 
   async function handleRetry(item: RepositoryItem) {
+    if (!canManage) return
     setRetryingItemId(item.id)
     const result = await executeRetry(item.id)
     if (result.isSuccess) {
@@ -263,7 +276,11 @@ export function RepositoryItemList({
                 Documents, URLs, and text content in this repository
               </CardDescription>
             </div>
-            <Button onClick={onAddItem}>Add Item</Button>
+            {canManage && onAddItem ? (
+              <Button onClick={onAddItem}>Add Item</Button>
+            ) : (
+              <Badge variant="outline">Read only</Badge>
+            )}
           </div>
         </CardHeader>
         <CardContent>
@@ -276,9 +293,11 @@ export function RepositoryItemList({
               <p className="text-muted-foreground mb-4">
                 No items in this repository yet
               </p>
-              <Button variant="outline" onClick={onAddItem}>
-                Add your first item
-              </Button>
+              {canManage && onAddItem ? (
+                <Button variant="outline" onClick={onAddItem}>
+                  Add your first item
+                </Button>
+              ) : null}
             </div>
           ) : (
             <Table>
@@ -308,7 +327,7 @@ export function RepositoryItemList({
                             {item.source}
                           </div>
                         )}
-                        {item.processingError && (
+                        {canManage && item.processingError && (
                           <div className="text-sm text-destructive mt-1">
                             {item.processingError}
                           </div>
@@ -321,6 +340,14 @@ export function RepositoryItemList({
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setDetailTarget(item)}
+                          aria-label={`View details for ${item.name}`}
+                        >
+                          <Eye className="h-4 w-4" />
+                        </Button>
                         {["document", "image", "audio", "video"].includes(item.type) && (
                           <Button
                             variant="ghost"
@@ -331,7 +358,7 @@ export function RepositoryItemList({
                             <Download className="h-4 w-4" />
                           </Button>
                         )}
-                        {item.canRetry && (
+                        {canManage && item.canRetry && (
                           <Button
                             variant="outline"
                             size="sm"
@@ -355,13 +382,16 @@ export function RepositoryItemList({
                             <ExternalLink className="h-4 w-4" />
                           </Button>
                         )}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setDeleteTarget(item)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
+                        {canManage ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setDeleteTarget(item)}
+                            aria-label={`Remove ${item.name}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        ) : null}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -372,37 +402,59 @@ export function RepositoryItemList({
         </CardContent>
       </Card>
 
-      <AlertDialog
-        open={!!deleteTarget}
-        onOpenChange={(open) => !open && setDeleteTarget(null)}
+      {canManage ? (
+        <AlertDialog
+          open={!!deleteTarget}
+          onOpenChange={(open) => !open && setDeleteTarget(null)}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Remove Item</AlertDialogTitle>
+              <AlertDialogDescription>
+                Are you sure you want to remove &quot;{deleteTarget?.name}&quot;
+                from this repository? This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handleDelete}
+                disabled={isRemoving}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                {isRemoving ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Removing...
+                  </>
+                ) : (
+                  "Remove"
+                )}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      ) : null}
+
+      <Dialog
+        open={detailTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDetailTarget(null)
+        }}
       >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Remove Item</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to remove &quot;{deleteTarget?.name}&quot; from this
-              repository? This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleDelete}
-              disabled={isRemoving}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {isRemoving ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Removing...
-                </>
-              ) : (
-                "Remove"
-              )}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Repository item details</DialogTitle>
+            <DialogDescription>
+              Source versions, processing, derived artifacts, and active
+              citation locators.
+            </DialogDescription>
+          </DialogHeader>
+          {detailTarget ? (
+            <RepositoryItemDetails itemId={detailTarget.id} />
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </>
   )
 }

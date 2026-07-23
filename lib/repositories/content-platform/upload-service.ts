@@ -9,9 +9,14 @@ import {
   UploadPartCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { and, eq } from "drizzle-orm";
-import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import { and, eq, sql } from "drizzle-orm";
 import {
+  executeQuery,
+  executeTransaction,
+  toPgRows,
+} from "@/lib/db/drizzle-client";
+import {
+  knowledgeRepositories,
   repositoryItems,
   repositoryItemVersions,
   repositoryProcessingJobs,
@@ -34,6 +39,9 @@ import {
 import { isOfficeContentType } from "./office-processing";
 import { isCanonicalTextContentType } from "./text-processing";
 import { buildRepositorySourceObjectKey } from "./object-key";
+import {
+  REPOSITORY_UPLOAD_TEMPORARY_TAGGING,
+} from "./upload-state";
 
 export interface InitiateRepositoryUploadInput {
   repositoryId: number;
@@ -82,11 +90,14 @@ export interface RepositoryUploadStorage {
   createSingleUpload(input: {
     objectKey: string;
     contentType: string;
+    byteSize: number;
     metadata: Record<string, string>;
   }): Promise<{ uploadUrl: string }>;
   createMultipartUpload(input: {
     objectKey: string;
     contentType: string;
+    byteSize: number;
+    partSize: number;
     partCount: number;
     metadata: Record<string, string>;
   }): Promise<{ uploadId: string; partUrls: UploadPartUrl[] }>;
@@ -108,6 +119,74 @@ const MIN_MULTIPART_PART_SIZE = 5 * 1024 * 1024;
 // thousands of signed URLs creates oversized API responses and browser state.
 const MAX_MULTIPART_PARTS = 100;
 const UPLOAD_EXPIRY_SECONDS = 60 * 60;
+export const MAX_ACTIVE_UPLOAD_SESSIONS_PER_USER = 10;
+export const MAX_ACTIVE_EPHEMERAL_BYTES_PER_OWNER = 5 * 1024 ** 3;
+export const MAX_ACTIVE_EPHEMERAL_REPOSITORIES_PER_OWNER = 100;
+
+export type RepositoryUploadQuota =
+  | "active-session-count"
+  | "active-session-bytes"
+  | "ephemeral-storage-bytes"
+  | "ephemeral-repository-count";
+
+/**
+ * A stable, non-sensitive signal for HTTP callers. Product routes may map this
+ * to 429 without exposing repository existence, byte totals, or storage keys.
+ */
+export class RepositoryUploadQuotaExceededError extends Error {
+  readonly code = "REPOSITORY_UPLOAD_QUOTA_EXCEEDED";
+  readonly httpStatus = 429;
+
+  constructor(readonly quota: RepositoryUploadQuota) {
+    super("Repository upload quota exceeded");
+    this.name = "RepositoryUploadQuotaExceededError";
+  }
+}
+
+interface RepositoryUploadQuotaUsage {
+  activeUploadCount: number;
+  activeUploadBytes: number;
+  nexusManagedStorageBytes: number;
+  nexusManagedRepositoryCount: number;
+  targetHasNexusManagedStorage: boolean;
+}
+
+export function repositoryUploadQuotaViolation(input: {
+  usage: RepositoryUploadQuotaUsage;
+  requestedBytes: number;
+  maximumActiveBytes: number;
+  repositoryKind: "durable" | "ephemeral" | "system";
+  nexusManaged: boolean;
+}): RepositoryUploadQuota | null {
+  if (
+    input.usage.activeUploadCount >= MAX_ACTIVE_UPLOAD_SESSIONS_PER_USER
+  ) {
+    return "active-session-count";
+  }
+  if (
+    input.usage.activeUploadBytes + input.requestedBytes >
+    input.maximumActiveBytes
+  ) {
+    return "active-session-bytes";
+  }
+  if (input.repositoryKind !== "ephemeral" && !input.nexusManaged) return null;
+  if (
+    input.usage.nexusManagedStorageBytes + input.requestedBytes >
+    MAX_ACTIVE_EPHEMERAL_BYTES_PER_OWNER
+  ) {
+    return "ephemeral-storage-bytes";
+  }
+  const repositoryCountAfterReservation =
+    input.usage.nexusManagedRepositoryCount +
+    (input.usage.targetHasNexusManagedStorage ? 0 : 1);
+  if (
+    repositoryCountAfterReservation >
+    MAX_ACTIVE_EPHEMERAL_REPOSITORIES_PER_OWNER
+  ) {
+    return "ephemeral-repository-count";
+  }
+  return null;
+}
 
 export function isCanonicalUploadContentType(contentType: string): boolean {
   return (
@@ -130,16 +209,13 @@ function partLayout(byteSize: number): { partSize: number; partCount: number } {
   return { partSize, partCount: Math.ceil(byteSize / partSize) };
 }
 
-function validateInitiation(
-  input: InitiateRepositoryUploadInput,
+export function validateRepositoryUploadFile(
+  input: Pick<
+    InitiateRepositoryUploadInput,
+    "itemName" | "fileName" | "contentType" | "byteSize"
+  >,
   config: ContentPlatformConfig
 ): void {
-  if (!Number.isSafeInteger(input.repositoryId) || input.repositoryId <= 0) {
-    throw new Error("A valid repository id is required");
-  }
-  if (!Number.isSafeInteger(input.userId) || input.userId <= 0) {
-    throw new Error("A valid user id is required");
-  }
   if (!input.itemName.trim() || input.itemName.length > 500) {
     throw new Error("A repository item name is required");
   }
@@ -176,6 +252,19 @@ function validateInitiation(
   }
 }
 
+function validateInitiation(
+  input: InitiateRepositoryUploadInput,
+  config: ContentPlatformConfig
+): void {
+  if (!Number.isSafeInteger(input.repositoryId) || input.repositoryId <= 0) {
+    throw new Error("A valid repository id is required");
+  }
+  if (!Number.isSafeInteger(input.userId) || input.userId <= 0) {
+    throw new Error("A valid user id is required");
+  }
+  validateRepositoryUploadFile(input, config);
+}
+
 export async function resolveRepositoryUploadStorageConfig(): Promise<{
   bucket: string;
   region: string | undefined;
@@ -186,19 +275,35 @@ export async function resolveRepositoryUploadStorageConfig(): Promise<{
   return { bucket, region: config.region ?? undefined };
 }
 
-async function createS3UploadStorage(): Promise<RepositoryUploadStorage> {
-  const { bucket, region } = await resolveRepositoryUploadStorageConfig();
-  const client = new S3Client({ region });
+export interface RepositoryUploadStorageFactoryOptions {
+  config?: { bucket: string; region?: string };
+  client?: S3Client;
+  signUrl?: typeof getSignedUrl;
+}
+
+export async function createRepositoryUploadStorage(
+  options: RepositoryUploadStorageFactoryOptions = {}
+): Promise<RepositoryUploadStorage> {
+  const { bucket, region } =
+    options.config ?? (await resolveRepositoryUploadStorageConfig());
+  const client = options.client ?? new S3Client({ region });
+  const signUrl = options.signUrl ?? getSignedUrl;
   return {
     async createSingleUpload(input) {
       const command = new PutObjectCommand({
         Bucket: bucket,
         Key: input.objectKey,
         ContentType: input.contentType,
+        ContentLength: input.byteSize,
+        // A presigned PUT remains reusable until it expires. Make the unique
+        // source key write-once so a client cannot replace canonical bytes
+        // after completion but before the processing worker reads them.
+        IfNoneMatch: "*",
+        Tagging: REPOSITORY_UPLOAD_TEMPORARY_TAGGING,
         Metadata: input.metadata,
       });
       return {
-        uploadUrl: await getSignedUrl(client, command, {
+        uploadUrl: await signUrl(client, command, {
           expiresIn: UPLOAD_EXPIRY_SECONDS,
         }),
       };
@@ -209,29 +314,54 @@ async function createS3UploadStorage(): Promise<RepositoryUploadStorage> {
           Bucket: bucket,
           Key: input.objectKey,
           ContentType: input.contentType,
+          Tagging: REPOSITORY_UPLOAD_TEMPORARY_TAGGING,
           Metadata: input.metadata,
         })
       );
       if (!created.UploadId) throw new Error("S3 did not return a multipart upload id");
-      const partUrls = await Promise.all(
-        Array.from({ length: input.partCount }, async (_, index) => {
-          const partNumber = index + 1;
-          return {
-            partNumber,
-            uploadUrl: await getSignedUrl(
-              client,
-              new UploadPartCommand({
-                Bucket: bucket,
-                Key: input.objectKey,
-                UploadId: created.UploadId,
-                PartNumber: partNumber,
-              }),
-              { expiresIn: UPLOAD_EXPIRY_SECONDS }
-            ),
-          };
-        })
-      );
-      return { uploadId: created.UploadId, partUrls };
+      const uploadId = created.UploadId;
+      try {
+        const partUrls = await Promise.all(
+          Array.from({ length: input.partCount }, async (_, index) => {
+            const partNumber = index + 1;
+            return {
+              partNumber,
+              uploadUrl: await signUrl(
+                client,
+                new UploadPartCommand({
+                  Bucket: bucket,
+                  Key: input.objectKey,
+                  UploadId: uploadId,
+                  PartNumber: partNumber,
+                  ContentLength:
+                    partNumber === input.partCount
+                      ? input.byteSize -
+                        input.partSize * (input.partCount - 1)
+                      : input.partSize,
+                }),
+                { expiresIn: UPLOAD_EXPIRY_SECONDS }
+              ),
+            };
+          })
+        );
+        return { uploadId, partUrls };
+      } catch (signingError) {
+        try {
+          await client.send(
+            new AbortMultipartUploadCommand({
+              Bucket: bucket,
+              Key: input.objectKey,
+              UploadId: uploadId,
+            })
+          );
+        } catch (abortError) {
+          throw new AggregateError(
+            [signingError, abortError],
+            "Failed to sign and abort repository multipart upload"
+          );
+        }
+        throw signingError;
+      }
     },
     async completeMultipartUpload(input) {
       await client.send(
@@ -272,13 +402,290 @@ async function createS3UploadStorage(): Promise<RepositoryUploadStorage> {
   };
 }
 
+interface UploadSessionReservation {
+  sessionId: string;
+  repositoryId: number;
+  userId: number;
+  objectKey: string;
+  uploadMethod: "single" | "multipart";
+  partSize?: number;
+  partCount?: number;
+  itemName: string;
+  originalFileName: string;
+  contentType: string;
+  byteSize: number;
+  expiresAt: Date;
+}
+
+async function reserveUploadSession(
+  input: UploadSessionReservation,
+  maximumActiveBytes: number
+): Promise<void> {
+  await executeTransaction(
+    async (tx) => {
+      // Every producer starts with the repository row. A delete/purge that
+      // wins this lock prevents new signed URLs; a reservation that wins is
+      // durably visible before deletion evaluates its session fence.
+      const repositoryRows = toPgRows<{
+        id: number;
+        nexus_managed: boolean;
+        owner_id: number;
+        repository_kind: "durable" | "ephemeral" | "system";
+      }>(
+        await tx.execute(sql`
+          SELECT
+            repository.id,
+            repository.owner_id,
+            repository.repository_kind,
+            (
+              COALESCE(repository.metadata ->> 'nexusManaged', 'false') = 'true'
+              OR EXISTS (
+                SELECT 1
+                FROM nexus_repository_bindings binding
+                WHERE binding.repository_id = repository.id
+              )
+            ) AS nexus_managed
+          FROM knowledge_repositories repository
+          WHERE repository.id = ${input.repositoryId}
+            AND repository.lifecycle_status = 'active'
+            AND (
+              repository.expires_at IS NULL
+              OR repository.expires_at > NOW()
+            )
+          FOR UPDATE OF repository
+        `)
+      );
+      const repository = repositoryRows[0];
+      if (!repository) {
+        throw new Error("Repository is no longer active");
+      }
+
+      // This must be a separate statement after the repository lock. Under
+      // READ COMMITTED, the subsequent usage statement then receives a fresh
+      // snapshot after any previous owner reservation releases the advisory
+      // lock, making concurrent quota enforcement deterministic.
+      const quotaPrincipals = [
+        input.userId,
+        ...(repository.repository_kind === "ephemeral" ||
+        repository.nexus_managed
+          ? [repository.owner_id]
+          : []),
+      ]
+        .filter((principal, index, values) => values.indexOf(principal) === index)
+        .sort((left, right) => left - right);
+      for (const principal of quotaPrincipals) {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${"repository-upload:"} || ${principal}::text, 0)
+          )
+        `);
+      }
+
+      const usageRows = toPgRows<{
+        active_upload_count: number | string;
+        active_upload_bytes: number | string;
+        ephemeral_storage_bytes: number | string;
+        ephemeral_storage_repository_count: number | string;
+        target_has_ephemeral_storage: boolean;
+      }>(
+        await tx.execute(sql`
+          WITH active_nexus_managed_repositories AS MATERIALIZED (
+            SELECT repository.id
+            FROM knowledge_repositories repository
+            WHERE repository.owner_id = ${repository.owner_id}
+              AND repository.lifecycle_status = 'active'
+              AND (
+                repository.expires_at IS NULL
+                OR repository.expires_at > NOW()
+              )
+              AND (
+                repository.repository_kind = 'ephemeral'
+                OR COALESCE(
+                  repository.metadata ->> 'nexusManaged',
+                  'false'
+                ) = 'true'
+                OR EXISTS (
+                  SELECT 1
+                  FROM nexus_repository_bindings binding
+                  WHERE binding.repository_id = repository.id
+                )
+              )
+          ),
+          current_versions AS MATERIALIZED (
+            SELECT
+              item.repository_id,
+              version.id,
+              COALESCE(version.byte_size, 0)::bigint AS byte_size
+            FROM active_nexus_managed_repositories repository
+            JOIN repository_items item
+              ON item.repository_id = repository.id
+            JOIN repository_item_versions version
+              ON version.id = item.current_version_id
+          ),
+          counted_sessions AS MATERIALIZED (
+            SELECT
+              session.repository_id,
+              session.expected_byte_size::bigint AS byte_size
+            FROM active_nexus_managed_repositories repository
+            JOIN repository_upload_sessions session
+              ON session.repository_id = repository.id
+            WHERE (
+                session.status IN ('initiated', 'uploading', 'uploaded')
+                AND session.expires_at > NOW()
+              )
+              OR (
+                session.status = 'completed'
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM current_versions current_version
+                  WHERE current_version.id = session.item_version_id
+                )
+              )
+          )
+          SELECT
+            (
+              SELECT COUNT(session.id)::integer
+              FROM repository_upload_sessions session
+              WHERE session.created_by = ${input.userId}
+                AND session.status IN ('initiated', 'uploading', 'uploaded')
+                AND session.expires_at > NOW()
+            ) AS active_upload_count,
+            (
+              SELECT COALESCE(SUM(session.expected_byte_size), 0)::bigint
+              FROM repository_upload_sessions session
+              WHERE session.created_by = ${input.userId}
+                AND session.status IN ('initiated', 'uploading', 'uploaded')
+                AND session.expires_at > NOW()
+            ) AS active_upload_bytes,
+            (
+              SELECT
+                COALESCE(
+                  (SELECT SUM(current_version.byte_size) FROM current_versions current_version),
+                  0
+                ) +
+                COALESCE(
+                  (SELECT SUM(counted_session.byte_size) FROM counted_sessions counted_session),
+                  0
+                )
+            )::bigint AS ephemeral_storage_bytes,
+            (
+              SELECT COUNT(*)::integer
+              FROM active_nexus_managed_repositories
+            ) AS ephemeral_storage_repository_count,
+            EXISTS (
+              SELECT 1
+              FROM active_nexus_managed_repositories repository
+              WHERE repository.id = ${input.repositoryId}
+            ) AS target_has_ephemeral_storage
+        `)
+      );
+      const usage = usageRows[0];
+      if (!usage) throw new Error("Failed to evaluate repository upload quota");
+      const violation = repositoryUploadQuotaViolation({
+        usage: {
+          activeUploadCount: Number(usage.active_upload_count),
+          activeUploadBytes: Number(usage.active_upload_bytes),
+          nexusManagedStorageBytes: Number(usage.ephemeral_storage_bytes),
+          nexusManagedRepositoryCount: Number(
+            usage.ephemeral_storage_repository_count
+          ),
+          targetHasNexusManagedStorage: usage.target_has_ephemeral_storage,
+        },
+        requestedBytes: input.byteSize,
+        maximumActiveBytes,
+        repositoryKind: repository.repository_kind,
+        nexusManaged: repository.nexus_managed,
+      });
+      if (violation) throw new RepositoryUploadQuotaExceededError(violation);
+
+      const inserted = toPgRows<{ id: string }>(
+        await tx.execute(sql`
+          INSERT INTO repository_upload_sessions (
+            id,
+            repository_id,
+            created_by,
+            object_key,
+            upload_method,
+            part_size,
+            part_count,
+            item_name,
+            original_file_name,
+            declared_content_type,
+            expected_byte_size,
+            status,
+            expires_at
+          )
+          VALUES (
+            ${input.sessionId}::uuid,
+            ${input.repositoryId},
+            ${input.userId},
+            ${input.objectKey},
+            ${input.uploadMethod},
+            ${input.partSize ?? null},
+            ${input.partCount ?? null},
+            ${input.itemName},
+            ${input.originalFileName},
+            ${input.contentType},
+            ${input.byteSize},
+            'initiated',
+            ${input.expiresAt.toISOString()}::timestamptz
+          )
+          RETURNING id
+        `)
+      );
+      if (inserted.length !== 1) {
+        throw new Error("Failed to reserve repository upload session");
+      }
+    },
+    "contentPlatform.reserveUploadSession"
+  );
+}
+
+async function activateUploadSession(
+  sessionId: string,
+  multipartUploadId?: string
+): Promise<void> {
+  const updated = await executeQuery(
+    (db) =>
+      db
+        .update(repositoryUploadSessions)
+        .set({
+          multipartUploadId: multipartUploadId ?? null,
+          status: "uploading",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(repositoryUploadSessions.id, sessionId),
+            eq(repositoryUploadSessions.status, "initiated")
+          )
+        )
+        .returning({ id: repositoryUploadSessions.id }),
+    "contentPlatform.activateUploadSession"
+  );
+  if (updated.length !== 1) {
+    throw new Error("Failed to activate repository upload session");
+  }
+}
+
+async function abortUploadSession(sessionId: string): Promise<void> {
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryUploadSessions)
+        .set({ status: "aborted", updatedAt: new Date() })
+        .where(eq(repositoryUploadSessions.id, sessionId)),
+    "contentPlatform.abortUploadSession"
+  );
+}
+
 export async function initiateRepositoryUpload(
   input: InitiateRepositoryUploadInput,
   config: ContentPlatformConfig,
   storage?: RepositoryUploadStorage
 ): Promise<InitiatedRepositoryUpload> {
   validateInitiation(input, config);
-  const resolvedStorage = storage ?? (await createS3UploadStorage());
+  const resolvedStorage = storage ?? (await createRepositoryUploadStorage());
   const sessionId = randomUUID();
   const safeFileName = sanitizeFileName(input.fileName);
   const objectKey = buildRepositorySourceObjectKey(
@@ -291,32 +698,40 @@ export async function initiateRepositoryUpload(
     repositoryId: String(input.repositoryId),
     uploadSessionId: sessionId,
   };
+  const layout =
+    input.byteSize <= SINGLE_UPLOAD_LIMIT
+      ? undefined
+      : partLayout(input.byteSize);
+  const uploadMethod = layout ? "multipart" : "single";
+
+  await reserveUploadSession(
+    {
+      sessionId,
+      repositoryId: input.repositoryId,
+      userId: input.userId,
+      objectKey,
+      uploadMethod,
+      partSize: layout?.partSize,
+      partCount: layout?.partCount,
+      itemName: input.itemName.trim(),
+      originalFileName: input.fileName,
+      contentType: input.contentType,
+      byteSize: input.byteSize,
+      expiresAt,
+    },
+    Math.floor(config.maxFileSizeGb * 1024 ** 3)
+  );
 
   let uploadId: string | undefined;
   try {
-    if (input.byteSize <= SINGLE_UPLOAD_LIMIT) {
+    if (!layout) {
       const created = await resolvedStorage.createSingleUpload({
         objectKey,
         contentType: input.contentType,
+        byteSize: input.byteSize,
         metadata,
       });
-      await executeQuery(
-        (db) =>
-          db.insert(repositoryUploadSessions).values({
-            id: sessionId,
-            repositoryId: input.repositoryId,
-            createdBy: input.userId,
-            objectKey,
-            uploadMethod: "single",
-            itemName: input.itemName.trim(),
-            originalFileName: input.fileName,
-            declaredContentType: input.contentType,
-            expectedByteSize: input.byteSize,
-            status: "uploading",
-            expiresAt,
-          }),
-        "contentPlatform.initiateSingleUpload"
-      );
+      await activateUploadSession(sessionId);
       return {
         sessionId,
         objectKey,
@@ -326,34 +741,16 @@ export async function initiateRepositoryUpload(
       };
     }
 
-    const layout = partLayout(input.byteSize);
     const created = await resolvedStorage.createMultipartUpload({
       objectKey,
       contentType: input.contentType,
+      byteSize: input.byteSize,
+      partSize: layout.partSize,
       partCount: layout.partCount,
       metadata,
     });
     uploadId = created.uploadId;
-    await executeQuery(
-      (db) =>
-        db.insert(repositoryUploadSessions).values({
-          id: sessionId,
-          repositoryId: input.repositoryId,
-          createdBy: input.userId,
-          objectKey,
-          multipartUploadId: created.uploadId,
-          uploadMethod: "multipart",
-          partSize: layout.partSize,
-          partCount: layout.partCount,
-          itemName: input.itemName.trim(),
-          originalFileName: input.fileName,
-          declaredContentType: input.contentType,
-          expectedByteSize: input.byteSize,
-          status: "uploading",
-          expiresAt,
-        }),
-      "contentPlatform.initiateMultipartUpload"
-    );
+    await activateUploadSession(sessionId, created.uploadId);
     return {
       sessionId,
       objectKey,
@@ -368,6 +765,7 @@ export async function initiateRepositoryUpload(
         .abortMultipartUpload({ objectKey, uploadId })
         .catch(() => undefined);
     }
+    await abortUploadSession(sessionId).catch(() => undefined);
     throw error;
   }
 }
@@ -413,17 +811,50 @@ function getRepositoryUploadSession(input: CompleteRepositoryUploadInput) {
   );
 }
 
+export function assertRepositoryUploadSessionActive(
+  session: Pick<
+    typeof repositoryUploadSessions.$inferSelect,
+    "status" | "expiresAt"
+  >,
+  now = new Date()
+): void {
+  if (
+    session.expiresAt.getTime() <= now.getTime() ||
+    session.status === "aborted" ||
+    session.status === "expired"
+  ) {
+    throw new Error("Upload session is no longer active");
+  }
+}
+
+export function assertRepositoryProducerActive(
+  repository:
+    | Pick<
+        typeof knowledgeRepositories.$inferSelect,
+        "lifecycleStatus" | "expiresAt"
+      >
+    | undefined,
+  now = new Date()
+): void {
+  const expiresAt = repository?.expiresAt?.getTime();
+  if (
+    !repository ||
+    repository.lifecycleStatus !== "active" ||
+    (expiresAt !== undefined &&
+      (Number.isNaN(expiresAt) || expiresAt <= now.getTime()))
+  ) {
+    throw new Error("Repository is no longer active");
+  }
+}
+
 export async function completeRepositoryUpload(
   input: CompleteRepositoryUploadInput,
   storage?: RepositoryUploadStorage
 ): Promise<CompletedRepositoryUpload> {
-  const resolvedStorage = storage ?? (await createS3UploadStorage());
+  const resolvedStorage = storage ?? (await createRepositoryUploadStorage());
   const [session] = await getRepositoryUploadSession(input);
   if (!session) throw new Error("Upload session was not found");
-  if (session.expiresAt.getTime() <= Date.now()) throw new Error("Upload session expired");
-  if (session.status === "aborted" || session.status === "expired") {
-    throw new Error("Upload session is no longer active");
-  }
+  assertRepositoryUploadSessionActive(session);
 
   if (session.uploadMethod === "multipart" && session.status !== "completed") {
     if (!session.multipartUploadId || !session.partCount) {
@@ -455,6 +886,21 @@ export async function completeRepositoryUpload(
 
   return executeTransaction(
     async (tx) => {
+      // Producer lock order is repository -> upload session. Repository/item
+      // deletion takes the same leading lock before fencing sessions, so either
+      // completion registers fully before deletion begins or observes the
+      // committed deleting state and cannot recreate a manifest after cleanup.
+      const [repository] = await tx
+        .select({
+          lifecycleStatus: knowledgeRepositories.lifecycleStatus,
+          expiresAt: knowledgeRepositories.expiresAt,
+        })
+        .from(knowledgeRepositories)
+        .where(eq(knowledgeRepositories.id, session.repositoryId))
+        .limit(1)
+        .for("update");
+      assertRepositoryProducerActive(repository);
+
       const [locked] = await tx
         .select()
         .from(repositoryUploadSessions)
@@ -462,6 +908,10 @@ export async function completeRepositoryUpload(
         .limit(1)
         .for("update");
       if (!locked) throw new Error("Upload session was not found");
+      // Expiry cleanup claims the same row with FOR UPDATE. Re-check the locked
+      // state after all S3 work so a completion that waited behind cleanup
+      // cannot register an item whose canonical object was just deleted.
+      assertRepositoryUploadSessionActive(locked);
 
       if (locked.status === "completed" && locked.itemVersionId) {
         const [existing] = await tx

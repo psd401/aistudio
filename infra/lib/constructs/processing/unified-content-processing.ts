@@ -307,6 +307,10 @@ export class UnifiedContentProcessing extends Construct {
                   "s3:GetObjectVersion",
                   "s3:GetObjectTagging",
                   "s3:PutObject",
+                  "s3:PutObjectTagging",
+                  "s3:DeleteObject",
+                  "s3:DeleteObjectVersion",
+                  "s3:AbortMultipartUpload",
                 ],
                 resources: [
                   `${props.documentsBucket.bucketArn}/repositories/*`,
@@ -314,7 +318,7 @@ export class UnifiedContentProcessing extends Construct {
               }),
               new iam.PolicyStatement({
                 sid: "CanonicalRepositoryArtifactDiscovery",
-                actions: ["s3:ListBucket"],
+                actions: ["s3:ListBucket", "s3:ListBucketVersions"],
                 resources: [props.documentsBucket.bucketArn],
                 conditions: {
                   StringLike: { "s3:prefix": ["repositories/*"] },

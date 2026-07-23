@@ -76,7 +76,10 @@ function selectModel(args: {
   requiredTools: string[]
 }): { model: NexusModelRow; fallbackUsed: boolean } {
   const configuredIds = configuredCandidates(args.config, args.family, args.tier, args.intent)
-  if (args.intent === "image") {
+  // A specialist-only image model cannot first call server-side input tools.
+  // When attachments or other tools are required, keep the request on a text
+  // model that can retrieve context and participate in the normal tool loop.
+  if (args.intent === "image" && args.requiredTools.length === 0) {
     const configured = configuredIds
       .map(id => args.models.find(model => model.modelId === id || String(model.id) === id))
       .filter((model): model is NexusModelRow => model !== undefined)
@@ -107,9 +110,11 @@ function selectModel(args: {
     fallbackModelId: args.fallbackModelId,
     requirements: {
       requiredTools: args.requiredTools,
+      requiresFunctionCalling: args.requiredTools.length > 0,
     },
     additionalEligibility: model =>
       !hasCapability(model.capabilities, "imageGeneration")
+      && !hasCapability(model.capabilities, "deepResearch")
       && (args.intent !== "instruction" || args.family !== "auto" || inferFamily(model) === "google")
       && (args.intent !== "web-search" || args.family !== "auto" || inferFamily(model) === "google"),
   })
@@ -200,8 +205,9 @@ export async function routeNexusRequest(args: {
   ))
   const fallback = models.find(model => model.modelId === args.fallbackModelId || String(model.id) === args.fallbackModelId)
   if (!fallback) throw new Error("The fallback Nexus model is unavailable")
+  const requiredTools = [...new Set(args.enabledToolNames ?? [])]
 
-  if (mode === "off") {
+  if (mode === "off" && requiredTools.length === 0) {
     return {
       modelId: fallback.modelId,
       connectorIds: args.enabledConnectorIds,
@@ -217,19 +223,59 @@ export async function routeNexusRequest(args: {
     }
   }
 
+  if (mode === "off") {
+    const selection = selectModel({
+      models,
+      config,
+      family: args.requestedFamily,
+      tier: inferTier(fallback),
+      intent: "general",
+      fallbackModelId: args.fallbackModelId,
+      accessibleIds,
+      requiredTools,
+    })
+    return {
+      modelId: selection.model.modelId,
+      connectorIds: args.enabledConnectorIds,
+      automaticConnectorIds: [],
+      automaticToolNames: [],
+      metadata: {
+        version: config.version,
+        runtimeMode: mode,
+        experienceMode: args.experienceMode,
+        requestedFamily: args.requestedFamily,
+        selectedFamily: inferFamily(selection.model) ?? "fallback",
+        intent: "general",
+        tier: inferTier(selection.model),
+        confidence: 1,
+        reasonCodes: ["router_off", "required_tools_enforced"],
+        decisionSource: "fallback",
+        selectedModelId: selection.model.modelId,
+        fallbackUsed: selection.fallbackUsed,
+        autoAttachedPsdData: false,
+        autoEnabledWebSearch: false,
+      },
+    }
+  }
+
   const decision = await classifyNexusRequest(args.text, config, {
     hasImageInput: args.hasImageInput,
     hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
   })
-  const requiredTools = [...new Set(args.enabledToolNames ?? [])]
   if (decision.intent === "web-search" && !requiredTools.includes("webSearch")) {
     requiredTools.push("webSearch")
   }
-  const selection = selectModelForRuntime({
+  const selectionArgs = {
     models, config, family: args.requestedFamily, tier: decision.tier,
     intent: decision.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
     requiredTools,
-  }, mode, fallback)
+  }
+  // Shadow mode may retain a legacy fallback only when doing so is safe. A
+  // server-required input tool is an authorization/correctness boundary, so
+  // execute a compatible text model even while recording the proposed route.
+  const selection = requiredTools.length > 0
+    ? selectModel(selectionArgs)
+    : selectModelForRuntime(selectionArgs, mode, fallback)
   const psdConnectorId = await resolveAutomaticPsdConnector(decision.intent, config)
   if (mode === "active" && decision.intent === "psd-data" && !psdConnectorId) {
     throw new NexusSpecialistUnavailableError(
@@ -240,7 +286,10 @@ export async function routeNexusRequest(args: {
   const proposedConnectors = psdConnectorId
     ? [...new Set([...args.enabledConnectorIds, psdConnectorId])]
     : args.enabledConnectorIds
-  const selected = mode === "shadow" ? fallback : selection.model
+  const selected =
+    mode === "shadow" && requiredTools.length === 0
+      ? fallback
+      : selection.model
   const connectorIds = mode === "shadow" ? args.enabledConnectorIds : proposedConnectors
   const autoEnabledWebSearch = mode === "active" && decision.intent === "web-search"
 
@@ -265,11 +314,18 @@ export async function routeNexusRequest(args: {
       intent: decision.intent,
       tier: decision.tier,
       confidence: decision.confidence,
-      reasonCodes: decision.reasonCodes,
+      reasonCodes:
+        requiredTools.length > 0
+          ? [...decision.reasonCodes, "required_tools_enforced"]
+          : decision.reasonCodes,
       decisionSource: decision.source,
       selectedModelId: selected.modelId,
       proposedModelId: mode === "shadow" ? selection.model.modelId : undefined,
-      fallbackUsed: selection.fallbackUsed || (mode === "shadow" && selection.model.modelId !== fallback.modelId),
+      fallbackUsed:
+        selection.fallbackUsed ||
+        (mode === "shadow" &&
+          requiredTools.length === 0 &&
+          selection.model.modelId !== fallback.modelId),
       autoAttachedPsdData: mode === "active" && !!psdConnectorId,
       autoEnabledWebSearch,
     },

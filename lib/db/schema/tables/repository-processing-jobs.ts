@@ -37,7 +37,7 @@ export interface RepositoryProcessingMetrics {
   postDeployRecovery?:
     | "unified-content-runtime-v2"
     | "unified-content-artifact-v3";
-  /** Current managed-service wait, used to enforce a bounded deadline. */
+  /** Current managed-service wait, used to enforce or observe its deadline. */
   waitReason?:
     | "CONTENT_PLATFORM_DISABLED"
     | "AWAITING_SECURITY_SCAN"
@@ -45,6 +45,12 @@ export interface RepositoryProcessingMetrics {
     | "AWAITING_MEDIA_ANALYSIS";
   /** ISO timestamp at which the current managed-service wait began. */
   waitStartedAt?: string;
+  /**
+   * First poll after the normal wait deadline. BDA has no cancellation API, so
+   * an overdue active invocation remains durably pollable until AWS reports a
+   * terminal state instead of being abandoned as a failed external writer.
+   */
+  waitDeadlineExceededAt?: string;
   durationMs?: number;
   inputBytes?: number;
   outputBytes?: number;
@@ -62,6 +68,12 @@ export interface RepositoryProcessingMetrics {
   thumbnailBytes?: number;
   ocrLines?: number;
   bdaInvocationArn?: string;
+  /**
+   * Missing is treated as active for rows written before this marker existed.
+   * Only a status response from BDA may transition an invocation to terminal.
+   */
+  bdaInvocationState?: "active" | "terminal";
+  bdaTerminalStatus?: "Success" | "ServiceError" | "ClientError";
   bdaSourceObjectKey?: string;
   bdaOutputPrefix?: string;
   bdaResultObjectKey?: string;

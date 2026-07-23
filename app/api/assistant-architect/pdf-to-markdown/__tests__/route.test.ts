@@ -36,6 +36,15 @@ jest.mock("@/actions/db/get-current-user-action", () => ({
   getCurrentUserAction: (...a: unknown[]) => mockGetCurrentUserAction(...a),
 }))
 
+const mockGetContentPlatformConfig = jest.fn()
+const mockIsCanonicalRepositoryUploadActive = jest.fn()
+jest.mock("@/lib/repositories/content-platform/config", () => ({
+  getContentPlatformConfig: (...a: unknown[]) =>
+    mockGetContentPlatformConfig(...a),
+  isCanonicalRepositoryUploadActive: (...a: unknown[]) =>
+    mockIsCanonicalRepositoryUploadActive(...a),
+}))
+
 jest.mock("@/lib/logger", () => ({
   createLogger: jest.fn(() => ({
     info: jest.fn(),
@@ -102,6 +111,25 @@ describe("POST pdf-to-markdown early size guard (REV-COR-201)", () => {
       isSuccess: true,
       data: { user: { id: 1 } },
     })
+    mockGetContentPlatformConfig.mockResolvedValue({})
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(false)
+  })
+
+  it("rejects new legacy jobs after canonical repository upload cutover", async () => {
+    mockIsCanonicalRepositoryUploadActive.mockReturnValue(true)
+    const request = makeReq({
+      contentLength: String(5 * MB),
+      formData: undefined,
+    })
+    const formDataSpy = jest.spyOn(request, "formData")
+    const res = await POST(request)
+
+    const body = await res.json()
+    expect(res.status).toBe(410)
+    expect(body.error).toContain("knowledge repository")
+    expect(res.headers.get("Deprecation")).toBe("true")
+    expect(formDataSpy).not.toHaveBeenCalled()
+    expect(mockCreateGenericJob).not.toHaveBeenCalled()
   })
 
   it("rejects an oversized upload with 413 via Content-Length before buffering the body", async () => {

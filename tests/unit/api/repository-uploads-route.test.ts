@@ -22,6 +22,10 @@ jest.mock("@/lib/repositories/content-platform", () => ({
   initiateRepositoryUpload: jest.fn(),
   completeRepositoryUpload: jest.fn(),
   dispatchContentProcessingJob: jest.fn(),
+  RepositoryUploadQuotaExceededError: class extends Error {
+    readonly code = "REPOSITORY_UPLOAD_QUOTA_EXCEEDED";
+    readonly httpStatus = 429;
+  },
 }));
 jest.mock("@/lib/logger", () => ({
   createLogger: jest.fn(),
@@ -43,6 +47,7 @@ import {
   initiateRepositoryUpload,
   isCanonicalUploadContentType,
   isCanonicalRepositoryUploadActive,
+  RepositoryUploadQuotaExceededError,
 } from "@/lib/repositories/content-platform";
 import { createLogger } from "@/lib/logger";
 import { DEFAULT_CONTENT_PLATFORM_CONFIG } from "@/lib/repositories/content-platform/config";
@@ -157,6 +162,107 @@ describe("canonical repository upload routes", () => {
     );
     expect(response.status).toBe(404);
     expect(mockInitiateRepositoryUpload).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    "absent",
+    "foreign active",
+    "ephemeral",
+    "system",
+    "inactive",
+  ])(
+    "returns the same non-disclosing response for a %s repository on both upload routes",
+    async (repositoryShape) => {
+      if (repositoryShape === "foreign active") {
+        mockCanModifyRepository.mockResolvedValue(false);
+      } else {
+        mockAssertNotSystemManagedRepository.mockRejectedValue(
+          new Error(`internal ${repositoryShape} classification`)
+        );
+      }
+
+      const initiated = await initiateUpload(
+        request("http://localhost/api/repositories/7/uploads", {
+          itemName: "Handbook",
+          fileName: "handbook.pdf",
+          contentType: "application/pdf",
+          byteSize: 1024,
+        }),
+        { params: Promise.resolve({ repositoryId: "7" }) }
+      );
+      const completed = await completeUpload(
+        request(
+          `http://localhost/api/repositories/7/uploads/${sessionId}/complete`,
+          {}
+        ),
+        { params: Promise.resolve({ repositoryId: "7", sessionId }) }
+      );
+
+      const expected = { error: "Not found", requestId: "request-1" };
+      expect(initiated.status).toBe(404);
+      expect(await initiated.json()).toEqual(expected);
+      expect(completed.status).toBe(404);
+      expect(await completed.json()).toEqual(expected);
+      expect(mockInitiateRepositoryUpload).not.toHaveBeenCalled();
+      expect(mockCompleteRepositoryUpload).not.toHaveBeenCalled();
+    }
+  );
+
+  test("does not return internal storage or database error text", async () => {
+    mockInitiateRepositoryUpload.mockRejectedValue(
+      new Error("secret bucket and SQL details")
+    );
+    const initiated = await initiateUpload(
+      request("http://localhost/api/repositories/7/uploads", {
+        itemName: "Handbook",
+        fileName: "handbook.pdf",
+        contentType: "application/pdf",
+        byteSize: 1024,
+      }),
+      { params: Promise.resolve({ repositoryId: "7" }) }
+    );
+    expect(await initiated.json()).toEqual({
+      error: "Failed to initiate upload",
+      requestId: "request-1",
+    });
+
+    mockCompleteRepositoryUpload.mockRejectedValue(
+      new Error("secret object and transaction details")
+    );
+    const completed = await completeUpload(
+      request(
+        `http://localhost/api/repositories/7/uploads/${sessionId}/complete`,
+        {}
+      ),
+      { params: Promise.resolve({ repositoryId: "7", sessionId }) }
+    );
+    expect(await completed.json()).toEqual({
+      error: "Failed to complete upload",
+      requestId: "request-1",
+    });
+  });
+
+  test("returns a bounded 429 response when upload quota is exhausted", async () => {
+    mockInitiateRepositoryUpload.mockRejectedValue(
+      new RepositoryUploadQuotaExceededError("active-session-count")
+    );
+
+    const response = await initiateUpload(
+      request("http://localhost/api/repositories/7/uploads", {
+        itemName: "Handbook",
+        fileName: "handbook.pdf",
+        contentType: "application/pdf",
+        byteSize: 1024,
+      }),
+      { params: Promise.resolve({ repositoryId: "7" }) }
+    );
+
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({
+      error: "Repository upload quota exceeded",
+      code: "REPOSITORY_UPLOAD_QUOTA_EXCEEDED",
+      requestId: "request-1",
+    });
   });
 
   test("keeps legacy behavior behind rollout gates and for non-PDF files", async () => {

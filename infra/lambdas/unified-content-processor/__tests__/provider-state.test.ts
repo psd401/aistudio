@@ -2,6 +2,7 @@ import {
   attachBdaInvocation,
   attachTextractJob,
   buildManagedServiceClientToken,
+  markBdaInvocationTerminal,
   reconcileBdaState,
   reconcileTextractState,
 } from "../provider-state";
@@ -136,11 +137,23 @@ describe("unified content managed-service state", () => {
       first.outputPrefix,
       "arn:aws:bedrock:invocation/one"
     );
+    expect(attached.bdaInvocationState).toBe("active");
     expect(reconcileBdaState(attached, source, base, "token-one")).toEqual({
       metrics: attached,
       invocationArn: "arn:aws:bedrock:invocation/one",
       outputPrefix: `${base}runs/token-one/`,
       reset: false,
+    });
+    expect(
+      markBdaInvocationTerminal(
+        attached,
+        "arn:aws:bedrock:invocation/one",
+        "Success"
+      )
+    ).toMatchObject({
+      bdaInvocationArn: "arn:aws:bedrock:invocation/one",
+      bdaInvocationState: "terminal",
+      bdaTerminalStatus: "Success",
     });
 
     expect(

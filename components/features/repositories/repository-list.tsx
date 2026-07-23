@@ -56,7 +56,7 @@ export function RepositoryList() {
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleDelete() {
-    if (!deleteTarget) return
+    if (!deleteTarget?.canManage) return
 
     const result = await executeDelete(deleteTarget.id)
     if (result.isSuccess) {
@@ -108,7 +108,7 @@ export function RepositoryList() {
           ) : repositories.length === 0 ? (
             <div className="text-center py-8">
               <p className="text-muted-foreground mb-4">
-                No repositories created yet
+                No accessible repositories yet
               </p>
               <Button
                 variant="outline"
@@ -127,6 +127,7 @@ export function RepositoryList() {
                   <TableHead>Owner</TableHead>
                   <TableHead>Items</TableHead>
                   <TableHead>Visibility</TableHead>
+                  <TableHead>Access</TableHead>
                   <TableHead>Created</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -142,7 +143,12 @@ export function RepositoryList() {
                         </span>
                       )}
                     </TableCell>
-                    <TableCell>{repo.ownerName || "Unknown"}</TableCell>
+                    <TableCell>
+                      <div>{repo.ownerName || "Unknown"}</div>
+                      <span className="text-xs capitalize text-muted-foreground">
+                        {repo.repositoryKind} · {repo.lifecycleStatus}
+                      </span>
+                    </TableCell>
                     <TableCell>
                       <Badge variant="secondary">
                         {repo.itemCount || 0} items
@@ -162,6 +168,11 @@ export function RepositoryList() {
                       )}
                     </TableCell>
                     <TableCell>
+                      <Badge variant={repo.canManage ? "secondary" : "outline"}>
+                        {repo.canManage ? "Manager" : "Shared read only"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
                       {repo.createdAt ? format(new Date(repo.createdAt), "MMM d, yyyy") : "-"}
                     </TableCell>
                     <TableCell className="text-right">
@@ -169,19 +180,23 @@ export function RepositoryList() {
                         <Button
                           variant="ghost"
                           size="sm"
+                          disabled={repo.lifecycleStatus !== "active"}
                           onClick={() =>
                             router.push(`/repositories/${repo.id}`)
                           }
                         >
                           <FolderOpen className="h-4 w-4" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setDeleteTarget(repo)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
+                        {repo.canManage ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setDeleteTarget(repo)}
+                            aria-label={`${repo.lifecycleStatus === "deleting" ? "Retry deletion of" : "Delete"} ${repo.name}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        ) : null}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -198,11 +213,15 @@ export function RepositoryList() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Repository</AlertDialogTitle>
+            <AlertDialogTitle>
+              {deleteTarget?.lifecycleStatus === "deleting"
+                ? "Retry Repository Deletion"
+                : "Delete Repository"}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete &quot;{deleteTarget?.name}&quot;? This will
-              permanently delete the repository and all its items. This action
-              cannot be undone.
+              {deleteTarget?.lifecycleStatus === "deleting"
+                ? `Cleanup for "${deleteTarget.name}" was interrupted. Retry the idempotent storage sweep and finish deleting its database records.`
+                : `Are you sure you want to delete "${deleteTarget?.name}"? This will permanently delete the repository and all its items. This action cannot be undone.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -218,7 +237,9 @@ export function RepositoryList() {
                   Deleting...
                 </>
               ) : (
-                "Delete"
+                deleteTarget?.lifecycleStatus === "deleting"
+                  ? "Retry deletion"
+                  : "Delete"
               )}
             </AlertDialogAction>
           </AlertDialogFooter>

@@ -4,7 +4,10 @@ import { getTelemetryConfig } from './telemetry-service';
 import { getProviderAdapter, type ProviderCapabilities } from './provider-adapters';
 import { CircuitBreaker, CircuitBreakerOpenError } from './circuit-breaker';
 import { getContentSafetyService, type ContentSafetyResult } from '@/lib/safety';
-import type { TokenMapping } from '@/lib/safety/types';
+import {
+  createTokenMappingSink,
+  type TokenMappingSink,
+} from '@/lib/safety/token-mapping-sink';
 import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, TelemetrySpan, TelemetryConfig, StepCallbackData } from './types';
 import { ContentSafetyBlockedError } from './types';
 
@@ -49,16 +52,18 @@ function hasPartialPIITokenAtEnd(text: string): { hasPartial: boolean; startInde
  */
 function replacePIITokensWithRemainder(
   text: string,
-  tokenMap: Map<string, string>
+  tokenMappingSink: TokenMappingSink
 ): { processed: string; remainder: string } {
   // Replace all complete tokens
   const processed = text.replace(PII_TOKEN_REGEX, (match) => {
-    const replacement = tokenMap.get(match);
-    if (replacement) {
+    const replacement = tokenMappingSink.resolve(match);
+    if (replacement !== undefined) {
       return replacement;
     } else {
       // Log without exposing actual token patterns - just indicate a mismatch occurred
-      piiTransformLog.warn('PII token mismatch during detokenization', { tokenCount: tokenMap.size });
+      piiTransformLog.warn('PII token mismatch during detokenization', {
+        tokenCount: tokenMappingSink.size,
+      });
       return match;
     }
   });
@@ -82,7 +87,7 @@ function replacePIITokensWithRemainder(
  */
 function processSSEEventWithBuffer(
   event: string,
-  tokenMap: Map<string, string>,
+  tokenMappingSink: TokenMappingSink,
   textBuffer: string,
   SSE_DATA_PREFIX: string
 ): { output: string; newBuffer: string } {
@@ -105,7 +110,10 @@ function processSSEEventWithBuffer(
     if (parsed.type === 'text-delta' && parsed.delta && typeof parsed.delta === 'string') {
       // Prepend any buffered text from previous chunks
       const fullText = textBuffer + parsed.delta;
-      const { processed, remainder } = replacePIITokensWithRemainder(fullText, tokenMap);
+      const { processed, remainder } = replacePIITokensWithRemainder(
+        fullText,
+        tokenMappingSink
+      );
 
       // Update the delta with processed text (may be empty if all buffered)
       parsed.delta = processed;
@@ -121,7 +129,10 @@ function processSSEEventWithBuffer(
     // Handle reasoning-delta events similarly
     if (parsed.type === 'reasoning-delta' && parsed.delta && typeof parsed.delta === 'string') {
       const fullText = textBuffer + parsed.delta;
-      const { processed, remainder } = replacePIITokensWithRemainder(fullText, tokenMap);
+      const { processed, remainder } = replacePIITokensWithRemainder(
+        fullText,
+        tokenMappingSink
+      );
       parsed.delta = processed;
       return {
         output: SSE_DATA_PREFIX + JSON.stringify(parsed),
@@ -147,18 +158,9 @@ function processSSEEventWithBuffer(
  *
  * @see https://sdk.vercel.ai/docs/ai-sdk-ui/stream-protocol
  */
-function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformStream<Uint8Array, Uint8Array> {
-  // Build lookup map from token placeholder to original value
-  const tokenMap = new Map<string, string>();
-  for (const mapping of tokenMappings) {
-    tokenMap.set(mapping.placeholder, mapping.original);
-  }
-
-  // If no tokens to replace, return a pass-through transform
-  if (tokenMap.size === 0) {
-    return new TransformStream();
-  }
-
+function createPIIDetokenizeTransform(
+  tokenMappingSink: TokenMappingSink
+): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let sseBuffer = '';      // Buffer for incomplete SSE events
@@ -183,7 +185,7 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
         // Process event with text buffering for cross-chunk PII tokens
         const { output, newBuffer } = processSSEEventWithBuffer(
           event,
-          tokenMap,
+          tokenMappingSink,
           textBuffer,
           SSE_DATA_PREFIX
         );
@@ -203,7 +205,12 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
 
       // Output any remaining SSE buffer content (handles incomplete final event)
       if (sseBuffer.length > 0) {
-        const { output } = processSSEEventWithBuffer(sseBuffer, tokenMap, '', SSE_DATA_PREFIX);
+        const { output } = processSSEEventWithBuffer(
+          sseBuffer,
+          tokenMappingSink,
+          '',
+          SSE_DATA_PREFIX
+        );
         controller.enqueue(encoder.encode(output));
       }
     }
@@ -439,7 +446,7 @@ async function checkOutputContentSafety(options: OutputSafetyCheckOptions): Prom
  */
 function wrapStreamWithPIIDetokenization(
   result: StreamResponse['result'],
-  tokenMappings: TokenMapping[]
+  tokenMappingSink: TokenMappingSink
 ): StreamResponse['result'] {
   return {
     ...result,
@@ -449,7 +456,7 @@ function wrapStreamWithPIIDetokenization(
         return originalResponse;
       }
       const transformedStream = originalResponse.body.pipeThrough(
-        createPIIDetokenizeTransform(tokenMappings)
+        createPIIDetokenizeTransform(tokenMappingSink)
       );
       return new Response(transformedStream, {
         status: originalResponse.status,
@@ -463,7 +470,7 @@ function wrapStreamWithPIIDetokenization(
         return originalResponse;
       }
       const transformedStream = originalResponse.body.pipeThrough(
-        createPIIDetokenizeTransform(tokenMappings)
+        createPIIDetokenizeTransform(tokenMappingSink)
       );
       return new Response(transformedStream, {
         status: originalResponse.status,
@@ -755,7 +762,8 @@ interface BuildStreamResponseOptions {
   requestId: string;
   capabilities: ProviderCapabilities;
   telemetryConfig: TelemetryConfig;
-  tokenMappings: TokenMapping[];
+  tokenMappingSink: TokenMappingSink;
+  hasDynamicTokenMappings: boolean;
   log: ReturnType<typeof createLogger>;
 }
 
@@ -763,11 +771,25 @@ interface BuildStreamResponseOptions {
  * Build stream response with optional PII wrapping
  */
 function buildStreamResponse(options: BuildStreamResponseOptions): StreamResponse {
-  const { result, requestId, capabilities, telemetryConfig, tokenMappings, log } = options;
+  const {
+    result,
+    requestId,
+    capabilities,
+    telemetryConfig,
+    tokenMappingSink,
+    hasDynamicTokenMappings,
+    log,
+  } = options;
 
-  if (tokenMappings.length > 0) {
-    log.info('Wrapping stream with PII detokenization transform', { tokenCount: tokenMappings.length });
-    const wrappedResult = wrapStreamWithPIIDetokenization(result, tokenMappings);
+  if (tokenMappingSink.size > 0 || hasDynamicTokenMappings) {
+    log.info('Wrapping stream with PII detokenization transform', {
+      tokenCount: tokenMappingSink.size,
+      dynamic: hasDynamicTokenMappings,
+    });
+    const wrappedResult = wrapStreamWithPIIDetokenization(
+      result,
+      tokenMappingSink
+    );
     return { result: wrappedResult, requestId, capabilities, telemetryConfig };
   }
   return { result, requestId, capabilities, telemetryConfig };
@@ -904,16 +926,20 @@ export class UnifiedStreamingService {
           source: request.source
         });
 
-        // Merge inline-scan tokens with any tokens pre-computed at the route
-        // level (e.g. from scanning attachment / document text before S3 storage).
-        const allTokenMappings: TokenMapping[] = [
+        // Merge inline-scan tokens with mappings pre-computed at the route and
+        // mappings that tools may add later in the same provider loop. A caller-
+        // supplied sink is request scoped; no mapping state is shared globally.
+        const tokenMappingSink =
+          request.inputTokenMappingSink ?? createTokenMappingSink();
+        tokenMappingSink.add([
           ...(request.precomputedInputTokenMappings || []),
           ...(inputSafetyResult?.tokens || []),
-        ];
+        ]);
 
         return buildStreamResponse({
           result, requestId, capabilities, telemetryConfig,
-          tokenMappings: allTokenMappings,
+          tokenMappingSink,
+          hasDynamicTokenMappings: request.inputTokenMappingSink !== undefined,
           log
         });
         

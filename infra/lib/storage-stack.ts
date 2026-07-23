@@ -84,8 +84,27 @@ export class StorageStack extends cdk.Stack {
           maxAge: 3000,
         },
       ],
-      // Lifecycle rules removed temporarily to match deployed state
-      // Will be re-added with OptimizedBucket in future PR
+      lifecycleRules: [
+        {
+          id: 'RepositoryUploadAndVersionCleanup',
+          enabled: true,
+          prefix: 'repositories/',
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+          noncurrentVersionExpiration: cdk.Duration.days(1),
+          expiredObjectDeleteMarker: true,
+        },
+        {
+          // Every presigned upload is born with this tag. Completion and the
+          // processing worker replace it with `permanent`; a replay or request
+          // that finishes after the database cleanup fence still recreates a
+          // temporary object, so S3 provides a final bounded orphan sweep.
+          id: 'RepositoryTemporaryUploadCleanup',
+          enabled: true,
+          prefix: 'repositories/',
+          tagFilters: { 'aistudio-upload-state': 'temporary' },
+          expiration: cdk.Duration.days(1),
+        },
+      ],
     });
 
     // Store bucket references

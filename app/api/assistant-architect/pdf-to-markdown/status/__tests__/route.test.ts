@@ -118,6 +118,37 @@ describe("GET pdf-to-markdown/status fallback ownership (REV-SEC-104)", () => {
     expect(body).toEqual({ jobId: 7, status: "running" })
   })
 
+  it("keeps a caller's completed historical result readable after POST retirement", async () => {
+    const timestamp = new Date("2026-07-23T12:00:00.000Z")
+    mockGetGenericJobByIdForUser.mockResolvedValue({
+      id: 7,
+      userId: CALLER_ID,
+      status: "completed",
+      output: JSON.stringify({
+        markdown: "# Historical document",
+        fileName: "historical.pdf",
+        processingTime: 125,
+      }),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+
+    const res = await GET(req())
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body).toEqual({
+      jobId: 7,
+      status: "completed",
+      createdAt: timestamp.toISOString(),
+      updatedAt: timestamp.toISOString(),
+      markdown: "# Historical document",
+      fileName: "historical.pdf",
+      processingTime: 125,
+    })
+    expect(mockGetGenericJobById).not.toHaveBeenCalled()
+  })
+
   it("returns 404 when neither lookup finds the job", async () => {
     mockGetGenericJobByIdForUser.mockResolvedValue(null)
     mockGetGenericJobById.mockResolvedValue(null)

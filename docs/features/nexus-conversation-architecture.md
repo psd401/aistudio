@@ -404,6 +404,58 @@ messages: exportedRepo.messages.map(item => {
 
 ---
 
+## Repository-backed attachments
+
+Nexus document, text, and image attachments use the unified repository platform when
+the content cutover flags are active. The memoized attachment adapter initiates
+an owner-bound ephemeral repository, uploads directly to signed object storage,
+completes canonical processing, and sends only an opaque repository marker for
+document/text provenance. Their source bytes and extracted text never traverse
+the chat request. Images retain an inline data URL in transient client state
+while also carrying the opaque marker, but a canonical server turn treats those
+caller-carried pixels as untrusted, ignores them, and reloads the exact
+inspected current version from the owner-bound repository.
+Durable history stores only image-presence metadata and the repository
+reference.
+
+The adapter reads the current conversation ID through a stable closure-backed
+accessor updated synchronously by the conversation callback. Do not add
+`conversationId` to its memo dependencies: the first `null → UUID` transition
+would recreate the runtime and lose draft/stream state. Each source uses a fresh
+draft key so a promoted repository or a binding from a different conversation
+cannot be silently reused.
+
+The chat route validates the current turn's markers before model routing or
+conversation creation, then atomically binds them to the current user and
+conversation before retrieval or model execution. A binding race removes a
+newly created empty conversation. The route strips opaque IDs into safe
+attachment labels, resolves all active/unexpired conversation repositories, and
+provides `searchNexusAttachments`. The tool uses Retrieval v2, which rechecks
+the current user at final context disclosure and returns immutable-version
+citations. It runs retrieved chunk text through the configured content-safety
+and PII input transform before returning provider-visible tool output. New token
+mappings flow through a per-request sink to the active stream detokenizer, never
+through shared process state. Raw search chunks are not persisted in
+conversation tool results or replayed on later turns. Missing, foreign, and
+expired references share one non-disclosing 404 response.
+
+Ephemeral repositories default to 30-day retention. “Keep as a repository”
+promotes the source in place to a private durable repository so version and
+citation identities do not change. Promotion is visible only when the
+authenticated capability catalog includes `knowledge-repositories`, and the
+server route enforces the same capability independently. Scheduled lifecycle
+maintenance disables retrieval at expiry and purges storage only after the
+recovery grace period. A partial purge remains retryable in `deleting`;
+nonterminal external processing blocks deletion, while an explicitly terminal
+failed/cancelled provider job is reconciled and released.
+
+With cutover flags off, initiation returns `mode: "legacy"` before creating
+repository state and the established attachment processor remains the rollback
+path. See
+[Unified Repository Product Integration](./unified-repository-product-integration.md).
+
+---
+
 ## Common Pitfalls
 
 ### ❌ Pitfall 1: Passing conversationId to ConversationInitializer
@@ -473,9 +525,23 @@ const attachmentAdapter = createEnhancedNexusAttachmentAdapter({...})
 
 ```typescript
 // CORRECT - memoize with stable dependencies
+const [conversationIdAccessor] = useState(() =>
+  createConversationIdAccessor(initialConversationId)
+)
+
 const attachmentAdapter = useMemo(() =>
-  createEnhancedNexusAttachmentAdapter({...}),
-  [handleAttachmentProcessingStart, handleAttachmentProcessingComplete]
+  createEnhancedNexusAttachmentAdapter(
+    {...callbacks},
+    {
+      repositoryBacked: true,
+      getConversationId: conversationIdAccessor.get
+    }
+  ),
+  [
+    conversationIdAccessor,
+    handleAttachmentProcessingStart,
+    handleAttachmentProcessingComplete
+  ]
 )
 ```
 

@@ -75,6 +75,31 @@ export interface PublishDocumentVersionResult {
   replayed: boolean;
 }
 
+export interface PublicationTargetLifecycle {
+  repositoryLifecycleStatus: "active" | "expired" | "deleting" | "deleted";
+  repositoryExpiresAt: Date | null;
+  itemLifecycleStatus:
+    | "active"
+    | "unavailable"
+    | "expired"
+    | "deleting"
+    | "deleted";
+}
+
+export function isPublicationTargetActive(
+  target: PublicationTargetLifecycle,
+  now = new Date()
+): boolean {
+  const repositoryExpiresAt = target.repositoryExpiresAt?.getTime();
+  return (
+    target.repositoryLifecycleStatus === "active" &&
+    (repositoryExpiresAt === undefined ||
+      (!Number.isNaN(repositoryExpiresAt) &&
+        repositoryExpiresAt > now.getTime())) &&
+    target.itemLifecycleStatus === "active"
+  );
+}
+
 export type PublishPdfVersionResult = PublishDocumentVersionResult;
 
 export const MAX_INLINE_ARTIFACT_CHARACTERS = 1_000_000;
@@ -172,28 +197,76 @@ export async function publishDocumentVersion(
 
   return executeTransaction(
     async (tx) => {
-      const [context] = await tx
+      const [coordinates] = await tx
         .select({
           itemId: repositoryItemVersions.itemId,
-          processingStatus: repositoryItemVersions.processingStatus,
-          storageStatus: repositoryItemVersions.storageStatus,
           repositoryId: repositoryItems.repositoryId,
-          currentVersionId: repositoryItems.currentVersionId,
-          activeGenerationId: knowledgeRepositories.activeIndexGenerationId,
         })
         .from(repositoryItemVersions)
         .innerJoin(
           repositoryItems,
           eq(repositoryItems.id, repositoryItemVersions.itemId)
         )
-        .innerJoin(
-          knowledgeRepositories,
-          eq(knowledgeRepositories.id, repositoryItems.repositoryId)
-        )
         .where(eq(repositoryItemVersions.id, input.itemVersionId))
+        .limit(1);
+      if (!coordinates) {
+        throw new Error("Repository item version was not found");
+      }
+      // Match deletion/claim ordering exactly: repository -> item -> version.
+      // A single joined FOR UPDATE lets the query plan choose row-lock order
+      // and can deadlock against a repository-wide delete.
+      const [repository] = await tx
+        .select({
+          repositoryLifecycleStatus: knowledgeRepositories.lifecycleStatus,
+          repositoryExpiresAt: knowledgeRepositories.expiresAt,
+          activeGenerationId: knowledgeRepositories.activeIndexGenerationId,
+        })
+        .from(knowledgeRepositories)
+        .where(eq(knowledgeRepositories.id, coordinates.repositoryId))
         .limit(1)
         .for("update");
-      if (!context) throw new Error("Repository item version was not found");
+      const [item] = await tx
+        .select({
+          currentVersionId: repositoryItems.currentVersionId,
+          itemLifecycleStatus: repositoryItems.lifecycleStatus,
+        })
+        .from(repositoryItems)
+        .where(
+          and(
+            eq(repositoryItems.id, coordinates.itemId),
+            eq(repositoryItems.repositoryId, coordinates.repositoryId)
+          )
+        )
+        .limit(1)
+        .for("update");
+      const [version] = await tx
+        .select({
+          processingStatus: repositoryItemVersions.processingStatus,
+          storageStatus: repositoryItemVersions.storageStatus,
+        })
+        .from(repositoryItemVersions)
+        .where(
+          and(
+            eq(repositoryItemVersions.id, input.itemVersionId),
+            eq(repositoryItemVersions.itemId, coordinates.itemId)
+          )
+        )
+        .limit(1)
+        .for("update");
+      if (!repository || !item || !version) {
+        throw new Error("Repository item version was not found");
+      }
+      const context = {
+        ...coordinates,
+        ...repository,
+        ...item,
+        ...version,
+      };
+      if (!isPublicationTargetActive(context)) {
+        throw new Error(
+          "A version in an inactive repository or item cannot become searchable"
+        );
+      }
       if (context.currentVersionId !== input.itemVersionId) {
         throw new Error("A superseded item version cannot become searchable");
       }

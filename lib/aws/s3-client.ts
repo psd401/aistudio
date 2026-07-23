@@ -6,6 +6,7 @@ import {
   DeleteObjectsCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
+  ListObjectVersionsCommand,
   CreateBucketCommand,
   HeadBucketCommand,
   PutBucketCorsCommand,
@@ -17,7 +18,10 @@ import { createError } from "@/lib/error-utils"
 import { Settings } from "@/lib/settings-manager"
 import { Readable } from "node:stream"
 import { randomUUID } from "node:crypto"
-import { buildRepositorySourceObjectKey } from "@/lib/repositories/content-platform/object-key"
+import {
+  buildRepositorySourceObjectKey,
+  isRepositorySourceObjectKey,
+} from "@/lib/repositories/content-platform/object-key"
 import { sanitizeFileName } from "@/lib/aws/document-upload"
 
 // Cache S3 config to avoid repeated async calls
@@ -343,51 +347,51 @@ export async function deleteDocument(key: string): Promise<void> {
   }
 }
 
-/**
- * Delete every current object below a repository-owned prefix. The documents
- * bucket is versioned, so S3 retains non-current versions according to the
- * bucket lifecycle policy while the application-visible objects disappear
- * immediately. Pagination is required because one item can accumulate more
- * than 1,000 processor artifacts across versions.
- */
-export async function deleteRepositoryObjectsByPrefix(
-  prefix: string
-): Promise<number> {
-  const repositoryArtifactPrefix =
-    /^repositories\/[1-9]\d*\/artifacts\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/$/i
-  if (!repositoryArtifactPrefix.test(prefix)) {
-    throw createError("Invalid repository object prefix", {
-      code: "S3_PREFIX_VALIDATION_ERROR",
-      details: { prefix },
-    })
-  }
+interface RepositoryObjectVersion {
+  Key: string
+  VersionId: string
+}
 
+async function deleteRepositoryVersions(input: {
+  prefix: string
+  exactKey?: string
+}): Promise<number> {
   const s3Client = await getS3Client()
   const config = await getS3Config()
   const bucketName = config.bucket!
   let deleted = 0
-  let continuationToken: string | undefined
+  let keyMarker: string | undefined
+  let versionIdMarker: string | undefined
 
   try {
     do {
       const listed = await s3Client.send(
-        new ListObjectsV2Command({
+        new ListObjectVersionsCommand({
           Bucket: bucketName,
-          Prefix: prefix,
-          ContinuationToken: continuationToken,
+          Prefix: input.prefix,
+          KeyMarker: keyMarker,
+          VersionIdMarker: versionIdMarker,
         })
       )
-      const keys = (listed.Contents ?? [])
-        .map((object) => object.Key)
-        .filter((key): key is string => typeof key === "string")
+      const versions = [...(listed.Versions ?? []), ...(listed.DeleteMarkers ?? [])]
+        .flatMap((object): RepositoryObjectVersion[] => {
+          if (
+            typeof object.Key !== "string" ||
+            typeof object.VersionId !== "string" ||
+            (input.exactKey != null && object.Key !== input.exactKey)
+          ) {
+            return []
+          }
+          return [{ Key: object.Key, VersionId: object.VersionId }]
+        })
 
-      for (let index = 0; index < keys.length; index += 1000) {
-        const batch = keys.slice(index, index + 1000)
+      for (let index = 0; index < versions.length; index += 1000) {
+        const batch = versions.slice(index, index + 1000)
         const removed = await s3Client.send(
           new DeleteObjectsCommand({
             Bucket: bucketName,
             Delete: {
-              Objects: batch.map((Key) => ({ Key })),
+              Objects: batch,
               Quiet: true,
             },
           })
@@ -396,7 +400,7 @@ export async function deleteRepositoryObjectsByPrefix(
           throw createError("S3 rejected one or more repository object deletions", {
             code: "S3_PREFIX_DELETE_PARTIAL_ERROR",
             details: {
-              prefix,
+              prefix: input.prefix,
               failedKeys: removed.Errors?.flatMap((failure) =>
                 failure.Key ? [failure.Key] : []
               ),
@@ -406,16 +410,20 @@ export async function deleteRepositoryObjectsByPrefix(
         deleted += batch.length
       }
 
-      if (listed.IsTruncated && !listed.NextContinuationToken) {
-        throw createError("S3 returned a truncated repository listing without a cursor", {
-          code: "S3_PREFIX_LIST_CURSOR_ERROR",
-          details: { prefix },
-        })
+      if (listed.IsTruncated && !listed.NextKeyMarker) {
+        throw createError(
+          "S3 returned a truncated repository version listing without a cursor",
+          {
+            code: "S3_PREFIX_LIST_CURSOR_ERROR",
+            details: { prefix: input.prefix },
+          }
+        )
       }
-      continuationToken = listed.IsTruncated
-        ? listed.NextContinuationToken
+      keyMarker = listed.IsTruncated ? listed.NextKeyMarker : undefined
+      versionIdMarker = listed.IsTruncated
+        ? listed.NextVersionIdMarker
         : undefined
-    } while (continuationToken)
+    } while (keyMarker)
 
     return deleted
   } catch (error) {
@@ -423,11 +431,73 @@ export async function deleteRepositoryObjectsByPrefix(
       code: "S3_PREFIX_DELETE_ERROR",
       details: {
         error: error instanceof Error ? error.message : String(error),
-        prefix,
+        prefix: input.prefix,
       },
     })
   }
 }
+
+/**
+ * Permanently delete every version and delete marker for one exact document
+ * key. Exact-key filtering prevents a shared prefix from removing neighbors
+ * while retaining compatibility with legacy document namespaces.
+ */
+export async function deleteDocumentVersions(key: string): Promise<number> {
+  if (!key.trim() || key.startsWith("/") || key.includes("..")) {
+    throw createError("Invalid document object key", {
+      code: "S3_OBJECT_KEY_VALIDATION_ERROR",
+      details: { key },
+    })
+  }
+  return deleteRepositoryVersions({ prefix: key, exactKey: key })
+}
+
+/**
+ * Permanently delete every version and delete marker for one immutable
+ * repository source. A normal DeleteObject request only adds a delete marker
+ * to the versioned documents bucket and does not satisfy retention deletion.
+ */
+export async function deleteRepositoryObjectVersions(key: string): Promise<number> {
+  const repositoryIdMatch = /^repositories\/([1-9]\d*)\//.exec(key)
+  const repositoryId = repositoryIdMatch
+    ? Number.parseInt(repositoryIdMatch[1]!, 10)
+    : Number.NaN
+  if (!isRepositorySourceObjectKey(repositoryId, key)) {
+    throw createError("Invalid repository object key", {
+      code: "S3_OBJECT_KEY_VALIDATION_ERROR",
+      details: { key },
+    })
+  }
+  return deleteDocumentVersions(key)
+}
+
+/**
+ * Permanently delete every version and delete marker below a repository-owned
+ * artifact namespace or an exact repository root. Repository-root deletion is
+ * reserved for final lifecycle cleanup so abandoned upload objects cannot
+ * survive the database row that owned them.
+ */
+export async function deleteRepositoryObjectVersionsByPrefix(
+  prefix: string
+): Promise<number> {
+  const repositoryArtifactPrefix =
+    /^repositories\/[1-9]\d*\/artifacts\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/$/i
+  const repositoryRootPrefix = /^repositories\/[1-9]\d*\/$/
+  if (
+    !repositoryArtifactPrefix.test(prefix) &&
+    !repositoryRootPrefix.test(prefix)
+  ) {
+    throw createError("Invalid repository object prefix", {
+      code: "S3_PREFIX_VALIDATION_ERROR",
+      details: { prefix },
+    })
+  }
+  return deleteRepositoryVersions({ prefix })
+}
+
+/** Backwards-compatible name retained for existing repository cleanup callers. */
+export const deleteRepositoryObjectsByPrefix =
+  deleteRepositoryObjectVersionsByPrefix
 
 // Check if a document exists
 export async function documentExists(key: string): Promise<boolean> {

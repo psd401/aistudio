@@ -12,6 +12,10 @@ import {
 } from '@/lib/db/drizzle'
 import { getDocumentSignedUrl } from '@/lib/aws/s3-client'
 import { decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer'
+import {
+  buildTemporaryAttachmentMarker,
+  parseTemporaryAttachmentMarkers,
+} from '@/lib/repositories/temporary-attachment-contract'
 
 // Broader content type for API response (less strict than MessagePart)
 type ContentPart = { type: string; text?: string; [key: string]: unknown }
@@ -51,6 +55,37 @@ function truncateContent(content: string): string {
   return content
 }
 
+function repositoryAttachmentText(part: MessagePart): string | null {
+  const metadata = part.metadata
+  if (!metadata || !Array.isArray(metadata.repositoryAttachments)) return null
+
+  const markers = metadata.repositoryAttachments.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== 'object') return []
+    const reference = candidate as Record<string, unknown>
+    if (
+      typeof reference.bindingId !== 'string' ||
+      !Number.isSafeInteger(reference.itemId) ||
+      Number(reference.itemId) <= 0 ||
+      typeof reference.name !== 'string'
+    ) {
+      return []
+    }
+    const marker = buildTemporaryAttachmentMarker({
+      bindingId: reference.bindingId,
+      itemId: Number(reference.itemId),
+      name: reference.name,
+    })
+    return parseTemporaryAttachmentMarkers(marker).length === 1 ? [marker] : []
+  })
+  if (markers.length === 0) return null
+
+  const displayText =
+    typeof metadata.repositoryAttachmentDisplayText === 'string'
+      ? truncateContent(metadata.repositoryAttachmentDisplayText)
+      : ''
+  return [displayText, ...markers].filter(Boolean).join('\n')
+}
+
 /**
  * Convert a part to content format, handling images as markdown and passing through tool parts.
  * For image parts with s3Key, generates a fresh presigned URL to replace expired ones.
@@ -59,6 +94,10 @@ async function convertPartToTextContent(part: MessagePart, conversationId: strin
   const partType = part.type as string
 
   if (partType === 'text') {
+    const attachmentText = repositoryAttachmentText(part)
+    if (attachmentText != null) {
+      return { type: 'text', text: attachmentText }
+    }
     const text = part.text && typeof part.text === 'string' && part.text.length > MAX_CONTENT_LENGTH
       ? part.text.substring(0, MAX_CONTENT_LENGTH) + '...[content truncated for size]'
       : part.text || ''
