@@ -26,11 +26,6 @@ export interface ProcessingStackProps extends cdk.StackProps {
   documentsBucketName?: string; // Optional for backward compatibility
   databaseResourceArn?: string; // Optional for backward compatibility
   databaseSecretArn?: string; // Optional for backward compatibility
-  // Email subscribed to the group-sync failure / staleness alarms (#1207).
-  // Sourced from the `alertEmail` CDK context, same as the other stacks. When
-  // absent the alarms are still created (and visible in CloudWatch) but have no
-  // notification target.
-  alertEmail?: string;
 }
 export class ProcessingStack extends cdk.Stack {
   public readonly fileProcessingQueue: sqs.Queue;
@@ -372,8 +367,14 @@ export class ProcessingStack extends cdk.Stack {
                   const inputDir = path.join(__dirname, '..', 'lambdas', 'embedding-generator');
                   execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
                   execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
-                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
-                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  execSync(`cp package.json bun.lock ${outputDir}/`, {
+                    cwd: inputDir,
+                    stdio: 'inherit',
+                  });
+                  execSync('bun install --production --frozen-lockfile', {
+                    cwd: outputDir,
+                    stdio: 'inherit',
+                  });
                   return true;
                 } catch (e) {
                   process.stderr.write(`Local bundling failed, falling back to Docker: ${e}\n`);
@@ -640,8 +641,14 @@ export class ProcessingStack extends cdk.Stack {
                   const inputDir = path.join(__dirname, '..', 'lambdas', 'group-sync');
                   execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
                   execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
-                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
-                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  execSync(`cp package.json bun.lock ${outputDir}/`, {
+                    cwd: inputDir,
+                    stdio: 'inherit',
+                  });
+                  execSync('bun install --production --frozen-lockfile', {
+                    cwd: outputDir,
+                    stdio: 'inherit',
+                  });
                   return true;
                 } catch (e) {
                   process.stderr.write(`Local bundling failed, falling back to Docker: ${e}\n`);
@@ -701,20 +708,18 @@ export class ProcessingStack extends cdk.Stack {
     //   2. Staleness alarm — no SUCCESSFUL run within the staleness window,
     //      which also catches "the schedule stopped firing entirely" (the custom
     //      SyncRunSucceeded metric goes absent → treatMissingData=BREACHING).
-    // Alarm actions are wired only when an alert email is configured; the alarms
-    // themselves always exist so their state is visible in CloudWatch.
-    let groupSyncAlarmTopic: sns.Topic | undefined;
-    if (props.alertEmail) {
-      groupSyncAlarmTopic = new sns.Topic(this, 'GroupSyncAlarmTopic', {
-        topicName: `psd-group-sync-alarms-${props.environment}`,
-        displayName: `PSD Group Sync Alarms (${props.environment})`,
-      });
-      groupSyncAlarmTopic.addSubscription(
-        new snsSubscriptions.EmailSubscription(props.alertEmail),
-      );
-      cdk.Tags.of(groupSyncAlarmTopic).add('Environment', props.environment);
-      cdk.Tags.of(groupSyncAlarmTopic).add('ManagedBy', 'cdk');
-    }
+    // Reuse the central alarm topic owned by MonitoringStack. Referencing its
+    // deterministic ARN avoids a cross-stack export dependency while keeping
+    // notification endpoints in one lifecycle owner. A focused ProcessingStack
+    // deployment therefore cannot remove or recreate confirmed subscriptions.
+    const groupSyncAlarmTopic = sns.Topic.fromTopicArn(
+      this,
+      'MonitoringAlarmTopic',
+      this.formatArn({
+        service: 'sns',
+        resource: `aistudio-${props.environment}-monitoring-alarms`,
+      }),
+    );
 
     // 1. Failure alarm — any errored invocation in the last hour. Missing data
     //    (no invocations) is NOT breaching here; the staleness alarm owns the
@@ -757,11 +762,9 @@ export class ProcessingStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     });
 
-    if (groupSyncAlarmTopic) {
-      const alarmAction = new cloudwatchActions.SnsAction(groupSyncAlarmTopic);
-      groupSyncFailureAlarm.addAlarmAction(alarmAction);
-      groupSyncStalenessAlarm.addAlarmAction(alarmAction);
-    }
+    const alarmAction = new cloudwatchActions.SnsAction(groupSyncAlarmTopic);
+    groupSyncFailureAlarm.addAlarmAction(alarmAction);
+    groupSyncStalenessAlarm.addAlarmAction(alarmAction);
 
     // Outputs
     new cdk.CfnOutput(this, 'GroupSyncFunctionName', {

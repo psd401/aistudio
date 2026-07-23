@@ -72,22 +72,21 @@ bunx cdk deploy AIStudio-StorageStack-Dev --exclusively
 bunx cdk deploy AIStudio-StorageStack-Prod --exclusively
 ```
 
-### ProcessingStack (Requires the existing alarm-email context)
+### ProcessingStack (No parameters needed)
 ```bash
 # Dev
 bunx cdk deploy AIStudio-ProcessingStack-Dev \
-  --context alertEmail=techalerts@psd401.net \
   --exclusively
 
 # Prod
 bunx cdk deploy AIStudio-ProcessingStack-Prod \
-  --context alertEmail=YOUR_PROD_ALERT_EMAIL \
   --exclusively
 ```
 
-The group-sync alarm topic and email subscription are conditional on
-`alertEmail`. Omitting a value that was used for the previous deployment removes
-those resources from the synthesized template.
+Group-sync alarms publish to the shared
+`aistudio-<environment>-monitoring-alarms` topic owned by MonitoringStack.
+Configure and confirm delivery endpoints when deploying MonitoringStack; a
+focused ProcessingStack deployment never creates or removes subscriptions.
 
 ### FrontendStack (Requires baseDomain)
 ```bash

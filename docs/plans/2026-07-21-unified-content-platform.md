@@ -953,13 +953,28 @@ v4 reported missing Marketplace entitlement. The previously active generation
 remained serving throughout, and this provider-enablement item does not affect
 the text-embedding or BDA media exit gate.
 
+The deployment also exposed a notification-ownership defect: ProcessingStack
+created a second group-sync SNS topic and email subscription even though each
+environment already has a confirmed central MonitoringStack alarm topic. The
+duplicate subscription remained pending and made focused Processing deployments
+sensitive to the optional `alertEmail` context. Group-sync alarms now always
+publish to the deterministic `aistudio-<environment>-monitoring-alarms` topic;
+MonitoringStack remains the sole owner of delivery subscriptions. Dev and prod
+both have confirmed `techalerts@psd401.net` subscriptions on their shared topics,
+and synthesis guards prevent ProcessingStack from recreating the redundant topic
+or any email subscription. The focused dev update completed with both group-sync
+alarm actions targeting `aistudio-dev-monitoring-alarms`; the redundant topic is
+absent, and a labeled end-to-end notification was accepted by SNS as message
+`093c57a9-0ad1-5cab-a6f4-35728755bda0` without requiring another subscription
+confirmation.
+
 Verification evidence for the managed-service validation slice:
 
 - Complete application CI: 278 suites and 3,125 tests passed with 60 intentional
   skips. The focused media, retrieval-evaluation, citation, and migration set
   passed 22 tests. Full lint completed with zero errors, and application,
   infrastructure, unified-content worker, and embedding-worker typechecks pass.
-- Complete infrastructure/Lambda suite: 38 suites and 377 tests passed. The
+- Complete infrastructure/Lambda suite: 38 suites and 378 tests passed. The
   production Next.js build, infrastructure build, all-stack no-lookup synthesis
   of 31 dev/prod/shared templates, and both exact Linux Lambda artifact smokes
   pass.
