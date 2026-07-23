@@ -1010,8 +1010,11 @@ Implemented on `codex/unified-content-product-migration`, ready for dev review:
   owner-bound temporary references. Every path rechecks the executing user,
   and assistant publish, grant, and post-approval prompt-binding changes fail
   closed when the proposed audience is wider than a bound repository. The
-  historical PDF conversion status remains readable for stored jobs, but no
-  live product path starts new legacy work.
+  interactive and v1 conversation starts persist server-resolved repository
+  IDs and bind temporary references before the first message, with compensating
+  cleanup if that write fails, so later Nexus or v1 turns resume the same
+  bounded content context. The historical PDF conversion status remains
+  readable for stored jobs, but no live product path starts new legacy work.
 - Nexus one-off attachments use private, expiring repositories, direct signed
   uploads, bounded retrieval tools, immutable citations, and in-place durable
   promotion. Canonical image turns reload the exact inspected S3 object instead
@@ -1030,7 +1033,7 @@ Implemented on `codex/unified-content-product-migration`, ready for dev review:
 
 Verification evidence for this checkpoint:
 
-- Complete application CI: 316 suites and 3,360 tests passed with 60 intentional
+- Complete application CI: 317 suites and 3,365 tests passed with 60 intentional
   skips. Full lint completed with zero errors, the application typecheck passed,
   and the production Next.js build passed.
 - Authenticated Playwright passed all 11 focused product-consolidation tests

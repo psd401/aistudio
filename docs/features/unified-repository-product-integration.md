@@ -62,9 +62,11 @@ Runtime `file_upload` inputs use the same temporary canonical upload contract as
 Nexus. The form receives an opaque repository marker, not extracted source text.
 Execution resolves that marker for the current owner before recording the run,
 then merges its repository into bounded retrieval and repository tools.
-Conversation starts bind those references to the new owned conversation and
-store only the bounded server-resolved repository IDs in metadata. Follow-up
-and history routes require that metadata's assistant ID to match the URL.
+Both interactive app and v1 API conversation starts bind those references to
+the new owned conversation before writing the first message and store only the
+bounded server-resolved repository IDs in metadata. A failed first-message
+write unbinds the references and removes the empty conversation. Follow-up and
+history routes require that metadata's assistant ID to match the URL.
 Follow-up turns recheck every static and runtime repository before parsing or
 persisting the message, inject bounded retrieval context only into the model
 copy, and retain the user's unmodified text in history.

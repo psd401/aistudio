@@ -39,4 +39,16 @@ describe("Assistant Architect runtime repository execution integration", () => {
       "systemPrompt: effectiveSystemPrompt"
     );
   });
+
+  it("persists runtime repository context on the resumable conversation", () => {
+    expect(routeSource).toContain(
+      "createAssistantExecutionConversation({"
+    );
+    expect(routeSource).toContain(
+      "runtimeRepositoryIds: runtimeRepositoryInputs.repositoryIds"
+    );
+    expect(routeSource).toContain(
+      "references: runtimeRepositoryInputs.references"
+    );
+  });
 });

@@ -31,6 +31,7 @@ import {
 } from '@/lib/agents';
 import type { ToolInvocationAudit } from '@/lib/agents';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
+import { createAssistantExecutionConversation } from '@/lib/assistant-architect/execution-conversation';
 import type {
   AssistantArchitectMode,
   AssistantModelFamily,
@@ -50,7 +51,7 @@ import {
 } from '@/lib/assistant-architect/repository-access-preflight';
 import { resolveAssistantRuntimeRepositoryInputs } from '@/lib/assistant-architect/runtime-repository-inputs';
 import { createAgenticRepositoryContext } from '@/lib/assistant-architect/agentic-repository-context';
-import { createConversation, updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
+import { updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { createMessageWithStats, updateConversationStats } from '@/lib/db/drizzle/nexus-messages';
 import type { AssistantArchitectMessageMetadata } from '@/lib/db/types/jsonb';
 
@@ -636,71 +637,6 @@ async function createToolExecutionRecord(args: {
 }
 
 /**
- * Phase (d): create the nexus conversation for this execution and persist the
- * user inputs as the first message. Non-fatal: any failure is logged and
- * `undefined` is returned so the execution continues without conversation
- * tracking. Mirrors the pattern in
- * /api/v1/assistants/[id]/conversations/route.ts.
- */
-async function createNexusConversationForExecution(args: {
-  architect: LoadedArchitect;
-  toolId: number;
-  userId: number;
-  inputs: Record<string, unknown>;
-  executionId: number;
-  log: RouteLogger;
-}): Promise<string | undefined> {
-  const { architect, toolId, userId, inputs, executionId, log } = args;
-  try {
-    const conversation = await createConversation({
-      userId,
-      title: `${architect.name} — ${new Date().toLocaleDateString()}`,
-      provider: 'assistant-architect',
-      metadata: buildExecutionMetadata(toolId, architect.name, executionId, 'running'),
-    });
-
-    // Save user inputs as the first message
-    // Sanitize and truncate inputs for safe storage
-    const userContent = Object.keys(inputs).length > 0
-      ? Object.entries(inputs)
-          .map(([key, value]) => {
-            const safeKey = String(key).substring(0, 100);
-            const safeValue = typeof value === 'string'
-              ? value.substring(0, 5000)
-              : String(sanitizeForLogging(value)).substring(0, 5000);
-            return `${safeKey}: ${safeValue}`;
-          })
-          .join('\n')
-          .substring(0, 10000)
-      : '(Assistant executed with default inputs)';
-
-    await createMessageWithStats({
-      conversationId: conversation.id,
-      role: 'user',
-      content: userContent,
-      parts: [{ type: 'text', text: userContent }],
-      metadata: { inputs, source: 'app' },
-    });
-
-    log.info('Nexus conversation created for execution', {
-      conversationId: conversation.id,
-      executionId,
-      toolId,
-    });
-
-    return conversation.id;
-  } catch (conversationError) {
-    // Non-fatal: log and continue execution without conversation tracking
-    log.error('Failed to create nexus conversation for execution', {
-      error: conversationError instanceof Error ? conversationError.message : String(conversationError),
-      executionId,
-      toolId,
-    });
-    return undefined;
-  }
-}
-
-/**
  * Phase (e): run the execution (agentic or prompt-chain), build the streaming
  * Response, and on a synchronous pre-stream failure roll back the
  * tool_executions row, emit the execution-error event, reconcile the nexus
@@ -913,8 +849,15 @@ export async function POST(req: Request) {
     });
 
     // 7.5. Create nexus conversation for this execution (non-fatal)
-    const nexusConversationId = await createNexusConversationForExecution({
-      architect, toolId, userId, inputs: modelInputs, executionId, log
+    const nexusConversationId = await createAssistantExecutionConversation({
+      assistantId: toolId,
+      assistantName: architect.name,
+      ownerId: userId,
+      inputs: modelInputs,
+      executionId,
+      runtimeRepositoryIds: runtimeRepositoryInputs.repositoryIds,
+      references: runtimeRepositoryInputs.references,
+      log,
     });
 
     // 7.6. Resolve the Atrium content Requester for permission-aware retrieval
