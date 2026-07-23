@@ -120,6 +120,16 @@ jobs:
       env:
         CI: true
 
+    - name: Run Nexus ephemeral-repository lifecycle smoke
+      run: bun run test:smoke:nexus-ephemeral
+      env:
+        CI: true
+
+    - name: Run repository upload quota smoke
+      run: bun run test:smoke:repository-upload-quota
+      env:
+        CI: true
+
   # CDK validation job - checks infrastructure code
   cdk-validate:
     name: Validate CDK Infrastructure

@@ -52,8 +52,14 @@ export type ContentCodeEncoding = (typeof CONTENT_CODE_ENCODINGS)[number];
  */
 export const MAX_DECODED_BODY_BYTES = 5_000_000;
 
-/** Canonical (padded, non-url-safe) base64: groups of 4, standard alphabet. */
-const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+/**
+ * Find a character outside the standard (non-url-safe) base64 alphabet.
+ *
+ * A negated single-character search is intentionally used instead of anchoring a
+ * multi-megabyte string behind a greedy quantifier. V8 can exhaust its regexp
+ * backtracking stack on the latter while enforcing the decoded-size boundary.
+ */
+const INVALID_BASE64_CHARACTER_RE = /[^A-Za-z0-9+/=]/;
 
 /**
  * Decode a content body according to its declared transit `encoding`.
@@ -97,23 +103,35 @@ function decodeBase64Body(encoded: string): string {
   if (normalized.length === 0) {
     throw new ValidationError("codeEncoding \"base64\" body is empty");
   }
-  // Reject non-base64 input up front so a corrupted payload / a raw `<script>`
-  // that slipped past a mis-set flag fails with a clear 400 instead of decoding
-  // to garbage (Buffer.from is lenient and would silently truncate).
-  if (normalized.length % 4 !== 0 || !BASE64_RE.test(normalized)) {
-    throw new ValidationError("Invalid base64 content body (codeEncoding)");
-  }
-  // Allocation guard: reject clearly-oversized input BEFORE decoding a huge
-  // buffer, using the MINIMUM possible decoded size. A canonical base64 string of
-  // length L decodes to (L/4)·3 − p bytes (p = 0–2 padding chars), so
-  // ⌊L·3/4⌋ overestimates the true size by at most 2 — the `+ 2` slack keeps a
-  // payload whose real decoded size is exactly the cap from being false-rejected
-  // here (the exact byte check below is authoritative).
+  // Allocation guard: reject clearly-oversized input BEFORE validating or
+  // decoding a huge string, using the MINIMUM possible decoded size. A canonical
+  // base64 string of length L decodes to (L/4)·3 − p bytes (p = 0–2 padding
+  // chars), so ⌊L·3/4⌋ overestimates the true size by at most 2. The `+ 2` slack
+  // keeps a payload whose real decoded size is exactly the cap from being
+  // false-rejected here (the exact byte check below is authoritative).
   const approxDecodedBytes = Math.floor((normalized.length * 3) / 4);
   if (approxDecodedBytes > MAX_DECODED_BODY_BYTES + 2) {
     throw new ValidationError(
       `Decoded content exceeds the ${MAX_DECODED_BODY_BYTES}-byte limit`
     );
+  }
+
+  // Reject non-base64 input up front so a corrupted payload / a raw `<script>`
+  // that slipped past a mis-set flag fails with a clear 400 instead of decoding
+  // to garbage (Buffer.from is lenient and would silently truncate). Padding is
+  // limited to the final one or two characters.
+  const firstPaddingIndex = normalized.indexOf("=");
+  const paddingLength =
+    firstPaddingIndex === -1 ? 0 : normalized.length - firstPaddingIndex;
+  const hasInvalidPadding =
+    paddingLength > 2 ||
+    (paddingLength > 0 && !normalized.endsWith("=".repeat(paddingLength)));
+  if (
+    normalized.length % 4 !== 0 ||
+    INVALID_BASE64_CHARACTER_RE.test(normalized) ||
+    hasInvalidPadding
+  ) {
+    throw new ValidationError("Invalid base64 content body (codeEncoding)");
   }
   const decoded = Buffer.from(normalized, "base64").toString("utf8");
   if (decoded.length === 0) {

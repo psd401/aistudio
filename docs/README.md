@@ -169,6 +169,8 @@ AI integration patterns using Vercel AI SDK v6, provider factory implementation,
 
 **[Assistant Architect model routing](./features/assistant-architect-model-routing.md)** — Standard/Advanced authoring, shared capability-aware tier routing, legacy compatibility, execution surfaces, and independent rollout controls.
 
+**[Unified repository product integration](./features/unified-repository-product-integration.md)** — Authoritative Repository Manager source/ACL/version UI, Assistant Architect repository-only knowledge, Nexus private ephemeral attachments, promotion, retention, and rollback boundaries.
+
 #### [features/navigation.md](./features/navigation.md)
 Dynamic navigation system with role-based menu items.
 

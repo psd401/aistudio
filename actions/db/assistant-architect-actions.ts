@@ -30,6 +30,10 @@ import { hasCapabilityAccess, hasRole } from "@/utils/roles";
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action";
 import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access";
 import {
+  validateAssistantRepositoryAudience,
+  validateAssistantRepositoryAudienceForRepositoryIds,
+} from "@/lib/assistant-architect/repository-audience";
+import {
   getAssistantArchitects as drizzleGetAssistantArchitects,
   getAssistantArchitectById as drizzleGetAssistantArchitectById,
   createAssistantArchitect as drizzleCreateAssistantArchitect,
@@ -51,7 +55,9 @@ import {
   getAIModelById,
   getArchitectEnabledModels,
   getAssistantArchitectsByStatus,
-  getRoleByName
+  getRoleByName,
+  getAccessibleRepositoryIds,
+  getRepositoryById,
 } from "@/lib/db/drizzle";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
@@ -1529,13 +1535,35 @@ export async function addChainPromptAction(
       }
     }
 
-    // If repository IDs are provided, validate the caller has repository access
-    // (the auth gate above already established the session + ownership).
-    if (data.repositoryIds && data.repositoryIds.length > 0) {
-      const hasAccess = await hasCapabilityAccess("knowledge-repositories");
-      if (!hasAccess) {
-        return { isSuccess: false, message: "Access denied. You need knowledge repository access." };
-      }
+    // Validate both the UI capability and every concrete repository ACL. The
+    // client picker is not an authorization boundary; crafted server-action
+    // payloads must not persist inaccessible repository IDs.
+    const repositoryAccessError = await validatePromptRepositoryAccessUpdate(
+      data.repositoryIds,
+      currentUserId
+    );
+    if (repositoryAccessError) {
+      return { isSuccess: false, message: repositoryAccessError };
+    }
+
+    const audienceCompatibility =
+      await validateApprovedAssistantRepositoryCandidate(
+        architect,
+        data.repositoryIds
+      );
+    if (audienceCompatibility && !audienceCompatibility.isCompatible) {
+      log.warn(
+        "Approved assistant repository audience mismatch blocked prompt creation",
+        {
+          assistantId: architectIdInt,
+          mismatches: audienceCompatibility.mismatches,
+        }
+      );
+      return {
+        isSuccess: false,
+        message:
+          "Repository permissions do not cover this approved assistant's audience. Update repository permissions or restrict assistant access before changing repository bindings.",
+      };
     }
 
     await createChainPrompt({
@@ -1684,14 +1712,90 @@ async function validatePromptEnabledToolsUpdate(
  * updatePromptAction to keep that action's cyclomatic complexity bounded.
  */
 async function validatePromptRepositoryAccessUpdate(
-  repositoryIds: number[] | null | undefined
+  repositoryIds: number[] | null | undefined,
+  currentUserId: number
 ): Promise<string | null> {
   if (!repositoryIds || repositoryIds.length === 0) return null;
   const hasAccess = await hasCapabilityAccess("knowledge-repositories");
   if (!hasAccess) {
     return "Access denied. You need knowledge repository access.";
   }
+
+  const uniqueRepositoryIds = [...new Set(repositoryIds)]
+  if (
+    uniqueRepositoryIds.some(
+      (repositoryId) =>
+        !Number.isSafeInteger(repositoryId) || repositoryId <= 0
+    )
+  ) {
+    return "One or more knowledge repositories are unavailable.";
+  }
+
+  const accessibleRepositoryIds = await getAccessibleRepositoryIds(
+    uniqueRepositoryIds,
+    currentUserId
+  )
+  const accessibleSet = new Set(accessibleRepositoryIds)
+  if (
+    accessibleSet.size !== uniqueRepositoryIds.length ||
+    uniqueRepositoryIds.some((repositoryId) => !accessibleSet.has(repositoryId))
+  ) {
+    return "One or more knowledge repositories are unavailable.";
+  }
+
+  // Static prompt bindings are durable product configuration. Ephemeral
+  // repositories are accepted only through owner-bound runtime attachment
+  // references, never through a crafted prompt mutation.
+  const repositories = await Promise.all(
+    uniqueRepositoryIds.map((repositoryId) =>
+      getRepositoryById(repositoryId)
+    )
+  )
+  if (
+    repositories.some(
+      (repository) =>
+        !repository ||
+        repository.repositoryKind !== "durable" ||
+        repository.lifecycleStatus !== "active"
+    )
+  ) {
+    return "One or more knowledge repositories are unavailable.";
+  }
   return null;
+}
+
+/**
+ * Evaluate the complete prompt-binding state that would exist after a repository
+ * mutation on an already-approved assistant. Approval is a publication
+ * boundary, but approved assistants remain editable, so checking only at
+ * submission/approval would let a later prompt edit widen past the repository
+ * audience policy.
+ */
+async function validateApprovedAssistantRepositoryCandidate(
+  architect: Pick<SelectAssistantArchitect, "id" | "status">,
+  repositoryIds: number[] | null | undefined,
+  replacedPromptId?: number
+) {
+  if (architect.status !== "approved" || repositoryIds === undefined) {
+    return null;
+  }
+
+  const prompts = await getChainPrompts(architect.id);
+  const candidateRepositoryIds = [
+    ...new Set([
+      ...prompts.flatMap((prompt) =>
+        prompt.id === replacedPromptId
+          ? []
+          : parseRepositoryIds(prompt.repositoryIds)
+      ),
+      ...(repositoryIds ?? []),
+    ]),
+  ];
+
+  return validateAssistantRepositoryAudienceForRepositoryIds(
+    architect.id,
+    candidateRepositoryIds
+  );
 }
 
 /**
@@ -1813,9 +1917,34 @@ export async function updatePromptAction(
     }
 
     // If repository IDs are being updated, validate user has access.
-    const repositoryAccessError = await validatePromptRepositoryAccessUpdate(effectiveData.repositoryIds);
+    const repositoryAccessError = await validatePromptRepositoryAccessUpdate(
+      effectiveData.repositoryIds,
+      currentUserId
+    );
     if (repositoryAccessError) {
       return { isSuccess: false, message: repositoryAccessError };
+    }
+
+    const audienceCompatibility =
+      await validateApprovedAssistantRepositoryCandidate(
+        architect,
+        effectiveData.repositoryIds,
+        idInt
+      );
+    if (audienceCompatibility && !audienceCompatibility.isCompatible) {
+      log.warn(
+        "Approved assistant repository audience mismatch blocked prompt update",
+        {
+          assistantId: architect.id,
+          promptId: idInt,
+          mismatches: audienceCompatibility.mismatches,
+        }
+      );
+      return {
+        isSuccess: false,
+        message:
+          "Repository permissions do not cover this approved assistant's audience. Update repository permissions or restrict assistant access before changing repository bindings.",
+      };
     }
 
     // Build update data matching ChainPromptUpdateData type. The branch logic is
@@ -2197,6 +2326,23 @@ export async function approveAssistantArchitectAction(
       return { isSuccess: false, message: "Invalid ID format" }
     }
 
+    // Re-check at the final approval boundary. Submission-time validation alone
+    // is insufficient because assistant or repository grants may change while
+    // the request is pending.
+    const audienceCompatibility =
+      await validateAssistantRepositoryAudience(idInt)
+    if (!audienceCompatibility.isCompatible) {
+      log.warn("Assistant repository audience mismatch blocked approval", {
+        assistantId: idInt,
+        mismatches: audienceCompatibility.mismatches,
+      })
+      return {
+        isSuccess: false,
+        message:
+          "Repository permissions do not cover this assistant's audience. Update repository permissions or restrict assistant access before approval.",
+      }
+    }
+
     // Approve the assistant architect and create its capability entry (transaction)
     const updatedTool = await drizzleApproveAssistantArchitect(idInt)
 
@@ -2468,6 +2614,20 @@ export async function submitAssistantArchitectForApprovalAction(
 
     if (!tool.name || !tool.description || prompts.length === 0) {
       return { isSuccess: false, message: "Assistant is incomplete" }
+    }
+
+    const audienceCompatibility =
+      await validateAssistantRepositoryAudience(idInt)
+    if (!audienceCompatibility.isCompatible) {
+      log.warn("Assistant repository audience mismatch blocked submission", {
+        assistantId: idInt,
+        mismatches: audienceCompatibility.mismatches,
+      })
+      return {
+        isSuccess: false,
+        message:
+          "Repository permissions do not cover this assistant's audience. Update repository permissions or restrict assistant access before submitting.",
+      }
     }
 
     await drizzleSubmitForApproval(idInt);

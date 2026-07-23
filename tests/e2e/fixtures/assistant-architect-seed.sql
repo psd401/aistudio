@@ -27,6 +27,30 @@ VALUES
    COALESCE((SELECT id FROM ai_models WHERE id = 9), (SELECT id FROM ai_models ORDER BY id LIMIT 1)), 1, 1)
 ON CONFLICT (id) DO NOTHING;
 
+-- A deterministic runtime file input exercises the repository-backed temporary
+-- attachment contract without calling a live model. The product-migration E2E
+-- intercepts only upload/status/execution transport and proves that the form
+-- sends an opaque repository reference rather than extracted document text.
+INSERT INTO tool_input_fields
+  (id, assistant_architect_id, name, label, field_type, position, options)
+VALUES
+  (
+    9003,
+    9000,
+    'e2e_knowledge_document',
+    'E2E knowledge document',
+    'file_upload',
+    0,
+    NULL
+  )
+ON CONFLICT (id) DO UPDATE
+SET assistant_architect_id = EXCLUDED.assistant_architect_id,
+    name = EXCLUDED.name,
+    label = EXCLUDED.label,
+    field_type = EXCLUDED.field_type,
+    position = EXCLUDED.position,
+    options = EXCLUDED.options;
+
 INSERT INTO assistant_architects
   (id, name, description, status, user_id, is_parallel, model_routing_mode, model_routing_family)
 SELECT fixture.id,
@@ -59,3 +83,45 @@ VALUES
   (9021, 9020, 'Advanced prompt', 'Analyze this request carefully.',
    COALESCE((SELECT id FROM ai_models WHERE id = 9), (SELECT id FROM ai_models ORDER BY id LIMIT 1)), 0)
 ON CONFLICT (id) DO NOTHING;
+
+-- Staff-owned draft proves the default Assistant Architect audience can reach
+-- the Repository Manager capability and bind an explicitly shared repository.
+INSERT INTO assistant_architects
+  (id, name, description, status, user_id, is_parallel, model_routing_mode, model_routing_family)
+SELECT
+  9030,
+  'E2E Staff Repository Architect',
+  'Fixture: staff repository picker access',
+  'draft',
+  user_row.id,
+  false,
+  'legacy',
+  NULL
+FROM users user_row
+WHERE user_row.cognito_sub = 'e2e-staff-user'
+ON CONFLICT (id) DO UPDATE
+SET user_id = EXCLUDED.user_id,
+    status = 'draft',
+    model_routing_mode = 'legacy',
+    model_routing_family = NULL;
+
+INSERT INTO chain_prompts
+  (id, assistant_architect_id, name, content, model_id, position)
+VALUES
+  (
+    9031,
+    9030,
+    'Staff repository prompt',
+    'Use the selected repository to answer the request.',
+    COALESCE(
+      (SELECT id FROM ai_models WHERE id = 9),
+      (SELECT id FROM ai_models ORDER BY id LIMIT 1)
+    ),
+    0
+  )
+ON CONFLICT (id) DO UPDATE
+SET assistant_architect_id = EXCLUDED.assistant_architect_id,
+    name = EXCLUDED.name,
+    content = EXCLUDED.content,
+    model_id = EXCLUDED.model_id,
+    position = EXCLUDED.position;

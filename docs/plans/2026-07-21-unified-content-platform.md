@@ -392,7 +392,7 @@ two worktrees should edit the same migration or contract file concurrently.
       managed-service validation passed)
 - [x] Retrieval v2 and visual search
 - [ ] Google Workspace sync
-- [ ] Universal product UI migration
+- [x] Universal product UI migration
 - [ ] OpenClaw and Projects integration
 - [ ] Backfill, cutover, and legacy retirement
 
@@ -988,3 +988,67 @@ Verification evidence for the managed-service validation slice:
 - Dev processing and embedding DLQs remained empty. The live audio/video jobs,
   pinned artifacts, active Titan embeddings, timestamp locators, and synthetic
   transcript marker were verified directly against the canonical database.
+
+### Product-consolidation checkpoint (2026-07-23)
+
+Issue #1268 was selected because Google synchronization remains explicitly
+blocked on `psd-gcp-infra#1`, Retrieval v2 is delivered, and product
+consolidation was therefore the earliest incomplete, unblocked plan item. No
+open pull request was implementing this work when the branch was created from
+the then-current `origin/dev` commit `a7358294`.
+
+Implemented on `codex/unified-content-product-migration`, ready for dev review:
+
+- Repository Manager is the universal durable-management surface. Its shared
+  picker/source flow supports direct single or multipart upload, URL, inline
+  text, private repository creation, exact read-only projection, immutable
+  versions, processing state, active-generation citations, and owner/admin
+  access editing. Google Drive remains an explicit unavailable state owned by
+  #1262 rather than a competing upload path.
+- Assistant Architect prompt authoring, interactive execution, scheduling, the
+  v1 execute/conversation APIs, and runtime file inputs use repository IDs or
+  owner-bound temporary references. Every path rechecks the executing user,
+  and assistant publish, grant, and post-approval prompt-binding changes fail
+  closed when the proposed audience is wider than a bound repository. The
+  historical PDF conversion status remains readable for stored jobs, but no
+  live product path starts new legacy work.
+- Nexus one-off attachments use private, expiring repositories, direct signed
+  uploads, bounded retrieval tools, immutable citations, and in-place durable
+  promotion. Canonical image turns reload the exact inspected S3 object instead
+  of trusting client-carried pixels. Forged, foreign, expired, or
+  conversation-mismatched references fail before conversation/message writes.
+- Additive migration 125 introduces owner-bound conversation bindings and
+  ephemeral lifecycle constraints, backfills the Repository Manager capability
+  for existing staff roles, and is safe to replay. Serialized reservations cap
+  active uploads, Nexus-managed storage, and Nexus-managed repository count.
+  Promotion deliberately remains counted against the originating quota.
+- Repository, item, upload-session, worker, publication, embedding, and purge
+  paths share lifecycle fencing and a consistent lock order. Partial deletion
+  remains visibly retryable. GuardDuty state tags survive object promotion,
+  temporary objects have a one-day cleanup bound, and active or unknown
+  external processing remains fail-closed during deletion.
+
+Verification evidence for this checkpoint:
+
+- Complete application CI: 316 suites and 3,359 tests passed with 60 intentional
+  skips. Full lint completed with zero errors, the application typecheck passed,
+  and the production Next.js build passed.
+- Authenticated Playwright passed all 11 focused product-consolidation tests
+  against the migrated local PostgreSQL database. The matrix covers Repository
+  Manager access projection, staff capability access, Assistant Architect
+  selection/runtime references, Nexus document/image promotion, forged
+  references, and explicit rollback.
+- Real PostgreSQL migration, unified-content lifecycle, Nexus ephemeral
+  lifecycle/promotion, and serialized upload-quota smokes passed. The broad
+  regression gate exposed and repaired an existing large-base64 validation
+  stack overflow with a bounded pre-allocation guard.
+- Complete infrastructure/Lambda validation passed 39 suites and 383 tests,
+  infrastructure plus both worker typechecks, the production build, full CDK
+  synthesis, and both exact Linux Lambda artifact smokes.
+
+Rollout remains controlled by the existing content-platform flags. Migration
+125 is additive and must deploy before the application. New temporary uploads
+fail closed to the documented legacy response while canonical cutover is off;
+already-issued canonical uploads may still complete safely. The remaining live
+environment check is deployment observability and cleanup behavior under real
+GuardDuty/S3 events, not an unresolved product or architecture decision.

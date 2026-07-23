@@ -42,6 +42,7 @@ import {
   repositoryItems,
   repositoryItemChunks,
   repositoryAccess,
+  roles,
   users,
   userRoles,
 } from "@/lib/db/schema";
@@ -68,6 +69,15 @@ import { createLogger, sanitizeForLogging } from "@/lib/logger";
  * `canView`. `IS DISTINCT FROM` handles a NULL `metadata` correctly.
  */
 const EXCLUDE_SYSTEM_MANAGED: SQL = sql`(${knowledgeRepositories.metadata} ->> 'systemManaged') IS DISTINCT FROM 'true'`;
+const ACTIVE_UNEXPIRED_REPOSITORY: SQL = sql`(
+  ${knowledgeRepositories.lifecycleStatus} = 'active'
+  AND (
+    ${knowledgeRepositories.expiresAt} IS NULL
+    OR ${knowledgeRepositories.expiresAt} > now()
+  )
+)`;
+const DURABLE_REPOSITORY: SQL =
+  sql`${knowledgeRepositories.repositoryKind} = 'durable'`;
 
 /**
  * Maximum number of chunks that can be inserted in a single batch operation
@@ -210,7 +220,13 @@ export async function getRepositoriesByOwnerId(
       db
         .select()
         .from(knowledgeRepositories)
-        .where(eq(knowledgeRepositories.ownerId, ownerId))
+        .where(
+          and(
+            eq(knowledgeRepositories.ownerId, ownerId),
+            DURABLE_REPOSITORY,
+            ACTIVE_UNEXPIRED_REPOSITORY
+          )
+        )
         .orderBy(desc(knowledgeRepositories.createdAt)),
     "getRepositoriesByOwnerId"
   );
@@ -229,7 +245,13 @@ export async function getPublicRepositories(): Promise<
       db
         .select()
         .from(knowledgeRepositories)
-        .where(eq(knowledgeRepositories.isPublic, true))
+        .where(
+          and(
+            eq(knowledgeRepositories.isPublic, true),
+            DURABLE_REPOSITORY,
+            ACTIVE_UNEXPIRED_REPOSITORY
+          )
+        )
         .orderBy(desc(knowledgeRepositories.createdAt)),
     "getPublicRepositories"
   );
@@ -241,7 +263,9 @@ export async function getPublicRepositories(): Promise<
  * Get all repositories with owner information and item count (admin function)
  * Returns all repositories with owner email and count of items
  */
-export async function getAllRepositoriesWithOwner(): Promise<
+export async function getAllRepositoriesWithOwner(
+  options: { includeDeleting?: boolean } = {}
+): Promise<
   Array<
     SelectKnowledgeRepository & {
       ownerEmail: string | null;
@@ -250,6 +274,12 @@ export async function getAllRepositoriesWithOwner(): Promise<
   >
 > {
   const { sql } = await import("drizzle-orm");
+  const lifecyclePredicate = options.includeDeleting
+    ? or(
+        ACTIVE_UNEXPIRED_REPOSITORY,
+        eq(knowledgeRepositories.lifecycleStatus, "deleting")
+      )
+    : ACTIVE_UNEXPIRED_REPOSITORY;
 
   const result = await executeQuery(
     (db) =>
@@ -274,6 +304,7 @@ export async function getAllRepositoriesWithOwner(): Promise<
         })
         .from(knowledgeRepositories)
         .leftJoin(users, eq(knowledgeRepositories.ownerId, users.id))
+        .where(and(DURABLE_REPOSITORY, lifecyclePredicate))
         .orderBy(desc(knowledgeRepositories.createdAt)),
     "getAllRepositoriesWithOwner"
   );
@@ -298,7 +329,17 @@ export async function getUserAccessibleRepositories(
     id: number;
     name: string;
     description: string | null;
+    ownerId: number;
+    ownerName: string | null;
     isPublic: boolean | null;
+    repositoryKind: "durable" | "ephemeral" | "system";
+    lifecycleStatus: "active" | "expired" | "deleting" | "deleted";
+    retentionDays: number | null;
+    expiresAt: Date | null;
+    activeIndexGenerationId: string | null;
+    metadata: Record<string, unknown> | null;
+    createdAt: Date | null;
+    updatedAt: Date | null;
     itemCount: number;
     lastUpdated: Date | null;
   }>
@@ -331,11 +372,23 @@ export async function getUserAccessibleRepositories(
           id: knowledgeRepositories.id,
           name: knowledgeRepositories.name,
           description: knowledgeRepositories.description,
+          ownerId: knowledgeRepositories.ownerId,
+          ownerName: sql<string | null>`NULLIF(TRIM(CONCAT_WS(' ', ${users.firstName}, ${users.lastName})), '')`,
           isPublic: knowledgeRepositories.isPublic,
+          repositoryKind: knowledgeRepositories.repositoryKind,
+          lifecycleStatus: knowledgeRepositories.lifecycleStatus,
+          retentionDays: knowledgeRepositories.retentionDays,
+          expiresAt: knowledgeRepositories.expiresAt,
+          activeIndexGenerationId:
+            knowledgeRepositories.activeIndexGenerationId,
+          metadata: knowledgeRepositories.metadata,
+          createdAt: knowledgeRepositories.createdAt,
+          updatedAt: knowledgeRepositories.updatedAt,
           itemCount: sql<number>`(SELECT COUNT(*) FROM ${repositoryItems} WHERE ${repositoryItems.repositoryId} = ${knowledgeRepositories.id})`,
           lastUpdated: sql<Date | null>`(SELECT MAX(updated_at) FROM ${repositoryItems} WHERE ${repositoryItems.repositoryId} = ${knowledgeRepositories.id})`,
         })
         .from(knowledgeRepositories)
+        .innerJoin(users, eq(users.id, knowledgeRepositories.ownerId))
         .leftJoin(
           repositoryAccess,
           eq(repositoryAccess.repositoryId, knowledgeRepositories.id)
@@ -345,6 +398,8 @@ export async function getUserAccessibleRepositories(
           and(
             // Never surface system-managed repos (Atrium index) here (#1056).
             EXCLUDE_SYSTEM_MANAGED,
+            DURABLE_REPOSITORY,
+            ACTIVE_UNEXPIRED_REPOSITORY,
             or(
               // Public repositories
               eq(knowledgeRepositories.isPublic, true),
@@ -407,6 +462,7 @@ export async function getAccessibleRepositoryIds(
             inArray(knowledgeRepositories.id, repositoryIds),
             // Never grant access to system-managed repos (Atrium index) (#1056).
             EXCLUDE_SYSTEM_MANAGED,
+            ACTIVE_UNEXPIRED_REPOSITORY,
             or(
               // Public repositories
               eq(knowledgeRepositories.isPublic, true),
@@ -491,6 +547,7 @@ export async function getAccessibleRepositoriesByCognitoSub(
             // Never grant access to system-managed repos (Atrium index) (#1056)
             // — repository-tools resolves access through this function.
             EXCLUDE_SYSTEM_MANAGED,
+            ACTIVE_UNEXPIRED_REPOSITORY,
             or(...accessConditions)
           )
         ),
@@ -717,17 +774,40 @@ export async function revokeAccessById(accessId: number): Promise<number> {
  */
 export async function getRepositoryAccessList(
   repositoryId: number
-): Promise<SelectRepositoryAccess[]> {
+): Promise<
+  Array<
+    SelectRepositoryAccess & {
+      userEmail: string | null;
+      userName: string | null;
+      roleName: string | null;
+    }
+  >
+> {
   const result = await executeQuery(
     (db) =>
       db
-        .select()
+        .select({
+          id: repositoryAccess.id,
+          repositoryId: repositoryAccess.repositoryId,
+          userId: repositoryAccess.userId,
+          roleId: repositoryAccess.roleId,
+          createdAt: repositoryAccess.createdAt,
+          userEmail: users.email,
+          userName: sql<string | null>`NULLIF(TRIM(CONCAT_WS(' ', ${users.firstName}, ${users.lastName})), '')`,
+          roleName: roles.name,
+        })
         .from(repositoryAccess)
+        .leftJoin(users, eq(users.id, repositoryAccess.userId))
+        .leftJoin(roles, eq(roles.id, repositoryAccess.roleId))
         .where(eq(repositoryAccess.repositoryId, repositoryId)),
     "getRepositoryAccessList"
   );
 
-  return result;
+  return result.sort((left, right) => {
+    const leftLabel = left.userName ?? left.userEmail ?? left.roleName ?? "";
+    const rightLabel = right.userName ?? right.userEmail ?? right.roleName ?? "";
+    return leftLabel.localeCompare(rightLabel);
+  });
 }
 
 // ============================================

@@ -1297,6 +1297,8 @@ try {
           metrics: {
             provider: "amazon-bedrock-data-automation",
             bdaInvocationArn: "arn:aws:bedrock:failed-invocation",
+            bdaInvocationState: "terminal",
+            bdaTerminalStatus: "ServiceError",
             bdaSourceObjectKey: activeUpgradeSourceObjectKey,
             bdaOutputPrefix: "repositories/1/artifacts/version/bda/runs/old/",
             bdaResultObjectKey: "repositories/1/artifacts/version/bda/partial.json",

@@ -5,6 +5,7 @@ import {
   GetObjectTaggingCommand,
   ListObjectsV2Command,
   PutObjectCommand,
+  PutObjectTaggingCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
 import {
@@ -110,6 +111,7 @@ import {
   recordRepositoryProcessingFailure,
   recordRepositorySecurityBlock,
 } from "../../../lib/repositories/content-platform/worker-job-service";
+import { permanentRepositoryUploadTags } from "../../../lib/repositories/content-platform/upload-state";
 import {
   claimIncompleteEmbeddingGenerations,
   canAcknowledgeCanonicalEmbeddingDlqMessage,
@@ -134,6 +136,7 @@ import {
   attachBdaInvocation,
   attachTextractJob,
   buildManagedServiceClientToken,
+  markBdaInvocationTerminal,
   reconcileBdaState,
   reconcileTextractState,
 } from "./provider-state";
@@ -146,6 +149,8 @@ import {
   repositoryEmbeddingConfigurationFromSettings,
   repositoryVisualEmbeddingConfiguration,
 } from "../../../lib/repositories/embedding-configuration";
+import { enforceNexusRepositoryLifecycle } from "../../../lib/repositories/content-platform/lifecycle-service";
+import { cleanupExpiredRepositoryUploads } from "../../../lib/repositories/content-platform/upload-lifecycle-service";
 
 type JobMetrics = RepositoryProcessingMetrics;
 
@@ -305,9 +310,48 @@ async function deferJob(
   );
 }
 
-async function getMalwareStatus(objectKey: string): Promise<string | null> {
-  const result = await s3.send(new GetObjectTaggingCommand({ Bucket: bucket, Key: objectKey }));
-  return result.TagSet?.find((tag) => tag.Key === "GuardDutyMalwareScanStatus")?.Value ?? null;
+async function persistBdaTerminalState(input: {
+  message: ContentProcessingMessage;
+  metrics: JobMetrics;
+  invocationArn: string;
+  status: "Success" | "ServiceError" | "ClientError";
+}): Promise<JobMetrics> {
+  const terminalMetrics = markBdaInvocationTerminal(
+    input.metrics,
+    input.invocationArn,
+    input.status
+  );
+  const updated = await executeQuery(
+    (db) =>
+      db
+        .update(repositoryProcessingJobs)
+        .set({ metrics: terminalMetrics, updatedAt: new Date() })
+        .where(
+          and(
+            eq(repositoryProcessingJobs.id, input.message.jobId),
+            eq(
+              repositoryProcessingJobs.itemVersionId,
+              input.message.itemVersionId
+            ),
+            eq(repositoryProcessingJobs.status, "running")
+          )
+        )
+        .returning({ id: repositoryProcessingJobs.id }),
+    "contentProcessor.persistBdaTerminalState"
+  );
+  if (updated.length !== 1) {
+    throw new Error("BDA terminal state no longer owns the processing job");
+  }
+  return terminalMetrics;
+}
+
+async function getObjectTags(
+  objectKey: string
+): Promise<Array<{ Key?: string; Value?: string }>> {
+  const result = await s3.send(
+    new GetObjectTaggingCommand({ Bucket: bucket, Key: objectKey })
+  );
+  return result.TagSet ?? [];
 }
 
 async function blockVersion(message: ContentProcessingMessage, status: string): Promise<void> {
@@ -418,11 +462,28 @@ async function pollMediaAnalysis(input: {
   invocationArn: string;
   outputPrefix: string;
   modality: MediaKind;
+  onTerminal: (
+    status: "Success" | "ServiceError" | "ClientError"
+  ) => Promise<void>;
 }): Promise<{ status: "pending" } | { status: "complete"; objectKey: string; output: ProcessedMediaOutput }> {
   const result = await dataAutomation.send(new GetDataAutomationStatusCommand({ invocationArn: input.invocationArn }));
   if (result.status === "Created" || result.status === "InProgress") {
     return { status: "pending" };
   }
+  if (
+    result.status !== "Success" &&
+    result.status !== "ServiceError" &&
+    result.status !== "ClientError"
+  ) {
+    throw new Error(
+      `Bedrock Data Automation returned an unknown status ${result.status ?? "UNKNOWN"}`
+    );
+  }
+  // Persist the provider terminal fence before resolving output. Output reads
+  // and parsing may fail independently, but AWS can no longer write after this
+  // observed state and deletion must not treat those local failures as an
+  // active external producer.
+  await input.onTerminal(result.status);
   if (result.status !== "Success") {
     const detail = [result.errorType, result.errorMessage].filter(Boolean).join(": ");
     const message =
@@ -953,10 +1014,6 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
   }
 
   const config = await getConfig();
-  if (!config.enabled) {
-    await deferJob(message, metrics, "CONTENT_PLATFORM_DISABLED", job.attempt);
-    return;
-  }
   const processingLimitBytes = mediaKind
     ? Math.min(maximumMediaBytes(mediaKind), config.maxFileSizeGb * 1024 ** 3)
     : (isPdf
@@ -972,7 +1029,10 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
   }
   let inspectionStatus: "clean" | "not_required" = "not_required";
   let inspectionDetails: Record<string, unknown> = { provider: "disabled" };
-  const malwareStatus = config.malwareScanRequired ? await getMalwareStatus(context.objectKey) : null;
+  const objectTags = await getObjectTags(context.objectKey);
+  const malwareStatus =
+    objectTags.find((tag) => tag.Key === "GuardDutyMalwareScanStatus")
+      ?.Value ?? null;
   const inspectionDecision = decideMalwareInspection(config.malwareScanRequired, malwareStatus);
   if (inspectionDecision.status === "awaiting") {
     await deferJob(message, metrics, "AWAITING_SECURITY_SCAN", job.attempt);
@@ -988,6 +1048,27 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
       provider: "guardduty",
       status: inspectionDecision.providerStatus,
     };
+  }
+  const permanentTags = permanentRepositoryUploadTags(
+    objectTags,
+    inspectionDecision.status
+  );
+  if (!permanentTags) {
+    throw new Error("Unsafe upload-tag promotion was rejected");
+  }
+  // PutObjectTagging replaces the entire set. Merge only after a terminal clean
+  // decision, preserving GuardDutyMalwareScanStatus so a clean result is not
+  // lost and a blocked result can never be overwritten or bypassed.
+  await s3.send(
+    new PutObjectTaggingCommand({
+      Bucket: bucket,
+      Key: context.objectKey,
+      Tagging: { TagSet: permanentTags },
+    })
+  );
+  if (!config.enabled) {
+    await deferJob(message, metrics, "CONTENT_PLATFORM_DISABLED", job.attempt);
+    return;
   }
 
   let segments: PublishableSegment[];
@@ -1037,6 +1118,14 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
       invocationArn,
       outputPrefix: bdaState.outputPrefix,
       modality: mediaKind,
+      onTerminal: async (status) => {
+        metrics = await persistBdaTerminalState({
+          message,
+          metrics,
+          invocationArn,
+          status,
+        });
+      },
     });
     if (analysis.status === "pending") {
       await deferJob(message, metrics, "AWAITING_MEDIA_ANALYSIS", job.attempt);
@@ -1527,6 +1616,30 @@ export async function handler(
             if (released.length > 0) {
               log.info("Released post-deployment unified content recovery jobs", {
                 count: released.length,
+              });
+            }
+          },
+        },
+        {
+          name: "repository-upload-cleanup",
+          run: async () => {
+            const result = await cleanupExpiredRepositoryUploads();
+            if (result.claimed > 0) {
+              log.info("Cleaned expired repository uploads", {
+                claimed: result.claimed,
+                cleaned: result.cleaned,
+              });
+            }
+          },
+        },
+        {
+          name: "nexus-ephemeral-lifecycle",
+          run: async () => {
+            const result = await enforceNexusRepositoryLifecycle();
+            if (result.expired > 0 || result.purged > 0) {
+              log.info("Enforced Nexus ephemeral repository lifecycle", {
+                expired: result.expired,
+                purged: result.purged,
               });
             }
           },

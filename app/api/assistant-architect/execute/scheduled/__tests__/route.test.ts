@@ -51,8 +51,17 @@ jest.mock("@/lib/db/drizzle", () => ({
   getAIModelById: (...a: unknown[]) => mockGetAIModelById(...a),
 }))
 
+const mockRepositoryAccessPreflight = jest.fn()
+jest.mock("@/lib/assistant-architect/repository-access-preflight", () => ({
+  REPOSITORY_ACCESS_CHANGED_MESSAGE:
+    "Repository access changed. Request access to every repository used by this assistant before trying again.",
+  preflightAssistantRepositoryAccess: (...a: unknown[]) =>
+    mockRepositoryAccessPreflight(...a),
+}))
+
+const mockUnifiedStream = jest.fn()
 jest.mock("@/lib/streaming/unified-streaming-service", () => ({
-  unifiedStreamingService: { stream: jest.fn() },
+  unifiedStreamingService: { stream: (...a: unknown[]) => mockUnifiedStream(...a) },
 }))
 jest.mock("@/lib/assistant-architect/knowledge-retrieval", () => ({
   retrieveKnowledgeForPrompt: jest.fn(),
@@ -157,6 +166,10 @@ describe("POST execute/scheduled binding & replay (REV-SEC-101 / REV-COR-200)", 
     execResultRows = []
     scheduleRows = []
     mockGetUserById.mockResolvedValue({ cognitoSub: "owner-sub" })
+    mockRepositoryAccessPreflight.mockResolvedValue({
+      isAllowed: true,
+      repositoryIds: [],
+    })
   })
 
   it("rejects an internal token with no `exp` claim (replay hardening)", async () => {
@@ -240,5 +253,49 @@ describe("POST execute/scheduled binding & replay (REV-SEC-101 / REV-COR-200)", 
 
     expect(res.status).toBe(401)
     expect(mockJwtVerify).not.toHaveBeenCalled()
+  })
+
+  it("fails before execution or model streaming when repository access was revoked", async () => {
+    mockJwtVerify.mockReturnValue({ scheduleId: "1", executionId: "100", exp: FUTURE_EXP })
+    execResultRows = [{ scheduledExecutionId: 1, status: "pending" }]
+    scheduleRows = [{ userId: 7, assistantArchitectId: 5 }]
+    mockGetAssistantArchitectById.mockResolvedValue({
+      id: 5,
+      name: "Repository assistant",
+      userId: 99,
+      modelRoutingMode: "legacy",
+      modelRoutingFamily: null,
+    })
+    mockGetChainPrompts.mockResolvedValue([{
+      id: 10,
+      name: "Retrieve",
+      content: "Use the repository",
+      systemContext: null,
+      modelId: 3,
+      position: 0,
+      inputMapping: null,
+      repositoryIds: [42],
+      enabledTools: null,
+      timeoutSeconds: null,
+    }])
+    mockRepositoryAccessPreflight.mockResolvedValue({
+      isAllowed: false,
+      repositoryIds: [42],
+    })
+
+    const res = await POST(buildReq(validBody))
+    const body = await res.json()
+
+    expect(res.status).toBe(403)
+    expect(body.message).toMatch(/Repository access changed/)
+    expect(mockRepositoryAccessPreflight).toHaveBeenCalledWith(
+      expect.any(Array),
+      "owner-sub"
+    )
+    expect(mockExecuteQuery).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "createToolExecution"
+    )
+    expect(mockUnifiedStream).not.toHaveBeenCalled()
   })
 })

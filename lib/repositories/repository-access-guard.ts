@@ -15,14 +15,12 @@
  *    canonical `getAccessibleRepositoriesByCognitoSub` model (the same one
  *    `lib/tools/repository-tools.ts` uses).
  *
- * 2. **System-managed repositories** (the Atrium retrieval index, Issue #1056)
- *    hold content governed by per-object `visibilityService.canView`, not
- *    repository-level access. `getAccessibleRepositoriesByCognitoSub` already
- *    EXCLUDES them, so the read-access guards above cover Atrium isolation for
- *    free. The `assertNotSystemManagedRepository` / `assertItemNotInSystemManagedRepository`
- *    guards remain for the WRITE/DELETE paths (which gate on ownership via
- *    `canModifyRepository`, not read-access) so the shared index cannot be
- *    mutated / deleted out-of-band.
+ * 2. **Repository product boundaries.** Generic Repository Manager actions are
+ *    only for active, unexpired, user-managed durable repositories. Ephemeral
+ *    Nexus repositories and system-managed indexes have their own lifecycle and
+ *    authorization surfaces and must not be readable or mutable through generic
+ *    repository actions. `assertUserManagedDurableRepository` establishes that
+ *    boundary for both read and write paths.
  *
  * All guards throw `dbRecordNotFound` (masking existence so ids are not
  * enumerable). `retrievalService` is the only intended reader of a system-managed
@@ -34,32 +32,74 @@ import {
   getRepositoryById,
   getRepositoryItemById,
   getAccessibleRepositoriesByCognitoSub,
+  checkUserRoleByCognitoSub,
   isSystemManagedRepository,
 } from "@/lib/db/drizzle";
 import { ErrorFactories } from "@/lib/error-utils";
 
 // ── Per-repository read authorization (IDOR fix) ─────────────────────────────
 
+function repositoryNotFound(repositoryId: number): Error {
+  return ErrorFactories.dbRecordNotFound(
+    "knowledge_repositories",
+    repositoryId
+  );
+}
+
+/**
+ * Throw `dbRecordNotFound` unless this is an active, unexpired,
+ * user-managed durable repository.
+ *
+ * Generic Repository Manager actions must never become a second management
+ * surface for Nexus ephemeral repositories or system indexes. Keep this guard
+ * separate from retrieval accessors, which intentionally include a caller's
+ * active ephemeral repositories for Nexus retrieval.
+ */
+export async function assertUserManagedDurableRepository(
+  repositoryId: number
+): Promise<void> {
+  const repo = await getRepositoryById(repositoryId);
+  const expiresAt = repo?.expiresAt?.getTime();
+  const isExpired =
+    expiresAt !== undefined &&
+    (Number.isNaN(expiresAt) || expiresAt <= Date.now());
+
+  if (
+    !repo ||
+    repo.repositoryKind !== "durable" ||
+    repo.lifecycleStatus !== "active" ||
+    isExpired ||
+    isSystemManagedRepository(repo)
+  ) {
+    throw repositoryNotFound(repositoryId);
+  }
+}
+
 /**
  * Throw `dbRecordNotFound` unless the caller (`cognitoSub`) can access the
- * repository (public / owner / `repository_access` grant). Also excludes
- * system-managed repos (the access query filters them), so this single check
- * closes both the generic-repository IDOR and Atrium isolation on read paths.
+ * active durable repository (public / owner / `repository_access` grant).
+ * Administrators may inspect any durable repository through Repository Manager,
+ * including private repositories they do not own.
  */
 export async function assertRepositoryReadAccess(
   repositoryId: number,
   cognitoSub: string
 ): Promise<void> {
+  await assertUserManagedDurableRepository(repositoryId);
+
   const [repo] = await getAccessibleRepositoriesByCognitoSub(
     [repositoryId],
     cognitoSub
   );
-  if (!repo || !repo.isAccessible) {
-    throw ErrorFactories.dbRecordNotFound(
-      "knowledge_repositories",
-      repositoryId
-    );
+  if (repo?.isAccessible) {
+    return;
   }
+
+  if (await checkUserRoleByCognitoSub(cognitoSub, "administrator")) {
+    return;
+  }
+
+  throw repositoryNotFound(repositoryId);
 }
 
 /**
@@ -78,21 +118,40 @@ export async function assertItemRepositoryReadAccess(
   await assertRepositoryReadAccess(item.repositoryId, cognitoSub);
 }
 
-// ── System-managed immutability (WRITE/DELETE paths) ─────────────────────────
+// ── Durable repository boundary (WRITE/DELETE paths) ─────────────────────────
 
 /**
- * Throw `dbRecordNotFound` if the repository is missing or system-managed.
- * Use in generic WRITE/DELETE actions (which gate on ownership, not read-access)
- * so the shared Atrium index cannot be mutated/deleted through the generic API.
+ * Backward-compatible name used throughout the generic write surface. This now
+ * enforces the complete Repository Manager product boundary, not only the
+ * historical system-managed exclusion.
  */
 export async function assertNotSystemManagedRepository(
   repositoryId: number
 ): Promise<void> {
+  await assertUserManagedDurableRepository(repositoryId);
+}
+
+/**
+ * Deletion retries deliberately remain addressable after the repository has
+ * entered `deleting`. Storage cleanup is idempotent, while restoring `active`
+ * after a partial S3 sweep would expose a corrupt repository and let producers
+ * recreate objects. All other Repository Manager boundaries remain unchanged.
+ */
+export async function assertUserManagedDurableRepositoryForDeletion(
+  repositoryId: number
+): Promise<void> {
   const repo = await getRepositoryById(repositoryId);
-  if (!repo || isSystemManagedRepository(repo)) {
-    throw ErrorFactories.dbRecordNotFound(
-      "knowledge_repositories",
-      repositoryId
-    );
+  const expiresAt = repo?.expiresAt?.getTime();
+  const activeAndCurrent =
+    repo?.lifecycleStatus === "active" &&
+    (expiresAt === undefined ||
+      (!Number.isNaN(expiresAt) && expiresAt > Date.now()));
+  if (
+    !repo ||
+    repo.repositoryKind !== "durable" ||
+    (!activeAndCurrent && repo.lifecycleStatus !== "deleting") ||
+    isSystemManagedRepository(repo)
+  ) {
+    throw repositoryNotFound(repositoryId);
   }
 }

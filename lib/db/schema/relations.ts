@@ -43,6 +43,7 @@ import { nexusShares } from "./tables/nexus-shares";
 import { nexusTemplates } from "./tables/nexus-templates";
 import { nexusUserPreferences } from "./tables/nexus-user-preferences";
 import { nexusProviderMetrics } from "./tables/nexus-provider-metrics";
+import { nexusRepositoryBindings } from "./tables/nexus-repository-bindings";
 
 // Nexus MCP
 import { nexusMcpServers } from "./tables/nexus-mcp-servers";
@@ -108,6 +109,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   toolExecutions: many(toolExecutions),
   toolEdits: many(toolEdits),
   nexusConversations: many(nexusConversations),
+  nexusRepositoryBindings: many(nexusRepositoryBindings),
   nexusFolders: many(nexusFolders),
   nexusShares: many(nexusShares),
   nexusTemplates: many(nexusTemplates),
@@ -286,6 +288,25 @@ export const nexusConversationsRelations = relations(
     promptLibrary: many(promptLibrary),
     promptUsageEvents: many(promptUsageEvents),
     documents: many(documents), // Added bidirectional relation for Issue #549
+    repositoryBindings: many(nexusRepositoryBindings),
+  })
+);
+
+export const nexusRepositoryBindingsRelations = relations(
+  nexusRepositoryBindings,
+  ({ one }) => ({
+    owner: one(users, {
+      fields: [nexusRepositoryBindings.ownerId],
+      references: [users.id],
+    }),
+    conversation: one(nexusConversations, {
+      fields: [nexusRepositoryBindings.conversationId],
+      references: [nexusConversations.id],
+    }),
+    repository: one(knowledgeRepositories, {
+      fields: [nexusRepositoryBindings.repositoryId],
+      references: [knowledgeRepositories.id],
+    }),
   })
 );
 
@@ -458,6 +479,7 @@ export const knowledgeRepositoriesRelations = relations(
     }),
     items: many(repositoryItems),
     access: many(repositoryAccess),
+    nexusBindings: many(nexusRepositoryBindings),
   })
 );
 

@@ -201,6 +201,10 @@ async function resolveSnapshots(
           sql`, `
         )})
           AND repository.lifecycle_status = 'active'
+          AND (
+            repository.expires_at IS NULL
+            OR repository.expires_at > now()
+          )
           AND (repository.metadata->>'systemManaged') IS DISTINCT FROM 'true'
           AND generation.status = 'active'
       `),
@@ -234,8 +238,10 @@ async function resolveSnapshots(
 function accessFilter(principal: RetrievalPrincipal) {
   const rolePredicate =
     principal.roleIds.length > 0
-      ? sql`(role_value #>> '{}')::integer IN (${sql.join(
-          principal.roleIds.map((roleId) => sql`${roleId}`),
+      ? sql`role_value IN (${sql.join(
+          principal.roleIds.map(
+            (roleId) => sql`to_jsonb(${roleId}::integer)`
+          ),
           sql`, `
         )})`
       : sql`false`;
@@ -254,8 +260,71 @@ function accessFilter(principal: RetrievalPrincipal) {
           FROM jsonb_array_elements(chunk.access_scope->'roleIds') role_value
           WHERE CASE
             WHEN jsonb_typeof(role_value) = 'number'
-              AND (role_value #>> '{}') ~ '^\d+$'
               THEN ${rolePredicate}
+            ELSE false
+          END
+        )
+      )
+    )
+  `;
+}
+
+/**
+ * Re-check repository-level access in the same statement that supplies model
+ * context. Candidate discovery can race with an ACL update, so the earlier
+ * getAccessibleRepositoriesByCognitoSub result is not sufficient at disclosure
+ * time.
+ */
+function repositoryAccessFilter(principal: RetrievalPrincipal) {
+  return sql`
+    (
+      repository.is_public = true
+      OR repository.owner_id = ${principal.userId}
+      OR EXISTS (
+        SELECT 1
+        FROM repository_access repository_acl
+        WHERE repository_acl.repository_id = repository.id
+          AND (
+            repository_acl.user_id = ${principal.userId}
+            OR EXISTS (
+              SELECT 1
+              FROM user_roles user_role_membership
+              WHERE user_role_membership.user_id = ${principal.userId}
+                AND user_role_membership.role_id = repository_acl.role_id
+            )
+          )
+      )
+    )
+  `;
+}
+
+/**
+ * Unlike candidate discovery, disclosure-time role checks must query current
+ * membership rather than rely on the role snapshot resolved earlier.
+ */
+function currentSegmentAccessFilter(principal: RetrievalPrincipal) {
+  return sql`
+    (
+      NOT (chunk.access_scope ? 'userIds' OR chunk.access_scope ? 'roleIds')
+      OR (
+        jsonb_typeof(chunk.access_scope->'userIds') = 'array'
+        AND chunk.access_scope->'userIds' @>
+          to_jsonb(ARRAY[${principal.userId}]::integer[])
+      )
+      OR (
+        jsonb_typeof(chunk.access_scope->'roleIds') = 'array'
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(chunk.access_scope->'roleIds') role_value
+          WHERE CASE
+            WHEN jsonb_typeof(role_value) = 'number'
+              THEN EXISTS (
+                SELECT 1
+                FROM user_roles user_role_membership
+                WHERE user_role_membership.user_id = ${principal.userId}
+                  AND role_value =
+                    to_jsonb(user_role_membership.role_id)
+              )
             ELSE false
           END
         )
@@ -308,6 +377,11 @@ async function denseCandidates(
         JOIN knowledge_repositories repository ON repository.id = item.repository_id
         WHERE chunk.index_generation_id = ${snapshot.generationId}::uuid
           AND repository.id = ${snapshot.repositoryId}
+          AND repository.lifecycle_status = 'active'
+          AND (
+            repository.expires_at IS NULL
+            OR repository.expires_at > now()
+          )
           AND chunk.embedding IS NOT NULL
           AND chunk.modality IN (${sql.join(
             modalities.map((modality) => sql`${modality}`),
@@ -317,6 +391,7 @@ async function denseCandidates(
           AND version.storage_status = 'available'
           AND version.inspection_status IN ('clean', 'not_required')
           AND version.processing_status = 'completed'
+          AND ${repositoryAccessFilter(principal)}
           AND ${accessFilter(principal)}
           AND 1 - (chunk.embedding <=> ${vector}::vector) >= ${threshold}
         ORDER BY score DESC, chunk.id
@@ -351,6 +426,11 @@ async function lexicalCandidates(
         JOIN knowledge_repositories repository ON repository.id = item.repository_id
         WHERE chunk.index_generation_id = ${snapshot.generationId}::uuid
           AND repository.id = ${snapshot.repositoryId}
+          AND repository.lifecycle_status = 'active'
+          AND (
+            repository.expires_at IS NULL
+            OR repository.expires_at > now()
+          )
           AND chunk.modality IN (${sql.join(
             modalities.map((modality) => sql`${modality}`),
             sql`, `
@@ -359,6 +439,7 @@ async function lexicalCandidates(
           AND version.storage_status = 'available'
           AND version.inspection_status IN ('clean', 'not_required')
           AND version.processing_status = 'completed'
+          AND ${repositoryAccessFilter(principal)}
           AND ${accessFilter(principal)}
           AND chunk.search_vector @@ websearch_to_tsquery('english', ${query})
         ORDER BY score DESC, chunk.id
@@ -422,7 +503,12 @@ async function legacyCompatibilityCandidates(
           AND item.lifecycle_status = 'active'
           AND item.processing_status = 'completed'
           AND repository.lifecycle_status = 'active'
+          AND (
+            repository.expires_at IS NULL
+            OR repository.expires_at > now()
+          )
           AND (repository.metadata->>'systemManaged') IS DISTINCT FROM 'true'
+          AND ${repositoryAccessFilter(principal)}
           AND ${accessFilter(principal)}
           AND chunk.search_vector @@ websearch_to_tsquery('english', ${query})
           AND NOT EXISTS (
@@ -461,12 +547,18 @@ async function visualCandidates(
         JOIN knowledge_repositories repository ON repository.id = item.repository_id
         WHERE chunk.index_generation_id = ${snapshot.generationId}::uuid
           AND repository.id = ${snapshot.repositoryId}
+          AND repository.lifecycle_status = 'active'
+          AND (
+            repository.expires_at IS NULL
+            OR repository.expires_at > now()
+          )
           AND chunk.visual_embedding IS NOT NULL
           AND chunk.modality IN ('image', 'video')
           AND item.lifecycle_status = 'active'
           AND version.storage_status = 'available'
           AND version.inspection_status IN ('clean', 'not_required')
           AND version.processing_status = 'completed'
+          AND ${repositoryAccessFilter(principal)}
           AND ${accessFilter(principal)}
           AND 1 - (chunk.visual_embedding <=> ${vector}::vector) >= ${threshold}
         ORDER BY score DESC, chunk.id
@@ -479,23 +571,153 @@ async function visualCandidates(
   );
 }
 
+/**
+ * A managed reranker is an external disclosure boundary. Candidate discovery
+ * can race with ACL, role, lifecycle, or active-generation changes, so only
+ * rows re-authorized immediately before the provider call may leave the
+ * application process. Final context expansion performs the same checks again
+ * before returning content to the caller.
+ */
+async function revalidateCandidatesForRerank(
+  candidates: RetrievalCandidate[],
+  principal: RetrievalPrincipal
+): Promise<RetrievalCandidate[]> {
+  if (candidates.length === 0) return [];
+  const chunkIds = uniquePositiveIds(
+    candidates.map((candidate) => candidate.chunkId)
+  );
+  if (chunkIds.length === 0) return [];
+
+  const rows = await executeQuery(
+    (db) =>
+      db.execute(sql`
+        SELECT chunk.id AS chunk_id
+        FROM repository_item_chunks chunk
+        JOIN repository_items item ON item.id = chunk.item_id
+        JOIN knowledge_repositories repository
+          ON repository.id = item.repository_id
+        LEFT JOIN repository_item_versions version
+          ON version.id = chunk.item_version_id
+        WHERE chunk.id IN (${sql.join(
+          chunkIds.map((chunkId) => sql`${chunkId}`),
+          sql`, `
+        )})
+          AND item.lifecycle_status = 'active'
+          AND repository.lifecycle_status = 'active'
+          AND (
+            repository.expires_at IS NULL
+            OR repository.expires_at > now()
+          )
+          AND ${repositoryAccessFilter(principal)}
+          AND ${currentSegmentAccessFilter(principal)}
+          AND (
+            (
+              chunk.item_version_id IS NULL
+              AND chunk.index_generation_id IS NULL
+              AND item.processing_status = 'completed'
+              AND (repository.metadata->>'systemManaged') IS DISTINCT FROM 'true'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM repository_item_chunks current_chunk
+                WHERE current_chunk.item_id = item.id
+                  AND current_chunk.item_version_id IS NOT NULL
+                  AND current_chunk.index_generation_id =
+                    repository.active_index_generation_id
+              )
+            )
+            OR (
+              chunk.item_version_id IS NOT NULL
+              AND chunk.index_generation_id =
+                repository.active_index_generation_id
+              AND version.storage_status = 'available'
+              AND version.inspection_status IN ('clean', 'not_required')
+              AND version.processing_status = 'completed'
+            )
+          )
+      `),
+    "retrievalV2.revalidateCandidatesForRerank"
+  );
+  const allowedChunkIds = new Set(
+    (rows as unknown as Array<Record<string, unknown>>).flatMap((row) => {
+      const chunkId = positiveInteger(row.chunk_id);
+      return chunkId == null ? [] : [chunkId];
+    })
+  );
+  return candidates.filter((candidate) =>
+    allowedChunkIds.has(candidate.chunkId)
+  );
+}
+
 async function expandCandidate(
   candidate: RetrievalCandidate,
   principal: RetrievalPrincipal,
   neighborCount: number
 ): Promise<RetrievalContextSegment[]> {
   if (candidate.versionNumber === 0) {
-    return [
-      {
-        chunkId: candidate.chunkId,
-        chunkIndex: candidate.chunkIndex,
-        content: candidate.content,
-        contextPrefix: candidate.contextPrefix,
-        modality: candidate.modality,
-        tokens: candidate.tokens,
-        citation: resolveRetrievalCitation(candidate),
-      },
-    ];
+    const rows = await executeQuery(
+      (db) =>
+        db.execute(sql`
+          SELECT
+            chunk.id AS chunk_id,
+            repository.id AS repository_id,
+            repository.name AS repository_name,
+            item.id AS item_id,
+            item.stable_id AS item_stable_id,
+            item.name AS item_name,
+            chunk.content,
+            chunk.chunk_index,
+            chunk.modality,
+            chunk.source_locator,
+            chunk.tokens,
+            chunk.metadata,
+            0::double precision AS score
+          FROM repository_item_chunks chunk
+          JOIN repository_items item ON item.id = chunk.item_id
+          JOIN knowledge_repositories repository ON repository.id = item.repository_id
+          WHERE chunk.id = ${candidate.chunkId}
+            AND repository.id = ${candidate.repositoryId}
+            AND item.id = ${candidate.itemId}
+            AND chunk.item_version_id IS NULL
+            AND chunk.index_generation_id IS NULL
+            AND item.lifecycle_status = 'active'
+            AND item.processing_status = 'completed'
+            AND repository.lifecycle_status = 'active'
+            AND (
+              repository.expires_at IS NULL
+              OR repository.expires_at > now()
+            )
+            AND (repository.metadata->>'systemManaged') IS DISTINCT FROM 'true'
+            AND ${repositoryAccessFilter(principal)}
+            AND ${currentSegmentAccessFilter(principal)}
+            AND NOT EXISTS (
+              SELECT 1
+              FROM repository_item_chunks current_chunk
+              WHERE current_chunk.item_id = item.id
+                AND current_chunk.item_version_id IS NOT NULL
+                AND current_chunk.index_generation_id = repository.active_index_generation_id
+            )
+          LIMIT 1
+        `),
+      "retrievalV2.expandLegacyContext"
+    );
+    return (rows as unknown as Array<Record<string, unknown>>).flatMap((row) => {
+      const rechecked = mapLegacyCandidate(row);
+      try {
+        return [
+          {
+            chunkId: rechecked.chunkId,
+            chunkIndex: rechecked.chunkIndex,
+            content: rechecked.content,
+            contextPrefix: rechecked.contextPrefix,
+            modality: rechecked.modality,
+            tokens: rechecked.tokens,
+            citation: resolveRetrievalCitation(rechecked),
+          },
+        ];
+      } catch {
+        return [];
+      }
+    });
   }
   const lower = Math.max(0, candidate.chunkIndex - neighborCount);
   const upper = candidate.chunkIndex + neighborCount;
@@ -510,6 +732,12 @@ async function expandCandidate(
         WHERE chunk.index_generation_id = ${candidate.generationId}::uuid
           AND chunk.item_version_id = ${candidate.itemVersionId}::uuid
           AND chunk.item_id = ${candidate.itemId}
+          AND repository.active_index_generation_id = ${candidate.generationId}::uuid
+          AND repository.lifecycle_status = 'active'
+          AND (
+            repository.expires_at IS NULL
+            OR repository.expires_at > now()
+          )
           AND (
             chunk.chunk_index BETWEEN ${lower} AND ${upper}
             OR chunk.chunk_index = ${candidate.parentChunkIndex ?? -1}
@@ -518,7 +746,8 @@ async function expandCandidate(
           AND version.storage_status = 'available'
           AND version.inspection_status IN ('clean', 'not_required')
           AND version.processing_status = 'completed'
-          AND ${accessFilter(principal)}
+          AND ${repositoryAccessFilter(principal)}
+          AND ${currentSegmentAccessFilter(principal)}
         ORDER BY chunk.chunk_index
       `),
     "retrievalV2.expandContext"
@@ -542,26 +771,14 @@ async function expandCandidate(
     }
   });
 
-  // The active generation is the serving snapshot. Keep its selected hit first
-  // even when the database returns a preceding neighbor (or a newly registered
-  // current version points at content that has not reached the active generation
-  // yet). This also guarantees a tight context budget cannot consume itself on a
-  // neighbor and omit the semantic/lexical hit that earned the result.
-  let primary: RetrievalContextSegment | null = null;
-  try {
-    primary = {
-      chunkId: candidate.chunkId,
-      chunkIndex: candidate.chunkIndex,
-      content: candidate.content,
-      contextPrefix: candidate.contextPrefix,
-      modality: candidate.modality,
-      tokens: candidate.tokens,
-      citation: resolveRetrievalCitation(candidate),
-    };
-  } catch {
-    // fitContextBudget applies the same citation guard and will omit this
-    // candidate. Preserve the previous fail-closed behavior for malformed rows.
-  }
+  // Only a row returned by the final ACL/lifecycle query may become model
+  // context. Reconstructing the primary from the pre-check candidate would
+  // disclose stale content when access is revoked or the repository expires
+  // between candidate discovery and context expansion.
+  const primary = expanded.find(
+    (segment) => segment.chunkId === candidate.chunkId
+  );
+  if (!primary) return [];
 
   const neighbors = expanded
     .filter((segment) => segment.chunkId !== candidate.chunkId)
@@ -575,7 +792,7 @@ async function expandCandidate(
       return distance || left.chunkIndex - right.chunkIndex;
     });
 
-  return primary ? [primary, ...neighbors] : neighbors;
+  return [primary, ...neighbors];
 }
 
 function fitContextBudget(
@@ -586,14 +803,10 @@ function fitContextBudget(
   const results: RetrievalResult[] = [];
   let remaining = tokenBudget;
   for (const [index, candidate] of candidates.entries()) {
-    let primaryCitation;
-    try {
-      primaryCitation = resolveRetrievalCitation(candidate);
-    } catch {
-      continue;
-    }
+    const recheckedContext = contexts[index] ?? [];
+    if (recheckedContext.length === 0) continue;
     const fitted: RetrievalContextSegment[] = [];
-    for (const segment of contexts[index] ?? []) {
+    for (const segment of recheckedContext) {
       const segmentTokens = countRepositoryTokens(
         `${segment.contextPrefix}\n${segment.content}`
       );
@@ -622,21 +835,7 @@ function fitContextBudget(
     }
     if (fitted.length === 0) {
       if (remaining < 64) break;
-      const fallbackContent = truncateToRepositoryTokens(
-        `${candidate.contextPrefix}\n${candidate.content}`,
-        remaining
-      );
-      const fallbackTokens = countRepositoryTokens(fallbackContent);
-      fitted.push({
-        chunkId: candidate.chunkId,
-        chunkIndex: candidate.chunkIndex,
-        content: fallbackContent,
-        contextPrefix: "",
-        modality: candidate.modality,
-        tokens: fallbackTokens,
-        citation: primaryCitation,
-      });
-      remaining -= fallbackTokens;
+      continue;
     }
     const similarity =
       candidate.rerankScore ??
@@ -857,18 +1056,29 @@ export async function retrieveRepositoryContent(
         dependencies.reranker ??
         new BedrockRepositoryReranker(config.retrievalRerankModelId);
       const rerankWindow = fused.slice(0, candidateLimit);
-      const scores = await reranker.rerank(
-        query,
-        rerankWindow.map((candidate) => ({
-          text: [candidate.contextPrefix, candidate.content]
-            .filter(Boolean)
-            .join("\n"),
-        })),
-        rerankWindow.length
+      const rerankRemainder = fused.slice(candidateLimit);
+      const disclosureSafeWindow = await revalidateCandidatesForRerank(
+        rerankWindow,
+        principal
       );
-      if (scores.length > 0) {
-        fused = applyRerankScores(rerankWindow, scores);
-        reranked = true;
+      fused = [...disclosureSafeWindow, ...rerankRemainder];
+      if (disclosureSafeWindow.length > 1) {
+        const scores = await reranker.rerank(
+          query,
+          disclosureSafeWindow.map((candidate) => ({
+            text: [candidate.contextPrefix, candidate.content]
+              .filter(Boolean)
+              .join("\n"),
+          })),
+          disclosureSafeWindow.length
+        );
+        if (scores.length > 0) {
+          fused = [
+            ...applyRerankScores(disclosureSafeWindow, scores),
+            ...rerankRemainder,
+          ];
+          reranked = true;
+        }
       }
     } catch (error) {
       log.warn("Bedrock reranking unavailable; using reciprocal-rank fusion", {

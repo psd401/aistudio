@@ -49,6 +49,7 @@ export interface TokenUsage {
 export interface MessagePart {
   type: "text" | "image" | "tool-call" | "tool-result";
   text?: string;
+  metadata?: Record<string, unknown>;
   image?: string;
   imageUrl?: string;
   s3Key?: string;

@@ -148,7 +148,8 @@ export function createVectorSearchTool(options: RepositoryToolOptions): unknown 
   const log = createLogger({ module: 'repository-tools', tool: 'vectorSearch' });
 
   return tool({
-    description: `Search repository knowledge base using semantic vector similarity. Best for finding conceptually related content even if exact keywords don't match. Searches repositories: ${repositoryIds.join(', ')}`,
+    description:
+      "Search the authorized repository knowledge base using semantic vector similarity. Best for finding conceptually related content even if exact keywords do not match.",
     inputSchema: z.object({
       query: z.string().describe('The search query to find relevant content'),
       limit: z.number().min(1).max(100).optional().default(5).describe('Maximum number of results to return (1-100, default: 5)'),
@@ -227,7 +228,8 @@ export function createKeywordSearchTool(options: RepositoryToolOptions): unknown
   const log = createLogger({ module: 'repository-tools', tool: 'keywordSearch' });
 
   return tool({
-    description: `Search repository knowledge base using exact keyword matching. Best for finding specific terms, phrases, or technical names. Searches repositories: ${repositoryIds.join(', ')}`,
+    description:
+      "Search the authorized repository knowledge base using exact keyword matching. Best for finding specific terms, phrases, or technical names.",
     inputSchema: z.object({
       query: z.string().describe('The keyword or phrase to search for'),
       limit: z.number().min(1).max(100).optional().default(5).describe('Maximum number of results to return (1-100, default: 5)')
@@ -304,7 +306,8 @@ export function createHybridSearchTool(options: RepositoryToolOptions): unknown 
   const log = createLogger({ module: 'repository-tools', tool: 'hybridSearch' });
 
   return tool({
-    description: `Search repository knowledge base using combined semantic and keyword matching. Best for comprehensive search that balances conceptual similarity with exact matches. Searches repositories: ${repositoryIds.join(', ')}`,
+    description:
+      "Search the authorized repository knowledge base using combined semantic and keyword matching. Best for comprehensive search that balances conceptual similarity with exact matches.",
     inputSchema: z.object({
       query: z.string().describe('The search query'),
       limit: z.number().min(1).max(100).optional().default(5).describe('Maximum number of results to return (1-100, default: 5)'),

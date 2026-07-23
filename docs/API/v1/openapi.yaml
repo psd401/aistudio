@@ -798,6 +798,18 @@ paths:
         uses: a resource restricted to specific roles/Google groups returns 403 to
         a caller who matches no grant (the assistant owner and administrators
         always pass; a resource with no grants is unrestricted).
+
+        Runtime `file_upload` values may include up to 10 opaque canonical
+        temporary-attachment markers returned by the authenticated staging API.
+        Do not construct markers manually. Before an execution row, model call,
+        or async polling job is created, the server resolves every marker as the
+        executing user, rejects missing/foreign/expired sources, replaces
+        caller-carried names with authoritative item names, and adds the resolved
+        repositories to retrieval and repository tools for every prompt. Current
+        repository ACLs are rechecked at execution and retrieval time.
+
+        Required scope: `assistants:execute` (or the narrower
+        `assistant:{id}:execute`; administrators may hold `*`).
       security:
         - BearerAuth: []
         - SessionAuth: []
@@ -823,7 +835,15 @@ paths:
                 inputs:
                   type: object
                   additionalProperties: true
-                  description: Key-value pairs matching the assistant's input fields
+                  description: |
+                    Key-value pairs matching the assistant's input fields.
+                    Canonical file inputs contain opaque temporary-attachment
+                    markers returned by the staging API; marker names are not
+                    trusted as source provenance.
+              example:
+                inputs:
+                  question: Summarize the attached implementation plan
+                  plan: "[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:44:implementation-plan.pdf]]"
       responses:
         "200":
           description: SSE streaming response (when Accept is text/event-stream)
@@ -854,8 +874,27 @@ paths:
                     properties:
                       requestId:
                         type: string
+              example:
+                data:
+                  jobId: 123e4567-e89b-42d3-a456-426614174111
+                  status: pending
+                  pollUrl: /api/v1/jobs/123e4567-e89b-42d3-a456-426614174111
+                meta:
+                  requestId: req_abc123
         "400":
-          $ref: "#/components/responses/ValidationError"
+          description: |
+            Invalid inputs, more than 10 temporary sources, or a temporary
+            source that is missing, foreign, expired, or otherwise unavailable.
+            Unavailable source variants intentionally return the same message.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: VALIDATION_ERROR
+                  message: Temporary repository input is unavailable
+                requestId: req_abc123
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -868,7 +907,7 @@ paths:
       operationId: startConversation
       tags: [Assistants]
       summary: Start a conversation with an assistant
-      description: >-
+      description: |
         Creates a new conversation, executes the assistant, and returns the SSE
         stream. Beyond the assistant scope check, the caller must have
         per-resource access (Epic #1202 Phase 3) to BOTH the assistant and the
@@ -876,6 +915,20 @@ paths:
         roles/Google groups returns 403 to a caller who matches no grant (the
         assistant owner and administrators always pass; a resource with no
         grants is unrestricted).
+
+        Runtime canonical file markers follow the same owner-bound rules as
+        `/assistants/{id}/execute`. Every marker is resolved and sanitized before
+        the conversation or first message is created. The persisted user message
+        contains authoritative human-readable labels, never binding IDs,
+        repository IDs, item IDs, or caller-carried marker names. An invalid
+        marker therefore cannot leave an empty conversation.
+        Resolved runtime repositories are bound to the new conversation before
+        its first message write and retained as bounded server-owned metadata for
+        ACL-safe follow-up retrieval. A binding or first-write failure removes
+        the empty conversation while leaving the temporary source retryable.
+
+        Required scope: `assistants:execute` (or the narrower
+        `assistant:{id}:execute`; administrators may hold `*`).
       security:
         - BearerAuth: []
         - SessionAuth: []
@@ -895,9 +948,17 @@ paths:
                 inputs:
                   type: object
                   additionalProperties: true
+                  description: |
+                    Assistant input values. Canonical file inputs may contain
+                    opaque staging markers and are sanitized before persistence.
                 title:
                   type: string
                   maxLength: 500
+              example:
+                title: Implementation plan review
+                inputs:
+                  request: Identify the rollout risks
+                  plan: "[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:44:implementation-plan.pdf]]"
       responses:
         "200":
           description: SSE stream with X-Conversation-Id header
@@ -907,7 +968,19 @@ paths:
                 type: string
                 format: uuid
         "400":
-          $ref: "#/components/responses/ValidationError"
+          description: |
+            Invalid inputs, more than 10 temporary sources, or a temporary
+            source that is missing, foreign, expired, or otherwise unavailable.
+            No conversation or message is created for this response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: VALIDATION_ERROR
+                  message: Temporary repository input is unavailable
+                requestId: req_abc123
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -920,13 +993,21 @@ paths:
       operationId: sendMessage
       tags: [Assistants]
       summary: Send a follow-up message
-      description: >-
-        Sends a message in an existing conversation. Preserves assistant context.
-        Beyond the assistant scope check, the caller must have per-resource access
-        (Epic #1202 Phase 3) to BOTH the assistant and the model it uses: a
-        resource restricted to specific roles/Google groups returns 403 to a
-        caller who matches no grant (the assistant owner and administrators always
-        pass; a resource with no grants is unrestricted).
+      description: |
+        Sends a message in an existing conversation. The conversation's
+        server-owned assistant ID must match the assistant ID in the path.
+        Beyond the assistant scope check, the caller must have per-resource
+        access (Epic #1202 Phase 3) to BOTH the assistant and the model it uses:
+        a resource restricted to specific roles/Google groups returns 403 to a
+        caller who matches no grant (the assistant owner and administrators
+        always pass; a resource with no grants is unrestricted).
+
+        Before the body is parsed or a message is written, the server unions
+        every prompt-bound repository with the conversation's bounded runtime
+        repository IDs and rechecks the executing principal's current ACL. The
+        model receives bounded hybrid retrieval context and vector, keyword, and
+        hybrid repository tools. Only the caller's original message text is
+        persisted; retrieved source context is request-local.
       security:
         - BearerAuth: []
         - SessionAuth: []
@@ -964,14 +1045,21 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/NotFound"
+          description: Conversation not found or not bound to this assistant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /assistants/{id}/conversations/{cid}:
     get:
       operationId: getConversation
       tags: [Assistants]
       summary: Get conversation history
-      description: Returns conversation metadata and messages.
+      description: |
+        Returns conversation metadata and messages only when the owned
+        conversation's server-bound assistant ID matches the assistant ID in
+        the path. A mismatch is masked as not found.
       security:
         - BearerAuth: []
         - SessionAuth: []

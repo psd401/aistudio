@@ -422,6 +422,30 @@ export class EcsServiceConstruct extends Construct {
                 `arn:aws:s3:::${documentsBucketName}/*`,
               ],
             }),
+            // Permanent canonical cleanup is restricted to the unified content
+            // namespace. Keep legacy document permissions above unchanged while
+            // preventing version deletion outside repositories/*.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                's3:PutObjectTagging',
+                's3:DeleteObjectVersion',
+                's3:AbortMultipartUpload',
+              ],
+              resources: [
+                `arn:aws:s3:::${documentsBucketName}/repositories/*`,
+              ],
+            }),
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:ListBucketVersions'],
+              resources: [`arn:aws:s3:::${documentsBucketName}`],
+              conditions: {
+                StringLike: {
+                  's3:prefix': ['repositories/*'],
+                },
+              },
+            }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [

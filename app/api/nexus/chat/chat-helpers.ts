@@ -9,6 +9,14 @@ import { nexusConversations, nexusMessages } from '@/lib/db/schema';
 import { sanitizeTextForDatabase, decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer';
 import { safeJsonbStringify } from '@/lib/db/json-utils';
 import { createLogger, sanitizeForLogging } from '@/lib/logger';
+import { repositoryAttachmentLabels } from '@/lib/nexus/repository-attachment-messages';
+import {
+  buildTemporaryAttachmentMarker,
+  parseTemporaryAttachmentMarkers,
+  removeTemporaryAttachmentMarkers,
+  stripTemporaryAttachmentMarkers,
+  type TemporaryAttachmentReference,
+} from '@/lib/repositories/temporary-attachment-contract';
 
 const log = createLogger({ route: 'api.nexus.chat.helpers' });
 
@@ -121,10 +129,96 @@ export async function createConversation(params: {
 /**
  * Process a single part from message parts array
  */
+function canonicalRepositoryAttachmentsFromMetadata(
+  value: unknown
+): TemporaryAttachmentReference[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  const attachments = (value as Record<string, unknown>).repositoryAttachments;
+  if (!Array.isArray(attachments)) return [];
+  return attachments.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      return [];
+    }
+    const reference = candidate as Record<string, unknown>;
+    if (
+      typeof reference.bindingId !== 'string' ||
+      !Number.isSafeInteger(reference.itemId) ||
+      Number(reference.itemId) <= 0 ||
+      typeof reference.name !== 'string'
+    ) {
+      return [];
+    }
+    const parsed = parseTemporaryAttachmentMarkers(
+      buildTemporaryAttachmentMarker({
+        bindingId: reference.bindingId,
+        itemId: Number(reference.itemId),
+        name: reference.name,
+      })
+    );
+    return parsed;
+  });
+}
+
 function processMessagePart(
   part: { type: string; text?: string; image?: string; [key: string]: unknown }
 ): { content: string; serialized: unknown } | null {
   const typedPart = part as Record<string, unknown>;
+  const canonicalAttachments = canonicalRepositoryAttachmentsFromMetadata(
+    typedPart.metadata
+  );
+  if (canonicalAttachments.length > 0) {
+    const metadata = typedPart.metadata as Record<string, unknown>;
+    const text = sanitizeTextForDatabase(
+      typeof typedPart.text === 'string'
+        ? typedPart.text
+        : canonicalAttachments
+            .map((attachment) =>
+              `[Attached repository content: ${attachment.name}]`
+            )
+            .join(' ')
+    );
+    const displayText = sanitizeTextForDatabase(
+      typeof metadata.repositoryAttachmentDisplayText === 'string'
+        ? metadata.repositoryAttachmentDisplayText
+        : ''
+    );
+    return {
+      content: text,
+      serialized: {
+        type: 'text',
+        text,
+        metadata: {
+          repositoryAttachments: canonicalAttachments,
+          repositoryAttachmentDisplayText: displayText,
+        },
+      },
+    };
+  }
+  const repositoryAttachments = repositoryAttachmentLabels(typedPart);
+  if (repositoryAttachments.length > 0) {
+    const rawText = typeof typedPart.text === 'string' ? typedPart.text : '';
+    const text = sanitizeTextForDatabase(
+      rawText
+        ? stripTemporaryAttachmentMarkers(rawText)
+        : repositoryAttachments.map((attachment) => attachment.text).join(' ')
+    );
+    const displayText = sanitizeTextForDatabase(
+      rawText ? removeTemporaryAttachmentMarkers(rawText) : ''
+    );
+    return {
+      content: text,
+      serialized: {
+        type: 'text',
+        text,
+        metadata: {
+          repositoryAttachments: repositoryAttachments.map(
+            ({ reference }) => reference
+          ),
+          repositoryAttachmentDisplayText: displayText,
+        },
+      },
+    };
+  }
   if (part.type === 'text' && typeof typedPart.text === 'string') {
     const sanitizedText = sanitizeTextForDatabase(typedPart.text);
     return { content: sanitizedText, serialized: { type: 'text', text: sanitizedText } };
@@ -230,11 +324,159 @@ export async function saveUserMessage(params: {
 /**
  * Convert messages to parts format for AI SDK v5
  */
+const NEXUS_ATTACHMENT_SEARCH_TOOL = 'searchNexusAttachments';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sanitizeSourceLocator(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+
+  const sanitized: Record<string, unknown> = {};
+  const numericKeys = [
+    'page',
+    'pageEnd',
+    'paragraph',
+    'paragraphEnd',
+    'slide',
+    'timeStartMs',
+    'timeEndMs',
+  ] as const;
+  for (const key of numericKeys) {
+    if (typeof value[key] === 'number' && Number.isFinite(value[key])) {
+      sanitized[key] = value[key];
+    }
+  }
+  if (typeof value.sheet === 'string') sanitized.sheet = value.sheet;
+  if (typeof value.cellRange === 'string') sanitized.cellRange = value.cellRange;
+  if (
+    Array.isArray(value.headingPath) &&
+    value.headingPath.every((entry) => typeof entry === 'string')
+  ) {
+    sanitized.headingPath = value.headingPath;
+  }
+  if (Array.isArray(value.regions)) {
+    sanitized.regions = value.regions.flatMap((candidate) => {
+      if (!isRecord(candidate)) return [];
+      const { x, y, width, height } = candidate;
+      if (
+        typeof x !== 'number' ||
+        !Number.isFinite(x) ||
+        typeof y !== 'number' ||
+        !Number.isFinite(y) ||
+        typeof width !== 'number' ||
+        !Number.isFinite(width) ||
+        typeof height !== 'number' ||
+        !Number.isFinite(height)
+      ) {
+        return [];
+      }
+      return [{
+        ...(typeof candidate.page === 'number' && Number.isFinite(candidate.page)
+          ? { page: candidate.page }
+          : {}),
+        x,
+        y,
+        width,
+        height,
+      }];
+    });
+  }
+  return sanitized;
+}
+
+function sanitizeAttachmentCitation(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+
+  const citation: Record<string, unknown> = {};
+  if (typeof value.itemVersionId === 'string') {
+    citation.itemVersionId = value.itemVersionId;
+  }
+  if (typeof value.chunkId === 'number' && Number.isSafeInteger(value.chunkId)) {
+    citation.chunkId = value.chunkId;
+  }
+  if (typeof value.label === 'string') citation.label = value.label;
+  if (isRecord(value.sourceLocator)) {
+    citation.sourceLocator = sanitizeSourceLocator(value.sourceLocator);
+  }
+  return citation;
+}
+
+/**
+ * The attachment search result is needed in-memory while the model is
+ * generating, but repository chunk bodies must not become durable conversation
+ * history. Keep only the fields required to render/replay a paired tool result
+ * and its exact citations.
+ */
+function sanitizeAttachmentSearchResult(result: unknown): Record<string, unknown> {
+  if (!isRecord(result)) {
+    return {
+      success: false,
+      error: 'Attachment search result unavailable for replay',
+      results: [],
+    };
+  }
+
+  const sanitizedResults = Array.isArray(result.results)
+    ? result.results.flatMap((candidate) => {
+        if (!isRecord(candidate)) return [];
+        const citations = Array.isArray(candidate.citations)
+          ? candidate.citations
+              .map(sanitizeAttachmentCitation)
+              .filter((citation): citation is Record<string, unknown> => citation !== null)
+          : [];
+        return [{
+          ...(typeof candidate.source === 'string' ? { source: candidate.source } : {}),
+          ...(typeof candidate.score === 'number' && Number.isFinite(candidate.score)
+            ? { score: candidate.score }
+            : {}),
+          citations,
+        }];
+      })
+    : [];
+
+  return {
+    success: result.success === true,
+    ...(typeof result.query === 'string' ? { query: result.query } : {}),
+    ...(result.success !== true ? { error: 'Attachment search failed' } : {}),
+    results: sanitizedResults,
+  };
+}
+
+function isNexusAttachmentSearchPart(part: Record<string, unknown>): boolean {
+  return (
+    part.toolName === NEXUS_ATTACHMENT_SEARCH_TOOL ||
+    part.type === `tool-${NEXUS_ATTACHMENT_SEARCH_TOOL}`
+  );
+}
+
+function sanitizeMessagePartForReplay(
+  part: { type: string; [key: string]: unknown }
+): { type: string; [key: string]: unknown } {
+  if (!isNexusAttachmentSearchPart(part)) return part;
+
+  const sanitized = { ...part };
+  // These are the two combined tool-part representations used by persisted
+  // Nexus messages (result) and AI SDK UI messages (output).
+  if ('result' in sanitized && sanitized.result != null) {
+    sanitized.result = sanitizeAttachmentSearchResult(sanitized.result);
+  }
+  if ('output' in sanitized && sanitized.output != null) {
+    sanitized.output = sanitizeAttachmentSearchResult(sanitized.output);
+  }
+  return sanitized;
+}
+
 export function convertMessagesToPartsFormat(messages: MessageWithContent[]): UIMessage[] {
   return messages.map(message => {
-    // If message already has parts, use as-is
+    // Sanitize already-normalized UI parts too: reload sends static
+    // tool-searchNexusAttachments output parts back on the next turn.
     if (message.parts) {
-      return message as unknown as UIMessage;
+      return {
+        ...message,
+        parts: message.parts.map(sanitizeMessagePartForReplay),
+      } as unknown as UIMessage;
     }
 
     // Convert legacy content format to parts format
@@ -248,7 +490,9 @@ export function convertMessagesToPartsFormat(messages: MessageWithContent[]): UI
     if (Array.isArray(message.content)) {
       return {
         ...message,
-        parts: message.content
+        parts: message.content.map((part) =>
+          sanitizeMessagePartForReplay(part as { type: string; [key: string]: unknown })
+        )
       } as unknown as UIMessage;
     }
 
@@ -318,14 +562,18 @@ function buildAssistantParts(
       // null when extraction missed the result (e.g. stream error before onFinish).
       // UI tool components handle null with loading/fallback states — verified in
       // web-search-ui.tsx, code-interpreter-ui.tsx, chart-visualization-ui.tsx.
-      const hasResult = tc.result != null;
+      const persistedResult =
+        tc.toolName === NEXUS_ATTACHMENT_SEARCH_TOOL && tc.result != null
+          ? sanitizeAttachmentSearchResult(tc.result)
+          : tc.result ?? null;
+      const hasResult = persistedResult != null;
       parts.push({
         type: 'tool-call',
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
         args: decodedArgs,
         argsText: JSON.stringify(decodedArgs),
-        result: tc.result ?? null,
+        result: persistedResult,
         isError: false,
         // AI SDK v6 UIMessage schema fields required by convertToModelMessages to emit
         // paired tool_result blocks when this conversation is reloaded and replayed.

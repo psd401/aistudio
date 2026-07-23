@@ -27,11 +27,18 @@ import {
   executeAssistantForJobCompletion,
   validateExecutionInputs,
   isContentSafetyBlocked,
+  isAssistantRuntimeRepositoryInputError,
+  prepareAssistantExecutionInputs,
+  type PreparedAssistantExecutionInputs,
 } from "@/lib/api/assistant-execution-service"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import { jobManagementService } from "@/lib/streaming/job-management-service"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { createLogger, startTimer } from "@/lib/logger"
+import {
+  preflightAssistantRepositoryAccess,
+  REPOSITORY_ACCESS_CHANGED_MESSAGE,
+} from "@/lib/assistant-architect/repository-access-preflight"
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900
@@ -43,6 +50,17 @@ export const maxDuration = 900
 const executeBodySchema = z.object({
   inputs: z.record(z.string(), z.unknown()).default({}),
 })
+
+function isForbiddenExecutionError(
+  error: unknown
+): error is { statusCode: 403; userMessage?: string } {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "statusCode" in error &&
+    error.statusCode === 403
+  )
+}
 
 const EXECUTE_TOOL_IDENTIFIER = "assistants.execute"
 
@@ -143,6 +161,18 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     log,
   })
   if (grantsError) return grantsError
+  const repositoryAccess = await preflightAssistantRepositoryAccess(
+    prompts,
+    auth.cognitoSub
+  )
+  if (!repositoryAccess.isAllowed) {
+    return createErrorResponse(
+      requestId,
+      403,
+      "FORBIDDEN",
+      REPOSITORY_ACCESS_CHANGED_MESSAGE
+    )
+  }
 
   // 4. Parse and validate request body
   const result = await parseRequestBody(request, executeBodySchema, requestId)
@@ -167,18 +197,33 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   })
 
   try {
+    // Resolve owner-bound temporary repositories before creating an async job
+    // (or any execution row). Reuse this exact preparation in the background
+    // run so marker validation and authoritative labels cannot race or diverge.
+    const preparedInputs = await prepareAssistantExecutionInputs(
+      inputs,
+      auth.userId
+    )
+
     if (wantsJson) {
       // Async mode: return 202 with job ID, execute in background
-      return await handleAsyncExecution(assistantId, inputs, auth, requestId, log)
+      return await handleAsyncExecution(
+        assistantId,
+        preparedInputs,
+        auth,
+        requestId,
+        log
+      )
     }
 
     // Streaming mode: return SSE response
     const execResult = await executeAssistant({
       assistantId,
-      inputs,
+      inputs: preparedInputs.inputs,
       userId: auth.userId,
       cognitoSub: auth.cognitoSub,
       requestId,
+      preparedInputs,
     })
 
     // Cast to NextResponse — streaming Response is compatible at runtime
@@ -187,11 +232,27 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       headers: Object.fromEntries(execResult.streamResponse.headers.entries()),
     })
   } catch (error) {
+    if (isAssistantRuntimeRepositoryInputError(error)) {
+      return createErrorResponse(
+        requestId,
+        400,
+        "VALIDATION_ERROR",
+        error.message
+      )
+    }
     if (isContentSafetyBlocked(error)) {
       return createErrorResponse(requestId, 400, "CONTENT_BLOCKED", error.message, {
         categories: error.blockedCategories,
         source: error.source,
       })
+    }
+    if (isForbiddenExecutionError(error)) {
+      return createErrorResponse(
+        requestId,
+        403,
+        "FORBIDDEN",
+        error.userMessage || "You do not have access to repository content used by this assistant"
+      )
     }
 
     log.error("Assistant execution failed", {
@@ -208,7 +269,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
 
 async function handleAsyncExecution(
   assistantId: number,
-  inputs: Record<string, unknown>,
+  preparedInputs: PreparedAssistantExecutionInputs,
   auth: { userId: number; cognitoSub: string },
   requestId: string,
   log: ReturnType<typeof createLogger>
@@ -241,10 +302,11 @@ async function handleAsyncExecution(
     try {
       const result = await executeAssistantForJobCompletion({
         assistantId,
-        inputs,
+        inputs: preparedInputs.inputs,
         userId: auth.userId,
         cognitoSub: auth.cognitoSub,
         requestId,
+        preparedInputs,
       })
 
       await jobManagementService.completeJob(jobId, {

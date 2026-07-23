@@ -8,7 +8,6 @@ import {
   getRepositoryItemById,
   getRepositoryItems,
   getRepositoryItemChunks,
-  deleteRepositoryItem,
   updateRepositoryItemStatus
 } from "@/lib/db/drizzle"
 import {
@@ -49,6 +48,10 @@ import {
   registerCanonicalUploadIfEnabled,
   retryCanonicalRepositoryItem,
 } from "@/lib/repositories/content-platform"
+import {
+  beginRepositoryItemDeletion,
+  finalizeRepositoryItemDeletion
+} from "@/lib/repositories/content-platform/deletion-service"
 
 // Runtime-validated processing-status union (REV-COR-068): actions are network
 // endpoints, so the TS parameter type is not enforced on the wire.
@@ -1051,22 +1054,34 @@ export async function removeRepositoryItem(
       throw ErrorFactories.authzOwnerRequired("remove items from repository")
     }
 
+    // Fence completion/publication and cancel queued processing before taking
+    // the storage snapshot. A failed cleanup leaves this item in `deleting`;
+    // repeating the same action is the documented idempotent retry path.
+    const deletionItem = await beginRepositoryItemDeletion({
+      repositoryId: item.repositoryId,
+      itemId
+    })
+
     // Clean every item type before cascading its version rows. The cleanup
     // service distinguishes stored S3 sources from inline text/URLs and always
     // removes canonical version artifacts. If cleanup fails, preserve the DB
     // rows so the operation can be retried without losing the object manifest.
     log.info("Deleting repository item objects from S3", {
       itemId,
-      s3Key: item.source
+      itemType: item.type,
+      repositoryId: item.repositoryId
     })
-    const cleanup = await deleteRepositoryItemStorage(item)
+    const cleanup = await deleteRepositoryItemStorage({
+      ...item,
+      ...deletionItem
+    })
     log.info("Repository item objects deleted from S3 successfully", cleanup)
 
     // Delete from database via Drizzle (cascades to chunks)
     log.info("Deleting item from database", { itemId })
-    const deletedCount = await deleteRepositoryItem(itemId)
+    const deleted = await finalizeRepositoryItemDeletion(itemId)
 
-    if (deletedCount === 0) {
+    if (!deleted) {
       log.warn("Item not found for deletion", { itemId })
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
@@ -1124,11 +1139,15 @@ export async function listRepositoryItems(
     // could list a private repo they don't own (REV-COR-061).
     await assertRepositoryReadAccess(repositoryId, session.sub)
 
-    // Fetch repository items via Drizzle
+    // Fetch repository items via Drizzle. Processing failures may contain
+    // storage keys, provider responses, or other operational details, so only
+    // repository managers may receive the raw error or retry affordance.
     log.debug("Fetching repository items from database", { repositoryId })
-    const [itemsRaw, canonicalStatuses] = await Promise.all([
+    const currentUserId = await getUserIdFromSession(session.sub)
+    const [itemsRaw, canonicalStatuses, canManageRepository] = await Promise.all([
       getRepositoryItems(repositoryId),
       getCanonicalRepositoryItemStatuses(repositoryId),
+      canModifyRepository(repositoryId, currentUserId),
     ])
 
     // Convert to action type
@@ -1143,11 +1162,14 @@ export async function listRepositoryItems(
         metadata: item.metadata ?? {},
         processingStatus:
           canonical?.processingStatus ?? item.processingStatus ?? 'pending',
-        processingError: canonical?.processingError ?? item.processingError,
-        canRetry:
-          canonical?.canRetry ??
-          (item.processingStatus === "failed" &&
-            item.processingError?.startsWith("Canonical content registration failed") === true),
+        processingError: canManageRepository
+          ? canonical?.processingError ?? item.processingError
+          : null,
+        canRetry: canManageRepository
+          ? canonical?.canRetry ??
+            (item.processingStatus === "failed" &&
+              item.processingError?.startsWith("Canonical content registration failed") === true)
+          : false,
         createdAt: item.createdAt ?? new Date(),
         updatedAt: item.updatedAt ?? new Date()
       }

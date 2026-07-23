@@ -9,6 +9,10 @@ import {
 import { createLogger } from "@/lib/client-logger";
 import { generateUUID } from "@/lib/utils/uuid";
 import { UploadClassifiedError, toValidErrorCode, type UploadErrorCode } from "@/lib/errors/upload-errors";
+import {
+  uploadTemporaryAttachment,
+  waitForTemporaryAttachment,
+} from "@/lib/repositories/temporary-attachment-client";
 
 const log = createLogger({ moduleName: 'enhanced-attachment-adapters' });
 
@@ -21,6 +25,20 @@ export interface AttachmentProcessingCallbacks {
    * The error is the original (unredacted) error — do NOT pass to LLM context.
    */
   onError?: (attachmentId: string, error: UploadClassifiedError | Error) => void;
+}
+
+export interface NexusAttachmentAdapterOptions {
+  /**
+   * Enables the unified repository-backed attachment path. The server still
+   * owns the rollout decision and may return legacy mode when cutover flags are
+   * disabled.
+   */
+  repositoryBacked?: boolean;
+  /**
+   * Read lazily so a null -> UUID conversation transition never recreates the
+   * adapter or the assistant-ui runtime.
+   */
+  getConversationId?: () => string | null | undefined;
 }
 
 /**
@@ -98,9 +116,14 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
   private processedCache = new Map<string, CompleteAttachment>();
   private processingPromises = new Map<string, Promise<CompleteAttachment>>();
   private callbacks?: AttachmentProcessingCallbacks;
+  private readonly options: NexusAttachmentAdapterOptions;
 
-  constructor(callbacks?: AttachmentProcessingCallbacks) {
+  constructor(
+    callbacks?: AttachmentProcessingCallbacks,
+    options: NexusAttachmentAdapterOptions = {}
+  ) {
     this.callbacks = callbacks;
+    this.options = options;
   }
 
   async add({ file }: { file: File }): Promise<PendingAttachment> {
@@ -196,11 +219,35 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
         fileSize: attachment.file.size
       });
 
-      // Use server-side upload to bypass school network restrictions on S3 presigned URLs
-      // See: https://github.com/psd401/aistudio/issues/632
-      const uploadResult = await this.uploadViaServer(attachment);
+      if (this.options.repositoryBacked) {
+        const repositoryUpload = await uploadTemporaryAttachment({
+          file: attachment.file,
+          // One binding per source keeps promotion precise and prevents a
+          // stable adapter from accidentally reusing a promoted repository or
+          // a repository already bound to another conversation.
+          draftKey: generateUUID(),
+          purpose: "nexus",
+          conversationId: this.options.getConversationId?.() ?? undefined,
+        });
+        if (repositoryUpload.mode === "canonical") {
+          const marker = await waitForTemporaryAttachment(repositoryUpload);
+          return {
+            id: attachment.id,
+            type: "document",
+            name: attachment.name,
+            contentType: attachment.contentType,
+            file: attachment.file,
+            // Only this opaque reference crosses the chat boundary. Source bytes
+            // and extracted text remain in the repository service.
+            content: [{ type: "text" as const, text: marker }],
+            status: { type: "complete" },
+          };
+        }
+      }
 
-      // Poll for processing results
+      // Flag-off compatibility path. The product calls the unified endpoint
+      // first; legacy processing remains available solely as a rollback.
+      const uploadResult = await this.uploadViaServer(attachment);
       const processedContent = await this.pollForResults(uploadResult.jobId, attachment.name);
       
       // Step 5: Return in assistant-ui format
@@ -585,9 +632,14 @@ export class VisionImageAdapter implements AttachmentAdapter {
   accept = "image/jpeg,image/png,image/webp,image/gif";
   
   private callbacks?: AttachmentProcessingCallbacks;
+  private readonly options: NexusAttachmentAdapterOptions;
 
-  constructor(callbacks?: AttachmentProcessingCallbacks) {
+  constructor(
+    callbacks?: AttachmentProcessingCallbacks,
+    options: NexusAttachmentAdapterOptions = {}
+  ) {
     this.callbacks = callbacks;
+    this.options = options;
   }
 
   async add({ file }: { file: File }): Promise<PendingAttachment> {
@@ -629,6 +681,19 @@ export class VisionImageAdapter implements AttachmentAdapter {
   async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
     // Convert image to base64 data URL
     const base64 = await this.fileToBase64DataURL(attachment.file);
+    let repositoryMarker: string | null = null;
+
+    if (this.options.repositoryBacked) {
+      const repositoryUpload = await uploadTemporaryAttachment({
+        file: attachment.file,
+        draftKey: generateUUID(),
+        purpose: "nexus",
+        conversationId: this.options.getConversationId?.() ?? undefined,
+      });
+      if (repositoryUpload.mode === "canonical") {
+        repositoryMarker = await waitForTemporaryAttachment(repositoryUpload);
+      }
+    }
 
     log.info('VisionImageAdapter.send() called', {
       attachmentId: attachment.id,
@@ -650,6 +715,9 @@ export class VisionImageAdapter implements AttachmentAdapter {
           type: "image",
           image: base64, // data:image/jpeg;base64,... format
         },
+        ...(repositoryMarker
+          ? [{ type: "text" as const, text: repositoryMarker }]
+          : []),
       ],
       status: { type: "complete" },
     };
@@ -709,11 +777,14 @@ export class VisionImageAdapter implements AttachmentAdapter {
  * - Hybrid document adapter (client/server processing)
  * - Simple text adapter
  */
-export function createEnhancedNexusAttachmentAdapter(callbacks?: AttachmentProcessingCallbacks) {
+export function createEnhancedNexusAttachmentAdapter(
+  callbacks?: AttachmentProcessingCallbacks,
+  options: NexusAttachmentAdapterOptions = {}
+) {
   return new CompositeAttachmentAdapter([
-    new VisionImageAdapter(callbacks),           // For vision-capable models
+    new VisionImageAdapter(callbacks, options),  // Canonical shadow + vision pixels
     new SimpleImageAttachmentAdapter(), // For display-only images (RESTORED)
-    new HybridDocumentAdapter(callbacks),        // Smart document processing (client/server)
+    new HybridDocumentAdapter(callbacks, options), // Smart document processing (client/server)
     new SimpleTextAttachmentAdapter(),  // Text files
   ]);
 }

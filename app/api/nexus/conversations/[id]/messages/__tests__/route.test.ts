@@ -133,4 +133,37 @@ describe('GET conversations/[id]/messages presign gate (REV-SEC-143)', () => {
     expect(res.status).toBe(404)
     expect(mockGetMessagesByConversation).not.toHaveBeenCalled()
   })
+
+  it('reconstructs owner-scoped repository attachment markers on reload', async () => {
+    const bindingId = '123e4567-e89b-42d3-a456-426614174000'
+    mockGetMessagesByConversation.mockResolvedValue([{
+      id: 'm2',
+      role: 'user',
+      content: 'Use this file. [Attached repository content: policy.pdf]',
+      parts: [{
+        type: 'text',
+        text: 'Use this file. [Attached repository content: policy.pdf]',
+        metadata: {
+          repositoryAttachments: [{
+            bindingId,
+            itemId: 42,
+            name: 'policy.pdf',
+          }],
+          repositoryAttachmentDisplayText: 'Use this file.',
+        },
+      }],
+      createdAt: new Date(),
+      metadata: null,
+    }])
+
+    const res = await GET(req(), ctx())
+    const body = await res.json()
+    const serialized = JSON.stringify(body)
+
+    expect(serialized).toContain('Use this file.')
+    expect(serialized).toContain(
+      `[[repository-attachment:v1:${bindingId}:42:policy.pdf]]`
+    )
+    expect(serialized).not.toContain('[Attached repository content:')
+  })
 })

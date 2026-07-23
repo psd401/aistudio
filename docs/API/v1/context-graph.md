@@ -681,6 +681,113 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 ---
 
+## Assistant execution runtime files
+
+`POST /api/v1/assistants/{id}/execute` and
+`POST /api/v1/assistants/{id}/conversations` accept the same structured
+`inputs` object used by Assistant Architect. A `file_upload` value can contain
+an opaque canonical temporary-attachment marker returned by the authenticated
+staging API:
+
+```json
+{
+  "inputs": {
+    "question": "Summarize the rollout risks",
+    "plan": "[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:44:implementation-plan.pdf]]"
+  }
+}
+```
+
+Clients must treat this marker as opaque and must not construct or edit it.
+At most 10 distinct temporary sources may appear in one execution input object.
+
+Before creating an execution row, async polling job, conversation, or first
+conversation message, the server:
+
+1. resolves every binding/item pair as the executing `userId`;
+2. accepts only an active, unexpired durable or ephemeral repository and active
+   item owned by that user;
+3. replaces the caller-carried filename with the authoritative repository item
+   name and removes binding/item identifiers from persisted and provider-facing
+   input values;
+4. unions every resolved repository with each prompt's configured repositories
+   for both eager retrieval and vector/keyword/hybrid repository tools; and
+5. reapplies the executing principal's current repository ACL before execution,
+   inside retrieval, and inside each repository tool.
+
+Assistant ownership never lends repository access. The synchronous REST path,
+the `Accept: application/json` async-job path, and MCP
+`execute_assistant` all use the same execution service and authorization rules.
+The conversation endpoint reuses the exact server-prepared input for execution,
+so it does not persist raw marker data or resolve the source twice. It binds
+temporary references to the new owned conversation before the first message
+write and records only the bounded resolved repository IDs in server-owned
+conversation metadata. If binding or that first write fails, the empty
+conversation is removed and the attachment remains retryable.
+
+`POST /api/v1/assistants/{id}/conversations/{cid}/messages` and the matching
+history route require the conversation's server-owned assistant ID to match
+`{id}`; a mismatched path returns the same `404` as a missing conversation.
+Before parsing or persisting a follow-up, the server unions all prompt-bound
+repositories with the conversation's runtime repositories and rechecks the
+executing principal's current ACL. The model receives tokenizer-bounded hybrid
+retrieval context and repository tools; durable history retains only the
+caller's original message text, not injected source content.
+
+**Authentication and scopes:** Bearer API key or authenticated session.
+Requires `assistants:execute`, `assistants:*`,
+`assistant:{id}:execute`, or `*`, plus per-resource access to the assistant and
+every model/repository used by the run.
+
+**Streaming request:**
+
+```bash
+curl -N -X POST \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"inputs":{"question":"Summarize the rollout risks","plan":"[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:44:implementation-plan.pdf]]"}}' \
+  "https://your-domain/api/v1/assistants/17/execute"
+```
+
+**Async response `202`:**
+
+```json
+{
+  "data": {
+    "jobId": "123e4567-e89b-42d3-a456-426614174111",
+    "status": "pending",
+    "pollUrl": "/api/v1/jobs/123e4567-e89b-42d3-a456-426614174111"
+  },
+  "meta": {
+    "requestId": "req_abc123"
+  }
+}
+```
+
+**Conversation response `200`:** SSE response with
+`X-Conversation-Id: <uuid>`. The first persisted user message contains a safe
+label such as `[Attached repository content: implementation-plan.pdf]`, never
+the opaque marker.
+
+**Response `400`** — Input shape/size failure, more than 10 temporary sources,
+or a missing, foreign, expired, or otherwise unavailable temporary source.
+Every unavailable-source variant returns the same
+`VALIDATION_ERROR: Temporary repository input is unavailable`; the conversation
+and async job are not created.
+
+**Response `401`** — Missing or invalid authentication.
+
+**Response `403`** — Missing assistant execution scope or current
+assistant/model/repository access.
+
+**Response `404`** — Assistant not found, assistant execution is disabled, or a
+conversation does not belong to the assistant ID in the path.
+
+**Response `500`** — Provider, persistence, or other internal execution failure.
+
+---
+
 ## Voice API (Issue #872, #877)
 
 ### GET `/api/nexus/voice/availability`
@@ -1448,4 +1555,3 @@ Create / get responses additionally include a `version` object (the current
 | `grants` | `{ kind, value }[]` | Group widening; only meaningful when `level` is `group` |
 | `grants[].kind` | `role` \| `building` \| `department` \| `grade` \| `user` \| `group` | Dimension to widen along (`group` = synced Google group email) |
 | `grants[].value` | string | Matching identifier for that dimension |
-

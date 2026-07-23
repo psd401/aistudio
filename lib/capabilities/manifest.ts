@@ -79,7 +79,7 @@ export const CAPABILITY_MANIFEST: readonly CapabilityManifestEntry[] = [
     identifier: "knowledge-repositories",
     name: "Knowledge Repositories",
     description: "Manage knowledge bases and document repositories for AI assistants.",
-    defaultRoles: ["administrator"],
+    defaultRoles: ["administrator", "staff"],
   },
   {
     identifier: "decision-capture",

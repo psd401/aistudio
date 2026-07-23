@@ -46,6 +46,10 @@ const ConnectorToolsSchema = z.record(z.string(), z.object({
 }))
 
 const ModelErrorSchema = z.object({ error: z.string().max(300) })
+const UserToolsResponseSchema = z.object({
+  isSuccess: z.literal(true),
+  data: z.array(z.string()),
+})
 
 // Loading spinner component for Suspense fallback
 function NexusLoadingSpinner() {
@@ -393,6 +397,7 @@ interface NexusRuntimeWrapperProps {
   onModelChange: (model: SelectAiModel) => void
   onToolsChange: (tools: string[]) => void
   onConnectorsChange: (connectors: string[]) => void
+  canPromoteRepositoryAttachments: boolean
 }
 
 function NexusRuntimeWrapper({
@@ -415,6 +420,7 @@ function NexusRuntimeWrapper({
   onModelChange,
   onToolsChange,
   onConnectorsChange,
+  canPromoteRepositoryAttachments,
 }: NexusRuntimeWrapperProps) {
   const { addFailedServerIds, failedServerIds, registerConnectorTools, removeFailedServerId, reset: resetConnectorTools } = useConnectorTools()
 
@@ -527,6 +533,7 @@ function NexusRuntimeWrapper({
           onModelFamilyChange={onModelFamilyChange}
           toolFallback={ConnectorToolFallback}
           composerExtraActions={composerExtraActions}
+          canPromoteRepositoryAttachments={canPromoteRepositoryAttachments}
         />
       </div>
 
@@ -546,10 +553,31 @@ const WorkspacePanel = dynamic(
   { ssr: false }
 )
 
+interface ConversationIdAccessor {
+  get: () => string | null
+  set: (value: string | null) => void
+}
+
+function createConversationIdAccessor(
+  initialValue: string | null
+): ConversationIdAccessor {
+  let value = initialValue
+  return {
+    get: () => value,
+    set: (nextValue) => {
+      value = nextValue
+    },
+  }
+}
+
 function NexusPageContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { data: session, status: sessionStatus } = useSession()
+  const [hasRepositoryManagerCapability, setHasRepositoryManagerCapability] =
+    useState(false)
+  const canPromoteRepositoryAttachments =
+    sessionStatus === 'authenticated' && hasRepositoryManagerCapability
   
   // Get conversation ID from URL parameter with validation
   const urlConversationId = searchParams.get('id')
@@ -727,6 +755,12 @@ function NexusPageContent() {
 
   // Conversation continuity state - initialize from validated URL parameter
   const [conversationId, setConversationId] = useState<string | null>(validatedConversationId)
+  // The attachment adapter must remain stable while the first request assigns a
+  // conversation UUID. A closure-backed accessor updates synchronously without
+  // putting the changing ID in adapter memo dependencies (Nexus invariant).
+  const [attachmentConversationId] = useState(() =>
+    createConversationIdAccessor(validatedConversationId)
+  )
 
   // Stable conversation ID for ConversationInitializer - only set on initial load from URL
   // This prevents remounting when ID is assigned during runtime
@@ -744,6 +778,7 @@ function NexusPageContent() {
     setEnabledTools([]);
     setEnabledConnectors([]);
     // Clear conversation ID and fallback state when switching models
+    attachmentConversationId.set(null);
     setConversationId(null);
     setConversationModelId(null);
     // Navigate to a clean /nexus URL on model change. router.replace() performs
@@ -762,7 +797,7 @@ function NexusPageContent() {
         ? `/nexus?workspace=${encodeURIComponent(workspace)}`
         : '/nexus';
     }
-  }, [originalSetSelectedModel, selectedModel])
+  }, [attachmentConversationId, originalSetSelectedModel, selectedModel])
 
   // Store the conversation's model ID when received — availability check is derived via useMemo above
   const handleModelUsed = useCallback((modelId: string | null) => {
@@ -825,6 +860,7 @@ function NexusPageContent() {
 
   // Conversation ID callback for maintaining conversation continuity
   const handleConversationIdChange = useCallback((newConversationId: string) => {
+    attachmentConversationId.set(newConversationId)
     setConversationId(newConversationId)
     // Clear fallback state — it's only relevant to the previously loaded conversation
     setConversationModelId(null)
@@ -843,7 +879,7 @@ function NexusPageContent() {
     router.push(`/nexus?${keep.toString()}`, { scroll: false })
 
     log.debug('Conversation ID updated', { newId: newConversationId })
-  }, [router])
+  }, [attachmentConversationId, router])
   
   // Handle invalid conversation ID in URL - redirect to clean state
   useEffect(() => {
@@ -866,14 +902,53 @@ function NexusPageContent() {
     }
   }, [session, sessionStatus, router])
 
+  useEffect(() => {
+    if (sessionStatus !== 'authenticated') return
+
+    let cancelled = false
+    void fetch('/api/auth/user-tools')
+      .then(async (response) => {
+        if (!response.ok) return null
+        const parsed = UserToolsResponseSchema.safeParse(
+          await response.json() as unknown
+        )
+        return parsed.success ? parsed.data.data : null
+      })
+      .then((capabilities) => {
+        if (!cancelled) {
+          setHasRepositoryManagerCapability(
+            capabilities?.includes('knowledge-repositories') ?? false
+          )
+        }
+      })
+      .catch((error: unknown) => {
+        log.warn('Failed to load repository promotion capability', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+        if (!cancelled) setHasRepositoryManagerCapability(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [sessionStatus])
+
   // Create attachment adapter with processing callbacks
   const attachmentAdapter = useMemo(() => {
     return createEnhancedNexusAttachmentAdapter({
       onProcessingStart: handleAttachmentProcessingStart,
       onProcessingComplete: handleAttachmentProcessingComplete,
       onError: handleAttachmentError,
+    }, {
+      repositoryBacked: true,
+      getConversationId: attachmentConversationId.get,
     })
-  }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete, handleAttachmentError])
+  }, [
+    attachmentConversationId,
+    handleAttachmentProcessingStart,
+    handleAttachmentProcessingComplete,
+    handleAttachmentError,
+  ])
 
   // Voice mode — check availability (adapter created inside NexusRuntimeWrapper via useVoiceSession)
   const voiceAvailability = useVoiceAvailability()
@@ -943,6 +1018,7 @@ function NexusPageContent() {
                           onModelChange={setSelectedModel}
                           onToolsChange={onToolsChange}
                           onConnectorsChange={onConnectorsChange}
+                          canPromoteRepositoryAttachments={canPromoteRepositoryAttachments}
                         />
                       )}
                     </ConversationInitializer>

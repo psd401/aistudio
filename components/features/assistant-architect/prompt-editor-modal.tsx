@@ -30,7 +30,7 @@ import {
 import { ModelSelectorFormAdapter } from "@/components/features/model-selector/model-selector-form-adapter"
 import { ToolSelectionSection } from "@/components/features/assistant-architect/tool-selection-section"
 import { RepositoryBrowser } from "@/components/features/assistant-architect/repository-browser"
-import DocumentUploadButton from "@/components/ui/document-upload-button"
+import { RepositorySourcePicker } from "@/components/features/repositories/repository-source-picker"
 import { toast } from "sonner"
 import dynamic from "next/dynamic"
 import {
@@ -205,6 +205,7 @@ function KnowledgeSection({
   contextTokens: number
 }) {
   const [isRepositoryBrowserOpen, setIsRepositoryBrowserOpen] = useState(false)
+  const [isRepositorySourcePickerOpen, setIsRepositorySourcePickerOpen] = useState(false)
 
   const handleOpenRepositoryBrowser = useCallback(() => {
     setIsRepositoryBrowserOpen(true)
@@ -214,20 +215,12 @@ function KnowledgeSection({
     setSelectedRepositoryIds(selectedRepositoryIds.filter(rid => rid !== idToRemove))
   }, [selectedRepositoryIds, setSelectedRepositoryIds])
 
-  const handleDocumentContent = useCallback((doc: string) => {
-    const currentContext = systemContext || ""
-    const merged = (!currentContext || currentContext.trim() === "") ? doc : currentContext + "\n\n" + doc
-    setSystemContext(merged)
-    setIsPdfContentCollapsed(false)
-  }, [systemContext, setSystemContext, setIsPdfContentCollapsed])
-
-  const handleDocumentError = useCallback((err: { status?: number; message?: string } | null) => {
-    if (err?.status === 413) {
-      toast.error("File too large. Please upload a file smaller than 50MB.")
-    } else {
-      toast.error("Upload failed: " + (err?.message || "Unknown error"))
+  const handleRepositorySourceAdded = useCallback((repositoryId: number) => {
+    if (!selectedRepositoryIds.includes(repositoryId)) {
+      setSelectedRepositoryIds([...selectedRepositoryIds, repositoryId])
     }
-  }, [])
+    setIsRepositorySourcePickerOpen(false)
+  }, [selectedRepositoryIds, setSelectedRepositoryIds])
 
   const handleCollapsibleOpenChange = useCallback((open: boolean | undefined) => {
     setIsPdfContentCollapsed(!(open ?? false))
@@ -268,6 +261,14 @@ function KnowledgeSection({
               >
                 Browse Repositories
               </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setIsRepositorySourcePickerOpen(true)}
+              >
+                Add repository content
+              </Button>
               {selectedRepositoryIds.length > 0 && (
                 <span className="text-sm text-muted-foreground">
                   {selectedRepositoryIds.length} selected
@@ -287,14 +288,10 @@ function KnowledgeSection({
             )}
           </div>
 
-          {/* PDF upload and content section */}
+          {/* System instructions remain prompt configuration, not source storage. */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <Label className="text-sm">Direct Knowledge Input</Label>
-              <DocumentUploadButton
-                onContent={handleDocumentContent}
-                onError={handleDocumentError}
-              />
+              <Label className="text-sm">System instructions</Label>
             </div>
 
             <Collapsible open={!isPdfContentCollapsed} onOpenChange={handleCollapsibleOpenChange}>
@@ -306,7 +303,7 @@ function KnowledgeSection({
                   className="w-full justify-between p-2 h-auto"
                 >
                   <span className="text-sm">
-                    {systemContext ? "View/Edit content" : "Add custom content"}
+                    {systemContext ? "View or edit instructions" : "Add instructions"}
                   </span>
                   <div className="flex items-center gap-2">
                     {systemContext && (
@@ -321,7 +318,7 @@ function KnowledgeSection({
                   <textarea
                     value={systemContext}
                     onChange={handleSystemContextChange}
-                    placeholder="Enter system instructions, persona, or background knowledge for the AI model."
+                    placeholder="Enter behavior, persona, or response-format instructions. Add knowledge through a repository above."
                     className="w-full h-full p-4 bg-muted resize-none border-none outline-none font-mono text-sm"
                   />
                 </div>
@@ -337,6 +334,11 @@ function KnowledgeSection({
         onOpenChange={setIsRepositoryBrowserOpen}
         selectedIds={selectedRepositoryIds}
         onSelectionChange={setSelectedRepositoryIds}
+      />
+      <RepositorySourcePicker
+        open={isRepositorySourcePickerOpen}
+        onOpenChange={setIsRepositorySourcePickerOpen}
+        onSuccess={handleRepositorySourceAdded}
       />
     </div>
   )

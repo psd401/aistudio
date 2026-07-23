@@ -16,3 +16,7 @@ export * from "./post-deploy-recovery";
 export * from "./worker-job-service";
 export * from "./embedding-recovery";
 export * from "./legacy-inline-recovery";
+export * from "./lifecycle-service";
+export * from "./upload-lifecycle-service";
+export * from "./deletion-service";
+export * from "./upload-state";

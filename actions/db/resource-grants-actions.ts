@@ -37,9 +37,11 @@ import {
 } from "@/lib/db/schema";
 import {
   listResourceGrants,
+  normalizeGrants,
   replaceResourceGrants,
   type ResourceGrant,
 } from "@/lib/db/drizzle/resource-access";
+import { validateAssistantRepositoryAudienceForGrants } from "@/lib/assistant-architect/repository-audience";
 import {
   listActiveGroupsForPicker,
   type GroupPickerOption,
@@ -213,6 +215,36 @@ export async function updateResourceGrantsAction(
         { field: "grants", message: "Malformed grant list" },
       ]);
     }
+    const normalized = normalizeGrants(sanitized);
+
+    // An assistant's access grants are its published audience. Validate the
+    // submitted replacement set rather than the currently stored rows so an
+    // administrator cannot make a repository-bound assistant unrestricted,
+    // add a group audience to a private repository, or add a role that the
+    // repository itself does not grant. Runtime ACL checks still fail closed,
+    // but rejecting the incompatible write keeps the approved product surface
+    // usable for every user to whom it is advertised.
+    if (resourceType === "assistant") {
+      if (typeof id !== "number") {
+        throw ErrorFactories.validationFailed([
+          { field: "resourceId", message: "Invalid assistant id" },
+        ]);
+      }
+      const audienceCompatibility =
+        await validateAssistantRepositoryAudienceForGrants(id, normalized);
+      if (!audienceCompatibility.isCompatible) {
+        log.warn("Assistant repository audience mismatch blocked grant update", {
+          assistantId: id,
+          mismatches: audienceCompatibility.mismatches,
+        });
+        timer({ status: "error" });
+        return {
+          isSuccess: false,
+          message:
+            "Repository permissions do not cover this assistant's proposed audience. Make every bound repository public or restrict access to roles each repository grants.",
+        };
+      }
+    }
 
     const current = await getCurrentUserAction();
     const createdBy = current.isSuccess ? current.data?.user?.id ?? null : null;
@@ -224,7 +256,7 @@ export async function updateResourceGrantsAction(
 
     // replaceResourceGrants normalizes (lowercases group emails, trims roles) +
     // de-dupes before the atomic delete-then-insert.
-    await replaceResourceGrants(resourceType, id, sanitized, createdBy);
+    await replaceResourceGrants(resourceType, id, normalized, createdBy);
 
     const saved = await listResourceGrants(resourceType, id);
     timer({ status: "success" });

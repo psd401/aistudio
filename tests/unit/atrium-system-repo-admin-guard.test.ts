@@ -27,6 +27,8 @@ jest.mock("@/lib/db/drizzle", () => ({
   getRepositoryById: jest.fn(async () => repoResult),
   updateRepository: jest.fn(async (id: number) => ({
     id, name: "x", description: null, ownerId: 1, isPublic: true, metadata: {},
+    repositoryKind: "durable", lifecycleStatus: "active",
+    retentionDays: null, expiresAt: null, activeIndexGenerationId: null,
     createdAt: new Date(0), updatedAt: new Date(0),
   })),
   getAllRepositoriesWithOwner: jest.fn(async () => []),
@@ -50,7 +52,14 @@ const updateRepositoryMock = updateRepository as jest.Mock;
 const getRepositoryItemsMock = getRepositoryItems as jest.Mock;
 
 const SYSTEM_REPO = { id: 9, name: "Atrium Content Index", metadata: { systemManaged: true } };
-const NORMAL_REPO = { id: 3, name: "My Docs", metadata: null };
+const NORMAL_REPO = {
+  id: 3,
+  name: "My Docs",
+  repositoryKind: "durable",
+  lifecycleStatus: "active",
+  expiresAt: null,
+  metadata: null,
+};
 
 beforeEach(() => {
   repoResult = null;

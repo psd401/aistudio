@@ -65,8 +65,17 @@ export async function POST(
     }
 
     const userId = await getUserIdFromSession(session.sub);
-    await assertNotSystemManagedRepository(repositoryId);
-    if (!(await canModifyRepository(repositoryId, userId))) {
+    // Keep every non-manageable repository shape indistinguishable. In
+    // particular, a durable repository owned by someone else must look exactly
+    // like an absent, ephemeral, system, or inactive repository.
+    let canManageRepository = false;
+    try {
+      await assertNotSystemManagedRepository(repositoryId);
+      canManageRepository = await canModifyRepository(repositoryId, userId);
+    } catch {
+      canManageRepository = false;
+    }
+    if (!canManageRepository) {
       return NextResponse.json({ error: "Not found", requestId }, { status: 404 });
     }
 
@@ -99,7 +108,7 @@ export async function POST(
     });
     return NextResponse.json(
       {
-        error: error instanceof Error ? error.message : "Failed to complete upload",
+        error: "Failed to complete upload",
         requestId,
       },
       { status: 400 }

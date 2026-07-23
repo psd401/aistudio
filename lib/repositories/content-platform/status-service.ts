@@ -9,6 +9,7 @@ import {
   repositoryProcessingJobs,
 } from "@/lib/db/schema";
 import { CONTENT_PROCESSING_MAX_ATTEMPTS } from "./job-state";
+import { isBdaInvocationExternallyActive } from "./worker-job-service";
 
 export type CanonicalItemProcessingStatus =
   | "pending"
@@ -290,6 +291,11 @@ export async function retryCanonicalRepositoryItem(
       if (!job) throw new Error("The item has no processing job to retry");
       if (job.postDeployRecovery !== null) {
         throw new Error(POST_DEPLOY_RECOVERY_RETRY_MESSAGE);
+      }
+      if (isBdaInvocationExternallyActive(job.metrics)) {
+        throw new Error(
+          "Bedrock media analysis is still being reconciled and cannot be restarted"
+        );
       }
       if (
         job.status !== "failed" &&

@@ -26,6 +26,10 @@ import {
   type AssistantArchitectRoutingMetadata,
 } from '@/lib/assistant-architect/model-router';
 import type { AssistantModelFamily, AssistantModelRoutingMode } from '@/lib/db/schema/tables/assistant-architects';
+import {
+  preflightAssistantRepositoryAccess,
+  REPOSITORY_ACCESS_CHANGED_MESSAGE,
+} from '@/lib/assistant-architect/repository-access-preflight';
 
 // Allow up to 15 minutes for long scheduled executions
 export const maxDuration = 900;
@@ -483,6 +487,28 @@ export async function POST(req: NextRequest) {
           requestId
         }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const repositoryAccess = await preflightAssistantRepositoryAccess(
+      prompts,
+      userCognitoSub
+    );
+    if (!repositoryAccess.isAllowed) {
+      log.warn('Scheduled assistant execution blocked because repository access changed', {
+        userId,
+        toolId,
+        scheduleId,
+        repositoryCount: repositoryAccess.repositoryIds.length,
+      });
+      timer({ status: 'error', reason: 'repository_access_changed' });
+      return new Response(
+        JSON.stringify({
+          error: 'Access denied',
+          message: REPOSITORY_ACCESS_CHANGED_MESSAGE,
+          requestId,
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
       );
     }
 

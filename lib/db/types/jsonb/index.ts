@@ -137,6 +137,8 @@ export interface AssistantArchitectConversationMetadata extends NexusConversatio
   assistantId?: number;
   /** Name of the assistant architect that created this conversation */
   assistantName?: string;
+  /** Owner-resolved temporary repositories available to API follow-up turns. */
+  runtimeRepositoryIds?: number[];
   /** Current execution status for display in conversation list */
   executionStatus?: 'running' | 'completed' | 'failed';
 }

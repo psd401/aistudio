@@ -29,6 +29,16 @@ import { unifiedStreamingService } from "@/lib/streaming/unified-streaming-servi
 import { createLogger } from "@/lib/logger"
 import type { UIMessage } from "ai"
 import type { StreamRequest } from "@/lib/streaming/types"
+import {
+  preflightAssistantRepositoryAccess,
+  REPOSITORY_ACCESS_CHANGED_MESSAGE,
+} from "@/lib/assistant-architect/repository-access-preflight"
+import {
+  formatKnowledgeContext,
+  retrieveKnowledgeForPrompt,
+} from "@/lib/assistant-architect/knowledge-retrieval"
+import { createRepositoryTools } from "@/lib/tools/repository-tools"
+import { parseBoundAssistantConversationMetadata } from "@/lib/api/assistant-conversation-metadata"
 
 export const maxDuration = 900
 
@@ -78,14 +88,18 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   if (!conversation) {
     return createErrorResponse(requestId, 404, "NOT_FOUND", `Conversation not found: ${conversationId}`)
   }
-
-  // 5. Parse body
-  const bodyResult = await parseRequestBody(request, sendMessageSchema, requestId)
-  if (isErrorResponse(bodyResult)) return bodyResult
-  const { message: userMessageText } = bodyResult.data
+  const conversationMetadata = parseBoundAssistantConversationMetadata(
+    conversation.metadata
+  )
+  if (
+    conversation.provider !== "assistant-architect" ||
+    conversationMetadata?.assistantId !== assistantId
+  ) {
+    return createErrorResponse(requestId, 404, "NOT_FOUND", `Conversation not found: ${conversationId}`)
+  }
 
   try {
-    // 6. Load assistant to get model and system prompt
+    // 5. Load assistant to get model and system prompt.
     const architectResult = await getAssistantArchitectByIdAction(assistantId.toString())
     if (!architectResult.isSuccess || !architectResult.data) {
       return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
@@ -106,16 +120,68 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     const accessDenied = await verifyAssistantResourceGrants({ auth, architectUserId: architect.userId, architectId: architect.id, modelDbIds: [lastPrompt.modelId], assistantId, requestId, log })
     if (accessDenied) return accessDenied
 
+    // Recheck every static repository plus the server-owned runtime repository
+    // set before reading the request body or writing a message. This preserves a
+    // clean 403 delivery boundary when access changes between turns.
+    const repositoryAccess = await preflightAssistantRepositoryAccess(
+      [
+        ...prompts,
+        { repositoryIds: conversationMetadata.runtimeRepositoryIds },
+      ],
+      auth.cognitoSub
+    )
+    if (!repositoryAccess.isAllowed) {
+      return createErrorResponse(
+        requestId,
+        403,
+        "FORBIDDEN",
+        REPOSITORY_ACCESS_CHANGED_MESSAGE
+      )
+    }
+
     const modelData = await getAIModelById(lastPrompt.modelId)
     if (!modelData || !modelData.modelId || !modelData.provider) {
       return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Failed to resolve model")
     }
 
-    // 7. Load conversation history
+    // 6. Parse only after all authorization and model setup has succeeded.
+    const bodyResult = await parseRequestBody(request, sendMessageSchema, requestId)
+    if (isErrorResponse(bodyResult)) return bodyResult
+    const { message: userMessageText } = bodyResult.data
+
+    // 7. Load conversation history and bounded repository context.
     const existingMessages = await getMessagesByConversation(conversationId, {
       limit: 100,
       includeModel: false,
     })
+    const knowledgeChunks = await retrieveKnowledgeForPrompt(
+      userMessageText,
+      repositoryAccess.repositoryIds,
+      auth.cognitoSub,
+      undefined,
+      {
+        maxChunks: 10,
+        maxTokens: 4000,
+        similarityThreshold: 0.7,
+        searchType: "hybrid",
+        vectorWeight: 0.8,
+      },
+      requestId
+    )
+    const repositoryContext =
+      knowledgeChunks.length > 0
+        ? `\n\n${formatKnowledgeContext(knowledgeChunks)}`
+        : ""
+    let repositoryTools = {}
+    if (repositoryAccess.repositoryIds.length > 0) {
+      repositoryTools = {
+        ...repositoryTools,
+        ...createRepositoryTools({
+          repositoryIds: repositoryAccess.repositoryIds,
+          userCognitoSub: auth.cognitoSub,
+        }),
+      }
+    }
 
     // Convert to UIMessage format with runtime validation
     const historyMessages: UIMessage[] = (existingMessages as unknown[])
@@ -145,7 +211,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     const newUserMessage: UIMessage = {
       id: `user-${Date.now()}`,
       role: "user",
-      parts: [{ type: "text", text: userMessageText }],
+      parts: [{ type: "text", text: userMessageText + repositoryContext }],
     }
 
     const allMessages = [...historyMessages, newUserMessage]
@@ -167,6 +233,11 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
         conversationId,
         source: "assistant_execution" as const,
         systemPrompt: lastPrompt.systemContext || undefined,
+        tools:
+          Object.keys(repositoryTools).length > 0
+            ? repositoryTools
+            : undefined,
+        maxSteps: 5,
         callbacks: {
           onFinish: async ({ text, usage, finishReason }) => {
             try {

@@ -4,7 +4,8 @@ import {
   copyRepositorySourceToCanonicalNamespace,
   getDocumentSignedUrl, 
   deleteDocument,
-  deleteRepositoryObjectsByPrefix,
+  deleteRepositoryObjectVersions,
+  deleteRepositoryObjectVersionsByPrefix,
   documentExists,
   listUserDocuments,
   extractKeyFromUrl
@@ -18,6 +19,7 @@ import {
   HeadObjectCommand,
   HeadBucketCommand,
   ListObjectsV2Command,
+  ListObjectVersionsCommand,
   CopyObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -239,21 +241,32 @@ describe('S3 Client', () => {
     });
   });
 
-  describe('deleteRepositoryObjectsByPrefix', () => {
-    it('paginates and deletes every object below the artifact prefix', async () => {
+  describe('version-aware repository deletion', () => {
+    it('paginates and permanently deletes versions and delete markers below an artifact prefix', async () => {
       let listCall = 0;
       mockS3Client.send.mockImplementation((command: unknown) => {
-        if (command instanceof ListObjectsV2Command) {
+        if (command instanceof ListObjectVersionsCommand) {
           listCall += 1;
           return Promise.resolve(
             listCall === 1
               ? {
-                  Contents: [{ Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/thumbnail.jpg' }],
+                  Versions: [{
+                    Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/thumbnail.jpg',
+                    VersionId: 'version-1',
+                  }],
+                  DeleteMarkers: [{
+                    Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/old.txt',
+                    VersionId: 'marker-1',
+                  }],
                   IsTruncated: true,
-                  NextContinuationToken: 'page-2',
+                  NextKeyMarker: 'page-2',
+                  NextVersionIdMarker: 'version-2',
                 }
               : {
-                  Contents: [{ Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/ocr.txt' }],
+                  Versions: [{
+                    Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/ocr.txt',
+                    VersionId: 'version-3',
+                  }],
                   IsTruncated: false,
                 }
           );
@@ -262,29 +275,76 @@ describe('S3 Client', () => {
       });
 
       await expect(
-        deleteRepositoryObjectsByPrefix(
+        deleteRepositoryObjectVersionsByPrefix(
           'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/'
         )
-      ).resolves.toBe(2);
+      ).resolves.toBe(3);
       expect(mockS3Client.send).toHaveBeenCalledWith(
         expect.any(DeleteObjectsCommand)
+      );
+      expect(DeleteObjectsCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          Delete: expect.objectContaining({
+            Objects: expect.arrayContaining([
+              {
+                Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/thumbnail.jpg',
+                VersionId: 'version-1',
+              },
+              {
+                Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/old.txt',
+                VersionId: 'marker-1',
+              },
+            ]),
+          }),
+        })
       );
       expect(listCall).toBe(2);
     });
 
     it('rejects prefixes outside the repository namespace', async () => {
       await expect(
-        deleteRepositoryObjectsByPrefix('atrium/objects/')
+        deleteRepositoryObjectVersionsByPrefix('atrium/objects/')
       ).rejects.toThrow('Invalid repository object prefix');
       expect(mockS3Client.send).not.toHaveBeenCalled();
     });
 
+    it('deletes only the exact immutable source key across all versions', async () => {
+      const key =
+        'repositories/7/11111111-2222-4333-8444-555555555555/source.pdf';
+      mockS3Client.send.mockImplementation((command: unknown) => {
+        if (command instanceof ListObjectVersionsCommand) {
+          return Promise.resolve({
+            Versions: [
+              { Key: key, VersionId: 'source-v1' },
+              { Key: `${key}.bak`, VersionId: 'other-v1' },
+            ],
+            DeleteMarkers: [{ Key: key, VersionId: 'source-marker' }],
+            IsTruncated: false,
+          });
+        }
+        return Promise.resolve({});
+      });
+
+      await expect(deleteRepositoryObjectVersions(key)).resolves.toBe(2);
+      expect(DeleteObjectsCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          Delete: expect.objectContaining({
+            Objects: [
+              { Key: key, VersionId: 'source-v1' },
+              { Key: key, VersionId: 'source-marker' },
+            ],
+          }),
+        })
+      );
+    });
+
     it('surfaces partial multi-object deletion failures', async () => {
       mockS3Client.send.mockImplementation((command: unknown) => {
-        if (command instanceof ListObjectsV2Command) {
+        if (command instanceof ListObjectVersionsCommand) {
           return Promise.resolve({
-            Contents: [{
+            Versions: [{
               Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/ocr.txt',
+              VersionId: 'version-1',
             }],
             IsTruncated: false,
           });
@@ -296,7 +356,7 @@ describe('S3 Client', () => {
       });
 
       await expect(
-        deleteRepositoryObjectsByPrefix(
+        deleteRepositoryObjectVersionsByPrefix(
           'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/'
         )
       ).rejects.toThrow('Failed to delete repository objects from S3');

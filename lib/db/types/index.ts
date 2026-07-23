@@ -52,6 +52,7 @@ import {
   nexusTemplates,
   nexusUserPreferences,
   nexusProviderMetrics,
+  nexusRepositoryBindings,
   // Nexus MCP
   nexusMcpServers,
   nexusMcpConnections,
@@ -211,6 +212,9 @@ export type SelectNexusUserPreferences = InferSelectModel<
 export type SelectNexusProviderMetrics = InferSelectModel<
   typeof nexusProviderMetrics
 >;
+export type SelectNexusRepositoryBinding = InferSelectModel<
+  typeof nexusRepositoryBindings
+>;
 
 // ============================================
 // Nexus Conversations - Insert Types
@@ -234,6 +238,9 @@ export type InsertNexusUserPreferences = InferInsertModel<
 >;
 export type InsertNexusProviderMetrics = InferInsertModel<
   typeof nexusProviderMetrics
+>;
+export type InsertNexusRepositoryBinding = InferInsertModel<
+  typeof nexusRepositoryBindings
 >;
 
 // ============================================

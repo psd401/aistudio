@@ -526,6 +526,9 @@ jest.mock('@/lib/db/drizzle-client', () => {
   return {
     executeQuery: mockExecuteQuery,
     executeTransaction: mockExecuteTransaction,
+    toPgRows: jest.fn((result) =>
+      result == null ? [] : Array.from(result)
+    ),
     validateDatabaseConnection: jest.fn(() => Promise.resolve(true)),
     db: {
       select: jest.fn().mockReturnThis(),

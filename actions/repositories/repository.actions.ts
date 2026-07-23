@@ -2,25 +2,32 @@
 
 import { getServerSession } from "@/lib/auth/server-session"
 import { type ActionState } from "@/types/actions-types"
-import { hasCapabilityAccess } from "@/utils/roles"
+import { hasCapabilityAccess, hasRole } from "@/utils/roles"
 import { getUserIdFromSession, canModifyRepository } from "@/actions/repositories/repository-permissions"
 import {
   createRepository as drizzleCreateRepository,
   updateRepository as drizzleUpdateRepository,
-  deleteRepository as drizzleDeleteRepository,
   getRepositoryById,
-  getRepositoriesByOwnerId,
-  getRepositoryItems,
   getRepositoryAccessList,
   grantUserAccess,
   grantRoleAccess,
   revokeAccessById,
   getUserAccessibleRepositories
 } from "@/lib/db/drizzle"
-import { assertNotSystemManagedRepository, assertRepositoryReadAccess } from "@/lib/repositories/repository-access-guard"
+import {
+  assertNotSystemManagedRepository,
+  assertRepositoryReadAccess,
+  assertUserManagedDurableRepositoryForDeletion
+} from "@/lib/repositories/repository-access-guard"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { eq, count, inArray } from "drizzle-orm"
-import { repositoryAccess, repositoryItems } from "@/lib/db/schema"
+import { and, asc, count, eq, ilike, inArray, or, sql } from "drizzle-orm"
+import {
+  knowledgeRepositories,
+  repositoryAccess,
+  repositoryItems,
+  roles,
+  users
+} from "@/lib/db/schema"
 import {
   handleError,
   ErrorFactories,
@@ -33,7 +40,11 @@ import {
   sanitizeForLogging
 } from "@/lib/logger"
 import { revalidatePath } from "next/cache"
-import { deleteRepositoryItemStorage } from "@/lib/repositories/content-platform/storage-cleanup"
+import { deleteRepositoryStorageTree } from "@/lib/repositories/content-platform/storage-cleanup"
+import {
+  beginRepositoryDeletion,
+  finalizeRepositoryDeletion
+} from "@/lib/repositories/content-platform/deletion-service"
 
 export interface Repository {
   id: number
@@ -41,12 +52,55 @@ export interface Repository {
   description: string | null
   ownerId: number
   isPublic: boolean
+  repositoryKind: "durable" | "ephemeral" | "system"
+  lifecycleStatus: "active" | "expired" | "deleting" | "deleted"
+  retentionDays: number | null
+  expiresAt: Date | null
+  activeIndexGenerationId: string | null
   metadata: Record<string, unknown>
   createdAt: Date
   updatedAt: Date
   ownerName?: string
   itemCount?: number
+  canManage: boolean
 }
+
+export interface AccessibleRepositorySummary {
+  id: number
+  name: string
+  description: string | null
+  isPublic: boolean
+  itemCount: number
+  lastUpdated: Date | null
+  canManage: boolean
+}
+
+export interface RepositoryAccessEntry {
+  id: number
+  repositoryId: number
+  userId: number | null
+  roleId: number | null
+  userEmail: string | null
+  userName: string | null
+  roleName: string | null
+  createdAt: Date | null
+}
+
+export interface RepositoryAccessOptions {
+  users: Array<{
+    id: number
+    email: string
+    name: string
+  }>
+  roles: Array<{
+    id: number
+    name: string
+  }>
+  nextUserOffset: number | null
+}
+
+const REPOSITORY_ACCESS_USER_PAGE_SIZE = 50
+const MAX_REPOSITORY_ACCESS_USER_OFFSET = 100_000
 
 export interface CreateRepositoryInput {
   name: string
@@ -74,9 +128,15 @@ function mapToRepository(resultRaw: RawRepository): Repository {
     description: resultRaw.description,
     ownerId: resultRaw.ownerId,
     isPublic: resultRaw.isPublic ?? false,
+    repositoryKind: resultRaw.repositoryKind,
+    lifecycleStatus: resultRaw.lifecycleStatus,
+    retentionDays: resultRaw.retentionDays,
+    expiresAt: resultRaw.expiresAt,
+    activeIndexGenerationId: resultRaw.activeIndexGenerationId,
     metadata: resultRaw.metadata ?? {},
     createdAt: resultRaw.createdAt ?? new Date(),
-    updatedAt: resultRaw.updatedAt ?? new Date()
+    updatedAt: resultRaw.updatedAt ?? new Date(),
+    canManage: false,
   }
 }
 
@@ -166,9 +226,15 @@ export async function createRepository(
       description: resultRaw.description,
       ownerId: resultRaw.ownerId,
       isPublic: resultRaw.isPublic ?? false,
+      repositoryKind: resultRaw.repositoryKind,
+      lifecycleStatus: resultRaw.lifecycleStatus,
+      retentionDays: resultRaw.retentionDays,
+      expiresAt: resultRaw.expiresAt,
+      activeIndexGenerationId: resultRaw.activeIndexGenerationId,
       metadata: resultRaw.metadata ?? {},
       createdAt: resultRaw.createdAt ?? new Date(),
-      updatedAt: resultRaw.updatedAt ?? new Date()
+      updatedAt: resultRaw.updatedAt ?? new Date(),
+      canManage: true,
     }
 
     log.info("Repository created successfully", {
@@ -250,7 +316,10 @@ export async function updateRepository(
       if (!current) {
         throw ErrorFactories.dbRecordNotFound("knowledge_repositories", input.id)
       }
-      return createSuccess(mapToRepository(current), "No changes to apply")
+      return createSuccess(
+        { ...mapToRepository(current), canManage: true },
+        "No changes to apply"
+      )
     }
 
     log.info("Updating repository in database", {
@@ -268,7 +337,10 @@ export async function updateRepository(
     }
 
     // Convert to expected type
-    const result: Repository = mapToRepository(resultRaw)
+    const result: Repository = {
+      ...mapToRepository(resultRaw),
+      canManage: true,
+    }
 
     log.info("Repository updated successfully", {
       repositoryId: result.id,
@@ -323,6 +395,10 @@ export async function deleteRepository(
     log.debug("Getting user ID from session")
     const userId = await getUserIdFromSession(session.sub)
 
+    // Establish the Repository Manager product boundary before the ownership
+    // check so ephemeral/system repository ids remain non-disclosive.
+    await assertUserManagedDurableRepositoryForDeletion(id)
+
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: id, userId })
     const canModify = await canModifyRepository(id, userId)
@@ -334,43 +410,25 @@ export async function deleteRepository(
       throw ErrorFactories.authzOwnerRequired("delete repository")
     }
 
-    // Never delete a system-managed repo (the Atrium index, #1056) through the
-    // generic API — it would destroy the retrieval index out-of-band.
-    await assertNotSystemManagedRepository(id)
+    // Atomically fence upload/worker producers and snapshot manifests before
+    // touching S3. A cleanup failure leaves `deleting` in place so invoking
+    // this same action with the repository id safely retries the idempotent
+    // sweep instead of reopening a partially deleted repository.
+    log.debug("Fencing repository producers before deletion")
+    const items = await beginRepositoryDeletion(id)
 
-    // First, get all stored items so source and canonical artifacts are removed.
-    log.debug("Fetching stored repository items for deletion")
-    const items = await getRepositoryItems(id)
-
-    const storedItems = items.filter(
-      item => item.type === 'document' || item.type === 'image'
-    )
-
-    log.info("Found repository item objects to delete from S3", {
-      itemCount: storedItems.length,
+    log.info("Cleaning repository storage before database deletion", {
+      itemCount: items.length,
       repositoryId: id
     })
-
-    if (storedItems.length > 0) {
-      const deletePromises = storedItems.map(item =>
-        deleteRepositoryItemStorage(item).catch(error => {
-          // Log error but continue with deletion
-          log.error("Failed to delete repository item objects from S3", {
-            file: item.source,
-            itemId: item.id,
-            error: error instanceof Error ? error.message : "Unknown error"
-          })
-        })
-      )
-      await Promise.all(deletePromises)
-      log.info("S3 repository item cleanup completed")
-    }
+    const cleanup = await deleteRepositoryStorageTree(id, items)
+    log.info("Repository storage cleanup completed", cleanup)
 
     // Now delete the repository (this will cascade delete all items and chunks)
     log.info("Deleting repository from database", { repositoryId: id })
-    const deletedCount = await drizzleDeleteRepository(id)
+    const deleted = await finalizeRepositoryDeletion(id)
 
-    if (deletedCount === 0) {
+    if (!deleted) {
       log.warn("Repository not found for deletion", { repositoryId: id })
       throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
     }
@@ -418,23 +476,74 @@ export async function listRepositories(): Promise<ActionState<Repository[]>> {
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
-    log.debug("Fetching repositories from database")
+    log.debug("Fetching accessible repositories from database")
     const userId = await getUserIdFromSession(session.sub)
-    const repositoriesRaw = await getRepositoriesByOwnerId(userId)
+    const [activeRepositories, isAdmin] = await Promise.all([
+      getUserAccessibleRepositories(session.sub),
+      hasRole("administrator"),
+    ])
+    // Cleanup failures intentionally retain the producer fence. Keep those
+    // rows reachable to their owner (and administrators) after reload so the
+    // same action can retry the idempotent S3 sweep and DB finalization.
+    const deletionRetries = await executeQuery(
+      (db) =>
+        db
+          .select({
+            id: knowledgeRepositories.id,
+            name: knowledgeRepositories.name,
+            description: knowledgeRepositories.description,
+            ownerId: knowledgeRepositories.ownerId,
+            ownerName: sql<string | null>`NULLIF(TRIM(CONCAT_WS(' ', ${users.firstName}, ${users.lastName})), '')`,
+            isPublic: knowledgeRepositories.isPublic,
+            repositoryKind: knowledgeRepositories.repositoryKind,
+            lifecycleStatus: knowledgeRepositories.lifecycleStatus,
+            retentionDays: knowledgeRepositories.retentionDays,
+            expiresAt: knowledgeRepositories.expiresAt,
+            activeIndexGenerationId:
+              knowledgeRepositories.activeIndexGenerationId,
+            metadata: knowledgeRepositories.metadata,
+            createdAt: knowledgeRepositories.createdAt,
+            updatedAt: knowledgeRepositories.updatedAt,
+            itemCount: sql<number>`(SELECT COUNT(*) FROM ${repositoryItems} WHERE ${repositoryItems.repositoryId} = ${knowledgeRepositories.id})`,
+            lastUpdated: sql<Date | null>`(SELECT MAX(updated_at) FROM ${repositoryItems} WHERE ${repositoryItems.repositoryId} = ${knowledgeRepositories.id})`,
+          })
+          .from(knowledgeRepositories)
+          .innerJoin(users, eq(users.id, knowledgeRepositories.ownerId))
+          .where(
+            and(
+              eq(knowledgeRepositories.repositoryKind, "durable"),
+              eq(knowledgeRepositories.lifecycleStatus, "deleting"),
+              isAdmin
+                ? undefined
+                : eq(knowledgeRepositories.ownerId, userId)
+            )
+          )
+          .orderBy(knowledgeRepositories.name),
+      "listRepositoryDeletionRetries"
+    )
+    const activeIds = new Set(activeRepositories.map((repository) => repository.id))
+    const repositoriesRaw = [
+      ...activeRepositories,
+      ...deletionRetries.filter((repository) => !activeIds.has(repository.id))
+    ]
 
-    // Item counts via ONE grouped COUNT(*) instead of an N+1 full-row SELECT *
-    // per repository (which pulled entire text-item bodies) — REV-COR-069.
-    const counts = await getRepositoryItemCounts(repositoriesRaw.map((r) => r.id))
     const repositories: Repository[] = repositoriesRaw.map((repo) => ({
       id: repo.id,
       name: repo.name,
       description: repo.description,
       ownerId: repo.ownerId,
       isPublic: repo.isPublic ?? false,
+      repositoryKind: repo.repositoryKind,
+      lifecycleStatus: repo.lifecycleStatus,
+      retentionDays: repo.retentionDays,
+      expiresAt: repo.expiresAt,
+      activeIndexGenerationId: repo.activeIndexGenerationId,
       metadata: repo.metadata ?? {},
       createdAt: repo.createdAt ?? new Date(),
       updatedAt: repo.updatedAt ?? new Date(),
-      itemCount: counts.get(repo.id) ?? 0
+      ownerName: repo.ownerName ?? undefined,
+      itemCount: Number(repo.itemCount),
+      canManage: isAdmin || repo.ownerId === userId,
     }))
 
     log.info("Repositories fetched successfully", {
@@ -517,8 +626,30 @@ export async function getRepository(
       throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
     }
 
-    // Item count via a single COUNT(*) instead of loading all item rows (REV-COR-069).
-    const counts = await getRepositoryItemCounts([id])
+    const currentUserId = await getUserIdFromSession(session.sub)
+    const [counts, ownerRows, canManage] = await Promise.all([
+      getRepositoryItemCounts([id]),
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              email: users.email,
+              firstName: users.firstName,
+              lastName: users.lastName,
+            })
+            .from(users)
+            .where(eq(users.id, resultRaw.ownerId))
+            .limit(1),
+        "getRepositoryOwner"
+      ),
+      canModifyRepository(id, currentUserId),
+    ])
+    const owner = ownerRows[0]
+    const ownerDisplayName = owner
+      ? [owner.firstName, owner.lastName].filter(Boolean).join(" ").trim() ||
+        owner.email ||
+        undefined
+      : undefined
 
     const result: Repository = {
       id: resultRaw.id,
@@ -526,10 +657,17 @@ export async function getRepository(
       description: resultRaw.description,
       ownerId: resultRaw.ownerId,
       isPublic: resultRaw.isPublic ?? false,
+      repositoryKind: resultRaw.repositoryKind,
+      lifecycleStatus: resultRaw.lifecycleStatus,
+      retentionDays: resultRaw.retentionDays,
+      expiresAt: resultRaw.expiresAt,
+      activeIndexGenerationId: resultRaw.activeIndexGenerationId,
       metadata: resultRaw.metadata ?? {},
       createdAt: resultRaw.createdAt ?? new Date(),
       updatedAt: resultRaw.updatedAt ?? new Date(),
-      itemCount: counts.get(id) ?? 0
+      ownerName: ownerDisplayName,
+      itemCount: counts.get(id) ?? 0,
+      canManage,
     }
 
     log.info("Repository fetched successfully", {
@@ -555,7 +693,7 @@ export async function getRepository(
 
 export async function getRepositoryAccess(
   repositoryId: number
-): Promise<ActionState<Record<string, unknown>[]>> {
+): Promise<ActionState<RepositoryAccessEntry[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getRepositoryAccess")
   const log = createLogger({ requestId, action: "getRepositoryAccess" })
@@ -586,6 +724,7 @@ export async function getRepositoryAccess(
       log.warn("Repository access list denied - not owner/admin", { userId: session.sub, repositoryId })
       throw ErrorFactories.authzOwnerRequired("view repository access")
     }
+    await assertNotSystemManagedRepository(repositoryId)
 
     log.debug("Fetching repository access list from database", { repositoryId })
     const access = await getRepositoryAccessList(repositoryId)
@@ -597,7 +736,7 @@ export async function getRepositoryAccess(
 
     timer({ status: "success", count: access.length })
 
-    return createSuccess(access as Record<string, unknown>[], "Access list loaded successfully")
+    return createSuccess(access, "Access list loaded successfully")
   } catch (error) {
     
     timer({ status: "error" })
@@ -607,6 +746,110 @@ export async function getRepositoryAccess(
       requestId,
       operation: "getRepositoryAccess",
       metadata: { repositoryId }
+    })
+  }
+}
+
+export async function getRepositoryAccessOptions(
+  repositoryId: number,
+  search = "",
+  userOffset = 0
+): Promise<ActionState<RepositoryAccessOptions>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getRepositoryAccessOptions")
+  const log = createLogger({ requestId, action: "getRepositoryAccessOptions" })
+
+  try {
+    const session = await getServerSession()
+    if (!session) throw ErrorFactories.authNoSession()
+    if (!(await hasCapabilityAccess("knowledge-repositories"))) {
+      throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
+    }
+
+    const currentUserId = await getUserIdFromSession(session.sub)
+    if (!(await canModifyRepository(repositoryId, currentUserId))) {
+      throw ErrorFactories.authzOwnerRequired("manage repository access")
+    }
+    await assertNotSystemManagedRepository(repositoryId)
+    if (
+      !Number.isSafeInteger(userOffset) ||
+      userOffset < 0 ||
+      userOffset > MAX_REPOSITORY_ACCESS_USER_OFFSET
+    ) {
+      throw ErrorFactories.invalidInput(
+        "userOffset",
+        userOffset,
+        `Must be an integer from 0 to ${MAX_REPOSITORY_ACCESS_USER_OFFSET}`
+      )
+    }
+
+    const normalizedSearch = search.trim().slice(0, 100)
+    const searchTerm = `%${normalizedSearch.replace(/[%_\\]/g, "\\$&")}%`
+    const [userRows, roleRows] = await Promise.all([
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              id: users.id,
+              email: users.email,
+              firstName: users.firstName,
+              lastName: users.lastName,
+            })
+            .from(users)
+            .where(
+              normalizedSearch
+                ? or(
+                    ilike(users.email, searchTerm),
+                    ilike(users.firstName, searchTerm),
+                    ilike(users.lastName, searchTerm)
+                  )
+                : undefined
+            )
+            .orderBy(asc(users.email), asc(users.id))
+            .limit(REPOSITORY_ACCESS_USER_PAGE_SIZE + 1)
+            .offset(userOffset),
+        "getRepositoryAccessOptions.users"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({ id: roles.id, name: roles.name })
+            .from(roles)
+            .orderBy(asc(roles.name)),
+        "getRepositoryAccessOptions.roles"
+      ),
+    ])
+
+    const hasMoreUsers =
+      userRows.length > REPOSITORY_ACCESS_USER_PAGE_SIZE
+    const visibleUserRows = userRows.slice(
+      0,
+      REPOSITORY_ACCESS_USER_PAGE_SIZE
+    )
+    const options: RepositoryAccessOptions = {
+      users: visibleUserRows.map((user) => ({
+        id: user.id,
+        email: user.email ?? "",
+        name:
+          [user.firstName, user.lastName].filter(Boolean).join(" ").trim() ||
+          user.email ||
+          `User ${user.id}`,
+      })),
+      roles: roleRows,
+      nextUserOffset: hasMoreUsers
+        ? userOffset + REPOSITORY_ACCESS_USER_PAGE_SIZE
+        : null,
+    }
+    timer({ status: "success", userCount: options.users.length, roleCount: options.roles.length })
+    return createSuccess(options, "Access options loaded successfully")
+  } catch (error) {
+    timer({ status: "error" })
+    log.warn("Failed to load repository access options", { repositoryId })
+    return handleError(error, "Failed to load repository access options", {
+      context: "getRepositoryAccessOptions",
+      requestId,
+      operation: "getRepositoryAccessOptions",
+      metadata: { repositoryId },
     })
   }
 }
@@ -637,14 +880,20 @@ export async function grantRepositoryAccess(
       log.warn("Grant access denied - not owner", { repositoryId, currentUserId })
       return { isSuccess: false, message: "Only the repository owner can grant access" }
     }
+    await assertNotSystemManagedRepository(repositoryId)
 
-    if (!userId && !roleId) {
-      return { isSuccess: false, message: "Must specify either user or role" }
+    const hasUserId = Number.isInteger(userId) && (userId ?? 0) > 0
+    const hasRoleId = Number.isInteger(roleId) && (roleId ?? 0) > 0
+    if (hasUserId === hasRoleId) {
+      return {
+        isSuccess: false,
+        message: "Specify exactly one valid user or role",
+      }
     }
 
-    if (userId) {
+    if (hasUserId && userId !== null) {
       await grantUserAccess(repositoryId, userId)
-    } else if (roleId) {
+    } else if (hasRoleId && roleId !== null) {
       await grantRoleAccess(repositoryId, roleId)
     }
 
@@ -697,6 +946,7 @@ export async function revokeRepositoryAccess(
       log.warn("Revoke access denied - not owner", { repositoryId, accessId, currentUserId })
       return { isSuccess: false, message: "Only the repository owner can revoke access" }
     }
+    await assertNotSystemManagedRepository(repositoryId)
 
     const deletedCount = await revokeAccessById(accessId)
 
@@ -710,14 +960,9 @@ export async function revokeRepositoryAccess(
   }
 }
 
-export async function getUserAccessibleRepositoriesAction(): Promise<ActionState<Array<{
-  id: number
-  name: string
-  description: string | null
-  isPublic: boolean
-  itemCount: number
-  lastUpdated: Date | null
-}>>> {
+export async function getUserAccessibleRepositoriesAction(): Promise<
+  ActionState<AccessibleRepositorySummary[]>
+> {
   const requestId = generateRequestId()
   const timer = startTimer("getUserAccessibleRepositories")
   const log = createLogger({ requestId, action: "getUserAccessibleRepositories" })
@@ -739,8 +984,11 @@ export async function getUserAccessibleRepositoriesAction(): Promise<ActionState
 
     log.debug("Fetching accessible repositories via Drizzle", { cognitoSub: session.sub })
 
-    // Get accessible repositories via Drizzle
-    const repositoriesRaw = await getUserAccessibleRepositories(session.sub)
+    const currentUserId = await getUserIdFromSession(session.sub)
+    const [repositoriesRaw, isAdmin] = await Promise.all([
+      getUserAccessibleRepositories(session.sub),
+      hasRole("administrator"),
+    ])
 
     // Convert nullable types to match return type
     const repositories = repositoriesRaw.map(repo => ({
@@ -748,8 +996,9 @@ export async function getUserAccessibleRepositoriesAction(): Promise<ActionState
       name: repo.name,
       description: repo.description,
       isPublic: repo.isPublic ?? false,
-      itemCount: repo.itemCount,
-      lastUpdated: repo.lastUpdated
+      itemCount: Number(repo.itemCount),
+      lastUpdated: repo.lastUpdated,
+      canManage: isAdmin || repo.ownerId === currentUserId,
     }))
 
     log.info("Accessible repositories fetched successfully", {

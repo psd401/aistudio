@@ -127,4 +127,27 @@ describe("unified content lifecycle policy", () => {
       waitStartedAt: "2026-07-22T14:00:00.000Z",
     });
   });
+
+  test("keeps an overdue BDA writer pollable and records reconciliation state", () => {
+    const mediaWait = {
+      waitReason: "AWAITING_MEDIA_ANALYSIS" as const,
+      waitStartedAt: "2026-07-22T12:00:00.000Z",
+    };
+    const overdue = prepareDeferredProcessingMetrics(
+      mediaWait,
+      "AWAITING_MEDIA_ANALYSIS",
+      new Date("2026-07-22T18:00:00.000Z")
+    );
+    expect(overdue).toEqual({
+      ...mediaWait,
+      waitDeadlineExceededAt: "2026-07-22T18:00:00.000Z",
+    });
+    expect(
+      prepareDeferredProcessingMetrics(
+        overdue,
+        "AWAITING_MEDIA_ANALYSIS",
+        new Date("2026-07-23T18:00:00.000Z")
+      ).waitDeadlineExceededAt
+    ).toBe("2026-07-22T18:00:00.000Z");
+  });
 });

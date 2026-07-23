@@ -39,6 +39,10 @@ import {
   ComposerAddAttachment,
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
+import {
+  RepositoryAwareUserMessageText,
+  RepositoryPromotionAccessProvider,
+} from "@/components/assistant-ui/repository-attachment-message";
 import { PromptSaveButton } from "@/app/(protected)/nexus/_components/chat/prompt-save-button";
 import { ComposerControls } from "@/app/(protected)/nexus/_components/chat/composer-controls";
 import type { SelectAiModel } from "@/types";
@@ -75,7 +79,9 @@ type AssistantContentComponents = typeof DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPO
  * extend the Thread props interface rather than exporting this context directly. */
 const AssistantContentComponentsContext = createContext<AssistantContentComponents>(DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS);
 
-const USER_MESSAGE_CONTENT_COMPONENTS = { Text: MarkdownText };
+const USER_MESSAGE_CONTENT_COMPONENTS = {
+  Text: RepositoryAwareUserMessageText,
+};
 
 const MOTION_FADE_IN = { y: 5, opacity: 0 };
 const MOTION_VISIBLE = { y: 0, opacity: 1 };
@@ -135,6 +141,8 @@ interface ThreadProps {
   toolFallback?: ToolCallMessagePartComponent;
   /** Extra action buttons to render in the composer action bar (e.g. voice mode button) */
   composerExtraActions?: React.ReactNode;
+  /** Whether the current user can promote Nexus attachments to durable repositories. */
+  canPromoteRepositoryAttachments?: boolean;
 }
 
 export const Thread: FC<ThreadProps> = ({
@@ -154,6 +162,7 @@ export const Thread: FC<ThreadProps> = ({
   suggestedActions,
   toolFallback,
   composerExtraActions,
+  canPromoteRepositoryAttachments = false,
 }) => {
   const contentComponents = useMemo(() =>
     toolFallback
@@ -176,45 +185,49 @@ export const Thread: FC<ThreadProps> = ({
   }), [selectedModel?.modelId, enabledTools, enabledConnectors]);
 
   return (
-    <AssistantContentComponentsContext.Provider value={contentComponents}>
-      <ChatConfigContext.Provider value={chatConfig}>
-      <ConversationIdContext.Provider value={conversationId || null}>
-        <ThreadPrimitive.Root
-          className="bg-white flex h-full flex-col"
-          style={THREAD_ROOT_STYLE}
-        >
-          <ThreadPrimitive.Viewport className="relative flex min-w-0 flex-1 h-0 flex-col gap-6 overflow-y-auto">
-            <ThreadWelcome conversationId={conversationId} />
+    <RepositoryPromotionAccessProvider
+      canPromote={canPromoteRepositoryAttachments}
+    >
+      <AssistantContentComponentsContext.Provider value={contentComponents}>
+        <ChatConfigContext.Provider value={chatConfig}>
+          <ConversationIdContext.Provider value={conversationId || null}>
+            <ThreadPrimitive.Root
+              className="bg-white flex h-full flex-col"
+              style={THREAD_ROOT_STYLE}
+            >
+              <ThreadPrimitive.Viewport className="relative flex min-w-0 flex-1 h-0 flex-col gap-6 overflow-y-auto">
+                <ThreadWelcome conversationId={conversationId} />
 
-            <ThreadPrimitive.Messages
-              components={messageComponents}
-            />
+                <ThreadPrimitive.Messages
+                  components={messageComponents}
+                />
 
-            <ThreadPrimitive.If empty={false}>
-              <motion.div className="min-h-6 min-w-6 shrink-0" />
-            </ThreadPrimitive.If>
-          </ThreadPrimitive.Viewport>
+                <ThreadPrimitive.If empty={false}>
+                  <motion.div className="min-h-6 min-w-6 shrink-0" />
+                </ThreadPrimitive.If>
+              </ThreadPrimitive.Viewport>
 
-          <Composer
-            processingAttachments={processingAttachments}
-            selectedModel={selectedModel}
-            onModelChange={onModelChange}
-            routingMode={routingMode}
-            modelFamily={modelFamily}
-            onRoutingModeChange={onRoutingModeChange}
-            onModelFamilyChange={onModelFamilyChange}
-            enabledTools={enabledTools}
-            onToolsChange={onToolsChange}
-            enabledConnectors={enabledConnectors}
-            onConnectorsChange={onConnectorsChange}
-            onReconnectSuccess={onReconnectSuccess}
-            suggestedActions={suggestedActions}
-            composerExtraActions={composerExtraActions}
-          />
-        </ThreadPrimitive.Root>
-      </ConversationIdContext.Provider>
-      </ChatConfigContext.Provider>
-    </AssistantContentComponentsContext.Provider>
+              <Composer
+                processingAttachments={processingAttachments}
+                selectedModel={selectedModel}
+                onModelChange={onModelChange}
+                routingMode={routingMode}
+                modelFamily={modelFamily}
+                onRoutingModeChange={onRoutingModeChange}
+                onModelFamilyChange={onModelFamilyChange}
+                enabledTools={enabledTools}
+                onToolsChange={onToolsChange}
+                enabledConnectors={enabledConnectors}
+                onConnectorsChange={onConnectorsChange}
+                onReconnectSuccess={onReconnectSuccess}
+                suggestedActions={suggestedActions}
+                composerExtraActions={composerExtraActions}
+              />
+            </ThreadPrimitive.Root>
+          </ConversationIdContext.Provider>
+        </ChatConfigContext.Provider>
+      </AssistantContentComponentsContext.Provider>
+    </RepositoryPromotionAccessProvider>
   );
 };
 

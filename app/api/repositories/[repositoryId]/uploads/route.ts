@@ -12,6 +12,7 @@ import {
   initiateRepositoryUpload,
   isCanonicalUploadContentType,
   isCanonicalRepositoryUploadActive,
+  RepositoryUploadQuotaExceededError,
 } from "@/lib/repositories/content-platform";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 
@@ -63,8 +64,18 @@ export async function POST(
     }
 
     const userId = await getUserIdFromSession(session.sub);
-    await assertNotSystemManagedRepository(repositoryId);
-    if (!(await canModifyRepository(repositoryId, userId))) {
+    // Repository kind/lifecycle and caller ownership form one non-disclosing
+    // boundary. Do not let status codes or guard exception text distinguish a
+    // foreign active repository from an absent, ephemeral, system, or inactive
+    // repository.
+    let canManageRepository = false;
+    try {
+      await assertNotSystemManagedRepository(repositoryId);
+      canManageRepository = await canModifyRepository(repositoryId, userId);
+    } catch {
+      canManageRepository = false;
+    }
+    if (!canManageRepository) {
       return NextResponse.json({ error: "Not found", requestId }, { status: 404 });
     }
 
@@ -96,9 +107,19 @@ export async function POST(
     log.error("Failed to initiate canonical repository upload", {
       error: error instanceof Error ? error.message : "Unknown error",
     });
+    if (error instanceof RepositoryUploadQuotaExceededError) {
+      return NextResponse.json(
+        {
+          error: "Repository upload quota exceeded",
+          code: error.code,
+          requestId,
+        },
+        { status: error.httpStatus }
+      );
+    }
     return NextResponse.json(
       {
-        error: error instanceof Error ? error.message : "Failed to initiate upload",
+        error: "Failed to initiate upload",
         requestId,
       },
       { status: 400 }

@@ -3,8 +3,10 @@ import { executeQuery } from "@/lib/db/drizzle-client";
 import { repositoryItemVersions } from "@/lib/db/schema";
 import {
   deleteDocument,
-  deleteRepositoryObjectsByPrefix,
+  deleteDocumentVersions,
+  deleteRepositoryObjectVersionsByPrefix,
 } from "@/lib/aws/s3-client";
+import { isRepositorySourceObjectKey } from "./object-key";
 
 export interface RepositoryStorageItem {
   id: number;
@@ -18,6 +20,12 @@ export interface RepositoryStorageCleanupResult {
   artifactObjectCount: number;
 }
 
+export interface RepositoryStorageTreeCleanupResult
+  extends RepositoryStorageCleanupResult {
+  itemCount: number;
+  repositoryObjectCount: number;
+}
+
 interface RepositoryStorageVersion {
   id: string;
   objectKey: string | null;
@@ -25,8 +33,9 @@ interface RepositoryStorageVersion {
 
 export interface RepositoryStorageCleanupDependencies {
   getVersions(itemId: number): Promise<RepositoryStorageVersion[]>;
-  deleteObject(key: string): Promise<void>;
-  deletePrefix(prefix: string): Promise<number>;
+  deleteObjectVersions(key: string): Promise<number>;
+  deleteLegacyObject(key: string): Promise<void>;
+  deletePrefixVersions(prefix: string): Promise<number>;
 }
 
 const defaultDependencies: RepositoryStorageCleanupDependencies = {
@@ -42,8 +51,21 @@ const defaultDependencies: RepositoryStorageCleanupDependencies = {
           .where(eq(repositoryItemVersions.itemId, itemId)),
       "contentPlatform.getItemStorageVersions"
     ),
-  deleteObject: deleteDocument,
-  deletePrefix: deleteRepositoryObjectsByPrefix,
+  deleteObjectVersions: deleteDocumentVersions,
+  deleteLegacyObject: deleteDocument,
+  deletePrefixVersions: deleteRepositoryObjectVersionsByPrefix,
+};
+
+export interface RepositoryStorageTreeCleanupDependencies {
+  deleteItemStorage(
+    item: RepositoryStorageItem
+  ): Promise<RepositoryStorageCleanupResult>;
+  deletePrefixVersions(prefix: string): Promise<number>;
+}
+
+const defaultTreeDependencies: RepositoryStorageTreeCleanupDependencies = {
+  deleteItemStorage: deleteRepositoryItemStorage,
+  deletePrefixVersions: deleteRepositoryObjectVersionsByPrefix,
 };
 
 /**
@@ -72,11 +94,30 @@ export async function deleteRepositoryItemStorage(
     if (version.objectKey?.trim()) sourceKeys.add(version.objectKey);
   }
 
-  const sourceDeletions = Array.from(sourceKeys, (key) =>
-    dependencies.deleteObject(key)
-  );
+  const canonicalSourceKeys: string[] = [];
+  const legacySourceKeys: string[] = [];
+  for (const key of sourceKeys) {
+    if (isRepositorySourceObjectKey(item.repositoryId, key)) {
+      canonicalSourceKeys.push(key);
+      continue;
+    }
+    // Never reinterpret a malformed or cross-repository canonical-looking key
+    // as a legacy object. Historical keys predate repositories/* entirely;
+    // anything in that namespace must belong to this repository or fail closed.
+    if (key.startsWith("repositories/")) {
+      throw new Error("Repository source object is outside its cleanup scope");
+    }
+    legacySourceKeys.push(key);
+  }
+
+  const sourceDeletions = [
+    ...canonicalSourceKeys.map((key) =>
+      dependencies.deleteObjectVersions(key)
+    ),
+    ...legacySourceKeys.map((key) => dependencies.deleteLegacyObject(key)),
+  ];
   const artifactDeletions = versions.map((version) =>
-    dependencies.deletePrefix(
+    dependencies.deletePrefixVersions(
       `repositories/${item.repositoryId}/artifacts/${version.id}/`
     )
   );
@@ -91,5 +132,46 @@ export async function deleteRepositoryItemStorage(
       (total, current) => total + current,
       0
     ),
+  };
+}
+
+/**
+ * Remove every item-owned source/artifact and then sweep the repository root.
+ *
+ * The final sweep removes abandoned upload objects and legacy or derived
+ * objects that never gained a durable item/version manifest. Callers
+ * must complete this operation before deleting the repository row: any storage
+ * failure deliberately rejects so the manifests remain available for retry.
+ */
+export async function deleteRepositoryStorageTree(
+  repositoryId: number,
+  items: RepositoryStorageItem[],
+  dependencies: RepositoryStorageTreeCleanupDependencies = defaultTreeDependencies
+): Promise<RepositoryStorageTreeCleanupResult> {
+  if (
+    !Number.isSafeInteger(repositoryId) ||
+    repositoryId < 1 ||
+    items.some((item) => item.repositoryId !== repositoryId)
+  ) {
+    throw new Error("Invalid repository storage cleanup scope");
+  }
+
+  let sourceObjectCount = 0;
+  let artifactObjectCount = 0;
+  for (const item of items) {
+    const result = await dependencies.deleteItemStorage(item);
+    sourceObjectCount += result.sourceObjectCount;
+    artifactObjectCount += result.artifactObjectCount;
+  }
+
+  const repositoryObjectCount = await dependencies.deletePrefixVersions(
+    `repositories/${repositoryId}/`
+  );
+
+  return {
+    itemCount: items.length,
+    sourceObjectCount,
+    artifactObjectCount,
+    repositoryObjectCount,
   };
 }

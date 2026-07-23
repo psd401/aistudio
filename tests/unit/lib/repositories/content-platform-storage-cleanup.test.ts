@@ -7,25 +7,31 @@ interface StoredVersion {
   objectKey: string | null;
 }
 
-const mockDeleteDocument = jest.fn<(key: string) => Promise<void>>();
-const mockDeleteRepositoryObjectsByPrefix = jest.fn<
+const mockDeleteObjectVersions = jest.fn<(key: string) => Promise<number>>();
+const mockDeleteLegacyObject = jest.fn<(key: string) => Promise<void>>();
+const mockDeleteRepositoryObjectVersionsByPrefix = jest.fn<
   (prefix: string) => Promise<number>
 >();
 
-import { deleteRepositoryItemStorage } from "@/lib/repositories/content-platform/storage-cleanup";
+import {
+  deleteRepositoryItemStorage,
+  deleteRepositoryStorageTree,
+} from "@/lib/repositories/content-platform/storage-cleanup";
 
 describe("canonical repository storage cleanup", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockDeleteDocument.mockResolvedValue(undefined);
-    mockDeleteRepositoryObjectsByPrefix.mockResolvedValue(0);
+    mockDeleteObjectVersions.mockResolvedValue(0);
+    mockDeleteLegacyObject.mockResolvedValue(undefined);
+    mockDeleteRepositoryObjectVersionsByPrefix.mockResolvedValue(0);
   });
 
   function dependencies(versions: StoredVersion[]) {
     return {
       getVersions: jest.fn(async () => versions),
-      deleteObject: mockDeleteDocument,
-      deletePrefix: mockDeleteRepositoryObjectsByPrefix,
+      deleteObjectVersions: mockDeleteObjectVersions,
+      deleteLegacyObject: mockDeleteLegacyObject,
+      deletePrefixVersions: mockDeleteRepositoryObjectVersionsByPrefix,
     };
   }
 
@@ -33,14 +39,16 @@ describe("canonical repository storage cleanup", () => {
     const cleanupDependencies = dependencies([
       {
         id: "11111111-2222-4333-8444-555555555555",
-        objectKey: "repositories/7/upload/source.png",
+        objectKey:
+          "repositories/7/11111111-2222-4333-8444-555555555555/source.png",
       },
       {
         id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-        objectKey: "repositories/7/upload/source-v2.png",
+        objectKey:
+          "repositories/7/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/source-v2.png",
       },
     ]);
-    mockDeleteRepositoryObjectsByPrefix
+    mockDeleteRepositoryObjectVersionsByPrefix
       .mockResolvedValueOnce(3)
       .mockResolvedValueOnce(2);
 
@@ -49,21 +57,23 @@ describe("canonical repository storage cleanup", () => {
         id: 41,
         repositoryId: 7,
         type: "image",
-        source: "repositories/7/upload/source.png",
+        source:
+          "repositories/7/11111111-2222-4333-8444-555555555555/source.png",
       }, cleanupDependencies)
     ).resolves.toEqual({ sourceObjectCount: 2, artifactObjectCount: 5 });
 
-    expect(mockDeleteDocument).toHaveBeenCalledTimes(2);
-    expect(mockDeleteDocument).toHaveBeenCalledWith(
-      "repositories/7/upload/source.png"
+    expect(mockDeleteObjectVersions).toHaveBeenCalledTimes(2);
+    expect(mockDeleteObjectVersions).toHaveBeenCalledWith(
+      "repositories/7/11111111-2222-4333-8444-555555555555/source.png"
     );
-    expect(mockDeleteDocument).toHaveBeenCalledWith(
-      "repositories/7/upload/source-v2.png"
+    expect(mockDeleteObjectVersions).toHaveBeenCalledWith(
+      "repositories/7/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/source-v2.png"
     );
-    expect(mockDeleteRepositoryObjectsByPrefix).toHaveBeenCalledWith(
+    expect(mockDeleteLegacyObject).not.toHaveBeenCalled();
+    expect(mockDeleteRepositoryObjectVersionsByPrefix).toHaveBeenCalledWith(
       "repositories/7/artifacts/11111111-2222-4333-8444-555555555555/"
     );
-    expect(mockDeleteRepositoryObjectsByPrefix).toHaveBeenCalledWith(
+    expect(mockDeleteRepositoryObjectVersionsByPrefix).toHaveBeenCalledWith(
       "repositories/7/artifacts/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/"
     );
   });
@@ -76,7 +86,7 @@ describe("canonical repository storage cleanup", () => {
           "repositories/7/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/inline.md",
       },
     ]);
-    mockDeleteRepositoryObjectsByPrefix.mockResolvedValueOnce(2);
+    mockDeleteRepositoryObjectVersionsByPrefix.mockResolvedValueOnce(2);
 
     await expect(
       deleteRepositoryItemStorage({
@@ -87,12 +97,12 @@ describe("canonical repository storage cleanup", () => {
       }, cleanupDependencies)
     ).resolves.toEqual({ sourceObjectCount: 1, artifactObjectCount: 2 });
 
-    expect(mockDeleteDocument).toHaveBeenCalledTimes(1);
-    expect(mockDeleteDocument).toHaveBeenCalledWith(
+    expect(mockDeleteObjectVersions).toHaveBeenCalledTimes(1);
+    expect(mockDeleteObjectVersions).toHaveBeenCalledWith(
       "repositories/7/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/inline.md"
     );
-    expect(mockDeleteDocument).not.toHaveBeenCalledWith("inline text");
-    expect(mockDeleteRepositoryObjectsByPrefix).toHaveBeenCalledWith(
+    expect(mockDeleteObjectVersions).not.toHaveBeenCalledWith("inline text");
+    expect(mockDeleteRepositoryObjectVersionsByPrefix).toHaveBeenCalledWith(
       "repositories/7/artifacts/11111111-2222-4333-8444-555555555555/"
     );
   });
@@ -107,7 +117,7 @@ describe("canonical repository storage cleanup", () => {
             `repositories/7/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/source.${type}`,
         },
       ]);
-      mockDeleteRepositoryObjectsByPrefix.mockResolvedValueOnce(4);
+      mockDeleteRepositoryObjectVersionsByPrefix.mockResolvedValueOnce(4);
 
       await expect(
         deleteRepositoryItemStorage(
@@ -122,10 +132,10 @@ describe("canonical repository storage cleanup", () => {
         )
       ).resolves.toEqual({ sourceObjectCount: 1, artifactObjectCount: 4 });
 
-      expect(mockDeleteDocument).toHaveBeenCalledWith(
+      expect(mockDeleteObjectVersions).toHaveBeenCalledWith(
         `repositories/7/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/source.${type}`
       );
-      expect(mockDeleteRepositoryObjectsByPrefix).toHaveBeenCalledWith(
+      expect(mockDeleteRepositoryObjectVersionsByPrefix).toHaveBeenCalledWith(
         "repositories/7/artifacts/11111111-2222-4333-8444-555555555555/"
       );
     }
@@ -158,9 +168,160 @@ describe("canonical repository storage cleanup", () => {
       )
     ).resolves.toEqual({ sourceObjectCount: 0, artifactObjectCount: 0 });
 
-    expect(mockDeleteDocument).not.toHaveBeenCalled();
-    expect(mockDeleteRepositoryObjectsByPrefix).not.toHaveBeenCalled();
+    expect(mockDeleteObjectVersions).not.toHaveBeenCalled();
+    expect(mockDeleteRepositoryObjectVersionsByPrefix).not.toHaveBeenCalled();
     expect(textDependencies.getVersions).toHaveBeenCalledWith(44);
     expect(urlDependencies.getVersions).toHaveBeenCalledWith(45);
+  });
+
+  it("retains the legacy DeleteObject path for historical file keys", async () => {
+    const cleanupDependencies = dependencies([
+      {
+        id: "11111111-2222-4333-8444-555555555555",
+        objectKey: null,
+      },
+    ]);
+
+    await expect(
+      deleteRepositoryItemStorage(
+        {
+          id: 46,
+          repositoryId: 7,
+          type: "document",
+          source: "42/1700000000-historical-policy.pdf",
+        },
+        cleanupDependencies
+      )
+    ).resolves.toEqual({ sourceObjectCount: 1, artifactObjectCount: 0 });
+
+    expect(mockDeleteLegacyObject).toHaveBeenCalledWith(
+      "42/1700000000-historical-policy.pdf"
+    );
+    expect(mockDeleteObjectVersions).not.toHaveBeenCalled();
+  });
+
+  it("propagates legacy storage failures so manifests remain retryable", async () => {
+    const cleanupDependencies = dependencies([]);
+    mockDeleteLegacyObject.mockRejectedValueOnce(
+      new Error("legacy storage unavailable")
+    );
+
+    await expect(
+      deleteRepositoryItemStorage(
+        {
+          id: 48,
+          repositoryId: 7,
+          type: "document",
+          source: "42/1700000000-historical-policy.pdf",
+        },
+        cleanupDependencies
+      )
+    ).rejects.toThrow("legacy storage unavailable");
+
+    expect(mockDeleteRepositoryObjectVersionsByPrefix).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for a canonical-looking key owned by another repository", async () => {
+    const cleanupDependencies = dependencies([]);
+
+    await expect(
+      deleteRepositoryItemStorage(
+        {
+          id: 47,
+          repositoryId: 7,
+          type: "document",
+          source:
+            "repositories/8/11111111-2222-4333-8444-555555555555/other.pdf",
+        },
+        cleanupDependencies
+      )
+    ).rejects.toThrow("outside its cleanup scope");
+
+    expect(mockDeleteLegacyObject).not.toHaveBeenCalled();
+    expect(mockDeleteObjectVersions).not.toHaveBeenCalled();
+    expect(mockDeleteRepositoryObjectVersionsByPrefix).not.toHaveBeenCalled();
+  });
+
+  it("cleans every item type before sweeping the complete repository prefix", async () => {
+    const items = ["text", "document", "image", "audio", "video"].map(
+      (type, index) => ({
+        id: index + 1,
+        repositoryId: 7,
+        type,
+        source: `source-${index + 1}`,
+      })
+    );
+    const deleteItemStorage = jest.fn(
+      async () => ({ sourceObjectCount: 1, artifactObjectCount: 2 })
+    );
+    const deletePrefixVersions = jest.fn(async () => 11);
+
+    await expect(
+      deleteRepositoryStorageTree(7, items, {
+        deleteItemStorage,
+        deletePrefixVersions,
+      })
+    ).resolves.toEqual({
+      itemCount: 5,
+      sourceObjectCount: 5,
+      artifactObjectCount: 10,
+      repositoryObjectCount: 11,
+    });
+
+    expect(deleteItemStorage).toHaveBeenCalledTimes(5);
+    for (const item of items) {
+      expect(deleteItemStorage).toHaveBeenCalledWith(item);
+    }
+    expect(deletePrefixVersions).toHaveBeenCalledWith("repositories/7/");
+    expect(deleteItemStorage.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      deletePrefixVersions.mock.invocationCallOrder[0]!
+    );
+  });
+
+  it("does not sweep or permit manifest deletion after item cleanup fails", async () => {
+    const deleteItemStorage = jest.fn(
+      async (): Promise<{
+        sourceObjectCount: number;
+        artifactObjectCount: number;
+      }> => {
+        throw new Error("storage unavailable");
+      }
+    );
+    const deletePrefixVersions = jest.fn(async () => 0);
+
+    await expect(
+      deleteRepositoryStorageTree(
+        7,
+        [
+          {
+            id: 1,
+            repositoryId: 7,
+            type: "document",
+            source: "repositories/7/source/document.pdf",
+          },
+        ],
+        { deleteItemStorage, deletePrefixVersions }
+      )
+    ).rejects.toThrow("storage unavailable");
+
+    expect(deletePrefixVersions).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mismatched item scope before touching storage", async () => {
+    const deleteItemStorage = jest.fn(
+      async () => ({ sourceObjectCount: 0, artifactObjectCount: 0 })
+    );
+    const deletePrefixVersions = jest.fn(async () => 0);
+
+    await expect(
+      deleteRepositoryStorageTree(
+        7,
+        [{ id: 1, repositoryId: 8, type: "text", source: "inline" }],
+        { deleteItemStorage, deletePrefixVersions }
+      )
+    ).rejects.toThrow("Invalid repository storage cleanup scope");
+
+    expect(deleteItemStorage).not.toHaveBeenCalled();
+    expect(deletePrefixVersions).not.toHaveBeenCalled();
   });
 });
