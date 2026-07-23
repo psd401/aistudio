@@ -24,7 +24,6 @@ jobs:
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
       with:
         bun-version: "1.2.x"
-        cache: true
 
     - name: Install dependencies
       run: bun install --frozen-lockfile
@@ -99,18 +98,25 @@ jobs:
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
       with:
         bun-version: "1.2.x"
-        cache: true
 
     - name: Install dependencies
       run: bun install --frozen-lockfile
 
     - name: Migrate and seed PostgreSQL
       run: |
-        bun run db:migrate
+        # Historical bootstrap predates strict migrations and is intentionally
+        # replayed the same way as init-local.sh. Unified-content migrations
+        # and every later migration are strict PR gates.
+        for migration in $(bun -e 'const manifest = await Bun.file("infra/database/migrations.json").json(); console.log([...manifest.initialSetupFiles, ...manifest.migrationFiles].filter((file) => Number.parseInt(file, 10) < 116).join("\n"));'); do
+          PGPASSWORD=postgres psql -v ON_ERROR_STOP=0 -h localhost -U postgres -d aistudio -f "infra/database/schema/${migration}"
+        done
+        for migration in $(bun -e 'const manifest = await Bun.file("infra/database/migrations.json").json(); console.log(manifest.migrationFiles.filter((file) => Number.parseInt(file, 10) >= 116).join("\n"));'); do
+          PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d aistudio -f "infra/database/schema/${migration}"
+        done
         PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d aistudio -f scripts/db/seed-local.sql
 
     - name: Run unified-content lifecycle smoke
-      run: bun run test:smoke:unified-content
+      run: bun run tests/smoke/unified-content-foundation.smoke.ts
       env:
         CI: true
 
@@ -135,7 +141,6 @@ jobs:
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
       with:
         bun-version: "1.2.x"
-        cache: true
 
     - name: Install dependencies
       run: |
