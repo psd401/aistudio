@@ -11,6 +11,11 @@
 export { contentService } from "./content-service";
 export type { DeletedContentSummary } from "./content-service";
 export { versionService } from "./version-service";
+export {
+  contentSourceService,
+  contentSourceEtag,
+  ifNoneMatchIncludes,
+} from "./source-read";
 export { visibilityService } from "./visibility-service";
 export { collectionService } from "./collection-service";
 export type { CollectionTreeNode } from "./collection-service";
@@ -62,6 +67,7 @@ export {
   NotFoundError,
   ValidationError,
   ConflictError,
+  StorageError,
   ApprovalRequiredError,
   isContentError,
 } from "./errors";
@@ -94,4 +100,5 @@ export type {
   ContentObjectDTO,
   ContentVersionDTO,
   ContentObjectWithVersion,
+  ContentSourceDTO,
 } from "./types";

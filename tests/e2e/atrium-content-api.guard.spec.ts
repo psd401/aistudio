@@ -50,6 +50,24 @@ test.describe("Atrium content v1 endpoints — unauthenticated 401 (always-run)"
     ).toBe(401);
   });
 
+  test("GET /api/v1/content/[id]/source -> 401", async ({ request }) => {
+    expect(
+      (await request.get(`/api/v1/content/${SOME_ID}/source`)).status()
+    ).toBe(401);
+  });
+
+  test("GET /api/v1/content/[id]/versions/[versionId]/source -> 401", async ({
+    request,
+  }) => {
+    expect(
+      (
+        await request.get(
+          `/api/v1/content/${SOME_ID}/versions/${SOME_ID}/source`
+        )
+      ).status()
+    ).toBe(401);
+  });
+
   test("POST /api/v1/content/[id]/versions -> 401", async ({ request }) => {
     const res = await request.post(`/api/v1/content/${SOME_ID}/versions`, {
       data: { body: "# probe" },

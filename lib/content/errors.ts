@@ -73,6 +73,16 @@ export class ConflictError extends ContentError {
   }
 }
 
+/** 503 — canonical content storage is temporarily unavailable or corrupt. */
+export class StorageError extends ContentError {
+  constructor(
+    message = "Content source is temporarily unavailable",
+    details?: Record<string, unknown>
+  ) {
+    super(message, "CONTENT_STORAGE_ERROR", 503, details);
+  }
+}
+
 /**
  * 409 — a public-facing publish was requested by a caller that lacks
  * `content:publish_public`; the request enters the approval queue rather than

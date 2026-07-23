@@ -26,7 +26,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Dirent } from "node:fs";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { Settings } from "@/lib/settings-manager";
 import { ErrorFactories } from "@/lib/error-utils";
@@ -135,6 +135,36 @@ async function readStreamToString(body: unknown): Promise<string> {
   );
 }
 
+async function readStreamToBoundedUtf8(
+  body: unknown,
+  maxBytes: number
+): Promise<string> {
+  const maybe = body as {
+    transformToByteArray?: () => Promise<Uint8Array>;
+  } | null;
+  if (!maybe || typeof maybe.transformToByteArray !== "function") {
+    throw ErrorFactories.sysInternalError(
+      "S3 object body does not support bounded reads"
+    );
+  }
+  const bytes = await maybe.transformToByteArray();
+  if (bytes.byteLength > maxBytes) {
+    throw ErrorFactories.validationFailed([
+      {
+        field: "body",
+        message: `Stored content exceeds the ${maxBytes}-byte read limit`,
+      },
+    ]);
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw ErrorFactories.validationFailed([
+      { field: "body", message: "Stored content is not valid UTF-8" },
+    ]);
+  }
+}
+
 export const s3Store = {
   /**
    * Build the canonical S3 key for a content object's per-version file.
@@ -220,6 +250,56 @@ export const s3Store = {
       throw ErrorFactories.sysInternalError("S3 object has no body", { key });
     }
     return readStreamToString(response.Body);
+  },
+
+  /**
+   * Read a UTF-8 object with a hard byte cap. Checks metadata before materializing
+   * the body and re-checks the received bytes for stores that omit ContentLength.
+   */
+  async getTextBounded(key: string, maxBytes: number): Promise<string> {
+    if (!Number.isInteger(maxBytes) || maxBytes < 1) {
+      throw ErrorFactories.validationFailed([
+        { field: "maxBytes", message: "maxBytes must be a positive integer" },
+      ]);
+    }
+    const localRoot = getLocalStorageRoot();
+    if (localRoot) {
+      const target = resolveLocalKey(localRoot, key);
+      const metadata = await stat(target);
+      if (metadata.size > maxBytes) {
+        throw ErrorFactories.validationFailed([
+          {
+            field: "body",
+            message: `Stored content exceeds the ${maxBytes}-byte read limit`,
+          },
+        ]);
+      }
+      const bytes = await readFile(target);
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw ErrorFactories.validationFailed([
+          { field: "body", message: "Stored content is not valid UTF-8" },
+        ]);
+      }
+    }
+    const client = await getClient();
+    const { bucket } = await getConfig();
+    const response = await client.send(
+      new GetObjectCommand({ Bucket: bucket, Key: key })
+    );
+    if (response.ContentLength != null && response.ContentLength > maxBytes) {
+      throw ErrorFactories.validationFailed([
+        {
+          field: "body",
+          message: `Stored content exceeds the ${maxBytes}-byte read limit`,
+        },
+      ]);
+    }
+    if (!response.Body) {
+      throw ErrorFactories.sysInternalError("S3 object has no body");
+    }
+    return readStreamToBoundedUtf8(response.Body, maxBytes);
   },
 
   /**

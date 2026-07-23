@@ -28,6 +28,10 @@ describe("Atrium local snapshot storage", () => {
     await s3Store.putText(key, "# Local body", "text/markdown");
 
     await expect(s3Store.getText(key)).resolves.toBe("# Local body");
+    await expect(s3Store.getTextBounded(key, 100)).resolves.toBe(
+      "# Local body"
+    );
+    await expect(s3Store.getTextBounded(key, 2)).rejects.toBeDefined();
   });
 
   it("deletes only the requested object's local tree", async () => {

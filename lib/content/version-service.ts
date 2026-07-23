@@ -25,6 +25,7 @@
  */
 
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import {
   executeQuery,
   executeTransaction,
@@ -49,11 +50,14 @@ import {
   ConflictError,
   ForbiddenError,
   NotFoundError,
+  StorageError,
   ValidationError,
 } from "./errors";
+import { MAX_DECODED_BODY_BYTES } from "./code-encoding";
 import type {
   BodyFormat,
   ContentVersionDTO,
+  ContentSourceDTO,
   Requester,
   SnapshotInput,
 } from "./types";
@@ -524,6 +528,61 @@ export const versionService = {
       "content.versionById"
     );
     return rows[0] ? rowToVersionDTO(rows[0] as VersionRowAsText) : null;
+  },
+
+  /**
+   * Read the exact canonical UTF-8 source for one committed version, regardless
+   * of whether it is inline, an artifact S3 object, or a Proof-backed document
+   * whose immutable markdown snapshot lives at `source.md`.
+   */
+  async loadSource(version: ContentVersionDTO): Promise<ContentSourceDTO> {
+    try {
+      let body: string;
+      if (version.bodyFormat === "markdown") {
+        body = await s3Store.getTextBounded(
+          s3Store.key(
+            version.objectId,
+            version.versionNumber,
+            "source.md"
+          ),
+          MAX_DECODED_BODY_BYTES
+        );
+      } else if (version.bodyLocation === "inline") {
+        body = version.bodyInline ?? "";
+        if (Buffer.byteLength(body, "utf8") > MAX_DECODED_BODY_BYTES) {
+          throw new StorageError();
+        }
+      } else {
+        body = await s3Store.getTextBounded(
+          version.bodyLocation,
+          MAX_DECODED_BODY_BYTES
+        );
+      }
+      return {
+        objectId: version.objectId,
+        versionId: version.id,
+        versionNumber: version.versionNumber,
+        bodyFormat: version.bodyFormat,
+        body,
+        sha256: createHash("sha256")
+          .update(body, "utf8")
+          .digest("base64url"),
+      };
+    } catch (error) {
+      if (error instanceof StorageError) throw error;
+      createLogger({ action: "content.loadSource" }).warn(
+        "Canonical source storage read failed",
+        {
+          objectId: version.objectId,
+          versionId: version.id,
+          errorName:
+            error instanceof Error ? error.name : "UnknownStorageError",
+        }
+      );
+      // Do not expose bucket names, object keys, presigned credentials, or raw
+      // SDK messages through the API error.
+      throw new StorageError();
+    }
   },
 
   /**

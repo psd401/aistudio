@@ -1725,6 +1725,128 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /content/{id}/source:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+    get:
+      operationId: getCurrentContentSource
+      tags: [Content]
+      summary: Read the current committed source snapshot
+      description: |
+        Returns the exact canonical UTF-8 source of the current committed version.
+        This is an immutable snapshot alias, not unsnapshotted live collaborative
+        state. Requires `content:read`; object visibility is checked before storage.
+        Missing and unviewable objects both return `404`.
+
+        The strong `ETag` is the current version id. `If-None-Match` returns `304`
+        when the head has not changed. Because the alias can advance and permissions
+        can change, responses use `Cache-Control: private, no-store`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Current canonical source.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentSourceResponse"
+          headers:
+            ETag:
+              schema: { type: string }
+              description: Quoted current version id.
+            Cache-Control:
+              schema: { type: string, example: "private, no-store" }
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+        "304":
+          description: The current head matches `If-None-Match`; no body.
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ContentStorageUnavailable"
+
+  /content/{id}/versions/{versionId}/source:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+      - name: versionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getContentVersionSource
+      tags: [Content]
+      summary: Read a specific immutable version source
+      description: |
+        Returns the exact canonical UTF-8 source for one retained version. The
+        version id is scoped to `{id}`; a version from another object returns the
+        same `404` as an absent version. Requires `content:read` and checks object
+        visibility before version/storage access.
+
+        The strong `ETag` is the immutable version id. Clients may revalidate with
+        `If-None-Match`; the response is private and must revalidate so a later
+        visibility revocation is enforced. Bodies are never redirected to S3.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Specific immutable canonical source.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentSourceResponse"
+          headers:
+            ETag:
+              schema: { type: string }
+              description: Quoted immutable version id.
+            Cache-Control:
+              schema:
+                {
+                  type: string,
+                  example: "private, no-cache, must-revalidate",
+                }
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+        "304":
+          description: The version matches `If-None-Match`; no body.
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ContentStorageUnavailable"
+
   /content/{id}/visibility:
     parameters:
       - $ref: "#/components/parameters/contentIdPath"
@@ -3481,6 +3603,47 @@ components:
             count:
               type: integer
 
+    ContentSource:
+      type: object
+      additionalProperties: false
+      required:
+        [objectId, versionId, versionNumber, bodyFormat, body, sha256]
+      properties:
+        objectId:
+          type: string
+          format: uuid
+        versionId:
+          type: string
+          format: uuid
+        versionNumber:
+          type: integer
+          minimum: 1
+        bodyFormat:
+          type: string
+          enum: [markdown, html, jsx]
+        body:
+          type: string
+          description: |
+            Exact committed UTF-8 source. Storage is uncompressed; no
+            content-encoding transformation is applied. The decoded body is
+            bounded to 5,000,000 bytes.
+        sha256:
+          type: string
+          description: Base64url-encoded SHA-256 of the UTF-8 body.
+
+    ContentSourceResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ContentSource"
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
     ContentVisibilityResponse:
       type: object
       required: [data, meta]
@@ -3937,6 +4100,16 @@ components:
 
     InternalError:
       description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+
+    ContentStorageUnavailable:
+      description: Canonical source storage is unavailable or invalid.
       content:
         application/json:
           schema:

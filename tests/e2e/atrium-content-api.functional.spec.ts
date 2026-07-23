@@ -146,6 +146,37 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     expect(fetched?.data?.version?.bodyInline).toBe(code)
   })
 
+  test('canonical current and historic source reads return exact bodies and 304 ETags', async ({
+    page,
+  }) => {
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    const markdown = '# Source read e2e\n\nImmutable body.'
+    const create = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'document',
+        title: 'e2e source read',
+        body: markdown,
+        bodyFormat: 'markdown',
+      },
+    })
+    expect(create.status()).toBe(201)
+    const created = await create.json()
+    const id = created.data.id as string
+    const versionId = created.data.version.id as string
+
+    const current = await page.request.get(`/api/v1/content/${id}/source`)
+    expect(current.status()).toBe(200)
+    expect((await current.json()).data.body).toBe(markdown)
+    expect(current.headers()['etag']).toBe(`"${versionId}"`)
+
+    const historic = await page.request.get(
+      `/api/v1/content/${id}/versions/${versionId}/source`,
+      { headers: { 'If-None-Match': `"${versionId}"` } }
+    )
+    expect(historic.status()).toBe(304)
+    expect(await historic.text()).toBe('')
+  })
+
   test('codeEncoding base64 with an invalid body -> 400 (never silently stored)', async ({
     page,
   }) => {

@@ -875,6 +875,7 @@ applied or downgraded.
 | 403 | `CONTENT_FORBIDDEN` | The caller may not edit / act on this object. |
 | 404 | `CONTENT_NOT_FOUND` | The object does not exist — or is not visible to the caller (reads are 404-masked). |
 | 409 | `CONTENT_CONFLICT` | Slug collision or version-number race. |
+| 503 | `CONTENT_STORAGE_ERROR` | Canonical source storage is unavailable, oversized, or invalid; storage coordinates are not exposed. |
 
 > The public-publish gate surfaces as a `202` **success** whose body is
 > `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
@@ -1239,6 +1240,48 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 **Response `201`** — the object joined with its new current `version` (no `url`).
 **Response `404`** — `CONTENT_NOT_FOUND`.
 **Response `409`** — `CONTENT_CONFLICT` (version-number race).
+
+---
+
+### Canonical source reads (#1288)
+
+- `GET /api/v1/content/{id}/source` reads the current committed snapshot.
+- `GET /api/v1/content/{id}/versions/{versionId}/source` reads a specific retained
+  immutable version.
+
+Both require `content:read` and run the normal object `canView` check before the
+version lookup or storage read. An invisible object, missing version, or a version
+that belongs to another object all return `404 CONTENT_NOT_FOUND`; version ids
+cannot be used to probe unrelated content.
+
+```json
+{
+  "data": {
+    "objectId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "versionId": "22222222-3333-4444-8555-666666666666",
+    "versionNumber": 4,
+    "bodyFormat": "markdown",
+    "body": "# Guide title\n...",
+    "sha256": "base64url-sha256"
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+The body is the exact UTF-8 string supplied at snapshot time: document markdown
+comes from its immutable `source.md`, small artifacts from `body_inline`, and
+larger artifacts from their immutable Atrium object. Storage is uncompressed; no
+decompression or content-encoding transform occurs. Reads are capped at the
+existing 5,000,000-byte decoded-body limit. A storage failure returns typed
+`503 CONTENT_STORAGE_ERROR` without bucket names, object keys, or presigned URLs.
+
+The `ETag` is the quoted version id. `If-None-Match` (including weak/list
+validators) returns `304` with no body. The current alias uses
+`Cache-Control: private, no-store` because its head can change. Specific immutable
+versions use `private, no-cache, must-revalidate`: their bytes and ETag do not
+change, but every reuse revalidates permission so a visibility revocation takes
+effect. These endpoints expose committed snapshots only, never unsnapshotted live
+Proof/collaborative state.
 
 ---
 
