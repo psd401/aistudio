@@ -432,6 +432,14 @@ describe("UnifiedContentProcessing", () => {
       "data-automation-profile/us.data-automation-v1"
     );
     expect(JSON.stringify(invoke?.Resource)).toContain("ProjectArn");
+    expect(JSON.stringify(invoke?.Resource)).toContain(
+      "data-automation-invocation/*"
+    );
+    expect(
+      statements.some((statement) =>
+        JSON.stringify(statement.Action).includes("bedrock:TagResource")
+      )
+    ).toBe(false);
     expect(status?.Action).toBe("bedrock:GetDataAutomationStatus");
     expect(JSON.stringify(status?.Resource)).toContain(
       "data-automation-invocation/*"

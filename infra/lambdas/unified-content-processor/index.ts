@@ -331,7 +331,6 @@ async function downloadJsonObject(objectKey: string): Promise<unknown> {
 
 async function startMediaAnalysis(input: {
   clientToken: string;
-  jobId: string;
   sourceObjectKey: string;
   outputPrefix: string;
 }): Promise<string> {
@@ -349,10 +348,6 @@ async function startMediaAnalysis(input: {
         stage: "LIVE",
       },
       dataAutomationProfileArn,
-      tags: [
-        { key: "ManagedBy", value: "aistudio" },
-        { key: "RepositoryProcessingJob", value: input.jobId },
-      ],
     }),
   );
   if (!result.invocationArn) {
@@ -1026,7 +1021,6 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
     if (!invocationArn) {
       invocationArn = await startMediaAnalysis({
         clientToken,
-        jobId: message.jobId,
         sourceObjectKey: context.objectKey,
         outputPrefix: bdaState.outputPrefix,
       });

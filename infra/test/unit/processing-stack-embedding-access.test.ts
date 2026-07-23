@@ -104,4 +104,29 @@ describe('ProcessingStack embedding visual-artifact access', () => {
       TreatMissingData: 'notBreaching',
     });
   });
+
+  it('routes group-sync alarms through the shared monitoring topic', () => {
+    const alarms = Object.values(
+      template.findResources('AWS::CloudWatch::Alarm'),
+    );
+
+    for (const alarmName of [
+      'psd-group-sync-failure-dev',
+      'psd-group-sync-staleness-dev',
+    ]) {
+      const alarm = alarms.find((resource) =>
+        JSON.stringify(resource).includes(`\"AlarmName\":\"${alarmName}\"`),
+      );
+      expect(alarm).toBeDefined();
+      expect(JSON.stringify(alarm)).toContain(
+        'aistudio-dev-monitoring-alarms',
+      );
+      expect(JSON.stringify(alarm)).not.toContain('psd-group-sync-alarms-dev');
+    }
+
+    const topics = template.findResources('AWS::SNS::Topic');
+    expect(JSON.stringify(topics)).not.toContain('psd-group-sync-alarms-dev');
+    const subscriptions = template.findResources('AWS::SNS::Subscription');
+    expect(JSON.stringify(subscriptions)).not.toContain('"Protocol":"email"');
+  });
 });

@@ -105,8 +105,9 @@ The Lambda emits CloudWatch metrics in namespace **`AIStudio/GroupSync`** (dimen
 `GroupsDeactivated`, `MembersTotal`, `RolesGranted`, `RolesRevoked`,
 `RoleUsersChanged`, `SyncRunFailed`, and `SyncRunSucceeded`.
 
-Two alarms are defined in `infra/lib/processing-stack.ts` (notify the `alertEmail`
-CDK-context address when set):
+Two alarms are defined in `infra/lib/processing-stack.ts`. Both publish to the
+shared `aistudio-<environment>-monitoring-alarms` topic owned by MonitoringStack;
+that stack owns email and other delivery subscriptions:
 
 | Alarm | Fires when | Why |
 |---|---|---|
@@ -118,9 +119,11 @@ CDK-context address when set):
 > emitting `SyncRunSucceeded`, so the metric is permanently absent and
 > `psd-group-sync-staleness-<env>` sits in **ALARM** by design (`treatMissingData:
 > BREACHING`). This is expected onboarding noise, not an incident — notifications are
-> gated on `alertEmail`, so no page fires. It clears on the first successful sync once
-> the service account is configured. If an environment will never use group sync,
-> disable the alarm rather than leaving it red.
+> delivered through the shared monitoring topic. It clears on the first successful
+> sync once the service account is configured. Before enabling group sync in a new
+> environment, deploy MonitoringStack and confirm at least one delivery endpoint. If
+> an environment will never use group sync, disable the alarm rather than leaving it
+> red.
 
 Per-group failures are surfaced in **Admin → Groups**: each group shows a "Failed"
 badge (with the `last_sync_error` as tooltip) and `last_synced_at`; the header shows
@@ -130,7 +133,8 @@ an aggregate "Failed syncs" count (`groups.last_sync_error IS NOT NULL AND is_ac
 
 1. **Failure alarm**: temporarily point `GOOGLE_DIRECTORY_SA_SECRET_ARN` at a bad
    secret (or invoke with the SA secret revoked) so a run throws; confirm
-   `psd-group-sync-failure-<env>` → ALARM and the email fires; restore the setting.
+   `psd-group-sync-failure-<env>` → ALARM and the shared monitoring notification
+   fires; restore the setting.
 2. **Staleness alarm**: set `GROUP_SYNC_ENABLED=false` and let 3 hourly windows pass
    with no manual run; confirm `psd-group-sync-staleness-<env>` → ALARM (missing data
    breaches); re-enable and run "Sync now" to clear it.
