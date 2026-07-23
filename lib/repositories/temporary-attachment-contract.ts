@@ -71,7 +71,7 @@ export function parseTemporaryAttachmentMarkers(
     }
     const key = `${bindingId}:${itemId}`;
     if (seen.has(key)) continue;
-    let name = "attachment";
+    let name: string;
     try {
       name = sanitizeTemporaryAttachmentName(decodeURIComponent(encodedName));
     } catch {

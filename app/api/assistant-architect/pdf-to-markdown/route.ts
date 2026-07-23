@@ -67,7 +67,7 @@ export async function POST(req: NextRequest) {
     headers,
     log,
     timer
-  )
+  );
 }
 
 async function processAuthenticatedPdfUpload(

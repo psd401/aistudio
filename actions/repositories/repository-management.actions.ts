@@ -138,14 +138,17 @@ export async function getRepositoryItemManagementView(
   })
 
   try {
-    if (!Number.isSafeInteger(itemId) || itemId <= 0) {
-      throw ErrorFactories.invalidInput("itemId", itemId, "A positive item id is required")
-    }
-
+    // Authenticate before branching on caller-controlled identifiers. Besides
+    // keeping the action non-disclosing, this prevents invalid IDs from
+    // bypassing the same session/capability gate applied to valid records.
     const session = await getServerSession()
     if (!session) throw ErrorFactories.authNoSession()
     if (!(await hasCapabilityAccess("knowledge-repositories"))) {
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
+    }
+
+    if (!Number.isSafeInteger(itemId) || itemId <= 0) {
+      throw ErrorFactories.invalidInput("itemId", itemId, "A positive item id is required")
     }
 
     await assertItemRepositoryReadAccess(itemId, session.sub)

@@ -203,4 +203,17 @@ describe("repository item management projection", () => {
     expect(mockGetRepositoryItemById).not.toHaveBeenCalled()
     expect(mockExecuteQuery).not.toHaveBeenCalled()
   })
+
+  it("authenticates before branching on a caller-controlled item id", async () => {
+    mockGetServerSession.mockResolvedValue(null)
+
+    const result = await getRepositoryItemManagementView(-1)
+
+    expect(result.isSuccess).toBe(false)
+    expect(mockGetServerSession).toHaveBeenCalledTimes(1)
+    expect(mockHasCapabilityAccess).not.toHaveBeenCalled()
+    expect(mockAssertItemRepositoryReadAccess).not.toHaveBeenCalled()
+    expect(mockGetRepositoryItemById).not.toHaveBeenCalled()
+    expect(mockExecuteQuery).not.toHaveBeenCalled()
+  })
 })
