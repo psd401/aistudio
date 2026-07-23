@@ -54,6 +54,13 @@ export const AGENT_DWD_SCOPES = [
   "https://www.googleapis.com/auth/meetings.space.created",
   "https://www.googleapis.com/auth/chat.messages",
   "https://www.googleapis.com/auth/chat.spaces",
+  // v3 (2026-07-16): members.list/create in agent-managed spaces 403'd
+  // "insufficient authentication scopes" without chat.memberships;
+  // chat.memberships.app lets the agent add/remove the PSD Chat app itself.
+  "https://www.googleapis.com/auth/chat.memberships",
+  "https://www.googleapis.com/auth/chat.memberships.app",
+  // v3: agent-slot task lists (user-slot tasks ride the consent OAuth flow).
+  "https://www.googleapis.com/auth/tasks",
   "https://www.googleapis.com/auth/directory.readonly",
 ] as const
 
