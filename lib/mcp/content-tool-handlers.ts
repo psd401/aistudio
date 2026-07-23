@@ -45,6 +45,10 @@ import {
   restVisibilitySchema as visibilityZ,
 } from "@/lib/content/rest";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
+import {
+  captureAuditDetails,
+  contentSourceRefSchema,
+} from "@/lib/content/source-ref";
 import type { McpToolContext, McpToolHandler, McpToolResult } from "./types";
 
 // ============================================
@@ -167,6 +171,7 @@ const createDocumentSchema = z.object({
   codeEncoding: z.enum(["base64"]).optional(),
   visibility: visibilityZ.optional(),
   tags: z.array(z.string()).optional(),
+  sourceRef: contentSourceRefSchema.optional(),
 });
 
 /**
@@ -184,6 +189,7 @@ async function createContent(
     collection?: string;
     visibility?: z.infer<typeof visibilityZ>;
     tags?: string[];
+    sourceRef?: z.infer<typeof contentSourceRefSchema>;
   },
   body: {
     body?: string;
@@ -212,6 +218,7 @@ async function createContent(
         bodyFormat: body.bodyFormat,
         visibility: common.visibility,
         tags: common.tags,
+        sourceRef: common.sourceRef,
       },
       { hasPublishPublicCapability }
     );
@@ -221,6 +228,7 @@ async function createContent(
       surface: "mcp",
       objectId: created.id,
       outcome: "ok",
+      details: captureAuditDetails(common.sourceRef),
       requestId: context.requestId,
     });
     return ok({
@@ -228,6 +236,7 @@ async function createContent(
       slug: created.slug,
       url: contentDeepLink(created.slug),
       visibilityLevel: created.visibilityLevel,
+      sourceRef: created.sourceRef,
     });
   } catch (err) {
     return fail(err, { req, action: "create", requestId: context.requestId });
@@ -240,12 +249,12 @@ async function handleCreateDocument(
 ): Promise<McpToolResult> {
   const parsed = createDocumentSchema.safeParse(args);
   if (!parsed.success) return zodFail(parsed.error);
-  const { title, collection, markdown, codeEncoding, visibility, tags } =
+  const { title, collection, markdown, codeEncoding, visibility, tags, sourceRef } =
     parsed.data;
   return createContent(
     context,
     "document",
-    { title, collection, visibility, tags },
+    { title, collection, visibility, tags, sourceRef },
     { body: markdown, bodyFormat: markdown ? "markdown" : undefined, codeEncoding }
   );
 }
@@ -262,6 +271,7 @@ const createArtifactSchema = z.object({
   codeEncoding: z.enum(["base64"]).optional(),
   visibility: visibilityZ.optional(),
   tags: z.array(z.string()).optional(),
+  sourceRef: contentSourceRefSchema.optional(),
 });
 
 async function handleCreateArtifact(
@@ -270,12 +280,21 @@ async function handleCreateArtifact(
 ): Promise<McpToolResult> {
   const parsed = createArtifactSchema.safeParse(args);
   if (!parsed.success) return zodFail(parsed.error);
-  const { title, collection, code, bodyFormat, codeEncoding, visibility, tags } =
+  const {
+    title,
+    collection,
+    code,
+    bodyFormat,
+    codeEncoding,
+    visibility,
+    tags,
+    sourceRef,
+  } =
     parsed.data;
   return createContent(
     context,
     "artifact",
-    { title, collection, visibility, tags },
+    { title, collection, visibility, tags, sourceRef },
     { body: code, bodyFormat, codeEncoding }
   );
 }
@@ -301,6 +320,7 @@ async function handleGetContent(
       status: obj.status,
       visibilityLevel: obj.visibilityLevel,
       tags: obj.tags,
+      sourceRef: obj.sourceRef,
       currentVersion: obj.version
         ? {
             id: obj.version.id,
@@ -352,6 +372,7 @@ async function handleListContent(
         title: o.title,
         status: o.status,
         visibilityLevel: o.visibilityLevel,
+        sourceRef: o.sourceRef,
       })),
     });
   } catch (err) {

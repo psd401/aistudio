@@ -94,6 +94,26 @@ function isUniqueViolation(error: unknown): boolean {
   );
 }
 
+function uniqueConstraint(error: unknown): string | null {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "constraint_name" in error &&
+    typeof error.constraint_name === "string"
+  ) {
+    return error.constraint_name;
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "constraint" in error &&
+    typeof error.constraint === "string"
+  ) {
+    return error.constraint;
+  }
+  return null;
+}
+
 /**
  * Allocate a unique slug for a title within the create transaction.
  *
@@ -432,6 +452,18 @@ export const contentService = {
           .returning(objectSelectFields)
           .catch((e: unknown) => {
             if (isUniqueViolation(e)) {
+              if (
+                uniqueConstraint(e) === "uq_content_capture_source" &&
+                input.sourceRef?.type === "capture"
+              ) {
+                throw new ConflictError(
+                  "This capture session already created a content object",
+                  {
+                    provider: input.sourceRef.provider,
+                    externalId: input.sourceRef.externalId,
+                  }
+                );
+              }
               throw new ConflictError("A content object with this slug already exists", {
                 slug,
               });

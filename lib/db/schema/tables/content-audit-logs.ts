@@ -42,6 +42,10 @@ export interface ContentAuditDetails {
   ownerUserId?: number;
   /** How many immutable version rows cascaded away with the object. */
   versionsDeleted?: number;
+  /** Safe capture provenance correlation; never raw step or page content. */
+  sourceProvider?: string;
+  sourceExternalId?: string;
+  clientSurface?: "browser" | "mac";
 }
 
 export const contentAuditLogs = pgTable("content_audit_logs", {

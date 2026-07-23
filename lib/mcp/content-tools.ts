@@ -22,6 +22,8 @@ const GRANTS_DESC =
   "Group grants: [{ kind: 'role'|'building'|'department'|'grade'|'user'|'group', value: string }]";
 const CODE_ENCODING_DESC =
   "Transit encoding for the body. Set 'base64' when the body/code contains HTML/JS/CSS (<script>, <style>, style=\"…\") — the edge WAF blocks that markup in a raw request body, so send the body base64-encoded and the server decodes it before screening. Omit for plain text/markdown.";
+const SOURCE_REF_DESC =
+  "Create-only structured provenance. Capture clients use { type: 'capture', provider, externalId, clientSurface: 'browser'|'mac', clientVersion, capturedAt, sourceOrigins? }. Source origins are normalized to scheme+host+port; arbitrary telemetry is rejected.";
 
 export const CONTENT_TOOL_SCOPE_MAP: Record<string, ApiScope> = {
   create_document: "content:create",
@@ -64,6 +66,7 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
         },
         visibility: { type: "object", description: VISIBILITY_DESC },
         tags: { type: "array", items: { type: "string" }, description: "Tags" },
+        sourceRef: { type: "object", description: SOURCE_REF_DESC },
       },
       required: ["title"],
     },
@@ -86,6 +89,7 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
         },
         visibility: { type: "object", description: VISIBILITY_DESC },
         tags: { type: "array", items: { type: "string" }, description: "Tags" },
+        sourceRef: { type: "object", description: SOURCE_REF_DESC },
       },
       required: ["title", "code", "bodyFormat"],
     },

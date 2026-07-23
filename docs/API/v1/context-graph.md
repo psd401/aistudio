@@ -952,6 +952,20 @@ initial version (v1) is snapshotted. Requires `content:create`.
 | `codeEncoding` | `base64` | no | Transit encoding for `body` (see below) |
 | `visibility` | object | no | `{ level, grants? }` (see Visibility below). Defaults to the collection default, else `private` |
 | `tags` | string[] | no | — |
+| `sourceRef` | object | no | Create-only typed provenance; see Capture provenance below |
+
+**Capture provenance (#1290):** Atrium Capture may send
+`sourceRef: { type: "capture", provider, externalId, clientSurface, clientVersion,
+capturedAt, sourceOrigins? }`. `clientSurface` is `browser` or `mac`; identifiers
+are bounded and unknown fields are rejected. At most 20 `sourceOrigins` may be
+sent. Only HTTP(S) origins are retained: paths, queries, and fragments are
+discarded, credentials and invalid/non-network URLs are rejected, duplicates are
+removed, and district policy can disable origin retention entirely with
+`ATRIUM_CAPTURE_SOURCE_ORIGINS_ENABLED=false`. The reference is immutable through
+metadata updates. `(owner, provider, externalId)` is unique for capture references,
+so a permanently repeated recorder session returns `409 CONTENT_CONFLICT` without
+creating a second object. Audit/support records include only the provider,
+external id, and client surface—never captured steps, typed values, or page text.
 
 **Artifact code with JS/CSS — `codeEncoding: "base64"`:** artifacts are self-contained
 HTML/JS/CSS, so their code legitimately contains `<script>`, `<style>`, and inline
@@ -1519,7 +1533,7 @@ curl -X POST -H "Authorization: Bearer <agent-oidc-jwt>" \
 | `collectionId` | UUID \| null | Owning collection |
 | `visibilityLevel` | `private` \| `group` \| `internal` \| `public` | Effective visibility level |
 | `currentVersionId` | UUID \| null | Current version pointer |
-| `sourceRef` | object \| null | Provenance reference when imported |
+| `sourceRef` | typed object \| null | Create-only provenance (`capture`, `upload`, `object`, `chat`, `okf`, or `none`); known variants reject additional properties |
 | `tags` | string[] | Free-form tags |
 | `status` | `draft` \| `published` \| `archived` | Lifecycle status |
 | `indexedAt` | ISO 8601 \| null | Last search-index time |

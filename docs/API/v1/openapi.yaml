@@ -3029,10 +3029,10 @@ components:
           format: uuid
           nullable: true
         sourceRef:
-          type: object
-          nullable: true
-          additionalProperties: true
-          description: Provenance reference for content created from another source.
+          oneOf:
+            - $ref: "#/components/schemas/ContentSourceRef"
+            - type: "null"
+          description: Typed, create-only provenance reference.
         tags:
           type: array
           items:
@@ -3052,6 +3052,82 @@ components:
           type: string
           format: date-time
           nullable: true
+
+    ContentSourceRef:
+      oneOf:
+        - $ref: "#/components/schemas/CaptureSourceRef"
+        - type: object
+          additionalProperties: false
+          required: [type, uploadId, filename]
+          properties:
+            type: { type: string, enum: [upload] }
+            uploadId: { type: string, maxLength: 200 }
+            filename: { type: string, maxLength: 500 }
+        - type: object
+          additionalProperties: false
+          required: [type, objectId]
+          properties:
+            type: { type: string, enum: [object] }
+            objectId: { type: string, format: uuid }
+        - type: object
+          additionalProperties: false
+          required: [type, conversationId]
+          properties:
+            type: { type: string, enum: [chat] }
+            conversationId: { type: string, format: uuid }
+        - type: object
+          additionalProperties: false
+          required: [type, generator]
+          properties:
+            type: { type: string, enum: [okf] }
+            generator: { type: string, maxLength: 200 }
+        - type: object
+          additionalProperties: false
+          required: [type]
+          properties:
+            type: { type: string, enum: [none] }
+      discriminator:
+        propertyName: type
+
+    CaptureSourceRef:
+      type: object
+      additionalProperties: false
+      required:
+        [type, provider, externalId, clientSurface, clientVersion, capturedAt]
+      description: |
+        Safe content-level provenance supplied by Atrium Capture. `sourceOrigins`
+        is optional and policy-controlled; each entry is normalized to its
+        HTTP(S) origin, so paths, queries, fragments, and credentials are never
+        retained. The reference is immutable after create.
+      properties:
+        type: { type: string, enum: [capture] }
+        provider:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        externalId:
+          type: string
+          minLength: 1
+          maxLength: 200
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        clientSurface:
+          type: string
+          enum: [browser, mac]
+        clientVersion:
+          type: string
+          minLength: 1
+          maxLength: 64
+        capturedAt:
+          type: string
+          format: date-time
+        sourceOrigins:
+          type: array
+          maxItems: 20
+          uniqueItems: true
+          items:
+            type: string
+            format: uri
 
     ContentVersion:
       type: object
@@ -3167,6 +3243,8 @@ components:
           type: array
           items:
             type: string
+        sourceRef:
+          $ref: "#/components/schemas/ContentSourceRef"
 
     UpdateContentRequest:
       type: object

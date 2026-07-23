@@ -141,6 +141,34 @@ describe("POST /api/v1/content — codeEncoding decode", () => {
     );
   });
 
+  it("passes validated capture provenance to the create service", async () => {
+    const sourceRef = {
+      type: "capture",
+      provider: "atrium-capture",
+      externalId: "capture-session-123",
+      clientSurface: "browser",
+      clientVersion: "1.0.0",
+      capturedAt: "2026-07-23T03:15:00.000Z",
+      sourceOrigins: ["https://example.edu"],
+    };
+    mockParseRequestBody.mockResolvedValue({
+      data: {
+        kind: "document",
+        title: "Captured guide",
+        body: "# guide",
+        sourceRef,
+      },
+    });
+
+    await createHandler(request, AUTH, "req-source");
+
+    expect(mockCreate).toHaveBeenCalledWith(
+      REQ,
+      expect.objectContaining({ sourceRef }),
+      expect.anything()
+    );
+  });
+
   it("rejects an invalid base64 body with a 400 and never calls the service", async () => {
     mockParseRequestBody.mockResolvedValue({
       data: {

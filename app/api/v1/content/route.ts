@@ -35,6 +35,10 @@ import {
 } from "@/lib/content/surface-helpers";
 import { decodeContentBody } from "@/lib/content/code-encoding";
 import { createLogger } from "@/lib/logger";
+import {
+  captureAuditDetails,
+  contentSourceRefSchema,
+} from "@/lib/content/source-ref";
 
 const listQuerySchema = z.object({
   kind: z.enum(["document", "artifact"]).optional(),
@@ -58,6 +62,7 @@ const createBodySchema = z.object({
   codeEncoding: z.enum(["base64"]).optional(),
   visibility: restVisibilitySchema.optional(),
   tags: z.array(z.string()).optional(),
+  sourceRef: contentSourceRefSchema.optional(),
 });
 
 // ============================================
@@ -147,6 +152,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
         bodyFormat: input.bodyFormat,
         visibility: input.visibility,
         tags: input.tags,
+        sourceRef: input.sourceRef,
       },
       { hasPublishPublicCapability }
     );
@@ -156,6 +162,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       surface: "rest",
       objectId: created.id,
       outcome: "ok",
+      details: captureAuditDetails(input.sourceRef),
       requestId,
     });
     // §26.4 create-as-private (issue #1118 item 2): an unauthorized public create

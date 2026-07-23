@@ -119,6 +119,7 @@
     "122-unified-content-runtime-recovery.sql",
     "123-unified-content-postdeploy-handoff.sql",
     "124-unified-content-artifact-state-recovery.sql",
-    "125-nexus-ephemeral-repositories.sql"
+    "125-nexus-ephemeral-repositories.sql",
+    "126-atrium-capture-source-ref.sql"
   ]
 }
