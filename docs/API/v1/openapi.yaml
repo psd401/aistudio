@@ -1417,6 +1417,58 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /content/collections:
+    get:
+      operationId: discoverContentCollections
+      tags: [Content]
+      summary: Discover requester-visible Atrium collections
+      description: |
+        Returns exactly the permission-filtered collection hierarchy used by the
+        Atrium reader. Hidden/private collection names and global counts are never
+        loaded into the client. Requires `content:read`.
+
+        `shape=tree` (default) returns nested children. `shape=flat` returns the
+        same stable pre-order without `children`, retaining each node's display
+        `path`. When the caller also holds `content:create`,
+        `selectableForCreate` is included so an external picker can select a
+        destination without hard-coded slugs or ids.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: shape
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [tree, flat]
+            default: tree
+      responses:
+        "200":
+          description: Requester-visible collections in stable Atrium order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionDiscoveryResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /content/{id}:
     parameters:
       - $ref: "#/components/parameters/contentIdPath"
@@ -2982,6 +3034,71 @@ components:
           enum: [role, building, department, grade, user, group]
         value:
           type: string
+
+    CollectionDiscoveryNode:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - slug
+        - parentId
+        - path
+        - defaultVisibilityLevel
+        - visibleObjectCount
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        path:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        defaultVisibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        visibleObjectCount:
+          type: integer
+          minimum: 0
+          description: Objects in this collection visible to this requester.
+        selectableForCreate:
+          type: boolean
+          description: Present when the token also holds `content:create`.
+        children:
+          type: array
+          description: Present for `shape=tree`; omitted for `shape=flat`.
+          items:
+            $ref: "#/components/schemas/CollectionDiscoveryNode"
+
+    CollectionDiscoveryResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionDiscoveryNode"
+        meta:
+          type: object
+          required: [requestId, shape, count]
+          properties:
+            requestId:
+              type: string
+            shape:
+              type: string
+              enum: [tree, flat]
+            count:
+              type: integer
+              minimum: 0
 
     ContentObject:
       type: object

@@ -81,6 +81,35 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     expect(body?.data?.id).toBeTruthy()
   })
 
+  test('external authoring picker discovers a collection without hard-coded ids', async ({
+    page,
+  }) => {
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    const picker = await page.request.get(
+      '/api/v1/content/collections?shape=flat'
+    )
+    expect(picker.ok()).toBeTruthy()
+    const payload = await picker.json()
+    expect(payload?.meta?.shape).toBe('flat')
+    expect(payload?.data?.length).toBeGreaterThan(0)
+    const target = payload.data.find(
+      (collection: { selectableForCreate?: boolean }) =>
+        collection.selectableForCreate
+    )
+    expect(target?.slug).toBeTruthy()
+    expect(target?.path?.length).toBeGreaterThan(0)
+
+    const created = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'document',
+        title: 'e2e discovered collection target',
+        collectionId: target.slug,
+      },
+    })
+    expect(created.status()).toBe(201)
+    expect((await created.json())?.data?.collectionId).toBe(target.id)
+  })
+
   test('codeEncoding base64 -> a <script>/<style> artifact round-trips as the DECODED code', async ({
     page,
   }) => {

@@ -882,6 +882,48 @@ applied or downgraded.
 
 ---
 
+### Collection discovery (#1286)
+
+#### `GET /api/v1/content/collections?shape=tree|flat`
+
+Returns the same requester-visible hierarchy as `collectionService.tree(req)`.
+Requires `content:read`. Filtering and visible-object counts are permission-pushed
+on the server; a hidden collection is never loaded into the client or exposed
+through a secondary id/name lookup.
+
+- `shape=tree` (default) retains nested `children`.
+- `shape=flat` walks that tree in stable Atrium position/name pre-order, omits
+  `children`, and retains the full name `path` for compact extension/native pickers.
+- A token that also holds `content:create` receives `selectableForCreate` on every
+  returned node. The decision lives in the collection service so future collection
+  author ACLs can narrow it without an API contract change.
+
+```json
+{
+  "data": [
+    {
+      "id": "c0ffee00-0000-4000-8000-000000000001",
+      "name": "Technology Guides",
+      "slug": "technology-guides",
+      "parentId": null,
+      "path": ["Technology Guides"],
+      "defaultVisibilityLevel": "internal",
+      "visibleObjectCount": 42,
+      "selectableForCreate": true,
+      "children": []
+    }
+  ],
+  "meta": { "requestId": "req_abc123", "shape": "tree", "count": 1 }
+}
+```
+
+`400 VALIDATION_ERROR` is returned for an invalid `shape`; normal auth/scope
+failures are `401`/`403`. A slug/UUID selected from this response is passed to
+`POST /content` unchanged. If it is deleted before create, the existing typed
+`400 CONTENT_VALIDATION` collection-not-found response is returned.
+
+---
+
 ### Content objects
 
 #### `GET /api/v1/content`

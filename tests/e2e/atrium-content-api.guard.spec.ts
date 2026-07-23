@@ -20,6 +20,12 @@ test.describe("Atrium content v1 endpoints — unauthenticated 401 (always-run)"
     expect((await request.get("/api/v1/content")).status()).toBe(401);
   });
 
+  test("GET /api/v1/content/collections -> 401", async ({ request }) => {
+    expect(
+      (await request.get("/api/v1/content/collections?shape=flat")).status()
+    ).toBe(401);
+  });
+
   test("POST /api/v1/content -> 401 (auth before body parse)", async ({ request }) => {
     const res = await request.post("/api/v1/content", {
       data: { kind: "document", title: "probe" },
