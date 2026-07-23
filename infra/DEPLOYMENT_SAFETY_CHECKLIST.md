@@ -63,8 +63,14 @@ bunx cdk deploy AIStudio-DatabaseStack-Dev AIStudio-StorageStack-Dev --context b
 aws ssm get-parameters-by-path --path '/aistudio/dev' --recursive
 
 # 3. Deploy stacks that consume SSM parameters
-bunx cdk deploy AIStudio-ProcessingStack-Dev AIStudio-FrontendStack-Dev --context baseDomain=aistudio.psd401.ai
+bunx cdk deploy AIStudio-ProcessingStack-Dev AIStudio-FrontendStack-Dev \
+  --context baseDomain=aistudio.psd401.ai \
+  --context alertEmail=techalerts@psd401.net
 ```
+
+`AIStudio-ProcessingStack-Dev` conditionally owns the group-sync alarm topic and
+subscription. Always preserve the existing `alertEmail` context; omitting it
+causes CDK to remove those monitoring resources.
 
 ## Post-Deployment Verification
 

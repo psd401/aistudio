@@ -56,6 +56,7 @@ describe("PermissionBoundaryConstruct", () => {
           "bedrock:GetDataAutomationStatus",
         ])
       );
+      expect(actions).not.toContain("bedrock:TagResource");
       expect(actions).not.toContain("bedrock:*");
     }
   );

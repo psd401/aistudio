@@ -388,8 +388,8 @@ two worktrees should edit the same migration or contract file concurrently.
 - [x] Repository PDF dual-write/canonical-upload walking skeleton
 - [x] Foundation unit/integration/E2E tests
 - [x] Foundation/Office/image dev deployment and observability validation
-- [ ] Multimodal processing (Office/image deployed; audio/video implementation
-      and local verification complete, dev managed-service validation pending)
+- [x] Multimodal processing (Office, image, audio, and video deployed; real dev
+      managed-service validation passed)
 - [x] Retrieval v2 and visual search
 - [ ] Google Workspace sync
 - [ ] Universal product UI migration
@@ -596,8 +596,8 @@ not have access to `text-embedding-3-small`; the Bedrock default, immutable
 generation routing, lexical fallback, and automatic replay in this slice close
 that observed failure mode.
 
-The remaining checkpoint gate is a dev deployment and real BDA audio/video
-validation.
+The dev deployment and real BDA audio/video gate is closed by the managed-service
+validation checkpoint below.
 
 ### Retrieval v2 checkpoint (2026-07-22)
 
@@ -919,3 +919,57 @@ fencing, migration 124 owns a distinct handoff marker, Textract and BDA reset
 asymmetries have direct tests, activation-only messages use an explicit empty
 work contract, and processing-DLQ reconciliation precedes the outbox so recovered
 jobs can redispatch in the same maintenance cycle.
+
+### Multimodal managed-service validation checkpoint (2026-07-22)
+
+Issue #1264 was selected as the next delivery because the progress ledger and
+media checkpoint explicitly named a dev deployment plus real BDA audio/video as
+the remaining gate. The other incomplete workstream with an external prerequisite,
+Google synchronization, remains coupled to `psd-gcp-infra#1`.
+
+Live dev validation used nonpersonal synthetic WAV and MP4 sources carrying the
+marker `LANTERN HARBOR 1264`. It exposed an IAM contract gap that local SDK mocks
+could not reproduce: `InvokeDataAutomationAsync` is authorized against the
+generated `data-automation-invocation/*` ARN in addition to the selected BDA
+project and cross-region profile. The worker policy now includes that exact
+invocation namespace. Optional invocation tags were removed instead of expanding
+the shared permission boundary with `bedrock:TagResource`; durable correlation
+continues through the BDA client token, processing-job metrics, immutable source
+key, and run-specific artifact prefix.
+
+After the focused Processing stack deployment, both owned validation jobs
+succeeded on their first post-fix attempt through real Amazon Bedrock Data
+Automation. The audio result reported a 9,536 ms PCM WAV with three segments and
+the video result a 9,520 ms H.264 MP4 with one shot and two segments. Both source
+versions became available, clean, completed, and embedded. Active generation
+`03b012ef-ec52-4ca0-8194-5b454dad1cd2` published 12 Titan G1 text-embedded
+segments across six source versions; its audio and video chunks contain the
+synthetic marker and nonempty `timeStartMs`/`timeEndMs` citation locators. The
+canonical artifact set contains pinned source, layout, transcript/caption, and
+canonical-text rows produced by `aistudio-media-bda-v2`.
+
+Visual indexing was returned to its independent disabled flag after Cohere Embed
+v4 reported missing Marketplace entitlement. The previously active generation
+remained serving throughout, and this provider-enablement item does not affect
+the text-embedding or BDA media exit gate.
+
+Verification evidence for the managed-service validation slice:
+
+- Complete application CI: 278 suites and 3,125 tests passed with 60 intentional
+  skips. The focused media, retrieval-evaluation, citation, and migration set
+  passed 22 tests. Full lint completed with zero errors, and application,
+  infrastructure, unified-content worker, and embedding-worker typechecks pass.
+- Complete infrastructure/Lambda suite: 38 suites and 377 tests passed. The
+  production Next.js build, infrastructure build, all-stack no-lookup synthesis
+  of 31 dev/prod/shared templates, and both exact Linux Lambda artifact smokes
+  pass.
+- The real PostgreSQL migration/lifecycle smoke passed publication, retry and
+  recovery state, generation activation, retrieval/citation, idempotency,
+  quarantine, and cleanup checks.
+- Authenticated Playwright passed 257 tests with 51 intentional
+  environment-gated skips. The canonical repository matrix covers direct,
+  inline-text, PDF, Office, image, audio/video, terminal failure visibility, and
+  retry from the item row.
+- Dev processing and embedding DLQs remained empty. The live audio/video jobs,
+  pinned artifacts, active Titan embeddings, timestamp locators, and synthetic
+  transcript marker were verified directly against the canonical database.

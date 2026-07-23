@@ -72,14 +72,22 @@ bunx cdk deploy AIStudio-StorageStack-Dev --exclusively
 bunx cdk deploy AIStudio-StorageStack-Prod --exclusively
 ```
 
-### ProcessingStack (No parameters needed after SSM setup)
+### ProcessingStack (Requires the existing alarm-email context)
 ```bash
 # Dev
-bunx cdk deploy AIStudio-ProcessingStack-Dev --exclusively
+bunx cdk deploy AIStudio-ProcessingStack-Dev \
+  --context alertEmail=techalerts@psd401.net \
+  --exclusively
 
 # Prod
-bunx cdk deploy AIStudio-ProcessingStack-Prod --exclusively
+bunx cdk deploy AIStudio-ProcessingStack-Prod \
+  --context alertEmail=YOUR_PROD_ALERT_EMAIL \
+  --exclusively
 ```
+
+The group-sync alarm topic and email subscription are conditional on
+`alertEmail`. Omitting a value that was used for the previous deployment removes
+those resources from the synthesized template.
 
 ### FrontendStack (Requires baseDomain)
 ```bash

@@ -345,6 +345,11 @@ export class UnifiedContentProcessing extends Construct {
                 actions: ["bedrock:InvokeDataAutomationAsync"],
                 resources: [
                   mediaProject.attrProjectArn,
+                  // The runtime authorizes creation of the asynchronous job
+                  // against the invocation ARN as well as the selected
+                  // project/profile. Without this resource the live service
+                  // rejects InvokeDataAutomationAsync before returning the ARN.
+                  `arn:${stack.partition}:bedrock:${stack.region}:${stack.account}:data-automation-invocation/*`,
                   ...["us-east-1", "us-east-2", "us-west-1", "us-west-2"].map(
                     (region) =>
                       `arn:${stack.partition}:bedrock:${region}:${stack.account}:data-automation-profile/us.data-automation-v1`
