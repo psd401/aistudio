@@ -11,11 +11,13 @@ import {
   requireScope,
   createApiResponse,
   createErrorResponse,
+  extractNumericParam,
   extractStringParam,
 } from "@/lib/api"
 import { getConversationById } from "@/lib/db/drizzle/nexus-conversations"
 import { getMessagesByConversation } from "@/lib/db/drizzle/nexus-messages"
 import { createLogger } from "@/lib/logger"
+import { parseBoundAssistantConversationMetadata } from "@/lib/api/assistant-conversation-metadata"
 
 // ============================================
 // Validation
@@ -45,7 +47,11 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
 
   const log = createLogger({ requestId, route: "api.v1.assistants.conversations.get" })
 
+  const assistantId = extractNumericParam(request.url, "assistants")
   const conversationId = extractStringParam(request.url, "conversations")
+  if (!assistantId) {
+    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
+  }
   if (!conversationId) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid conversation ID")
   }
@@ -62,6 +68,15 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
     // Verify conversation exists and belongs to user
     const conversation = await getConversationById(conversationId, auth.userId)
     if (!conversation) {
+      return createErrorResponse(requestId, 404, "NOT_FOUND", `Conversation not found: ${conversationId}`)
+    }
+    const metadata = parseBoundAssistantConversationMetadata(
+      conversation.metadata
+    )
+    if (
+      conversation.provider !== "assistant-architect" ||
+      metadata?.assistantId !== assistantId
+    ) {
       return createErrorResponse(requestId, 404, "NOT_FOUND", `Conversation not found: ${conversationId}`)
     }
 

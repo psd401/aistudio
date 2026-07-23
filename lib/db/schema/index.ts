@@ -21,8 +21,9 @@ export * from "./enums";
 export * from "./tables/users";
 export * from "./tables/roles";
 export * from "./tables/user-roles";
-export * from "./tables/tools";
-export * from "./tables/role-tools";
+export * from "./tables/capabilities";
+export * from "./tables/role-capabilities";
+export * from "./tables/tool-catalog";
 
 // ============================================
 // AI Models
@@ -56,6 +57,7 @@ export * from "./tables/nexus-shares";
 export * from "./tables/nexus-templates";
 export * from "./tables/nexus-user-preferences";
 export * from "./tables/nexus-provider-metrics";
+export * from "./tables/nexus-repository-bindings";
 
 // ============================================
 // Nexus MCP (Model Context Protocol)
@@ -79,6 +81,11 @@ export * from "./tables/knowledge-repositories";
 export * from "./tables/repository-items";
 export * from "./tables/repository-item-chunks";
 export * from "./tables/repository-access";
+export * from "./tables/repository-item-versions";
+export * from "./tables/repository-upload-sessions";
+export * from "./tables/repository-processing-jobs";
+export * from "./tables/repository-artifacts";
+export * from "./tables/repository-index-generations";
 
 // ============================================
 // Prompt Library
@@ -142,6 +149,11 @@ export * from "./tables/agent-sessions";
 export * from "./tables/agent-feedback";
 export * from "./tables/agent-health-snapshots";
 export * from "./tables/agent-patterns";
+export * from "./tables/agent-failures";
+export * from "./tables/agent-pattern-scan-runs";
+export * from "./tables/agent-health-scan-runs";
+export * from "./tables/agent-message-content";
+export * from "./tables/agent-tool-invocations";
 
 // ============================================
 // Agent Skills Platform (#910)
@@ -173,6 +185,38 @@ export * from "./tables/oauth-access-tokens";
 export * from "./tables/oauth-refresh-tokens";
 export * from "./tables/jwks-keys";
 export * from "./tables/oauth-consent-decisions";
+
+// ============================================
+// Atrium Content Workspace (#1058, Epic #1059)
+// ============================================
+export * from "./tables/content-collections";
+export * from "./tables/content-objects";
+export * from "./tables/content-versions";
+export * from "./tables/content-visibility-grants";
+export * from "./tables/content-publications";
+export * from "./tables/agent-identities";
+export * from "./tables/content-index-links";
+export * from "./tables/content-audit-logs";
+// Epic #1059 completion: §26.4 public-publish approval queue
+export * from "./tables/content-publish-requests";
+// Phase 1 (#1051): live collaborative document state (Yjs CRDT)
+export * from "./tables/atrium-doc-state";
+// Comments / track-changes thread store (§18.1)
+export * from "./tables/atrium-doc-comments";
+// Meridian slice D (#1059): embedded-artifact backlinks ("EMBEDDED IN")
+export * from "./tables/content-embed-links";
+
+// ============================================
+// Google Directory Group Sync (Epic #1202, Phase 0 / #1203)
+// ============================================
+export * from "./tables/groups";
+export * from "./tables/group-members";
+export * from "./tables/group-selection-rules";
+// Phase 1 (#1204): group→role mappings that drive managed roles.
+export * from "./tables/group-role-mappings";
+// Phase 3 (#1206): per-resource role/group access grants on models,
+// assistants, and agent skills.
+export * from "./tables/resource-access-grants";
 
 // ============================================
 // Relations

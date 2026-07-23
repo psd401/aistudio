@@ -1,7 +1,11 @@
 import { 
   uploadDocument, 
+  uploadRepositoryTextSource,
+  copyRepositorySourceToCanonicalNamespace,
   getDocumentSignedUrl, 
   deleteDocument,
+  deleteRepositoryObjectVersions,
+  deleteRepositoryObjectVersionsByPrefix,
   documentExists,
   listUserDocuments,
   extractKeyFromUrl
@@ -11,9 +15,12 @@ import {
   PutObjectCommand, 
   GetObjectCommand, 
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   HeadObjectCommand,
   HeadBucketCommand,
-  ListObjectsV2Command
+  ListObjectsV2Command,
+  ListObjectVersionsCommand,
+  CopyObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -125,6 +132,83 @@ describe('S3 Client', () => {
         expect.any(PutObjectCommand)
       );
     });
+
+    it('uses the canonical repository namespace for direct repository uploads', async () => {
+      mockS3Client.send.mockResolvedValue({});
+
+      const result = await uploadDocument({
+        userId: 'user-123',
+        repositoryId: 7,
+        fileName: 'handbook.pdf',
+        fileContent: Buffer.from('test content'),
+        contentType: 'application/pdf',
+      });
+
+      expect(result.key).toMatch(
+        /^repositories\/7\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/handbook\.pdf$/i
+      );
+    });
+  });
+
+  describe('uploadRepositoryTextSource', () => {
+    it('stores inline text under the canonical repository namespace', async () => {
+      mockS3Client.send.mockResolvedValue({});
+
+      const result = await uploadRepositoryTextSource({
+        repositoryId: 7,
+        itemId: 37,
+        userId: 1,
+        fileName: 'Quick_reference.txt',
+        content: 'hello world',
+      });
+
+      expect(result).toEqual({
+        key: expect.stringMatching(
+          /^repositories\/7\/[0-9a-f-]{36}\/Quick_reference\.txt$/
+        ),
+        byteSize: 11,
+      });
+      expect(mockS3Client.send).toHaveBeenCalledWith(
+        expect.any(PutObjectCommand)
+      );
+    });
+  });
+
+  describe('copyRepositorySourceToCanonicalNamespace', () => {
+    it('copies a legacy source to a canonical key while preserving S3 metadata', async () => {
+      mockS3Client.send.mockResolvedValue({});
+
+      const result = await copyRepositorySourceToCanonicalNamespace({
+        repositoryId: 7,
+        sourceKey: 'user-1/1700000000-Emergency Plan.pdf',
+        fileName: 'Emergency Plan.pdf',
+      });
+
+      expect(result.key).toMatch(
+        /^repositories\/7\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/Emergency_Plan\.pdf$/i
+      );
+      expect(CopyObjectCommand).toHaveBeenCalledWith({
+        Bucket: 'test-bucket',
+        Key: result.key,
+        CopySource: '/test-bucket/user-1/1700000000-Emergency%20Plan.pdf',
+      });
+      expect(mockS3Client.send).toHaveBeenCalledWith(
+        expect.any(CopyObjectCommand)
+      );
+    });
+
+    it('rejects traversal-like legacy source keys before copying', async () => {
+      await expect(
+        copyRepositorySourceToCanonicalNamespace({
+          repositoryId: 7,
+          sourceKey: '../secret.pdf',
+          fileName: 'secret.pdf',
+        })
+      ).rejects.toThrow('safe source object key');
+      expect(mockS3Client.send).not.toHaveBeenCalledWith(
+        expect.any(CopyObjectCommand)
+      );
+    });
   });
 
   // TODO: Update these tests once downloadDocument is implemented
@@ -154,6 +238,128 @@ describe('S3 Client', () => {
       mockS3Client.send.mockRejectedValue(new Error('S3 Error'));
 
       await expect(deleteDocument(key)).rejects.toThrow('Failed to delete document');
+    });
+  });
+
+  describe('version-aware repository deletion', () => {
+    it('paginates and permanently deletes versions and delete markers below an artifact prefix', async () => {
+      let listCall = 0;
+      mockS3Client.send.mockImplementation((command: unknown) => {
+        if (command instanceof ListObjectVersionsCommand) {
+          listCall += 1;
+          return Promise.resolve(
+            listCall === 1
+              ? {
+                  Versions: [{
+                    Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/thumbnail.jpg',
+                    VersionId: 'version-1',
+                  }],
+                  DeleteMarkers: [{
+                    Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/old.txt',
+                    VersionId: 'marker-1',
+                  }],
+                  IsTruncated: true,
+                  NextKeyMarker: 'page-2',
+                  NextVersionIdMarker: 'version-2',
+                }
+              : {
+                  Versions: [{
+                    Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/ocr.txt',
+                    VersionId: 'version-3',
+                  }],
+                  IsTruncated: false,
+                }
+          );
+        }
+        return Promise.resolve({});
+      });
+
+      await expect(
+        deleteRepositoryObjectVersionsByPrefix(
+          'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/'
+        )
+      ).resolves.toBe(3);
+      expect(mockS3Client.send).toHaveBeenCalledWith(
+        expect.any(DeleteObjectsCommand)
+      );
+      expect(DeleteObjectsCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          Delete: expect.objectContaining({
+            Objects: expect.arrayContaining([
+              {
+                Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/thumbnail.jpg',
+                VersionId: 'version-1',
+              },
+              {
+                Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/old.txt',
+                VersionId: 'marker-1',
+              },
+            ]),
+          }),
+        })
+      );
+      expect(listCall).toBe(2);
+    });
+
+    it('rejects prefixes outside the repository namespace', async () => {
+      await expect(
+        deleteRepositoryObjectVersionsByPrefix('atrium/objects/')
+      ).rejects.toThrow('Invalid repository object prefix');
+      expect(mockS3Client.send).not.toHaveBeenCalled();
+    });
+
+    it('deletes only the exact immutable source key across all versions', async () => {
+      const key =
+        'repositories/7/11111111-2222-4333-8444-555555555555/source.pdf';
+      mockS3Client.send.mockImplementation((command: unknown) => {
+        if (command instanceof ListObjectVersionsCommand) {
+          return Promise.resolve({
+            Versions: [
+              { Key: key, VersionId: 'source-v1' },
+              { Key: `${key}.bak`, VersionId: 'other-v1' },
+            ],
+            DeleteMarkers: [{ Key: key, VersionId: 'source-marker' }],
+            IsTruncated: false,
+          });
+        }
+        return Promise.resolve({});
+      });
+
+      await expect(deleteRepositoryObjectVersions(key)).resolves.toBe(2);
+      expect(DeleteObjectsCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          Delete: expect.objectContaining({
+            Objects: [
+              { Key: key, VersionId: 'source-v1' },
+              { Key: key, VersionId: 'source-marker' },
+            ],
+          }),
+        })
+      );
+    });
+
+    it('surfaces partial multi-object deletion failures', async () => {
+      mockS3Client.send.mockImplementation((command: unknown) => {
+        if (command instanceof ListObjectVersionsCommand) {
+          return Promise.resolve({
+            Versions: [{
+              Key: 'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/ocr.txt',
+              VersionId: 'version-1',
+            }],
+            IsTruncated: false,
+          });
+        }
+        if (command instanceof DeleteObjectsCommand) {
+          return Promise.resolve({ Errors: [{ Key: 'failed-object' }] });
+        }
+        return Promise.resolve({});
+      });
+
+      await expect(
+        deleteRepositoryObjectVersionsByPrefix(
+          'repositories/7/artifacts/11111111-2222-4333-8444-555555555555/'
+        )
+      ).rejects.toThrow('Failed to delete repository objects from S3');
     });
   });
 

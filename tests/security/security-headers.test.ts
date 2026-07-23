@@ -61,6 +61,14 @@ describe('Security Headers Tests', () => {
     { name: 'X-XSS-Protection', value: '1; mode=block' }
   ]
 
+  // Headers only set on direct responses (redirects, 401s) — passthrough
+  // responses receive these from next.config.mjs headers() instead to avoid
+  // duplicate headers violating RFC 6797.
+  const directResponseHeaders = [
+    { name: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains' },
+    { name: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+  ]
+
   describe('Protected Routes', () => {
     it.each([
       '/dashboard',
@@ -97,6 +105,27 @@ describe('Security Headers Tests', () => {
 
       // But still have security headers
       securityHeaders.forEach(({ name, value }) => {
+        expect(response.headers.get(name)).toBe(value)
+      })
+
+      // Redirects are direct responses — HSTS and Referrer-Policy are set here
+      // (next.config.mjs headers() does not apply to redirects).
+      directResponseHeaders.forEach(({ name, value }) => {
+        expect(response.headers.get(name)).toBe(value)
+      })
+    })
+
+    it('should apply HSTS and Referrer-Policy on 401 responses for unauthenticated API calls', async () => {
+      const request = new NextRequest('http://localhost:3000/api/users')
+      // No authorization header — triggers 401 direct response
+
+      const response = await middleware(request, {} as any) as NextResponse
+
+      expect(response.status).toBe(401)
+
+      // 401 responses are direct — HSTS and Referrer-Policy must be set by
+      // middleware because next.config.mjs headers() does not apply here.
+      directResponseHeaders.forEach(({ name, value }) => {
         expect(response.headers.get(name)).toBe(value)
       })
     })

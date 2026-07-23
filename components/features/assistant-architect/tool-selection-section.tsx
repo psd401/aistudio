@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, startTransition } from 'react'
+import { useState, useEffect, useCallback, startTransition, useMemo } from 'react'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
@@ -15,6 +15,13 @@ import {
 import type { SelectAiModel } from '@/types'
 import { getAvailableToolsForModel, type ToolConfig } from '@/lib/tools'
 import { createLogger } from '@/lib/client-logger'
+import type { AssistantModelFamily } from '@/lib/db/schema/tables/assistant-architects'
+import {
+  compatibleRoutedToolNames,
+  inferModelFamily,
+  isExecutableTextModel,
+  modelSupportsProviderNativeTool,
+} from '@/lib/ai/model-router/core'
 
 const log = createLogger({ moduleName: 'tool-selection-section' })
 
@@ -23,6 +30,8 @@ interface ToolSelectionSectionProps {
   enabledTools: string[]
   onToolsChange: (tools: string[]) => void
   models: SelectAiModel[]
+  automaticRouting?: boolean
+  modelFamily?: AssistantModelFamily | null
   disabled?: boolean
 }
 
@@ -39,6 +48,8 @@ export function ToolSelectionSection({
   enabledTools,
   onToolsChange,
   models,
+  automaticRouting = false,
+  modelFamily = null,
   disabled = false
 }: ToolSelectionSectionProps) {
   const [availableTools, setAvailableTools] = useState<ToolConfig[]>([])
@@ -49,6 +60,14 @@ export function ToolSelectionSection({
   const selectedModel = selectedModelId
     ? models.find(m => m.id === selectedModelId)
     : null
+  const candidateModels = useMemo(() => {
+    if (!automaticRouting) return selectedModel ? [selectedModel] : []
+    return models.filter(model => {
+      if (!isExecutableTextModel(model)) return false
+      if (!modelFamily) return true
+      return inferModelFamily(model) === modelFamily
+    })
+  }, [automaticRouting, modelFamily, models, selectedModel])
 
   // Auto-disable tools that are no longer available when tools list changes
   const filterIncompatibleTools = useCallback((tools: ToolConfig[]) => {
@@ -66,7 +85,7 @@ export function ToolSelectionSection({
 
   // Load available tools when model changes
   useEffect(() => {
-    if (!selectedModel?.modelId) {
+    if (candidateModels.length === 0) {
       startTransition(() => {
         setAvailableTools([])
         setError(null)
@@ -76,12 +95,26 @@ export function ToolSelectionSection({
 
     startTransition(() => { setIsLoading(true) })
     log.debug('Loading tools for model', {
-      modelId: selectedModel.modelId,
-      modelName: selectedModel.name
+      modelCount: candidateModels.length,
+      automaticRouting,
     })
 
-    getAvailableToolsForModel(selectedModel.modelId)
-      .then(tools => {
+    Promise.all(candidateModels.map(async model => ({
+      tools: (await getAvailableToolsForModel(model.modelId))
+        .filter(tool => modelSupportsProviderNativeTool(model, tool.name)),
+    })))
+      .then(candidateToolLists => {
+        const compatibleNames = compatibleRoutedToolNames(
+          candidateToolLists.map(candidate => candidate.tools.map(tool => tool.name)),
+          enabledTools
+        )
+        const byName = new Map<string, ToolConfig>()
+        for (const candidate of candidateToolLists) {
+          for (const tool of candidate.tools) {
+            if (compatibleNames.has(tool.name)) byName.set(tool.name, tool)
+          }
+        }
+        const tools = [...byName.values()]
         log.debug('Tools loaded', { tools: tools.map(t => t.name) })
         setError(null) // Clear any previous errors
         setAvailableTools(tools)
@@ -95,7 +128,7 @@ export function ToolSelectionSection({
       .finally(() => {
         setIsLoading(false)
       })
-  }, [selectedModel?.modelId, selectedModel?.name, filterIncompatibleTools])
+  }, [automaticRouting, candidateModels, filterIncompatibleTools])
 
   const handleToolToggle = (toolName: string, enabled: boolean) => {
     log.debug('Tool toggle', { toolName, enabled, currentEnabledTools: enabledTools })
@@ -112,7 +145,7 @@ export function ToolSelectionSection({
   }
 
   // Don't render if no model is selected
-  if (!selectedModel) {
+  if (!automaticRouting && !selectedModel) {
     return null
   }
 
@@ -136,7 +169,7 @@ export function ToolSelectionSection({
             </TooltipTrigger>
             <TooltipContent>
               <p className="max-w-xs text-sm">
-                Enable AI tools for this prompt based on your selected model&apos;s capabilities.
+                Enable AI tools for this prompt based on the eligible model capabilities.
                 Tools will be available during prompt execution.
               </p>
             </TooltipContent>
@@ -161,7 +194,7 @@ export function ToolSelectionSection({
       ) : availableTools.length === 0 ? (
         <div className="p-4 border rounded-lg bg-muted/50">
           <p className="text-sm text-muted-foreground text-center">
-            No tools available for {selectedModel.name}
+            No tools available for {automaticRouting ? "this routing selection" : selectedModel?.name}
           </p>
           <p className="text-xs text-muted-foreground text-center mt-1">
             This model does not support any AI tools at this time.

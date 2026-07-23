@@ -48,9 +48,6 @@ export {
   checkUserRoleByCognitoSub,
   getUserRolesByCognitoSub,
   getAllUserRoles,
-  // Tool access operations
-  hasToolAccess,
-  getUserTools,
 } from "./users";
 
 // ============================================
@@ -66,6 +63,11 @@ export {
   removeUserRole,
   updateUserRole,
   assignRoleToUser,
+  // Managed-role reconciliation (#1204)
+  computeManagedRoleDiff,
+  reconcileUserManagedRoles,
+  type ExistingUserRole,
+  type ManagedRoleDiff,
 } from "./user-roles";
 
 // ============================================
@@ -105,14 +107,56 @@ export {
   createRole,
   updateRole,
   deleteRole,
-  // Tool operations
-  getTools,
-  getToolsByIds,
-  getRoleTools,
-  assignToolToRole,
-  removeToolFromRole,
-  setRoleTools,
+  // Capability id -> identifier resolution (navigation guard)
+  getCapabilitiesByIdsMap,
 } from "./roles";
+
+// ============================================
+// Capability Operations (Issue #923)
+// ============================================
+
+export {
+  // Types
+  type CapabilityData,
+  type UpdateCapabilityData,
+  // Access check operations
+  hasCapabilityAccess,
+  getUserCapabilities,
+  // Query operations
+  getCapabilities,
+  getCapabilityById,
+  getCapabilityByIdentifier,
+  getCapabilitiesByIds,
+  // CRUD operations
+  createCapability,
+  updateCapability,
+  upsertCapabilityByIdentifier,
+  setCapabilityActive,
+  // Role-capability assignment operations
+  getRoleCapabilities,
+  getCapabilityRoleIds,
+  assignCapabilityToRole,
+  removeCapabilityFromRole,
+  getRoleIdByName,
+} from "./capabilities";
+
+// ============================================
+// Tool Catalog Version Lifecycle (Issue #927)
+// ============================================
+
+export {
+  type ToolVersionUsage,
+  type ToolVersionWithUsage,
+  getToolCatalogVersions,
+  getToolCatalogVersion,
+  listToolCatalogIdentifiers,
+  getToolVersionUsage,
+  getToolVersionsWithUsage,
+  deprecateToolVersion,
+  undeprecateToolVersion,
+  removeToolVersion,
+  removeToolVersionWithPolicy,
+} from "./tool-catalog";
 
 // ============================================
 // Notification Operations
@@ -465,6 +509,7 @@ export {
   type RepositoryWithAccess,
   // Repository query operations
   getRepositoryById,
+  isSystemManagedRepository,
   getRepositoriesByOwnerId,
   getPublicRepositories,
   getAllRepositoriesWithOwner,

@@ -7,9 +7,14 @@
       "Action": [
         "s3:GetObject",
         "s3:GetObjectVersion",
+        "s3:GetObjectTagging",
         "s3:PutObject",
+        "s3:PutObjectTagging",
         "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
+        "s3:AbortMultipartUpload",
         "s3:ListBucket",
+        "s3:ListBucketVersions",
         "dynamodb:GetItem",
         "dynamodb:PutItem",
         "dynamodb:UpdateItem",
@@ -48,11 +53,15 @@
         "ecs:RunTask",
         "ecs:StopTask",
         "ecs:DescribeTasks",
+        "textract:StartDocumentTextDetection",
+        "textract:GetDocumentTextDetection",
         "bedrock:InvokeModel",
         "bedrock:InvokeModelWithResponseStream",
         "bedrock:CallWithBearerToken",
         "bedrock:ApplyGuardrail",
         "bedrock:GetGuardrail",
+        "bedrock:InvokeDataAutomationAsync",
+        "bedrock:GetDataAutomationStatus",
         "bedrock-agentcore:InvokeAgentRuntime",
         "bedrock-agentcore:InvokeAgentRuntimeForUser",
         "ssm:GetParameter",
@@ -73,7 +82,20 @@
       "Action": "iam:PassRole",
       "Resource": "arn:aws:iam::*:role/psd-agent-scheduler-invoke-*",
       "Condition": {
-        "StringEquals": { "iam:PassedToService": "scheduler.amazonaws.com" }
+        "StringEquals": {
+          "iam:PassedToService": "scheduler.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "AllowPassRoleToEcsTasks",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/*JobRunner*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
       }
     },
     {
@@ -140,6 +162,7 @@
     },
     {
       "Sid": "DenyRegionRestriction",
+      "_comment": "Bedrock actions are in NotAction because cross-region inference profiles route invocations to arbitrary regions. Model access is scoped by per-Lambda resource policies, not by this boundary.",
       "Effect": "Deny",
       "NotAction": [
         "iam:*",
@@ -147,7 +170,11 @@
         "route53:*",
         "cloudfront:*",
         "globalaccelerator:*",
-        "s3:*"
+        "s3:*",
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:Converse",
+        "bedrock:ConverseStream"
       ],
       "Resource": "*",
       "Condition": {

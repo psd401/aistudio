@@ -53,6 +53,9 @@ export default [
   {
     ignores: [
       ".next/**",
+      // e2e-local.sh builds into .next-e2e (E2E_PORT=3100 server, PR #1168) —
+      // generated output, same class as .next
+      ".next-e2e/**",
       "out/**",
       "build/**",
       "dist/**",
@@ -87,6 +90,16 @@ export default [
   // Base ESLint recommended rules
   js.configs.recommended,
 
+  // ESLint 10 promoted these to recommended-as-error. Keep them visible as warnings
+  // (consistent with this repo's 0-errors / warnings-tolerated lint policy) instead of
+  // blocking the ESLint 10 upgrade on 43 pre-existing call sites. Revisit to fix properly.
+  {
+    rules: {
+      "preserve-caught-error": "warn",
+      "no-useless-assignment": "warn",
+    },
+  },
+
   // TypeScript configuration
   ...tseslint.configs.recommended,
   {
@@ -112,7 +125,9 @@ export default [
     },
     settings: {
       react: {
-        version: "detect",
+        // Pinned (not "detect") because eslint-plugin-react's version auto-detection
+        // calls the removed context.getFilename() API and crashes under ESLint 10.
+        version: "19.2",
       },
     },
     rules: {
@@ -223,7 +238,7 @@ export default [
       "unicorn/prefer-type-error": "error",
 
       // Better practices
-      "unicorn/no-array-for-each": "warn",
+      "unicorn/no-for-each": "warn",
       "unicorn/no-for-loop": "warn",
       "unicorn/prefer-array-find": "warn",
       "unicorn/prefer-array-some": "warn",

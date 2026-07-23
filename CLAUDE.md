@@ -273,119 +273,47 @@ export async function actionName(params: ParamsType): Promise<ActionState<Return
 
 ## 🧪 Testing
 
-**E2E Testing**:
+**E2E Testing** (config: `playwright.config.ts`; `baseURL` via `PLAYWRIGHT_BASE_URL`, default `:3000`):
 - Run locally: `bunx playwright test tests/e2e/`
 - Add specs to `tests/e2e/`
+- **Two tiers**: *guard* specs run unauthenticated (CI-safe); *functional* specs mint a session and are gated by `PLAYWRIGHT_AUTH_ENABLED`. To run authenticated functional tests (drive the real UI as a logged-in user), use the host `:3100` dev server + `tests/e2e/helpers/session-auth.ts` — see **`docs/guides/e2e-authenticated-testing.md`** (covers the migration/seed prereqs and the `tokenLifetimeMs` + `addCookies` auth gotchas).
 - See `docs/guides/TESTING.md` (E2E Expectations section) for when tests are required
 
 ## 🏗️ Infrastructure Patterns
 
-### VPC & Networking
-**Shared VPC Architecture** (consolidated from 2 VPCs to 1):
-- All stacks use `VPCProvider.getOrCreate()` for consistent networking
-- DatabaseStack creates VPC, other stacks import via `Vpc.fromLookup()`
-- **Subnets**: Public, Private-Application, Private-Data, Isolated
-- **VPC Endpoints**: S3, DynamoDB (gateway), plus 14+ interface endpoints
-- **NAT Gateways**: Managed NAT gateways in all environments
-- See `/infra/lib/constructs/network/` for patterns
-
-```typescript
-import { VPCProvider } from './constructs/network'
-
-const vpc = VPCProvider.getOrCreate(this, environment, config)
-// Automatically handles VPC creation vs. import based on stack
-```
-
-### Lambda Optimization
-**PowerTuning Results** (use these defaults):
-- **Standard functions**: 1024 MB (66% reduction from previous 3GB)
-- **Memory-intensive**: 2048 MB
-- **Lightweight**: 512 MB
-- All functions use **Node.js 20.x** runtime
-- X-Ray tracing enabled for observability
-
-**Lambda Best Practices**:
-- Always use `ServiceRoleFactory` for IAM roles
-- Enable VPC only when accessing RDS/ElastiCache
-- Use environment variables for configuration
-- Add CloudWatch Logs retention (7 days dev, 30 days prod)
-
-### ECS Fargate Optimization
-- **Non-critical workloads**: Fargate Spot (70% cost savings)
-- **Production frontend**: Fargate on-demand with auto-scaling
-- **Task sizing**: Right-sized via load testing
-- **Graviton2**: Not yet enabled (future optimization)
-
-### Monitoring & Observability
-**Consolidated Monitoring** (see `/infra/lib/constructs/monitoring/`):
-- **AWS Distro for OpenTelemetry (ADOT)** for distributed tracing
-- **Unified CloudWatch Dashboard** with 115+ widgets across all services
-- **Metrics tracked**: Lambda performance, ECS health, RDS metrics, API latency
-- **Alarms**: Configured for critical thresholds (errors, latency, resource utilization)
-
-**Access Dashboards**:
-- AWS Console → CloudWatch → Dashboards → "AIStudio-Consolidated-[Environment]"
-
-**Custom Metrics** (add via ADOT):
-```typescript
-// In Lambda/ECS code
-import { metrics } from '@aws-lambda-powertools/metrics'
-
-metrics.addMetric('customMetric', 'Count', 1)
-```
-
-### Cost Optimization Patterns
-**Implemented Optimizations**:
-1. **Aurora Serverless**: Auto-pause in dev (saves ~$44/month)
-2. **ECS Spot**: 70% savings on non-critical workloads
-3. **Lambda Right-Sizing**: 66% memory reduction via PowerTuning
-4. **S3 Lifecycle**: Intelligent-Tiering + automatic archival
-5. **VPC Endpoints**: Reduces NAT gateway data transfer costs
-
-**Cost Monitoring**:
-- AWS Cost Explorer: Track by service and environment tags
-- Budget alerts configured for each environment
-- Monthly cost reports automated via CloudWatch Events
+See [infra/CLAUDE.md](infra/CLAUDE.md) (auto-loads when working under `/infra`): VPC/networking, Lambda sizing, ECS Fargate, monitoring/ADOT, and cost optimization patterns.
 
 ## 🔒 Security & IAM
 
 ### Application Security
 - Routes under `/(protected)` require authentication
-- Role-based access via `hasToolAccess("tool-name")` - checks if user has permission
+- Role-based UI access via `hasCapabilityAccess("capability-id")` - checks if the user's roles grant a capability (see Permissions below)
 - Parameterized queries prevent SQL injection
 - All secrets in AWS Secrets Manager with automatic rotation
 - `sanitizeForLogging()` for PII protection
 
+### Permissions
+
+Two **separate** authorization systems — never collapse them. See
+`docs/architecture/capabilities-and-scopes.md` for the full split, decision
+tree, and anti-patterns.
+
+- **Capabilities** — role-gated **UI features** for logged-in humans (Nexus,
+  Assistant Architect, admin pages). Check with `hasCapabilityAccess(identifier)`
+  (`utils/roles.ts`). Backed by `capabilities` / `role_capabilities`; registry in
+  `lib/capabilities/manifest.ts`.
+- **Scopes** — permissions on **API keys** for programmatic/MCP callers (e.g.
+  `assistants:execute`, `chat:read`). Check with `requireScope(auth, scope)`
+  (`lib/api/auth-middleware.ts`). Backed by `api_keys.scopes`; defined in
+  `lib/api-keys/scopes.ts`.
+- **Don't** gate API/MCP endpoints with `hasCapabilityAccess()`, **don't** gate
+  UI features with `requireScope()`, and **don't** share an identifier across the
+  two systems.
+- Note: `hasCapabilityAccess` (user access) is unrelated to `hasCapability` in
+  `lib/ai/capability-utils.ts` (AI-model feature flags).
+
 ### Infrastructure Security (IAM Least Privilege)
-**CRITICAL**: All new Lambda/ECS roles MUST use `ServiceRoleFactory`:
-
-```typescript
-import { ServiceRoleFactory } from './constructs/security'
-
-const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
-  functionName: 'my-function',
-  environment: props.environment,  // REQUIRED for tag-based access
-  region: this.region,
-  account: this.account,
-  vpcEnabled: false,
-  s3Buckets: ['bucket-name'],           // Auto-scoped with tags
-  dynamodbTables: ['table-name'],       // Auto-scoped with tags
-  sqsQueues: ['queue-arn'],             // Auto-scoped with tags
-  secrets: ['secret-arn'],              // Auto-scoped with tags
-})
-```
-
-**Tag-Based Access Control** (Enforced):
-- All AWS resources MUST have tags: `Environment` (dev/staging/prod), `ManagedBy` (cdk)
-- IAM policies enforce tag-based conditions (dev Lambda cannot access prod S3)
-- Cross-environment access is blocked at IAM level
-- See `/infra/lib/constructs/security/service-role-factory.ts` for patterns
-
-**Secrets Management**:
-- All secrets stored in AWS Secrets Manager (never hardcoded)
-- Access via `SecretsManagerClient` from AWS SDK
-- Secrets scoped by environment tags
-- Automatic rotation enabled where supported
+**CRITICAL**: All new Lambda/ECS roles MUST use `ServiceRoleFactory` — see [infra/CLAUDE.md](infra/CLAUDE.md) for the pattern, tag-based access control, and secrets management.
 
 ## 📦 Key Dependencies
 
@@ -429,11 +357,25 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - **Don't** use `{}` as an accumulator for model/user-controlled keys — use `Object.create(null)`
 - **Don't** use static tool-call format (`tool-show_chart`) with `fromThreadMessageLike` — use `type: 'tool-call'` dynamic format
 - **Don't** chain `.replace()` for HTML entity decoding — use single-pass regex (see `lib/utils/text-sanitizer.ts`)
+- **Don't** use `response.json().catch(() => fallback)` without checking `response.ok` first — hides HTTP status codes; infra errors (502/503) become indistinguishable from app errors
+- **Don't** return (without throwing) from `customFetch` after showing a toast for non-2xx responses — AI SDK will try to parse the error body as SSE and throw a `TypeError`
+- **Don't** construct SNS Subject from variable-length arrays without a 100-char truncation guard — silent publish failures with no SDK error surfaced
+- **Don't** return `null` from a DB accessor for both not-found and error in an SWR cache — cache cannot distinguish the two; DB errors silently overwrite valid cached state with defaults
+- **Don't** pass a Web API `Blob` to `@google/genai` SDK methods — the SDK expects `{ data: base64string, mimeType: string }`, not a `Blob` object
+- **Don't** assume AWS SDK assessment objects are flat — check ALL sub-properties (e.g., `wordPolicy.customWords` AND `wordPolicy.managedWordLists`); missing one drops an entire blocking category from observability
+- **Don't** omit `state: 'output-available'` and `input` on tool-call UIMessage parts — `convertToModelMessages` silently skips the `tool_result` block, causing `AI_MissingToolResultsError` on replay
+- **Don't** consolidate multi-step MCP responses into a single DB row — persist each step separately inside `executeTransaction` or reload fails with consecutive user turns (see `chat-helpers.ts:saveConversationSteps`)
 
 ### React (see `docs/guides/react-patterns.md`)
 - **Don't** put `key` on Provider/context wrapper components
 - **Don't** use boolean `useRef` for init guards on parameterized routes — use ID-tracking refs
 - **Don't** place hooks after conditional returns
+- **Don't** include `isLoading` state in polling `useEffect` deps — use `useRef` to prevent timer churn
+- **Don't** rely on `clearTimeout` alone for polling cleanup — pair with a `cancelled = true` flag
+- **Don't** assign callback refs inside `useEffect` — assign synchronously in the render body to close the stale-ref timing gap
+- **Don't** return internal state getters from hooks when the caller also supplies `fn` — use `onFailure(count)` event callbacks
+- **Don't** read a ref mutated inside a hook's `.catch()` without `+1` — use `onFailure(count)` callback instead (callers see pre-mutation value)
+- **Don't** pass unstable adapter references to `useChatRuntime` — use ref-based getters with empty dep arrays to prevent runtime re-initialization and duplicate messages
 
 ## 📖 Documentation
 
@@ -455,6 +397,8 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - Remove outdated content
 - Update index when adding docs
 
+**OpenWiki (agent wiki):** `openwiki/` is an auto-maintained, agent-navigable index of this codebase — start at [openwiki/quickstart.md](openwiki/quickstart.md) for a structured map before spelunking. It coexists with `/docs` (human-oriented). The tree is refreshed by `.github/workflows/openwiki-update.yml` on every `dev` push (opens a rolling `openwiki/update` PR, served by Bedrock GLM-5). Do not hand-edit `openwiki/`; it is regenerated.
+
 ## 🎯 Repository Knowledge System
 
 **Assistant Architect**: Processes repository context for AI assistants
@@ -462,5 +406,15 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 **Knowledge Base**: Stored in S3, retrieved during execution
 
 ---
-*Token-optimized for Claude Code efficiency. Last updated: January 2025*
+*Token-optimized for Claude Code efficiency. Last updated: May 2026*
 *Infrastructure optimized via Epic #372 - AWS Well-Architected Framework aligned*
+
+<!-- OPENWIKI:START -->
+
+## OpenWiki
+
+This repository uses OpenWiki for recurring code documentation. Start with `openwiki/quickstart.md`, then follow its links to architecture, workflows, domain concepts, operations, integrations, testing guidance, and source maps.
+
+The scheduled OpenWiki GitHub Actions workflow refreshes the repository wiki. Do not hand-edit generated OpenWiki pages unless explicitly asked; prefer updating source code/docs and letting OpenWiki regenerate.
+
+<!-- OPENWIKI:END -->

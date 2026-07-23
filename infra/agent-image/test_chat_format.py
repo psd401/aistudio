@@ -1,8 +1,14 @@
-"""Unit tests for chat_format.markdown_to_chat."""
+"""Unit tests for chat_format."""
 
+import json
 import unittest
 
-from chat_format import markdown_to_chat
+from chat_format import (
+    RICH_ENVELOPE_CLOSE,
+    RICH_ENVELOPE_OPEN,
+    extract_rich_envelope,
+    markdown_to_chat,
+)
 
 
 class TestMarkdownToChat(unittest.TestCase):
@@ -163,6 +169,67 @@ class TestMarkdownToChat(unittest.TestCase):
             markdown_to_chat("Click **https://example.com** to continue"),
             "Click *https://example.com* to continue",
         )
+
+
+def _wrap(payload: dict) -> str:
+    return f"{RICH_ENVELOPE_OPEN}\n{json.dumps(payload)}\n{RICH_ENVELOPE_CLOSE}"
+
+
+class TestExtractRichEnvelope(unittest.TestCase):
+    def test_empty_input(self):
+        self.assertEqual(extract_rich_envelope(""), (None, ""))
+        self.assertEqual(extract_rich_envelope(None), (None, None))
+
+    def test_no_envelope_passes_through(self):
+        text = "Just a plain reply, nothing fancy."
+        env, remaining = extract_rich_envelope(text)
+        self.assertIsNone(env)
+        self.assertEqual(remaining, text)
+
+    def test_envelope_only(self):
+        payload = {"cardsV2": [{"cardId": "x", "card": {"header": {"title": "Hi"}}}]}
+        text = _wrap(payload)
+        env, remaining = extract_rich_envelope(text)
+        self.assertEqual(env, payload)
+        self.assertEqual(remaining, "")
+
+    def test_envelope_with_prose(self):
+        payload = {"cardsV2": [{"cardId": "x"}]}
+        text = "Here is your brief:\n" + _wrap(payload) + "\nLet me know if you need more."
+        env, remaining = extract_rich_envelope(text)
+        self.assertEqual(env, payload)
+        self.assertEqual(
+            remaining,
+            "Here is your brief:\nLet me know if you need more.",
+        )
+
+    def test_malformed_json_returns_original(self):
+        text = f"prose\n{RICH_ENVELOPE_OPEN}\n{{not json{RICH_ENVELOPE_CLOSE}\nmore prose"
+        env, remaining = extract_rich_envelope(text)
+        self.assertIsNone(env)
+        self.assertEqual(remaining, text)
+
+    def test_missing_close_returns_original(self):
+        text = f"prose\n{RICH_ENVELOPE_OPEN}\n{{\"cardsV2\": []}}\nno close"
+        env, remaining = extract_rich_envelope(text)
+        self.assertIsNone(env)
+        self.assertEqual(remaining, text)
+
+    def test_multiple_envelopes_last_wins(self):
+        first = {"cardsV2": [{"cardId": "first"}]}
+        second = {"cardsV2": [{"cardId": "second"}]}
+        text = "a\n" + _wrap(first) + "\nb\n" + _wrap(second) + "\nc"
+        env, remaining = extract_rich_envelope(text)
+        self.assertEqual(env, second)
+        self.assertEqual(remaining, "a\nb\nc")
+
+    def test_non_dict_payload_rejected(self):
+        # A bare list is valid JSON but not a useful envelope shape.
+        text = f"{RICH_ENVELOPE_OPEN}\n[1, 2, 3]\n{RICH_ENVELOPE_CLOSE}"
+        env, remaining = extract_rich_envelope(text)
+        self.assertIsNone(env)
+        # Malformed-only path returns original text untouched.
+        self.assertEqual(remaining, text)
 
 
 if __name__ == "__main__":

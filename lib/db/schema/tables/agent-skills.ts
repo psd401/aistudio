@@ -50,8 +50,22 @@ export const psdAgentSkills = pgTable("psd_agent_skills", {
   s3Key: text("s3_key").notNull(),
   version: integer("version").notNull().default(1),
   summary: text("summary").notNull(),
+  // Added in migration 081. The skill's `allowed-tools` frontmatter (catalog tool
+  // identifiers), persisted on publish. Empty array = no pin (open to all catalog
+  // tools the caller already holds). Used to (a) register the skill into
+  // tool_catalog on approval and (b) intersect the session tool set at invocation
+  // time (Issue #925 AC#5/AC#6).
+  allowedTools: jsonb("allowed_tools").$type<string[]>().notNull().default([]),
   scanStatus: varchar("scan_status", { length: 16 }).$type<AgentSkillScanStatus>().notNull().default("pending"),
   scanFindings: jsonb("scan_findings").$type<SkillScanFindings>(),
+  // Added in migration 075. NULL = open to all; non-null = capability required.
+  // NOTE: No FK constraint to `tools` — the column stores a capability
+  // identifier string (e.g. "skill.image-gen") validated at application
+  // level. Setting a non-existent identifier silently blocks the skill.
+  // Harness-level enforcement (catalog filtering per session) is pending
+  // OpenClaw's per-session catalog hook. Currently, skills self-enforce
+  // via check_capability.js at invocation time.
+  requiredCapability: text("required_capability"),
   approvedBy: integer("approved_by").references(() => users.id, { onDelete: "set null" }),
   approvedAt: timestamp("approved_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

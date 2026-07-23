@@ -83,6 +83,7 @@ export class ServiceRoleFactory {
       policies,
       environment: props.environment,
       maxSessionDuration: cdk.Duration.hours(1),
+      enablePermissionBoundary: props.enablePermissionBoundary,
     })
 
     return baseRole.role
@@ -163,6 +164,7 @@ export class ServiceRoleFactory {
       description: `Task role for ${props.taskName} ECS service`,
       policies,
       environment: props.environment,
+      enablePermissionBoundary: props.enablePermissionBoundary,
     })
 
     return baseRole.role
@@ -205,6 +207,7 @@ export class ServiceRoleFactory {
       description: `Execution role for ${props.taskName} ECS service`,
       policies,
       environment: props.environment,
+      enablePermissionBoundary: props.enablePermissionBoundary,
     })
 
     return baseRole.role
@@ -251,14 +254,10 @@ export class ServiceRoleFactory {
             "ec2:AssignPrivateIpAddresses",
             "ec2:UnassignPrivateIpAddresses",
           ],
-          resources: ["*"], // VPC ENI operations require wildcard, but we add conditions
-          conditions: {
-            StringEquals: {
-              "ec2:Subnet": [
-                `arn:aws:ec2:${props.region}:${props.account}:subnet/*`,
-              ],
-            },
-          },
+          // Lambda's VPC ENI operations do not support useful resource-level
+          // scoping. Keep this exception isolated to the five AWS-documented
+          // actions and validate it explicitly in PolicyValidator.
+          resources: ["*"],
         }),
       ],
     })
@@ -353,17 +352,22 @@ export class ServiceRoleFactory {
             },
           },
         }),
-        // Bucket operations - tag conditions enforce environment isolation
+        // Bucket operations.
+        //
+        // No tag-based condition on the bucket-level statement: S3 does not
+        // honor `aws:ResourceTag` for s3:ListBucket / s3:GetBucketLocation
+        // (it's accepted in policy syntax but never resolves to a match),
+        // so attaching the condition causes every call to fail closed. The
+        // explicit `bucketArns` resource list already enforces the same
+        // environment isolation — a dev role only ever sees dev bucket ARNs
+        // (each Lambda's CDK definition passes its own scoped bucket name)
+        // so the tag check was redundant defense-in-depth that, in practice,
+        // broke the primary grant. Pre-existing bug — see
+        // psd-agent-health-daily-dev s3:ListBucket denials May 2026.
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
           actions: ["s3:ListBucket", "s3:GetBucketLocation"],
           resources: bucketArns,
-          conditions: {
-            StringEquals: {
-              "aws:ResourceTag/Environment": props.environment,
-              "aws:ResourceTag/ManagedBy": "cdk",
-            },
-          },
         }),
       ],
     })

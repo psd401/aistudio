@@ -1,0 +1,5 @@
+# Keep the job-runner image build context small and machine-independent.
+node_modules/
+dist/
+*.test.ts
+cdk.out/

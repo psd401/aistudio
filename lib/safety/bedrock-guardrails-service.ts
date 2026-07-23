@@ -17,7 +17,8 @@ import {
   type ApplyGuardrailCommandInput,
   type GuardrailAssessment as SDKGuardrailAssessment,
 } from '@aws-sdk/client-bedrock-runtime';
-import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
+import { SNSClient } from '@aws-sdk/client-sns';
+import { snsPublishBestEffort } from '@/lib/aws/sns';
 import { createLogger, generateRequestId } from '@/lib/logger';
 import { createHmac } from 'node:crypto';
 import type {
@@ -27,6 +28,12 @@ import type {
   GuardrailsConfig,
   ContentFilterType,
 } from './types';
+
+/** Log message constants — shared with test assertions to prevent fragile string coupling */
+export const LOG_MESSAGES = {
+  TOPICS_DETECTED: 'Topics detected in detect-only mode (not blocked)',
+  FILTERS_DETECTED: 'Content filters detected in detect-only mode (not blocked)',
+} as const;
 
 /**
  * BedrockGuardrailsService - Content safety filtering for K-12 environments
@@ -49,41 +56,97 @@ export class BedrockGuardrailsService {
     // In production (ECS/Lambda), AWS_REGION is always set
     if (!region) {
       this.log.warn('AWS_REGION not configured - BedrockGuardrailsService disabled (local development mode)');
-      // Initialize with dummy region for client instantiation (won't be used)
       this.bedrockClient = new BedrockRuntimeClient({ region: 'us-east-1' });
       this.snsClient = new SNSClient({ region: 'us-east-1' });
-      this.config = {
-        region: '',
-        guardrailId: '', // Empty guardrailId disables the service
-        guardrailVersion: 'DRAFT',
-        enableViolationNotifications: false,
-        enablePiiTokenization: false,
-        tokenTtlSeconds: 3600,
-      };
+      this.config = BedrockGuardrailsService.buildDisabledConfig();
       return;
     }
 
     this.bedrockClient = new BedrockRuntimeClient({ region });
     this.snsClient = new SNSClient({ region });
+    this.config = BedrockGuardrailsService.buildConfig(region, config);
+    this.logConfigurationWarnings(config);
+  }
 
-    this.config = {
+  /**
+   * Build a disabled configuration for local development (no AWS region)
+   */
+  private static buildDisabledConfig(): GuardrailsConfig {
+    return {
+      region: '',
+      guardrailId: '',
+      guardrailVersion: 'DRAFT',
+      enableViolationNotifications: false,
+      enablePiiTokenization: false,
+      tokenTtlSeconds: 3600,
+    };
+  }
+
+  /** First non-empty of the provided override and the env fallback. */
+  private static firstSet(override: string | undefined, env: string | undefined, fallback = ''): string {
+    return override || env || fallback;
+  }
+
+  /**
+   * Build configuration from provided config and environment variables
+   */
+  private static buildConfig(region: string, config?: Partial<GuardrailsConfig>): GuardrailsConfig {
+    return {
       region,
-      guardrailId: config?.guardrailId || process.env.BEDROCK_GUARDRAIL_ID || '',
-      guardrailVersion: config?.guardrailVersion || process.env.BEDROCK_GUARDRAIL_VERSION || 'DRAFT',
-      violationTopicArn: config?.violationTopicArn || process.env.GUARDRAIL_VIOLATION_TOPIC_ARN,
+      guardrailId: BedrockGuardrailsService.firstSet(config?.guardrailId, process.env.BEDROCK_GUARDRAIL_ID),
+      guardrailVersion: BedrockGuardrailsService.firstSet(config?.guardrailVersion, process.env.BEDROCK_GUARDRAIL_VERSION, 'DRAFT'),
+      violationTopicArn: BedrockGuardrailsService.firstSet(config?.violationTopicArn, process.env.GUARDRAIL_VIOLATION_TOPIC_ARN) || undefined,
       enableViolationNotifications: config?.enableViolationNotifications ?? true,
       enablePiiTokenization: config?.enablePiiTokenization ?? true,
-      tokenTtlSeconds: config?.tokenTtlSeconds ?? 3600, // 1 hour default
+      tokenTtlSeconds: config?.tokenTtlSeconds ?? 3600,
+      hashSecret: config?.hashSecret,
     };
+  }
 
-    // Validate required configuration
+  /**
+   * Log warnings about missing configuration
+   */
+  private logConfigurationWarnings(config?: Partial<GuardrailsConfig>): void {
     if (!this.config.guardrailId) {
       this.log.warn('Bedrock Guardrail ID not configured - content safety filtering disabled');
     }
 
-    // Issue #727: Validate GUARDRAIL_HASH_SECRET is set for privacy protection
+    if (this.config.enableViolationNotifications && !this.config.violationTopicArn) {
+      this.log.warn('Violation notifications enabled but GUARDRAIL_VIOLATION_TOPIC_ARN not set — violations will not notify');
+    }
+
+    // Issue #727: Validate GUARDRAIL_HASH_SECRET is set for privacy protection.
+    // The old default literal was a real privacy hole: anyone who reads the
+    // open-source repo could pre-compute the HMAC of a known session/user id and
+    // correlate guardrail-violation logs across requests for a K-12 student.
+    //
+    // This USED to throw in production — which took down EVERY chat request when
+    // the env var was missing (the guardrails service is constructed lazily on
+    // the first chat request, so the "startup error" surfaced as a per-request
+    // 500 across the whole product; broke deployed dev, 2026-07-06). A missing
+    // secret must never cost availability: instead, hashValue() REFUSES to hash
+    // and emits a fixed 'redacted' placeholder — zero correlation is possible,
+    // which is strictly more private than default-secret hashing — and we log
+    // loudly (error in production, warn elsewhere) so ops wires the secret.
     if (!process.env.GUARDRAIL_HASH_SECRET && !config?.hashSecret) {
-      this.log.warn('GUARDRAIL_HASH_SECRET not configured - using default secret for session ID hashing (weakens privacy protection)');
+      if (process.env.NODE_ENV === 'production') {
+        this.log.error(
+          'GUARDRAIL_HASH_SECRET is not set: guardrail violation logs will record a redacted placeholder instead of a per-session hash (violations cannot be correlated per user until the secret is configured). Set the GUARDRAIL_HASH_SECRET env var / ECS secret.'
+        );
+      } else {
+        this.log.warn('GUARDRAIL_HASH_SECRET not configured - violation logs will use a redacted placeholder for session ID hashing');
+      }
+    }
+
+    // Issue #929: Warn when content snippet logging is active — snippets contain the
+    // first/last 30 chars of user content and bypass PII tokenization. This should
+    // only be enabled during time-boxed tuning sprints, never left on in production.
+    if (process.env.GUARDRAIL_LOG_SNIPPET === 'true') {
+      const isProduction = process.env.NODE_ENV === 'production';
+      const level = isProduction ? 'error' : 'warn';
+      this.log[level](
+        `GUARDRAIL_LOG_SNIPPET is enabled${isProduction ? ' IN PRODUCTION' : ''} — detection logs will include content head/tail snippets. Disable after tuning sprint to minimize PII surface in K-12 logs.`
+      );
     }
   }
 
@@ -161,35 +224,7 @@ export class BedrockGuardrailsService {
         };
       }
 
-      // Issue #742: Send detection notification for topics in detect-only mode
-      if (result.detectedTopics && result.detectedTopics.length > 0) {
-        await this.sendViolationNotification({
-          violationId: requestId,
-          userIdHash: this.hashValue(sessionId || 'anonymous'),
-          timestamp: new Date().toISOString(),
-          source: 'input',
-          categories: result.detectedTopics,
-          modelId: 'pre-check',
-          provider: 'user-input',
-          action: 'detected',
-          sessionId,
-        });
-      }
-
-      // Issue #761: Send detection notification for content filters in detect-only mode
-      if (result.detectedFilters && result.detectedFilters.length > 0) {
-        await this.sendViolationNotification({
-          violationId: requestId,
-          userIdHash: this.hashValue(sessionId || 'anonymous'),
-          timestamp: new Date().toISOString(),
-          source: 'input',
-          categories: result.detectedFilters,
-          modelId: 'pre-check',
-          provider: 'user-input',
-          action: 'detected',
-          sessionId,
-        });
-      }
+      // Issue #929: Detect-only detections logged to CloudWatch only; SNS reserved for blocks.
 
       this.log.info('Input content passed safety check', {
         requestId,
@@ -209,10 +244,12 @@ export class BedrockGuardrailsService {
       });
 
       // Graceful degradation - allow content if guardrails unavailable
-      // This ensures service continuity while logging the issue
+      // This ensures service continuity while logging the issue. `degraded`
+      // marks this as a fail-OPEN so stricter callers can fail closed instead.
       return {
         allowed: true,
         processedContent: content,
+        degraded: true,
       };
     }
   }
@@ -276,35 +313,7 @@ export class BedrockGuardrailsService {
         };
       }
 
-      // Issue #742: Send detection notification for topics in detect-only mode
-      if (result.detectedTopics && result.detectedTopics.length > 0) {
-        await this.sendViolationNotification({
-          violationId: requestId,
-          userIdHash: this.hashValue(sessionId || 'anonymous'),
-          timestamp: new Date().toISOString(),
-          source: 'output',
-          categories: result.detectedTopics,
-          modelId,
-          provider,
-          action: 'detected',
-          sessionId,
-        });
-      }
-
-      // Issue #761: Send detection notification for content filters in detect-only mode
-      if (result.detectedFilters && result.detectedFilters.length > 0) {
-        await this.sendViolationNotification({
-          violationId: requestId,
-          userIdHash: this.hashValue(sessionId || 'anonymous'),
-          timestamp: new Date().toISOString(),
-          source: 'output',
-          categories: result.detectedFilters,
-          modelId,
-          provider,
-          action: 'detected',
-          sessionId,
-        });
-      }
+      // Issue #929: Detect-only detections logged to CloudWatch only; SNS reserved for blocks.
 
       this.log.info('Output content passed safety check', {
         requestId,
@@ -327,10 +336,13 @@ export class BedrockGuardrailsService {
         provider,
       });
 
-      // Graceful degradation - allow content if guardrails unavailable
+      // Graceful degradation - allow content if guardrails unavailable.
+      // `degraded` marks this as a fail-OPEN (vs a deliberate pass) so stricter
+      // callers can choose to fail closed.
       return {
         allowed: true,
         processedContent: content,
+        degraded: true,
       };
     }
   }
@@ -368,11 +380,24 @@ export class BedrockGuardrailsService {
     // topics, but the assessment trace still contains detection information.
     const assessment = response.assessments?.[0];
     const detectedTopics = this.extractDetectedTopics(assessment);
+    const detectedFilters = this.extractDetectedFilters(assessment);
+
+    // Issue #929: Build a privacy-preserving fingerprint to enable detection
+    // clustering without writing raw content to logs. `contentHash` (HMAC-SHA256,
+    // 16-hex-char prefix) lets us identify duplicate triggers across requests.
+    // `contentSnippet` is opt-in via GUARDRAIL_LOG_SNIPPET=true and exposes only
+    // the first/last 30 chars — enough to reverse-engineer trigger phrases during
+    // a tuning sprint, but defaults OFF to minimize PII surface.
+    const detectionFingerprint = (detectedTopics.length > 0 || detectedFilters.length > 0)
+      ? this.buildDetectionFingerprint(content)
+      : undefined;
+
     if (detectedTopics.length > 0) {
-      this.log.info('Topics detected in detect-only mode (not blocked)', {
+      this.log.info(LOG_MESSAGES.TOPICS_DETECTED, {
         source,
         detectedTopics,
         contentLength: content.length,
+        ...detectionFingerprint,
       });
     }
 
@@ -380,48 +405,17 @@ export class BedrockGuardrailsService {
     // When content filters use inputStrength/outputStrength: 'NONE' (detect-only mode),
     // the overall response.action will NOT be 'GUARDRAIL_INTERVENED' for those
     // filters, but the assessment trace still contains detection information.
-    const detectedFilters = this.extractDetectedFilters(assessment);
     if (detectedFilters.length > 0) {
-      this.log.info('Content filters detected in detect-only mode (not blocked)', {
+      this.log.info(LOG_MESSAGES.FILTERS_DETECTED, {
         source,
         detectedFilters,
         contentLength: content.length,
+        ...detectionFingerprint,
       });
     }
 
     if (response.action === 'GUARDRAIL_INTERVENED') {
-      const blockedCategories = this.extractBlockedCategories(assessment);
-      const blockedMessage = response.outputs?.[0]?.text;
-
-      // Issue #763: Log detailed assessment data for blocked content to support
-      // analysis of false positive patterns and tuning strategy development.
-      // Includes word policy matches (count/type only — never raw words), filter
-      // confidence levels, and topic triggers.
-      // Note: raw matched words are NOT logged — they come from user/AI content
-      // and could contain profane or offensive terms. Log type and count instead.
-      const wordMatches = [
-        ...(assessment?.wordPolicy?.customWords?.filter(w => w.action === 'BLOCKED').map(w => ({ type: 'custom', matchLength: w.match?.length })) || []),
-        ...(assessment?.wordPolicy?.managedWordLists?.filter(w => w.action === 'BLOCKED').map(w => ({ type: w.type, matchLength: w.match?.length })) || []),
-      ];
-      const filterDetails = assessment?.contentPolicy?.filters
-        ?.filter(f => f.action === 'BLOCKED')
-        .map(f => ({ type: f.type, confidence: f.confidence })) || [];
-
-      this.log.warn('Guardrail intervened', {
-        source,
-        blockedCategories,
-        hasBlockedMessage: !!blockedMessage,
-        wordPolicyMatches: wordMatches.length > 0 ? wordMatches : undefined,
-        contentFilterDetails: filterDetails.length > 0 ? filterDetails : undefined,
-        contentLength: content.length,
-      });
-
-      return {
-        blocked: true,
-        reason: blockedCategories.join(', ') || 'Content policy violation',
-        blockedMessage,
-        blockedCategories,
-      };
+      return this.buildBlockedResult(assessment, response, source, content.length);
     }
 
     return {
@@ -432,51 +426,113 @@ export class BedrockGuardrailsService {
   }
 
   /**
+   * Build a blocked result with detailed assessment logging
+   *
+   * Issue #763: Logs word policy matches (count/type only — never raw words),
+   * filter confidence levels, and topic triggers to support false positive analysis.
+   */
+  private buildBlockedResult(
+    assessment: SDKGuardrailAssessment | undefined,
+    response: { outputs?: Array<{ text?: string }> },
+    source: 'INPUT' | 'OUTPUT',
+    contentLength: number
+  ): GuardrailCheckResult {
+    const blockedCategories = this.extractBlockedCategories(assessment);
+    const blockedMessage = response.outputs?.[0]?.text;
+
+    const wordMatches = this.extractBlockedWordMatches(assessment);
+    const filterDetails = this.extractBlockedFilterDetails(assessment);
+
+    this.log.warn('Guardrail intervened', {
+      source,
+      blockedCategories,
+      hasBlockedMessage: !!blockedMessage,
+      wordPolicyMatches: wordMatches.length > 0 ? wordMatches : undefined,
+      contentFilterDetails: filterDetails.length > 0 ? filterDetails : undefined,
+      contentLength,
+    });
+
+    return {
+      blocked: true,
+      reason: blockedCategories.join(', ') || 'Content policy violation',
+      blockedMessage,
+      blockedCategories,
+    };
+  }
+
+  /**
+   * Extract word policy match metadata (type/count only — never raw matched words)
+   */
+  private extractBlockedWordMatches(assessment?: SDKGuardrailAssessment): Array<{ type: string; matchLength?: number }> {
+    const customWordMatches = assessment?.wordPolicy?.customWords
+      ?.filter(w => w.action === 'BLOCKED')
+      .map(w => ({ type: 'custom', matchLength: w.match?.length })) ?? [];
+
+    const managedWordMatches = assessment?.wordPolicy?.managedWordLists
+      ?.filter(w => w.action === 'BLOCKED')
+      .map(w => ({ type: w.type ?? 'unknown', matchLength: w.match?.length })) ?? [];
+
+    return [...customWordMatches, ...managedWordMatches];
+  }
+
+  /**
+   * Extract blocked content filter details (type and confidence)
+   */
+  private extractBlockedFilterDetails(assessment?: SDKGuardrailAssessment): Array<{ type?: string; confidence?: string }> {
+    return assessment?.contentPolicy?.filters
+      ?.filter(f => f.action === 'BLOCKED')
+      .map(f => ({ type: f.type, confidence: f.confidence })) ?? [];
+  }
+
+  /**
    * Extract blocked category names from guardrail assessment
    */
   private extractBlockedCategories(assessment?: SDKGuardrailAssessment): string[] {
+    return [
+      ...this.extractBlockedContentFilterCategories(assessment),
+      ...this.extractBlockedTopicCategories(assessment),
+      ...this.extractBlockedWordCategories(assessment),
+    ];
+  }
+
+  /**
+   * Extract content filter categories that triggered blocking (hate, violence, etc.)
+   */
+  private extractBlockedContentFilterCategories(assessment?: SDKGuardrailAssessment): string[] {
+    return assessment?.contentPolicy?.filters
+      ?.filter(f => f.action === 'BLOCKED' && f.type)
+      .map(f => this.formatCategoryName(f.type as ContentFilterType)) ?? [];
+  }
+
+  /**
+   * Extract topic policy categories that triggered blocking
+   */
+  private extractBlockedTopicCategories(assessment?: SDKGuardrailAssessment): string[] {
+    return assessment?.topicPolicy?.topics
+      ?.filter(t => t.action === 'BLOCKED' && t.name)
+      .map(t => t.name ?? '') ?? [];
+  }
+
+  /**
+   * Extract word policy categories that triggered blocking (custom words + managed word lists)
+   *
+   * Issue #763: Includes managedWordLists (PROFANITY filter) which was previously missing.
+   * Note: word.match (the raw blocked word) is intentionally NOT included — it flows into
+   * SNS email subjects which appear in plaintext on lock screens.
+   */
+  private extractBlockedWordCategories(assessment?: SDKGuardrailAssessment): string[] {
     const categories: string[] = [];
 
-    // Content policy filters (hate, violence, etc.)
-    if (assessment?.contentPolicy?.filters) {
-      for (const filter of assessment.contentPolicy.filters) {
-        if (filter.action === 'BLOCKED' && filter.type) {
-          categories.push(this.formatCategoryName(filter.type as ContentFilterType));
-        }
-      }
+    const hasBlockedCustomWord = assessment?.wordPolicy?.customWords
+      ?.some(w => w.action === 'BLOCKED') ?? false;
+    if (hasBlockedCustomWord) {
+      categories.push('Blocked word detected');
     }
 
-    // Topic policy
-    if (assessment?.topicPolicy?.topics) {
-      for (const topic of assessment.topicPolicy.topics) {
-        if (topic.action === 'BLOCKED' && topic.name) {
-          categories.push(topic.name);
-        }
-      }
-    }
-
-    // Word policy - custom words
-    if (assessment?.wordPolicy?.customWords) {
-      for (const word of assessment.wordPolicy.customWords) {
-        if (word.action === 'BLOCKED') {
-          categories.push('Blocked word detected');
-          break; // Only add once
-        }
-      }
-    }
-
-    // Issue #763: Word policy - managed word lists (PROFANITY filter)
-    // Previously missing — PROFANITY blocks were not categorized in logs/notifications,
-    // making it impossible to identify them as the source of increased blocking.
-    // Note: word.match (the raw blocked word) is intentionally NOT included in the
-    // category string — it flows into SNS email subjects which appear in plaintext
-    // on lock screens and email previews.
-    if (assessment?.wordPolicy?.managedWordLists) {
-      for (const word of assessment.wordPolicy.managedWordLists) {
-        if (word.action === 'BLOCKED') {
-          categories.push(`Profanity filter (${word.type ?? 'managed word list'})`);
-        }
-      }
+    const blockedManagedWords = assessment?.wordPolicy?.managedWordLists
+      ?.filter(w => w.action === 'BLOCKED') ?? [];
+    for (const word of blockedManagedWords) {
+      categories.push(`Profanity filter (${word.type ?? 'managed word list'})`);
     }
 
     return categories;
@@ -540,54 +596,65 @@ export class BedrockGuardrailsService {
    * @returns Array of detected pattern types (empty if none found)
    */
   private detectSuspiciousPatterns(content: string): string[] {
-    const patterns: string[] = [];
     const lowerContent = content.toLowerCase();
 
-    // System instruction override attempts
-    if (lowerContent.includes('system instruction') ||
-        lowerContent.includes('system prompt') ||
-        lowerContent.includes('system message') ||
-        lowerContent.includes('ignore previous') ||
-        lowerContent.includes('ignore all previous') ||
-        lowerContent.includes('disregard previous') ||
-        lowerContent.includes('forget everything')) {
-      patterns.push('system_override_attempt');
-    }
+    return [
+      this.detectSystemOverride(lowerContent),
+      this.detectRoleManipulation(content),
+      this.detectDataExtraction(lowerContent),
+      this.detectDelimiterBypass(content),
+      this.detectJailbreak(content),
+    ].filter((pattern): pattern is string => pattern !== null);
+  }
 
-    // Role manipulation attempts
-    const roleManipulationPatterns = [
+  /** System instruction override attempts */
+  private detectSystemOverride(lowerContent: string): string | null {
+    const overridePhrases = [
+      'system instruction', 'system prompt', 'system message',
+      'ignore previous', 'ignore all previous',
+      'disregard previous', 'forget everything',
+    ];
+    return overridePhrases.some(phrase => lowerContent.includes(phrase))
+      ? 'system_override_attempt' : null;
+  }
+
+  /** Role manipulation attempts (excludes legitimate educational role-playing) */
+  private detectRoleManipulation(content: string): string | null {
+    const isLegitimateRolePlaying = /principal|teacher|administrator|superintendent|danielson|evaluation|observation/iu.test(content);
+    if (isLegitimateRolePlaying) return null;
+
+    const rolePatterns = [
       /you\s+are\s+now\s+(?:a|an|the)/iu,
       /act\s+as\s+(?:if|though)\s+you\s+(?:are|were)/iu,
       /pretend\s+(?:to\s+be|you\s+are)/iu,
       /simulate\s+(?:being|a)/iu,
     ];
-    // Exclude legitimate educational role-playing (context: Danielson observations, teacher evaluation)
-    const isLegitimateRolePlaying = /principal|teacher|administrator|superintendent|danielson|evaluation|observation/iu.test(content);
-    if (!isLegitimateRolePlaying && roleManipulationPatterns.some(pattern => pattern.test(content))) {
-      patterns.push('role_manipulation');
-    }
+    return rolePatterns.some(pattern => pattern.test(content))
+      ? 'role_manipulation' : null;
+  }
 
-    // Data extraction attempts
-    if (lowerContent.includes('show me your prompt') ||
-        lowerContent.includes('what are your instructions') ||
-        lowerContent.includes('reveal your system prompt') ||
-        lowerContent.includes('output your configuration')) {
-      patterns.push('data_extraction_attempt');
-    }
+  /** Data extraction attempts (probing for system prompts / instructions) */
+  private detectDataExtraction(lowerContent: string): string | null {
+    const extractionPhrases = [
+      'show me your prompt', 'what are your instructions',
+      'reveal your system prompt', 'output your configuration',
+    ];
+    return extractionPhrases.some(phrase => lowerContent.includes(phrase))
+      ? 'data_extraction_attempt' : null;
+  }
 
-    // Delimiter/encoding bypass attempts
-    if ((/[<>]{3,}/u.test(content) && /<\/?system>/iu.test(content)) ||
-        content.includes('[INST]') ||
-        /\{\{\{\s*system/iu.test(content)) {
-      patterns.push('delimiter_bypass');
-    }
+  /** Delimiter/encoding bypass attempts */
+  private detectDelimiterBypass(content: string): string | null {
+    if (/[<>]{3,}/u.test(content) && /<\/?system>/iu.test(content)) return 'delimiter_bypass';
+    if (content.includes('[INST]')) return 'delimiter_bypass';
+    if (/\{\{\{\s*system/iu.test(content)) return 'delimiter_bypass';
+    return null;
+  }
 
-    // Jailbreak/DAN patterns
-    if (/do\s+anything\s+now|dan\s+mode|developer\s+mode/iu.test(content)) {
-      patterns.push('jailbreak_attempt');
-    }
-
-    return patterns;
+  /** Jailbreak/DAN pattern attempts */
+  private detectJailbreak(content: string): string | null {
+    return /do\s+anything\s+now|dan\s+mode|developer\s+mode/iu.test(content)
+      ? 'jailbreak_attempt' : null;
   }
 
   /**
@@ -617,52 +684,49 @@ export class BedrockGuardrailsService {
       return;
     }
 
-    try {
-      const message = {
-        timestamp: violation.timestamp,
-        violationId: violation.violationId,
-        source: violation.source,
-        categories: violation.categories,
-        action: violation.action,
-        modelId: violation.modelId,
-        provider: violation.provider,
-        // Note: userIdHash is a hash, not actual user ID for privacy
-        userIdHash: violation.userIdHash,
-      };
+    const message = {
+      timestamp: violation.timestamp,
+      violationId: violation.violationId,
+      source: violation.source,
+      categories: violation.categories,
+      action: violation.action,
+      modelId: violation.modelId,
+      provider: violation.provider,
+      // Note: userIdHash is a hash, not actual user ID for privacy
+      userIdHash: violation.userIdHash,
+    };
 
-      const command = new PublishCommand({
-        TopicArn: this.config.violationTopicArn,
-        // SNS Subject max is 100 chars. Truncate category list to fit.
-        Subject: (() => {
-          const base = 'K-12 Content Safety Alert: ';
-          const full = base + violation.categories.join(', ');
-          return full.length <= 100 ? full : full.slice(0, 97) + '...';
-        })(),
-        Message: JSON.stringify(message, null, 2),
-        MessageAttributes: {
-          violationType: {
-            DataType: 'String',
-            StringValue: violation.source,
-          },
-          action: {
-            DataType: 'String',
-            StringValue: violation.action,
-          },
+    // Best-effort publish via the shared helper (Subject cap + swallow — never
+    // throws, so no surrounding try/catch needed). Use THIS service's own
+    // region-configured client, not the shared default.
+    const { sent, error } = await snsPublishBestEffort({
+      client: this.snsClient,
+      topicArn: this.config.violationTopicArn,
+      subject: 'K-12 Content Safety Alert: ' + violation.categories.join(', '),
+      message: JSON.stringify(message, null, 2),
+      messageAttributes: {
+        violationType: {
+          DataType: 'String',
+          StringValue: violation.source,
         },
-      });
+        action: {
+          DataType: 'String',
+          StringValue: violation.action,
+        },
+      },
+    });
 
-      await this.snsClient.send(command);
-
+    if (sent) {
       this.log.info('Violation notification sent', {
         violationId: violation.violationId,
         categories: violation.categories,
       });
-    } catch (error) {
+    } else {
+      // Don't throw - notification failure shouldn't block the response.
       this.log.error('Failed to send violation notification', {
         violationId: violation.violationId,
         error: error instanceof Error ? error.message : String(error),
       });
-      // Don't throw - notification failure shouldn't block the response
     }
   }
 
@@ -671,10 +735,38 @@ export class BedrockGuardrailsService {
    *
    * Uses a secret key to prevent rainbow table attacks on predictable values
    * like session IDs. The secret should be set via GUARDRAIL_HASH_SECRET env var.
+   *
+   * With NO secret configured this returns a fixed 'redacted' placeholder
+   * instead of falling back to a publicly-known default key: a repo-visible
+   * default lets anyone pre-compute HMACs of known ids and correlate a K-12
+   * student's violation logs, whereas a constant placeholder carries zero
+   * information. Availability is never traded for the secret (see
+   * logConfigurationWarnings).
    */
   private hashValue(value: string): string {
-    const secret = process.env.GUARDRAIL_HASH_SECRET || this.config.hashSecret || 'aistudio-guardrail-default-secret';
+    const secret = process.env.GUARDRAIL_HASH_SECRET || this.config.hashSecret;
+    if (!secret) return 'redacted';
     return createHmac('sha256', secret).update(value).digest('hex').substring(0, 16);
+  }
+
+  /**
+   * Build a privacy-preserving fingerprint for a detection event (Issue #929).
+   *
+   * Returns the HMAC-SHA256 hash of the content (clustering key) and, when the
+   * `GUARDRAIL_LOG_SNIPPET` env var is set to "true", a short head/tail snippet
+   * for human review during tuning. Snippet is OFF by default to minimize PII
+   * surface in K-12 logs.
+   */
+  private buildDetectionFingerprint(content: string): { contentHash: string; contentSnippet?: string } {
+    const fp: { contentHash: string; contentSnippet?: string } = {
+      contentHash: this.hashValue(content),
+    };
+    if (process.env.GUARDRAIL_LOG_SNIPPET === 'true') {
+      const head = content.slice(0, 30).replace(/\s+/g, ' ').trim();
+      const tail = content.length > 60 ? content.slice(-30).replace(/\s+/g, ' ').trim() : '';
+      fp.contentSnippet = tail ? `${head} … ${tail}` : head;
+    }
+    return fp;
   }
 
   /**

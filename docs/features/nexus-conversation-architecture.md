@@ -404,6 +404,58 @@ messages: exportedRepo.messages.map(item => {
 
 ---
 
+## Repository-backed attachments
+
+Nexus document, text, and image attachments use the unified repository platform when
+the content cutover flags are active. The memoized attachment adapter initiates
+an owner-bound ephemeral repository, uploads directly to signed object storage,
+completes canonical processing, and sends only an opaque repository marker for
+document/text provenance. Their source bytes and extracted text never traverse
+the chat request. Images retain an inline data URL in transient client state
+while also carrying the opaque marker, but a canonical server turn treats those
+caller-carried pixels as untrusted, ignores them, and reloads the exact
+inspected current version from the owner-bound repository.
+Durable history stores only image-presence metadata and the repository
+reference.
+
+The adapter reads the current conversation ID through a stable closure-backed
+accessor updated synchronously by the conversation callback. Do not add
+`conversationId` to its memo dependencies: the first `null → UUID` transition
+would recreate the runtime and lose draft/stream state. Each source uses a fresh
+draft key so a promoted repository or a binding from a different conversation
+cannot be silently reused.
+
+The chat route validates the current turn's markers before model routing or
+conversation creation, then atomically binds them to the current user and
+conversation before retrieval or model execution. A binding race removes a
+newly created empty conversation. The route strips opaque IDs into safe
+attachment labels, resolves all active/unexpired conversation repositories, and
+provides `searchNexusAttachments`. The tool uses Retrieval v2, which rechecks
+the current user at final context disclosure and returns immutable-version
+citations. It runs retrieved chunk text through the configured content-safety
+and PII input transform before returning provider-visible tool output. New token
+mappings flow through a per-request sink to the active stream detokenizer, never
+through shared process state. Raw search chunks are not persisted in
+conversation tool results or replayed on later turns. Missing, foreign, and
+expired references share one non-disclosing 404 response.
+
+Ephemeral repositories default to 30-day retention. “Keep as a repository”
+promotes the source in place to a private durable repository so version and
+citation identities do not change. Promotion is visible only when the
+authenticated capability catalog includes `knowledge-repositories`, and the
+server route enforces the same capability independently. Scheduled lifecycle
+maintenance disables retrieval at expiry and purges storage only after the
+recovery grace period. A partial purge remains retryable in `deleting`;
+nonterminal external processing blocks deletion, while an explicitly terminal
+failed/cancelled provider job is reconciled and released.
+
+With cutover flags off, initiation returns `mode: "legacy"` before creating
+repository state and the established attachment processor remains the rollback
+path. See
+[Unified Repository Product Integration](./unified-repository-product-integration.md).
+
+---
+
 ## Common Pitfalls
 
 ### ❌ Pitfall 1: Passing conversationId to ConversationInitializer
@@ -473,9 +525,23 @@ const attachmentAdapter = createEnhancedNexusAttachmentAdapter({...})
 
 ```typescript
 // CORRECT - memoize with stable dependencies
+const [conversationIdAccessor] = useState(() =>
+  createConversationIdAccessor(initialConversationId)
+)
+
 const attachmentAdapter = useMemo(() =>
-  createEnhancedNexusAttachmentAdapter({...}),
-  [handleAttachmentProcessingStart, handleAttachmentProcessingComplete]
+  createEnhancedNexusAttachmentAdapter(
+    {...callbacks},
+    {
+      repositoryBacked: true,
+      getConversationId: conversationIdAccessor.get
+    }
+  ),
+  [
+    conversationIdAccessor,
+    handleAttachmentProcessingStart,
+    handleAttachmentProcessingComplete
+  ]
 )
 ```
 
@@ -495,7 +561,23 @@ useEffect(() => {
 // The component doesn't remount, so useEffect only runs once
 ```
 
-### ❌ Pitfall 6: Session object reference in useEffect deps
+### ❌ Pitfall 6: Consolidating multi-step MCP responses into a single DB row
+
+When MCP connector tools are enabled, `streamText` runs with `maxSteps > 1`, producing multiple assistant→tool→assistant turns in one streaming call. Writing all steps into a single `nexus_messages` row causes `convertToModelMessages()` to produce consecutive user turns on reload, which Anthropic's API rejects.
+
+```typescript
+// WRONG — one row for all steps; replay triggers AI_MissingToolResultsError / consecutive-user-turn rejection
+await saveAssistantMessage(conversationId, consolidatedContent)
+
+// CORRECT — saveConversationSteps() writes each step as a separate row inside executeTransaction
+await saveConversationSteps(conversationId, event.steps)
+// If existing rows are already consolidated, normalizeMultiStepMessages() pre-processes them
+// before passing to convertToModelMessages() without requiring a DB migration.
+```
+
+Additionally, every tool-call part must carry `state: 'output-available'` and `input: Record<string,unknown>`. Without both fields the SDK emits `tool_use` with no paired `tool_result`, causing Anthropic to reject the next user turn. See `app/api/nexus/chat/chat-helpers.ts` and `docs/guides/silent-failure-patterns.md` for the full patterns.
+
+### ❌ Pitfall 7: Session object reference in useEffect deps
 
 ```typescript
 // WRONG - new session object on every refetch triggers re-mount
@@ -682,6 +764,13 @@ After making changes to conversation handling, test ALL of these scenarios:
 ---
 
 ## Version History
+
+### May 2026 - Multi-Step MCP Tool-Use Persistence (Issue #977)
+- **Problem:** `AI_MissingToolResultsError` ("Expected toolResult blocks") on follow-up messages in conversations that previously used MCP connector tools
+- **Root Causes:** (1) Tool-call parts missing `state`/`input` fields required by `convertToModelMessages`; (2) multi-step responses consolidated into a single DB row, producing invalid Anthropic turn structure on reload; (3) `convertContentToParts` silently downgraded stored `state` fields
+- **Solution:** `buildAssistantParts` now sets `state` and `input` on every tool-call part; `saveConversationSteps()` persists each step as a separate row inside `executeTransaction`; `normalizeMultiStepMessages()` repairs existing consolidated rows without migration; `convertContentToParts` validates the stored `state` enum
+- **Files Changed:** `app/api/nexus/chat/chat-helpers.ts`, `app/api/nexus/chat/route.ts`, `lib/streaming/types.ts`, `lib/streaming/provider-adapters/base-adapter.ts`, `lib/streaming/unified-streaming-service.ts`, `lib/nexus/history-adapter.ts`, `app/(protected)/nexus/_components/conversation-initializer.tsx`
+- **Breaking:** None (backward-compatible; normalizer handles existing rows)
 
 ### January 2025 - Stable Conversation ID Pattern
 - **Problem:** Component remounting on conversation ID assignment, losing streaming state

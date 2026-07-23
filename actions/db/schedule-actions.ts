@@ -1,8 +1,11 @@
 "use server"
 
-import { hasToolAccess } from "@/lib/db/drizzle"
+import { hasCapabilityAccess } from "@/utils/roles"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
+// Pure cron logic lives in a non-"use server" module so it can be unit-tested
+// and so custom POSIX cron is converted to AWS EventBridge form (REV-COR-046/047).
+import { convertToCronExpression, validateCustomCronExpression } from "@/lib/schedules/cron"
 import { getServerSession } from "@/lib/auth/server-session"
 import { ActionState } from "@/types"
 // Note: cron-parser had import issues, using robust regex validation instead
@@ -262,23 +265,12 @@ function validateInputData(inputData: Record<string, unknown>): { isValid: boole
 }
 
 /**
- * Validates schedule configuration
+ * Validates frequency-specific schedule configuration fields.
+ * Returns any validation errors found (empty array when valid).
  */
-function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; errors: string[] } {
+function validateFrequencySpecificConfig(config: ScheduleConfig): string[] {
   const errors: string[] = []
 
-  // Validate frequency
-  if (!['daily', 'weekly', 'monthly', 'custom'].includes(config.frequency)) {
-    errors.push('Invalid frequency. Must be daily, weekly, monthly, or custom')
-  }
-
-  // Validate time format (HH:MM)
-  const timeRegex = /^([01]?\d|2[0-3]):[0-5]\d$/
-  if (!timeRegex.test(config.time)) {
-    errors.push('Invalid time format. Must be HH:MM (24-hour format)')
-  }
-
-  // Validate frequency-specific fields
   if (config.frequency === 'weekly') {
     if (!config.daysOfWeek || !Array.isArray(config.daysOfWeek) || config.daysOfWeek.length === 0) {
       errors.push('daysOfWeek is required and must be a non-empty array for weekly schedules')
@@ -297,51 +289,32 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
     if (!config.cron) {
       errors.push('cron expression is required for custom schedules')
     } else {
-      // Comprehensive cron validation with strict input sanitization
-      const trimmedCron = config.cron.trim()
-
-      // First, ensure the cron string only contains allowed characters
-      // eslint-disable-next-line no-useless-escape
-      if (!/^[\d\s*,/\-]+$/.test(trimmedCron)) {
-        errors.push('Cron expression contains invalid characters')
-      } else {
-        const cronFields = trimmedCron.split(/\s+/)
-
-        // Validate exact field count first
-        if (cronFields.length !== 5) {
-          errors.push('cron expression must have exactly 5 fields (minute hour day month day-of-week)')
-        } else {
-          // Validate each field individually to prevent bypass attempts
-          const [minute, hour, day, month, dayOfWeek] = cronFields
-
-          // Validate minute field (0-59) - ReDoS-safe pattern
-          if (!/^\*$|^[0-5]?\d$|^[0-5]?\d-[0-5]?\d$|^[0-5]?\d\/\d+$|^\*\/\d+$/.test(minute)) {
-            errors.push('Invalid minute field in cron expression')
-          }
-
-          // Validate hour field (0-23) - ReDoS-safe pattern
-          if (!/^\*$|^(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])-(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])\/\d+$|^\*\/\d+$/.test(hour)) {
-            errors.push('Invalid hour field in cron expression')
-          }
-
-          // Validate day field (1-31) - ReDoS-safe pattern
-          if (!/^\*$|^(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])-(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])\/\d+$|^\*\/\d+$/.test(day)) {
-            errors.push('Invalid day field in cron expression')
-          }
-
-          // Validate month field (1-12) - ReDoS-safe pattern
-          if (!/^\*$|^(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])-(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])\/\d+$|^\*\/\d+$/.test(month)) {
-            errors.push('Invalid month field in cron expression')
-          }
-
-          // Validate day-of-week field (0-6) - ReDoS-safe pattern
-          if (!/^\*$|^[0-6]$|^[0-6]-[0-6]$|^[0-6]\/\d+$|^\*\/\d+$/.test(dayOfWeek)) {
-            errors.push('Invalid day-of-week field in cron expression')
-          }
-        }
-      }
+      errors.push(...validateCustomCronExpression(config.cron))
     }
   }
+
+  return errors
+}
+
+/**
+ * Validates schedule configuration
+ */
+function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; errors: string[] } {
+  const errors: string[] = []
+
+  // Validate frequency
+  if (!['daily', 'weekly', 'monthly', 'custom'].includes(config.frequency)) {
+    errors.push('Invalid frequency. Must be daily, weekly, monthly, or custom')
+  }
+
+  // Validate time format (HH:MM)
+  const timeRegex = /^([01]?\d|2[0-3]):[0-5]\d$/
+  if (!timeRegex.test(config.time)) {
+    errors.push('Invalid time format. Must be HH:MM (24-hour format)')
+  }
+
+  // Validate frequency-specific fields
+  errors.push(...validateFrequencySpecificConfig(config))
 
   // Note: Timezone validation removed to prevent false positives
   // The timezone will be stored as-is and used by the scheduler
@@ -349,52 +322,29 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
   return { isValid: errors.length === 0, errors }
 }
 
+// convertToCronExpression + validateCustomCronExpression are imported from
+// @/lib/schedules/cron (see import at top) — extracted so the pure logic is
+// unit-testable and so custom POSIX cron is converted to AWS EventBridge form.
+
 /**
- * Converts schedule configuration to cron expression for EventBridge
+ * Options for creating an EventBridge schedule
  */
-function convertToCronExpression(scheduleConfig: ScheduleConfig): string {
-  const { frequency, time, daysOfWeek, dayOfMonth, cron } = scheduleConfig
-
-  if (frequency === 'custom' && cron) {
-    return cron
-  }
-
-  const [hours, minutes] = time.split(':').map(Number)
-
-  switch (frequency) {
-    case 'daily':
-      return `${minutes} ${hours} * * ? *`
-
-    case 'weekly': {
-      if (!daysOfWeek || daysOfWeek.length === 0) {
-        throw ErrorFactories.validationFailed([{ field: 'daysOfWeek', message: 'Days of week required for weekly schedules' }])
-      }
-      // Convert from 0=Sunday to 1=Sunday for cron
-      const cronDays = daysOfWeek.map(day => day === 0 ? 7 : day).join(',')
-      return `${minutes} ${hours} ? * ${cronDays} *`
-    }
-
-    case 'monthly': {
-      const day = dayOfMonth || 1
-      return `${minutes} ${hours} ${day} * ? *`
-    }
-
-    default:
-      throw ErrorFactories.validationFailed([{ field: 'frequency', message: `Unsupported frequency: ${frequency}`, value: frequency }])
-  }
+interface CreateEventBridgeScheduleOptions {
+  scheduleId: number
+  name: string
+  scheduleConfig: ScheduleConfig
+  targetArn: string
+  roleArn: string
+  inputData: Record<string, unknown>
 }
 
 /**
  * Creates an EventBridge schedule
  */
 async function _createEventBridgeSchedule(
-  scheduleId: number,
-  name: string,
-  scheduleConfig: ScheduleConfig,
-  targetArn: string,
-  roleArn: string,
-  _inputData: Record<string, unknown>
+  options: CreateEventBridgeScheduleOptions
 ): Promise<string> {
+  const { scheduleId, name, scheduleConfig, targetArn, roleArn } = options
   const log = createLogger({ operation: 'createEventBridgeSchedule' })
 
   try {
@@ -464,17 +414,25 @@ async function _createEventBridgeSchedule(
 }
 
 /**
+ * Options for updating an EventBridge schedule
+ */
+interface UpdateEventBridgeScheduleOptions {
+  scheduleId: number
+  name: string
+  scheduleConfig: ScheduleConfig
+  targetArn: string
+  roleArn: string
+  inputData: Record<string, unknown>
+  active: boolean
+}
+
+/**
  * Updates an EventBridge schedule
  */
 async function _updateEventBridgeSchedule(
-  scheduleId: number,
-  name: string,
-  scheduleConfig: ScheduleConfig,
-  targetArn: string,
-  roleArn: string,
-  _inputData: Record<string, unknown>,
-  active: boolean
+  options: UpdateEventBridgeScheduleOptions
 ): Promise<void> {
+  const { scheduleId, name, scheduleConfig, targetArn, roleArn, active } = options
   const log = createLogger({ operation: 'updateEventBridgeSchedule' })
 
   try {
@@ -568,6 +526,92 @@ async function _deleteEventBridgeSchedule(scheduleId: number): Promise<void> {
 }
 
 /**
+ * Validates and sanitizes the inputs for createScheduleAction.
+ * Performs name, assistantArchitectId, scheduleConfig, and inputData validation,
+ * throwing the appropriate validation error on failure.
+ * Returns the sanitized name and clean assistant architect ID on success.
+ */
+function validateCreateScheduleInput(
+  params: CreateScheduleRequest,
+  log: ReturnType<typeof createLogger>
+): { sanitizedName: string; cleanArchitectId: number } {
+  const { name, assistantArchitectId, scheduleConfig, inputData } = params
+
+  // Validate and sanitize name
+  log.info("Validating name", { name, nameType: typeof name })
+  const nameValidation = validateAndSanitizeName(name)
+  if (!nameValidation.isValid) {
+    log.error("Name validation failed", { nameValidation })
+    throw ErrorFactories.validationFailed(
+      nameValidation.errors.map(error => ({ field: 'name', message: error }))
+    )
+  }
+  const sanitizedName = nameValidation.sanitizedName
+  log.info("Name validation passed", { sanitizedName })
+
+  // Security: Sanitize ID with CodeQL-compliant pattern that breaks taint flow
+  log.info("Validating assistantArchitectId", {
+    assistantArchitectId,
+    type: typeof assistantArchitectId,
+    value: assistantArchitectId,
+    isNaN: Number.isNaN(Number(assistantArchitectId))
+  })
+  let cleanArchitectId: number
+  try {
+    cleanArchitectId = sanitizeNumericId(assistantArchitectId)
+    log.info("AssistantArchitectId validation passed", { cleanArchitectId })
+  } catch (error) {
+    log.error("AssistantArchitectId validation failed", {
+      assistantArchitectId,
+      type: typeof assistantArchitectId,
+      converted: Number(assistantArchitectId),
+      isNaN: Number.isNaN(Number(assistantArchitectId)),
+      isInteger: Number.isInteger(Number(assistantArchitectId)),
+      error: sanitizeForLogging(error)
+    })
+    throw ErrorFactories.validationFailed([{
+      field: 'assistantArchitectId',
+      message: `assistantArchitectId must be a valid positive integer. Received: ${assistantArchitectId} (${typeof assistantArchitectId})`
+    }])
+  }
+
+  // Validate schedule configuration
+  log.info("Validating schedule configuration", {
+    scheduleConfig: sanitizeForLogging(scheduleConfig)
+  })
+  const validation = validateScheduleConfig(scheduleConfig)
+  if (!validation.isValid) {
+    log.error("Schedule config validation failed", {
+      scheduleConfig: sanitizeForLogging(scheduleConfig),
+      validationErrors: validation.errors
+    })
+    throw ErrorFactories.validationFailed(
+      validation.errors.map(error => ({ field: 'scheduleConfig', message: error }))
+    )
+  }
+  log.info("Schedule config validation passed")
+
+  // Validate input data size
+  log.info("Validating input data", {
+    inputDataSize: JSON.stringify(inputData).length,
+    inputDataType: typeof inputData
+  })
+  const inputDataValidation = validateInputData(inputData)
+  if (!inputDataValidation.isValid) {
+    log.error("Input data validation failed", {
+      inputDataValidation,
+      inputDataSize: JSON.stringify(inputData).length
+    })
+    throw ErrorFactories.validationFailed(
+      inputDataValidation.errors.map(error => ({ field: 'inputData', message: error }))
+    )
+  }
+  log.info("Input data validation passed")
+
+  return { sanitizedName, cleanArchitectId }
+}
+
+/**
  * Creates a new schedule
  */
 export async function createScheduleAction(params: CreateScheduleRequest): Promise<ActionState<{ id: number; scheduleArn?: string; nextExecution?: string }>> {
@@ -597,7 +641,7 @@ export async function createScheduleAction(params: CreateScheduleRequest): Promi
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -605,78 +649,10 @@ export async function createScheduleAction(params: CreateScheduleRequest): Promi
 
 
     // Validate input
-    const { name, assistantArchitectId, scheduleConfig, inputData } = params
+    const { scheduleConfig, inputData } = params
 
-    // Validate and sanitize name
-    log.info("Validating name", { name, nameType: typeof name })
-    const nameValidation = validateAndSanitizeName(name)
-    if (!nameValidation.isValid) {
-      log.error("Name validation failed", { nameValidation })
-      throw ErrorFactories.validationFailed(
-        nameValidation.errors.map(error => ({ field: 'name', message: error }))
-      )
-    }
-    const sanitizedName = nameValidation.sanitizedName
-    log.info("Name validation passed", { sanitizedName })
-
-    // Security: Sanitize ID with CodeQL-compliant pattern that breaks taint flow
-    log.info("Validating assistantArchitectId", {
-      assistantArchitectId,
-      type: typeof assistantArchitectId,
-      value: assistantArchitectId,
-      isNaN: Number.isNaN(Number(assistantArchitectId))
-    })
-    let cleanArchitectId: number
-    try {
-      cleanArchitectId = sanitizeNumericId(assistantArchitectId)
-      log.info("AssistantArchitectId validation passed", { cleanArchitectId })
-    } catch (error) {
-      log.error("AssistantArchitectId validation failed", {
-        assistantArchitectId,
-        type: typeof assistantArchitectId,
-        converted: Number(assistantArchitectId),
-        isNaN: Number.isNaN(Number(assistantArchitectId)),
-        isInteger: Number.isInteger(Number(assistantArchitectId)),
-        error: sanitizeForLogging(error)
-      })
-      throw ErrorFactories.validationFailed([{
-        field: 'assistantArchitectId',
-        message: `assistantArchitectId must be a valid positive integer. Received: ${assistantArchitectId} (${typeof assistantArchitectId})`
-      }])
-    }
-
-    // Validate schedule configuration
-    log.info("Validating schedule configuration", {
-      scheduleConfig: sanitizeForLogging(scheduleConfig)
-    })
-    const validation = validateScheduleConfig(scheduleConfig)
-    if (!validation.isValid) {
-      log.error("Schedule config validation failed", {
-        scheduleConfig: sanitizeForLogging(scheduleConfig),
-        validationErrors: validation.errors
-      })
-      throw ErrorFactories.validationFailed(
-        validation.errors.map(error => ({ field: 'scheduleConfig', message: error }))
-      )
-    }
-    log.info("Schedule config validation passed")
-
-    // Validate input data size
-    log.info("Validating input data", {
-      inputDataSize: JSON.stringify(inputData).length,
-      inputDataType: typeof inputData
-    })
-    const inputDataValidation = validateInputData(inputData)
-    if (!inputDataValidation.isValid) {
-      log.error("Input data validation failed", {
-        inputDataValidation,
-        inputDataSize: JSON.stringify(inputData).length
-      })
-      throw ErrorFactories.validationFailed(
-        inputDataValidation.errors.map(error => ({ field: 'inputData', message: error }))
-      )
-    }
-    log.info("Input data validation passed")
+    // Validate and sanitize all inputs
+    const { sanitizedName, cleanArchitectId } = validateCreateScheduleInput(params, log)
 
     // Get user ID from sub using Drizzle
     const userId = await getScheduleUserIdByCognitoSub(session.sub)
@@ -784,7 +760,7 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -853,6 +829,108 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
 }
 
 /**
+ * Mutable update payload shape for a schedule update.
+ */
+interface ScheduleUpdateData {
+  name?: string;
+  assistantArchitectId?: number;
+  scheduleConfig?: DrizzleScheduleConfig;
+  inputData?: Record<string, string>;
+  active?: boolean;
+  updatedBy?: string;
+}
+
+/**
+ * Builds and validates the update payload for updateScheduleAction.
+ * Only the fields present in params are validated and applied. Throws the
+ * appropriate validation/authorization error on failure, including when no
+ * updatable fields are provided.
+ */
+async function buildScheduleUpdateData(
+  params: UpdateScheduleRequest,
+  cognitoSub: string,
+  userId: number
+): Promise<ScheduleUpdateData> {
+  // Build update data object
+  const updateData: ScheduleUpdateData = {
+    updatedBy: cognitoSub
+  }
+
+  if (params.name !== undefined) {
+    // Validate and sanitize name
+    const nameValidation = validateAndSanitizeName(params.name)
+    if (!nameValidation.isValid) {
+      throw ErrorFactories.validationFailed(
+        nameValidation.errors.map(error => ({ field: 'name', message: error }))
+      )
+    }
+    updateData.name = nameValidation.sanitizedName
+  }
+
+  if (params.assistantArchitectId !== undefined) {
+    // Security: Sanitize ID with CodeQL-compliant pattern that breaks taint flow.
+    // General assistant-architect capability access is already enforced by the
+    // caller (updateScheduleAction) before this helper runs, so it is not
+    // re-checked here — this avoids a redundant DB round-trip and keeps the
+    // capability gate out of a user-controlled (params-driven) branch.
+    let cleanArchitectId: number
+    try {
+      cleanArchitectId = sanitizeNumericId(params.assistantArchitectId)
+    } catch {
+      throw ErrorFactories.validationFailed([{
+        field: 'assistantArchitectId',
+        message: 'assistantArchitectId must be a valid positive integer'
+      }])
+    }
+
+    // Check if assistant architect exists and user has ownership access using Drizzle
+    const hasArchitectAccess = await checkAssistantArchitectOwnership(cleanArchitectId, userId)
+
+    if (!hasArchitectAccess) {
+      throw ErrorFactories.authzInsufficientPermissions("assistant architect")
+    }
+
+    updateData.assistantArchitectId = cleanArchitectId
+  }
+
+  if (params.scheduleConfig !== undefined) {
+    // Validate schedule configuration
+    const validation = validateScheduleConfig(params.scheduleConfig)
+    if (!validation.isValid) {
+      throw ErrorFactories.validationFailed(
+        validation.errors.map(error => ({ field: 'scheduleConfig', message: error }))
+      )
+    }
+
+    updateData.scheduleConfig = params.scheduleConfig as DrizzleScheduleConfig
+  }
+
+  if (params.inputData !== undefined) {
+    // Validate input data size
+    const inputDataValidation = validateInputData(params.inputData)
+    if (!inputDataValidation.isValid) {
+      throw ErrorFactories.validationFailed(
+        inputDataValidation.errors.map(error => ({ field: 'inputData', message: error }))
+      )
+    }
+
+    updateData.inputData = params.inputData as Record<string, string>
+  }
+
+  if (params.active !== undefined) {
+    updateData.active = params.active
+  }
+
+  // Check if there's anything to update besides updatedBy
+  const hasUpdates = Object.keys(updateData).some(k => k !== 'updatedBy')
+  if (!hasUpdates) {
+    throw ErrorFactories.validationFailed([{ field: 'general', message: 'No fields to update' }])
+  }
+
+  return updateData
+}
+
+/**
  * Updates an existing schedule
  */
 export async function updateScheduleAction(id: number, params: UpdateScheduleRequest): Promise<ActionState<Schedule>> {
@@ -871,7 +949,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -895,91 +973,8 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
 
     // Schedule exists and user has access, proceed with update
 
-    // Build update data object
-    const updateData: {
-      name?: string;
-      assistantArchitectId?: number;
-      scheduleConfig?: DrizzleScheduleConfig;
-      inputData?: Record<string, string>;
-      active?: boolean;
-      updatedBy?: string;
-    } = {
-      updatedBy: session.sub
-    }
-
-    if (params.name !== undefined) {
-      // Validate and sanitize name
-      const nameValidation = validateAndSanitizeName(params.name)
-      if (!nameValidation.isValid) {
-        throw ErrorFactories.validationFailed(
-          nameValidation.errors.map(error => ({ field: 'name', message: error }))
-        )
-      }
-      updateData.name = nameValidation.sanitizedName
-    }
-
-    if (params.assistantArchitectId !== undefined) {
-      // Security: Pre-validate user access BEFORE sanitization to prevent bypass
-      // First verify user has general assistant architect access
-      const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
-      if (!hasAccess) {
-        throw ErrorFactories.authzToolAccessDenied("assistant-architect")
-      }
-
-      // Security: Sanitize ID with CodeQL-compliant pattern that breaks taint flow
-      let cleanArchitectId: number
-      try {
-        cleanArchitectId = sanitizeNumericId(params.assistantArchitectId)
-      } catch {
-        throw ErrorFactories.validationFailed([{
-          field: 'assistantArchitectId',
-          message: 'assistantArchitectId must be a valid positive integer'
-        }])
-      }
-
-      // Check if assistant architect exists and user has ownership access using Drizzle
-      const hasArchitectAccess = await checkAssistantArchitectOwnership(cleanArchitectId, userId)
-
-      if (!hasArchitectAccess) {
-        throw ErrorFactories.authzInsufficientPermissions("assistant architect")
-      }
-
-      updateData.assistantArchitectId = cleanArchitectId
-    }
-
-    if (params.scheduleConfig !== undefined) {
-      // Validate schedule configuration
-      const validation = validateScheduleConfig(params.scheduleConfig)
-      if (!validation.isValid) {
-        throw ErrorFactories.validationFailed(
-          validation.errors.map(error => ({ field: 'scheduleConfig', message: error }))
-        )
-      }
-
-      updateData.scheduleConfig = params.scheduleConfig as DrizzleScheduleConfig
-    }
-
-    if (params.inputData !== undefined) {
-      // Validate input data size
-      const inputDataValidation = validateInputData(params.inputData)
-      if (!inputDataValidation.isValid) {
-        throw ErrorFactories.validationFailed(
-          inputDataValidation.errors.map(error => ({ field: 'inputData', message: error }))
-        )
-      }
-
-      updateData.inputData = params.inputData as Record<string, string>
-    }
-
-    if (params.active !== undefined) {
-      updateData.active = params.active
-    }
-
-    // Check if there's anything to update besides updatedBy
-    const hasUpdates = Object.keys(updateData).some(k => k !== 'updatedBy')
-    if (!hasUpdates) {
-      throw ErrorFactories.validationFailed([{ field: 'general', message: 'No fields to update' }])
-    }
+    // Build and validate the update data object
+    const updateData = await buildScheduleUpdateData(params, session.sub, userId)
 
     // Execute update using Drizzle
     const updatedSchedule = await drizzleUpdateSchedule(id, userId, updateData)
@@ -1073,7 +1068,7 @@ export async function deleteScheduleAction(id: number): Promise<ActionState<{ su
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -1149,7 +1144,7 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")

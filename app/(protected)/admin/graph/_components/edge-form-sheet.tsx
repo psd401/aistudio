@@ -15,7 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { IconSearch } from "@tabler/icons-react"
-import type { SelectGraphNode } from "@/lib/db/types"
+import type { PublicGraphNode } from "@/lib/graph"
 
 export interface EdgeFormData {
   sourceNodeId: string
@@ -27,7 +27,7 @@ export interface EdgeFormData {
 interface EdgeFormSheetProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  nodes: SelectGraphNode[]
+  nodes: PublicGraphNode[]
   onSave: (data: EdgeFormData) => Promise<void>
 }
 

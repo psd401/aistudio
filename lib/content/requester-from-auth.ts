@@ -1,0 +1,377 @@
+/**
+ * Atrium requester resolution for the agent surfaces (REST v1 + MCP)
+ *
+ * Issue #1055 (Epic #1059, Atrium Phase 5 — Agent access). The single place that
+ * turns an authenticated API/MCP caller into a content-service `Requester` (§26).
+ * Every content REST route and MCP tool builds its requester here so identity and
+ * authorization are uniform across surfaces — mirroring how server actions use
+ * `actions/db/atrium/requester.ts` for the logged-in-human path.
+ *
+ * Three caller shapes resolve to the three `Requester` kinds:
+ *   - `delegated_for` claim present  -> `agent-delegated` (acts for that human,
+ *     inherits exactly their roles/org; never admin — see `principalOf`).
+ *   - `oauthClientId` ∈ active `agent_identities` -> `agent-autonomous`
+ *     (role-driven visibility, scopes from the token, owns via the system user).
+ *   - otherwise (sk- key / session / human OIDC token) -> `user`.
+ *
+ * Scope enforcement happens at the surface (`requireScope` / the unified tool
+ * catalog's per-entry `requiredScopes` on MCP dispatch, #924) BEFORE the service
+ * is called; this resolver only establishes WHO is calling.
+ */
+
+import { and, eq } from "drizzle-orm";
+import { executeQuery } from "@/lib/db/drizzle-client";
+import { agentIdentities, roles, users } from "@/lib/db/schema";
+import { getUserRoles } from "@/lib/db/user-roles";
+import { listUserGroupEmailsByUserId } from "@/lib/groups/queries";
+import { createLogger } from "@/lib/logger";
+import { ForbiddenError } from "./errors";
+import { systemUserIdOrNull } from "./helpers";
+import type { Requester } from "./types";
+
+const ADMIN_ROLE = "administrator";
+
+/**
+ * The minimal auth shape this resolver needs — satisfied by both
+ * `ApiAuthContext` (REST) and `McpToolContext` (MCP, once it threads the OIDC
+ * client id + delegation marker through).
+ */
+export interface RequesterAuthInput {
+  userId: number;
+  scopes: string[];
+  oauthClientId?: string;
+  delegatedForUserId?: number;
+}
+
+/** A user's roles + org attributes, shared by the user and delegated paths. */
+async function loadUserContext(userId: number): Promise<{
+  roles: string[];
+  building: string | null;
+  department: string | null;
+  gradeLevels: string[] | null;
+  groups: string[];
+} | null> {
+  // Defensive: a malformed token sub could yield a non-positive / NaN id; skip
+  // the query and let the caller surface a clean auth error.
+  if (!Number.isInteger(userId) || userId <= 0) return null;
+  // The user-attributes SELECT, the roles lookup, and the group-membership lookup
+  // are independent, so run them concurrently — this is on the hot path of every
+  // authenticated content REST/MCP call. A not-found user makes the roles/groups
+  // queries wasted work, but that path is rare (a deleted/invalid token sub) and
+  // the common found-user path saves a round trip. `groups` powers `group`-kind
+  // visibility grants (#1205); it is `[]` for a user with no memberships.
+  const [rows, roleNames, groupEmails] = await Promise.all([
+    executeQuery(
+      (db) =>
+        db
+          .select({
+            building: users.building,
+            department: users.department,
+            gradeLevels: users.gradeLevels,
+          })
+          .from(users)
+          .where(eq(users.id, userId))
+          .limit(1),
+      "atrium.requesterFromAuth.loadUser"
+    ),
+    getUserRoles(userId),
+    listUserGroupEmailsByUserId(userId),
+  ]);
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    roles: roleNames,
+    building: row.building,
+    department: row.department,
+    gradeLevels: row.gradeLevels,
+    groups: groupEmails,
+  };
+}
+
+/** Look up the active autonomous agent identity bound to an OIDC client. */
+async function findAgentIdentity(oauthClientId: string): Promise<{
+  id: string;
+  name: string;
+  roleId: number | null;
+  roleName: string | null;
+} | null> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: agentIdentities.id,
+          name: agentIdentities.name,
+          roleId: agentIdentities.roleId,
+          roleName: roles.name,
+        })
+        .from(agentIdentities)
+        .leftJoin(roles, eq(agentIdentities.roleId, roles.id))
+        .where(
+          and(
+            eq(agentIdentities.oauthClientId, oauthClientId),
+            eq(agentIdentities.isActive, true)
+          )
+        )
+        .limit(1),
+    "atrium.requesterFromAuth.findAgent"
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Look up the active autonomous agent identity by its PRIMARY KEY (`agent_identities.id`),
+ * including its own `scopes` column. Distinct from `findAgentIdentity` (which keys on
+ * `oauthClientId` and reads scopes from the OAuth token): a scheduled run has NO
+ * token, so the identity's authority MUST come from the row itself.
+ */
+async function findAgentIdentityById(agentIdentityId: string): Promise<{
+  id: string;
+  name: string;
+  roleId: number | null;
+  roleName: string | null;
+  scopes: string[];
+} | null> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: agentIdentities.id,
+          name: agentIdentities.name,
+          roleId: agentIdentities.roleId,
+          roleName: roles.name,
+          scopes: agentIdentities.scopes,
+        })
+        .from(agentIdentities)
+        .leftJoin(roles, eq(agentIdentities.roleId, roles.id))
+        .where(
+          and(
+            eq(agentIdentities.id, agentIdentityId),
+            eq(agentIdentities.isActive, true)
+          )
+        )
+        .limit(1),
+    "atrium.requesterFromAuth.findAgentById"
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Build an `agent-autonomous` Requester from an `agent_identities.id` — the
+ * identity-first path a SCHEDULED Assistant Architect run uses (§25). Unlike
+ * `requesterFromApiAuth` (token-first: scopes come from the OAuth token), the
+ * scopes here come from the identity row, because a scheduled run carries no token.
+ *
+ * Fails CLOSED: throws `ForbiddenError` when the identity is missing, inactive, or
+ * deleted. A scheduled run that requested a specific service identity must NOT
+ * silently degrade to running as the owning user (that would grant the run the
+ * user's full human authority instead of the identity's bounded scopes) — the
+ * caller surfaces the failure so an operator who deactivated an identity sees the
+ * run stop, not quietly run with the wrong authority.
+ */
+export async function buildAutonomousRequesterForIdentity(
+  agentIdentityId: string
+): Promise<Requester> {
+  const log = createLogger({ action: "atrium.autonomousRequesterForIdentity" });
+  const identity = await findAgentIdentityById(agentIdentityId);
+  if (!identity) {
+    throw new ForbiddenError("No active agent identity for this id", {
+      agentIdentityId,
+    });
+  }
+  log.debug("Resolved agent-autonomous requester by id", {
+    agentId: identity.id,
+    agentLabel: identity.name,
+  });
+  return {
+    kind: "agent-autonomous",
+    agentId: identity.id,
+    roleId: identity.roleId,
+    roles: identity.roleName ? [identity.roleName] : [],
+    // `agent_identities.scopes` is NOT NULL (text[].notNull), so this is never
+    // null in practice — but coalesce defensively so a malformed/legacy row (or a
+    // test double) can never make a downstream `req.scopes.includes(...)` throw.
+    scopes: identity.scopes ?? [],
+    agentLabel: identity.name,
+  };
+}
+
+/**
+ * Build the `agent-delegated` requester. Exposed (and unit-tested) on its own so
+ * the grant-inheritance invariant is explicit: it carries the human's roles/org
+ * but `principalOf` forces `isAdmin:false`, so a delegated agent can NEVER exceed
+ * the human's grants even when the human is an administrator.
+ */
+export function buildDelegatedRequester(input: {
+  actingForUserId: number;
+  roles: string[];
+  building: string | null;
+  department: string | null;
+  gradeLevels: string[] | null;
+  /** The human's synced group emails — inherited by the delegated agent (#1205). */
+  groups?: string[];
+  scopes: string[];
+  agentLabel: string;
+}): Requester {
+  return {
+    kind: "agent-delegated",
+    actingForUserId: input.actingForUserId,
+    roles: input.roles,
+    building: input.building,
+    department: input.department,
+    gradeLevels: input.gradeLevels,
+    groups: input.groups ?? [],
+    scopes: input.scopes,
+    agentLabel: input.agentLabel,
+  };
+}
+
+/**
+ * Build a plain `user` Requester from a known integer `users.id` — the
+ * identity-known path the API-key Assistant Architect execution service uses
+ * (its auth wrapper already resolved the key's owner to a user id before
+ * execution starts). Returns `null` instead of throwing when the user row is
+ * missing or the lookup fails: the retrieval callers treat a null requester as
+ * "no Atrium context" (fail closed to nothing), and a context-enrichment lookup
+ * must never fail the execution itself.
+ */
+export async function requesterForUserId(
+  userId: number
+): Promise<Requester | null> {
+  const log = createLogger({ action: "atrium.requesterForUserId" });
+  try {
+    const ctx = await loadUserContext(userId);
+    if (!ctx) {
+      log.warn("No user row resolving Atrium requester by id", { userId });
+      return null;
+    }
+    return {
+      kind: "user",
+      userId,
+      roles: ctx.roles,
+      building: ctx.building,
+      department: ctx.department,
+      gradeLevels: ctx.gradeLevels,
+      groups: ctx.groups,
+      isAdmin: ctx.roles.includes(ADMIN_ROLE),
+    };
+  } catch (error) {
+    log.warn("Failed resolving Atrium requester by id", {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+/**
+ * Resolve an authenticated API/MCP caller into a content `Requester`. Throws when
+ * a referenced user row is missing (a token for a deleted user must not silently
+ * become a guest with surprising access).
+ */
+export async function requesterFromApiAuth(
+  auth: RequesterAuthInput
+): Promise<Requester> {
+  const log = createLogger({ action: "atrium.requesterFromAuth" });
+
+  // 1. Delegated: an explicit `delegated_for` human wins. The agent inherits that
+  //    human's roles/org; scopes come from the token (gate `content:update` etc.).
+  if (auth.delegatedForUserId != null) {
+    const ctx = await loadUserContext(auth.delegatedForUserId);
+    if (ctx) {
+      log.debug("Resolved agent-delegated requester", {
+        actingForUserId: auth.delegatedForUserId,
+        agentLabel: auth.oauthClientId,
+      });
+      return buildDelegatedRequester({
+        actingForUserId: auth.delegatedForUserId,
+        roles: ctx.roles,
+        building: ctx.building,
+        department: ctx.department,
+        gradeLevels: ctx.gradeLevels,
+        groups: ctx.groups,
+        scopes: auth.scopes,
+        agentLabel: auth.oauthClientId ?? "delegated-agent",
+      });
+    }
+    // A stale/invalid `delegated_for` claim (e.g. the delegating human's
+    // account was deleted) on a token that ALSO carries an `oauthClientId` is
+    // not necessarily a dead token — it may still be a legitimate registered
+    // agent. Fall through to step 2 (autonomous) rather than hard-failing;
+    // only reject outright when there is no other identity to try.
+    if (!auth.oauthClientId) {
+      // A token for a deleted/invalid human is an auth failure (403), not a 500.
+      throw new ForbiddenError("Delegated-for user not found", {
+        delegatedForUserId: auth.delegatedForUserId,
+      });
+    }
+    log.warn(
+      "Delegated-for user not found; falling back to autonomous resolution",
+      {
+        delegatedForUserId: auth.delegatedForUserId,
+        oauthClientId: auth.oauthClientId,
+      }
+    );
+  }
+
+  // 2. Autonomous: the OIDC client is a registered service/skill identity.
+  //    NOTE `oauthClientId` is NOT machine-only — `verifyJwtToken` populates it
+  //    from `client_id`/`azp` for EVERY verified JWT (see auth-middleware.ts), so
+  //    a human authorization-code/PKCE login carries one too. Distinguish the two
+  //    by the token subject: a client-credentials (machine) token's `sub` is
+  //    `ATRIUM_SYSTEM_USER_ID` (so `auth.userId` === the system user), a human's
+  //    is their own user id.
+  if (auth.oauthClientId) {
+    const identity = await findAgentIdentity(auth.oauthClientId);
+    if (identity) {
+      log.debug("Resolved agent-autonomous requester", {
+        agentId: identity.id,
+        agentLabel: identity.name,
+      });
+      return {
+        kind: "agent-autonomous",
+        agentId: identity.id,
+        roleId: identity.roleId,
+        roles: identity.roleName ? [identity.roleName] : [],
+        scopes: auth.scopes,
+        agentLabel: identity.name,
+      };
+    }
+    // No ACTIVE agent identity for this client id. Two very different callers land
+    // here and must be handled differently:
+    const systemUserId = systemUserIdOrNull();
+    if (systemUserId != null && auth.userId === systemUserId) {
+      // A machine (client-credentials) token whose agent was deactivated or never
+      // registered — its `sub` is the system user. Fail closed rather than fall
+      // through to step 3, which would resolve it AS the system account and
+      // silently undo a deliberate deactivation.
+      throw new ForbiddenError("No active agent identity for this client", {
+        oauthClientId: auth.oauthClientId,
+      });
+    }
+    // Otherwise this is a human's OIDC (authorization-code/PKCE) token whose
+    // OAuth client simply is not a registered agent — resolve them as the `user`
+    // their `sub` names (per this resolver's documented contract), NOT a 403.
+    log.debug("OAuth client is not a registered agent; resolving as human user", {
+      oauthClientId: auth.oauthClientId,
+      userId: auth.userId,
+    });
+  }
+
+  // 3. User: sk- key, session, or a human OIDC token acting as themselves.
+  const ctx = await loadUserContext(auth.userId);
+  if (!ctx) {
+    // A token for a deleted/invalid user is an auth failure (403), not a 500.
+    throw new ForbiddenError("User not found", { userId: auth.userId });
+  }
+  log.debug("Resolved user requester", { userId: auth.userId });
+  return {
+    kind: "user",
+    userId: auth.userId,
+    roles: ctx.roles,
+    building: ctx.building,
+    department: ctx.department,
+    gradeLevels: ctx.gradeLevels,
+    groups: ctx.groups,
+    isAdmin: ctx.roles.includes(ADMIN_ROLE),
+  };
+}

@@ -384,7 +384,11 @@ export function UsersPageClient({
           throw new Error(result.message || "Failed to update user")
         }
 
-        // Update local state
+        // Update local state from the ACTUAL post-write role set, not the
+        // submission — "unchecking" a group-managed role is a correct server
+        // no-op (the reconciler owns those rows), and trusting the submitted
+        // list would show a revocation that never happened (#1222 round 3).
+        const persistedRoles = result.data?.roles ?? user.roles
         setUsers((prev) =>
           prev.map((u) =>
             u.id === user.id
@@ -392,7 +396,7 @@ export function UsersPageClient({
                   ...u,
                   firstName: user.firstName,
                   lastName: user.lastName,
-                  roles: user.roles,
+                  roles: persistedRoles,
                 }
               : u
           )
@@ -417,7 +421,7 @@ export function UsersPageClient({
   )
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 space-y-6" data-testid="user-management-page">
       {/* Header */}
       <div className="mb-6">
         <PageBranding />

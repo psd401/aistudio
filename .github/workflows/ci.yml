@@ -18,13 +18,12 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Setup Bun
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
       with:
         bun-version: "1.2.x"
-        cache: true
 
     - name: Install dependencies
       run: bun install --frozen-lockfile
@@ -35,28 +34,113 @@ jobs:
     - name: Run type checking
       run: bun run typecheck
 
+    - name: Check generated tool-catalog OpenAPI is in sync
+      run: bun run openapi:check
+
+    - name: Check generated capability catalog is in sync
+      run: bun run capabilities:check
+
     - name: Run tests
       run: bun run test:ci
       env:
         # Prevent tests from timing out in CI
         CI: true
+
+    # Atrium Bun smokes: these exercise pure-ESM modules (jose, dompurify+jsdom,
+    # unified/remark/rehype, yjs/y-protocols) that next/jest (SWC) cannot transform
+    # in node_modules, so they run under Bun, not jest. The DB-backed visibility
+    # smoke is excluded (it needs Postgres); the rest are self-contained.
+    - name: Run Atrium smokes (Bun)
+      run: bun run test:smoke:atrium
+      env:
+        CI: true
+        # Dedicated collab-token signing key (mirrors the smoke's own default).
+        COLLAB_JWT_SECRET: ci-collab-secret-0123456789
     
     # Optional: Upload test coverage if you generate it
     # - name: Upload coverage reports
     #   uses: codecov/codecov-action@v3
     #   if: always()
-  
+
+  # Real PostgreSQL lifecycle coverage for the durable repository pipeline.
+  # This catches claim/lease/DLQ/activation behavior that mocked Jest queries
+  # cannot prove and prevents a deployment from being its first integration run.
+  unified-content-integration:
+    name: Unified Content PostgreSQL Lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aistudio
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d aistudio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/aistudio
+      DB_SSL: "false"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+      with:
+        bun-version: "1.2.x"
+
+    - name: Install dependencies
+      run: bun install --frozen-lockfile
+
+    - name: Migrate and seed PostgreSQL
+      run: |
+        # Historical bootstrap predates strict migrations and is intentionally
+        # replayed the same way as init-local.sh. Unified-content migrations
+        # and every later migration are strict PR gates.
+        for migration in $(bun -e 'const manifest = await Bun.file("infra/database/migrations.json").json(); console.log([...manifest.initialSetupFiles, ...manifest.migrationFiles].filter((file) => Number.parseInt(file, 10) < 116).join("\n"));'); do
+          PGPASSWORD=postgres psql -v ON_ERROR_STOP=0 -h localhost -U postgres -d aistudio -f "infra/database/schema/${migration}"
+        done
+        for migration in $(bun -e 'const manifest = await Bun.file("infra/database/migrations.json").json(); console.log(manifest.migrationFiles.filter((file) => Number.parseInt(file, 10) >= 116).join("\n"));'); do
+          PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d aistudio -f "infra/database/schema/${migration}"
+        done
+        PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d aistudio -f scripts/db/seed-local.sql
+
+    - name: Run unified-content lifecycle smoke
+      run: bun run tests/smoke/unified-content-foundation.smoke.ts
+      env:
+        CI: true
+
+    - name: Run Nexus ephemeral-repository lifecycle smoke
+      run: bun run test:smoke:nexus-ephemeral
+      env:
+        CI: true
+
+    - name: Run repository upload quota smoke
+      run: bun run test:smoke:repository-upload-quota
+      env:
+        CI: true
+
   # CDK validation job - checks infrastructure code
   cdk-validate:
     name: Validate CDK Infrastructure
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 20
     permissions:
       contents: read
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Setup Node.js
       uses: actions/setup-node@v6
@@ -67,7 +151,6 @@ jobs:
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
       with:
         bun-version: "1.2.x"
-        cache: true
 
     - name: Install dependencies
       run: |
@@ -76,6 +159,11 @@ jobs:
 
     - name: Install CDK CLI
       run: bun install -g aws-cdk@2
+
+    - name: Enable ARM64 Lambda artifact execution
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: arm64
 
     - name: Build CDK TypeScript
       run: cd infra && bun run build
@@ -88,6 +176,11 @@ jobs:
         # Dummy values for synthesis only - not for deployment
         CDK_DEFAULT_ACCOUNT: '123456789012'
         CDK_DEFAULT_REGION: 'us-east-1'
+
+    - name: Run exact Lambda artifact smokes
+      run: |
+        bun run test:smoke:unified-content-lambda-artifact
+        bun run test:smoke:embedding-lambda-artifact
 
     # Show infrastructure changes on PRs
     - name: CDK Diff

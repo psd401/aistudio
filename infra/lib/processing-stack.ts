@@ -2,16 +2,23 @@ import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-// import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as path from 'path';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
+import { execSync } from 'child_process';
 import { ServiceRoleFactory } from './constructs/security';
+import { VPCProvider, EnvironmentConfig } from './constructs';
+import { UnifiedContentProcessing } from './constructs/processing/unified-content-processing';
 
 export interface ProcessingStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
@@ -20,10 +27,10 @@ export interface ProcessingStackProps extends cdk.StackProps {
   databaseResourceArn?: string; // Optional for backward compatibility
   databaseSecretArn?: string; // Optional for backward compatibility
 }
-
 export class ProcessingStack extends cdk.Stack {
   public readonly fileProcessingQueue: sqs.Queue;
   public readonly embeddingQueue: sqs.Queue;
+  public readonly contentProcessingQueue: sqs.Queue;
   public readonly jobStatusTable: dynamodb.Table;
   public readonly textractCompletionTopic: sns.Topic;
 
@@ -31,20 +38,29 @@ export class ProcessingStack extends cdk.Stack {
     super(scope, id, props);
 
     // Retrieve values from SSM Parameter Store (or use provided props for backward compatibility)
-    const documentsBucketName = props.documentsBucketName || 
+    const documentsBucketName = props.documentsBucketName ||
       ssm.StringParameter.valueForStringParameter(
         this, `/aistudio/${props.environment}/documents-bucket-name`
       );
-    
+
     const databaseResourceArn = props.databaseResourceArn ||
       ssm.StringParameter.valueForStringParameter(
         this, `/aistudio/${props.environment}/db-cluster-arn`
       );
-    
+
     const databaseSecretArn = props.databaseSecretArn ||
       ssm.StringParameter.valueForStringParameter(
         this, `/aistudio/${props.environment}/db-secret-arn`
       );
+
+    // Aurora hostname for direct postgres.js connection (embedding-generator)
+    const databaseHost = ssm.StringParameter.valueForStringParameter(
+      this, `/aistudio/${props.environment}/db-host`
+    );
+
+    // VPC + config — required by embedding-generator Lambda (postgres.js needs direct TCP to Aurora)
+    const config = EnvironmentConfig.get(props.environment);
+    const vpc = VPCProvider.getOrCreate(this, props.environment, config);
 
     // Import the documents bucket
     const documentsBucket = s3.Bucket.fromBucketName(
@@ -93,6 +109,17 @@ export class ProcessingStack extends cdk.Stack {
         maxReceiveCount: 3,
       },
     });
+
+    const unifiedContent = new UnifiedContentProcessing(this, 'UnifiedContent', {
+      environment: props.environment,
+      documentsBucket,
+      databaseHost,
+      databaseSecretArn,
+      embeddingQueue: this.embeddingQueue,
+      embeddingDeadLetterQueue: embeddingDlq,
+      vpc,
+    });
+    this.contentProcessingQueue = unifiedContent.queue;
 
     // SNS Topic for Textract completion notifications
     this.textractCompletionTopic = new sns.Topic(this, 'TextractCompletionTopic', {
@@ -250,56 +277,192 @@ export class ProcessingStack extends cdk.Stack {
       role: urlProcessorRole,
     });
 
-    // Embedding Generator Lambda
+    // Embedding Generator Lambda — uses postgres.js + Drizzle (Issue #578), must be in VPC
     const embeddingGeneratorRole = ServiceRoleFactory.createLambdaRole(this, 'EmbeddingGeneratorRole', {
       functionName: 'embedding-generator',
       environment: props.environment,
       region: this.region,
       account: this.account,
+      // vpcEnabled: false — VPC access added manually via managed policy below
+      // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
       vpcEnabled: false,
-      secrets: [databaseSecretArn],
+      sqsQueues: [this.embeddingQueue.queueArn],
+      // secrets[] uses tag-conditional access which won't match the DatabaseStack secret.
+      // Add an explicit statement without tag conditions instead (same as AgentHealthDailyRole).
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [
-            // RDS Data API permissions
             new iam.PolicyStatement({
+              sid: 'AuroraSecretAccess',
               effect: iam.Effect.ALLOW,
-              actions: [
-                'rds-data:ExecuteStatement',
-                'rds-data:BatchExecuteStatement',
-                'rds-data:BeginTransaction',
-                'rds-data:CommitTransaction',
-                'rds-data:RollbackTransaction',
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [databaseSecretArn],
+            }),
+            new iam.PolicyStatement({
+              // ServiceRoleFactory's generic object grant has an S3 bucket-tag
+              // condition that does not resolve for object ARNs. Keep this
+              // read-only and limited to canonical repository artifacts.
+              sid: 'RepositoryVisualArtifactRead',
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:GetObject'],
+              resources: [
+                `arn:${this.partition}:s3:::${documentsBucketName}/repositories/*`,
               ],
-              resources: [databaseResourceArn],
-              conditions: {
-                StringEquals: {
-                  'aws:ResourceTag/Environment': props.environment,
-                  'aws:ResourceTag/ManagedBy': 'cdk',
-                },
-              },
+            }),
+            new iam.PolicyStatement({
+              sid: 'RepositoryTitanEmbeddingAccess',
+              effect: iam.Effect.ALLOW,
+              actions: ['bedrock:InvokeModel'],
+              resources: [
+                this.formatArn({
+                  service: 'bedrock',
+                  region: this.region,
+                  account: '',
+                  resource: 'foundation-model',
+                  resourceName: 'amazon.titan-embed-text-v1',
+                }),
+                this.formatArn({
+                  service: 'bedrock',
+                  region: this.region,
+                  account: '',
+                  resource: 'foundation-model',
+                  resourceName: 'amazon.titan-embed-text-v2:0',
+                }),
+                this.formatArn({
+                  service: 'bedrock',
+                  region: this.region,
+                  account: '',
+                  resource: 'foundation-model',
+                  resourceName: 'cohere.embed-v4:0',
+                }),
+              ],
             }),
           ],
         }),
       ],
     });
+    // Aurora via VPC — same managed policy pattern as AgentHealthDailyRole, RouterLambda, etc.
+    embeddingGeneratorRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
+
+    const embeddingGeneratorSg = new ec2.SecurityGroup(this, 'EmbeddingGeneratorSg', {
+      vpc,
+      description: 'Security group for embedding-generator Lambda (postgres.js to Aurora)',
+      allowAllOutbound: true,
+    });
 
     const embeddingGenerator = new lambda.Function(this, 'EmbeddingGenerator', {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambdas/embedding-generator')),
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '../lambdas/embedding-generator'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'embedding-generator');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json bun.lock ${outputDir}/`, {
+                    cwd: inputDir,
+                    stdio: 'inherit',
+                  });
+                  execSync('bun install --production --frozen-lockfile', {
+                    cwd: outputDir,
+                    stdio: 'inherit',
+                  });
+                  return true;
+                } catch (e) {
+                  process.stderr.write(`Local bundling failed, falling back to Docker: ${e}\n`);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
       timeout: cdk.Duration.minutes(5),
       memorySize: 1024, // 1GB
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [embeddingGeneratorSg],
       environment: {
         NODE_OPTIONS: '--enable-source-maps',
-        DB_CLUSTER_ARN: databaseResourceArn,
-        DB_SECRET_ARN: databaseSecretArn,
-        DB_NAME: 'aistudio',
+        DATABASE_HOST: databaseHost,
+        DATABASE_SECRET_ARN: databaseSecretArn,
+        DATABASE_NAME: 'aistudio',
+        DATABASE_PORT: '5432',
+        DOCUMENTS_BUCKET_NAME: documentsBucketName,
         ENVIRONMENT: props.environment,
       },
       layers: [processingLayer],
       role: embeddingGeneratorRole,
     });
+    cdk.Tags.of(embeddingGenerator).add('Environment', props.environment);
+    cdk.Tags.of(embeddingGenerator).add('ManagedBy', 'cdk');
+
+    const embeddingDlqAlarm = new cloudwatch.Alarm(this, 'EmbeddingDlqAlarm', {
+      alarmName: `aistudio-${props.environment}-embedding-dlq-visible`,
+      alarmDescription:
+        'Repository embedding records reached the DLQ and require diagnosis or retry',
+      metric: embeddingDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const embeddingAgeAlarm = new cloudwatch.Alarm(this, 'EmbeddingAgeAlarm', {
+      alarmName: `aistudio-${props.environment}-embedding-oldest-message`,
+      alarmDescription:
+        'Repository embedding work has not drained within 30 minutes',
+      metric: this.embeddingQueue.metricApproximateAgeOfOldestMessage({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Maximum',
+      }),
+      threshold: cdk.Duration.minutes(30).toSeconds(),
+      evaluationPeriods: 2,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    const embeddingErrorAlarm = new cloudwatch.Alarm(this, 'EmbeddingErrorAlarm', {
+      alarmName: `aistudio-${props.environment}-embedding-worker-errors`,
+      alarmDescription: 'Repository embedding worker invocations are failing',
+      metric: embeddingGenerator.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    for (const alarm of [
+      embeddingDlqAlarm,
+      embeddingAgeAlarm,
+      embeddingErrorAlarm,
+    ]) {
+      cdk.Tags.of(alarm).add('Environment', props.environment);
+      cdk.Tags.of(alarm).add('ManagedBy', 'cdk');
+    }
 
     // Textract Processor Lambda
     const textractProcessorRole = ServiceRoleFactory.createLambdaRole(this, 'TextractProcessorRole', {
@@ -386,7 +549,230 @@ export class ProcessingStack extends cdk.Stack {
       maxBatchingWindow: cdk.Duration.seconds(5),
     }));
 
+    // =====================================================================
+    // Group Sync Lambda (Epic #1202, Phase 0 / #1203)
+    // =====================================================================
+    // Hourly Google Directory sync: resolves the admin selection (picks ∪ prefix
+    // rules), fetches each group's transitive membership, and full-replaces
+    // group_members per group with last-known-good fail-safety. Reads all config
+    // (SA secret ARN, customer id, optional DWD subject, enabled flag) from the
+    // settings table at runtime — so no redeploy is needed to (re)configure it.
+    // In VPC (PRIVATE_WITH_EGRESS) for postgres.js → Aurora AND NAT egress to the
+    // Google Directory / Cloud Identity APIs. Same role/VPC pattern as
+    // embedding-generator and AgentHealthDaily.
+    //
+    // The SA JSON key secret is admin-chosen at runtime, so the read grant is
+    // scoped by NAME PATTERN (aistudio-<env>-google-directory-*) rather than a
+    // single ARN — least-privilege to the directory-sync secret family only.
+    const groupSyncSaSecretArnPattern =
+      `arn:aws:secretsmanager:${this.region}:${this.account}:secret:aistudio-${props.environment}-google-directory-*`;
+
+    // functionName MUST match the Lambda's physical name below — the factory
+    // scopes the CloudWatch Logs grant to /aws/lambda/<functionName>, and a
+    // mismatch means AccessDenied on every log write (invisible failures).
+    const groupSyncRole = ServiceRoleFactory.createLambdaRole(this, 'GroupSyncRole', {
+      functionName: `psd-group-sync-${props.environment}`,
+      environment: props.environment,
+      region: this.region,
+      account: this.account,
+      // vpcEnabled: false — VPC access added manually via the managed policy below
+      // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
+      vpcEnabled: false,
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [
+            // Aurora credentials (DatabaseStack secret) — no tag condition (same
+            // as EmbeddingGeneratorRole/AgentHealthDailyRole).
+            new iam.PolicyStatement({
+              sid: 'AuroraSecretAccess',
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [databaseSecretArn],
+            }),
+            // Google service-account JSON key — scoped to the directory-sync
+            // secret name family.
+            new iam.PolicyStatement({
+              sid: 'GoogleDirectorySaSecretAccess',
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [groupSyncSaSecretArnPattern],
+            }),
+            // Sync-run metrics (namespace-scoped).
+            new iam.PolicyStatement({
+              sid: 'GroupSyncMetrics',
+              effect: iam.Effect.ALLOW,
+              actions: ['cloudwatch:PutMetricData'],
+              resources: ['*'],
+              conditions: {
+                StringEquals: { 'cloudwatch:namespace': 'AIStudio/GroupSync' },
+              },
+            }),
+          ],
+        }),
+      ],
+    });
+    groupSyncRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
+
+    const groupSyncSg = new ec2.SecurityGroup(this, 'GroupSyncSg', {
+      vpc,
+      description: 'Security group for group-sync Lambda (Aurora + Google Directory egress)',
+      allowAllOutbound: true,
+    });
+
+    const groupSyncLambda = new lambda.Function(this, 'GroupSync', {
+      functionName: `psd-group-sync-${props.environment}`,
+      // Singleton: a manual "Sync now" must not race the hourly schedule into
+      // two concurrent full-replaces of the same group (mirrors AgentHealthDaily
+      // / nonce-cleanup). A throttled scheduled invoke retries on its own.
+      reservedConcurrentExecutions: 1,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '../lambdas/group-sync'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'group-sync');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json bun.lock ${outputDir}/`, {
+                    cwd: inputDir,
+                    stdio: 'inherit',
+                  });
+                  execSync('bun install --production --frozen-lockfile', {
+                    cwd: outputDir,
+                    stdio: 'inherit',
+                  });
+                  return true;
+                } catch (e) {
+                  process.stderr.write(`Local bundling failed, falling back to Docker: ${e}\n`);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      timeout: cdk.Duration.minutes(10),
+      memorySize: 512,
+      architecture: lambda.Architecture.ARM_64,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [groupSyncSg],
+      environment: {
+        NODE_OPTIONS: '--enable-source-maps',
+        DATABASE_HOST: databaseHost,
+        DATABASE_SECRET_ARN: databaseSecretArn,
+        DATABASE_NAME: 'aistudio',
+        DATABASE_PORT: '5432',
+        ENVIRONMENT: props.environment,
+      },
+      role: groupSyncRole,
+    });
+    cdk.Tags.of(groupSyncLambda).add('Environment', props.environment);
+    cdk.Tags.of(groupSyncLambda).add('ManagedBy', 'cdk');
+
+    // Hourly schedule. The same function is async-invoked by the admin
+    // "Sync now" action (see lib/groups/trigger.ts).
+    new events.Rule(this, 'GroupSyncHourlySchedule', {
+      description: 'Hourly Google Directory group membership sync (#1203)',
+      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      targets: [new eventsTargets.LambdaFunction(groupSyncLambda)],
+    });
+
+    // -----------------------------------------------------------------------
+    // Group-sync observability (Epic #1202, Phase 4 / #1207)
+    // -----------------------------------------------------------------------
+    // Group sync is an AUTHORIZATION source (membership drives roles + resource
+    // grants), so a silently-dead or persistently-failing sync degrades access
+    // control. Two alarms cover the two distinct failure shapes:
+    //   1. Failure alarm  — a run executed but errored (directory outage, DB
+    //      failure, crash/timeout). The handler re-throws on failure, so the
+    //      Lambda's built-in Errors metric captures BOTH unhandled crashes and
+    //      handled-then-rethrown sync failures in one signal.
+    //   2. Staleness alarm — no SUCCESSFUL run within the staleness window,
+    //      which also catches "the schedule stopped firing entirely" (the custom
+    //      SyncRunSucceeded metric goes absent → treatMissingData=BREACHING).
+    // Reuse the central alarm topic owned by MonitoringStack. Referencing its
+    // deterministic ARN avoids a cross-stack export dependency while keeping
+    // notification endpoints in one lifecycle owner. A focused ProcessingStack
+    // deployment therefore cannot remove or recreate confirmed subscriptions.
+    const groupSyncAlarmTopic = sns.Topic.fromTopicArn(
+      this,
+      'MonitoringAlarmTopic',
+      this.formatArn({
+        service: 'sns',
+        resource: `aistudio-${props.environment}-monitoring-alarms`,
+      }),
+    );
+
+    // 1. Failure alarm — any errored invocation in the last hour. Missing data
+    //    (no invocations) is NOT breaching here; the staleness alarm owns the
+    //    "not running at all" case.
+    const groupSyncFailureAlarm = new cloudwatch.Alarm(this, 'GroupSyncFailureAlarm', {
+      alarmName: `psd-group-sync-failure-${props.environment}`,
+      alarmDescription:
+        'Google Directory group-sync Lambda errored — membership/roles may be stale. ' +
+        'Check /aws/lambda/psd-group-sync logs; last-known-good membership is preserved per group.',
+      metric: groupSyncLambda.metricErrors({
+        period: cdk.Duration.hours(1),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // 2. Staleness alarm — fewer than one successful sync across three
+    //    consecutive hourly windows (the hourly schedule should produce one
+    //    SyncRunSucceeded=1 per hour). BREACHING on missing data so a Lambda that
+    //    stops running (disabled schedule, throttle, broken deploy) trips it too.
+    const groupSyncStalenessAlarm = new cloudwatch.Alarm(this, 'GroupSyncStalenessAlarm', {
+      alarmName: `psd-group-sync-staleness-${props.environment}`,
+      alarmDescription:
+        'No successful Google Directory group sync in ~3 hours (time since last success exceeded threshold). ' +
+        'Group-driven roles/resource grants are frozen at their last-known-good state until sync recovers.',
+      metric: new cloudwatch.Metric({
+        namespace: 'AIStudio/GroupSync',
+        metricName: 'SyncRunSucceeded',
+        dimensionsMap: { Environment: props.environment },
+        period: cdk.Duration.hours(1),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 3,
+      datapointsToAlarm: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    });
+
+    const alarmAction = new cloudwatchActions.SnsAction(groupSyncAlarmTopic);
+    groupSyncFailureAlarm.addAlarmAction(alarmAction);
+    groupSyncStalenessAlarm.addAlarmAction(alarmAction);
+
     // Outputs
+    new cdk.CfnOutput(this, 'GroupSyncFunctionName', {
+      value: groupSyncLambda.functionName,
+      description: 'Name of the Google Directory group-sync Lambda function',
+      exportName: `${props.environment}-GroupSyncFunctionName`,
+    });
+
     new cdk.CfnOutput(this, 'FileProcessingQueueUrl', {
       value: this.fileProcessingQueue.queueUrl,
       description: 'URL of the file processing queue',
@@ -427,6 +813,18 @@ export class ProcessingStack extends cdk.Stack {
       value: this.embeddingQueue.queueArn,
       description: 'ARN of the embedding generation queue',
       exportName: `${props.environment}-EmbeddingQueueArn`,
+    });
+
+    new cdk.CfnOutput(this, 'ContentProcessingQueueUrl', {
+      value: this.contentProcessingQueue.queueUrl,
+      description: 'URL of the unified repository content processing queue',
+      exportName: `${props.environment}-ContentProcessingQueueUrl`,
+    });
+
+    new cdk.CfnOutput(this, 'ContentProcessingQueueArn', {
+      value: this.contentProcessingQueue.queueArn,
+      description: 'ARN of the unified repository content processing queue',
+      exportName: `${props.environment}-ContentProcessingQueueArn`,
     });
 
     new cdk.CfnOutput(this, 'EmbeddingGeneratorFunctionName', {

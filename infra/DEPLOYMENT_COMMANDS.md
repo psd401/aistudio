@@ -72,14 +72,21 @@ bunx cdk deploy AIStudio-StorageStack-Dev --exclusively
 bunx cdk deploy AIStudio-StorageStack-Prod --exclusively
 ```
 
-### ProcessingStack (No parameters needed after SSM setup)
+### ProcessingStack (No parameters needed)
 ```bash
 # Dev
-bunx cdk deploy AIStudio-ProcessingStack-Dev --exclusively
+bunx cdk deploy AIStudio-ProcessingStack-Dev \
+  --exclusively
 
 # Prod
-bunx cdk deploy AIStudio-ProcessingStack-Prod --exclusively
+bunx cdk deploy AIStudio-ProcessingStack-Prod \
+  --exclusively
 ```
+
+Group-sync alarms publish to the shared
+`aistudio-<environment>-monitoring-alarms` topic owned by MonitoringStack.
+Configure and confirm delivery endpoints when deploying MonitoringStack; a
+focused ProcessingStack deployment never creates or removes subscriptions.
 
 ### FrontendStack (Requires baseDomain)
 ```bash

@@ -44,10 +44,11 @@ const client_sqs_1 = require("@aws-sdk/client-sqs");
 const client_textract_1 = require("@aws-sdk/client-textract");
 const pdf_parse_1 = __importDefault(require("pdf-parse"));
 const mammoth = __importStar(require("mammoth"));
-const XLSX = __importStar(require("xlsx"));
+const XLSX = __importStar(require("@e965/xlsx"));
 const sync_1 = require("csv-parse/sync");
 const marked_1 = require("marked");
 const textract_usage_1 = require("./textract-usage");
+const storage_key_1 = require("./storage-key");
 const s3Client = new client_s3_1.S3Client({});
 const rdsClient = new client_rds_data_1.RDSDataClient({});
 const dynamoClient = new client_dynamodb_1.DynamoDBClient({});
@@ -229,13 +230,19 @@ async function extractTextFromDOCX(buffer) {
     const result = await mammoth.extractRawText({ buffer });
     return result.value;
 }
+const MAX_XLSX_BYTES = 25 * 1024 * 1024;
+const MAX_XLSX_ROWS = 10000;
 async function extractTextFromExcel(buffer) {
-    const workbook = XLSX.read(buffer);
+    if (buffer.length > MAX_XLSX_BYTES) {
+        throw new Error(`XLSX file exceeds maximum allowed size of ${MAX_XLSX_BYTES} bytes`);
+    }
+    const workbook = XLSX.read(buffer, { cellFormula: false, sheetRows: MAX_XLSX_ROWS });
     let text = '';
     workbook.SheetNames.forEach((sheetName) => {
         const sheet = workbook.Sheets[sheetName];
         const csv = XLSX.utils.sheet_to_csv(sheet);
-        text += `\n\n## Sheet: ${sheetName}\n${csv}`;
+        const safeSheetName = sheetName.replace(/[\r\n|#`\\]/g, ' ').trim() || 'Sheet';
+        text += `\n\n## Sheet: ${safeSheetName}\n${csv}`;
     });
     return text.trim();
 }
@@ -463,18 +470,9 @@ async function processFile(job) {
         throw error; // Re-throw to let Lambda handle retry logic
     }
 }
-// Validate S3 key to prevent path traversal attacks
-function validateS3Key(key) {
-    // Reject keys with path traversal patterns
-    if (key.includes('../') || key.includes('..\\') || key.startsWith('/')) {
-        return false;
-    }
-    // Accept two valid patterns:
-    // 1. New format: repositories/{repoId}/{itemId}/{filename}
-    // 2. Legacy format: {userId}/{timestamp}-{filename}
-    const newFormatPattern = /^repositories\/\d+\/\d+\/[^/]+$/;
-    const legacyFormatPattern = /^\d+\/\d+-[^/]+$/;
-    return newFormatPattern.test(key) || legacyFormatPattern.test(key);
+// Validate S3 bucket name against the expected environment bucket
+function validateBucketName(bucketName) {
+    return bucketName === DOCUMENTS_BUCKET;
 }
 // Lambda handler
 async function handler(event) {
@@ -482,8 +480,11 @@ async function handler(event) {
     for (const record of event.Records) {
         try {
             const job = JSON.parse(record.body);
-            // Validate file key before processing
-            if (!validateS3Key(job.fileKey)) {
+            if (!validateBucketName(job.bucketName)) {
+                console.error(`Invalid bucket name in job: ${job.bucketName}`);
+                throw new Error(`Invalid bucket name: ${job.bucketName}`);
+            }
+            if (!(0, storage_key_1.validateRepositoryProcessingKey)(job.fileKey)) {
                 console.error(`Invalid S3 key detected: ${job.fileKey}`);
                 throw new Error(`Invalid S3 key: ${job.fileKey}`);
             }

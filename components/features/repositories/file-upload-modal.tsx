@@ -23,6 +23,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAction } from "@/lib/hooks/use-action"
 import {
@@ -31,8 +32,19 @@ import {
   addUrlItem,
   addTextItem,
 } from "@/actions/repositories/repository-items.actions"
-import { FileText, Link, Type, Upload, Loader2 } from "lucide-react"
+import {
+  Cloud,
+  FileText,
+  Link,
+  Type,
+  Upload,
+  Loader2,
+} from "lucide-react"
 import { useToast } from "@/components/ui/use-toast"
+import {
+  uploadFileToRepositoryStorage,
+  type BrowserRepositoryUpload,
+} from "@/lib/repositories/content-platform/browser-upload"
 
 // File size limits - will be loaded from environment
 const ACCEPTED_FILE_TYPES = [
@@ -40,46 +52,72 @@ const ACCEPTED_FILE_TYPES = [
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "image/tiff",
+  "audio/amr",
+  "audio/flac",
+  "audio/mp4",
+  "audio/mpeg",
+  "audio/ogg",
+  "audio/wav",
+  "audio/x-flac",
+  "audio/x-m4a",
+  "audio/x-wav",
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+  "video/x-matroska",
+  "video/x-msvideo",
   "text/plain",
   "text/markdown",
   "text/csv",
 ]
 
-// Helper function to validate file type
-function isValidFileType(file: File): boolean {
-  const mimeType = file.type.toLowerCase()
-  const fileName = file.name.toLowerCase()
-  
-  // Check exact MIME type match
-  if (ACCEPTED_FILE_TYPES.includes(mimeType)) {
-    return true
-  }
-  
-  // Check partial MIME type match (e.g., "text/plain; charset=UTF-8" matches "text/plain")
-  if (ACCEPTED_FILE_TYPES.some(type => mimeType.startsWith(type))) {
-    return true
-  }
-  
-  // Fallback to file extension check
-  const extensionMap: Record<string, string[]> = {
-    '.pdf': ['application/pdf'],
-    '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/octet-stream'],
-    '.xlsx': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/octet-stream'],
-    '.pptx': ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/octet-stream'],
-    '.txt': ['text/plain'],
-    '.md': ['text/markdown', 'text/plain'],
-    '.csv': ['text/csv', 'text/plain'],
-  }
-  
-  for (const [ext] of Object.entries(extensionMap)) {
-    if (fileName.endsWith(ext)) {
-      return true
-    }
-  }
-  
-  return false
+const FILE_TYPE_BY_EXTENSION: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+  '.amr': 'audio/amr',
+  '.flac': 'audio/flac',
+  '.m4a': 'audio/mp4',
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.wav': 'audio/wav',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.avi': 'video/x-msvideo',
+  '.mkv': 'video/x-matroska',
+  '.webm': 'video/webm',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.csv': 'text/csv',
 }
 
+function contentTypeForFile(file: File): string {
+  const declared = file.type.toLowerCase().split(';', 1)[0]?.trim() ?? ''
+  if (ACCEPTED_FILE_TYPES.includes(declared)) return declared
+  const fileName = file.name.toLowerCase()
+  const extension = Object.keys(FILE_TYPE_BY_EXTENSION).find((candidate) =>
+    fileName.endsWith(candidate)
+  )
+  return extension ? FILE_TYPE_BY_EXTENSION[extension] : declared
+}
+
+// Helper function to validate file type
+function isValidFileType(file: File): boolean {
+  return ACCEPTED_FILE_TYPES.includes(contentTypeForFile(file))
+}
 const urlSchema = z.object({
   name: z.string().min(1, "Name is required"),
   url: z.string().url("Must be a valid URL"),
@@ -105,11 +143,15 @@ export function FileUploadModal({
 }: FileUploadModalProps) {
   const { toast } = useToast()
   const [activeTab, setActiveTab] = useState("document")
+  const [isDocumentUploadPending, setIsDocumentUploadPending] = useState(false)
   
   // Get max file size from environment variable or use default
   // Note: MAX_FILE_SIZE_MB is a server-side env var, so we need to hardcode or pass it from server
-  const maxFileSizeMB = 25 // Default 25MB - matches server default
-  const maxFileSize = maxFileSizeMB * 1024 * 1024
+  // The server applies the administrator-configured limit (default 10 GiB,
+  // hard configuration ceiling 50 GiB). Keep the browser guard at that ceiling
+  // so it never contradicts a valid admin policy.
+  const maxFileSizeGB = 50
+  const maxFileSize = maxFileSizeGB * 1024 * 1024 * 1024
 
   // Use presigned URL method to bypass Amplify 1MB limit
   const USE_PRESIGNED_URL = true // Always use presigned URL for repository uploads for consistency
@@ -127,7 +169,7 @@ export function FileUploadModal({
           if (!file) return false
           return file.size <= MAX_FILE_SIZE
         },
-        `File size must be less than ${USE_PRESIGNED_URL ? `${MAX_FILE_SIZE / 1024 / 1024}MB` : `${MAX_FILE_SIZE / 1024}KB`}`
+        `File size must be less than ${USE_PRESIGNED_URL ? `${maxFileSizeGB} GB` : `${MAX_FILE_SIZE / 1024}KB`}`
       )
       .refine(
         (files) => {
@@ -171,19 +213,73 @@ export function FileUploadModal({
   const { execute: executeAddText, isPending: isAddingText } = useAction(addTextItem)
   
   // Select the appropriate loading state based on the flag
-  const isAddingDocument = USE_PRESIGNED_URL ? isAddingDocumentNew : isAddingDocumentOld
+  const isAddingDocument =
+    isDocumentUploadPending ||
+    (USE_PRESIGNED_URL ? isAddingDocumentNew : isAddingDocumentOld)
 
   const isLoading = isAddingDocument || isAddingUrl || isAddingText
   
 
   async function onDocumentSubmit(data: z.infer<typeof dynamicDocumentSchema>) {
+    if (isDocumentUploadPending) return
+
     const file = data.file[0]
+    const contentType = contentTypeForFile(file)
+    setIsDocumentUploadPending(true)
     
     try {
       let result
       
       if (USE_PRESIGNED_URL) {
-        // New method: Upload directly to S3
+        // Ask the unified repository endpoint first. With rollout flags off (or
+        // for a file type not migrated yet) it explicitly returns legacy mode.
+        const canonicalResponse = await fetch(
+          `/api/repositories/${repositoryId}/uploads`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              itemName: data.name,
+              fileName: file.name,
+              contentType,
+              byteSize: file.size,
+            }),
+          }
+        )
+        if (!canonicalResponse.ok) {
+          const error = await canonicalResponse.json()
+          throw new Error(error.error || 'Failed to initiate upload')
+        }
+        const canonical = await canonicalResponse.json()
+
+        if (canonical.mode === 'canonical') {
+          const upload = canonical.upload as BrowserRepositoryUpload
+          const completedParts = await uploadFileToRepositoryStorage(
+            file,
+            upload,
+            contentType
+          )
+
+          const completionResponse = await fetch(
+            `/api/repositories/${repositoryId}/uploads/${upload.sessionId}/complete`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                parts:
+                  upload.uploadMethod === 'multipart'
+                    ? completedParts
+                    : undefined,
+              }),
+            }
+          )
+          if (!completionResponse.ok) {
+            const error = await completionResponse.json()
+            throw new Error(error.error || 'Failed to complete upload')
+          }
+          result = { isSuccess: true, message: 'File uploaded successfully' }
+        } else {
+        // Existing single-object flow remains unchanged until canonical cutover.
         // Step 1: Get presigned URL
         const presignedResponse = await fetch('/api/documents/presigned-url', {
           method: 'POST',
@@ -192,8 +288,9 @@ export function FileUploadModal({
           },
           body: JSON.stringify({
             fileName: file.name,
-            fileType: file.type,
+            fileType: contentType,
             fileSize: file.size,
+            repositoryId,
           }),
         })
 
@@ -209,7 +306,7 @@ export function FileUploadModal({
         const uploadResponse = await fetch(url, {
           method: 'PUT',
           headers: {
-            'Content-Type': file.type,
+            'Content-Type': contentType,
           },
           body: file,
         })
@@ -224,11 +321,12 @@ export function FileUploadModal({
           name: data.name,
           s3Key: key,
           metadata: {
-            contentType: file.type,
+            contentType,
             size: file.size,
             originalFileName: file.name,
           },
         })
+        }
       } else {
         // Old method: Upload through server
         const buffer = await file.arrayBuffer()
@@ -248,7 +346,7 @@ export function FileUploadModal({
           name: data.name,
           file: {
             content: base64,
-            contentType: file.type,
+            contentType,
             size: file.size,
             fileName: file.name,
           },
@@ -257,8 +355,8 @@ export function FileUploadModal({
 
       if (result.isSuccess) {
         toast({
-          title: "Document uploaded",
-          description: "The document has been added to the repository.",
+          title: "File uploaded",
+          description: "The file has been added to the repository.",
         })
         documentForm.reset()
         onSuccess()
@@ -276,6 +374,8 @@ export function FileUploadModal({
         description: error instanceof Error ? error.message : "Failed to upload document",
         variant: "destructive",
       })
+    } finally {
+      setIsDocumentUploadPending(false)
     }
   }
 
@@ -328,28 +428,38 @@ export function FileUploadModal({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && isDocumentUploadPending) return
+        onOpenChange(nextOpen)
+      }}
+    >
       <DialogContent className="sm:max-w-[600px]">
         <DialogHeader>
           <DialogTitle>Add Item to Repository</DialogTitle>
           <DialogDescription>
-            Add documents, URLs, or text content to your knowledge repository.
+            Add files, URLs, or text content to your knowledge repository.
           </DialogDescription>
         </DialogHeader>
 
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="document">
+          <TabsList className="grid h-auto w-full grid-cols-2 sm:grid-cols-4">
+            <TabsTrigger value="document" disabled={isDocumentUploadPending}>
               <FileText className="mr-2 h-4 w-4" />
-              Document
+              File
             </TabsTrigger>
-            <TabsTrigger value="url">
+            <TabsTrigger value="url" disabled={isDocumentUploadPending}>
               <Link className="mr-2 h-4 w-4" />
               URL
             </TabsTrigger>
-            <TabsTrigger value="text">
+            <TabsTrigger value="text" disabled={isDocumentUploadPending}>
               <Type className="mr-2 h-4 w-4" />
               Text
+            </TabsTrigger>
+            <TabsTrigger value="google-drive" disabled={isDocumentUploadPending}>
+              <Cloud className="mr-2 h-4 w-4" />
+              Google Drive
             </TabsTrigger>
           </TabsList>
 
@@ -366,7 +476,11 @@ export function FileUploadModal({
                     <FormItem>
                       <FormLabel>Name</FormLabel>
                       <FormControl>
-                        <Input {...field} placeholder="e.g., User Manual" />
+                        <Input
+                          {...field}
+                          placeholder="e.g., User Manual"
+                          disabled={isDocumentUploadPending}
+                        />
                       </FormControl>
                       <FormDescription>
                         A descriptive name for the document
@@ -388,13 +502,16 @@ export function FileUploadModal({
                           {...field}
                           value={undefined}
                           type="file"
-                          accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.csv"
+                          disabled={isDocumentUploadPending}
+                          accept=".pdf,.docx,.xlsx,.pptx,.jpg,.jpeg,.png,.webp,.gif,.tif,.tiff,.amr,.flac,.m4a,.mp3,.ogg,.wav,.mp4,.mov,.avi,.mkv,.webm,.txt,.md,.csv"
                           onChange={(e) => onChange(e.target.files)}
                         />
                       </FormControl>
                       <FormDescription>
-                        Supported: PDF, Word, Excel, PowerPoint, Text, Markdown,
-                        CSV (max {maxFileSize / 1024 / 1024}MB)
+                        Supported: PDF, Word, Excel, PowerPoint, JPEG, PNG,
+                        WebP, GIF, TIFF, MP3, M4A, WAV, FLAC, Ogg, AMR, MP4,
+                        MOV, AVI, MKV, WebM, Text, Markdown, CSV (max server
+                        policy; browser ceiling {maxFileSizeGB} GB)
                       </FormDescription>
                       <FormMessage />
                     </FormItem>
@@ -406,6 +523,7 @@ export function FileUploadModal({
                     type="button"
                     variant="outline"
                     onClick={() => onOpenChange(false)}
+                    disabled={isDocumentUploadPending}
                   >
                     Cancel
                   </Button>
@@ -414,7 +532,7 @@ export function FileUploadModal({
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     )}
                     <Upload className="mr-2 h-4 w-4" />
-                    Upload Document
+                    Upload File
                   </Button>
                 </div>
               </form>
@@ -548,6 +666,33 @@ export function FileUploadModal({
                 </div>
               </form>
             </Form>
+          </TabsContent>
+
+          <TabsContent value="google-drive">
+            <Alert>
+              <Cloud className="h-4 w-4" />
+              <AlertTitle>Google Drive is not available yet</AlertTitle>
+              <AlertDescription className="space-y-2">
+                <p>
+                  Drive import and synchronization remain disabled until the
+                  connector boundary tracked in issue #1262 is implemented.
+                </p>
+                <p>
+                  Download the file from Drive and use the File tab in the
+                  meantime. No Drive permissions or credentials are requested
+                  by this screen.
+                </p>
+              </AlertDescription>
+            </Alert>
+            <div className="mt-4 flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+              >
+                Close
+              </Button>
+            </div>
           </TabsContent>
         </Tabs>
       </DialogContent>

@@ -12,16 +12,38 @@ import { UIMessage } from "ai"
 import { z } from "zod"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import { createLogger, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { getAIModelById } from "@/lib/db/drizzle"
+import { getUserById } from "@/lib/db/drizzle"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { sql } from "drizzle-orm"
 import { unifiedStreamingService } from "@/lib/streaming/unified-streaming-service"
-import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from "@/lib/assistant-architect/knowledge-retrieval"
+import {
+  retrieveKnowledgeForPrompt,
+  formatKnowledgeContext,
+  retrieveAtriumKnowledgeForPrompt,
+  formatAtriumKnowledgeContext,
+} from "@/lib/assistant-architect/knowledge-retrieval"
+import { requesterForUserId } from "@/lib/content/requester-from-auth"
+import type { Requester } from "@/lib/content/types"
 import { ErrorFactories } from "@/lib/error-utils"
 import { createRepositoryTools } from "@/lib/tools/repository-tools"
 import type { StreamRequest } from "@/lib/streaming/types"
 import { ContentSafetyBlockedError } from "@/lib/streaming/types"
 import { storeExecutionEvent } from "@/lib/assistant-architect/event-storage"
+import { decodeMdxEditorEscapes } from "@/lib/utils/text-sanitizer"
+import {
+  routeAssistantArchitectModel,
+  type AssistantArchitectRoutingMetadata,
+} from "@/lib/assistant-architect/model-router"
+import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects"
+import {
+  preflightAssistantRepositoryAccess,
+  REPOSITORY_ACCESS_CHANGED_MESSAGE,
+} from "@/lib/assistant-architect/repository-access-preflight"
+import {
+  AssistantRuntimeRepositoryInputError,
+  resolveAssistantRuntimeRepositoryInputs,
+  type AssistantRuntimeRepositoryInputs,
+} from "@/lib/assistant-architect/runtime-repository-inputs"
 
 // ============================================
 // Constants
@@ -43,6 +65,12 @@ export interface ExecuteAssistantParams {
   userId: number
   cognitoSub: string
   requestId: string
+  /**
+   * A server-created preparation may be reused by entry points that must
+   * validate and sanitize inputs before creating their own durable records.
+   * Arbitrary caller-created objects are rejected by this module.
+   */
+  preparedInputs?: PreparedAssistantExecutionInputs
 }
 
 export interface ExecuteAssistantResult {
@@ -74,6 +102,21 @@ interface PromptExecutionContext {
   assistantOwnerSub?: string
   userId: number
   executionStartTime: number
+  /** The assistant being executed — keys the Atrium retrieval_scope lookup. */
+  assistantId: number
+  modelRoutingMode: AssistantModelRoutingMode
+  modelRoutingFamily: AssistantModelFamily | null
+  modelRoutes: Map<number, AssistantArchitectRoutingMetadata>
+  /**
+   * The key owner's content Requester, or null when unresolvable. Atrium
+   * retrieval is bounded per hit by THIS caller's canView; null skips it
+   * entirely (fail closed to nothing) without failing the execution.
+   */
+  atriumRequester: Requester | null
+  /** Temporary repositories resolved from opaque runtime attachment markers. */
+  runtimeRepositoryIds: number[]
+  /** Authoritative item labels used to improve retrieval queries. */
+  runtimeRepositoryQuery: string
 }
 
 // ============================================
@@ -102,6 +145,67 @@ export function validateExecutionInputs(
   return result.error.issues
 }
 
+export function isAssistantRuntimeRepositoryInputError(
+  error: unknown
+): error is AssistantRuntimeRepositoryInputError {
+  return error instanceof AssistantRuntimeRepositoryInputError
+}
+
+export interface PreparedAssistantExecutionInputs {
+  /** Numeric owner identity used for the authoritative resolution. */
+  ownerId: number
+  /** Marker-free, authoritative-label inputs safe for persistence/providers. */
+  inputs: Record<string, unknown>
+  runtimeRepositoryIds: number[]
+  runtimeRepositoryQuery: string
+  references: AssistantRuntimeRepositoryInputs["references"]
+}
+
+// A WeakSet makes `preparedInputs` an opaque in-process capability. REST routes
+// can reuse one resolution across pre-persistence validation and execution, but
+// a future caller cannot bypass owner-bound resolution by constructing a
+// lookalike object.
+const preparedAssistantInputs = new WeakSet<PreparedAssistantExecutionInputs>()
+
+/**
+ * Resolve and sanitize canonical temporary repository markers as the executing
+ * owner. Entry points that persist a conversation/job should call this before
+ * those writes, then pass the returned object to the execution service.
+ */
+export async function prepareAssistantExecutionInputs(
+  inputs: Record<string, unknown>,
+  ownerId: number
+): Promise<PreparedAssistantExecutionInputs> {
+  const resolved = await resolveAssistantRuntimeRepositoryInputs(inputs, ownerId)
+  const prepared: PreparedAssistantExecutionInputs = {
+    ownerId,
+    inputs: resolved.modelInputs,
+    runtimeRepositoryIds: resolved.repositoryIds,
+    runtimeRepositoryQuery: resolved.queryContext,
+    references: resolved.references,
+  }
+  preparedAssistantInputs.add(prepared)
+  return prepared
+}
+
+async function resolvePreparedAssistantInputs(
+  params: ExecuteAssistantParams
+): Promise<PreparedAssistantExecutionInputs> {
+  if (params.preparedInputs) {
+    if (
+      !preparedAssistantInputs.has(params.preparedInputs) ||
+      params.preparedInputs.ownerId !== params.userId
+    ) {
+      throw ErrorFactories.validationFailed([{
+        field: "inputs",
+        message: "Prepared assistant inputs are invalid",
+      }])
+    }
+    return params.preparedInputs
+  }
+  return prepareAssistantExecutionInputs(params.inputs, params.userId)
+}
+
 // ============================================
 // Shared Execution Setup
 // ============================================
@@ -110,6 +214,7 @@ interface ExecutionSetup {
   prompts: ChainPrompt[]
   context: PromptExecutionContext
   executionId: number
+  inputs: Record<string, unknown>
   log: ReturnType<typeof createLogger>
 }
 
@@ -121,7 +226,7 @@ interface ExecutionSetup {
 async function prepareAssistantExecution(
   params: ExecuteAssistantParams
 ): Promise<ExecutionSetup> {
-  const { assistantId, inputs, userId, cognitoSub, requestId } = params
+  const { assistantId, userId, cognitoSub, requestId } = params
   const log = createLogger({ requestId, action: "executeAssistant" })
 
   log.info("Starting assistant execution", { assistantId, userId })
@@ -133,6 +238,21 @@ async function prepareAssistantExecution(
   }
 
   const architect = architectResult.data
+
+  // Agentic assistants (#926) require the full agentic runtime (tool resolution,
+  // per-run limits, mid-loop cost cap) which currently lives only in the
+  // assistant-architect execute route. The REST API v1 and MCP execution paths
+  // route through this prompt-chain service. Rather than silently running an
+  // agentic assistant as a plain prompt chain — dropping its configured tools and
+  // limits — fail loudly so callers get a clear, actionable error.
+  if (architect.mode === "agentic") {
+    throw ErrorFactories.validationFailed([{
+      field: "mode",
+      message:
+        "Agentic assistants are not supported on this execution surface. Run agentic assistants through the Assistant Architect UI.",
+    }])
+  }
+
   const prompts = (architect.prompts || []).sort((a, b) => a.position - b.position)
 
   if (!prompts || prompts.length === 0) {
@@ -149,14 +269,44 @@ async function prepareAssistantExecution(
     }])
   }
 
+  // Runtime markers are owner-bound and must be resolved before the execution
+  // row/event writes below. Their repository IDs then join the normal
+  // executor-ACL preflight; ownership of an assistant never lends access.
+  const preparedInputs = await resolvePreparedAssistantInputs(params)
+  const repositoryAccess = await preflightAssistantRepositoryAccess(
+    preparedInputs.runtimeRepositoryIds.length > 0
+      ? [
+          ...prompts,
+          { repositoryIds: preparedInputs.runtimeRepositoryIds },
+        ]
+      : prompts,
+    cognitoSub
+  )
+  if (!repositoryAccess.isAllowed) {
+    log.warn("Assistant execution blocked because repository access changed", {
+      assistantId,
+      userId,
+      repositoryCount: repositoryAccess.repositoryIds.length,
+    })
+    throw ErrorFactories.authzToolAccessDenied("assistant repository access", {
+      userMessage: REPOSITORY_ACCESS_CHANGED_MESSAGE,
+      technicalMessage: "Executing principal cannot access every repository bound to the assistant",
+    })
+  }
+
   log.info("Assistant loaded", sanitizeForLogging({
     assistantId,
+    modelRoutingMode: architect.modelRoutingMode ?? "legacy",
+    modelRoutingFamily: architect.modelRoutingFamily ?? null,
     name: architect.name,
     promptCount: prompts.length,
   }))
 
   // 2. Create tool_execution record
-  const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true }
+  const inputData =
+    Object.keys(preparedInputs.inputs).length > 0
+      ? preparedInputs.inputs
+      : { __no_inputs: true }
   const inputDataJson = JSON.stringify(inputData)
 
   const executionResult = await executeQuery(
@@ -183,18 +333,51 @@ async function prepareAssistantExecution(
     toolName: architect.name,
   })
 
-  // 4. Build execution context
+  // 4. Build execution context. The Atrium requester resolves the key owner's
+  // roles/org for canView-bounded content retrieval (Phase 6, #1056);
+  // requesterForUserId never throws — a failed resolve yields null, which
+  // skips Atrium retrieval without failing the execution.
+  // Resolve the assistant creator's cognito_sub so owner-based repository access
+  // resolves for non-owner runs. This was String(architect.userId) — a numeric
+  // users.id, which never equals the users.cognito_sub the knowledge/repository
+  // access predicates compare against, so owner-shared private repos silently
+  // returned zero chunks (REV-COR-511).
+  let assistantOwnerSub: string | undefined
+  if (architect.userId) {
+    try {
+      assistantOwnerSub = (await getUserById(architect.userId))?.cognitoSub ?? undefined
+    } catch (error) {
+      log.warn("Failed to resolve assistant owner sub", {
+        userId: architect.userId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
   const context: PromptExecutionContext = {
     previousOutputs: new Map(),
     accumulatedMessages: [],
     executionId,
     userCognitoSub: cognitoSub,
-    assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
+    assistantOwnerSub,
     userId,
     executionStartTime: Date.now(),
+    assistantId,
+    modelRoutingMode: architect.modelRoutingMode ?? "legacy",
+    modelRoutingFamily: architect.modelRoutingFamily ?? null,
+    modelRoutes: new Map(),
+    atriumRequester: await requesterForUserId(userId),
+    runtimeRepositoryIds: preparedInputs.runtimeRepositoryIds,
+    runtimeRepositoryQuery: preparedInputs.runtimeRepositoryQuery,
   }
 
-  return { prompts: prompts as ChainPrompt[], context, executionId, log }
+  return {
+    prompts: prompts as ChainPrompt[],
+    context,
+    executionId,
+    inputs: preparedInputs.inputs,
+    log,
+  }
 }
 
 /**
@@ -238,12 +421,12 @@ export async function executeAssistant(
 ): Promise<ExecuteAssistantResult> {
   const timer = startTimer("assistantExecution")
   const setup = await prepareAssistantExecution(params)
-  const { prompts, context, executionId, log } = setup
+  const { prompts, context, executionId, inputs, log } = setup
 
   try {
     const streamResponse = await executePromptChain(
       prompts,
-      params.inputs,
+      inputs,
       context,
       params.requestId,
       log
@@ -281,12 +464,12 @@ export async function executeAssistantForJobCompletion(
   params: ExecuteAssistantParams
 ): Promise<{ text: string; executionId: number; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
   const setup = await prepareAssistantExecution(params)
-  const { prompts, context, executionId, log } = setup
+  const { prompts, context, executionId, inputs, log } = setup
 
   try {
     const result = await executePromptChainForText(
       prompts,
-      params.inputs,
+      inputs,
       context,
       params.requestId,
       log
@@ -438,6 +621,98 @@ async function executePromptChainForText(
 // Single Prompt Execution (Streaming)
 // ============================================
 
+function getPromptRepositoryIds(
+  prompt: ChainPrompt,
+  context: PromptExecutionContext
+): number[] {
+  return [
+    ...new Set([
+      ...(prompt.repositoryIds ?? []),
+      ...context.runtimeRepositoryIds,
+    ]),
+  ]
+}
+
+function getPromptRepositoryQuery(
+  prompt: ChainPrompt,
+  context: PromptExecutionContext
+): string {
+  return [prompt.content, context.runtimeRepositoryQuery]
+    .filter(Boolean)
+    .join("\n")
+}
+
+/**
+ * Build the knowledge context injected ahead of a prompt: repository chunks
+ * (hybrid search over the prompt's configured and runtime repository IDs) plus
+ * Atrium content-as-context
+ * (Phase 6, #1056 — off unless the assistant has a retrieval_scope; skipped when
+ * no requester resolved; bounded per hit by the caller's canView). Shared by the
+ * streaming and collect-text execution paths; `withEvents` controls the
+ * execution-event emission only the streaming path performs.
+ */
+async function buildPromptKnowledgeContext(
+  prompt: ChainPrompt,
+  context: PromptExecutionContext,
+  requestId: string,
+  withEvents: boolean
+): Promise<string> {
+  let repositoryContext = ""
+  const repositoryIds = getPromptRepositoryIds(prompt, context)
+  if (repositoryIds.length > 0) {
+    if (withEvents) {
+      await storeExecutionEvent(context.executionId, "knowledge-retrieval-start", {
+        promptId: prompt.id,
+        repositories: repositoryIds,
+        searchType: "hybrid",
+      })
+    }
+
+    const knowledgeChunks = await retrieveKnowledgeForPrompt(
+      getPromptRepositoryQuery(prompt, context),
+      repositoryIds,
+      context.userCognitoSub,
+      context.assistantOwnerSub,
+      {
+        maxChunks: 10,
+        maxTokens: 4000,
+        similarityThreshold: 0.7,
+        searchType: "hybrid",
+        vectorWeight: 0.8,
+      },
+      requestId
+    )
+
+    if (knowledgeChunks.length > 0) {
+      repositoryContext = "\n\n" + formatKnowledgeContext(knowledgeChunks)
+      if (withEvents) {
+        const totalTokens = knowledgeChunks.reduce((sum, chunk) => sum + Math.ceil(chunk.content.length / 4), 0)
+        const avgRelevance = knowledgeChunks.reduce((sum, chunk) => sum + chunk.similarity, 0) / knowledgeChunks.length
+
+        await storeExecutionEvent(context.executionId, "knowledge-retrieved", {
+          promptId: prompt.id,
+          documentsFound: knowledgeChunks.length,
+          relevanceScore: avgRelevance,
+          tokens: totalTokens,
+        })
+      }
+    }
+  }
+
+  const atriumHits = await retrieveAtriumKnowledgeForPrompt(
+    context.atriumRequester,
+    context.assistantId,
+    prompt.content,
+    { maxChunks: 10, maxTokens: 4000 },
+    requestId
+  )
+  if (atriumHits.length > 0) {
+    repositoryContext += "\n\n" + formatAtriumKnowledgeContext(atriumHits)
+  }
+
+  return repositoryContext
+}
+
 async function executeSinglePromptWithCompletion(
   prompt: ChainPrompt,
   inputs: Record<string, unknown>,
@@ -457,7 +732,7 @@ async function executeSinglePromptWithCompletion(
     position: prompt.position,
     totalPrompts,
     modelId: String(prompt.modelId || "unknown"),
-    hasKnowledge: !!(prompt.repositoryIds && prompt.repositoryIds.length > 0),
+    hasKnowledge: getPromptRepositoryIds(prompt, context).length > 0,
     hasTools: !!(prompt.enabledTools && prompt.enabledTools.length > 0),
   })
 
@@ -469,43 +744,13 @@ async function executeSinglePromptWithCompletion(
       }])
     }
 
-    // 1. Repository context
-    let repositoryContext = ""
-    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
-      await storeExecutionEvent(context.executionId, "knowledge-retrieval-start", {
-        promptId: prompt.id,
-        repositories: prompt.repositoryIds,
-        searchType: "hybrid",
-      })
-
-      const knowledgeChunks = await retrieveKnowledgeForPrompt(
-        prompt.content,
-        prompt.repositoryIds,
-        context.userCognitoSub,
-        context.assistantOwnerSub,
-        {
-          maxChunks: 10,
-          maxTokens: 4000,
-          similarityThreshold: 0.7,
-          searchType: "hybrid",
-          vectorWeight: 0.8,
-        },
-        requestId
-      )
-
-      if (knowledgeChunks.length > 0) {
-        repositoryContext = "\n\n" + formatKnowledgeContext(knowledgeChunks)
-        const totalTokens = knowledgeChunks.reduce((sum, chunk) => sum + Math.ceil(chunk.content.length / 4), 0)
-        const avgRelevance = knowledgeChunks.reduce((sum, chunk) => sum + chunk.similarity, 0) / knowledgeChunks.length
-
-        await storeExecutionEvent(context.executionId, "knowledge-retrieved", {
-          promptId: prompt.id,
-          documentsFound: knowledgeChunks.length,
-          relevanceScore: avgRelevance,
-          tokens: totalTokens,
-        })
-      }
-    }
+    // 1. Knowledge context (repository chunks + Atrium content-as-context)
+    const repositoryContext = await buildPromptKnowledgeContext(
+      prompt,
+      context,
+      requestId,
+      true
+    )
 
     // 2. Variable substitution
     const inputMapping = (prompt.inputMapping || {}) as Record<string, string>
@@ -527,27 +772,31 @@ async function executeSinglePromptWithCompletion(
 
     const messages = [...context.accumulatedMessages, userMessage]
 
-    // 4. Get model
-    const modelData = await getAIModelById(prompt.modelId)
-    if (!modelData || !modelData.modelId || !modelData.provider) {
-      throw ErrorFactories.dbRecordNotFound("ai_models", prompt.modelId || "unknown")
-    }
-
-    const modelId = String(modelData.modelId)
-    const provider = String(modelData.provider)
-
-    // 5. Prepare tools
+    // 4-5. Prepare tools, then route to a compatible model.
     const enabledTools: string[] = [...(prompt.enabledTools || [])]
     let promptTools = {}
 
-    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+    const repositoryIds = getPromptRepositoryIds(prompt, context)
+    if (repositoryIds.length > 0) {
       const repoTools = createRepositoryTools({
-        repositoryIds: prompt.repositoryIds,
+        repositoryIds,
         userCognitoSub: context.userCognitoSub,
         assistantOwnerSub: context.assistantOwnerSub,
       })
       promptTools = { ...promptTools, ...repoTools }
     }
+    const modelRoute = await routeAssistantArchitectModel({
+      text: processedContent,
+      userId: context.userId,
+      fallbackModelDbId: prompt.modelId,
+      routingMode: context.modelRoutingMode,
+      requestedFamily: context.modelRoutingFamily,
+      requirements: {
+        requiredTools: enabledTools,
+        requiresFunctionCalling: enabledTools.length > 0 || Object.keys(promptTools).length > 0,
+      },
+    })
+    context.modelRoutes.set(prompt.id, modelRoute.metadata)
 
     // 6. Stream execution via Promise pattern
     return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
@@ -560,8 +809,8 @@ async function executeSinglePromptWithCompletion(
 
       const streamRequest: StreamRequest = {
         messages,
-        modelId: String(modelId),
-        provider: String(provider),
+        modelId: modelRoute.modelId,
+        provider: modelRoute.provider,
         userId: context.userId.toString(),
         sessionId: context.userCognitoSub,
         conversationId: undefined,
@@ -581,6 +830,7 @@ async function executeSinglePromptWithCompletion(
                 originalContent: prompt.content,
                 processedContent,
                 repositoryContext: repositoryContext ? "included" : "none",
+                modelRouting: modelRoute.metadata,
               }
               const inputDataJson = JSON.stringify(promptInputData)
 
@@ -721,7 +971,7 @@ async function executeSinglePromptCollectText(
     position: prompt.position,
     totalPrompts,
     modelId: String(prompt.modelId || "unknown"),
-    hasKnowledge: !!(prompt.repositoryIds && prompt.repositoryIds.length > 0),
+    hasKnowledge: getPromptRepositoryIds(prompt, context).length > 0,
     hasTools: !!(prompt.enabledTools && prompt.enabledTools.length > 0),
   })
 
@@ -733,22 +983,14 @@ async function executeSinglePromptCollectText(
       }])
     }
 
-    // Repository context
-    let repositoryContext = ""
-    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
-      const knowledgeChunks = await retrieveKnowledgeForPrompt(
-        prompt.content,
-        prompt.repositoryIds,
-        context.userCognitoSub,
-        context.assistantOwnerSub,
-        { maxChunks: 10, maxTokens: 4000, similarityThreshold: 0.7, searchType: "hybrid", vectorWeight: 0.8 },
-        requestId
-      )
-
-      if (knowledgeChunks.length > 0) {
-        repositoryContext = "\n\n" + formatKnowledgeContext(knowledgeChunks)
-      }
-    }
+    // Knowledge context (repository chunks + Atrium content-as-context) —
+    // same behavior as the streaming path, minus execution events.
+    const repositoryContext = await buildPromptKnowledgeContext(
+      prompt,
+      context,
+      requestId,
+      false
+    )
 
     // Variable substitution
     const inputMapping = (prompt.inputMapping || {}) as Record<string, string>
@@ -770,30 +1012,37 @@ async function executeSinglePromptCollectText(
 
     const messages = [...context.accumulatedMessages, userMessage]
 
-    // Get model
-    const modelData = await getAIModelById(prompt.modelId)
-    if (!modelData || !modelData.modelId || !modelData.provider) {
-      throw ErrorFactories.dbRecordNotFound("ai_models", prompt.modelId || "unknown")
-    }
-
-    // Prepare tools
+    // Prepare tools and route to a compatible model.
     const enabledTools: string[] = [...(prompt.enabledTools || [])]
     let promptTools = {}
-    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+    const repositoryIds = getPromptRepositoryIds(prompt, context)
+    if (repositoryIds.length > 0) {
       const repoTools = createRepositoryTools({
-        repositoryIds: prompt.repositoryIds,
+        repositoryIds,
         userCognitoSub: context.userCognitoSub,
         assistantOwnerSub: context.assistantOwnerSub,
       })
       promptTools = { ...promptTools, ...repoTools }
     }
+    const modelRoute = await routeAssistantArchitectModel({
+      text: processedContent,
+      userId: context.userId,
+      fallbackModelDbId: prompt.modelId,
+      routingMode: context.modelRoutingMode,
+      requestedFamily: context.modelRoutingFamily,
+      requirements: {
+        requiredTools: enabledTools,
+        requiresFunctionCalling: enabledTools.length > 0 || Object.keys(promptTools).length > 0,
+      },
+    })
+    context.modelRoutes.set(prompt.id, modelRoute.metadata)
 
     // Stream and collect text
     return new Promise((resolve, reject) => {
       const streamRequest: StreamRequest = {
         messages,
-        modelId: String(modelData.modelId),
-        provider: String(modelData.provider),
+        modelId: modelRoute.modelId,
+        provider: modelRoute.provider,
         userId: context.userId.toString(),
         sessionId: context.userCognitoSub,
         source: "assistant_execution" as const,
@@ -811,6 +1060,7 @@ async function executeSinglePromptCollectText(
                 originalContent: prompt.content,
                 processedContent,
                 repositoryContext: repositoryContext ? "included" : "none",
+                modelRouting: modelRoute.metadata,
               }
               const inputDataJson = JSON.stringify(promptInputData)
 
@@ -910,7 +1160,8 @@ function slugify(str: string): string {
     .replace(/(^-|-$)+/g, "")
 }
 
-function substituteVariables(
+// Exported for unit testing (REV-COR-517).
+export function substituteVariables(
   content: string,
   inputs: Record<string, unknown>,
   previousOutputs: Map<number, string>,
@@ -925,8 +1176,11 @@ function substituteVariables(
     }])
   }
 
+  // Decode MDXEditor escapes (\$ \{ \_ &#x24; &amp;#x24;) so the variable regex can match stored content.
+  const decoded = decodeMdxEditorEscapes(content)
+
   // Updated regex: [\w-]+ to match hyphenated slugified names (regression from #685)
-  const placeholderMatches = content.match(/\${([\w-]+)}|{{([\w-]+)}}/g)
+  const placeholderMatches = decoded.match(/\${([\w-]+)}|{{([\w-]+)}}/g)
   const placeholderCount = placeholderMatches ? placeholderMatches.length : 0
 
   if (placeholderCount > MAX_VARIABLE_REPLACEMENTS) {
@@ -943,8 +1197,7 @@ function substituteVariables(
     .filter(p => p.position < currentPromptPosition)
     .sort((a, b) => a.position - b.position)
 
-  for (let i = 0; i < sortedPrevPrompts.length; i++) {
-    const prevPrompt = sortedPrevPrompts[i]
+  for (const [i, prevPrompt] of sortedPrevPrompts.entries()) {
     const output = previousOutputs.get(prevPrompt.id)
     // Always map position → prompt ID for prompt_N_output (even if no output yet)
     positionToPromptId.set(i, prevPrompt.id)
@@ -957,11 +1210,13 @@ function substituteVariables(
     }
   }
 
-  return content.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
+  return decoded.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
     const varName = dollarVar || braceVar
 
-    // Path 1: Explicit inputMapping (backward compatible)
-    if (mapping[varName]) {
+    // Path 1: Explicit inputMapping (backward compatible). Guard with Object.hasOwn
+    // so a placeholder naming an inherited member (${constructor}) does not read
+    // Object.prototype.constructor off the mapping and fire this branch (REV-COR-517).
+    if (Object.hasOwn(mapping, varName) && mapping[varName]) {
       const mappedPath = mapping[varName]
       const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/)
       if (promptMatch) {
@@ -974,8 +1229,11 @@ function substituteVariables(
       if (value !== undefined && value !== null) return String(value)
     }
 
-    // Path 2: User input fields
-    if (varName in inputs) {
+    // Path 2: User input fields. Use Object.hasOwn (not `in`, which walks the
+    // prototype chain) so placeholders naming inherited Object.prototype members
+    // (${constructor}, ${toString}, …) are treated as unknown and left literal
+    // (REV-COR-517).
+    if (Object.hasOwn(inputs, varName)) {
       const value = inputs[varName]
       return value !== undefined && value !== null ? String(value) : match
     }
@@ -1008,7 +1266,10 @@ function resolvePath(
   let current: unknown = context
 
   for (const part of parts) {
-    if (current && typeof current === "object") {
+    // Guard with Object.hasOwn so a mapping path (e.g. inputs.constructor,
+    // previousOutputs.__proto__) cannot traverse into an inherited prototype
+    // member (REV-COR-517).
+    if (current && typeof current === "object" && Object.hasOwn(current, part)) {
       current = (current as Record<string, unknown>)[part]
     } else {
       return undefined

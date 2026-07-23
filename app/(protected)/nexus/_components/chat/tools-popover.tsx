@@ -14,10 +14,14 @@ import { cn } from '@/lib/utils'
 import { getAvailableToolsForModel, type ToolConfig } from '@/lib/tools/client-tool-registry'
 import type { SelectAiModel } from '@/types'
 
+const WEB_SEARCH_TOOL_NAME = 'webSearch'
+
 interface ToolsPopoverProps {
   selectedModel: SelectAiModel | null
   enabledTools: string[]
   onToolsChange: (tools: string[]) => void
+  /** Pass true in non-chat contexts (prompt library) to suppress auto-enabling tools */
+  disableAutoEnable?: boolean
 }
 
 // Tool-specific icons
@@ -81,6 +85,7 @@ export function ToolsPopover({
   selectedModel,
   enabledTools,
   onToolsChange,
+  disableAutoEnable = false,
 }: ToolsPopoverProps) {
   const [availableTools, setAvailableTools] = useState<ToolConfig[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -104,23 +109,38 @@ export function ToolsPopover({
       return
     }
 
+    let cancelled = false
     startTransition(() => { setIsLoading(true) })
     getAvailableToolsForModel(selectedModelId)
       .then(tools => {
+        if (cancelled) return
+
         setAvailableTools(tools)
 
-        // Remove any enabled tools that are no longer available
         const availableToolNames = tools.map(t => t.name)
         const currentEnabledTools = enabledToolsRef.current
         const validEnabledTools = currentEnabledTools.filter(tool =>
           availableToolNames.includes(tool)
         )
+        const supportsWebSearch = !disableAutoEnable && availableToolNames.includes(WEB_SEARCH_TOOL_NAME)
+
         if (validEnabledTools.length !== currentEnabledTools.length) {
-            onToolsChangeRef.current(validEnabledTools)
-          }
+          // Some previously-enabled tools are no longer available for this model.
+          // If stripping leaves nothing and webSearch is available, auto-enable it —
+          // the user didn't opt out of search, they just had a different tool active.
+          const finalTools = validEnabledTools.length === 0 && supportsWebSearch
+            ? [WEB_SEARCH_TOOL_NAME]
+            : validEnabledTools
+          onToolsChangeRef.current(finalTools)
+        } else if (currentEnabledTools.length === 0 && supportsWebSearch) {
+          // No tools currently enabled — auto-enable web search as a sensible default
+          onToolsChangeRef.current([WEB_SEARCH_TOOL_NAME])
+        }
       })
-      .finally(() => { setIsLoading(false) })
-  }, [selectedModelId])
+      .finally(() => { if (!cancelled) setIsLoading(false) })
+
+    return () => { cancelled = true }
+  }, [selectedModelId, disableAutoEnable])
 
   const handleToolToggle = useCallback((toolName: string) => {
     if (enabledTools.includes(toolName)) {
@@ -139,6 +159,7 @@ export function ToolsPopover({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
+          data-testid="nexus-tools-control"
           variant="ghost"
           size="sm"
           className={cn(

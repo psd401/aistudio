@@ -2,8 +2,8 @@
 
 import {
   checkUserRole,
-  hasToolAccess as dbHasToolAccess,
-  getUserTools as dbGetUserTools,
+  hasCapabilityAccess as dbHasCapabilityAccess,
+  getUserCapabilities as dbGetUserCapabilities,
   getUserIdByCognitoSub,
   getUserRolesByCognitoSub as dbGetUserRolesByCognitoSub
 } from "@/lib/db/drizzle";
@@ -66,54 +66,76 @@ export async function hasRole(roleName: string): Promise<boolean> {
 }
 
 /**
- * Check if a user has access to a specific tool
+ * Check if the current user has access to a role-gated capability.
+ *
+ * Capabilities are the role-gated UI-feature registry (Nexus access, Assistant
+ * Architect access, admin pages, etc.). This resolves the session itself and
+ * delegates to the `capabilities`/`role_capabilities`-backed DB accessor.
+ *
+ * NOTE: not to be confused with `hasCapability()` in `@/lib/ai/capability-utils`,
+ * which checks AI-model feature flags (image generation, web search, etc.).
+ * See `docs/architecture/capabilities-and-scopes.md`.
  */
-export async function hasToolAccess(toolIdentifier: string): Promise<boolean> {
+export async function hasCapabilityAccess(
+  capabilityIdentifier: string,
+  /**
+   * Optional pre-resolved Cognito sub. When the caller has already resolved the
+   * session (e.g. a server action that also builds a requester), passing the sub
+   * here avoids a second `getServerSession()` JWT-verify + cookie-parse, and
+   * removes the chance of reading a session that changed mid-action (token
+   * refresh). Omit to resolve the session internally as before.
+   */
+  cognitoSub?: string
+): Promise<boolean> {
   const requestId = generateRequestId();
-  const timer = startTimer("hasToolAccess");
-  const log = createLogger({ requestId, function: "hasToolAccess" });
-  
-  log.debug("Checking tool access", { toolIdentifier });
-  
-  const session = await getServerSession();
-  if (!session) {
-    log.warn("Tool access check failed - no session", { toolIdentifier });
-    timer({ status: "failed", reason: "no_session" });
-    return false;
+  const timer = startTimer("hasCapabilityAccess");
+  const log = createLogger({ requestId, function: "hasCapabilityAccess" });
+
+  log.debug("Checking capability access", { capabilityIdentifier });
+
+  let sub = cognitoSub;
+  if (!sub) {
+    const session = await getServerSession();
+    if (!session) {
+      log.warn("Capability access check failed - no session", { capabilityIdentifier });
+      timer({ status: "failed", reason: "no_session" });
+      return false;
+    }
+    sub = session.sub;
   }
-  
-  log.debug("Session found, checking database", { 
-    cognitoSub: session.sub,
-    toolIdentifier 
+
+  log.debug("Session found, checking database", {
+    cognitoSub: sub,
+    capabilityIdentifier
   });
-  
-  const hasAccess = await dbHasToolAccess(session.sub, toolIdentifier);
-  
+
+  const hasAccess = await dbHasCapabilityAccess(sub, capabilityIdentifier);
+
   if (hasAccess) {
-    log.info("Tool access granted", { 
-      cognitoSub: session.sub,
-      toolIdentifier 
+    log.info("Capability access granted", {
+      cognitoSub: sub,
+      capabilityIdentifier
     });
     timer({ status: "success" });
   } else {
-    log.warn("Tool access denied", { 
-      cognitoSub: session.sub,
-      toolIdentifier 
+    log.warn("Capability access denied", {
+      cognitoSub: sub,
+      capabilityIdentifier
     });
     timer({ status: "denied" });
   }
-  
+
   return hasAccess;
 }
 
 /**
- * Get all tools a user has access to
+ * Get all capability identifiers the current user has access to.
  */
-export async function getUserTools(): Promise<string[]> {
+export async function getUserCapabilities(): Promise<string[]> {
   const session = await getServerSession();
   if (!session) return [];
-  
-  return dbGetUserTools(session.sub);
+
+  return dbGetUserCapabilities(session.sub);
 }
 
 /**

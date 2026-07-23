@@ -16,8 +16,8 @@ import { relations } from "drizzle-orm";
 import { users } from "./tables/users";
 import { roles } from "./tables/roles";
 import { userRoles } from "./tables/user-roles";
-import { tools } from "./tables/tools";
-import { roleTools } from "./tables/role-tools";
+import { capabilities } from "./tables/capabilities";
+import { roleCapabilities } from "./tables/role-capabilities";
 
 // AI Models
 import { aiModels } from "./tables/ai-models";
@@ -43,6 +43,7 @@ import { nexusShares } from "./tables/nexus-shares";
 import { nexusTemplates } from "./tables/nexus-templates";
 import { nexusUserPreferences } from "./tables/nexus-user-preferences";
 import { nexusProviderMetrics } from "./tables/nexus-provider-metrics";
+import { nexusRepositoryBindings } from "./tables/nexus-repository-bindings";
 
 // Nexus MCP
 import { nexusMcpServers } from "./tables/nexus-mcp-servers";
@@ -108,6 +109,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   toolExecutions: many(toolExecutions),
   toolEdits: many(toolEdits),
   nexusConversations: many(nexusConversations),
+  nexusRepositoryBindings: many(nexusRepositoryBindings),
   nexusFolders: many(nexusFolders),
   nexusShares: many(nexusShares),
   nexusTemplates: many(nexusTemplates),
@@ -145,7 +147,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
 
 export const rolesRelations = relations(roles, ({ many }) => ({
   userRoles: many(userRoles),
-  roleTools: many(roleTools),
+  roleCapabilities: many(roleCapabilities),
   repositoryAccess: many(repositoryAccess),
 }));
 
@@ -160,21 +162,24 @@ export const userRolesRelations = relations(userRoles, ({ one }) => ({
   }),
 }));
 
-export const toolsRelations = relations(tools, ({ many }) => ({
-  roleTools: many(roleTools),
+export const capabilitiesRelations = relations(capabilities, ({ many }) => ({
+  roleCapabilities: many(roleCapabilities),
   navigationItems: many(navigationItems),
 }));
 
-export const roleToolsRelations = relations(roleTools, ({ one }) => ({
-  role: one(roles, {
-    fields: [roleTools.roleId],
-    references: [roles.id],
-  }),
-  tool: one(tools, {
-    fields: [roleTools.toolId],
-    references: [tools.id],
-  }),
-}));
+export const roleCapabilitiesRelations = relations(
+  roleCapabilities,
+  ({ one }) => ({
+    role: one(roles, {
+      fields: [roleCapabilities.roleId],
+      references: [roles.id],
+    }),
+    capability: one(capabilities, {
+      fields: [roleCapabilities.capabilityId],
+      references: [capabilities.id],
+    }),
+  })
+);
 
 // ============================================
 // Assistant Architect Relations
@@ -283,6 +288,25 @@ export const nexusConversationsRelations = relations(
     promptLibrary: many(promptLibrary),
     promptUsageEvents: many(promptUsageEvents),
     documents: many(documents), // Added bidirectional relation for Issue #549
+    repositoryBindings: many(nexusRepositoryBindings),
+  })
+);
+
+export const nexusRepositoryBindingsRelations = relations(
+  nexusRepositoryBindings,
+  ({ one }) => ({
+    owner: one(users, {
+      fields: [nexusRepositoryBindings.ownerId],
+      references: [users.id],
+    }),
+    conversation: one(nexusConversations, {
+      fields: [nexusRepositoryBindings.conversationId],
+      references: [nexusConversations.id],
+    }),
+    repository: one(knowledgeRepositories, {
+      fields: [nexusRepositoryBindings.repositoryId],
+      references: [knowledgeRepositories.id],
+    }),
   })
 );
 
@@ -455,6 +479,7 @@ export const knowledgeRepositoriesRelations = relations(
     }),
     items: many(repositoryItems),
     access: many(repositoryAccess),
+    nexusBindings: many(nexusRepositoryBindings),
   })
 );
 
@@ -707,9 +732,9 @@ export const ideaNotesRelations = relations(ideaNotes, ({ one }) => ({
 export const navigationItemsRelations = relations(
   navigationItems,
   ({ one, many }) => ({
-    tool: one(tools, {
-      fields: [navigationItems.toolId],
-      references: [tools.id],
+    capability: one(capabilities, {
+      fields: [navigationItems.capabilityId],
+      references: [capabilities.id],
     }),
     parent: one(navigationItems, {
       fields: [navigationItems.parentId],

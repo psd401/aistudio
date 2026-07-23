@@ -77,11 +77,11 @@ redirect('/auth/signin');
 INSERT INTO user_roles (user_id, role_id)
 VALUES (:userId, :roleId);
 
--- Or grant tool permission to role
-INSERT INTO role_tools (role_id, tool_id)
-SELECT r.id, t.id
-FROM roles r, tools t
-WHERE r.name = 'staff' AND t.identifier = 'assistant-architect';
+-- Or grant capability to role (prefer the admin UI at /admin/roles)
+INSERT INTO role_capabilities (role_id, capability_id)
+SELECT r.id, c.id
+FROM roles r, capabilities c
+WHERE r.name = 'staff' AND c.identifier = 'assistant-architect';
 ```
 
 ### Validation Errors
@@ -402,9 +402,9 @@ WHERE ur.user_id = :userId;
 
 2. Check role permissions:
 ```sql
-SELECT t.identifier FROM role_tools rt
-JOIN tools t ON rt.tool_id = t.id
-WHERE rt.role_id = :roleId;
+SELECT c.identifier FROM role_capabilities rc
+JOIN capabilities c ON rc.capability_id = c.id
+WHERE rc.role_id = :roleId;
 ```
 
 3. Grant access if appropriate

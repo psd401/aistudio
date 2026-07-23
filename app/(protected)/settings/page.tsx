@@ -1,4 +1,4 @@
-import { getUserProfile, listUserApiKeys } from "@/actions/settings/user-settings.actions"
+import { getNexusChatPreferences, getUserProfile, listUserApiKeys } from "@/actions/settings/user-settings.actions"
 import { PageBranding } from "@/components/ui/page-branding"
 import { SettingsClient } from "./_components/settings-client"
 
@@ -7,9 +7,10 @@ export const metadata = {
 }
 
 export default async function SettingsPage() {
-  const [profileResult, keysResult] = await Promise.all([
+  const [profileResult, keysResult, preferencesResult] = await Promise.all([
     getUserProfile(),
     listUserApiKeys(),
+    getNexusChatPreferences(),
   ])
 
   return (
@@ -25,6 +26,7 @@ export default async function SettingsPage() {
       <SettingsClient
         profileData={profileResult.isSuccess ? profileResult.data : null}
         apiKeys={keysResult.isSuccess ? keysResult.data : []}
+        nexusPreferences={preferencesResult.isSuccess ? preferencesResult.data : { mode: "standard", family: "auto" }}
       />
     </div>
   )

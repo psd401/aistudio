@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
+import type { Session } from 'next-auth';
 import { motion, AnimatePresence } from 'framer-motion';
 import { LogOut, Settings, Bug, LucideIcon, Image as ImageIcon, X } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -45,7 +46,7 @@ interface NavigationItem {
   type: 'link' | 'section' | 'page';
   parent_id: string | null;
   parent_label: string | null;
-  tool_id: string | null;
+  capability_id: string | null;
   position: number;
   color?: string;
 }
@@ -330,7 +331,9 @@ function sanitizeUrl(url: string): string {
   try {
     const urlObj = new URL(url);
     const sensitiveParams = ['token', 'key', 'session', 'auth', 'reset', 'verify', 'code', 'state', 'apikey'];
-    sensitiveParams.forEach(param => urlObj.searchParams.delete(param));
+    for (const param of sensitiveParams) {
+      urlObj.searchParams.delete(param);
+    }
     return urlObj.toString();
   } catch {
     return url.split('?')[0];
@@ -359,15 +362,15 @@ function validateScreenshotFile(file: File): string | null {
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
+    reader.addEventListener('load', () => resolve(reader.result as string));
+    reader.addEventListener('error', () => reject(reader.error || new Error('Failed to read file')));
     reader.readAsDataURL(file);
   });
 }
 
-function collectBugReportMetadata(userDescription: string, steps: string, consoleErrors: string[], isAuthenticated: boolean): string {
-  const sections: string[] = [];
+// --- collectBugReportMetadata sub-collectors (each appends to `sections`) ---
 
+function pushUserDescriptionSection(sections: string[], userDescription: string, steps: string): void {
   // User description - escape HTML
   sections.push('<strong>=== USER DESCRIPTION ===</strong>');
   sections.push(escapeHtml(userDescription));
@@ -375,7 +378,9 @@ function collectBugReportMetadata(userDescription: string, steps: string, consol
     sections.push('<br><strong>Steps to Reproduce:</strong>');
     sections.push(escapeHtml(steps));
   }
+}
 
+function pushBrowserSystemSection(sections: string[]): void {
   // Browser & System - escape all user-controlled data
   sections.push('<br><br><strong>=== BROWSER & SYSTEM INFO ===</strong>');
   if (typeof window !== 'undefined') {
@@ -397,7 +402,9 @@ function collectBugReportMetadata(userDescription: string, steps: string, consol
       sections.push(`CPU Cores: ${nav.hardwareConcurrency}`);
     }
   }
+}
 
+function pushDisplaySection(sections: string[]): void {
   // Display
   sections.push('<br><br><strong>=== DISPLAY INFO ===</strong>');
   if (typeof window !== 'undefined') {
@@ -406,16 +413,26 @@ function collectBugReportMetadata(userDescription: string, steps: string, consol
     sections.push(`Color Depth: ${window.screen.colorDepth}-bit`);
     sections.push(`Pixel Ratio: ${window.devicePixelRatio}`);
   }
+}
 
-  // Session - use isAuthenticated param instead of localStorage
+function pushSessionSection(sections: string[], session: Session | null | undefined): void {
+  // Session info
   sections.push('<br><br><strong>=== SESSION INFO ===</strong>');
   sections.push(`Timestamp: ${new Date().toISOString()}`);
   sections.push(`Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`);
-  sections.push(`Authenticated: ${isAuthenticated ? 'Yes' : 'No'}`);
+  sections.push(`Authenticated: ${session ? 'Yes' : 'No'}`);
+  if (session?.user) {
+    sections.push(`User Email: ${escapeHtml(session.user.email ?? 'N/A')}`);
+    const displayName = session.user.name ?? ([session.user.givenName, session.user.familyName].filter(Boolean).join(' ') || 'N/A');
+    sections.push(`User Name: ${escapeHtml(displayName)}`);
+    sections.push(`User ID: ${escapeHtml(session.user.id ?? 'N/A')}`);
+  }
   if (typeof window !== 'undefined' && window.localStorage) {
     sections.push(`Local Storage Items: ${window.localStorage.length}`);
   }
+}
 
+function pushPerformanceSection(sections: string[]): void {
   // Performance
   sections.push('<br><br><strong>=== PERFORMANCE METRICS ===</strong>');
   if (typeof window !== 'undefined' && window.performance) {
@@ -427,7 +444,9 @@ function collectBugReportMetadata(userDescription: string, steps: string, consol
       sections.push('Memory info not available');
     }
   }
+}
 
+function pushNetworkSection(sections: string[]): void {
   // Network
   if (typeof navigator !== 'undefined') {
     const navConn = navigator as unknown as NavigatorWithExtras;
@@ -440,16 +459,163 @@ function collectBugReportMetadata(userDescription: string, steps: string, consol
       sections.push(`Data Saver: ${navConn.connection.saveData ? 'Enabled' : 'Disabled'}`);
     }
   }
+}
 
+function pushConsoleErrorsSection(sections: string[], consoleErrors: string[]): void {
   // Console errors - sanitize and escape
   if (consoleErrors.length > 0) {
     sections.push('<br><br><strong>=== RECENT CONSOLE ERRORS ===</strong>');
-    consoleErrors.slice(0, 10).forEach((err, index) => {
+    const recentErrors = consoleErrors.slice(0, 10);
+    for (const [index, err] of recentErrors.entries()) {
       sections.push(`Error ${index + 1}: ${sanitizeErrorMessage(err)}`);
-    });
+    }
   }
+}
+
+function collectBugReportMetadata(userDescription: string, steps: string, consoleErrors: string[], session: Session | null | undefined): string {
+  const sections: string[] = [];
+
+  pushUserDescriptionSection(sections, userDescription, steps);
+  pushBrowserSystemSection(sections);
+  pushDisplaySection(sections);
+  pushSessionSection(sections, session);
+  pushPerformanceSection(sections);
+  pushNetworkSection(sections);
+  pushConsoleErrorsSection(sections, consoleErrors);
 
   return sections.join('<br>');
+}
+
+// Screenshot field for the bug report form (presentational; no hooks)
+interface BugReportScreenshotFieldProps {
+  screenshotPreview: string | null;
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
+  onScreenshotChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onRemoveScreenshot: () => void;
+}
+
+function BugReportScreenshotField({
+  screenshotPreview,
+  fileInputRef,
+  onScreenshotChange,
+  onRemoveScreenshot,
+}: BugReportScreenshotFieldProps) {
+  return (
+    <div className="space-y-2">
+      <Label>Screenshot (optional)</Label>
+      {screenshotPreview ? (
+        <div className="relative inline-block">
+          <img
+            src={screenshotPreview}
+            alt="Screenshot preview"
+            className="max-h-32 rounded-md border"
+          />
+          <Button
+            type="button"
+            variant="destructive"
+            size="icon"
+            className="absolute -top-2 -right-2 h-6 w-6"
+            onClick={onRemoveScreenshot}
+          >
+            <X className="h-3 w-3" />
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Label
+              htmlFor="bug-screenshot"
+              className="flex items-center gap-2 px-4 py-2 border rounded-md cursor-pointer hover:bg-muted transition-colors"
+            >
+              <ImageIcon className="h-4 w-4" />
+              <span className="text-sm">Attach Screenshot</span>
+            </Label>
+            <Input
+              ref={fileInputRef}
+              id="bug-screenshot"
+              type="file"
+              accept=".jpg,.jpeg,.png,.gif,.webp"
+              className="hidden"
+              onChange={onScreenshotChange}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Tip: You can also paste images directly (Ctrl/Cmd+V)
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Bug report form body (presentational; no hooks)
+interface BugReportFormProps {
+  isSubmitting: boolean;
+  screenshotPreview: string | null;
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
+  onSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
+  onPaste: (e: React.ClipboardEvent) => void;
+  onScreenshotChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onRemoveScreenshot: () => void;
+  onCancel: () => void;
+}
+
+function BugReportForm({
+  isSubmitting,
+  screenshotPreview,
+  fileInputRef,
+  onSubmit,
+  onPaste,
+  onScreenshotChange,
+  onRemoveScreenshot,
+  onCancel,
+}: BugReportFormProps) {
+  return (
+    <form onSubmit={onSubmit} onPaste={onPaste} className="space-y-4 pt-4">
+      <div className="space-y-2">
+        <Label htmlFor="bug-title">Title</Label>
+        <Input
+          id="bug-title"
+          name="title"
+          placeholder="Brief description of the issue"
+          required
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="bug-description">Description</Label>
+        <Textarea
+          id="bug-description"
+          name="description"
+          placeholder="What happened? What did you expect to happen?"
+          rows={4}
+          required
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="bug-steps">Steps to Reproduce (optional)</Label>
+        <Textarea
+          id="bug-steps"
+          name="steps"
+          placeholder="1. Go to...&#10;2. Click on...&#10;3. See error"
+          rows={3}
+        />
+      </div>
+      <BugReportScreenshotField
+        screenshotPreview={screenshotPreview}
+        fileInputRef={fileInputRef}
+        onScreenshotChange={onScreenshotChange}
+        onRemoveScreenshot={onRemoveScreenshot}
+      />
+      <div className="flex justify-end gap-2 pt-2">
+        <Button type="button" variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={isSubmitting}>
+          {isSubmitting ? 'Submitting...' : 'Submit Report'}
+        </Button>
+      </div>
+    </form>
+  );
 }
 
 function BugReportModal({ isExpanded }: BugReportModalProps) {
@@ -532,7 +698,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
       const steps = stepsEl instanceof HTMLTextAreaElement ? stepsEl.value : '';
 
       // Build rich description with all metadata
-      const fullDescription = collectBugReportMetadata(descriptionText, steps, consoleErrors, !!session);
+      const fullDescription = collectBugReportMetadata(descriptionText, steps, consoleErrors, session);
 
       const formData = new FormData();
       formData.append('title', title);
@@ -588,88 +754,16 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
             Found an issue? Let us know so we can fix it.
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit} onPaste={handlePaste} className="space-y-4 pt-4">
-          <div className="space-y-2">
-            <Label htmlFor="bug-title">Title</Label>
-            <Input
-              id="bug-title"
-              name="title"
-              placeholder="Brief description of the issue"
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="bug-description">Description</Label>
-            <Textarea
-              id="bug-description"
-              name="description"
-              placeholder="What happened? What did you expect to happen?"
-              rows={4}
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="bug-steps">Steps to Reproduce (optional)</Label>
-            <Textarea
-              id="bug-steps"
-              name="steps"
-              placeholder="1. Go to...&#10;2. Click on...&#10;3. See error"
-              rows={3}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Screenshot (optional)</Label>
-            {screenshotPreview ? (
-              <div className="relative inline-block">
-                <img
-                  src={screenshotPreview}
-                  alt="Screenshot preview"
-                  className="max-h-32 rounded-md border"
-                />
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="icon"
-                  className="absolute -top-2 -right-2 h-6 w-6"
-                  onClick={removeScreenshot}
-                >
-                  <X className="h-3 w-3" />
-                </Button>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <Label
-                    htmlFor="bug-screenshot"
-                    className="flex items-center gap-2 px-4 py-2 border rounded-md cursor-pointer hover:bg-muted transition-colors"
-                  >
-                    <ImageIcon className="h-4 w-4" />
-                    <span className="text-sm">Attach Screenshot</span>
-                  </Label>
-                  <Input
-                    ref={fileInputRef}
-                    id="bug-screenshot"
-                    type="file"
-                    accept=".jpg,.jpeg,.png,.gif,.webp"
-                    className="hidden"
-                    onChange={handleScreenshotChange}
-                  />
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Tip: You can also paste images directly (Ctrl/Cmd+V)
-                </p>
-              </div>
-            )}
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={isSubmitting}>
-              {isSubmitting ? 'Submitting...' : 'Submit Report'}
-            </Button>
-          </div>
-        </form>
+        <BugReportForm
+          isSubmitting={isSubmitting}
+          screenshotPreview={screenshotPreview}
+          fileInputRef={fileInputRef}
+          onSubmit={handleSubmit}
+          onPaste={handlePaste}
+          onScreenshotChange={handleScreenshotChange}
+          onRemoveScreenshot={removeScreenshot}
+          onCancel={() => setOpen(false)}
+        />
       </DialogContent>
     </Dialog>
   );
@@ -764,18 +858,91 @@ function processNavigationItems(navItems: NavigationItem[]): ProcessedItem[] {
   return processed;
 }
 
+// Sidebar logo header (presentational; no hooks)
+interface NavigationLogoProps {
+  isExpanded: boolean;
+  logoSrc: string;
+  logoIsExternal: boolean;
+  orgName: string;
+  appName: string;
+}
+
+function NavigationLogo({ isExpanded, logoSrc, logoIsExternal, orgName, appName }: NavigationLogoProps) {
+  return (
+    <div className={cn('flex items-center justify-center py-2 border-b border-border/40', isExpanded ? 'px-3' : 'px-2')}>
+      <Link
+        href="/dashboard"
+        className={cn(
+          'flex items-center justify-center transition-all duration-200',
+          isExpanded ? 'w-full h-10 gap-2' : 'w-10 h-10'
+        )}
+      >
+        <Image
+          src={logoSrc}
+          alt={orgName}
+          width={isExpanded ? 28 : 24}
+          height={isExpanded ? 28 : 24}
+          className="object-contain"
+          unoptimized={logoIsExternal}
+        />
+        {isExpanded && <span className="text-[var(--brand-primary)] text-base font-bold">{appName}</span>}
+      </Link>
+    </div>
+  );
+}
+
+// Scrollable navigation links list (presentational; no hooks)
+interface NavigationLinksProps {
+  isExpanded: boolean;
+  isLoading: boolean;
+  processedItems: ProcessedItem[];
+}
+
+function NavigationLinks({ isExpanded, isLoading, processedItems }: NavigationLinksProps) {
+  return (
+    <ScrollArea className="flex-1">
+      <div className={cn('py-4', isExpanded ? 'px-3' : 'px-2')}>
+        {isLoading ? (
+          <div className="text-center py-4">Loading...</div>
+        ) : (
+          <div className="space-y-2">
+            {processedItems.map((item) => (
+              <LinksGroup
+                key={item.id}
+                isExpanded={isExpanded}
+                {...item}
+                icon={iconMap[item.icon] || iconMap.IconHome}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </ScrollArea>
+  );
+}
+
+// Derive the display name and initials shown in the sidebar user profile
+function deriveUserDisplay(
+  givenNameRaw: string | null | undefined,
+  name: string | null | undefined,
+  familyNameRaw: string | null | undefined
+): { fullName: string; userInitials: string } {
+  const givenName = givenNameRaw || name?.split(' ')[0] || 'User';
+  const familyName = familyNameRaw || '';
+  const displayName = familyName ? `${givenName} ${familyName}` : givenName;
+  return { fullName: displayName, userInitials: givenName.charAt(0).toUpperCase() };
+}
+
 function NavigationContent({ isExpanded }: { isExpanded: boolean }) {
   const { data: session } = useSession();
   const [navItems, setNavItems] = useState<NavigationItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const { orgName, appName, logoSrc, logoIsExternal } = useBranding();
 
-  const { fullName, userInitials } = useMemo(() => {
-    const givenName = session?.user?.givenName || session?.user?.name?.split(' ')[0] || 'User';
-    const familyName = session?.user?.familyName || '';
-    const displayName = familyName ? `${givenName} ${familyName}` : givenName;
-    return { fullName: displayName, userInitials: givenName.charAt(0).toUpperCase() };
-  }, [session?.user?.givenName, session?.user?.name, session?.user?.familyName]);
+  const { fullName, userInitials } = useMemo(
+    () => deriveUserDisplay(session?.user?.givenName, session?.user?.name, session?.user?.familyName),
+    [session?.user?.givenName, session?.user?.name, session?.user?.familyName]
+  );
 
   const processedItems = useMemo(() => processNavigationItems(navItems), [navItems]);
 
@@ -798,46 +965,17 @@ function NavigationContent({ isExpanded }: { isExpanded: boolean }) {
   return (
     <>
       {/* Sidebar Logo */}
-      <div className={cn('flex items-center justify-center py-2 border-b border-border/40', isExpanded ? 'px-3' : 'px-2')}>
-        <Link
-          href="/dashboard"
-          className={cn(
-            'flex items-center justify-center transition-all duration-200',
-            isExpanded ? 'w-full h-10 gap-2' : 'w-10 h-10'
-          )}
-        >
-          <Image
-            src={logoSrc}
-            alt={orgName}
-            width={isExpanded ? 28 : 24}
-            height={isExpanded ? 28 : 24}
-            className="object-contain"
-            unoptimized={logoIsExternal}
-          />
-          {isExpanded && <span className="text-[var(--brand-primary)] text-base font-bold">{appName}</span>}
-        </Link>
-      </div>
+      <NavigationLogo
+        isExpanded={isExpanded}
+        logoSrc={logoSrc}
+        logoIsExternal={logoIsExternal}
+        orgName={orgName}
+        appName={appName}
+      />
 
       {/* Navigation Links */}
       <div className="flex-1 flex flex-col">
-        <ScrollArea className="flex-1">
-          <div className={cn('py-4', isExpanded ? 'px-3' : 'px-2')}>
-            {isLoading ? (
-              <div className="text-center py-4">Loading...</div>
-            ) : (
-              <div className="space-y-2">
-                {processedItems.map((item) => (
-                  <LinksGroup
-                    key={item.id}
-                    isExpanded={isExpanded}
-                    {...item}
-                    icon={iconMap[item.icon] || iconMap.IconHome}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        </ScrollArea>
+        <NavigationLinks isExpanded={isExpanded} isLoading={isLoading} processedItems={processedItems} />
 
         {/* Bottom Section */}
         <div className={cn('border-t border-border/40 py-3', isExpanded ? 'px-3' : 'px-2')}>

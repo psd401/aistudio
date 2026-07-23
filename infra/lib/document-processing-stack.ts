@@ -84,6 +84,7 @@ export class DocumentProcessingStack extends cdk.Stack {
     // Dead Letter Queue for failed processing jobs
     this.processingDLQ = new sqs.Queue(this, 'ProcessingDLQ', {
       queueName: `AIStudio-DocumentProcessing-DLQ-${environment}`,
+      encryption: sqs.QueueEncryption.SQS_MANAGED, // SSE at rest — REV-INFRA-165
       retentionPeriod: cdk.Duration.days(14),
       removalPolicy: environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
@@ -91,6 +92,7 @@ export class DocumentProcessingStack extends cdk.Stack {
     // Standard processing queue for files under 50MB
     this.processingQueue = new sqs.Queue(this, 'ProcessingQueue', {
       queueName: `AIStudio-DocumentProcessing-${environment}`,
+      encryption: sqs.QueueEncryption.SQS_MANAGED, // SSE at rest — REV-INFRA-165
       visibilityTimeout: cdk.Duration.minutes(15), // 15 minutes for processing
       receiveMessageWaitTime: cdk.Duration.seconds(20), // Long polling
       deadLetterQueue: {
@@ -103,6 +105,7 @@ export class DocumentProcessingStack extends cdk.Stack {
     // High-memory queue for large files (50MB+)
     this.highMemoryQueue = new sqs.Queue(this, 'HighMemoryQueue', {
       queueName: `AIStudio-DocumentProcessing-HighMemory-${environment}`,
+      encryption: sqs.QueueEncryption.SQS_MANAGED, // SSE at rest — REV-INFRA-165
       visibilityTimeout: cdk.Duration.minutes(15), // Match Lambda timeout
       receiveMessageWaitTime: cdk.Duration.seconds(20),
       deadLetterQueue: {

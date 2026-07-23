@@ -1,4 +1,5 @@
-import { test, expect } from '@playwright/test'
+import { mkdir } from 'node:fs/promises'
+import { test, expect } from './fixtures'
 
 /**
  * E2E tests for the Agent Platform Telemetry Dashboard (Issue #890)
@@ -14,7 +15,11 @@ import { test, expect } from '@playwright/test'
  * PLAYWRIGHT_AUTH_ENABLED=true is set.
  */
 
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Agent Dashboard — Public Access', () => {
+  test.use({ storageState: { cookies: [], origins: [] } })
+
   test('non-admin user is redirected away from /admin/agents', async ({ page }) => {
     await page.goto('/admin/agents')
 
@@ -60,12 +65,14 @@ test.describe('Agent Dashboard — Admin', () => {
   })
 
   test('stats cards section renders', async ({ page }) => {
-    // Wait for stats to load — skeleton or actual cards
+    // AgentStatsCards renders a grid of shadcn <Card>s. shadcn cards carry the
+    // 'bg-card' class (lowercase) — the old [class*="Card"] (capital C) matched
+    // nothing. Match the lowercase card class.
     const statsSection = page
       .locator('[class*="grid"]')
-      .filter({ has: page.locator('[class*="Card"]') })
+      .filter({ has: page.locator('[class*="card"]') })
       .first()
-    await expect(statsSection).toBeVisible({ timeout: 10000 })
+    await expect(statsSection).toBeVisible({ timeout: 15000 })
   })
 
   test('tab navigation renders all tabs', async ({ page }) => {
@@ -73,6 +80,7 @@ test.describe('Agent Dashboard — Admin', () => {
       'Usage',
       'Cost',
       'Adoption',
+      'Failures',
       'Health',
       'Safety',
       'Patterns',
@@ -83,6 +91,34 @@ test.describe('Agent Dashboard — Admin', () => {
       const trigger = page.locator('[role="tab"]').filter({ hasText: tab })
       await expect(trigger).toBeVisible({ timeout: 5000 })
     }
+  })
+
+  test('failures tab loads and shows table or empty state', async ({ page }) => {
+    await page.waitForSelector('[role="tab"][aria-selected="true"]', {
+      timeout: 10000,
+    })
+    const failuresTab = page
+      .locator('[role="tab"]')
+      .filter({ hasText: 'Failures' })
+    await failuresTab.click()
+    const card = page.locator('text=/Agent Failures/i').first()
+    await expect(card).toBeVisible({ timeout: 10000 })
+    // Either rows render OR the empty-state message shows
+    const emptyOrTable = page.locator(
+      'text=/No failures match these filters|Showing/i',
+    )
+    await expect(emptyOrTable.first()).toBeVisible({ timeout: 10000 })
+  })
+
+  test('failures filters are interactive', async ({ page }) => {
+    await page.waitForSelector('[role="tab"][aria-selected="true"]', {
+      timeout: 10000,
+    })
+    await page.locator('[role="tab"]').filter({ hasText: 'Failures' }).click()
+    // Acknowledge button starts disabled (no rows selected)
+    const ackBtn = page.locator('button').filter({ hasText: /Acknowledge \(0\)/ })
+    await expect(ackBtn).toBeVisible({ timeout: 10000 })
+    await expect(ackBtn).toBeDisabled()
   })
 
   test('clicking a tab switches content', async ({ page }) => {
@@ -124,5 +160,114 @@ test.describe('Agent Dashboard — Admin', () => {
       .locator('button')
       .filter({ hasText: /Refresh/i })
     await expect(refreshButton).toBeVisible({ timeout: 10000 })
+  })
+
+  // admin-agents-cache-cost (issue #1089): the Cost tab's token×pricing view is
+  // the source-of-truth model-cost panel. After the GLM-5 -> Sonnet 5 migration
+  // it must render the Bedrock cache-read / cache-write token columns and a
+  // cache-aware cost figure.
+  test('cost tab renders cache-aware model cost with cache token columns', async ({
+    page,
+  }, testInfo) => {
+    await page.waitForSelector('[role="tab"][aria-selected="true"]', {
+      timeout: 10000,
+    })
+    await page.locator('[role="tab"]').filter({ hasText: 'Cost' }).click()
+
+    // Source-of-truth panel heading always renders on the Cost tab.
+    // NOTE: must be a regex LITERAL, not a 'text=/…/' string selector — inside a
+    // string literal JS collapses \( to (, turning the parens into a regex group
+    // that can never match the rendered "(tokens × pricing)" heading.
+    const panelHeading = page
+      .getByRole('heading', { name: /Model cost \(tokens × pricing\)/i })
+      .first()
+    await expect(panelHeading).toBeVisible({ timeout: 15000 })
+
+    // The cache-aware cost figure is documented in the panel description — it
+    // renders regardless of whether there is token data in the window.
+    await expect(
+      page.locator('text=/cache-aware/i').first()
+    ).toBeVisible({ timeout: 10000 })
+
+    // When there is recorded token usage, the by-model table renders the
+    // cache-read + cache-write columns; otherwise the empty state shows.
+    // Either satisfies the CI-safe assertion; both are valid renders.
+    const cacheReadHeader = page
+      .locator('th')
+      .filter({ hasText: /Cache read tok/i })
+      .first()
+    const emptyState = page
+      .locator('text=/No token usage recorded/i')
+      .first()
+    await expect(cacheReadHeader.or(emptyState)).toBeVisible({ timeout: 10000 })
+
+    if (await cacheReadHeader.isVisible().catch(() => false)) {
+      // Data present — assert BOTH cache columns exist alongside the cost col.
+      await expect(
+        page.locator('th').filter({ hasText: /Cache write tok/i }).first()
+      ).toBeVisible()
+    }
+
+    // Visual evidence for the PR (screenshot_dir default = .verification).
+    // Ensure the dir exists first — a clean CI workspace has no .verification/
+    // and the screenshot write would otherwise fail (copilot #1092 review).
+    await mkdir('.verification', { recursive: true })
+    await page.screenshot({
+      path: `.verification/admin-agents-cache-cost-${testInfo.project.name}.png`,
+      fullPage: true,
+    })
+  })
+
+  // admin-agents-iteration-telemetry (issue #1161): the always-visible stats
+  // area renders an "Iteration telemetry (per turn)" card row surfacing the
+  // Loop-2 measurement metrics — avg/p95 model-calls-per-turn, empty-turn rate,
+  // and nudge-fire rate. These render regardless of whether there is turn data
+  // in the window (they show 0 / 0.0% on an empty range).
+  test('iteration telemetry cards render (model calls, empty-turn, nudge rate)', async ({
+    page,
+  }, testInfo) => {
+    // The stats cards live above the tabs and load with the page.
+    const sectionHeading = page
+      .getByText('Iteration telemetry (per turn)', { exact: true })
+      .first()
+    await expect(sectionHeading).toBeVisible({ timeout: 15000 })
+
+    // All four iteration metric cards must be present by label.
+    for (const label of [
+      'Avg Model Calls / Turn',
+      'p95 Model Calls / Turn',
+      'Empty-Turn Rate',
+      'Nudge-Fire Rate',
+    ]) {
+      await expect(
+        page.getByText(label, { exact: true }).first()
+      ).toBeVisible({ timeout: 10000 })
+    }
+
+    // The Adoption tab's per-user table adds the per-user iteration columns.
+    await page.waitForSelector('[role="tab"][aria-selected="true"]', {
+      timeout: 10000,
+    })
+    await page.locator('[role="tab"]').filter({ hasText: 'Adoption' }).click()
+    // Either the new columns render (data present) or the empty state shows.
+    const callsCol = page
+      .locator('th')
+      .filter({ hasText: /Avg Calls\/Turn/i })
+      .first()
+    const nudgeCol = page
+      .locator('th')
+      .filter({ hasText: /Nudge Rate/i })
+      .first()
+    const emptyState = page.locator('text=/No user data available/i').first()
+    await expect(callsCol.or(emptyState)).toBeVisible({ timeout: 10000 })
+    if (await callsCol.isVisible().catch(() => false)) {
+      await expect(nudgeCol).toBeVisible()
+    }
+
+    await mkdir('.verification', { recursive: true })
+    await page.screenshot({
+      path: `.verification/admin-agents-iteration-telemetry-${testInfo.project.name}.png`,
+      fullPage: true,
+    })
   })
 })

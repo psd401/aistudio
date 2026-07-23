@@ -44,6 +44,13 @@ const customJestConfig = {
   transformIgnorePatterns: [
     'node_modules/(?!(lucide-react|next-auth|@next-auth|nanoid|uuid)/)'
   ],
+  // CDK synthesis copies the application (including manual mocks) into many
+  // asset folders. Exclude those generated modules from Jest's haste map so a
+  // prior synth cannot create hundreds of false duplicate-mock warnings.
+  modulePathIgnorePatterns: [
+    '<rootDir>/infra/cdk.out/',
+    '<rootDir>/.next/',
+  ],
   testPathIgnorePatterns: [
     '/node_modules/',
     '/tests/e2e/',

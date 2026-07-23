@@ -5,6 +5,52 @@ import type { JWT } from "next-auth/jwt"
 import { refreshAccessToken, shouldRefreshToken } from "@/lib/auth/token-refresh-client"
 import { createLogger } from "@/lib/auth/edge-logger"
 
+/**
+ * Fire-and-forget mirror of the user's Cognito refresh token to Secrets
+ * Manager so the AgentCore agent (running in a different environment) can
+ * authenticate to the data MCP server on their behalf.
+ *
+ * Dynamic import so this never loads on edge runtime, and any failure
+ * (missing env vars, IAM, AWS unavailable) is logged but does NOT break
+ * the auth flow.
+ */
+function syncCognitoRefreshForAgentBackground(
+  email: string | undefined,
+  refreshToken: string | undefined,
+): void {
+  if (!email || !refreshToken) return
+  // REV-COR-247: route this failure through the edge logger like the rest of
+  // auth.ts rather than console.error — auth.ts runs inside the Next.js runtime,
+  // where console.* is banned (CLAUDE.md). Only the error message is logged, never
+  // the refresh token.
+  const log = createLogger({ context: "agent-token-sync" })
+  ;(async () => {
+    try {
+      const mod = await import("@/lib/auth/agent-token-sync")
+      await mod.syncCognitoRefreshForAgent(email, refreshToken)
+    } catch (err) {
+      // edge runtime, missing IAM, etc. — swallow. The on-demand consent
+      // flow is the fallback for users whose token never makes it here.
+      log.warn("background sync failed", {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  })()
+}
+
+const DEFAULT_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60 // 24 hours
+
+/**
+ * Parse SESSION_MAX_AGE defensively (REV-COR-248). A set-but-invalid value
+ * ("24h", "abc", "0", negative, empty, whitespace) must fall back to the 24h
+ * default rather than passing NaN/0 to NextAuth's session/cookie config, which
+ * produces undefined session-lifetime behavior (an invalid `Max-Age`).
+ */
+export function resolveSessionMaxAge(raw: string | undefined): number {
+  const parsed = Number.parseInt(raw ?? "", 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SESSION_MAX_AGE_SECONDS
+}
+
 export const authConfig: NextAuthConfig = {
   providers: [
     Cognito({
@@ -104,6 +150,15 @@ export const authConfig: NextAuthConfig = {
             expiresAt: newToken.expiresAt ? new Date(newToken.expiresAt).toISOString() : 'unknown'
           })
 
+          // Mirror the freshly-issued Cognito refresh token into Secrets
+          // Manager so the AgentCore agent (different environment) can
+          // authenticate as this user against the data MCP server. Best
+          // effort — see syncCognitoRefreshForAgentBackground above.
+          syncCognitoRefreshForAgentBackground(
+            typeof newToken.email === "string" ? newToken.email : undefined,
+            typeof newToken.refreshToken === "string" ? newToken.refreshToken : undefined,
+          )
+
           return newToken
         } catch (error) {
           // Log error but don't fail authentication
@@ -184,6 +239,14 @@ export const authConfig: NextAuthConfig = {
             log.info("Token refresh successful", {
               newExpiresAt: new Date(refreshedTokens.expiresAt).toISOString()
             })
+
+            // Re-mirror the rotated refresh token to Secrets Manager so the
+            // agent's stored copy stays current. Best effort — see
+            // syncCognitoRefreshForAgentBackground above.
+            syncCognitoRefreshForAgentBackground(
+              typeof token.email === "string" ? token.email : undefined,
+              refreshedTokens.refreshToken,
+            )
 
             // Return refreshed token with existing user data and preserve lifetime info
             const tokenWithLifetime = token as JWT & { tokenLifetimeMs?: number }
@@ -308,8 +371,9 @@ export const authConfig: NextAuthConfig = {
   },
   session: {
     strategy: "jwt",
-    // Session max age in seconds (default: 24 hours)
-    maxAge: process.env.SESSION_MAX_AGE ? Number.parseInt(process.env.SESSION_MAX_AGE) : 24 * 60 * 60,
+    // Session max age in seconds (default: 24 hours). Parsed defensively so a
+    // malformed SESSION_MAX_AGE can never yield NaN (REV-COR-248).
+    maxAge: resolveSessionMaxAge(process.env.SESSION_MAX_AGE),
   },
   cookies: {
     sessionToken: {

@@ -39,9 +39,14 @@ import {
   ComposerAddAttachment,
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
+import {
+  RepositoryAwareUserMessageText,
+  RepositoryPromotionAccessProvider,
+} from "@/components/assistant-ui/repository-attachment-message";
 import { PromptSaveButton } from "@/app/(protected)/nexus/_components/chat/prompt-save-button";
 import { ComposerControls } from "@/app/(protected)/nexus/_components/chat/composer-controls";
 import type { SelectAiModel } from "@/types";
+import type { NexusExperienceMode, NexusModelFamily } from "@/lib/nexus/model-router/types";
 
 // Context for passing conversationId to message components
 const ConversationIdContext = createContext<string | null>(null);
@@ -51,7 +56,6 @@ export const useConversationId = () => useContext(ConversationIdContext);
 // ChatConfigContext and useChatConfig imported from @/lib/contexts/chat-config-context
 
 // Pre-defined constants to avoid creating new objects/arrays on every render
-const EMPTY_MODELS_ARRAY: SelectAiModel[] = [];
 const EMPTY_TOOLS_ARRAY: string[] = [];
 const EMPTY_CONNECTORS_ARRAY: string[] = [];
 
@@ -75,7 +79,9 @@ type AssistantContentComponents = typeof DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPO
  * extend the Thread props interface rather than exporting this context directly. */
 const AssistantContentComponentsContext = createContext<AssistantContentComponents>(DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS);
 
-const USER_MESSAGE_CONTENT_COMPONENTS = { Text: MarkdownText };
+const USER_MESSAGE_CONTENT_COMPONENTS = {
+  Text: RepositoryAwareUserMessageText,
+};
 
 const MOTION_FADE_IN = { y: 5, opacity: 0 };
 const MOTION_VISIBLE = { y: 0, opacity: 1 };
@@ -117,10 +123,12 @@ interface ThreadProps {
   processingAttachments?: Set<string>;
   conversationId?: string | null;
   // Model and tools for composer controls
-  models?: SelectAiModel[];
   selectedModel?: SelectAiModel | null;
   onModelChange?: (model: SelectAiModel) => void;
-  isLoadingModels?: boolean;
+  routingMode?: NexusExperienceMode;
+  modelFamily?: NexusModelFamily;
+  onRoutingModeChange?: (mode: NexusExperienceMode) => void;
+  onModelFamilyChange?: (family: NexusModelFamily) => void;
   enabledTools?: string[];
   onToolsChange?: (tools: string[]) => void;
   // Connector selection
@@ -133,15 +141,19 @@ interface ThreadProps {
   toolFallback?: ToolCallMessagePartComponent;
   /** Extra action buttons to render in the composer action bar (e.g. voice mode button) */
   composerExtraActions?: React.ReactNode;
+  /** Whether the current user can promote Nexus attachments to durable repositories. */
+  canPromoteRepositoryAttachments?: boolean;
 }
 
 export const Thread: FC<ThreadProps> = ({
   processingAttachments,
   conversationId,
-  models = EMPTY_MODELS_ARRAY,
   selectedModel,
   onModelChange,
-  isLoadingModels = false,
+  routingMode = "standard",
+  modelFamily = "auto",
+  onRoutingModeChange,
+  onModelFamilyChange,
   enabledTools = EMPTY_TOOLS_ARRAY,
   onToolsChange,
   enabledConnectors = EMPTY_CONNECTORS_ARRAY,
@@ -150,6 +162,7 @@ export const Thread: FC<ThreadProps> = ({
   suggestedActions,
   toolFallback,
   composerExtraActions,
+  canPromoteRepositoryAttachments = false,
 }) => {
   const contentComponents = useMemo(() =>
     toolFallback
@@ -172,43 +185,49 @@ export const Thread: FC<ThreadProps> = ({
   }), [selectedModel?.modelId, enabledTools, enabledConnectors]);
 
   return (
-    <AssistantContentComponentsContext.Provider value={contentComponents}>
-      <ChatConfigContext.Provider value={chatConfig}>
-      <ConversationIdContext.Provider value={conversationId || null}>
-        <ThreadPrimitive.Root
-          className="bg-white flex h-full flex-col"
-          style={THREAD_ROOT_STYLE}
-        >
-          <ThreadPrimitive.Viewport className="relative flex min-w-0 flex-1 h-0 flex-col gap-6 overflow-y-auto">
-            <ThreadWelcome conversationId={conversationId} />
+    <RepositoryPromotionAccessProvider
+      canPromote={canPromoteRepositoryAttachments}
+    >
+      <AssistantContentComponentsContext.Provider value={contentComponents}>
+        <ChatConfigContext.Provider value={chatConfig}>
+          <ConversationIdContext.Provider value={conversationId || null}>
+            <ThreadPrimitive.Root
+              className="bg-white flex h-full flex-col"
+              style={THREAD_ROOT_STYLE}
+            >
+              <ThreadPrimitive.Viewport className="relative flex min-w-0 flex-1 h-0 flex-col gap-6 overflow-y-auto">
+                <ThreadWelcome conversationId={conversationId} />
 
-            <ThreadPrimitive.Messages
-              components={messageComponents}
-            />
+                <ThreadPrimitive.Messages
+                  components={messageComponents}
+                />
 
-            <ThreadPrimitive.If empty={false}>
-              <motion.div className="min-h-6 min-w-6 shrink-0" />
-            </ThreadPrimitive.If>
-          </ThreadPrimitive.Viewport>
+                <ThreadPrimitive.If empty={false}>
+                  <motion.div className="min-h-6 min-w-6 shrink-0" />
+                </ThreadPrimitive.If>
+              </ThreadPrimitive.Viewport>
 
-          <Composer
-            processingAttachments={processingAttachments}
-            models={models}
-            selectedModel={selectedModel}
-            onModelChange={onModelChange}
-            isLoadingModels={isLoadingModels}
-            enabledTools={enabledTools}
-            onToolsChange={onToolsChange}
-            enabledConnectors={enabledConnectors}
-            onConnectorsChange={onConnectorsChange}
-            onReconnectSuccess={onReconnectSuccess}
-            suggestedActions={suggestedActions}
-            composerExtraActions={composerExtraActions}
-          />
-        </ThreadPrimitive.Root>
-      </ConversationIdContext.Provider>
-      </ChatConfigContext.Provider>
-    </AssistantContentComponentsContext.Provider>
+              <Composer
+                processingAttachments={processingAttachments}
+                selectedModel={selectedModel}
+                onModelChange={onModelChange}
+                routingMode={routingMode}
+                modelFamily={modelFamily}
+                onRoutingModeChange={onRoutingModeChange}
+                onModelFamilyChange={onModelFamilyChange}
+                enabledTools={enabledTools}
+                onToolsChange={onToolsChange}
+                enabledConnectors={enabledConnectors}
+                onConnectorsChange={onConnectorsChange}
+                onReconnectSuccess={onReconnectSuccess}
+                suggestedActions={suggestedActions}
+                composerExtraActions={composerExtraActions}
+              />
+            </ThreadPrimitive.Root>
+          </ConversationIdContext.Provider>
+        </ChatConfigContext.Provider>
+      </AssistantContentComponentsContext.Provider>
+    </RepositoryPromotionAccessProvider>
   );
 };
 
@@ -307,10 +326,12 @@ const ThreadWelcomeSuggestions: FC<{ actions?: SuggestedAction[] }> = ({ actions
 
 interface ComposerProps {
   processingAttachments?: Set<string>;
-  models?: SelectAiModel[];
   selectedModel?: SelectAiModel | null;
   onModelChange?: (model: SelectAiModel) => void;
-  isLoadingModels?: boolean;
+  routingMode?: NexusExperienceMode;
+  modelFamily?: NexusModelFamily;
+  onRoutingModeChange?: (mode: NexusExperienceMode) => void;
+  onModelFamilyChange?: (family: NexusModelFamily) => void;
   enabledTools?: string[];
   onToolsChange?: (tools: string[]) => void;
   enabledConnectors?: string[];
@@ -322,10 +343,12 @@ interface ComposerProps {
 
 const Composer: FC<ComposerProps> = ({
   processingAttachments,
-  models = EMPTY_MODELS_ARRAY,
   selectedModel,
   onModelChange,
-  isLoadingModels = false,
+  routingMode = "standard",
+  modelFamily = "auto",
+  onRoutingModeChange,
+  onModelFamilyChange,
   enabledTools = EMPTY_TOOLS_ARRAY,
   onToolsChange,
   enabledConnectors = EMPTY_CONNECTORS_ARRAY,
@@ -335,19 +358,20 @@ const Composer: FC<ComposerProps> = ({
   composerExtraActions,
 }) => {
   return (
-    <div className="bg-white relative mx-auto flex w-full max-w-[var(--thread-max-width)] flex-col gap-4 px-[var(--thread-padding-x)] pb-4 md:pb-6">
+    <div className="bg-white relative mx-auto flex w-full max-w-[var(--thread-max-width)] shrink-0 flex-col gap-4 px-[var(--thread-padding-x)] pb-4 md:pb-6">
       <ThreadScrollToBottom />
       <ThreadPrimitive.Empty>
         <ThreadWelcomeSuggestions actions={suggestedActions} />
       </ThreadPrimitive.Empty>
       <ComposerPrimitive.Root className="relative flex w-full flex-col rounded-2xl border border-border focus-within:ring-2 focus-within:ring-black focus-within:ring-offset-2 dark:focus-within:ring-white overflow-hidden">
         {/* Control dock for model, tools, skills, MCP */}
-        {onModelChange && onToolsChange && (
+        {onModelChange && onToolsChange && onRoutingModeChange && onModelFamilyChange && (
           <ComposerControls
-            models={models}
             selectedModel={selectedModel ?? null}
-            onModelChange={onModelChange}
-            isLoadingModels={isLoadingModels}
+            routingMode={routingMode}
+            modelFamily={modelFamily}
+            onRoutingModeChange={onRoutingModeChange}
+            onModelFamilyChange={onModelFamilyChange}
             enabledTools={enabledTools}
             onToolsChange={onToolsChange}
             enabledConnectors={enabledConnectors}
@@ -358,7 +382,7 @@ const Composer: FC<ComposerProps> = ({
         <ComposerAttachments processingAttachments={processingAttachments} />
         <ComposerPrimitive.Input
           placeholder="How can I help you today?"
-          className="bg-muted dark:border-muted-foreground/15 focus:outline-primary placeholder:text-muted-foreground max-h-[calc(50dvh)] min-h-16 w-full resize-none px-4 pb-3 pt-2 text-base outline-none"
+          className="bg-muted dark:border-muted-foreground/15 focus:outline-primary placeholder:text-muted-foreground max-h-48 min-h-16 w-full resize-none overflow-y-auto px-4 pb-3 pt-2 text-base outline-none"
           rows={1}
           // eslint-disable-next-line jsx-a11y/no-autofocus -- Intentional: message input is primary interaction
           autoFocus

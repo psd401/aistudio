@@ -4,29 +4,30 @@
  * Part of Issue #685 - Assistant Execution API (Phase 2)
  */
 
-import { z } from "zod"
 import { withApiAuth, requireScope, createApiResponse, createErrorResponse, isAdminByUserId } from "@/lib/api"
 import { listAccessibleAssistants } from "@/lib/api/assistant-service"
+import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { createLogger } from "@/lib/logger"
+import { listQuerySchema } from "./query-schema"
 
-// ============================================
-// Validation Schemas
-// ============================================
-
-const listQuerySchema = z.object({
-  status: z.enum(["draft", "pending_approval", "approved", "rejected", "disabled"]).optional(),
-  search: z.string().min(1).max(100).optional(),
-  limit: z.coerce.number().int().min(1).max(100).optional(),
-  cursor: z.string().optional(),
-})
+const LIST_TOOL_IDENTIFIER = "assistants.list"
 
 // ============================================
 // GET — List Assistants
 // ============================================
 
 export const GET = withApiAuth(async (request, auth, requestId) => {
-  const scopeError = requireScope(auth, "assistants:list", requestId)
-  if (scopeError) return scopeError
+  // Resolve the REST scope from the tool catalog (single source of truth —
+  // issue #924 AC #4/#7), matching the execute route. The catalog declares
+  // every required scope (all-of semantics); the literal fallback only applies
+  // if the tool is absent from the catalog (e.g. a DB outage that also lost the
+  // manifest projection).
+  const restScopes = await toolCatalogInstance.getRequiredScopes(LIST_TOOL_IDENTIFIER, "rest")
+  const scopesToCheck = restScopes?.length ? restScopes : ["assistants:list"]
+  for (const scope of scopesToCheck) {
+    const scopeError = requireScope(auth, scope, requestId)
+    if (scopeError) return scopeError
+  }
 
   const log = createLogger({ requestId, route: "api.v1.assistants.list" })
 

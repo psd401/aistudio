@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test'
+import { test, expect, type Page } from './fixtures'
 
 /**
  * E2E tests for session-expiry polling guards (#837 / #845).
@@ -30,6 +30,8 @@ async function gotoNexus(page: Page) {
   // silently passing with route mocks that were never invoked.
   await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 10000 })
 }
+
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
 
 test.describe('Polling Session Guards — useExecutionResults', () => {
   test.skip(!process.env.PLAYWRIGHT_AUTH_ENABLED, 'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run')
@@ -158,12 +160,9 @@ test.describe('Polling Backoff Behavior', () => {
     // Install fake clock BEFORE navigation to control timer scheduling
     await page.clock.install()
 
-    // requestTimestamps uses wall-clock Date.now() (Node.js process, not browser).
-    // Only .length is checked — do not add timing-gap assertions without
-    // switching to page.evaluate(() => Date.now()) for fake-clock time.
-    const requestTimestamps: number[] = []
+    let recentRequests = 0
     await page.route('/api/execution-results/recent*', (route) => {
-      requestTimestamps.push(Date.now())
+      recentRequests++
       route.fulfill({
         status: 500,
         contentType: 'application/json',
@@ -181,26 +180,47 @@ test.describe('Polling Backoff Behavior', () => {
       })
     })
 
-    // Wait for initial fetch (1 failure → consecutiveFailures = 1)
+    // Initial mount fetch. NOTE: this runs OUTSIDE the polling chain
+    // (useExecutionResults calls fetchResults() directly in a mount effect
+    // with .catch(() => {})), so its 500 does NOT increment the hook's
+    // consecutiveFailures.
     await Promise.all([
       page.waitForResponse('/api/execution-results/recent*'),
       gotoNexus(page),
     ])
-    expect(requestTimestamps.length).toBe(1)
+    expect(recentRequests).toBe(1)
 
-    // After 1 failure, backoff = 2^1 × 60s = 120s (±10% jitter: 108s–132s).
-    // Timings here are for useExecutionResults (refreshInterval = 60 000 ms);
-    // NotificationProvider uses a 30 s base interval and is a separate concern.
-    // At 60s into the backoff window — no second request yet.
-    await page.clock.fastForward(60000)
-    expect(requestTimestamps.length).toBe(1)
+    // usePollingWithBackoff schedules the FIRST poll at mount, before any
+    // failure is registered: base 60s ± 10% jitter = 54–66s (fake time). That
+    // poll's 500 sets consecutiveFailures = 1, so the SECOND poll follows
+    // 2¹ × 60s ± 10% = 108–132s later. Advance the fake clock in small steps
+    // with a real-time yield after each jump — fastForward fires due timers
+    // but does not pump the page's promise queue, so the app needs real
+    // cycles to process each 500 and reschedule with backoff. (A single big
+    // fastForward races that reschedule, and jumping to exactly 60s made the
+    // old version of this spec a per-attempt coin flip on the first poll's
+    // jitter draw.) Record the fake elapsed time at which each poll lands.
+    const pollSeenAtMs: number[] = []
+    let fakeElapsedMs = 0
+    while (pollSeenAtMs.length < 2 && fakeElapsedMs < 250_000) {
+      await page.clock.fastForward(2_000)
+      fakeElapsedMs += 2_000
+      await page.waitForTimeout(20)
+      if (recentRequests >= 2 && pollSeenAtMs.length === 0) pollSeenAtMs.push(fakeElapsedMs)
+      if (recentRequests >= 3 && pollSeenAtMs.length === 1) pollSeenAtMs.push(fakeElapsedMs)
+    }
+    expect(pollSeenAtMs).toHaveLength(2)
+    const [firstPollAt, secondPollAt] = pollSeenAtMs
 
-    // At 140s total — past the maximum backoff window (132s).
-    // Second request should now fire.
-    await page.clock.fastForward(80000)
-    // Route handler updates requestTimestamps when the request is fulfilled.
-    // poll() gives a clear failure message if the second request never arrives,
-    // rather than a silent timeout via .catch(() => {}).
-    await expect.poll(() => requestTimestamps.length, { timeout: 5000 }).toBeGreaterThanOrEqual(2)
+    // First poll: base interval with jitter (54–66s). Upper bound is loose
+    // (2s step granularity + real-cycle drift under load) but still far below
+    // the 108s backoff minimum, so it cannot mask a missing backoff.
+    expect(firstPollAt).toBeGreaterThanOrEqual(54_000)
+    expect(firstPollAt).toBeLessThanOrEqual(80_000)
+
+    // Backoff proof: the post-failure gap is 108–132s (fake), while an
+    // un-backed-off base gap tops out at ~66s + drift. 90s splits the two
+    // ranges with ≥14s of margin on each side.
+    expect(secondPollAt - firstPollAt).toBeGreaterThan(90_000)
   })
 })

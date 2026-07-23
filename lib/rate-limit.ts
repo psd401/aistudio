@@ -5,13 +5,21 @@ interface RateLimitConfig {
   interval: number; // Time window in milliseconds
   uniqueTokenPerInterval: number; // Max requests per interval
   skipAuth?: boolean; // Skip rate limiting for authenticated users
+  /** Internal per-handler namespace so unrelated routes do not share a budget. */
+  namespace?: string;
 }
 
 // In-memory store for rate limiting (consider using Redis in production)
 const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
+let rateLimiterInstance = 0;
+
+function nextRateLimiterNamespace(prefix: string): string {
+  rateLimiterInstance += 1;
+  return `${prefix}-${rateLimiterInstance}`;
+}
 
 // Clean up expired entries periodically
-setInterval(() => {
+const rateLimitCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [key, value] of rateLimitStore.entries()) {
     if (value.resetTime < now) {
@@ -19,6 +27,7 @@ setInterval(() => {
     }
   }
 }, 60000); // Clean up every minute
+rateLimitCleanupTimer.unref?.();
 
 /**
  * Get identifier for rate limiting
@@ -46,14 +55,17 @@ async function getIdentifier(request: NextRequest, skipAuth: boolean): Promise<s
  * Rate limiting middleware
  */
 export function rateLimit(config: RateLimitConfig) {
+  const namespace =
+    config.namespace ?? nextRateLimiterNamespace("rate-limiter");
   return async function rateLimitMiddleware(
     request: NextRequest
   ): Promise<NextResponse | null> {
     const identifier = await getIdentifier(request, config.skipAuth || false);
+    const storeKey = `${namespace}:${identifier}`;
     const now = Date.now();
     
     // Get or create rate limit entry
-    let entry = rateLimitStore.get(identifier);
+    let entry = rateLimitStore.get(storeKey);
     
     if (!entry || entry.resetTime < now) {
       // Create new entry
@@ -61,7 +73,7 @@ export function rateLimit(config: RateLimitConfig) {
         count: 1,
         resetTime: now + config.interval
       };
-      rateLimitStore.set(identifier, entry);
+      rateLimitStore.set(storeKey, entry);
       return null; // Allow request
     }
     
@@ -108,7 +120,9 @@ export function withRateLimit<T extends unknown[], R>(
     uniqueTokenPerInterval: 100 // 100 requests per minute
   }
 ): (...args: T) => Promise<R | NextResponse> {
-  const limiter = rateLimit(config);
+  const namespace =
+    config.namespace ?? nextRateLimiterNamespace("rate-limit-handler");
+  const limiter = rateLimit({ ...config, namespace });
   
   return async (...args: T) => {
     // Assume first argument is NextRequest
@@ -123,11 +137,13 @@ export function withRateLimit<T extends unknown[], R>(
     // Call original handler
     const response = await handler(...args);
     
-    // Add rate limit headers to successful responses
-    if (response instanceof NextResponse) {
+    // Add rate limit headers to successful responses.
+    // Guard with typeof first: in test environments NextResponse may be mocked as a
+    // plain object (not a constructor), which would cause `instanceof` to throw TypeError.
+    if (typeof NextResponse === 'function' && response instanceof NextResponse) {
       const identifier = await getIdentifier(request, config.skipAuth || false);
-      const entry = rateLimitStore.get(identifier);
-      
+      const entry = rateLimitStore.get(`${namespace}:${identifier}`);
+
       if (entry) {
         response.headers.set('X-RateLimit-Limit', String(config.uniqueTokenPerInterval));
         response.headers.set('X-RateLimit-Remaining', String(config.uniqueTokenPerInterval - entry.count));

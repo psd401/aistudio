@@ -1,0 +1,40 @@
+# Issue #1161 — build-time eval-gate induced-failure evidence
+Generated: 2026-07-10T15:38:38Z
+
+## Gate 3 (over-budget bootstrap) — real files PASS at HEAD
+Bootstrap instruction budget (from openclaw.json):
+  bootstrapMaxChars      = 32000
+  bootstrapTotalMaxChars = 80000
+Effective bootstrap files:
+    ok   IDENTITY.md        520 chars
+    ok   MEMORY.md          692 chars
+    ok   SOUL.md          26643 chars
+    ok   USER.md           1963 chars
+  ----- TOTAL            29818 chars
+
+OK — all bootstrap files within budget.
+
+## Gate: over-budget INDUCED failure (bootstrapMaxChars lowered) — exit 1
+
+INSTRUCTION-BUDGET GATE FAILED:
+  - SOUL.md: 26643 chars > bootstrapMaxChars 5000 (over by 21643)
+
+A bootstrap file exceeds the openclaw.json budget and OpenClaw would SILENTLY truncate it at boot. Trim the file (or split rules into an on-demand skill) before building.
+Bootstrap instruction budget (from openclaw.json):
+  bootstrapMaxChars      = 5000
+  bootstrapTotalMaxChars = 80000
+Effective bootstrap files:
+    ok   IDENTITY.md        520 chars
+    ok   MEMORY.md          692 chars
+    OVER SOUL.md          26643 chars
+    ok   USER.md           1963 chars
+  ----- TOTAL            29818 chars
+exit=1
+
+## Config self-consistency — real files PASS at HEAD
+OK — openclaw.json context windows + apiKey hydration paths consistent.
+
+## Config: bad contextWindow INDUCED failure — exit 1
+CONFIG SELF-CONSISTENCY GATE FAILED:
+  - amazon-bedrock-mantle/anthropic.claude-sonnet-5: contextWindow 20000 != known value 200000
+exit=1

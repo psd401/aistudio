@@ -1,0 +1,20 @@
+{
+  "name": "atrium-content-key-bootstrap",
+  "version": "1.0.0",
+  "description": "CloudFormation custom resource \u2014 idempotently mints the content-scoped sk- key for the psd-atrium skill and stores it in Secrets Manager (zero-touch provisioning)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "prebuild": "rm -rf dist"
+  },
+  "dependencies": {
+    "@aws-sdk/client-rds-data": "^3.0.0",
+    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "hash-wasm": "4.12.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

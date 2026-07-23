@@ -11,12 +11,21 @@ import { Badge } from "@/components/ui/badge"
 import { RefreshCw, Upload } from "lucide-react"
 import type { Setting, CreateSettingInput } from "@/actions/db/settings-actions"
 import { LogoUpload } from "./logo-upload"
+import {
+  NexusRouterSettingsCard,
+  type NexusRouterConnectorOption,
+  type NexusRouterModelOption,
+} from "./nexus-router-settings-card"
 
 const CATEGORY_INFO: Record<string, { title: string; description: string }> = {
   ai: { title: "AI Configuration", description: "AI prompts, embeddings, and model configuration" },
   ai_providers: { title: "AI Providers", description: "API keys and configuration for AI model providers" },
   branding: { title: "Branding", description: "Organization name, logo, and brand colors" },
   storage: { title: "Storage", description: "Configuration for file storage services" },
+  "Content Platform": {
+    title: "Content Platform",
+    description: "Unified document ingestion, retention, processing, and connector rollout controls",
+  },
   external_services: { title: "External Services", description: "API keys and configuration for external integrations" },
   voice: { title: "Voice Mode", description: "Real-time voice conversation provider, model, and language settings" },
   embeddings: { title: "Embeddings", description: "Configuration for embedding generation and vector search" },
@@ -26,10 +35,17 @@ const CATEGORY_INFO: Record<string, { title: string; description: string }> = {
 interface SettingsClientProps {
   initialSettings: Setting[]
   currentLogoUrl?: string
+  nexusRouterModels?: NexusRouterModelOption[]
+  nexusRouterConnectors?: NexusRouterConnectorOption[]
 }
 
 // eslint-disable-next-line max-lines-per-function -- Settings dashboard with CRUD handlers and tab rendering
-export function SettingsClient({ initialSettings, currentLogoUrl = "/logo.png" }: SettingsClientProps) {
+export function SettingsClient({
+  initialSettings,
+  currentLogoUrl = "/logo.png",
+  nexusRouterModels = [],
+  nexusRouterConnectors = [],
+}: SettingsClientProps) {
   const [settings, setSettings] = useState(initialSettings)
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [editingSetting, setEditingSetting] = useState<Setting | null>(null)
@@ -194,6 +210,11 @@ export function SettingsClient({ initialSettings, currentLogoUrl = "/logo.png" }
 
   return (
     <div className="space-y-6">
+      <NexusRouterSettingsCard
+        settings={settings}
+        models={nexusRouterModels}
+        connectors={nexusRouterConnectors}
+      />
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -236,7 +257,7 @@ export function SettingsClient({ initialSettings, currentLogoUrl = "/logo.png" }
         </CardHeader>
         <CardContent>
           <Tabs defaultValue="ai_providers" className="space-y-4">
-            <TabsList>
+            <TabsList className="h-auto flex-wrap justify-start">
               {Object.entries(CATEGORY_INFO).map(([key, info]) => {
                 const count = settingsByCategory[key]?.length || 0
                 if (count === 0 && key !== 'uncategorized') return null

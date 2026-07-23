@@ -22,6 +22,16 @@ export interface SafetyCheckResult {
   tokens?: TokenMapping[];
   /** Categories that triggered blocking */
   blockedCategories?: string[];
+  /**
+   * True when guardrails were ENABLED but the evaluation could not complete
+   * (AWS error/timeout/throttle) and the service fell open to `allowed: true`
+   * as graceful degradation. As of the agent-screening fail-open fix, every
+   * consumer — including the Atrium agent bridge writing into a live K-12
+   * document — treats a degraded evaluation as telemetry-only and allows the
+   * content; none fail CLOSED on this signal. Never set when guardrails are
+   * simply disabled — that is a deliberate "allowed", not a degraded one.
+   */
+  degraded?: boolean;
 }
 
 /**
@@ -262,6 +272,58 @@ export const K12_PII_TYPES: ComprehendPIIType[] = [
   'DATE_TIME',
   'AGE',
 ];
+
+/**
+ * The subset of K12_PII_TYPES where Comprehend commonly produces false positives
+ * on technical strings (hardware model numbers, firmware versions, etc.).
+ * PII_MIN_CONFIDENCE_SCORE is applied only to these types; high-precision types
+ * (EMAIL, PHONE, SSN, ADDRESS) are always tokenized when detected as K-12 PII,
+ * regardless of the Comprehend score.
+ */
+export const CONFIDENCE_GATED_PII_TYPES: ReadonlySet<ComprehendPIIType> = new Set([
+  'NAME',
+  'DATE_TIME',
+  'AGE',
+]);
+
+/**
+ * Minimum Comprehend confidence score required to tokenize a detected entity.
+ *
+ * Comprehend's ML model can misclassify alphanumeric hardware identifiers
+ * (e.g., "AP-505", "JW177A") as NAME, and numeric version/revision strings
+ * as DATE_TIME or AGE. Actual PII (real names, dates of birth) consistently
+ * scores ≥ 0.99 while misclassified technical strings score substantially lower.
+ * A threshold of 0.90 eliminates the hardware false-positive class while
+ * preserving all genuine PII detections.
+ *
+ * Override at runtime via PII_MIN_CONFIDENCE_SCORE env var (0–1 float).
+ * This allows threshold tuning without redeployment if AWS retrains the
+ * Comprehend model and score distributions shift.
+ *
+ * See: GitHub issue #972 — PII tokenizer false-positives on hardware part numbers.
+ */
+const envScore = Number.parseFloat(process.env.PII_MIN_CONFIDENCE_SCORE ?? '');
+export const PII_MIN_CONFIDENCE_SCORE: number =
+  !Number.isNaN(envScore) && envScore >= 0 && envScore <= 1 ? envScore : 0.90;
+
+/**
+ * Per-type confidence floors that override PII_MIN_CONFIDENCE_SCORE for
+ * specific gated types. Used when a type needs a stricter threshold than
+ * the global floor.
+ *
+ * DATE_TIME: firmware/version strings ("8.11.2", "3.2.14") can score
+ * Comprehend confidence anywhere from 0.65 to ~0.93, while real calendar
+ * dates and birthdates (FERPA-sensitive) consistently score above 0.97.
+ * A flat 0.90 floor would let a 0.91-scored firmware string through as
+ * a false-positive PII tokenization. Raising the DATE_TIME floor to
+ * 0.97 eliminates that band without rejecting any real dates.
+ *
+ * Types in CONFIDENCE_GATED_PII_TYPES not listed here fall back to
+ * PII_MIN_CONFIDENCE_SCORE.
+ */
+export const PII_TYPE_CONFIDENCE_OVERRIDES: Partial<Record<ComprehendPIIType, number>> = {
+  DATE_TIME: 0.97,
+};
 
 /**
  * Custom PII pattern definition for district-specific identifiers

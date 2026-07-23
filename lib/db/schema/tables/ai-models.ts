@@ -32,7 +32,9 @@ export const aiModels = pgTable("ai_models", {
   updatedAt: timestamp("updated_at"),
   nexusEnabled: boolean("nexus_enabled").default(true).notNull(),
   architectEnabled: boolean("architect_enabled").default(true).notNull(),
-  allowedRoles: jsonb("allowed_roles").$type<string[]>(),
+  // NOTE: the legacy allowed_roles column was dropped in migration 113 (#1207).
+  // Per-model role/group access now lives solely in resource_access_grants
+  // (migration 111) — see lib/db/drizzle/resource-access.ts.
   inputCostPer1kTokens: numeric("input_cost_per_1k_tokens", {
     precision: 10,
     scale: 6,
@@ -42,6 +44,13 @@ export const aiModels = pgTable("ai_models", {
     scale: 6,
   }),
   cachedInputCostPer1kTokens: numeric("cached_input_cost_per_1k_tokens", {
+    precision: 10,
+    scale: 6,
+  }),
+  // Cache-WRITE rate (migration 092, issue #1089). The cache-read rate is
+  // cachedInputCostPer1kTokens above; this is the price to WRITE the cache
+  // (2x input at 1h TTL). Nullable — only caching-capable models set it.
+  cacheWriteCostPer1kTokens: numeric("cache_write_cost_per_1k_tokens", {
     precision: 10,
     scale: 6,
   }),

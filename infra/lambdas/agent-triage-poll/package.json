@@ -1,0 +1,26 @@
+{
+  "name": "agent-triage-poll",
+  "version": "1.0.0",
+  "description": "Email triage classifier — every 5 minutes, fetches Gmail history for opted-in users, classifies new mail via deterministic rules + Bedrock Nova Micro, applies labels, detects user-driven label changes as training signals, posts Chat escalations.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "prebuild": "rm -rf dist"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-agentcore": "^3.1052.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.0.0",
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "@aws-sdk/client-sqs": "^3.0.0",
+    "@aws-sdk/client-ssm": "^3.1052.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@googleapis/chat": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

@@ -144,10 +144,33 @@ export class CanvaApiClient {
         })
 
         if (resp.status === 429) {
+          // Materialize the rate-limit as lastError so an all-429 run throws a
+          // 429-typed error rather than the generic "failed after retries" — the
+          // 429 branch continues without ever entering the catch that sets
+          // lastError, so without this the caller loses all rate-limit context
+          // (REV-COR-627).
+          lastError = new CanvaApiClientError(
+            `Canva API rate limited (HTTP 429) after ${attempt + 1} attempt(s)`,
+            429,
+            "RATE_LIMITED"
+          )
+
+          // Retry-After is seconds-delta per RFC 7231, but proxies/gateways may send
+          // an HTTP-date instead; parseInt alone yields NaN for a date and collapses
+          // waitMs to 0, causing an immediate retry with no backoff.
           const retryAfter = resp.headers.get("Retry-After")
-          const waitMs = retryAfter
-            ? parseInt(retryAfter, 10) * 1000
-            : INITIAL_BACKOFF_MS * Math.pow(2, attempt)
+          let waitMs = INITIAL_BACKOFF_MS * Math.pow(2, attempt)
+          if (retryAfter) {
+            const seconds = parseInt(retryAfter, 10)
+            if (!Number.isNaN(seconds)) {
+              waitMs = seconds * 1000
+            } else {
+              const dateMs = Date.parse(retryAfter)
+              if (!Number.isNaN(dateMs)) {
+                waitMs = Math.max(0, dateMs - Date.now())
+              }
+            }
+          }
 
           log.warn("Canva API rate limited", {
             url,
@@ -155,7 +178,12 @@ export class CanvaApiClient {
             waitMs,
           })
 
-          await sleep(waitMs)
+          // Skip the backoff on the terminal attempt — the loop is about to exit
+          // and throw the recorded 429 error, so sleeping first only adds latency
+          // to a call that has already failed (REV-COR-627).
+          if (attempt < MAX_RETRIES - 1) {
+            await sleep(waitMs)
+          }
           continue
         }
 

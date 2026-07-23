@@ -83,8 +83,10 @@ export class NoWildcardResourcesRule implements ValidationRule {
     "logs:CreateLogGroup",
     "cloudwatch:PutMetricData",
     "ec2:DescribeNetworkInterfaces", // VPC Lambda needs this
-    "ec2:CreateNetworkInterface", // VPC Lambda needs this but should be conditioned
+    "ec2:CreateNetworkInterface", // Lambda VPC ENI APIs do not support resource scoping
     "ec2:DeleteNetworkInterface",
+    "ec2:AssignPrivateIpAddresses",
+    "ec2:UnassignPrivateIpAddresses",
     // Textract doesn't support resource-level permissions (AWS limitation)
     // See: https://docs.aws.amazon.com/textract/latest/dg/security_iam_service-with-iam.html
     "textract:StartDocumentTextDetection",

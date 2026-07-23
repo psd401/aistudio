@@ -36,16 +36,18 @@ if [ ! -f "$MANIFEST_FILE" ]; then
     exit 1
 fi
 
-# Parse JSON manifest without jq (postgres:alpine doesn't have it)
-# Extract initialSetupFiles array
+# Parse JSON manifest without jq (the postgres image doesn't ship it).
+# Reads ONLY the lines from the key to its array's closing bracket, so one
+# array can never bleed into the next, and there is no arbitrary length cap —
+# the old `grep -A 100 | head -50` version silently dropped every migration
+# past the 50th (first noticed when 115-graph-decision-lifecycle.sql never ran)
+# and over-counted initialSetupFiles with entries from the following array.
 parse_json_array() {
     local key=$1
     local file=$2
-    # Extract the array, remove brackets, quotes, and whitespace
-    grep -A 100 "\"$key\"" "$file" | \
+    awk "/\"$key\"/,/\]/" "$file" | \
         grep -o '"[^"]*\.sql"' | \
-        tr -d '"' | \
-        head -50  # Safety limit
+        tr -d '"'
 }
 
 echo "Reading migration manifest from $MANIFEST_FILE..."

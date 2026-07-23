@@ -328,7 +328,9 @@ export function getUserMessage(code: ErrorCode): string {
     [ErrorCode.AUTHZ_INSUFFICIENT_PERMISSIONS]: "You don't have permission to perform this action",
     [ErrorCode.AUTHZ_RESOURCE_NOT_FOUND]: "The requested resource was not found or you don't have access to it",
     [ErrorCode.AUTHZ_ROLE_NOT_ASSIGNED]: "Your account doesn't have the required role for this action",
-    [ErrorCode.AUTHZ_TOOL_ACCESS_DENIED]: "You don't have access to this tool",
+    // Code name kept stable (referenced at 25+ call sites); message updated to
+    // capability-neutral wording for the tools -> capabilities migration (#928).
+    [ErrorCode.AUTHZ_TOOL_ACCESS_DENIED]: "You don't have access to this feature",
     [ErrorCode.AUTHZ_ADMIN_REQUIRED]: "Administrator privileges are required for this action",
     [ErrorCode.AUTHZ_OWNER_REQUIRED]: "Only the owner can perform this action",
     

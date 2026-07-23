@@ -1,9 +1,36 @@
 # File Upload Architecture
 
 ## Overview
-The application now uses a hybrid approach for file uploads to work around AWS Amplify SSR's 1MB request body limitation.
 
-## Upload Flow
+Repository-backed product uploads use the canonical unified-content contract.
+The browser sends bounded metadata to an authenticated initiation route, uploads
+the file directly to a signed S3 URL, and sends only multipart ETags/session
+metadata to completion. File bytes do not traverse a Next.js request.
+
+The document endpoints below remain compatibility paths for product surfaces
+not yet retired. Repository Manager, Assistant Architect canonical runtime
+inputs, and Nexus canonical attachments use the repository flow described in
+[Unified Repository Product Integration](./unified-repository-product-integration.md).
+
+### Canonical upload safety
+
+- Upload reservation locks and verifies the current active repository before
+  issuing a one-hour URL. Completion takes the same repository lock before the
+  session lock and registration transaction.
+- Single-part URLs are write-once (`If-None-Match: *`). Single and multipart
+  sources are created with `aistudio-upload-state=temporary`.
+- The processor reads GuardDuty tags before source bytes. Awaiting or infected
+  objects remain temporary; after a clean/not-required decision it preserves
+  the full existing tag set and changes only the upload-state value to
+  `permanent`.
+- Expired sessions receive an initial version-aware sweep and a delayed final
+  sweep after a one-hour request-settle window. A tag-filtered S3 lifecycle rule
+  expires any late temporary current object within one day.
+- Repository deletion waits through the same settle window and refuses active
+  or deferred external processors before entering its retryable `deleting`
+  state.
+
+## Legacy document upload flow
 
 ### Small Files (≤ 1MB)
 1. Files are uploaded directly to `/api/documents/upload`

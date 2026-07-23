@@ -17,7 +17,7 @@ loading, and agent-authored skill creation.
 ### `search` — search the skill catalog
 
 ```bash
-node /home/node/.openclaw/skills/psd-skills-meta/search.js \
+node /opt/psd-skills/psd-skills-meta/search.js \
   --user <email> \
   --query "<search term>"
 ```
@@ -28,7 +28,7 @@ the user asks "do you have a skill for X?" or you need to find a skill.
 ### `load` — load a skill's full SKILL.md into the session
 
 ```bash
-node /home/node/.openclaw/skills/psd-skills-meta/load.js \
+node /opt/psd-skills/psd-skills-meta/load.js \
   --user <email> \
   --name "<skill-name>"
 ```
@@ -40,7 +40,7 @@ indicates a skill exists but you need the full instructions.
 ### `author` — create a new skill draft
 
 ```bash
-node /home/node/.openclaw/skills/psd-skills-meta/author.js \
+node /opt/psd-skills/psd-skills-meta/author.js \
   --user <email> \
   --name "<skill-name>" \
   --summary "<one-line summary>" \
@@ -58,6 +58,15 @@ available in your next session. If flagged, it goes to the admin review queue.
 - Must start with YAML frontmatter (between `---` markers)
 - Frontmatter must include `name` and `summary` fields
 - Summary must be a single line (used in the catalog)
+
+**Naming rules (enforced):**
+- The `psd-` prefix is **reserved** for system-provided skills bundled
+  into the image at `/opt/psd-skills/`. User-authored skills MUST NOT
+  start with `psd-`.
+- Name user-authored skills with the caller's username prefix:
+  `{username}-{skill-name}` (example: `hagelk-morning-brief`).
+- A `psd-*` draft will be rejected by the skill builder before
+  promotion.
 
 **Requirements for entry point files:**
 - At least one `.js` file

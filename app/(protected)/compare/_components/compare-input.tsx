@@ -72,11 +72,10 @@ export function CompareInput({
             models={models}
             value={selectedModel1}
             onChange={onModel1Change}
-            requiredCapabilities={["chat"]}
+            anyOfCapabilities={["chat", "image_generation"]}
             placeholder="Select first model"
             showDescription={false}
             groupByProvider={true}
-            hideRoleRestricted={true}
             hideCapabilityMissing={true}
             aria-label="Select first model"
           />
@@ -89,11 +88,10 @@ export function CompareInput({
             models={models}
             value={selectedModel2}
             onChange={onModel2Change}
-            requiredCapabilities={["chat"]}
+            anyOfCapabilities={["chat", "image_generation"]}
             placeholder="Select second model"
             showDescription={false}
             groupByProvider={true}
-            hideRoleRestricted={true}
             hideCapabilityMissing={true}
             aria-label="Select second model"
           />

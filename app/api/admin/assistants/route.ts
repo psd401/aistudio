@@ -266,6 +266,7 @@ export async function DELETE(request: Request) {
       )
     }
 
+    // deleteAssistantArchitect handles all FK-constrained cleanup atomically
     await deleteAssistantArchitect(assistantId)
 
     log.info("Assistant deleted successfully", { assistantId });

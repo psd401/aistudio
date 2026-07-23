@@ -9,7 +9,7 @@
 
 import type { Tool } from 'ai'
 import { jsonSchema } from 'ai'
-import { createLogger } from '@/lib/logger'
+import { createLogger, generateRequestId } from '@/lib/logger'
 import {
   queryGraphNodes,
 } from '@/lib/graph/graph-service'
@@ -20,9 +20,10 @@ import {
   type DecisionSubgraphNode,
   type DecisionSubgraphEdge,
 } from '@/lib/graph/decision-framework'
-import { executeTransaction } from '@/lib/db/drizzle-client'
-import { graphNodes, graphEdges } from '@/lib/db/schema'
-import { eq } from 'drizzle-orm'
+import {
+  commitDecisionSubgraph,
+  describeDecisionError,
+} from '@/lib/graph/decision-capture-service'
 
 import type {
   SearchGraphNodesArgs,
@@ -71,6 +72,8 @@ function createSearchGraphNodesTool(): Tool<SearchGraphNodesArgs, SearchGraphNod
         limit: {
           type: 'number',
           description: 'Maximum number of results to return (default: 10, max: 50)',
+          minimum: 1,
+          maximum: 50,
         },
       },
       required: ['query'],
@@ -83,7 +86,7 @@ function createSearchGraphNodesTool(): Tool<SearchGraphNodesArgs, SearchGraphNod
           search: args.query,
           nodeType: args.nodeType,
         },
-        { limit: Math.min(args.limit || 10, 50) }
+        { limit: Math.min(args.limit ?? 10, 50) }
       )
 
       return {
@@ -113,6 +116,7 @@ function createProposeDecisionTool(): Tool<ProposeDecisionArgs, ProposeDecisionR
         nodes: {
           type: 'array',
           description: 'Proposed graph nodes for this decision',
+          maxItems: 100,
           items: {
             type: 'object',
             properties: {
@@ -121,6 +125,7 @@ function createProposeDecisionTool(): Tool<ProposeDecisionArgs, ProposeDecisionR
               nodeType: { type: 'string', description: 'Node type (decision, evidence, constraint, reasoning, person, condition, request, policy, outcome)' },
               description: { type: 'string', description: 'Node description (nullable)' },
               existingNodeId: { type: 'string', description: 'If linking to an existing node, its UUID. Omit to create new.' },
+              isPrimary: { type: 'boolean', description: 'Mark the decision that was actually adopted. Required when more than one "decision"-typed node is present (rejected alternatives are also typed "decision").' },
             },
             required: ['tempId', 'name', 'nodeType'],
           },
@@ -128,6 +133,7 @@ function createProposeDecisionTool(): Tool<ProposeDecisionArgs, ProposeDecisionR
         edges: {
           type: 'array',
           description: 'Proposed edges connecting nodes by their tempIds',
+          maxItems: 200,
           items: {
             type: 'object',
             properties: {
@@ -199,6 +205,7 @@ function createCommitDecisionTool(userId: number): Tool<CommitDecisionArgs, Comm
         nodes: {
           type: 'array',
           description: 'Nodes to commit (same format as propose_decision)',
+          maxItems: 100,
           items: {
             type: 'object',
             properties: {
@@ -207,6 +214,7 @@ function createCommitDecisionTool(userId: number): Tool<CommitDecisionArgs, Comm
               nodeType: { type: 'string' },
               description: { type: 'string' },
               existingNodeId: { type: 'string' },
+              isPrimary: { type: 'boolean', description: 'Mark the decision that was actually adopted. Required when more than one "decision"-typed node is present.' },
             },
             required: ['tempId', 'name', 'nodeType'],
           },
@@ -214,6 +222,7 @@ function createCommitDecisionTool(userId: number): Tool<CommitDecisionArgs, Comm
         edges: {
           type: 'array',
           description: 'Edges to commit (same format as propose_decision)',
+          maxItems: 200,
           items: {
             type: 'object',
             properties: {
@@ -228,101 +237,47 @@ function createCommitDecisionTool(userId: number): Tool<CommitDecisionArgs, Comm
       required: ['summary', 'nodes', 'edges'],
     }),
     execute: async (args: CommitDecisionArgs): Promise<CommitDecisionResult> => {
+      const requestId = generateRequestId()
       log.info('Committing decision to graph', {
+        requestId,
         summary: args.summary.substring(0, 100),
         nodeCount: args.nodes.length,
         edgeCount: args.edges.length,
         userId,
       })
 
-      const committedNodeIds: string[] = []
-      const committedEdgeIds: string[] = []
-
       try {
-        // Map tempId -> real UUID after insert
-        const tempIdToRealId = new Map<string, string>()
-
-        await executeTransaction(async (tx) => {
-          // 1. Create or map nodes
-          for (const node of args.nodes) {
-            if (node.existingNodeId) {
-              // Verify existing node exists
-              const existing = await tx
-                .select({ id: graphNodes.id })
-                .from(graphNodes)
-                .where(eq(graphNodes.id, node.existingNodeId))
-                .limit(1)
-
-              if (existing.length === 0) {
-                throw new Error(`Existing node not found: ${node.existingNodeId}`)
-              }
-              tempIdToRealId.set(node.tempId, node.existingNodeId)
-            } else {
-              const [newNode] = await tx
-                .insert(graphNodes)
-                .values({
-                  name: node.name.trim(),
-                  nodeType: node.nodeType.trim(),
-                  nodeClass: 'decision',
-                  description: node.description?.trim() || null,
-                  metadata: { source: 'decision-capture', summary: args.summary.substring(0, 200) },
-                  createdBy: userId,
-                })
-                .returning({ id: graphNodes.id })
-
-              tempIdToRealId.set(node.tempId, newNode.id)
-              committedNodeIds.push(newNode.id)
-            }
-          }
-
-          // 2. Create edges
-          for (const edge of args.edges) {
-            const sourceId = tempIdToRealId.get(edge.sourceTempId)
-            const targetId = tempIdToRealId.get(edge.targetTempId)
-
-            if (!sourceId || !targetId) {
-              throw new Error(
-                `Edge references unknown tempId: source=${edge.sourceTempId}, target=${edge.targetTempId}`
-              )
-            }
-
-            try {
-              const [newEdge] = await tx
-                .insert(graphEdges)
-                .values({
-                  sourceNodeId: sourceId,
-                  targetNodeId: targetId,
-                  edgeType: edge.edgeType.trim(),
-                  metadata: { source: 'decision-capture' },
-                  createdBy: userId,
-                })
-                .returning({ id: graphEdges.id })
-
-              committedEdgeIds.push(newEdge.id)
-            } catch (edgeError: unknown) {
-              const pgError = edgeError as { code?: string }
-              if (pgError.code === '23503') {
-                throw new Error(
-                  `Foreign key constraint: referenced node no longer exists (source: ${edge.sourceTempId}, target: ${edge.targetTempId})`
-                )
-              }
-              throw edgeError
-            }
-          }
-        }, 'commitDecision')
+        // Route through the shared decision-capture service (Issue #1251) so the
+        // conversational channel inherits vocabulary enforcement, self-reference /
+        // duplicate-edge guards, typed errors, existing-node reuse, and completeness
+        // recomputation. The old inline transaction has been removed.
+        const result = await commitDecisionSubgraph(
+          { nodes: args.nodes, edges: args.edges, summary: args.summary },
+          userId,
+          requestId
+        )
 
         log.info('Decision committed successfully', {
-          nodeCount: committedNodeIds.length,
-          edgeCount: committedEdgeIds.length,
+          requestId,
+          nodeCount: result.committedNodeIds.length,
+          edgeCount: result.committedEdgeIds.length,
+          completenessScore: result.completenessScore,
         })
 
         return {
           success: true,
-          committedNodeIds,
-          committedEdgeIds,
+          committedNodeIds: result.committedNodeIds,
+          committedEdgeIds: result.committedEdgeIds,
+          completenessScore: result.completenessScore,
+          completenessMethod: result.completenessMethod,
+          warnings: result.warnings,
         }
       } catch (error) {
+        // Log the raw error for diagnostics; describeDecisionError yields the
+        // friendly message (never a raw Postgres string) that the commit tool
+        // UI renders directly.
         log.error('Failed to commit decision', {
+          requestId,
           error: error instanceof Error ? error.message : String(error),
         })
 
@@ -330,7 +285,7 @@ function createCommitDecisionTool(userId: number): Tool<CommitDecisionArgs, Comm
           success: false,
           committedNodeIds: [],
           committedEdgeIds: [],
-          error: error instanceof Error ? error.message : 'Failed to commit decision',
+          error: describeDecisionError(error),
         }
       }
     },

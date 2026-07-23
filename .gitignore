@@ -16,6 +16,7 @@
 
 # next.js
 /.next/
+/.next-e2e/
 /out/
 
 # production
@@ -35,6 +36,11 @@ yarn-error.log*
 .env*
 !.env.example
 
+# OpenWiki local config/secrets (canonical location is ~/.openwiki/.env; this
+# guards against an accidental in-repo .openwiki/ holding a provider API key).
+# The generated openwiki/ wiki tree itself IS committed and is not ignored.
+.openwiki/
+
 # vercel
 .vercel
 
@@ -53,9 +59,20 @@ next-env.d.ts
 /tests/e2e/videos/
 /.playwright-mcp/
 
+# Local scratch / scripts/db/sync-from-dev.ts dump output (may contain dev data)
+/tmp/
+
 # Python
 __pycache__/
 
+# CDK Lambda bundling artifacts (covers database/lambda and any future lambdas)
+infra/**/package-lock.json
+
 # Claude agent internal state
 .claude/agent-memory/
+.claude/worktrees/
 docs/learnings/.evolve-state.json
+tests/e2e/.auth/
+
+# Agent-image build-time eval-gate probe artifacts (#1161)
+infra/agent-image/.build-probes/

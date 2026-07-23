@@ -4,15 +4,16 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ProfileTab } from "./profile-tab"
 import { ApiKeysTab } from "./api-keys-tab"
 import { PreferencesTab } from "./preferences-tab"
-import type { UserProfileData } from "@/actions/settings/user-settings.actions"
+import type { NexusChatPreferences, UserProfileData } from "@/actions/settings/user-settings.actions"
 import type { ApiKeyInfo } from "@/lib/api-keys/key-service"
 
 interface SettingsClientProps {
   profileData: UserProfileData | null
   apiKeys: ApiKeyInfo[]
+  nexusPreferences: NexusChatPreferences
 }
 
-export function SettingsClient({ profileData, apiKeys }: SettingsClientProps) {
+export function SettingsClient({ profileData, apiKeys, nexusPreferences }: SettingsClientProps) {
   return (
     <Tabs defaultValue="profile" className="w-full">
       <TabsList className="grid w-full grid-cols-3">
@@ -33,7 +34,7 @@ export function SettingsClient({ profileData, apiKeys }: SettingsClientProps) {
       </TabsContent>
 
       <TabsContent value="preferences" className="mt-6">
-        <PreferencesTab />
+        <PreferencesTab initialPreferences={nexusPreferences} />
       </TabsContent>
     </Tabs>
   )

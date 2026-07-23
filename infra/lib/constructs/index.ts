@@ -36,6 +36,9 @@ export {
 export { SharedVPC, SharedVPCProps } from "./network/shared-vpc"
 export { VPCProvider } from "./network/vpc-provider"
 
+// Cache constructs
+export { RedisCache, RedisCacheProps } from "./cache/redis-cache"
+
 // Database constructs
 export {
   AuroraCostOptimizer,

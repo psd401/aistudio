@@ -15,15 +15,28 @@
 -- Create a local test user for development (bypasses Cognito auth locally)
 -- Email: test@example.com
 -- This user is pre-assigned the administrator role for full access
-
-INSERT INTO users (email, first_name, last_name, last_sign_in_at)
+--
+-- cognito_sub = 'e2e-test-user' is REQUIRED for the Playwright auth harness:
+-- mintSessionToken() (tests/e2e/helpers/session-auth.ts) mints a session with
+-- sub='e2e-test-user', and hasCapabilityAccess() joins directly on
+-- users.cognito_sub. Without this value the test user's cognito_sub is NULL, the
+-- capability join returns zero rows, and every capability-gated route redirects —
+-- making the functional E2E specs fail on a freshly seeded DB. cognito_sub is the
+-- table's unique key (email is NOT unique), so it is also the correct conflict
+-- target for idempotency.
+INSERT INTO users (email, first_name, last_name, cognito_sub, last_sign_in_at)
 VALUES (
     'test@example.com',
     'Test',
     'User',
+    'e2e-test-user',
     CURRENT_TIMESTAMP
 )
-ON CONFLICT DO NOTHING;
+ON CONFLICT (cognito_sub) DO UPDATE SET
+    email = EXCLUDED.email,
+    first_name = EXCLUDED.first_name,
+    last_name = EXCLUDED.last_name,
+    last_sign_in_at = EXCLUDED.last_sign_in_at;
 
 -- Assign administrator role to test user
 INSERT INTO user_roles (user_id, role_id)
@@ -40,14 +53,21 @@ ON CONFLICT (user_id, role_id) DO NOTHING;
 -- Additional Test Users (optional)
 -- ============================================================================
 
--- Staff user for testing staff-level access
-INSERT INTO users (email, first_name, last_name)
+-- Staff user for testing staff-level access.
+-- cognito_sub is the unique key (email is not), so set a deterministic value to
+-- make this seed idempotent — ON CONFLICT DO NOTHING with no target would
+-- otherwise insert a duplicate row on every re-run.
+INSERT INTO users (email, first_name, last_name, cognito_sub)
 VALUES (
     'staff@example.com',
     'Staff',
-    'Member'
+    'Member',
+    'e2e-staff-user'
 )
-ON CONFLICT DO NOTHING;
+ON CONFLICT (cognito_sub) DO UPDATE SET
+    email = EXCLUDED.email,
+    first_name = EXCLUDED.first_name,
+    last_name = EXCLUDED.last_name;
 
 INSERT INTO user_roles (user_id, role_id)
 SELECT u.id, r.id
@@ -55,14 +75,25 @@ FROM users u CROSS JOIN roles r
 WHERE u.email = 'staff@example.com' AND r.name = 'staff'
 ON CONFLICT (user_id, role_id) DO NOTHING;
 
--- Student user for testing student-level access
-INSERT INTO users (email, first_name, last_name)
+-- Keep the dedicated router E2E identity deterministic across local runs. Router
+-- tests use the staff account so they never race with the larger admin suite.
+DELETE FROM nexus_user_preferences
+WHERE user_id = (SELECT id FROM users WHERE cognito_sub = 'e2e-staff-user');
+
+-- Student user for testing student-level access.
+-- cognito_sub is the unique key (email is not); deterministic value keeps the
+-- seed idempotent (see staff user note above).
+INSERT INTO users (email, first_name, last_name, cognito_sub)
 VALUES (
     'student@example.com',
     'Student',
-    'Test'
+    'Test',
+    'e2e-student-user'
 )
-ON CONFLICT DO NOTHING;
+ON CONFLICT (cognito_sub) DO UPDATE SET
+    email = EXCLUDED.email,
+    first_name = EXCLUDED.first_name,
+    last_name = EXCLUDED.last_name;
 
 INSERT INTO user_roles (user_id, role_id)
 SELECT u.id, r.id
@@ -71,42 +102,54 @@ WHERE u.email = 'student@example.com' AND r.name = 'student'
 ON CONFLICT (user_id, role_id) DO NOTHING;
 
 -- ============================================================================
--- Tools (ensuring all code-referenced tools exist)
+-- Capabilities (role-gated UI features; successor to the legacy tools table)
 -- ============================================================================
--- The codebase uses hasToolAccess() with these identifiers:
+-- hasCapabilityAccess() reads from capabilities/role_capabilities. Seed ALL 8
+-- identifiers from CAPABILITY_MANIFEST (lib/capabilities/manifest.ts) so local
+-- test users keep access immediately on a freshly seeded DB — before the
+-- boot-time manifest sync has run:
 -- - assistant-architect: schedules, execute API
 -- - model-compare: compare feature
 -- - knowledge-repositories: repositories, prompt library
+-- - decision-capture, voice-mode: Nexus features
+-- - atrium-content: Atrium content workspace (/atrium)
+-- - internal-performance-monitoring, internal-system-administration: internal
+--   monitoring/admin APIs (would 403 for admin until first server boot otherwise)
+-- These are marked source='manual' here; the boot-time manifest sync flips
+-- manifest-managed identifiers to source='code' when the dev server starts.
 
-INSERT INTO tools (identifier, name, description, is_active) VALUES
-('assistant-architect', 'Assistant Architect', 'Build and schedule custom AI assistants', true),
-('model-compare', 'Model Compare', 'Compare AI model responses side-by-side', true),
-('knowledge-repositories', 'Knowledge Repositories', 'Manage knowledge bases for AI assistants', true),
-('decision-capture', 'Decision Capture', 'Extract and capture decisions from meeting transcripts into the context graph', true),
-('voice-mode', 'Voice Mode', 'Real-time voice conversations in Nexus using AI speech providers', true)
+INSERT INTO capabilities (identifier, name, description, is_active, source) VALUES
+('assistant-architect', 'Assistant Architect', 'Build and schedule custom AI assistants', true, 'manual'),
+('model-compare', 'Model Compare', 'Compare AI model responses side-by-side', true, 'manual'),
+('knowledge-repositories', 'Knowledge Repositories', 'Manage knowledge bases for AI assistants', true, 'manual'),
+('decision-capture', 'Decision Capture', 'Extract and capture decisions from meeting transcripts into the context graph', true, 'manual'),
+('voice-mode', 'Voice Mode', 'Real-time voice conversations in Nexus using AI speech providers', true, 'manual'),
+('atrium-content', 'Atrium Content', 'Create and manage Atrium documents, artifacts, and collections', true, 'manual'),
+('internal-performance-monitoring', 'Internal Performance Monitoring', 'Access internal performance monitoring dashboards and metrics.', true, 'manual'),
+('internal-system-administration', 'Internal System Administration', 'Access internal system administration tooling and diagnostics.', true, 'manual')
 ON CONFLICT (identifier) DO UPDATE SET
     name = EXCLUDED.name,
     description = EXCLUDED.description,
     is_active = EXCLUDED.is_active,
     updated_at = CURRENT_TIMESTAMP;
 
--- Grant these tools to administrator role
-INSERT INTO role_tools (role_id, tool_id)
-SELECT r.id, t.id
+-- Grant these capabilities to administrator role
+INSERT INTO role_capabilities (role_id, capability_id)
+SELECT r.id, c.id
 FROM roles r
-CROSS JOIN tools t
+CROSS JOIN capabilities c
 WHERE r.name = 'administrator'
-  AND t.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture', 'voice-mode')
-ON CONFLICT (role_id, tool_id) DO NOTHING;
+  AND c.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture', 'voice-mode', 'atrium-content', 'internal-performance-monitoring', 'internal-system-administration')
+ON CONFLICT (role_id, capability_id) DO NOTHING;
 
 -- Grant assistant-architect and model-compare to staff role
-INSERT INTO role_tools (role_id, tool_id)
-SELECT r.id, t.id
+INSERT INTO role_capabilities (role_id, capability_id)
+SELECT r.id, c.id
 FROM roles r
-CROSS JOIN tools t
+CROSS JOIN capabilities c
 WHERE r.name = 'staff'
-  AND t.identifier IN ('assistant-architect', 'model-compare')
-ON CONFLICT (role_id, tool_id) DO NOTHING;
+  AND c.identifier IN ('assistant-architect', 'model-compare')
+ON CONFLICT (role_id, capability_id) DO NOTHING;
 
 -- ============================================================================
 -- Navigation Items
@@ -119,7 +162,7 @@ DELETE FROM navigation_items;
 ALTER SEQUENCE navigation_items_id_seq RESTART WITH 1;
 
 -- Main sections
-INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, requires_role, position, is_active, description, type) VALUES
+INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, requires_role, position, is_active, description, type) VALUES
 (20, 'Dashboard', 'IconHome', '/dashboard', NULL, NULL, NULL, 0, true, '', 'link'),
 (39, 'Nexus', 'IconRobot', '/nexus', NULL, NULL, NULL, 10, true, '', 'link'),
 (21, 'Instructional', 'IconChalkboard', '', NULL, NULL, NULL, 20, true, '', 'section'),
@@ -131,7 +174,7 @@ INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, require
 (11, 'Admin', 'IconShield', '', NULL, NULL, 'administrator', 80, true, '', 'section');
 
 -- Admin sub-items (alphabetical order)
-INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, requires_role, position, is_active, description, type) VALUES
+INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, requires_role, position, is_active, description, type) VALUES
 (46, 'Activity Dashboard', 'IconActivity', '/admin/activity', 11, NULL, 'administrator', 0, true, 'View activity across Nexus, Assistant Architect, and Model Compare', 'link'),
 (16, 'AI Models', 'IconRobot', '/admin/models', 11, NULL, 'administrator', 10, true, '', 'link'),
 (18, 'Assistant Administration', 'IconBraces', '/admin/assistants', 11, NULL, 'administrator', 20, true, '', 'link'),
@@ -144,13 +187,20 @@ INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, require
 (13, 'System Settings', 'IconTools', '/admin/settings', 11, NULL, 'administrator', 90, true, '', 'link'),
 (15, 'User Management', 'IconUser', '/admin/users', 11, NULL, 'administrator', 100, true, '', 'link');
 
--- Utilities sub-items
-INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, requires_role, position, is_active, description, type) VALUES
-(40, 'Assistant Scheduler', 'IconCalendar', '/schedules', 19, NULL, NULL, 0, true, '', 'link'),
-(7, 'Assistant Architect', 'IconBraces', '/utilities/assistant-architect', 19, NULL, NULL, 10, true, NULL, 'link'),
-(37, 'Model Compare', 'IconRobot', '/compare', 19, NULL, NULL, 20, true, 'Compare AI model responses side-by-side', 'link'),
-(36, 'Repositories', 'IconBuildingBank', '/repositories', 19, NULL, NULL, 30, true, '', 'link'),
-(47, 'Decision Capture', 'IconGitBranch', '/nexus/decision-capture', 19, NULL, NULL, 40, true, 'Extract decisions from meeting transcripts', 'link');
+-- Utilities sub-items.
+-- capability_id gates each item by the capability the route enforces. A NULL
+-- capability_id reads as "not gated" in the navigation API (see app/api/
+-- navigation/route.ts: `if (!item.capabilityId) continue`), which in local dev
+-- would expose these items to low-privilege roles — the inverse of production
+-- and a vacuous pass for any "user CANNOT see gated nav" E2E assertion. Resolve
+-- each capability by identifier (decoupled from id sequencing); the capabilities
+-- above are seeded before this INSERT so every subquery returns a row.
+INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, requires_role, position, is_active, description, type) VALUES
+(40, 'Assistant Scheduler', 'IconCalendar', '/schedules', 19, (SELECT id FROM capabilities WHERE identifier = 'assistant-architect'), NULL, 0, true, '', 'link'),
+(7, 'Assistant Architect', 'IconBraces', '/utilities/assistant-architect', 19, (SELECT id FROM capabilities WHERE identifier = 'assistant-architect'), NULL, 10, true, NULL, 'link'),
+(37, 'Model Compare', 'IconRobot', '/compare', 19, (SELECT id FROM capabilities WHERE identifier = 'model-compare'), NULL, 20, true, 'Compare AI model responses side-by-side', 'link'),
+(36, 'Repositories', 'IconBuildingBank', '/repositories', 19, (SELECT id FROM capabilities WHERE identifier = 'knowledge-repositories'), NULL, 30, true, '', 'link'),
+(47, 'Decision Capture', 'IconGitBranch', '/nexus/decision-capture', 19, (SELECT id FROM capabilities WHERE identifier = 'decision-capture'), NULL, 40, true, 'Extract decisions from meeting transcripts', 'link');
 
 -- Update sequence to max id + 1
 SELECT setval('navigation_items_id_seq', (SELECT MAX(id) FROM navigation_items));
@@ -168,7 +218,7 @@ ALTER SEQUENCE ai_models_id_seq RESTART WITH 1;
 -- Insert current models
 INSERT INTO ai_models (
     name, model_id, provider, description, capabilities, max_tokens, active,
-    nexus_enabled, architect_enabled, allowed_roles,
+    nexus_enabled, architect_enabled,
     input_cost_per_1k_tokens, output_cost_per_1k_tokens, cached_input_cost_per_1k_tokens
 ) VALUES
 -- Google Gemini 3 Models
@@ -182,7 +232,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    NULL,
     0.002000,
     0.012000,
     0.000500
@@ -197,7 +246,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    NULL,
     0.000500,
     0.003000,
     0.000125
@@ -212,7 +260,6 @@ INSERT INTO ai_models (
     true,
     true,
     false,
-    NULL,
     0.002000,
     0.120000,
     NULL
@@ -227,7 +274,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    NULL,
     0.002000,
     0.012000,
     0.000200
@@ -242,7 +288,6 @@ INSERT INTO ai_models (
     true,
     true,
     false,
-    NULL,
     0.000250,
     0.001500,
     NULL
@@ -259,7 +304,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    NULL,
     0.001750,
     0.014000,
     0.000175
@@ -274,7 +318,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    '["administrator", "staff"]',
     0.001750,
     0.014000,
     0.000175
@@ -289,7 +332,6 @@ INSERT INTO ai_models (
     true,
     true,
     false,
-    NULL,
     0.010000,
     0.040000,
     NULL
@@ -306,7 +348,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    '["administrator", "staff"]',
     0.005000,
     0.025000,
     0.000500
@@ -321,7 +362,6 @@ INSERT INTO ai_models (
     true,
     true,
     true,
-    NULL,
     0.003000,
     0.015000,
     0.000300
@@ -442,14 +482,14 @@ DECLARE
     user_count INT;
     role_count INT;
     model_count INT;
-    tool_count INT;
+    capability_count INT;
     nav_count INT;
     settings_count INT;
 BEGIN
     SELECT COUNT(*) INTO user_count FROM users;
     SELECT COUNT(*) INTO role_count FROM roles;
     SELECT COUNT(*) INTO model_count FROM ai_models WHERE active = true;
-    SELECT COUNT(*) INTO tool_count FROM tools WHERE is_active = true;
+    SELECT COUNT(*) INTO capability_count FROM capabilities WHERE is_active = true;
     SELECT COUNT(*) INTO nav_count FROM navigation_items WHERE is_active = true;
     SELECT COUNT(*) INTO settings_count FROM settings;
 
@@ -460,7 +500,7 @@ BEGIN
     RAISE NOTICE 'Users: %', user_count;
     RAISE NOTICE 'Roles: %', role_count;
     RAISE NOTICE 'Active AI Models: %', model_count;
-    RAISE NOTICE 'Active Tools: %', tool_count;
+    RAISE NOTICE 'Active Capabilities: %', capability_count;
     RAISE NOTICE 'Navigation Items: %', nav_count;
     RAISE NOTICE 'Settings: %', settings_count;
     RAISE NOTICE '';

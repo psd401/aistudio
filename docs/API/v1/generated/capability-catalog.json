@@ -1,0 +1,791 @@
+{
+  "summary": {
+    "actions": 24,
+    "features": 8,
+    "scopes": 25,
+    "agentInvocableActions": 17
+  },
+  "actions": [
+    {
+      "identifier": "assistants.execute",
+      "name": "execute_assistant",
+      "description": "Execute an AI assistant with the given inputs and return the final text result.",
+      "surfaces": [
+        "mcp",
+        "internal",
+        "rest"
+      ],
+      "requiredScopes": [
+        "mcp:execute_assistant"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:execute_assistant"
+        ],
+        "internal": [
+          "mcp:execute_assistant"
+        ],
+        "rest": [
+          "assistants:execute"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "assistants.list",
+      "name": "list_assistants",
+      "description": "List AI assistants the authenticated user has access to execute.",
+      "surfaces": [
+        "mcp",
+        "internal",
+        "rest"
+      ],
+      "requiredScopes": [
+        "mcp:list_assistants"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:list_assistants"
+        ],
+        "internal": [
+          "mcp:list_assistants"
+        ],
+        "rest": [
+          "assistants:list"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "chat.code_interpreter",
+      "name": "code_interpreter",
+      "description": "Execute code and perform data analysis.",
+      "surfaces": [
+        "ai_sdk"
+      ],
+      "requiredScopes": [
+        "chat:write"
+      ],
+      "scopesBySurface": {
+        "ai_sdk": [
+          "chat:write"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": false
+    },
+    {
+      "identifier": "chat.generate_image",
+      "name": "generateImage",
+      "description": "Generate images from text descriptions using AI models like GPT-Image-1, DALL-E 3, and Imagen 4.",
+      "surfaces": [
+        "ai_sdk"
+      ],
+      "requiredScopes": [
+        "chat:write"
+      ],
+      "scopesBySurface": {
+        "ai_sdk": [
+          "chat:write"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": false
+    },
+    {
+      "identifier": "chat.show_chart",
+      "name": "show_chart",
+      "description": "Render a chart (bar, line, pie, etc.) from structured data on the client.",
+      "surfaces": [
+        "ai_sdk"
+      ],
+      "requiredScopes": [],
+      "scopesBySurface": {
+        "ai_sdk": []
+      },
+      "destructive": false,
+      "agentInvocable": false
+    },
+    {
+      "identifier": "chat.web_search",
+      "name": "web_search_preview",
+      "description": "Search the web for current information and facts.",
+      "surfaces": [
+        "ai_sdk"
+      ],
+      "requiredScopes": [
+        "chat:write"
+      ],
+      "scopesBySurface": {
+        "ai_sdk": [
+          "chat:write"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": false
+    },
+    {
+      "identifier": "content.create_artifact",
+      "name": "create_artifact",
+      "description": "Create an interactive artifact (HTML/JS or JSX) content object. Does not publish. Returns the object id, slug, and reader link.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:create"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:create"
+        ],
+        "internal": [
+          "content:create"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "content.create_document",
+      "name": "create_document",
+      "description": "Create a document (markdown) content object. Does not publish. Returns the object id, slug, and reader link.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:create"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:create"
+        ],
+        "internal": [
+          "content:create"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "content.create_version",
+      "name": "create_version",
+      "description": "Add a new version with new body content and an optional change summary.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:update"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:update"
+        ],
+        "internal": [
+          "content:update"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "content.export_okf",
+      "name": "export_okf",
+      "description": "Export a collection subtree as a portable Open Knowledge Format (OKF v0.1) bundle: one markdown-with-frontmatter concept file per content object, an index.md per collection, and a log.md change history. Every object is filtered by the caller's view permission. A 'public' audience produces an anonymous-safe (public-visibility-only) bundle and requires content:publish_public — without it the call returns a structured approval_required signal. Returns the bundle files inline plus its S3 location.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:read"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:read"
+        ],
+        "internal": [
+          "content:read"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "content.get",
+      "name": "get_content",
+      "description": "Fetch a content object and its current version by id or slug. Permission-checked (404 when not viewable).",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:read"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:read"
+        ],
+        "internal": [
+          "content:read"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "content.import_okf",
+      "name": "import_okf",
+      "description": "Import an Open Knowledge Format bundle (the { files: [{ path, content }] } shape export_okf returns) into Atrium content. Reconstructs the collection tree from the bundle directories and creates one content object per concept file. Imported objects are agent-authored (actor_kind='agent') and created private + draft. Returns the created object + collection ids.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:create"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:create"
+        ],
+        "internal": [
+          "content:create"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "content.list",
+      "name": "list_content",
+      "description": "List content the caller may view. Filterable by kind, collection, tag, status, and title text.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:read"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:read"
+        ],
+        "internal": [
+          "content:read"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "content.publish",
+      "name": "publish_content",
+      "description": "Publish a content object to a destination. Public destinations require the human-held content:publish_public; without it the call returns a structured approval_required signal. 'okf' serializes the single object to a portable Open Knowledge Format concept bundle in S3 (internal-publish authority).",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:publish_internal"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:publish_internal"
+        ],
+        "internal": [
+          "content:publish_internal"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "content.set_visibility",
+      "name": "set_visibility",
+      "description": "Set who can view the object (level + group grants).",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:update"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:update"
+        ],
+        "internal": [
+          "content:update"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "content.unpublish",
+      "name": "unpublish_content",
+      "description": "Unpublish (take down) a content object from a destination. Idempotent: unpublishing an object that is not live there returns unpublished: false rather than erroring. Taking down a public-facing destination requires the human-held content:publish_public; without it the call returns a structured approval_required signal — the same §26.4 authority needed to publish it. Mirrors DELETE /api/v1/content/{id}/publish/{destination} (no okf: an okf publication is a serialized S3 bundle with no live surface to take down).",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:publish_internal"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:publish_internal"
+        ],
+        "internal": [
+          "content:publish_internal"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "content.update",
+      "name": "update_content",
+      "description": "Update object metadata (title, tags, collection, status). Body changes use create_version.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:update"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:update"
+        ],
+        "internal": [
+          "content:update"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "decisions.capture",
+      "name": "capture_decision",
+      "description": "Capture a structured decision with full context (evidence, constraints, reasoning, alternatives). Creates a decision subgraph with completeness scoring.\n\nExample:\n{\n  \"decision\": \"Use PostgreSQL for data layer\",\n  \"decidedBy\": \"Engineering Team\",\n  \"reasoning\": \"Strong ACID guarantees needed for financial data\",\n  \"evidence\": [\"Benchmark shows 3x throughput vs MySQL\"],\n  \"constraints\": [\"Must support JSONB queries\"],\n  \"conditions\": [\"Revisit if write volume exceeds 50k ops/s\"],\n  \"alternatives_considered\": [\"MongoDB\", \"DynamoDB\"],\n  \"relatedTo\": [\"550e8400-e29b-41d4-a716-446655440000\"]\n}",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "mcp:capture_decision"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:capture_decision"
+        ],
+        "internal": [
+          "mcp:capture_decision"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "decisions.graph_get",
+      "name": "get_decision_graph",
+      "description": "Get a self-contained decision package for a node: the decision plus its evidence, constraints, reasoning, persons, conditions, outcomes, and supersession chain, gathered by a depth-bounded graph expansion.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "mcp:get_decision_graph"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:get_decision_graph"
+        ],
+        "internal": [
+          "mcp:get_decision_graph"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "decisions.search",
+      "name": "search_decisions",
+      "description": "Search decision graph nodes. Provide `q` for semantic (embedding-based) paraphrase search over decision nodes, or `query` for literal text (ILIKE) search. Returns paginated results.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "mcp:search_decisions"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "mcp:search_decisions"
+        ],
+        "internal": [
+          "mcp:search_decisions"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "documents.create",
+      "name": "generate_document",
+      "description": "Generate a downloadable document from text content and return a URL. Supported formats: pdf, docx (Word), xlsx (Excel — content is CSV rows), pptx (PowerPoint — slides separated by a line containing only '---'), and md/html/txt/csv. Use to deliver reports, spreadsheets, or slide decks.",
+      "surfaces": [
+        "internal"
+      ],
+      "requiredScopes": [
+        "chat:write"
+      ],
+      "scopesBySurface": {
+        "internal": [
+          "chat:write"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": false
+    },
+    {
+      "identifier": "images.generate",
+      "name": "generate_image",
+      "description": "Generate an image from a text prompt using the platform's configured image model. Returns a URL to the generated image (stored securely). Use for diagrams, illustrations, or visual assets requested by the user.",
+      "surfaces": [
+        "internal"
+      ],
+      "requiredScopes": [
+        "chat:write"
+      ],
+      "scopesBySurface": {
+        "internal": [
+          "chat:write"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": false
+    },
+    {
+      "identifier": "platform.describe_capabilities",
+      "name": "describe_capabilities",
+      "description": "Describe what AI Studio can do, live from the app's own registries. Returns invocable actions (with the surfaces/scopes each needs and whether the agent can invoke it over MCP), role-gated UI features to steer users toward, and a scope reference. Use this to discover current capabilities instead of relying on a static list.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "platform:read"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "platform:read"
+        ],
+        "internal": [
+          "platform:read"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "web.fetch",
+      "name": "web_fetch",
+      "description": "Fetch a single public web page over HTTPS and return its readable text content (scripts, styles, and markup stripped). Use to read documentation, articles, or reference pages the user links to. Private/internal hosts are blocked.",
+      "surfaces": [
+        "internal"
+      ],
+      "requiredScopes": [
+        "chat:write"
+      ],
+      "scopesBySurface": {
+        "internal": [
+          "chat:write"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": false
+    }
+  ],
+  "features": [
+    {
+      "identifier": "assistant-architect",
+      "name": "Assistant Architect",
+      "description": "Build and schedule custom multi-step AI assistants.",
+      "defaultRoles": [
+        "administrator",
+        "staff"
+      ],
+      "humanDriven": true
+    },
+    {
+      "identifier": "atrium-content",
+      "name": "Atrium Content",
+      "description": "Create and version Atrium content objects (documents and artifacts).",
+      "defaultRoles": [
+        "administrator",
+        "staff"
+      ],
+      "humanDriven": true
+    },
+    {
+      "identifier": "decision-capture",
+      "name": "Decision Capture",
+      "description": "Extract and capture decisions from meeting transcripts into the context graph.",
+      "defaultRoles": [
+        "administrator"
+      ],
+      "humanDriven": true
+    },
+    {
+      "identifier": "internal-performance-monitoring",
+      "name": "Internal Performance Monitoring",
+      "description": "Access internal performance monitoring dashboards and metrics.",
+      "defaultRoles": [
+        "administrator"
+      ],
+      "humanDriven": true
+    },
+    {
+      "identifier": "internal-system-administration",
+      "name": "Internal System Administration",
+      "description": "Access internal system administration tooling and diagnostics.",
+      "defaultRoles": [
+        "administrator"
+      ],
+      "humanDriven": true
+    },
+    {
+      "identifier": "knowledge-repositories",
+      "name": "Knowledge Repositories",
+      "description": "Manage knowledge bases and document repositories for AI assistants.",
+      "defaultRoles": [
+        "administrator",
+        "staff"
+      ],
+      "humanDriven": true
+    },
+    {
+      "identifier": "model-compare",
+      "name": "Model Compare",
+      "description": "Compare AI model responses side-by-side.",
+      "defaultRoles": [
+        "administrator",
+        "staff"
+      ],
+      "humanDriven": true
+    },
+    {
+      "identifier": "voice-mode",
+      "name": "Voice Mode",
+      "description": "Real-time voice conversations in Nexus using AI speech providers.",
+      "defaultRoles": [
+        "administrator"
+      ],
+      "humanDriven": true
+    }
+  ],
+  "scopes": [
+    {
+      "scope": "assistants:execute",
+      "description": "Execute any assistant via API",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "assistants:list",
+      "description": "List assistants available for API execution",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "assistants:read",
+      "description": "List and view assistant architects",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "assistants:write",
+      "description": "Create and modify assistant architects",
+      "roles": [
+        "administrator"
+      ]
+    },
+    {
+      "scope": "chat:read",
+      "description": "Read chat conversations",
+      "roles": [
+        "student",
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "chat:write",
+      "description": "Create and send chat messages",
+      "roles": [
+        "student",
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "content:create",
+      "description": "Create Atrium content objects and initial versions",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "content:delegate",
+      "description": "Mint delegated Atrium content tokens on behalf of a user",
+      "roles": [
+        "administrator"
+      ]
+    },
+    {
+      "scope": "content:delete",
+      "description": "Delete Atrium content objects (owner/admin only)",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "content:publish_internal",
+      "description": "Publish Atrium content to internal destinations",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "content:publish_public",
+      "description": "Publish Atrium content publicly",
+      "roles": [
+        "administrator"
+      ]
+    },
+    {
+      "scope": "content:read",
+      "description": "Read Atrium content objects and versions",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "content:update",
+      "description": "Update Atrium content object metadata and create new versions",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "documents:read",
+      "description": "Read documents and attachments",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "documents:write",
+      "description": "Upload and manage documents",
+      "roles": [
+        "administrator"
+      ]
+    },
+    {
+      "scope": "graph:read",
+      "description": "Read context graph nodes and edges",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "graph:write",
+      "description": "Create, update, and delete graph nodes and edges",
+      "roles": [
+        "administrator"
+      ]
+    },
+    {
+      "scope": "mcp:capture_decision",
+      "description": "Create decision graph nodes and edges via MCP",
+      "roles": [
+        "administrator"
+      ]
+    },
+    {
+      "scope": "mcp:execute_assistant",
+      "description": "Execute an assistant via MCP",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "mcp:get_decision_graph",
+      "description": "Get decision node details and connections via MCP",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "mcp:list_assistants",
+      "description": "List available assistants via MCP",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "mcp:search_decisions",
+      "description": "Search decision graph nodes via MCP",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "models:read",
+      "description": "List available AI models",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "platform:read",
+      "description": "Read the AI Studio capability catalog (actions, features, scopes)",
+      "roles": [
+        "student",
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "tools:read",
+      "description": "List and view tool catalog entries and their versions",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    }
+  ]
+}

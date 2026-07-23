@@ -1,9 +1,21 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
+import { authenticateContext } from './helpers/session-auth'
+
+// Authenticated functional spec: skip when no minted session, and inject the
+// session cookie before every test (was missing — the suite ran unauthenticated
+// and every test redirected to sign-in). See docs/guides/e2e-authenticated-testing.md.
+test.skip(
+  !process.env.PLAYWRIGHT_AUTH_ENABLED,
+  'Requires an authenticated session — set PLAYWRIGHT_AUTH_ENABLED=true'
+)
+test.beforeEach(async ({ page }) => {
+  await authenticateContext(page.context())
+})
 
 test.describe('Assistant Architect Streaming API', () => {
   test.beforeEach(async ({ page }) => {
     // Go to assistant architect page
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
 
     // Wait for authentication if needed
     try {

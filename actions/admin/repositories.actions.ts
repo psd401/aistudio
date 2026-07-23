@@ -6,11 +6,14 @@ import { hasRole } from "@/utils/roles"
 import {
   getAllRepositoriesWithOwner,
   updateRepository,
-  deleteRepository,
   getRepositoryItems,
   getRepositoryItemById,
-  deleteRepositoryItem
+  isSystemManagedRepository
 } from "@/lib/db/drizzle"
+import {
+  assertNotSystemManagedRepository,
+  assertUserManagedDurableRepositoryForDeletion
+} from "@/lib/repositories/repository-access-guard"
 import {
   handleError,
   ErrorFactories,
@@ -25,6 +28,16 @@ import {
 import { revalidatePath } from "next/cache"
 import type { Repository } from "@/actions/repositories/repository.actions"
 import type { RepositoryItem } from "@/actions/repositories/repository-items.actions"
+import {
+  deleteRepositoryItemStorage,
+  deleteRepositoryStorageTree
+} from "@/lib/repositories/content-platform/storage-cleanup"
+import {
+  beginRepositoryDeletion,
+  beginRepositoryItemDeletion,
+  finalizeRepositoryDeletion,
+  finalizeRepositoryItemDeletion
+} from "@/lib/repositories/content-platform/deletion-service"
 
 export interface RepositoryWithOwner extends Repository {
   ownerEmail: string | null
@@ -68,7 +81,26 @@ export async function listAllRepositories(): Promise<ActionState<RepositoryWithO
     await requireAdminSession(log)
 
     log.debug("Fetching all repositories from database")
-    const repositoriesRaw = await getAllRepositoriesWithOwner()
+    // Repository Manager is the durable product surface. Nexus/Assistant
+    // Architect ephemeral repositories and system indexes have separate
+    // lifecycle/authorization paths and must not appear as unmanageable rows.
+    const now = Date.now()
+    const repositoriesRaw = (
+      await getAllRepositoriesWithOwner({ includeDeleting: true })
+    ).filter(
+      repo => {
+        const expiresAt = repo.expiresAt?.getTime()
+        const activeAndCurrent =
+          repo.lifecycleStatus === "active" &&
+          (expiresAt === undefined ||
+            (!Number.isNaN(expiresAt) && expiresAt > now))
+        return (
+          repo.repositoryKind === "durable" &&
+          !isSystemManagedRepository(repo) &&
+          (activeAndCurrent || repo.lifecycleStatus === "deleting")
+        )
+      }
+    )
 
     // Convert to expected type
     const repositories: RepositoryWithOwner[] = repositoriesRaw.map(repo => ({
@@ -77,11 +109,17 @@ export async function listAllRepositories(): Promise<ActionState<RepositoryWithO
       description: repo.description,
       ownerId: repo.ownerId,
       isPublic: repo.isPublic ?? false,
+      repositoryKind: repo.repositoryKind,
+      lifecycleStatus: repo.lifecycleStatus,
+      retentionDays: repo.retentionDays,
+      expiresAt: repo.expiresAt,
+      activeIndexGenerationId: repo.activeIndexGenerationId,
       metadata: repo.metadata ?? {},
       createdAt: repo.createdAt ?? new Date(),
       updatedAt: repo.updatedAt ?? new Date(),
       ownerEmail: repo.ownerEmail,
-      itemCount: repo.itemCount
+      itemCount: repo.itemCount,
+      canManage: true,
     }))
 
     log.info("All repositories fetched successfully", {
@@ -138,6 +176,12 @@ export async function adminUpdateRepository(
       return { isSuccess: false, message: "No fields to update" }
     }
 
+    // A system-managed repository (the Atrium retrieval index, #1056) is
+    // immutable through this generic admin path: editing it (e.g. flipping
+    // `isPublic` to true, or stripping the `systemManaged` flag) would reopen the
+    // shared-index bypass the system-managed guards close.
+    await assertNotSystemManagedRepository(input.id)
+
     log.info("Updating repository in database (admin)", {
       repositoryId: input.id
     })
@@ -169,9 +213,15 @@ export async function adminUpdateRepository(
       description: resultRaw.description,
       ownerId: resultRaw.ownerId,
       isPublic: resultRaw.isPublic ?? false,
+      repositoryKind: resultRaw.repositoryKind,
+      lifecycleStatus: resultRaw.lifecycleStatus,
+      retentionDays: resultRaw.retentionDays,
+      expiresAt: resultRaw.expiresAt,
+      activeIndexGenerationId: resultRaw.activeIndexGenerationId,
       metadata: resultRaw.metadata ?? {},
       createdAt: resultRaw.createdAt ?? new Date(),
-      updatedAt: resultRaw.updatedAt ?? new Date()
+      updatedAt: resultRaw.updatedAt ?? new Date(),
+      canManage: true,
     }
 
     log.info("Repository updated successfully (admin)", {
@@ -208,45 +258,31 @@ export async function adminDeleteRepository(
   
   try {
     log.info("Admin action started: Deleting repository", { repositoryId: id })
-    
+
     await requireAdminSession(log)
 
-    // First, get all document items to delete from S3
-    log.debug("Fetching document items for S3 deletion")
-    const items = await getRepositoryItems(id)
+    // Never delete a system-managed repo (the Atrium index, #1056) through the
+    // generic admin path — it would destroy the retrieval index out-of-band.
+    await assertUserManagedDurableRepositoryForDeletion(id)
 
-    // Filter for document types
-    const documents = items.filter(item => item.type === 'document')
+    // Fence every upload/worker producer and snapshot manifests before cleanup.
+    // A failed sweep leaves `deleting` and this same admin action is the
+    // idempotent retry path.
+    log.debug("Fencing repository producers before S3 deletion")
+    const items = await beginRepositoryDeletion(id)
 
-    log.info("Found documents to delete from S3", {
-      documentCount: documents.length,
+    log.info("Cleaning repository storage before database deletion", {
+      itemCount: items.length,
       repositoryId: id
     })
-
-    // Delete all documents from S3 in parallel
-    if (documents.length > 0) {
-      const { deleteDocument } = await import("@/lib/aws/s3-client")
-
-      log.info("Deleting documents from S3", { count: documents.length })
-      const deletePromises = documents.map(item =>
-        deleteDocument(item.source).catch(error => {
-          // Log error but continue with deletion
-          log.error("Failed to delete S3 file", {
-            file: item.source,
-            itemId: item.id,
-            error: error instanceof Error ? error.message : "Unknown error"
-          })
-        })
-      )
-      await Promise.all(deletePromises)
-      log.info("S3 document cleanup completed")
-    }
+    const cleanup = await deleteRepositoryStorageTree(id, items)
+    log.info("Repository storage cleanup completed", cleanup)
 
     // Now delete the repository (this will cascade delete all items and chunks)
     log.info("Deleting repository from database (admin)", { repositoryId: id })
-    const deletedCount = await deleteRepository(id)
+    const deleted = await finalizeRepositoryDeletion(id)
 
-    if (deletedCount === 0) {
+    if (!deleted) {
       log.warn("Repository not found for deletion", { repositoryId: id })
       throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
     }
@@ -284,6 +320,11 @@ export async function adminGetRepositoryItems(
     log.info("Admin action started: Getting repository items", { repositoryId })
     
     await requireAdminSession(log)
+
+    // System-managed repositories (the Atrium retrieval index, #1056) are not
+    // browsable through the generic admin UI — their per-object visibility is
+    // enforced by `retrievalService`, not repository-level access.
+    await assertNotSystemManagedRepository(repositoryId)
 
     log.debug("Fetching repository items from database (admin)", { repositoryId })
     const itemsRaw = await getRepositoryItems(repositoryId)
@@ -337,7 +378,8 @@ export async function adminRemoveRepositoryItem(
     
     await requireAdminSession(log)
 
-    // Get the item to check if it's a document (need to delete from S3)
+    // Resolve the item before cleanup because its version rows are the durable
+    // namespace for derived storage.
     log.debug("Fetching item details", { itemId })
     const item = await getRepositoryItemById(itemId)
 
@@ -346,38 +388,39 @@ export async function adminRemoveRepositoryItem(
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
 
+    // Never mutate a system-managed repo's items (the Atrium index, #1056) —
+    // deleting one out-of-band would desync the retrieval index.
+    await assertNotSystemManagedRepository(item.repositoryId)
+
     log.debug("Item found", {
       itemId,
       itemType: item.type,
       repositoryId: item.repositoryId
     })
 
-    // Delete from S3 if it's a document
-    if (item.type === 'document') {
-      log.info("Deleting document from S3 (admin)", {
-        itemId,
-        s3Key: item.source
-      })
+    const deletionItem = await beginRepositoryItemDeletion({
+      repositoryId: item.repositoryId,
+      itemId
+    })
 
-      try {
-        const { deleteDocument } = await import("@/lib/aws/s3-client")
-        await deleteDocument(item.source)
-        log.info("Document deleted from S3 successfully")
-      } catch (error) {
-        // Log error but continue with database deletion
-        log.error("Failed to delete from S3", {
-          itemId,
-          s3Key: item.source,
-          error: error instanceof Error ? error.message : "Unknown error"
-        })
-      }
-    }
+    // Clean every item type before cascading its version rows. A failure must
+    // preserve the database manifest so cleanup can be retried safely.
+    log.info("Deleting repository item objects from S3 (admin)", {
+      itemId,
+      itemType: item.type,
+      repositoryId: item.repositoryId
+    })
+    const cleanup = await deleteRepositoryItemStorage({
+      ...item,
+      ...deletionItem
+    })
+    log.info("Repository item objects deleted from S3 successfully", cleanup)
 
     // Delete from database (cascades to chunks)
     log.info("Deleting item from database (admin)", { itemId })
-    const deletedCount = await deleteRepositoryItem(itemId)
+    const deleted = await finalizeRepositoryItemDeletion(itemId)
 
-    if (deletedCount === 0) {
+    if (!deleted) {
       log.warn("Item not found for deletion", { itemId })
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }

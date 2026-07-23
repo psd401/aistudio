@@ -93,7 +93,10 @@ export function validateModel(
     }
   }
 
-  // Array fields
+  // Array fields. 'allowedRoles' no longer maps to a column (#1207) — it is
+  // translated into role grants (resource_access_grants) after import — but it is
+  // still a meaningful, validated field so a malformed value fails loudly instead of
+  // silently importing a model with the wrong (or no) access restriction.
   if (m.allowedRoles !== undefined) {
     if (!Array.isArray(m.allowedRoles)) {
       modelErrors.push(`${prefix}: 'allowedRoles' must be an array`);

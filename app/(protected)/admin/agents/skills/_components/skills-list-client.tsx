@@ -19,7 +19,8 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
-import { IconRefresh, IconTrash } from "@tabler/icons-react"
+import { IconRefresh, IconTrash, IconLock } from "@tabler/icons-react"
+import { ResourceGrantsDialog } from "@/components/features/resource-grants"
 import {
   getAgentSkills,
   deleteSkill,
@@ -175,14 +176,26 @@ export function SkillsListClient() {
                     {new Date(skill.createdAt).toLocaleDateString()}
                   </TableCell>
                   <TableCell>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => handleDelete(skill.id)}
-                      title="Delete skill"
-                    >
-                      <IconTrash className="h-4 w-4" />
-                    </Button>
+                    <div className="flex items-center justify-end gap-1">
+                      <ResourceGrantsDialog
+                        resourceType="skill"
+                        resourceId={skill.id}
+                        resourceLabel={skill.name}
+                        trigger={
+                          <Button variant="ghost" size="icon" title="Manage access">
+                            <IconLock className="h-4 w-4" />
+                          </Button>
+                        }
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleDelete(skill.id)}
+                        title="Delete skill"
+                      >
+                        <IconTrash className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))

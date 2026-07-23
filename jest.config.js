@@ -30,8 +30,18 @@ const customJestConfig = {
     '^@/components/ui/table$': '<rootDir>/tests/mocks/radix-ui.js'
   },
   setupFiles: ['<rootDir>/.jest/setEnvVars.js'],
+  // NOTE: the Atrium markdown render pipeline (lib/content/render/markdown-render.ts)
+  // imports the pure-ESM unified/remark/rehype ecosystem, which next/jest (SWC)
+  // does not transform in node_modules (transformIgnorePatterns is ineffective for
+  // it under next/jest). That module is therefore not jest-loadable: tests reaching
+  // it must jest.mock("@/lib/content/render/markdown-render"), and the pipeline is
+  // verified by tests/smoke/atrium-markdown-render.smoke.ts (Bun) + the E2E.
   transformIgnorePatterns: [
     'node_modules/(?!(lucide-react|next-auth|@next-auth|nanoid)/)'
+  ],
+  modulePathIgnorePatterns: [
+    '<rootDir>/infra/cdk.out/',
+    '<rootDir>/.next/',
   ],
   testPathIgnorePatterns: [
     '/node_modules/',
@@ -43,4 +53,4 @@ const customJestConfig = {
   ]
 };
 
-module.exports = createJestConfig(customJestConfig); 
+module.exports = createJestConfig(customJestConfig);

@@ -329,6 +329,14 @@ Tools work seamlessly with knowledge repositories:
 - Web search can supplement repository knowledge with current data
 - Code interpreter can analyze files and documents from repositories
 - Combine internal knowledge with external, real-time information
+- Prompt authors use the shared repository picker and “Add repository content”
+  flow; uploaded source is never copied into system instructions.
+- Prompt create/update validates exact repository access, submission/approval
+  validates audience compatibility, and every execution surface revalidates the
+  current caller before retrieval or model invocation.
+- Runtime file inputs carry owner-scoped opaque temporary-repository references
+  rather than extracted text. See
+  [Unified Repository Product Integration](./unified-repository-product-integration.md).
 
 ## API Integration
 

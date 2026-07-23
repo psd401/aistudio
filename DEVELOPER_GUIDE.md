@@ -57,7 +57,7 @@ This project follows a **Layered Architecture** pattern:
 2. **Application Layer** (`/actions`)
    - All business logic in server actions
    - Consistent `ActionState<T>` return pattern
-   - Authorization checks via `hasToolAccess()`
+   - Authorization checks via `hasCapabilityAccess()`
 
 3. **Infrastructure Layer** (`/lib`, `/infra`)
    - Database access via Drizzle ORM (`executeQuery`/`executeTransaction`)
@@ -152,7 +152,7 @@ export async function actionName(): Promise<ActionState<ReturnType>> {
   const session = await getServerSession()
   if (!session) return { isSuccess: false, message: "Unauthorized" }
 
-  const hasAccess = await hasToolAccess(session.user.sub, "toolName")
+  const hasAccess = await hasCapabilityAccess("toolName")
   if (!hasAccess) return { isSuccess: false, message: "Access denied" }
 
   try {

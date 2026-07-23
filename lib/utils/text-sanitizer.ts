@@ -227,6 +227,26 @@ export function decodeHtmlEntities(text: string): string {
   );
 }
 
+// Decodes MDXEditor Markdown serializer escapes (\$ \{ \} \_ &#x24; &#36; and doubly-encoded &amp;#x24; &amp;#36;) so /\${([\w-]+)}|{{([\w-]+)}}/g can match stored prompt content.
+export function decodeMdxEditorEscapes(text: string): string {
+  return text.replace(
+    /&amp;#x24;|&amp;#36;|&#x24;|&#36;|\\\$|\\\{|\\\}|\\_/g,
+    (match) => {
+      switch (match) {
+        case '&amp;#x24;': return '$';
+        case '&amp;#36;': return '$';
+        case '&#x24;': return '$';
+        case '&#36;': return '$';
+        case '\\$': return '$';
+        case '\\{': return '{';
+        case '\\}': return '}';
+        case '\\_': return '_';
+        default: return match;
+      }
+    }
+  );
+}
+
 /**
  * Recursively decodes HTML entities in all string values within an object.
  * Traverses plain objects and arrays, returning a new structure (no mutation).

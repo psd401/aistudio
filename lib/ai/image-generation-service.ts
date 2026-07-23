@@ -18,6 +18,7 @@ import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { createLogger, generateRequestId } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
+import { assertSafeFetchUrl } from '@/lib/agents/agent-tools/web-fetch';
 
 // Type for OpenAI image size
 type OpenAIImageSize = '256x256' | '512x512' | '1024x1024' | '1792x1024' | '1024x1792';
@@ -33,6 +34,104 @@ interface GeminiGenerateTextResult {
 }
 
 const log = createLogger({ module: 'image-generation-service' });
+
+const MAX_REFERENCE_REDIRECTS = 5;
+/** Mirrors `lib/agents/agent-tools/web-fetch.ts` FETCH_TIMEOUT_MS/MAX_BYTES bounds. */
+const REFERENCE_IMAGE_TIMEOUT_MS = 10_000;
+const REFERENCE_IMAGE_MAX_BYTES = 10_000_000;
+/** Actual HTTP redirect codes — excludes 304 Not Modified and other non-redirect 3xx. */
+const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
+
+/** Read a response body without buffering past `maxBytes`, aborting the stream early. */
+async function readBoundedArrayBuffer(res: Response, maxBytes: number): Promise<ArrayBuffer> {
+  if (!res.body) {
+    const buffer = await res.arrayBuffer();
+    if (buffer.byteLength > maxBytes) {
+      throw createImageError('NO_IMAGE', 'Reference image exceeds maximum allowed size');
+    }
+    return buffer;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const result = await reader.read();
+    if (result.done) break;
+    total += result.value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw createImageError('NO_IMAGE', 'Reference image exceeds maximum allowed size');
+    }
+    chunks.push(result.value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out.buffer;
+}
+
+/**
+ * Fetch a caller-supplied reference-image URL with SSRF protection (REV-COR-497).
+ *
+ * Reference-image `url`s originate from user chat message parts, so they are
+ * untrusted. Validate the host against the shared SSRF guard (`assertSafeFetchUrl`
+ * blocks private/loopback/link-local/cloud-metadata hosts and non-http(s) schemes)
+ * BEFORE issuing the request, and re-validate on every redirect hop — a public host
+ * can 302 to an internal one — by following redirects manually. Returns the raw
+ * bytes + content-type so callers can pass base64 to the AI SDK instead of a raw URL
+ * (so the SDK never fetches an unguarded URL server-side).
+ *
+ * Bounded like the sibling `web-fetch.ts` guard: a request timeout so a slow/stalled
+ * origin can't hang the request indefinitely, and a streamed size cap so a large
+ * response can't exhaust memory (checked incrementally, not just via Content-Length,
+ * since that header can be absent or lie).
+ *
+ * Exported for unit testing.
+ */
+export async function fetchReferenceImageSafely(
+  rawUrl: string
+): Promise<{ data: ArrayBuffer; mimeType: string }> {
+  let currentUrl = rawUrl;
+  for (let hop = 0; hop <= MAX_REFERENCE_REDIRECTS; hop++) {
+    try {
+      assertSafeFetchUrl(currentUrl);
+    } catch (e) {
+      log.warn('Blocked unsafe reference-image URL', {
+        reason: e instanceof Error ? e.message : String(e),
+      });
+      throw createImageError('NO_IMAGE', 'Reference image URL is not allowed');
+    }
+    const res = await fetch(currentUrl, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(REFERENCE_IMAGE_TIMEOUT_MS),
+    });
+    if (REDIRECT_STATUS_CODES.has(res.status)) {
+      const location = res.headers.get('location');
+      if (!location) {
+        throw createImageError(
+          'NO_IMAGE',
+          `Redirect response missing Location header (status ${res.status})`
+        );
+      }
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+    if (!res.ok) {
+      throw createImageError('NO_IMAGE', `Failed to fetch reference image (status ${res.status})`);
+    }
+    const contentLength = res.headers.get('content-length');
+    if (contentLength && Number(contentLength) > REFERENCE_IMAGE_MAX_BYTES) {
+      throw createImageError('NO_IMAGE', 'Reference image exceeds maximum allowed size');
+    }
+    const data = await readBoundedArrayBuffer(res, REFERENCE_IMAGE_MAX_BYTES);
+    const mimeType = (res.headers.get('content-type') || 'image/png').split(';')[0].trim();
+    return { data, mimeType };
+  }
+  throw createImageError('NO_IMAGE', 'Too many redirects fetching reference image');
+}
 
 // Cache S3 client to avoid repeated async calls
 let s3ClientCache: S3Client | null = null;
@@ -219,11 +318,9 @@ async function generateWithOpenAIDirect(
         type: ref.mimeType || 'image/png',
       });
     } else if (ref.url) {
-      const fetched = await fetch(ref.url);
-      if (!fetched.ok) {
-        throw createImageError('NO_IMAGE', 'Failed to fetch reference image');
-      }
-      blob = await fetched.blob();
+      // ref.url is user-controlled — fetch it through the SSRF guard (REV-COR-497).
+      const { data, mimeType } = await fetchReferenceImageSafely(ref.url);
+      blob = new Blob([data], { type: ref.mimeType || mimeType });
     } else {
       throw createImageError('NO_IMAGE', 'Reference image has no base64 or url');
     }
@@ -398,8 +495,11 @@ async function generateWithOpenAI(
           // AI SDK accepts base64 strings (with or without data URL prefix)
           imageInputs.push(refImage.base64);
         } else if (refImage.url) {
-          // AI SDK also accepts URLs
-          imageInputs.push(refImage.url);
+          // Pre-download user-controlled URLs through the SSRF guard and pass base64,
+          // so the AI SDK never fetches an unguarded URL server-side (REV-COR-497).
+          // base64 is the same shape the SDK accepts on the branch above.
+          const { data, mimeType } = await fetchReferenceImageSafely(refImage.url);
+          imageInputs.push(`data:${mimeType};base64,${Buffer.from(data).toString('base64')}`);
         }
       }
 
@@ -557,10 +657,14 @@ async function generateWithGemini(
             mimeType
           });
         } else if (refImage.url) {
-          // Gemini can fetch images from URLs
+          // Pre-download user-controlled URLs through the SSRF guard and pass base64,
+          // so the SDK never fetches an unguarded URL server-side (REV-COR-497). This
+          // matches the base64 branch shape above.
+          const { data, mimeType } = await fetchReferenceImageSafely(refImage.url);
           contentParts.push({
             type: 'image',
-            image: refImage.url
+            image: Buffer.from(data).toString('base64'),
+            mimeType: refImage.mimeType || mimeType
           });
         }
       }
@@ -835,6 +939,8 @@ export function isImageGenerationModel(modelId: string): boolean {
     'gpt-image',
     'dall-e',
     'gemini-2.5-flash-image',
+    'gemini-3.1-flash-image',
+    'gemini-3.1-flash-lite-image',
     'gemini-3-pro-image',
     'imagen'
   ];

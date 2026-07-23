@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# Regression tests for gh-wrapper.sh. Runs the wrapper against a stub gh.real
+# (via GH_REAL) and asserts the blocklist. No network, no real gh.
+# Run: bash infra/agent-image/bin/gh-wrapper.test.sh
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+WRAPPER="$HERE/gh-wrapper.sh"
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# Stub gh.real: records argv and exits 0, so "allowed" commands are observable.
+STUB="$WORK/gh.real"
+cat > "$STUB" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$WORK/last_args"
+exit 0
+EOF
+chmod +x "$STUB"
+
+pass=0 fail=0
+
+# refused: wrapper must exit 2 (never reaching the stub)
+refuse_case() {
+  local desc="$1"; shift
+  rm -f "$WORK/last_args"
+  GH_REAL="$STUB" GH_CONFIG_DIR="$WORK/ghcfg" bash "$WRAPPER" "$@" >/dev/null 2>&1
+  local rc=$?
+  if [ "$rc" -eq 2 ] && [ ! -f "$WORK/last_args" ]; then
+    pass=$((pass+1)); echo "ok   refuse: $desc"
+  else
+    fail=$((fail+1)); echo "FAIL refuse: $desc (exit $rc, stub_reached=$([ -f "$WORK/last_args" ] && echo yes || echo no))"
+  fi
+}
+
+# allowed: wrapper must exit 0 and delegate to the stub
+allow_case() {
+  local desc="$1"; shift
+  rm -f "$WORK/last_args"
+  GH_REAL="$STUB" GH_CONFIG_DIR="$WORK/ghcfg" bash "$WRAPPER" "$@" >/dev/null 2>&1
+  local rc=$?
+  if [ "$rc" -eq 0 ] && [ -f "$WORK/last_args" ]; then
+    pass=$((pass+1)); echo "ok   allow:  $desc"
+  else
+    fail=$((fail+1)); echo "FAIL allow:  $desc (exit $rc, stub_reached=$([ -f "$WORK/last_args" ] && echo yes || echo no))"
+  fi
+}
+
+mkdir -p "$WORK/ghcfg"
+
+# --- REV-COR-316: full-URL / graphql / lowercase-method api bypasses ---
+refuse_case "api -X PUT full-URL pulls merge" api -X PUT https://api.github.com/repos/o/r/pulls/1/merge
+refuse_case "api graphql mutation"            api graphql -f 'query=mutation{mergePullRequest(input:{})}'
+refuse_case "api -X delete (lowercase)"        api -X delete /repos/o/r
+# --- REV-INFRA-003: PATCH repo-edit + method case-insensitivity ---
+refuse_case "api -X PATCH repo edit"           api -X PATCH /repos/o/r -f visibility=public
+refuse_case "api -X put full-URL merge (lc)"   api -X put https://api.github.com/repos/o/r/pulls/2/merge
+# --- existing name rules still fire ---
+refuse_case "pr merge"                          pr merge 1
+refuse_case "repo delete"                       repo delete o/r
+refuse_case "api -X DELETE repos"               api -X DELETE /repos/o/r
+refuse_case "api repos-form pulls merge"        api repos/o/r/pulls/1/merge -X POST
+# --- REV-INFRA-004: alias surface ---
+refuse_case "alias set"                         alias set m 'pr merge'
+refuse_case "alias set --shell"                 alias set x --shell 'echo hi'
+refuse_case "alias import"                       alias import -
+
+# --- gemini-code-assist review: graphql mutation hidden in a file/stdin field ---
+# The literal-argv scan for "mutation" can't see inside a file or stdin the
+# query is read from, so a mutation could hide there undetected — refuse any
+# graphql field value of the form name=@source instead.
+refuse_case "api graphql mutation via stdin field"  api graphql -f 'query=@-'
+refuse_case "api graphql mutation via file field"   api graphql -f 'query=@mutation.graphql'
+refuse_case "api graphql mutation via -F stdin"     api graphql -F 'query=@-'
+
+# --- claude[bot] review: value-taking global flag ahead of the subcommand
+# shifting the token stream and defeating name-based + `gh api` policy ---
+refuse_case "pr merge behind --repo"                 --repo o/r pr merge 1
+refuse_case "repo delete behind -R"                  -R o/r repo delete o/r
+refuse_case "api -X DELETE behind --repo"            --repo o/r api -X DELETE /repos/o/r
+refuse_case "api -X PATCH repo-edit behind -R"        -R o/r api -X PATCH /repos/o/r -f visibility=public
+refuse_case "api graphql mutation behind --repo"      --repo o/r api graphql -f 'query=mutation{mergePullRequest(input:{})}'
+allow_case "pr create behind --repo (still allowed)"  --repo o/r pr create --title x --body y
+allow_case "api PATCH deeper sub-resource behind -R"  -R o/r api -X PATCH /repos/o/r/pulls/1 -f title=x
+
+# --- claude[bot] review: --input replaces the entire graphql body, opaque
+# to both the "mutation" substring scan and the `name=@source` field scan ---
+refuse_case "api graphql --input file"               api graphql --input payload.json
+refuse_case "api graphql --input stdin"              api graphql --input -
+refuse_case "api graphql --input= attached form"     api graphql --input=payload.json
+
+# --- claude[bot] review: trailing slash / query string on the path lets
+# bash `case` glob matching treat a zero-length final segment as a "deeper
+# sub-resource", or makes the path no longer end in the literal suffix the
+# merge/protection guards match on ---
+refuse_case "api PATCH repo edit with trailing slash"     api -X PATCH /repos/o/r/ -f archived=true
+refuse_case "api PUT repo edit with trailing slash"       api -X PUT /repos/o/r/ -f visibility=public
+refuse_case "api raw PR merge with trailing slash"        api repos/o/r/pulls/1/merge/ -X POST
+refuse_case "api raw PR merge with query string"          api repos/o/r/pulls/1/merge?foo=bar -X POST
+refuse_case "api branch protection with trailing slash"   api -X PUT /repos/o/r/branches/main/protection/
+allow_case "api PATCH deeper sub-resource with trailing slash" api -X PATCH /repos/o/r/pulls/1/ -f title=x
+
+# --- allowed: reads + reversible + deeper sub-resources ---
+allow_case "api GET repos"                       api GET /repos/o/r
+allow_case "api list pulls"                       api /repos/o/r/pulls
+allow_case "api graphql read-only query"          api graphql -f 'query=query{viewer{login}}'
+allow_case "api PATCH deeper sub-resource"        api -X PATCH /repos/o/r/pulls/1 -f title=x
+allow_case "pr create"                            pr create --title x --body y
+allow_case "issue close"                          issue close 1
+allow_case "alias list"                            alias list
+
+# --- REV-INFRA-004: a pre-seeded config alias is stripped and cannot expand ---
+mkdir -p "$WORK/ghcfg"
+cat > "$WORK/ghcfg/config.yml" <<'EOF'
+git_protocol: https
+aliases:
+    m: pr merge
+    co: pr checkout
+editor: vim
+EOF
+rm -f "$WORK/last_args"
+GH_REAL="$STUB" GH_CONFIG_DIR="$WORK/ghcfg" bash "$WRAPPER" m 123 >/dev/null 2>&1
+if grep -q '^aliases:' "$WORK/ghcfg/config.yml"; then
+  fail=$((fail+1)); echo "FAIL alias-strip: aliases: still present in config"
+elif grep -q 'git_protocol: https' "$WORK/ghcfg/config.yml" && grep -q 'editor: vim' "$WORK/ghcfg/config.yml"; then
+  pass=$((pass+1)); echo "ok   alias-strip: aliases removed, other config preserved"
+else
+  fail=$((fail+1)); echo "FAIL alias-strip: non-alias config was damaged"
+fi
+
+# --- gemini-code-assist review: blank line / comment inside the aliases
+# block must not prematurely end the strip, leaving a later alias intact ---
+mkdir -p "$WORK/ghcfg2"
+cat > "$WORK/ghcfg2/config.yml" <<'EOF'
+git_protocol: https
+aliases:
+    m: pr merge
+
+    # a comment inside the aliases block
+    co: pr checkout
+editor: vim
+EOF
+rm -f "$WORK/last_args"
+GH_REAL="$STUB" GH_CONFIG_DIR="$WORK/ghcfg2" bash "$WRAPPER" co >/dev/null 2>&1
+if grep -q '^aliases:' "$WORK/ghcfg2/config.yml" || grep -q 'co: pr checkout' "$WORK/ghcfg2/config.yml"; then
+  fail=$((fail+1)); echo "FAIL alias-strip: alias after blank/comment line survived"
+elif grep -q 'git_protocol: https' "$WORK/ghcfg2/config.yml" && grep -q 'editor: vim' "$WORK/ghcfg2/config.yml"; then
+  pass=$((pass+1)); echo "ok   alias-strip: blank/comment mid-block does not resurrect stripping"
+else
+  fail=$((fail+1)); echo "FAIL alias-strip: non-alias config was damaged"
+fi
+
+echo "----"
+echo "pass=$pass fail=$fail"
+[ "$fail" -eq 0 ]

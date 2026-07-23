@@ -270,6 +270,153 @@ bunx cdk deploy AIStudio-AgentPlatformStack-Dev \
   --context baseDomain=yourdomain.com
 ```
 
+### Agent image supply-chain pins (SEC-009)
+
+Every third-party artifact baked into the agent base image is pinned and
+verified before use — the container holds IAM reach to `psd-agent-creds/${env}/*`
+and `psd-agent/${env}/*`, so build-time substitution is a real compromise
+vector. `build-and-push.sh` fails fast if any `BLOCKER(prod)` marker remains in
+the Dockerfile (the enforcement gate that keeps these from regressing).
+
+| Artifact | Pin | Verification |
+|----------|-----|--------------|
+| OpenClaw base | `ghcr.io/openclaw/openclaw@sha256:3814fb…` (2026.6.11) | Immutable digest in `FROM` |
+| bun | `1.2.12` | `bun-linux-aarch64.zip` SHA256 vs `BUN_SHA256` ARG |
+| uv | `0.7.9` | `uv-aarch64-unknown-linux-gnu.tar.gz` SHA256 vs `UV_SHA256` ARG |
+| Google Workspace CLI (`gws`) | `0.22.5` | `.tar.gz` SHA256 vs `GWS_SHA256` ARG |
+| GitHub CLI (`gh`) | `2.92.0` | `.tar.gz` SHA256 vs `GH_SHA256` ARG |
+| `bedrock-agentcore` (+ closure) | `1.15.1` | `pip install --require-hashes -r requirements-agentcore.txt` |
+
+bun and uv install from their official GitHub release artifacts (no
+`curl … | bash`). `bedrock-agentcore` is the official AWS SDK
+(`github.com/aws/bedrock-agentcore-sdk-python`); its full transitive closure is
+hash-pinned in `requirements-agentcore.txt`, so `--require-hashes` aborts the
+build on any mismatch — the image build itself is the supply-chain test.
+
+**Bumping a pinned artifact:**
+
+```bash
+# bun — refresh the bun-linux-aarch64.zip line from SHASUMS256.txt:
+curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v<VER>/SHASUMS256.txt" | grep bun-linux-aarch64.zip
+
+# uv — refresh from the .sha256 sidecar:
+curl -fsSL "https://github.com/astral-sh/uv/releases/download/<VER>/uv-aarch64-unknown-linux-gnu.tar.gz.sha256"
+
+# bedrock-agentcore (+ transitive deps) — regenerate the hashed closure:
+cd infra/agent-image
+# edit requirements-agentcore.in (top-level pins), then:
+uv pip compile --universal --generate-hashes --python-version 3.11 \
+  --no-annotate --no-header requirements-agentcore.in -o requirements-agentcore.txt
+```
+
+Paste each refreshed hash into the matching `ARG` in the Dockerfile (or commit
+the regenerated `requirements-agentcore.txt`). Never hand-edit a hash.
+
+**Bumping the OpenClaw base image (the `FROM` digest):**
+
+This is gated on a regression check, not just a digest swap — see the Dockerfile
+header for the full history. The runtime has twice been broken by a new OpenClaw
+release (Morning Brief "chat deadline expired"; nested
+`/home/node/.openclaw/.openclaw/` ENOENT). Resolve the digest and verify the
+workspace double-nesting fix is present — no Docker required, just `curl`/`jq`/`gh`:
+
+```bash
+REPO=openclaw/openclaw; TAG=2026.6.11        # target the latest stable release
+TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:$REPO:pull&service=ghcr.io" | jq -r .token)
+
+# Multi-arch index digest (this is what goes in FROM):
+curl -sI -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.oci.image.index.v1+json" \
+  "https://ghcr.io/v2/$REPO/manifests/$TAG" | grep -i docker-content-digest
+
+# arm64 sub-digest (record in the header for traceability):
+curl -s -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.oci.image.index.v1+json" \
+  "https://ghcr.io/v2/$REPO/manifests/$TAG" \
+  | jq -r '.manifests[] | select(.platform.architecture=="arm64") | .digest'
+
+# MANDATORY gate: confirm the workspace double-nesting fix (PR #93520, merge
+# commit 52280351bb53) is an ancestor of the target tag. ahead_by==0 ⇒ present.
+gh api "repos/$REPO/compare/v$TAG...52280351bb53" --jq '{ahead_by, fix_present: (.ahead_by==0)}'
+```
+
+Then update the `FROM` digest and the header block in `infra/agent-image/Dockerfile`,
+and **always** finish with the Morning Brief smoke test (below) — a trivial
+"respond OK" prompt masks session-completion regressions.
+
+## Rich Chat output — cards, charts, button callbacks
+
+Phase 1 of native Chat interactivity (#TBD) added two skills and one shared
+contract between the agent and the Lambdas that talk to Chat. Reference
+material when wiring new skills, debugging missing cards, or extending
+interactivity.
+
+### The PSD_AGENT_RICH_V1 envelope
+
+The agent emits a sentinel-wrapped JSON block inside its final reply. The
+Router and Cron Lambdas detect it and lift the payload into the
+`spaces.messages.create` request alongside the plain-text fallback:
+
+```
+<<<PSD_AGENT_RICH_V1>>>
+{ "cardsV2": [...], "accessoryWidgets": [...]?, "textFallback": "..."? }
+<<<END_PSD_AGENT_RICH_V1>>>
+```
+
+- The envelope shape lives in three places that must stay in lockstep:
+  - `infra/agent-image/chat_format.py` (`extract_rich_envelope`)
+  - `infra/lambdas/agent-router/rich-envelope.ts`
+  - `infra/lambdas/agent-cron/rich-envelope.ts` (byte-identical copy)
+- Sentinels are deterministic strings, not regex — `JSON.parse` validates
+  the payload. Malformed envelopes fall back to plain-text send and log
+  `rich_envelope_malformed` at WARNING. Look for that log line first when
+  cards stop appearing.
+- `text` is always sent for notification previews. When the envelope
+  carries `textFallback` and the agent's prose is empty, we use the
+  fallback; otherwise prose wins.
+
+### Skills that emit the envelope
+
+- `infra/agent-image/skills/chat-card` — high-level flags (`--title`,
+  `--paragraph`, `--kv`, `--button`, `--image`, `--divider`) plus a
+  `--card-json` escape hatch for widget types not exposed by flags.
+- `infra/agent-image/skills/chat-chart` — chart renderer. `--engine auto`
+  routes sensitive data (or anything that trips the inline PII regex) to
+  the local matplotlib path; everything else goes to QuickChart.io.
+
+### Button click contract (CARD_CLICKED)
+
+Every button emitted by `chat-card` uses:
+
+```json
+{ "onClick": { "action": { "function": "psd-agent", "parameters": [
+  { "key": "intent", "value": "<freeform-intent>" },
+  { "key": "<extra>", "value": "<extra-value>" }
+] } } }
+```
+
+Chat delivers the click as a `CARD_CLICKED` event. The Router Lambda
+normalises it into a synthesised user MESSAGE of the form
+`[button] intent=<intent> key=value key=value` and routes through the
+normal agent pipeline — same auth, same allowlist, same thread session
+continuity. The agent decides what to do based on the intent name; we
+don't dispatch on `intent` Lambda-side.
+
+When testing: send any prompt that exercises the agent's use of
+`chat-card --button …`, click the button in Chat, then check the next
+event the Router logs — it should appear as `MESSAGE` with the bracketed
+intent text.
+
+### Troubleshooting cards
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Card looks like plain text in Chat | Envelope reached Lambda but malformed | Search CloudWatch for `rich_envelope_malformed`; preview field shows the first 200 chars |
+| Chart is the wrong type | Agent passed wrong `--type` | Re-read chat-chart SKILL.md; only bar/line/pie/scatter supported in v1 |
+| QuickChart image is broken | Spec URL > ~16KB | Cut data points (≤ 50 series points is the design target) |
+| Local engine "renderer claimed success but produced no file" | matplotlib install missing from agent image | Rebuild image — matplotlib goes into `/opt/agentcore-venv` |
+| Buttons do nothing | CARD_CLICKED event not arriving at Router | Verify `chat.buttonClickedPayload` is in the Pub/Sub event — check Bridge Lambda logs |
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

@@ -22,7 +22,7 @@ export default async function EditRepositoryPage({ params }: EditRepositoryPageP
   }
 
   const result = await getRepository(repositoryId)
-  if (!result.isSuccess || !result.data) {
+  if (!result.isSuccess || !result.data || !result.data.canManage) {
     notFound()
   }
 

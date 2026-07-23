@@ -1,0 +1,10 @@
+{
+  "name": "psd-classified-evaluation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenClaw skill: conversational PSD Classified Performance Evaluation over the PSD Agent Gateway (n8n MCP Server Trigger, SSE transport). Zero npm deps — native fetch streaming; @aws-sdk/client-secrets-manager (token secret-id fallback only) is resolved at runtime from psd-workspace's node_modules, so this skill adds no image dependency.",
+  "main": "run.js",
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -39,8 +39,11 @@ const EXCLUDED_TABLES = [
 // since we only iterate over this known-safe list
 const TABLES_TO_SYNC = [
   "roles",
-  "tools",
-  "role_tools",
+  // capabilities/role_capabilities replaced the legacy tools/role_tools tables
+  // (#928). They must precede navigation_items, which FKs navigation_items
+  // .capability_id -> capabilities.id.
+  "capabilities",
+  "role_capabilities",
   "ai_models",
   "ai_model_tiers",
   "model_role_restrictions",
@@ -125,7 +128,9 @@ async function main(): Promise<void> {
   }
 
   // Clean up temp directory
-  fs.rmdirSync(tmpDir, { recursive: true });
+  // fs.rmSync replaces the deprecated fs.rmdirSync({ recursive }); @types/node 26
+  // dropped the recursive option from rmdirSync. force:true ignores a missing dir.
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 
   log.section("Sync complete!");
   log.info("Note: User data was NOT synced for privacy.");

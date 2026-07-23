@@ -104,6 +104,7 @@ export function ModelSelectorCompact({
           size="sm"
           className="h-8 gap-1.5 text-xs max-w-[200px]"
           disabled={isLoading}
+          aria-label="Select AI model"
         >
           {isLoading ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />

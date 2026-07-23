@@ -1,9 +1,78 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getSchedulesAction, createScheduleAction } from "@/actions/db/schedule-actions"
 import { getServerSession } from "@/lib/auth/server-session"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger'
 export const dynamic = 'force-dynamic'
+
+type RequestLogger = ReturnType<typeof createLogger>
+
+/**
+ * Map a failed createScheduleAction result message to the appropriate HTTP status code.
+ * Preserves the original branching order: Unauthorized/not found -> 401,
+ * Forbidden/access -> 403, Maximum -> 429, otherwise 400.
+ */
+function resolveCreateScheduleErrorStatus(message: string): number {
+  if (message.includes("Unauthorized") || message.includes("not found")) {
+    return 401
+  }
+  if (message.includes("Forbidden") || message.includes("access")) {
+    return 403
+  }
+  if (message.includes("Maximum")) {
+    return 429
+  }
+  return 400
+}
+
+/**
+ * Diagnostic log emitted after the request body is successfully parsed.
+ * Extracted from POST to keep the handler's cyclomatic complexity low.
+ */
+function logParsedScheduleBody(log: RequestLogger, body: unknown): void {
+  log.info("Request body parsed successfully", {
+    bodyType: typeof body,
+    bodyKeys: body ? Object.keys(body) : 'null',
+    bodyContent: sanitizeForLogging(body)
+  })
+}
+
+/**
+ * Diagnostic log describing the presence/types of the extracted schedule fields.
+ */
+function logExtractedScheduleFields(
+  log: RequestLogger,
+  fields: { name: unknown; assistantArchitectId: unknown; scheduleConfig: unknown; inputData: unknown }
+): void {
+  const { name, assistantArchitectId, scheduleConfig, inputData } = fields
+  log.info("Extracted fields from request body", {
+    name: name ? 'present' : 'missing',
+    nameType: typeof name,
+    assistantArchitectId: assistantArchitectId ? 'present' : 'missing',
+    assistantArchitectIdType: typeof assistantArchitectId,
+    assistantArchitectIdValue: assistantArchitectId,
+    scheduleConfig: scheduleConfig ? 'present' : 'missing',
+    scheduleConfigType: typeof scheduleConfig,
+    inputData: inputData ? 'present' : 'missing',
+    inputDataType: typeof inputData
+  })
+}
+
+/**
+ * Diagnostic log emitted when one or more required schedule fields are missing.
+ */
+function logMissingScheduleFields(
+  log: RequestLogger,
+  fields: { name: unknown; assistantArchitectId: unknown; scheduleConfig: unknown; inputData: unknown }
+): void {
+  const { name, assistantArchitectId, scheduleConfig, inputData } = fields
+  log.warn("Missing required fields", {
+    nameCheck: !!name,
+    assistantArchitectIdCheck: !!assistantArchitectId,
+    scheduleConfigCheck: !!scheduleConfig,
+    inputDataCheck: !!inputData
+  })
+}
 
 /**
  * GET /api/schedules - List user schedules
@@ -27,7 +96,7 @@ export async function GET() {
     }
 
     // Check if user has access to the assistant-architect tool
-    const hasAccess = await hasToolAccess("assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("Forbidden - User lacks assistant-architect access")
       timer({ status: "error", reason: "forbidden" })
@@ -91,7 +160,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if user has access to the assistant-architect tool
-    const hasAccess = await hasToolAccess("assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("Forbidden - User lacks assistant-architect access")
       timer({ status: "error", reason: "forbidden" })
@@ -107,11 +176,7 @@ export async function POST(request: NextRequest) {
     let body
     try {
       body = await request.json()
-      log.info("Request body parsed successfully", {
-        bodyType: typeof body,
-        bodyKeys: body ? Object.keys(body) : 'null',
-        bodyContent: sanitizeForLogging(body)
-      })
+      logParsedScheduleBody(log, body)
     } catch (error) {
       log.warn("Invalid JSON in request body", { error: sanitizeForLogging(error) })
       timer({ status: "error", reason: "invalid_json" })
@@ -124,25 +189,10 @@ export async function POST(request: NextRequest) {
     // Validate required fields
     const { name, assistantArchitectId, scheduleConfig, inputData } = body
 
-    log.info("Extracted fields from request body", {
-      name: name ? 'present' : 'missing',
-      nameType: typeof name,
-      assistantArchitectId: assistantArchitectId ? 'present' : 'missing',
-      assistantArchitectIdType: typeof assistantArchitectId,
-      assistantArchitectIdValue: assistantArchitectId,
-      scheduleConfig: scheduleConfig ? 'present' : 'missing',
-      scheduleConfigType: typeof scheduleConfig,
-      inputData: inputData ? 'present' : 'missing',
-      inputDataType: typeof inputData
-    })
+    logExtractedScheduleFields(log, { name, assistantArchitectId, scheduleConfig, inputData })
 
     if (!name || !assistantArchitectId || !scheduleConfig || !inputData) {
-      log.warn("Missing required fields", {
-        nameCheck: !!name,
-        assistantArchitectIdCheck: !!assistantArchitectId,
-        scheduleConfigCheck: !!scheduleConfig,
-        inputDataCheck: !!inputData
-      })
+      logMissingScheduleFields(log, { name, assistantArchitectId, scheduleConfig, inputData })
       timer({ status: "error", reason: "missing_fields" })
       return NextResponse.json(
         { isSuccess: false, message: "Missing required fields: name, assistantArchitectId, scheduleConfig, inputData" },
@@ -176,14 +226,7 @@ export async function POST(request: NextRequest) {
       timer({ status: "error", reason: "create_failed" })
 
       // Return appropriate status code based on error type
-      let statusCode = 400
-      if (result.message.includes("Unauthorized") || result.message.includes("not found")) {
-        statusCode = 401
-      } else if (result.message.includes("Forbidden") || result.message.includes("access")) {
-        statusCode = 403
-      } else if (result.message.includes("Maximum")) {
-        statusCode = 429
-      }
+      const statusCode = resolveCreateScheduleErrorStatus(result.message)
 
       return NextResponse.json(result, {
         status: statusCode,

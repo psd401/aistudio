@@ -41,9 +41,9 @@ export async function myAction(params: ParamsType): Promise<ActionState<ReturnTy
     }
     
     // Authorization
-    const hasAccess = await hasToolAccess(session.user.sub, "toolName")
+    const hasAccess = await hasCapabilityAccess("toolName")
     if (!hasAccess) {
-      log.warn("Access denied", { userId: session.user.sub, tool: "toolName" })
+      log.warn("Access denied", { tool: "toolName" })
       throw ErrorFactories.authzToolAccessDenied("toolName")
     }
     

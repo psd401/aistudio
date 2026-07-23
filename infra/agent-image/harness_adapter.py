@@ -6,18 +6,61 @@ without changing the AgentCore wrapper. Each adapter implements the same interfa
 """
 
 import abc
+import dataclasses
 import json
 import logging
 import os
+import secrets
 import subprocess
 import sys
 import time
 import uuid
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Union
 
+from agent_failures import emit_agent_metric, record_failure
 from chat_format import markdown_to_chat
 
 logger = logging.getLogger("harness_adapter")
+
+
+@dataclasses.dataclass
+class TurnResult:
+    """Structured result of a single agent turn.
+
+    Replaces the old `process() -> str` contract so the wrapper can pass
+    real model / token / latency / tool metadata down to the router
+    Lambda, which writes:
+      - agent_messages (model, input_tokens, output_tokens, latency_ms)
+      - agent_message_content (per-turn role/content rows)
+      - agent_tool_invocations (per-turn tool calls with args + result)
+
+    `text` is the user-visible reply (already passed through
+    chat_format markdown→Chat-subset). Empty zero/None values are
+    acceptable when the harness doesn't surface the data — the writer
+    coalesces gracefully.
+    """
+
+    text: str
+    model: Optional[str] = None
+    tokens_in: int = 0
+    tokens_out: int = 0
+    latency_ms: int = 0
+    messages: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    tool_calls: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    # Set True when this turn is an error/degraded return (session conflict,
+    # deadline, empty response, WS failure) rather than a real answer. The
+    # wrapper forwards this to the router (metadata.failed) so a 0-token error
+    # turn is no longer logged as a clean "Message processed" success.
+    failed: bool = False
+    error_class: Optional[str] = None
+    # Iteration telemetry (issue #1161): True when the empty-turn nudge fired
+    # at least once this turn (the turn did tool work but produced no user-
+    # visible text, so the harness sent one follow-up asking for the summary).
+    # The wrapper forwards this as metadata.nudged -> agent_messages.nudged so
+    # the dashboard can trend nudge-fire rate. A recovered-after-nudge turn
+    # writes no agent_failures row, so this flag is its only persisted signal.
+    nudged: bool = False
 
 
 def _format_for_chat(text: str) -> str:
@@ -39,12 +82,47 @@ def _format_for_chat(text: str) -> str:
         return text
 
 
+def _frame_failed_partial(partial: str) -> str:
+    """Wrap a failed/degraded turn so it is never presented as a clean answer.
+
+    When a turn dies mid-task the model has usually emitted some scratchpad
+    narration ("Now let's read the file...") before it stopped. Posting that
+    verbatim reads to the user as a finished reply, hiding the failure and any
+    side effects that already ran (issue #1138 F4). Prefix an explicit error
+    frame; keep the partial so the user still sees what completed. When there
+    is no partial, return a standalone error.
+
+    `partial` must already be chat-formatted (the frame text is plain).
+    """
+    partial = (partial or "").strip()
+    if partial:
+        return (
+            "⚠️ I couldn't finish that — I hit a problem partway "
+            "through and some steps may have already run. Here's how far I "
+            "got:\n\n" + partial
+        )
+    return (
+        "⚠️ I couldn't complete that — I hit a problem partway "
+        "through. Some steps may have already run, so please check before "
+        "retrying."
+    )
+
+
 class HarnessAdapter(abc.ABC):
     """Abstract base class for agent harness adapters."""
 
     @abc.abstractmethod
-    def process(self, message: str, session_id: str, model_override: Optional[str] = None) -> str:
-        """Send a message to the harness and return the response."""
+    def process(
+        self,
+        message: str,
+        session_id: str,
+        model_override: Optional[str] = None,
+        deadline_s: Optional[int] = None,
+    ) -> Union[str, TurnResult]:
+        """Send a message to the harness and return either a plain string
+        (legacy contract) or a TurnResult (preferred). Wrapper accepts
+        both. `deadline_s` (async-job path, #1138) overrides the turn
+        deadline; None keeps the interactive default."""
 
     @abc.abstractmethod
     def configure(self, config: dict) -> None:
@@ -74,10 +152,12 @@ class OpenClawAdapter(HarnessAdapter):
     """
 
     DEFAULT_CONFIG_PATH = "/home/node/.openclaw/openclaw.json"
-    # Fixed gateway token passed via --token CLI flag. OpenClaw overwrites the
-    # config file on startup (generating a new random token), so reading from
-    # the config is unreliable. The --token CLI flag overrides the config value.
-    GATEWAY_TOKEN = "psd-agent-internal-gateway-token"
+    # Gateway auth token is generated per container at startup (see __init__),
+    # never hardcoded. It is passed to the gateway via the --token CLI flag and
+    # reused by this adapter's connect envelope, so launcher and client always
+    # agree within the process. OpenClaw overwrites the config file's token on
+    # startup and --token overrides that config value, so the on-disk config
+    # token is never the operative secret.
     # client.id MUST be "openclaw-tui" — verified by reading OpenClaw source:
     # - "cli" passes auth but scopes are cleared (not an operator UI client)
     # - "openclaw-control-ui" triggers browser origin check (rejects non-browser)
@@ -95,6 +175,12 @@ class OpenClawAdapter(HarnessAdapter):
         self._gateway_port: int = 3100
         self._process: Optional[subprocess.Popen] = None
         self._ready: bool = False
+        # Per-container random gateway token (REV-INFRA-005). Generated once at
+        # startup so it is never committed to source and never readable by the
+        # sandboxed `node` agent from a static file. Passed to `openclaw gateway
+        # --token` (launcher) and reused in the connect envelope (client), so the
+        # two always agree within this process.
+        self._gateway_token: str = secrets.token_urlsafe(32)
 
     def configure(self, config: dict) -> None:
         """Configure the OpenClaw adapter. Idempotent — safe to call multiple times."""
@@ -111,7 +197,7 @@ class OpenClawAdapter(HarnessAdapter):
                     [
                         "openclaw", "gateway",
                         "--port", str(self._gateway_port),
-                        "--token", self.GATEWAY_TOKEN,
+                        "--token", self._gateway_token,
                     ],
                     stdout=sys.stdout,
                     stderr=sys.stderr,
@@ -162,11 +248,23 @@ class OpenClawAdapter(HarnessAdapter):
             f"OpenClaw gateway did not become ready within {timeout}s"
         )
 
-    def process(self, message: str, session_id: str, model_override: Optional[str] = None) -> str:
-        """Send a message to OpenClaw via WebSocket and return the response.
+    def process(
+        self,
+        message: str,
+        session_id: str,
+        model_override: Optional[str] = None,
+        deadline_s: Optional[int] = None,
+        _is_nudge: bool = False,
+    ) -> TurnResult:
+        """Send a message to OpenClaw via WebSocket and return a TurnResult.
 
         Uses the native OpenClaw gateway WebSocket protocol:
         connect.challenge → connect (auth) → chat.send → collect chat events
+
+        Captures (best-effort) the real model id, token usage, tool calls,
+        and latency from the event stream so the router Lambda can write
+        proper telemetry into agent_messages + agent_message_content +
+        agent_tool_invocations.
         """
         if not self._ready:
             raise RuntimeError(
@@ -174,13 +272,28 @@ class OpenClawAdapter(HarnessAdapter):
                 "must be called before process()"
             )
 
+        # Track metadata across the whole turn. The user message is the
+        # first content entry; we'll append assistant + tool entries as
+        # the event stream completes.
+        observed_model: Optional[str] = model_override
+        tokens_in = 0
+        tokens_out = 0
+        tool_calls: List[Dict[str, Any]] = []
+        tool_starts: Dict[str, Dict[str, Any]] = {}
+        messages_log: List[Dict[str, Any]] = [
+            {"role": "user", "content": message}
+        ]
+
         try:
             import websocket  # websocket-client library
         except ImportError:
             logger.error("websocket-client not installed, falling back to error")
-            return "Agent communication library not available. Please contact an administrator."
+            return TurnResult(
+                text="Agent communication library not available. Please contact an administrator.",
+                model=observed_model,
+            )
 
-        gateway_token = self.GATEWAY_TOKEN
+        gateway_token = self._gateway_token
         ws_url = f"ws://127.0.0.1:{self._gateway_port}"
         response_text = ""
 
@@ -199,7 +312,10 @@ class OpenClawAdapter(HarnessAdapter):
 
         if ws is None:
             logger.error("Failed to connect to gateway after 3 attempts: %s", last_error)
-            return f"I'm temporarily unable to respond. Error: {str(last_error)[:100]}"
+            return TurnResult(
+                text=f"I'm temporarily unable to respond. Error: {str(last_error)[:100]}",
+                model=observed_model,
+            )
 
         try:
 
@@ -219,8 +335,19 @@ class OpenClawAdapter(HarnessAdapter):
                     "id": connect_id,
                     "method": "connect",
                     "params": {
+                        # OpenClaw 2026.6.11's gateway moved to WS protocol v4
+                        # (PROTOCOL_VERSION=4); it rejects any [minProtocol,
+                        # maxProtocol] range that does not include its current
+                        # protocol (the pin at 3/3 produced PROTOCOL_MISMATCH /
+                        # WS_AUTH_FAIL after the bump). Advertise [3,4] per the
+                        # gateway protocol docs so we negotiate v4 against this
+                        # gateway yet stay compatible with a v3 gateway on
+                        # rollback. The v4 connect envelope + fields below are
+                        # unchanged, and device auth is disabled in the gateway
+                        # config (dangerouslyDisableDeviceAuth=true), so no
+                        # `device` block is required.
                         "minProtocol": 3,
-                        "maxProtocol": 3,
+                        "maxProtocol": 4,
                         "client": self.CLIENT_INFO,
                         "caps": [],
                         "auth": {"token": gateway_token},
@@ -238,7 +365,10 @@ class OpenClawAdapter(HarnessAdapter):
                         break
 
                 if not connect_resp.get("ok"):
-                    return f"[WS_AUTH_FAIL] {json.dumps(connect_resp)[:800]}"
+                    return TurnResult(
+                        text=f"[WS_AUTH_FAIL] {json.dumps(connect_resp)[:800]}",
+                        model=observed_model,
+                    )
 
                 # Diagnostic: ask the gateway what tools are actually
                 # wired for the default agent. If the model says "let me
@@ -274,6 +404,61 @@ class OpenClawAdapter(HarnessAdapter):
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("tools.catalog probe failed: %s", str(exc)[:200])
 
+                # Step 2.5: Defensively abort any lingering reply session for
+                # this sessionKey before sending (#session-conflict fix).
+                #
+                # OpenClaw keys its server-side reply session on sessionKey,
+                # which we reuse across turns (the stable AgentCore session_id).
+                # A prior turn's reply session can survive that turn's
+                # ws.close() and then reject the next chat.send with "reply
+                # session initialization conflicted" — observed 2026-07-01,
+                # where every follow-up turn returned "I encountered an error."
+                # The router already serializes turns per session (a DynamoDB
+                # session lock; see agent-router waitForSessionLock), so no
+                # legitimate work for this sessionKey is active here — a
+                # pre-send chat.abort is therefore safe and clears the wedged
+                # state. chat.abort takes `sessionKey` per the OpenClaw gateway
+                # protocol (sessions.reset would additionally wipe stored
+                # conversation state, so we deliberately do NOT use it here).
+                # Kill switch: OPENCLAW_PRESEND_ABORT=0.
+                if os.environ.get("OPENCLAW_PRESEND_ABORT", "1") != "0":
+                    try:
+                        abort_id = str(uuid.uuid4())
+                        ws.send(json.dumps({
+                            "type": "req",
+                            "id": abort_id,
+                            "method": "chat.abort",
+                            "params": {"sessionKey": session_id or "default"},
+                        }))
+                        # Drain until the abort ack (bounded ~5s). Any
+                        # intervening `aborted` chat event for the stale session
+                        # is consumed here so it can't leak into the chat.send
+                        # event loop below. The main loop resets settimeout(60).
+                        ws.settimeout(5)
+                        abort_deadline = time.time() + 5
+                        while time.time() < abort_deadline:
+                            try:
+                                raw_a = ws.recv()
+                            except websocket.WebSocketTimeoutException:
+                                break
+                            try:
+                                msg_a = json.loads(raw_a)
+                                if (isinstance(msg_a, dict)
+                                        and msg_a.get("type") == "res"
+                                        and msg_a.get("id") == abort_id):
+                                    logger.info(
+                                        "pre-send chat.abort ack: ok=%s",
+                                        msg_a.get("ok"),
+                                    )
+                                    break
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "pre-send chat.abort failed (continuing): %s",
+                            str(exc)[:200],
+                        )
+
                 # Step 3: Send chat message
                 #
                 # sessionKey MUST be per-invocation caller, not "global".
@@ -285,6 +470,10 @@ class OpenClawAdapter(HarnessAdapter):
                 # AgentCore runtime gives us a stable per-user session_id;
                 # use it directly.
                 chat_id = str(uuid.uuid4())
+                # Latency clock starts the instant we hand the message to
+                # the gateway. final_state event stops it. Captured before
+                # ws.send so we don't count our own serialization.
+                chat_send_at = time.time()
                 ws.send(json.dumps({
                     "type": "req",
                     "id": chat_id,
@@ -316,15 +505,10 @@ class OpenClawAdapter(HarnessAdapter):
                 # OPENCLAW_CHAT_DEADLINE_S env override for escape hatch,
                 # clamped to [60, 840] so a misconfig can't either starve
                 # the turn or exceed the undici/Lambda ceilings.
-                default_deadline_s = 780  # 13 min — 1 min under undici
-                try:
-                    deadline_s = int(os.environ.get(
-                        "OPENCLAW_CHAT_DEADLINE_S",
-                        str(default_deadline_s),
-                    ))
-                except ValueError:
-                    deadline_s = default_deadline_s
-                deadline_s = max(60, min(840, deadline_s))
+                # 14 min — 30s under the cron Lambda's 14:30 AbortSignal so
+                # the harness gets a chance to return whatever it has
+                # accumulated before the client kills the connection.
+                deadline_s = self._resolve_deadline_s(deadline_s)
                 deadline = time.time() + deadline_s
                 got_final = False
                 event_counts: dict = {}
@@ -338,6 +522,11 @@ class OpenClawAdapter(HarnessAdapter):
                 # final `event:chat` state=final arrives with an empty message
                 # and is now just a completion signal).
                 agent_assistant_accum: str = ""
+                # True when tool activity arrived after accumulated assistant
+                # text — the next assistant delta starts a NEW narration
+                # segment and gets a blank-line separator (issue #1138 F4;
+                # the run-on "…in Plaud.Good, done…" came from this path).
+                assistant_boundary_pending: bool = False
                 # Allow recv() to sit idle for up to 60s between events
                 # without raising — long tool calls (web_fetch, model
                 # inference on a big prompt) produce gaps with no stream
@@ -365,24 +554,153 @@ class OpenClawAdapter(HarnessAdapter):
                         raw_event_samples.append(raw[:600] if isinstance(raw, str) else str(raw)[:600])
 
                     if mtype == "event" and mevent == "agent":
+                        # DIAGNOSTIC (remove after schema discovery): log the
+                        # first occurrence of each unique `stream` value with
+                        # a payload sample so we can see what OpenClaw
+                        # actually emits for model id / token usage / tool
+                        # calls. The speculative field-name extraction below
+                        # produced model=unknown + 0 tool_calls in initial
+                        # runs (2026-05-28).
+                        _stream_val = (msg.get("payload", {}) or {}).get("stream")
+                        if isinstance(_stream_val, str):
+                            _diag_key = f"_seen_stream::{_stream_val}"
+                            if _diag_key not in event_counts:
+                                event_counts[_diag_key] = 1
+                                logger.info(
+                                    "openclaw_event_sample stream=%s payload=%s",
+                                    _stream_val,
+                                    json.dumps(msg.get("payload", {}))[:1500],
+                                )
                         # Agent events carry streaming content per OpenClaw's
                         # AgentEventSchema: {runId, seq, stream, ts, data}.
-                        # stream="assistant" holds model output; stream=
-                        # "thinking" is reasoning which we intentionally drop
-                        # from user-facing replies. Tool events are ignored
-                        # here — they surface via their own channel.
+                        # We extract:
+                        #   stream="assistant" → accumulate the user-visible
+                        #     reply (drops markdown formatting later via
+                        #     chat_format).
+                        #   stream="thinking" → drop (reasoning isn't shown
+                        #     to the user and isn't useful for telemetry).
+                        #   stream="tool_call" / stream="tool_result" →
+                        #     record into tool_calls for the Conversations
+                        #     dashboard tab.
+                        # Also opportunistically capture `model` whenever
+                        # the harness reports it on any event so we can
+                        # surface the real model id in agent_messages.
                         agent_payload = msg.get("payload", {})
                         stream = agent_payload.get("stream")
                         data = agent_payload.get("data", {})
+                        if isinstance(data, dict):
+                            model_hint = data.get("model") or data.get("modelId")
+                            if isinstance(model_hint, str) and model_hint:
+                                observed_model = model_hint
+                            # Token usage may appear on a 'usage' field on
+                            # the final assistant event in newer builds.
+                            usage = data.get("usage")
+                            if isinstance(usage, dict):
+                                ti = usage.get("input_tokens") or usage.get("prompt_tokens")
+                                to = usage.get("output_tokens") or usage.get("completion_tokens")
+                                if isinstance(ti, int):
+                                    tokens_in = max(tokens_in, ti)
+                                if isinstance(to, int):
+                                    tokens_out = max(tokens_out, to)
                         if stream == "assistant" and isinstance(data, dict):
-                            delta = (
-                                data.get("delta")
+                            # OpenClaw protocol v4 streams assistant text as
+                            # `deltaText` (the incremental piece) alongside
+                            # `message` (the CUMULATIVE snapshot); `replace=true`
+                            # means deltaText replaces the buffer rather than
+                            # appends. Protocol v3 used `delta`/`text` for the
+                            # increment. Accumulate ONLY an incremental field;
+                            # treat `message` as a whole-value snapshot (assign,
+                            # never +=) — summing a cumulative field double-counts
+                            # and garbles the reply ("H"+"He"+"Hel"…). The agent
+                            # event payload is logged by the diagnostic above on
+                            # first occurrence, so the live v4 shape is verifiable.
+                            replace = data.get("replace") is True
+                            increment = (
+                                data.get("deltaText")
+                                or data.get("delta")
                                 or data.get("text")
                                 or self._extract_text(data.get("content"))
-                                or self._extract_text(data.get("message"))
                             )
-                            if isinstance(delta, str) and delta:
-                                agent_assistant_accum += delta
+                            cumulative = self._extract_text(data.get("message"))
+                            if isinstance(increment, str) and increment:
+                                agent_assistant_accum = self._accumulate_assistant(
+                                    agent_assistant_accum,
+                                    increment,
+                                    replace,
+                                    assistant_boundary_pending,
+                                )
+                                assistant_boundary_pending = False
+                            elif isinstance(cumulative, str) and cumulative:
+                                agent_assistant_accum = cumulative
+                                assistant_boundary_pending = False
+                        elif stream in ("item", "command_output"):
+                            # Newer OpenClaw builds report tool activity as
+                            # `item`/`command_output` streams. Tool activity
+                            # after accumulated text means the next assistant
+                            # delta starts a NEW narration segment — mark the
+                            # boundary so segments don't run together
+                            # ("...in Plaud.Good, done..."), issue #1138 F4.
+                            if agent_assistant_accum:
+                                assistant_boundary_pending = True
+                            # Native-tool mode (#1138 r12+) reports tool
+                            # execution ONLY here — record it so telemetry's
+                            # tool_calls and the empty-turn nudge below see
+                            # native-mode activity (the legacy tool_call/
+                            # tool_result streams stay handled underneath).
+                            if stream == "item" and isinstance(data, dict)                                     and data.get("kind") == "tool":
+                                self._record_item_tool_event(
+                                    data, tool_starts, tool_calls
+                                )
+                        elif stream == "tool_call" and isinstance(data, dict):
+                            # Same boundary rule for protocol-v3 tool events.
+                            if agent_assistant_accum:
+                                assistant_boundary_pending = True
+                            tool_id = (
+                                data.get("id")
+                                or data.get("toolCallId")
+                                or data.get("callId")
+                                or str(uuid.uuid4())
+                            )
+                            tool_starts[tool_id] = {
+                                "name": data.get("name") or data.get("tool") or "unknown",
+                                "args": data.get("arguments") or data.get("args") or data.get("input"),
+                                "started_at": time.time(),
+                            }
+                        elif stream == "tool_result" and isinstance(data, dict):
+                            if agent_assistant_accum:
+                                assistant_boundary_pending = True
+                            tool_id = (
+                                data.get("id")
+                                or data.get("toolCallId")
+                                or data.get("callId")
+                                or ""
+                            )
+                            start = tool_starts.pop(tool_id, None)
+                            now = time.time()
+                            started_at = start["started_at"] if start else now
+                            entry = {
+                                "name": (start or {}).get("name")
+                                or data.get("name")
+                                or "unknown",
+                                "args": (start or {}).get("args"),
+                                "result": data.get("result")
+                                or data.get("output")
+                                or data.get("content"),
+                                "status": data.get("status")
+                                or ("error" if data.get("error") else "success"),
+                                "error_text": (
+                                    str(data.get("error"))[:2000]
+                                    if data.get("error") else None
+                                ),
+                                "duration_ms": int(max(0, (now - started_at) * 1000)),
+                                "started_at": datetime.fromtimestamp(
+                                    started_at, tz=timezone.utc
+                                ).isoformat(),
+                                "finished_at": datetime.fromtimestamp(
+                                    now, tz=timezone.utc
+                                ).isoformat(),
+                            }
+                            tool_calls.append(entry)
 
                     elif mtype == "event" and mevent == "chat":
                         payload = msg.get("payload", {})
@@ -412,23 +730,99 @@ class OpenClawAdapter(HarnessAdapter):
                             break
 
                         elif state == "error":
+                            err_msg = payload.get("errorMessage", "unknown")
                             logger.error(
                                 "chat event error: %s | full_payload=%s",
-                                payload.get("errorMessage", "unknown"),
+                                err_msg,
                                 json.dumps(payload)[:800],
                             )
-                            return _format_for_chat(response_text) if response_text else "I encountered an error processing your message."
+                            # Previously returned silently — no failure signal.
+                            # This is where OpenClaw's "reply session
+                            # initialization conflicted" surfaces, so recording
+                            # it is what makes the session-conflict class of
+                            # failure visible in agent_failures / the alarm.
+                            record_failure(
+                                source="harness",
+                                severity="error",
+                                error_class="OpenClawChatError",
+                                error_message=str(err_msg),
+                                session_id=session_id,
+                                model=observed_model or model_override,
+                                context={
+                                    "phase": "chat_event_error",
+                                    "last_state": last_state,
+                                },
+                            )
+                            # Never post the accumulated scratchpad narration
+                            # as if it were the answer — frame it as a failed
+                            # partial (issue #1138 F4).
+                            err_text = _frame_failed_partial(
+                                _format_for_chat(response_text)
+                                if response_text
+                                else ""
+                            )
+                            return TurnResult(
+                                text=err_text,
+                                model=observed_model,
+                                tokens_in=tokens_in,
+                                tokens_out=tokens_out,
+                                latency_ms=int((time.time() - chat_send_at) * 1000),
+                                messages=messages_log,
+                                tool_calls=tool_calls,
+                                failed=True,
+                                error_class="OpenClawChatError",
+                            )
 
                         elif state == "aborted":
                             logger.warning("chat aborted: payload=%s", json.dumps(payload)[:500])
                             break
 
                     elif mtype == "res" and msg.get("id") == chat_id:
+                        # DIAGNOSTIC (remove after schema discovery): dump
+                        # the final res payload so we can see if usage /
+                        # model lives here vs on agent events.
+                        if "_seen_chat_res" not in event_counts:
+                            event_counts["_seen_chat_res"] = 1
+                            logger.info(
+                                "openclaw_chat_res_sample payload=%s",
+                                json.dumps(msg.get("payload", {}))[:1500],
+                            )
                         if not msg.get("ok"):
                             error = msg.get("error", {})
                             logger.error("chat.send error: %s", json.dumps(error)[:500])
-                            return "I encountered an error processing your message."
-                        status = msg.get("payload", {}).get("status")
+                            # Previously returned silently — no failure signal.
+                            record_failure(
+                                source="harness",
+                                severity="error",
+                                error_class="OpenClawChatSendError",
+                                error_message=json.dumps(error)[:2000],
+                                session_id=session_id,
+                                model=observed_model or model_override,
+                                context={"phase": "chat_send_res"},
+                            )
+                            return TurnResult(
+                                text="I encountered an error processing your message.",
+                                model=observed_model,
+                                latency_ms=int((time.time() - chat_send_at) * 1000),
+                                messages=messages_log,
+                                tool_calls=tool_calls,
+                                failed=True,
+                                error_class="OpenClawChatSendError",
+                            )
+                        res_payload = msg.get("payload", {})
+                        # Final res may carry the authoritative usage object.
+                        usage = res_payload.get("usage")
+                        if isinstance(usage, dict):
+                            ti = usage.get("input_tokens") or usage.get("prompt_tokens")
+                            to = usage.get("output_tokens") or usage.get("completion_tokens")
+                            if isinstance(ti, int):
+                                tokens_in = max(tokens_in, ti)
+                            if isinstance(to, int):
+                                tokens_out = max(tokens_out, to)
+                        model_field = res_payload.get("model") or res_payload.get("modelId")
+                        if isinstance(model_field, str) and model_field:
+                            observed_model = model_field
+                        status = res_payload.get("status")
                         if status in {"started", "accepted"}:
                             continue
                         if status in {"final", "done"}:
@@ -442,12 +836,50 @@ class OpenClawAdapter(HarnessAdapter):
 
         except Exception as exc:
             logger.error("WebSocket error: %s", str(exc)[:500])
-            return "I'm temporarily unable to respond. The agent process may be restarting."
+            record_failure(
+                source="harness",
+                severity="error",
+                exc=exc,
+                session_id=session_id,
+                model=model_override,
+                context={"phase": "websocket"},
+            )
+            return TurnResult(
+                text="I'm temporarily unable to respond. The agent process may be restarting.",
+                model=observed_model,
+                messages=messages_log,
+                tool_calls=tool_calls,
+                failed=True,
+                error_class="WebSocketError",
+            )
+
+        latency_ms = int((time.time() - chat_send_at) * 1000)
+
+        def _result(
+            text: str,
+            *,
+            failed: bool = False,
+            error_class: Optional[str] = None,
+            nudged: bool = False,
+        ) -> TurnResult:
+            assistant = text or ""
+            log = list(messages_log)
+            if assistant:
+                log.append({"role": "assistant", "content": assistant})
+            return TurnResult(
+                text=assistant,
+                model=observed_model,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=latency_ms,
+                messages=log,
+                tool_calls=tool_calls,
+                failed=failed,
+                error_class=error_class,
+                nudged=nudged,
+            )
 
         if not got_final:
-            # Deadline hit but the agent may have already streamed a full
-            # response via event:agent. Prefer partial content over the
-            # "stalled" apology when we have something to show.
             if not response_text and agent_assistant_accum:
                 response_text = agent_assistant_accum
             logger.error(
@@ -463,22 +895,230 @@ class OpenClawAdapter(HarnessAdapter):
                 raw_event_samples[0] if raw_event_samples else "",
             )
             if response_text:
-                return _format_for_chat(response_text.strip())
-            return (
+                record_failure(
+                    source="harness",
+                    severity="warn",
+                    error_class="ChatDeadlineExpiredPartial",
+                    error_message=(
+                        f"chat deadline expired with partial response "
+                        f"(last_state={last_state})"
+                    ),
+                    session_id=session_id,
+                    model=observed_model or model_override,
+                    context={
+                        "phase": "deadline",
+                        "last_state": last_state,
+                        "event_counts": event_counts,
+                        "first_events": first_event_types,
+                    },
+                )
+                # A partial that never reached a final event is still a
+                # failed turn — frame it so it doesn't read as a finished
+                # answer (issue #1138 F4).
+                return _result(
+                    _frame_failed_partial(_format_for_chat(response_text.strip())),
+                    failed=True,
+                    error_class="ChatDeadlineExpiredPartial",
+                )
+            record_failure(
+                source="harness",
+                severity="error",
+                error_class="ChatDeadlineExpired",
+                error_message=(
+                    f"chat deadline expired without final event "
+                    f"(last_state={last_state})"
+                ),
+                session_id=session_id,
+                model=observed_model or model_override,
+                context={
+                    "phase": "deadline",
+                    "last_state": last_state,
+                    "event_counts": event_counts,
+                    "first_events": first_event_types,
+                },
+            )
+            return _result(
                 "I wasn't able to finish responding in time — the agent "
-                "stalled. Please try again in a moment."
+                "stalled. Please try again in a moment.",
+                failed=True,
+                error_class="ChatDeadlineExpired",
             )
 
-        # Happy path: still log the event summary so we can audit whether
-        # tool_call / tool_result / thinking events ever flowed for this turn.
         logger.info(
-            "chat turn ok: resp_len=%d last_state=%s event_counts=%s",
+            "chat turn ok: resp_len=%d last_state=%s event_counts=%s "
+            "model=%s tokens_in=%d tokens_out=%d latency_ms=%d tool_calls=%d",
             len(response_text),
             last_state,
             json.dumps(event_counts),
+            observed_model or "unknown",
+            tokens_in,
+            tokens_out,
+            latency_ms,
+            len(tool_calls),
         )
 
-        return _format_for_chat(response_text.strip()) if response_text.strip() else "I processed your message but had no response."
+        if response_text.strip():
+            return _result(_format_for_chat(response_text.strip()))
+        if not _is_nudge and tool_calls:
+            # The turn DID work (tool calls ran) but produced no reply —
+            # nudge once for the user-facing summary instead of sending the
+            # canned fallback (#1138, observed live on r12). Recursive call
+            # is bounded by _is_nudge; a short deadline is plenty at direct-
+            # Mantle serving speeds.
+            logger.warning(
+                "empty final after %d tool calls — sending one nudge",
+                len(tool_calls),
+            )
+            # Iteration telemetry (issue #1161): a nudge fired this turn.
+            # Emit a CloudWatch metric (best-effort) so nudge-fire rate is
+            # trendable in the AgentCore container log group, which has a
+            # runtime-generated suffix a MetricFilter can't attach to.
+            emit_agent_metric("AgentNudgeFired")
+            nudged = self.process(
+                self.EMPTY_TURN_NUDGE,
+                session_id,
+                model_override,
+                deadline_s=180,
+                _is_nudge=True,
+            )
+            if nudged.text.strip():
+                merged_tools = tool_calls + nudged.tool_calls
+                return TurnResult(
+                    text=nudged.text,
+                    model=nudged.model or observed_model,
+                    tokens_in=tokens_in + nudged.tokens_in,
+                    tokens_out=tokens_out + nudged.tokens_out,
+                    latency_ms=int((time.time() - chat_send_at) * 1000),
+                    messages=messages_log + nudged.messages,
+                    tool_calls=merged_tools,
+                    failed=nudged.failed,
+                    error_class=nudged.error_class,
+                    # The nudge fired and recovered a reply — record it so the
+                    # dashboard counts this turn in the nudge-fire rate even
+                    # though it wrote no agent_failures row.
+                    nudged=True,
+                )
+        record_failure(
+            source="harness",
+            severity="empty_response",
+            error_class="EmptyAgentResponse",
+            error_message=(
+                "Agent reached final state but produced no user-visible text"
+            ),
+            session_id=session_id,
+            model=observed_model or model_override,
+            context={
+                "last_state": last_state,
+                "event_counts": event_counts,
+                "first_events": first_event_types,
+            },
+        )
+        # nudged reflects whether the one nudge fired this turn: it did iff this
+        # is not itself a nudge leg AND there were tool calls to summarize (the
+        # exact condition guarding the self.process() nudge call above).
+        return _result(
+            "I processed your message but had no response.",
+            failed=True,
+            error_class="EmptyAgentResponse",
+            nudged=(not _is_nudge and bool(tool_calls)),
+        )
+
+    @staticmethod
+    def _record_item_tool_event(data, tool_starts, tool_calls) -> None:
+        """Track a native-mode tool item (stream="item", kind="tool").
+
+        phase="start" registers the call; a later phase ("end"/"error"/
+        anything terminal with a status) completes it into tool_calls. The
+        item stream is the ONLY place beta.2 reports tool execution when
+        toolSearch/code-mode is off, so without this the Conversations tab
+        showed zero tool calls and the empty-turn nudge couldn't tell a
+        silent WORKING turn from a truly idle one.
+        """
+        item_id = data.get("itemId") or data.get("toolCallId") or ""
+        phase = data.get("phase")
+        if phase == "start":
+            tool_starts[item_id] = {
+                "name": data.get("name") or data.get("title") or "unknown",
+                "args": data.get("meta"),
+                "started_at": time.time(),
+            }
+            return
+        start = tool_starts.pop(item_id, None)
+        now = time.time()
+        started_at = start["started_at"] if start else now
+        tool_calls.append({
+            "name": (start or {}).get("name") or data.get("name") or "unknown",
+            "args": (start or {}).get("args"),
+            "result": data.get("output") or data.get("result"),
+            "status": "error" if (data.get("status") in ("error", "failed")) else "success",
+            "error_text": (
+                str(data.get("error"))[:2000] if data.get("error") else None
+            ),
+            "duration_ms": int(max(0, (now - started_at) * 1000)),
+            "started_at": datetime.fromtimestamp(started_at, tz=timezone.utc).isoformat(),
+            "finished_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        })
+
+    # Sent as a one-shot follow-up when a turn completes tool work but ends
+    # with no user-visible text (observed live on r12: the model executed
+    # every grant, then a provider timeout ate the closing message and the
+    # user got the canned empty-response fallback). One nudge only — if the
+    # model stays silent twice, the canned fallback stands.
+    EMPTY_TURN_NUDGE = (
+        "[system-nudge] Your previous turn finished tool work but sent the "
+        "user NO reply — they saw nothing. Send the user-facing summary of "
+        "what you just did (and its outcome) now, as plain text. Do not "
+        "re-run any tools unless something genuinely failed."
+    )
+
+    @staticmethod
+    def _resolve_deadline_s(override) -> int:
+        """Resolve the turn deadline in seconds.
+
+        `override` is the payload-supplied deadline from the async-job runner
+        (#1138): the promoted job leg holds the SSE stream for up to 2 hours,
+        so the override clamps to [60, 7200] (ceiling approved 2026-07-07).
+        Interactive turns send no override and keep the env-var/default path
+        clamped to [60, 840] — bounded by the router Lambda's 15-min ceiling.
+        Garbage values degrade to the 840s default, never raise.
+        """
+        default_deadline_s = 840
+        if override is not None:
+            try:
+                return max(60, min(7200, int(override)))
+            except (TypeError, ValueError):
+                return default_deadline_s
+        try:
+            value = int(os.environ.get(
+                "OPENCLAW_CHAT_DEADLINE_S",
+                str(default_deadline_s),
+            ))
+        except ValueError:
+            value = default_deadline_s
+        return max(60, min(840, value))
+
+    @staticmethod
+    def _accumulate_assistant(
+        accum: str,
+        increment: str,
+        replace: bool,
+        boundary_pending: bool,
+    ) -> str:
+        """Append a streamed assistant increment to the turn accumulator.
+
+        `replace` resets the buffer (protocol v4 replace-mode delta).
+        `boundary_pending` means tool activity separated this increment from
+        the previously accumulated text — i.e. the model started a NEW
+        narration segment — so join with a blank line instead of butting the
+        segments together (issue #1138 F4: "…in Plaud.Good, done…").
+        Increments within one segment must never get separators; the caller
+        only sets `boundary_pending` on tool events.
+        """
+        if replace:
+            return increment
+        if boundary_pending and accum and increment:
+            return accum + "\n\n" + increment
+        return accum + increment
 
     @staticmethod
     def _extract_text(content) -> str:
@@ -496,7 +1136,15 @@ class OpenClawAdapter(HarnessAdapter):
                     parts.append(block.get("text", ""))
                 elif isinstance(block, str):
                     parts.append(block)
-            return "".join(parts)
+            # Join DISTINCT text blocks with a blank line. The model emits a
+            # short narration text block before each tool call, so a single
+            # assistant message often carries several text blocks interleaved
+            # with tool_use blocks. Concatenating them with no separator
+            # produced runs like "...in Plaud.Good, done. Let's read the
+            # file.Now getting..." (issue #1138 F4). Blank-line join keeps each
+            # block readable; empties are dropped so we never emit a leading or
+            # trailing separator.
+            return "\n\n".join(p for p in parts if p and p.strip())
         return str(content) if content else ""
 
     def health(self) -> bool:

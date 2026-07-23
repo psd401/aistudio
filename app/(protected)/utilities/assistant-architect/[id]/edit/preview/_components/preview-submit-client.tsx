@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { AssistantArchitectStreaming } from "@/components/features/assistant-architect/assistant-architect-streaming"
 import { Button } from "@/components/ui/button"
 import { submitAssistantArchitectForApprovalAction } from "@/actions/db/assistant-architect-actions"
+import { publishAssistantArchitectAsSkillAction } from "@/actions/db/publish-skill.actions"
 import { toast } from "sonner"
 import { AlertCircle, CheckCircle2 } from "lucide-react"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
@@ -20,6 +21,7 @@ export function PreviewSubmitClient({
   tool
 }: PreviewSubmitClientProps) {
   const [isLoading, setIsLoading] = useState(false)
+  const [isPublishing, setIsPublishing] = useState(false)
   const router = useRouter()
 
   const handleSubmit = async () => {
@@ -44,6 +46,30 @@ export function PreviewSubmitClient({
       toast.error("Failed to submit assistant")
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  const handlePublishAsSkill = async () => {
+    const requestId = generateRequestId()
+    const log = createLogger({ requestId, component: "PreviewSubmitClient" })
+
+    try {
+      log.info("Publishing assistant as skill", { assistantId })
+      setIsPublishing(true)
+      const result = await publishAssistantArchitectAsSkillAction(assistantId)
+
+      if (result.isSuccess) {
+        log.info("Assistant published as skill", { assistantId, slug: result.data?.slug })
+        toast.success(result.message ?? "Published as a draft skill")
+      } else {
+        log.warn("Publish as skill failed", { assistantId, message: result.message })
+        toast.error(result.message)
+      }
+    } catch (error) {
+      log.error("Failed to publish assistant as skill", { assistantId, error })
+      toast.error("Failed to publish assistant as a skill")
+    } finally {
+      setIsPublishing(false)
     }
   }
 
@@ -83,12 +109,22 @@ export function PreviewSubmitClient({
           ))}
         </div>
 
-        <Button
-          onClick={handleSubmit}
-          disabled={isLoading || !allRequirementsMet}
-        >
-          {isLoading ? "Submitting..." : "Submit for Approval"}
-        </Button>
+        <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            onClick={handlePublishAsSkill}
+            disabled={isPublishing || isLoading || !allRequirementsMet}
+            data-testid="publish-as-skill-button"
+          >
+            {isPublishing ? "Publishing..." : "Publish as Skill"}
+          </Button>
+          <Button
+            onClick={handleSubmit}
+            disabled={isLoading || isPublishing || !allRequirementsMet}
+          >
+            {isLoading ? "Submitting..." : "Submit for Approval"}
+          </Button>
+        </div>
       </div>
     </div>
   )

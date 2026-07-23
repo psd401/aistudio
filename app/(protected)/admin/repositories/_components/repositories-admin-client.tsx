@@ -142,6 +142,11 @@ export function RepositoriesAdminClient() {
                       <TableCell className="font-medium">
                         <div>
                           <div>{repo.name}</div>
+                          {repo.lifecycleStatus === "deleting" ? (
+                            <Badge variant="outline" className="mt-1">
+                              Deletion pending retry
+                            </Badge>
+                          ) : null}
                           {repo.description && (
                             <div className="text-sm text-muted-foreground">
                               {repo.description}
@@ -177,18 +182,21 @@ export function RepositoriesAdminClient() {
                           <DropdownMenuContent align="end">
                             <DropdownMenuLabel>Actions</DropdownMenuLabel>
                             <DropdownMenuItem
+                              disabled={repo.lifecycleStatus !== "active"}
                               onClick={() => router.push(`/repositories/${repo.id}`)}
                             >
                               <Eye className="mr-2 h-4 w-4" />
                               View
                             </DropdownMenuItem>
                             <DropdownMenuItem
+                              disabled={repo.lifecycleStatus !== "active"}
                               onClick={() => router.push(`/repositories/${repo.id}/edit`)}
                             >
                               <Edit className="mr-2 h-4 w-4" />
                               Edit
                             </DropdownMenuItem>
                             <DropdownMenuItem
+                              disabled={repo.lifecycleStatus !== "active"}
                               onClick={() => router.push(`/repositories/${repo.id}/items`)}
                             >
                               <Package className="mr-2 h-4 w-4" />
@@ -200,7 +208,9 @@ export function RepositoriesAdminClient() {
                               className="text-destructive"
                             >
                               <Trash2 className="mr-2 h-4 w-4" />
-                              Delete
+                              {repo.lifecycleStatus === "deleting"
+                                ? "Retry deletion"
+                                : "Delete"}
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>

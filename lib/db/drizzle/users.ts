@@ -16,10 +16,7 @@ import {
   users,
   userRoles,
   roles,
-  roleTools,
-  tools,
 } from "@/lib/db/schema";
-import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
 
 // ============================================
@@ -93,7 +90,15 @@ export async function getUserById(userId: number) {
 }
 
 /**
- * Get user by email address
+ * Get user by email address.
+ *
+ * Case-INSENSITIVE (`lower(email) = lower(:email)`) — email is an authorization join
+ * key and migration 112 (#1207) enforces uniqueness on `lower(email)`. A
+ * case-sensitive `=` here would miss an existing row when Cognito sends a
+ * differently-cased address, and the caller's fall-through insert/link would then
+ * violate `uq_users_email_lower` and lock the user out of provisioning. Lowercasing
+ * both sides also lets the query use that functional unique index.
+ *
  * @throws {DatabaseError} If user not found
  */
 export async function getUserByEmail(email: string) {
@@ -111,7 +116,7 @@ export async function getUserByEmail(email: string) {
           updatedAt: users.updatedAt,
         })
         .from(users)
-        .where(eq(users.email, email))
+        .where(eq(sql`lower(${users.email})`, email.toLowerCase()))
         .limit(1),
     "getUserByEmail"
   );
@@ -371,86 +376,6 @@ export async function getAllUserRoles() {
   );
 }
 
-// ============================================
-// Tool Access Operations
-// ============================================
-
-/**
- * Check if user has access to a specific tool by Cognito sub
- */
-export async function hasToolAccess(
-  cognitoSub: string,
-  toolIdentifier: string
-): Promise<boolean> {
-  const requestId = generateRequestId();
-  const timer = startTimer("drizzle.hasToolAccess");
-  const log = createLogger({ requestId, function: "drizzle.hasToolAccess" });
-
-  log.debug("Checking tool access in database", {
-    cognitoSub,
-    toolIdentifier,
-  });
-
-  try {
-    const result = await executeQuery(
-      (db) =>
-        db
-          .select({ exists: sql<boolean>`true` })
-          .from(users)
-          .innerJoin(userRoles, eq(users.id, userRoles.userId))
-          .innerJoin(roleTools, eq(userRoles.roleId, roleTools.roleId))
-          .innerJoin(tools, eq(roleTools.toolId, tools.id))
-          .where(
-            and(
-              eq(users.cognitoSub, cognitoSub),
-              eq(tools.identifier, toolIdentifier)
-            )
-          )
-          .limit(1),
-      "hasToolAccess"
-    );
-
-    const hasAccess = result.length > 0;
-
-    if (hasAccess) {
-      log.info("Database: Tool access granted", {
-        cognitoSub,
-        toolIdentifier,
-      });
-    } else {
-      log.warn("Database: Tool access denied", {
-        cognitoSub,
-        toolIdentifier,
-      });
-    }
-
-    timer({ status: "success", hasAccess });
-    return hasAccess;
-  } catch (error) {
-    log.error("Database error checking tool access", {
-      error: error instanceof Error ? error.message : "Unknown error",
-      cognitoSub,
-      toolIdentifier,
-    });
-    timer({ status: "error" });
-    throw error;
-  }
-}
-
-/**
- * Get all tool identifiers accessible by a user
- */
-export async function getUserTools(cognitoSub: string): Promise<string[]> {
-  const result = await executeQuery(
-    (db) =>
-      db
-        .selectDistinct({ identifier: tools.identifier })
-        .from(users)
-        .innerJoin(userRoles, eq(users.id, userRoles.userId))
-        .innerJoin(roleTools, eq(userRoles.roleId, roleTools.roleId))
-        .innerJoin(tools, eq(roleTools.toolId, tools.id))
-        .where(eq(users.cognitoSub, cognitoSub)),
-    "getUserTools"
-  );
-  return result.map((r) => r.identifier);
-}
+// Capability access checks live in `lib/db/drizzle/capabilities.ts`
+// (`hasCapabilityAccess`, `getUserCapabilities`). The legacy `hasToolAccess` /
+// `getUserTools` compat shims were removed in workstream #6 (Issue #928).

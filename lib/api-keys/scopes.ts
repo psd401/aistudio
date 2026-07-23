@@ -19,6 +19,15 @@ export const API_SCOPES = {
   "assistants:list": "List assistants available for API execution",
   "assistants:execute": "Execute any assistant via API",
   "models:read": "List available AI models",
+  "tools:read": "List and view tool catalog entries and their versions",
+  // Platform capability catalog (Issue #1100). A low-sensitivity read scope over
+  // non-sensitive PRODUCT METADATA — the live projection of AI Studio's own
+  // registries (invocable actions, role-gated UI features, and the scope
+  // reference). Granted broadly (student/staff/administrator) so any authenticated
+  // caller — including the OpenClaw agent holding a scoped key — can discover what
+  // the platform can do via the `describe_capabilities` MCP meta-tool. It exposes
+  // no user data, only the shape of the app.
+  "platform:read": "Read the AI Studio capability catalog (actions, features, scopes)",
   "documents:read": "Read documents and attachments",
   "documents:write": "Upload and manage documents",
   "graph:read": "Read context graph nodes and edges",
@@ -28,6 +37,31 @@ export const API_SCOPES = {
   "mcp:execute_assistant": "Execute an assistant via MCP",
   "mcp:list_assistants": "List available assistants via MCP",
   "mcp:get_decision_graph": "Get decision node details and connections via MCP",
+  // Atrium content scopes (Phase 5 — REST/MCP surfaces, Issue #1059).
+  // `content:read` is reserved now so the Phase 5 read endpoints
+  // (`GET /api/v1/content/:id`, MCP fetch) have a scope to gate agent
+  // read-access on without a scope-definition change landing alongside them.
+  // Users hold no content scopes — their reads are capability-gated.
+  "content:read": "Read Atrium content objects and versions",
+  "content:create": "Create Atrium content objects and initial versions",
+  "content:update": "Update Atrium content object metadata and create new versions",
+  // Hard-delete an Atrium content object (owner/admin-gated in the service, so a
+  // key holding this can only remove content its OWNER owns). Separate from
+  // content:update so delete authority is granted deliberately, not as a
+  // side effect of edit access.
+  "content:delete": "Delete Atrium content objects (owner/admin only)",
+  "content:publish_internal": "Publish Atrium content to internal destinations",
+  "content:publish_public": "Publish Atrium content publicly",
+  // Agent-held AUTHORITY scope (Atrium §26.1, #1059): permits an autonomous agent
+  // to mint a short-lived delegated token acting on behalf of a user
+  // (`POST /api/v1/agents/delegated-token`). It is NOT a content DATA operation and
+  // is deliberately excluded from every minted delegated token (see
+  // `lib/oauth/delegated-token.ts`), so a delegated credential can never re-mint.
+  // Granted to agent identities via their `agent_identities.scopes`; a human who
+  // inherits it (administrator gets ALL_SCOPES) still cannot mint — the route also
+  // requires a registered agent identity — and it can never appear in a delegated
+  // token, so it cannot leak onto the content surface.
+  "content:delegate": "Mint delegated Atrium content tokens on behalf of a user",
 } as const;
 
 export type ApiScope = keyof typeof API_SCOPES;
@@ -39,7 +73,7 @@ export type ApiScope = keyof typeof API_SCOPES;
 const ALL_SCOPES = Object.keys(API_SCOPES) as ApiScope[];
 
 export const ROLE_SCOPES: Record<string, ApiScope[]> = {
-  student: ["chat:read", "chat:write"],
+  student: ["chat:read", "chat:write", "platform:read"],
   staff: [
     "chat:read",
     "chat:write",
@@ -47,11 +81,29 @@ export const ROLE_SCOPES: Record<string, ApiScope[]> = {
     "assistants:list",
     "assistants:execute",
     "models:read",
+    "tools:read",
+    "platform:read",
     "documents:read",
     "graph:read",
     "mcp:search_decisions",
     "mcp:list_assistants",
     "mcp:get_decision_graph",
+    // Staff may execute assistants over MCP so an agent acting with a staff
+    // member's own API key can do what that staff member can already do in the UI
+    // and via REST (`assistants:execute` is staff+admin). Issue #1223 §5 (Option B).
+    // `mcp:capture_decision` stays admin-only, consistent with `graph:write`.
+    "mcp:execute_assistant",
+    // Atrium content (Phase 5, Issue #1055). Staff may mint API keys that
+    // author and publish content INTERNALLY — "agents do what people can".
+    // `content:publish_public` is human-/admin-held and deliberately withheld.
+    "content:read",
+    "content:create",
+    "content:update",
+    // Staff may clean up (hard-delete) Atrium content — the service still gates
+    // every delete to the object's OWNER or an admin, so a staff key can only
+    // remove content that key's owner owns. "Agents do what people can."
+    "content:delete",
+    "content:publish_internal",
   ],
   administrator: ALL_SCOPES,
 };

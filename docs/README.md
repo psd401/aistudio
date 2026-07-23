@@ -165,6 +165,12 @@ AI integration patterns using Vercel AI SDK v6, provider factory implementation,
 #### [features/nexus-conversation-architecture.md](./features/nexus-conversation-architecture.md) ⭐ **CRITICAL**
 **Complete Nexus conversation system architecture** - Component hierarchy, state management (conversationId vs stableConversationId vs ref), message flows, runtime memoization, format conversions, common pitfalls, and troubleshooting. **Read this before modifying conversation code.**
 
+**[Nexus model routing](./features/nexus-model-routing.md)** — Standard/Advanced UX, Nova Micro classification, family/tier resolution, automatic web search, image and PSD-data MCP dispatch, configuration, fallbacks, and rollout modes.
+
+**[Assistant Architect model routing](./features/assistant-architect-model-routing.md)** — Standard/Advanced authoring, shared capability-aware tier routing, legacy compatibility, execution surfaces, and independent rollout controls.
+
+**[Unified repository product integration](./features/unified-repository-product-integration.md)** — Authoritative Repository Manager source/ACL/version UI, Assistant Architect repository-only knowledge, Nexus private ephemeral attachments, promotion, retention, and rollback boundaries.
+
 #### [features/navigation.md](./features/navigation.md)
 Dynamic navigation system with role-based menu items.
 
@@ -179,6 +185,21 @@ Server-Sent Events for Assistant Architect execution.
 
 #### [features/assistant-architect-tools.md](./features/assistant-architect-tools.md)
 Tool integration for Assistant Architect prompts.
+
+#### [features/tool-versioning.md](./features/tool-versioning.md)
+**Tool & skill versioning contract** — `v1`/`v2` versions, `identifier@version` addressing, deprecation lifecycle (90-day grace period, `replaced_by`, removal), MCP/REST visibility, and SKILL.md version pinning.
+
+#### [features/skill-publishing.md](./features/skill-publishing.md)
+**Skill publishing & export** — SKILL.md format, publish → scan → review pipeline, how skills are consumed (Nexus session binding vs `skill.{slug}` catalog tools), and the zip-export format + portability caveats for Claude Code / Desktop.
+
+#### [features/email-triage-user-guide.md](./features/email-triage-user-guide.md)
+**Email triage user guide** — enabling triage, the three-label folder model, escalation modes (what pings vs what gets labeled), rule tuning, the correction → nightly-learning → suggestion loop, digest, and `@psd/Task` email-to-task. End-user companion to [operations/email-triage.md](./operations/email-triage.md).
+
+#### [features/nexus-workspace-chat-editing.md](./features/nexus-workspace-chat-editing.md)
+**Nexus workspace chat editing (§1087)** — when a document/artifact is open beside the chat, the chat can read + edit it (live Yjs document edits via the agent bridge, artifact edits via `createVersion`); server-bound, canView/canEdit-gated, §28.3-screened.
+
+#### [features/atrium-agent-access.md](./features/atrium-agent-access.md)
+**Connecting agents to Atrium content** — how a local MCP client (Claude Code etc.) or the PSD AI Agents (OpenClaw) read/write Atrium documents: API-key setup, the MCP content tools + scope table, the version-based vs live-document distinction, delegated tokens, and the loopback binding hazard for the live bridge.
 
 #### [features/assistant-architect-json-import-spec.md](./features/assistant-architect-json-import-spec.md)
 **Complete JSON import specification** for generating valid assistant import files. Includes schema reference, field types, variable substitution, execution patterns, and comprehensive examples.
@@ -209,6 +230,9 @@ K-12 content filtering with Amazon Bedrock Guardrails.
 
 #### [features/voice-api.md](./features/voice-api.md)
 Real-time voice conversations via WebSocket with Gemini Live API, transcript persistence, permissions, and content safety guardrails.
+
+#### [features/atrium-design-spec.md](./features/atrium-design-spec.md)
+**Atrium content workspace** (Epic #1059) — agent-native documents and sandboxed interactive artifacts: collaborative editing, visibility model and permission-aware retrieval, publishing connectors with the §26.4 public-publish approval gate, the anonymous `/p/[slug]` public reader, OKF export/import, and the MCP/REST content tool surfaces.
 
 ## 🚀 Quick Start
 

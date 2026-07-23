@@ -1,8 +1,16 @@
 import { createLogger } from '@/lib/logger';
 import { executeSQL, type DatabaseRow } from './db-helpers';
 import { hasCapability, hasAnyCapability } from '@/lib/ai/capability-utils';
+import { blendedTokenCostUsd } from '@/lib/costs/token-cost';
 
 const log = createLogger({ module: 'cost-optimizer' });
+
+// Pre-flight cost here is an estimate: only a single token total is known
+// before a request runs, so we blend the input/output rates. This module
+// assumes a 60/40 input/output split (its long-standing value). Converging
+// this with the Activity dashboard's 0.5 blend is a product decision — see the
+// note in lib/costs/token-cost.ts.
+const INPUT_TOKEN_WEIGHT = 0.6;
 
 // Database row interfaces for cost optimization queries (camelCase)
 interface CostModelRow extends DatabaseRow {
@@ -34,7 +42,6 @@ interface TransformedModel extends DatabaseRow {
   supportsBatching?: boolean;
   capabilities?: string | string[] | null;
   providerMetadata?: Record<string, unknown>;
-  allowedRoles?: string[];
 }
 
 export interface CostOptimizationRequest {
@@ -294,8 +301,7 @@ export class CostOptimizer {
           max_concurrency as "maxConcurrency",
           supports_batching as "supportsBatching",
           capabilities,
-          provider_metadata as "providerMetadata",
-          allowed_roles as "allowedRoles"
+          provider_metadata as "providerMetadata"
         FROM ai_models
         WHERE active = true AND nexus_enabled = true
         ORDER BY provider, name
@@ -337,21 +343,23 @@ export class CostOptimizer {
       if (result.length > 0) {
         const inputCost = result[0].inputCostPer1kTokens || 0;
         const outputCost = result[0].outputCostPer1kTokens || 0;
-        // Rough estimate: 60% input, 40% output
-        return (tokens / 1000) * (inputCost * 0.6 + outputCost * 0.4);
+        // Pre-flight estimate: only a single token total is known here, so we
+        // blend the two rates (assumed 60% input / 40% output). Shared helper,
+        // same math as before — see lib/costs/token-cost.ts.
+        return blendedTokenCostUsd(tokens, inputCost, outputCost, INPUT_TOKEN_WEIGHT);
       }
-      
+
       return 0;
     }
-    
+
     return this.calculateCostForModel(model, tokens);
   }
-  
+
   private calculateCostForModel(model: TransformedModel, tokens: number): number {
     const inputCost = model.inputCostPer1kTokens || 0;
     const outputCost = model.outputCostPer1kTokens || 0;
-    // Rough estimate: 60% input, 40% output
-    return (tokens / 1000) * (inputCost * 0.6 + outputCost * 0.4);
+    // Pre-flight estimate — see calculateCost() above and lib/costs/token-cost.ts.
+    return blendedTokenCostUsd(tokens, inputCost, outputCost, INPUT_TOKEN_WEIGHT);
   }
   
   private async filterEligibleModels(
@@ -366,14 +374,15 @@ export class CostOptimizer {
           return false;
         }
       }
-      
-      // Check role access
-      if (model.allowedRoles && model.allowedRoles.length > 0) {
-        // Would need to check user roles here
-        // For now, skip restricted models
-        return false;
-      }
-      
+
+      // NOTE: per-resource access (roles/groups) is NOT enforced here. This
+      // optimizer only ranks/filters among models the caller is ALREADY entitled
+      // to; the authoritative access gate is userCanAccessResource at model
+      // resolution (#1206). The prior stub here unconditionally dropped EVERY
+      // restricted model for EVERYONE (a "would need to check user roles"
+      // placeholder that never was) — removed so a legitimately-granted model is
+      // not silently excluded from cost optimization.
+
       // Filter based on priority
       if (request.priority === 'speed' && (model.averageLatencyMs || 0) > 2000) {
         return false;

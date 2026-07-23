@@ -9,13 +9,32 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { FileText, Hash } from "lucide-react"
+import { FileText, Hash, MapPin } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { formatRepositorySourceLocator } from "@/lib/repositories/citation-label"
 
 interface SearchResultsProps {
   results: SearchResult[]
   query: string
   isLoading?: boolean
+}
+
+function ResultCitation({ result }: { result: SearchResult }) {
+  const label = result.citation
+    ? formatRepositorySourceLocator(result.citation.sourceLocator)
+    : null
+  if (!label || !result.citation) return null
+  return (
+    <>
+      <MapPin className="ml-2 h-3 w-3" />
+      {label}
+      <span className="sr-only">
+        {result.citation.versionNumber > 0
+          ? `, source version ${result.citation.versionNumber}`
+          : ", legacy source pending canonical backfill"}
+      </span>
+    </>
+  )
 }
 
 export function SearchResults({ results, query, isLoading }: SearchResultsProps) {
@@ -111,6 +130,7 @@ export function SearchResults({ results, query, isLoading }: SearchResultsProps)
                 <CardDescription className="flex items-center gap-2">
                   <Hash className="h-3 w-3" />
                   Chunk {typeof result.chunkIndex === 'number' ? result.chunkIndex + 1 : 1}
+                  <ResultCitation result={result} />
                 </CardDescription>
               </div>
               <Badge 

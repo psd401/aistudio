@@ -13,7 +13,6 @@ interface ModelSelectorFormAdapterProps {
   className?: string
   showDescription?: boolean
   requiredCapabilities?: string[]
-  hideRoleRestricted?: boolean
   hideCapabilityMissing?: boolean
 }
 
@@ -30,7 +29,6 @@ export function ModelSelectorFormAdapter({
   className,
   showDescription = true,
   requiredCapabilities = [],
-  hideRoleRestricted = false,
   hideCapabilityMissing = false
 }: ModelSelectorFormAdapterProps) {
   // Convert string ID to model object
@@ -55,7 +53,6 @@ export function ModelSelectorFormAdapter({
       showDescription={showDescription}
       groupByProvider={true}
       requiredCapabilities={requiredCapabilities}
-      hideRoleRestricted={hideRoleRestricted}
       hideCapabilityMissing={hideCapabilityMissing}
     />
   )

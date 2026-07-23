@@ -45,6 +45,7 @@ import {
   modelComparisons,
   modelReplacementAudit,
   promptLibrary,
+  resourceAccessGrants,
 } from "@/lib/db/schema";
 import { createLogger, generateRequestId } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
@@ -63,7 +64,6 @@ export interface AIModelData {
   provider: string;
   description?: string | null;
   capabilities?: string | null;
-  allowedRoles?: string[] | null;
   maxTokens?: number | null;
   active?: boolean;
   nexusEnabled?: boolean;
@@ -71,6 +71,9 @@ export interface AIModelData {
   inputCostPer1kTokens?: string | null;
   outputCostPer1kTokens?: string | null;
   cachedInputCostPer1kTokens?: string | null;
+  // Cache-WRITE rate (migration 092, issue #1089). Pairs with the cache-read
+  // rate above so an admin can price a caching-capable model end-to-end.
+  cacheWriteCostPer1kTokens?: string | null;
   pricingUpdatedAt?: Date | null;
   averageLatencyMs?: number | null;
   maxConcurrency?: number | null;
@@ -84,7 +87,6 @@ export interface AIModelUpdateData {
   provider?: string;
   description?: string | null;
   capabilities?: string | null;
-  allowedRoles?: string[] | null;
   maxTokens?: number | null;
   active?: boolean;
   nexusEnabled?: boolean;
@@ -92,6 +94,8 @@ export interface AIModelUpdateData {
   inputCostPer1kTokens?: string | null;
   outputCostPer1kTokens?: string | null;
   cachedInputCostPer1kTokens?: string | null;
+  // Cache-WRITE rate (migration 092, issue #1089).
+  cacheWriteCostPer1kTokens?: string | null;
   pricingUpdatedAt?: Date | null;
   averageLatencyMs?: number | null;
   maxConcurrency?: number | null;
@@ -117,7 +121,6 @@ export async function getAIModels() {
           modelId: aiModels.modelId,
           description: aiModels.description,
           capabilities: aiModels.capabilities,
-          allowedRoles: aiModels.allowedRoles,
           maxTokens: aiModels.maxTokens,
           active: aiModels.active,
           nexusEnabled: aiModels.nexusEnabled,
@@ -127,6 +130,7 @@ export async function getAIModels() {
           inputCostPer1kTokens: aiModels.inputCostPer1kTokens,
           outputCostPer1kTokens: aiModels.outputCostPer1kTokens,
           cachedInputCostPer1kTokens: aiModels.cachedInputCostPer1kTokens,
+          cacheWriteCostPer1kTokens: aiModels.cacheWriteCostPer1kTokens,
           pricingUpdatedAt: aiModels.pricingUpdatedAt,
           averageLatencyMs: aiModels.averageLatencyMs,
           maxConcurrency: aiModels.maxConcurrency,
@@ -314,7 +318,6 @@ export async function createAIModel(modelData: AIModelData) {
           provider: modelData.provider,
           description: modelData.description,
           capabilities: modelData.capabilities,
-          allowedRoles: modelData.allowedRoles,
           maxTokens: modelData.maxTokens,
           active: modelData.active ?? true,
           nexusEnabled: modelData.nexusEnabled ?? true,
@@ -322,6 +325,7 @@ export async function createAIModel(modelData: AIModelData) {
           inputCostPer1kTokens: modelData.inputCostPer1kTokens,
           outputCostPer1kTokens: modelData.outputCostPer1kTokens,
           cachedInputCostPer1kTokens: modelData.cachedInputCostPer1kTokens,
+          cacheWriteCostPer1kTokens: modelData.cacheWriteCostPer1kTokens,
           pricingUpdatedAt: modelData.pricingUpdatedAt,
           averageLatencyMs: modelData.averageLatencyMs,
           maxConcurrency: modelData.maxConcurrency,
@@ -354,14 +358,26 @@ export async function updateAIModel(id: number, updates: AIModelUpdateData) {
 }
 
 /**
- * Delete an AI model
+ * Delete an AI model. Also removes any per-resource access grants on the model
+ * (#1206) in the SAME transaction, so a recycled serial id can never inherit a
+ * departed model's grants.
  */
 export async function deleteAIModel(id: number) {
-  const result = await executeQuery(
-    (db) => db.delete(aiModels).where(eq(aiModels.id, id)).returning(),
+  return executeTransaction(
+    async (tx) => {
+      await tx
+        .delete(resourceAccessGrants)
+        .where(
+          and(
+            eq(resourceAccessGrants.resourceType, "model"),
+            eq(resourceAccessGrants.resourceId, String(id))
+          )
+        );
+      const result = await tx.delete(aiModels).where(eq(aiModels.id, id)).returning();
+      return result[0];
+    },
     "deleteAIModel"
   );
-  return result[0];
 }
 
 /**
@@ -729,7 +745,6 @@ export interface BulkModelImportData {
   active?: boolean;
   nexusEnabled?: boolean;
   architectEnabled?: boolean;
-  allowedRoles?: string[] | null;
   inputCostPer1kTokens?: string | null;
   outputCostPer1kTokens?: string | null;
   cachedInputCostPer1kTokens?: string | null;
@@ -803,7 +818,6 @@ export async function bulkImportAIModels(
                 active: "active" in model ? model.active : existing.active,
                 nexusEnabled: "nexusEnabled" in model ? model.nexusEnabled : existing.nexusEnabled,
                 architectEnabled: "architectEnabled" in model ? model.architectEnabled : existing.architectEnabled,
-                allowedRoles: "allowedRoles" in model ? model.allowedRoles : existing.allowedRoles,
                 inputCostPer1kTokens:
                   "inputCostPer1kTokens" in model ? model.inputCostPer1kTokens : existing.inputCostPer1kTokens,
                 outputCostPer1kTokens:
@@ -826,7 +840,6 @@ export async function bulkImportAIModels(
               active: model.active ?? true,
               nexusEnabled: model.nexusEnabled ?? true,
               architectEnabled: model.architectEnabled ?? true,
-              allowedRoles: model.allowedRoles,
               inputCostPer1kTokens: model.inputCostPer1kTokens,
               outputCostPer1kTokens: model.outputCostPer1kTokens,
               cachedInputCostPer1kTokens: model.cachedInputCostPer1kTokens,

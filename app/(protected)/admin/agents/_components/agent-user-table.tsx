@@ -60,6 +60,9 @@ export function AgentUserTable({ data, loading = false }: AgentUserTableProps) {
               <TableHead className="text-right">Messages</TableHead>
               <TableHead className="text-right">Tokens</TableHead>
               <TableHead className="text-right">Sessions</TableHead>
+              {/* Iteration telemetry (issue #1161) */}
+              <TableHead className="text-right">Avg Calls/Turn</TableHead>
+              <TableHead className="text-right">Nudge Rate</TableHead>
               <TableHead className="text-right">Last Active</TableHead>
             </TableRow>
           </TableHeader>
@@ -77,6 +80,12 @@ export function AgentUserTable({ data, loading = false }: AgentUserTableProps) {
                 </TableCell>
                 <TableCell className="text-right">
                   {item.sessionCount.toLocaleString()}
+                </TableCell>
+                <TableCell className="text-right">
+                  {item.avgModelCallsPerTurn.toFixed(1)}
+                </TableCell>
+                <TableCell className="text-right">
+                  {`${(item.nudgeFireRate * 100).toFixed(1)}%`}
                 </TableCell>
                 <TableCell className="text-right text-sm text-muted-foreground">
                   {formatDate(item.lastActive, true)}

@@ -14,9 +14,11 @@ import { ConversationInitializer } from '../_components/conversation-initializer
 import { DecisionToolUIs } from './_components/tools/decision-tools-ui'
 import { ChartVisualizationUI } from '../_components/tools/chart-visualization-ui'
 import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
+import { UploadClassifiedError } from '@/lib/errors/upload-errors'
 import { validateConversationId, navigateToDecisionCaptureConversation, navigateToNewDecisionCapture } from '@/lib/nexus/conversation-navigation'
 import { createLogger } from '@/lib/client-logger'
 import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handler'
+import { toast } from 'sonner'
 
 /**
  * Decision Capture Page
@@ -98,6 +100,35 @@ function DecisionRuntimeProvider({
     })
   }, [])
 
+  const handleAttachmentError = useCallback((attachmentId: string, error: UploadClassifiedError | Error) => {
+    log.warn('Attachment processing failed', {
+      attachmentId,
+      code: error instanceof UploadClassifiedError ? error.code : undefined,
+      error: error.message,
+    })
+
+    if (error instanceof UploadClassifiedError && error.code === 'UNAUTHORIZED') {
+      toast.error('Session expired', {
+        description: 'Your session expired during file upload. Please sign in again.',
+        duration: 8000,
+        action: {
+          label: 'Sign in',
+          onClick: () => {
+            const callbackUrl = encodeURIComponent(window.location.pathname + window.location.search)
+            window.location.href = `/api/auth/signin?callbackUrl=${callbackUrl}`
+          },
+        },
+      })
+    } else {
+      toast.error('File upload failed', {
+        description: error instanceof UploadClassifiedError
+          ? `Upload error: ${error.code.replace(/_/g, ' ').toLowerCase()}.`
+          : 'The file could not be uploaded. Please try again.',
+        duration: 6000,
+      })
+    }
+  }, [])
+
   // Custom fetch to intercept conversation ID header and handle content safety blocks
   const customFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
     const response = await fetch(input, init)
@@ -121,8 +152,14 @@ function DecisionRuntimeProvider({
     return createEnhancedNexusAttachmentAdapter({
       onProcessingStart: handleAttachmentProcessingStart,
       onProcessingComplete: handleAttachmentProcessingComplete,
+      onError: handleAttachmentError,
+    }, {
+      // Decision Capture continues to send the extracted transcript to its
+      // specialized route. Its repository migration is intentionally separate
+      // from the Nexus chat cutover so changing the shared factory cannot break it.
+      repositoryBacked: false,
     })
-  }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete])
+  }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete, handleAttachmentError])
 
   // Chat runtime — no model picker needed, model is admin-configured
   const runtime = useChatRuntime({

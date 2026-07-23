@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
+import { ResourceGrantsEditor } from "@/components/features/resource-grants"
 import {
   Select,
   SelectContent,
@@ -43,11 +44,11 @@ export interface ModelFormData {
   active: boolean
   nexusEnabled: boolean
   architectEnabled: boolean
-  allowedRoles: string[]
   // Pricing
   inputCostPer1kTokens: string | null
   outputCostPer1kTokens: string | null
   cachedInputCostPer1kTokens: string | null
+  cacheWriteCostPer1kTokens: string | null
   // Performance (not displayed but preserved)
   averageLatencyMs: number | null
   maxConcurrency: number | null
@@ -69,10 +70,10 @@ const emptyFormData: ModelFormData = {
   active: true,
   nexusEnabled: true,
   architectEnabled: true,
-  allowedRoles: [],
   inputCostPer1kTokens: null,
   outputCostPer1kTokens: null,
   cachedInputCostPer1kTokens: null,
+  cacheWriteCostPer1kTokens: null,
   averageLatencyMs: null,
   maxConcurrency: null,
   supportsBatching: false,
@@ -99,8 +100,6 @@ interface ModelDetailModalProps {
   onOpenChange: (open: boolean) => void
   onSave: (data: ModelFormData) => Promise<void>
   onDelete?: (model: SelectAiModel) => void
-  roleOptions: MultiSelectOption[]
-  roleLoading?: boolean
 }
 
 export function ModelDetailModal({
@@ -110,8 +109,6 @@ export function ModelDetailModal({
   onOpenChange,
   onSave,
   onDelete,
-  roleOptions,
-  roleLoading = false,
 }: ModelDetailModalProps) {
   const { toast } = useToast()
   const [formData, setFormData] = useState<ModelFormData>(emptyFormData)
@@ -127,6 +124,7 @@ export function ModelDetailModal({
     inputCostPer1kTokens?: string
     outputCostPer1kTokens?: string
     cachedInputCostPer1kTokens?: string
+    cacheWriteCostPer1kTokens?: string
   }>({})
 
   // Initialize form data when model changes
@@ -151,12 +149,6 @@ export function ModelDetailModal({
         }
       }
 
-      // Parse allowed roles
-      let allowedRoles: string[] = []
-      if (model.allowedRoles && Array.isArray(model.allowedRoles)) {
-        allowedRoles = model.allowedRoles
-      }
-
       setFormData({
         id: model.id,
         name: model.name,
@@ -169,10 +161,10 @@ export function ModelDetailModal({
         active: model.active,
         nexusEnabled: model.nexusEnabled ?? true,
         architectEnabled: model.architectEnabled ?? true,
-        allowedRoles,
         inputCostPer1kTokens: model.inputCostPer1kTokens || null,
         outputCostPer1kTokens: model.outputCostPer1kTokens || null,
         cachedInputCostPer1kTokens: model.cachedInputCostPer1kTokens || null,
+        cacheWriteCostPer1kTokens: model.cacheWriteCostPer1kTokens || null,
         averageLatencyMs: model.averageLatencyMs || null,
         maxConcurrency: model.maxConcurrency || null,
         supportsBatching: model.supportsBatching || false,
@@ -209,7 +201,7 @@ export function ModelDetailModal({
 
   // Cost field handler with validation
   const handleCostChange = useCallback(
-    (field: "inputCostPer1kTokens" | "outputCostPer1kTokens" | "cachedInputCostPer1kTokens") =>
+    (field: "inputCostPer1kTokens" | "outputCostPer1kTokens" | "cachedInputCostPer1kTokens" | "cacheWriteCostPer1kTokens") =>
       (e: React.ChangeEvent<HTMLInputElement>) => {
         const value = e.target.value
 
@@ -445,25 +437,21 @@ export function ModelDetailModal({
                     />
                   </div>
 
-                  {/* Allowed Roles */}
+                  {/* Access — authoritative per-resource grants (roles + groups), #1206 */}
                   <div className="space-y-2">
-                    <Label>
-                      Allowed Roles
-                      {roleLoading && (
-                        <span className="ml-2 text-xs text-muted-foreground">(Loading...)</span>
-                      )}
-                    </Label>
-                    <MultiSelect
-                      options={roleOptions}
-                      value={formData.allowedRoles}
-                      onChange={(v) => updateField("allowedRoles", v)}
-                      placeholder={roleLoading ? "Loading roles..." : "All roles (unrestricted)"}
-                      disabled={roleLoading}
-                      className="w-full"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Leave empty to allow access for all roles
-                    </p>
+                    <Label>Access</Label>
+                    {isNew || !model ? (
+                      <p className="text-xs text-muted-foreground">
+                        New models are available to everyone. Save the model first, then reopen it to
+                        restrict access to specific roles or Google groups.
+                      </p>
+                    ) : (
+                      <ResourceGrantsEditor
+                        resourceType="model"
+                        resourceId={model.id}
+                        resourceLabel={model.name}
+                      />
+                    )}
                   </div>
                 </div>
               </div>
@@ -592,6 +580,26 @@ export function ModelDetailModal({
                       {costErrors.cachedInputCostPer1kTokens && (
                         <p id="cachedCost-error" className="text-sm text-destructive">
                           {costErrors.cachedInputCostPer1kTokens}
+                        </p>
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="cacheWriteCost">Cache Write Cost per 1K ($)</Label>
+                      <Input
+                        id="cacheWriteCost"
+                        type="number"
+                        step="0.000001"
+                        value={formData.cacheWriteCostPer1kTokens || ""}
+                        onChange={handleCostChange("cacheWriteCostPer1kTokens")}
+                        placeholder="0.000000"
+                        aria-invalid={!!costErrors.cacheWriteCostPer1kTokens}
+                        aria-describedby={
+                          costErrors.cacheWriteCostPer1kTokens ? "cacheWriteCost-error" : undefined
+                        }
+                      />
+                      {costErrors.cacheWriteCostPer1kTokens && (
+                        <p id="cacheWriteCost-error" className="text-sm text-destructive">
+                          {costErrors.cacheWriteCostPer1kTokens}
                         </p>
                       )}
                     </div>

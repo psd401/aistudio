@@ -1,14 +1,20 @@
 "use server"
 
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { handleError, createSuccess } from "@/lib/error-utils"
+import { handleError, createSuccess, ErrorFactories } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
-import { desc, eq, sql } from "drizzle-orm"
+import { and, desc, eq, sql } from "drizzle-orm"
 import { psdAgentSkills } from "@/lib/db/schema/tables/agent-skills"
 import { psdAgentSkillAudit } from "@/lib/db/schema/tables/agent-skill-audit"
+import { resourceAccessGrants } from "@/lib/db/schema/tables/resource-access-grants"
 import type { SkillScanFindings } from "@/lib/db/schema/tables/agent-skills"
+import {
+  registerSkillCatalogTool,
+  deactivateSkillCatalogTool,
+} from "@/lib/skills/skill-catalog-registration"
+import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 
 export interface SkillRow {
   id: string
@@ -225,6 +231,21 @@ export async function approveSkillToShared(
 
     await executeTransaction(
       async (tx) => {
+        // Read the skill's slug + summary so the catalog tool can be registered
+        // atomically with the scope change.
+        const [skill] = await tx
+          .select({
+            name: psdAgentSkills.name,
+            summary: psdAgentSkills.summary,
+          })
+          .from(psdAgentSkills)
+          .where(eq(psdAgentSkills.id, skillId))
+          .limit(1)
+
+        if (!skill) {
+          throw ErrorFactories.dbRecordNotFound("psd_agent_skills", skillId)
+        }
+
         await tx
           .update(psdAgentSkills)
           .set({
@@ -236,6 +257,16 @@ export async function approveSkillToShared(
           })
           .where(eq(psdAgentSkills.id, skillId))
 
+        // AC#5: register the approved skill as a `source: 'skill'` tool in the
+        // unified tool catalog so every surface can discover/invoke it.
+        await registerSkillCatalogTool(tx, {
+          skillId,
+          // psd_agent_skills.name stores the URL-safe slug (the serializer writes
+          // name: serialized.slug), not a human display name.
+          slug: skill.name,
+          summary: skill.summary,
+        })
+
         await tx.insert(psdAgentSkillAudit).values({
           skillId,
           action: "approved_to_shared",
@@ -245,6 +276,9 @@ export async function approveSkillToShared(
       },
       "approveSkillToShared"
     )
+
+    // Bust the 5-minute catalog cache so the new skill tool is live immediately.
+    toolCatalogInstance.invalidate()
 
     timer({ status: "success" })
     log.info("Skill approved to shared", sanitizeForLogging({ skillId, adminUserId }))
@@ -282,10 +316,17 @@ export async function rejectSkill(
 
     await executeTransaction(
       async (tx) => {
-        await tx
+        const [skill] = await tx
           .update(psdAgentSkills)
           .set({ scope: "rejected", updatedAt: new Date() })
           .where(eq(psdAgentSkills.id, skillId))
+          .returning({ name: psdAgentSkills.name })
+
+        // A rejected skill must not remain invocable: deactivate any catalog row
+        // (no-op if it was never approved / registered).
+        if (skill?.name) {
+          await deactivateSkillCatalogTool(tx, skill.name)
+        }
 
         await tx.insert(psdAgentSkillAudit).values({
           skillId,
@@ -296,6 +337,8 @@ export async function rejectSkill(
       },
       "rejectSkill"
     )
+
+    toolCatalogInstance.invalidate()
 
     timer({ status: "success" })
     log.info("Skill rejected", sanitizeForLogging({ skillId, adminUserId }))
@@ -403,10 +446,29 @@ export async function deleteSkill(
           },
         })
 
+        // Deactivate any catalog row before removing the skill so it stops being
+        // offered (no-op if the skill was never approved / registered).
+        if (skill?.name) {
+          await deactivateSkillCatalogTool(tx, skill.name)
+        }
+
+        // Remove any per-resource access grants keyed to this skill (#1206) in
+        // the same transaction so no orphan grant lingers after deletion.
+        await tx
+          .delete(resourceAccessGrants)
+          .where(
+            and(
+              eq(resourceAccessGrants.resourceType, "skill"),
+              eq(resourceAccessGrants.resourceId, skillId)
+            )
+          )
+
         await tx.delete(psdAgentSkills).where(eq(psdAgentSkills.id, skillId))
       },
       "deleteSkill"
     )
+
+    toolCatalogInstance.invalidate()
 
     timer({ status: "success" })
     log.info("Skill deleted", sanitizeForLogging({ skillId, adminUserId }))

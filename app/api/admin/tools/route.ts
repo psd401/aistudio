@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { requireAdmin } from "@/lib/auth/admin-check"
-import { getTools } from "@/lib/db/drizzle"
+import { getCapabilities } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 
 export async function GET() {
@@ -19,8 +19,8 @@ export async function GET() {
       return authError;
     }
 
-    // Get all tools using Drizzle
-    const result = await getTools()
+    // Get all active capabilities (the "tools" selection list, #928)
+    const result = await getCapabilities({ activeOnly: true })
 
     const tools = result.map((record) => ({
       id: String(record.id),

@@ -4,12 +4,28 @@
  */
 import { UIMessage, createUIMessageStream, createUIMessageStreamResponse } from 'ai';
 import { sql, and, desc, eq } from 'drizzle-orm';
-import { executeQuery } from '@/lib/db/drizzle-client';
+import { executeQuery, executeTransaction } from '@/lib/db/drizzle-client';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
 import { getAttachmentFromS3 } from '@/lib/services/attachment-storage-service';
+import { getObjectStream } from '@/lib/aws/s3-client';
 import { sanitizeTextForDatabase } from '@/lib/utils/text-sanitizer';
 import { safeJsonbStringify } from '@/lib/db/json-utils';
+import { assertSafeFetchUrl } from '@/lib/agents/agent-tools/web-fetch';
+import { deleteDocumentVersions } from '@/lib/aws/s3-client';
 import { createLogger } from '@/lib/logger';
+import type { NexusAttachmentImageSource } from '@/lib/nexus/ephemeral-repository-service';
+import { isRepositorySourceObjectKey } from '@/lib/repositories/content-platform/object-key';
+
+/**
+ * A client-supplied reference `s3Key` (or `s3://` URL) must live under the
+ * ownership-verified conversation's own attachment prefix (REV-SEC-144). Attachment
+ * keys are written as `conversations/${conversationId}/attachments/...`, so any key
+ * outside that prefix points at another conversation/user's object and must be
+ * rejected before any S3 read.
+ */
+function isKeyInConversationPrefix(s3Key: string, conversationId: string): boolean {
+  return s3Key.startsWith(`conversations/${conversationId}/attachments/`);
+}
 
 const log = createLogger({ route: 'api.nexus.chat.image' });
 
@@ -32,12 +48,111 @@ export interface ImageGenerationParams {
   timer: (data: Record<string, unknown>) => void;
 }
 
+/**
+ * Remove a generated object when the subsequent durable message transaction
+ * fails. The key comes from the server-side image service, but still enforce
+ * the conversation-scoped generated-image prefix before deleting anything.
+ */
+export async function deleteUnpersistedGeneratedImage(params: {
+  conversationId: string;
+  s3Key?: string;
+}): Promise<boolean> {
+  const { conversationId, s3Key } = params;
+  if (
+    !s3Key ||
+    !s3Key.startsWith(`v2/generated-images/${conversationId}/`)
+  ) {
+    return false;
+  }
+  await deleteDocumentVersions(s3Key);
+  return true;
+}
+
 interface ReferenceImage {
   base64?: string;
   url?: string;
   s3Key?: string;
   mimeType?: string;
   role?: 'reference' | 'mask';
+}
+
+const MAX_CANONICAL_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
+// SVG intentionally excluded — it can embed scripts and event handlers.
+const ALLOWED_IMAGE_MIMES = new Set([
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
+  'image/avif', 'image/heic', 'image/heif'
+]);
+
+/**
+ * Load the exact immutable repository versions resolved for canonical markers.
+ * Caller-supplied inline pixels are deliberately ignored whenever markers are
+ * present, preventing marker A from being paired with unrelated image B.
+ */
+export async function extractCanonicalRepositoryImages(
+  sources: readonly NexusAttachmentImageSource[]
+): Promise<ReferenceImage[]> {
+  const images: ReferenceImage[] = [];
+  for (const source of sources) {
+    if (
+      !isRepositorySourceObjectKey(source.repositoryId, source.objectKey)
+    ) {
+      throw Object.assign(new Error('Canonical image source is invalid'), {
+        type: 'INVALID_ATTACHMENT',
+      });
+    }
+    if (
+      source.byteSize != null &&
+      source.byteSize > MAX_CANONICAL_REFERENCE_IMAGE_BYTES
+    ) {
+      throw Object.assign(new Error('Canonical image source is too large'), {
+        type: 'INVALID_ATTACHMENT',
+      });
+    }
+
+    const object = await getObjectStream(source.objectKey);
+    if (
+      object.contentLength != null &&
+      object.contentLength > MAX_CANONICAL_REFERENCE_IMAGE_BYTES
+    ) {
+      throw Object.assign(new Error('Canonical image source is too large'), {
+        type: 'INVALID_ATTACHMENT',
+      });
+    }
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    for await (const chunk of object.stream) {
+      const buffer =
+        typeof chunk === 'string'
+          ? Buffer.from(chunk)
+          : Buffer.from(chunk as Uint8Array);
+      totalBytes += buffer.byteLength;
+      if (totalBytes > MAX_CANONICAL_REFERENCE_IMAGE_BYTES) {
+        object.stream.destroy();
+        throw Object.assign(new Error('Canonical image source is too large'), {
+          type: 'INVALID_ATTACHMENT',
+        });
+      }
+      chunks.push(buffer);
+    }
+
+    const mimeType = (
+      source.detectedContentType ??
+      object.contentType ??
+      source.declaredContentType ??
+      ''
+    ).split(';', 1)[0]?.trim().toLowerCase();
+    if (!mimeType || !ALLOWED_IMAGE_MIMES.has(mimeType)) {
+      throw Object.assign(new Error('Canonical image source is not an image'), {
+        type: 'INVALID_ATTACHMENT',
+      });
+    }
+    images.push({
+      base64: `data:${mimeType};base64,${Buffer.concat(chunks).toString('base64')}`,
+      mimeType,
+      role: 'reference',
+    });
+  }
+  return images;
 }
 
 /**
@@ -119,10 +234,31 @@ export async function getOrCreateImageConversation(params: {
   imageProvider: string;
   modelId: string;
   userId: number;
+  requestId: string;
 }): Promise<{ conversationId: string; title: string } | { error: Response }> {
-  const { existingConversationId, imagePrompt, imageProvider, modelId, userId } = params;
+  const { existingConversationId, imagePrompt, imageProvider, modelId, userId, requestId } = params;
 
   if (existingConversationId) {
+    const owned = await executeQuery(
+      (db) => db
+        .select({ id: nexusConversations.id })
+        .from(nexusConversations)
+        .where(and(
+          eq(nexusConversations.id, existingConversationId),
+          eq(nexusConversations.userId, userId)
+        ))
+        .limit(1),
+      'verifyImageConversationOwnership'
+    );
+    if (!owned || owned.length === 0) {
+      log.warn('Image conversation ownership check failed — access denied', { existingConversationId, userId });
+      return {
+        error: new Response(
+          JSON.stringify({ error: 'Conversation not found or access denied', requestId }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
+        )
+      };
+    }
     return { conversationId: existingConversationId, title: 'Image Generation' };
   }
 
@@ -166,36 +302,114 @@ export async function getOrCreateImageConversation(params: {
 }
 
 /**
- * Save user message for image generation
+ * Persist an image-generation exchange atomically (REV-DB-047 / REV-COR-220).
+ *
+ * The user-prompt row, the assistant image row, and the conversation-stats
+ * increment previously ran as three independent queries with a hardcoded
+ * `message_count + 2`, so a failure between them left the counter out of sync with
+ * the actual rows. Wrapping all three in one executeTransaction makes the `+2`
+ * guaranteed correct (both rows are inserted in the same unit). Image generation
+ * and S3 access are side effects and stay OUTSIDE this transaction — only the DB
+ * writes are inside.
  */
-export async function saveImageUserMessage(params: {
+export async function persistImageExchange(params: {
   conversationId: string;
   imagePrompt: string;
+  userContent?: string;
+  userParts?: unknown[];
+  imageResult: {
+    imageUrl: string;
+    s3Key?: string;
+    model?: string;
+    provider?: string;
+    altText?: string;
+    dimensions?: { width: number; height: number };
+    estimatedCost?: number;
+  };
   dbModelId: number;
+  routingMetadata?: Record<string, unknown>;
 }): Promise<void> {
-  const { conversationId, imagePrompt, dbModelId } = params;
+  const {
+    conversationId,
+    imagePrompt,
+    userContent = imagePrompt,
+    userParts = [{ type: 'text', text: imagePrompt }],
+    imageResult,
+    dbModelId,
+    routingMetadata = {},
+  } = params;
 
-  await executeQuery(
-    (db) => db.insert(nexusMessages)
-      .values({
-        id: crypto.randomUUID(),
-        conversationId,
-        role: 'user',
-        content: imagePrompt,
-        parts: sql`${safeJsonbStringify([{ type: 'text', text: imagePrompt }])}::jsonb`,
-        modelId: dbModelId,
-        metadata: sql`${safeJsonbStringify({})}::jsonb`,
-        createdAt: new Date()
-      }),
-    'saveImageUserMessage'
-  );
+  // Build assistant parts/content outside the transaction (pure computation).
+  const messageParts: Array<{
+    type: string;
+    text?: string;
+    imageUrl?: string;
+    s3Key?: string;
+    altText?: string;
+  }> = [];
+
+  if (imageResult.altText && imageResult.altText.trim()) {
+    messageParts.push({ type: 'text', text: imageResult.altText.trim() });
+  }
+
+  messageParts.push({
+    type: 'image',
+    imageUrl: imageResult.imageUrl,
+    s3Key: imageResult.s3Key,
+    altText: 'Generated image'
+  });
+
+  const assistantMessageContent = JSON.stringify({
+    type: 'image',
+    imageUrl: imageResult.imageUrl,
+    s3Key: imageResult.s3Key,
+    model: imageResult.model,
+    provider: imageResult.provider,
+    altText: imageResult.altText,
+    dimensions: imageResult.dimensions
+  });
+
+  await executeTransaction(async (tx) => {
+    await tx.insert(nexusMessages).values({
+      id: crypto.randomUUID(),
+      conversationId,
+      role: 'user',
+      content: userContent,
+      parts: sql`${safeJsonbStringify(userParts)}::jsonb`,
+      modelId: dbModelId,
+      metadata: sql`${safeJsonbStringify({})}::jsonb`,
+      createdAt: new Date()
+    });
+
+    await tx.insert(nexusMessages).values({
+      conversationId,
+      role: 'assistant',
+      content: assistantMessageContent,
+      parts: sql`${safeJsonbStringify(messageParts)}::jsonb`,
+      modelId: dbModelId,
+      metadata: sql`${safeJsonbStringify({
+        generationType: 'image',
+        estimatedCost: imageResult.estimatedCost,
+        routing: routingMetadata,
+      })}::jsonb`,
+      createdAt: new Date()
+    });
+
+    // Both rows are inserted in this same transaction, so `+ 2` cannot desync.
+    await tx.update(nexusConversations).set({
+      messageCount: sql`${nexusConversations.messageCount} + 2`,
+      lastMessageAt: new Date(),
+      updatedAt: new Date()
+    }).where(eq(nexusConversations.id, conversationId));
+  }, 'persistImageExchange');
 }
 
 /**
  * Extract reference images from message parts
  */
 export async function extractReferenceImages(
-  lastMessage: ImageGenerationParams['messages'][0] | undefined
+  lastMessage: ImageGenerationParams['messages'][0] | undefined,
+  conversationId: string
 ): Promise<ReferenceImage[]> {
   const referenceImages: ReferenceImage[] = [];
 
@@ -221,9 +435,9 @@ export async function extractReferenceImages(
 
   for (const part of partsArray) {
     if (part.type === 'image') {
-      await handleImagePart(part, referenceImages);
+      await handleImagePart(part, referenceImages, conversationId);
     } else if (part.type === 'file') {
-      await handleFilePart(part, referenceImages);
+      await handleFilePart(part, referenceImages, conversationId);
     }
   }
 
@@ -232,9 +446,16 @@ export async function extractReferenceImages(
 
 async function handleImagePart(
   part: { s3Key?: string; image?: string; imageUrl?: string },
-  referenceImages: ReferenceImage[]
+  referenceImages: ReferenceImage[],
+  conversationId: string
 ): Promise<void> {
   if (part.s3Key) {
+    // REV-SEC-144: only read an s3Key that lives under this conversation's own
+    // attachment prefix — a client can otherwise reference another tenant's key.
+    if (!isKeyInConversationPrefix(part.s3Key, conversationId)) {
+      log.warn('Rejected reference image s3Key outside conversation prefix', { conversationId });
+      return;
+    }
     try {
       const attachmentData = await getAttachmentFromS3(part.s3Key);
       if (attachmentData.image) {
@@ -258,12 +479,31 @@ async function handleImagePart(
     // Logging explicitly is safer than a silent fallback to an unusable URL.
     log.warn('Image part has s3:// URL but no s3Key — cannot retrieve');
   } else if (part.imageUrl) {
-    // s3Key is intentionally omitted — it is provably undefined here because
-    // the first branch (if part.s3Key) already handles parts that carry an s3Key.
+    // REV-SEC-142: a client-supplied reference URL is fetched server-side
+    // downstream; reject private/loopback/link-local/metadata targets (SSRF)
+    // before it can become a reference image. https-only in production.
+    if (!isSafeReferenceUrl(part.imageUrl)) {
+      log.warn('Rejected unsafe reference image URL (SSRF guard)');
+      return;
+    }
     referenceImages.push({
       url: part.imageUrl,
       role: 'reference'
     });
+  }
+}
+
+/**
+ * SSRF guard for a client-supplied reference-image URL (REV-SEC-142). Wraps the
+ * shared assertSafeFetchUrl (blocks private/loopback/link-local/metadata hosts;
+ * https-only in production) and returns a boolean so callers can skip+log.
+ */
+function isSafeReferenceUrl(url: string): boolean {
+  try {
+    assertSafeFetchUrl(url);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -301,15 +541,10 @@ async function handleS3FileImage(
   }
 }
 
-// SVG intentionally excluded — can embed <script> tags and JS event handlers (XSS vector)
-const ALLOWED_IMAGE_MIMES = new Set([
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
-  'image/avif', 'image/heic', 'image/heif'
-]);
-
 async function handleFilePart(
   part: { mediaType?: string; mimeType?: string; s3Key?: string; url?: string; data?: string },
-  referenceImages: ReferenceImage[]
+  referenceImages: ReferenceImage[],
+  conversationId: string
 ): Promise<void> {
   const mimeType = part.mediaType || part.mimeType || '';
   if (!ALLOWED_IMAGE_MIMES.has(mimeType)) {
@@ -318,6 +553,12 @@ async function handleFilePart(
 
   const s3Key = getS3KeyFromPart(part);
   if (s3Key) {
+    // REV-SEC-144: reject a client-supplied key (incl. s3:// URLs) that is not
+    // under this conversation's own attachment prefix before any S3 read.
+    if (!isKeyInConversationPrefix(s3Key, conversationId)) {
+      log.warn('Rejected reference file s3Key outside conversation prefix', { conversationId });
+      return;
+    }
     await handleS3FileImage(s3Key, mimeType, referenceImages);
     return;
   }
@@ -331,6 +572,12 @@ async function handleFilePart(
   }
 
   if (part.url) {
+    // REV-SEC-142: part.url here is a non-s3:// URL (getS3KeyFromPart already
+    // handled s3://). Reject SSRF targets before it becomes a fetched reference.
+    if (!isSafeReferenceUrl(part.url)) {
+      log.warn('Rejected unsafe reference file URL (SSRF guard)');
+      return;
+    }
     referenceImages.push({ url: part.url, mimeType, role: 'reference' });
   }
 }
@@ -339,7 +586,8 @@ async function handleFilePart(
  * Get previous generated images from conversation
  */
 export async function getPreviousGeneratedImages(
-  conversationId: string
+  conversationId: string,
+  userId: number
 ): Promise<ReferenceImage[]> {
   const referenceImages: ReferenceImage[] = [];
 
@@ -347,10 +595,15 @@ export async function getPreviousGeneratedImages(
     (db) => db
       .select({ parts: nexusMessages.parts })
       .from(nexusMessages)
+      .innerJoin(
+        nexusConversations,
+        eq(nexusMessages.conversationId, nexusConversations.id)
+      )
       .where(
         and(
           eq(nexusMessages.conversationId, conversationId),
-          eq(nexusMessages.role, 'assistant')
+          eq(nexusMessages.role, 'assistant'),
+          eq(nexusConversations.userId, userId)
         )
       )
       .orderBy(desc(nexusMessages.createdAt))
@@ -382,84 +635,42 @@ export async function getPreviousGeneratedImages(
 }
 
 /**
- * Save assistant message with generated image
+ * Determine whether routing can safely treat the current request as having image
+ * context. Persisted history is scoped to the authenticated owner because routing
+ * runs before the normal conversation ownership check.
  */
-export async function saveImageAssistantMessage(params: {
-  conversationId: string;
-  imageResult: {
-    imageUrl: string;
-    s3Key?: string;
-    model?: string;
-    provider?: string;
-    altText?: string;
-    dimensions?: { width: number; height: number };
-    estimatedCost?: number;
-  };
-  dbModelId: number;
-}): Promise<void> {
-  const { conversationId, imageResult, dbModelId } = params;
+export async function getImageRoutingContext(params: {
+  messages: ImageGenerationParams['messages'];
+  conversationId?: string;
+  userId: number;
+}): Promise<{ hasImageInput: boolean; hasPreviousGeneratedImage: boolean }> {
+  const lastUserMessage = [...params.messages].reverse().find(message => message.role === 'user');
+  const hasImageInput = lastUserMessage?.parts?.some(part => {
+    const mimeType = part.mimeType ?? part.mediaType;
+    return part.type === 'image'
+      || (part.type === 'file' && typeof mimeType === 'string' && mimeType.startsWith('image/'));
+  }) ?? false;
 
-  const messageParts: Array<{
-    type: string;
-    text?: string;
-    imageUrl?: string;
-    s3Key?: string;
-    altText?: string;
-  }> = [];
-
-  if (imageResult.altText && imageResult.altText.trim()) {
-    messageParts.push({ type: 'text', text: imageResult.altText.trim() });
+  if (hasImageInput || !params.conversationId) {
+    return { hasImageInput, hasPreviousGeneratedImage: false };
   }
 
-  messageParts.push({
-    type: 'image',
-    imageUrl: imageResult.imageUrl,
-    s3Key: imageResult.s3Key,
-    altText: 'Generated image'
-  });
-
-  const assistantMessageContent = JSON.stringify({
-    type: 'image',
-    imageUrl: imageResult.imageUrl,
-    s3Key: imageResult.s3Key,
-    model: imageResult.model,
-    provider: imageResult.provider,
-    altText: imageResult.altText,
-    dimensions: imageResult.dimensions
-  });
-
-  await executeQuery(
-    (db) => db.insert(nexusMessages)
-      .values({
-        conversationId,
-        role: 'assistant',
-        content: assistantMessageContent,
-        parts: sql`${safeJsonbStringify(messageParts)}::jsonb`,
-        modelId: dbModelId,
-        metadata: sql`${safeJsonbStringify({
-          generationType: 'image',
-          estimatedCost: imageResult.estimatedCost
-        })}::jsonb`,
-        createdAt: new Date()
-      }),
-    'saveImageAssistantMessage'
-  );
-}
-
-/**
- * Update conversation stats after image generation
- */
-export async function updateImageConversationStats(conversationId: string): Promise<void> {
-  await executeQuery(
-    (db) => db.update(nexusConversations)
-      .set({
-        messageCount: sql`${nexusConversations.messageCount} + 2`,
-        lastMessageAt: new Date(),
-        updatedAt: new Date()
-      })
-      .where(eq(nexusConversations.id, conversationId)),
-    'updateImageConversationStats'
-  );
+  try {
+    const previousImages = await getPreviousGeneratedImages(params.conversationId, params.userId);
+    return {
+      hasImageInput: false,
+      hasPreviousGeneratedImage: previousImages.length > 0,
+    };
+  } catch (error) {
+    // Prior-image context improves routing but is not required for an ordinary
+    // chat request. Degrade to no context instead of turning a lookup failure
+    // into a pre-stream 500.
+    log.warn('Could not load previous image context for routing', {
+      conversationId: params.conversationId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { hasImageInput: false, hasPreviousGeneratedImage: false };
+  }
 }
 
 /**
@@ -471,8 +682,9 @@ export function createImageStreamResponse(params: {
   conversationTitle: string;
   isNewConversation: boolean;
   requestId: string;
+  routingMetadata?: Record<string, unknown>;
 }): Response {
-  const { imageResult, conversationId, conversationTitle, isNewConversation, requestId } = params;
+  const { imageResult, conversationId, conversationTitle, isNewConversation, requestId, routingMetadata } = params;
 
   let responseContent = '';
   if (imageResult.altText && imageResult.altText.trim()) {
@@ -490,6 +702,10 @@ export function createImageStreamResponse(params: {
 
   if (isNewConversation) {
     responseHeaders['X-Conversation-Title'] = encodeURIComponent(conversationTitle);
+  }
+  if (routingMetadata) {
+    const encodedRouting = encodeURIComponent(JSON.stringify(routingMetadata));
+    if (encodedRouting.length <= 4096) responseHeaders['X-Nexus-Routing'] = encodedRouting;
   }
 
   return createUIMessageStreamResponse({
@@ -558,6 +774,23 @@ export function handleImageGenerationError(
     return new Response(
       JSON.stringify({ error: 'Image generation service authentication failed', code: 'AUTH_ERROR', requestId }),
       { status: 401, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  if (errorType === 'INVALID_ATTACHMENT') {
+    log.warn('Image generation canonical attachment rejected', {
+      conversationId,
+      errorMessage,
+      requestId,
+    });
+    return new Response(
+      JSON.stringify({
+        error:
+          'The attached repository image is unavailable for image generation.',
+        code: 'INVALID_ATTACHMENT',
+        requestId,
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
     );
   }
 

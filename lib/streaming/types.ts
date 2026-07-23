@@ -1,4 +1,6 @@
 import type { UIMessage, LanguageModel, ModelMessage, ToolSet } from 'ai';
+import type { TokenMapping } from '@/lib/safety/types';
+import type { TokenMappingSink } from '@/lib/safety/token-mapping-sink';
 import type { SSEEventEmitter } from '@/types/sse-events';
 import type { SSEEvent } from './sse-event-types';
 
@@ -33,6 +35,19 @@ export interface StreamRequest {
   enabledTools?: string[]; // Tool names to enable (tools will be created by adapter)
   enabledConnectors?: string[]; // MCP connector server IDs to enable
   maxSteps?: number; // Max tool-use round-trips (default: 1, set higher for multi-step tool use)
+  /**
+   * Per-run cost cap in whole US cents (Issue #926, agentic Assistant Architect).
+   * When set, the multi-step loop stops scheduling further steps once accumulated
+   * usage cost reaches/exceeds this cap. Null/undefined = no cap. Enforced via a
+   * `stopWhen` cost predicate in the provider adapter (alongside `maxSteps`).
+   */
+  costCapCents?: number | null;
+  /**
+   * Per-token cost rates (USD/token) used with `costCapCents` to estimate
+   * accumulated cost across steps. Omitted = the cost cap can't be evaluated and
+   * is skipped (the `maxSteps` bound still applies). (#926.)
+   */
+  costRates?: { inputPerToken: number; outputPerToken: number } | null;
 
   // Advanced model options
   options?: {
@@ -74,6 +89,22 @@ export interface StreamRequest {
   
   // Callbacks for streaming events
   callbacks?: StreamingCallbacks;
+
+  /**
+   * Token mappings pre-computed by the route (e.g. from scanning attachment text
+   * before it is moved to S3). These are merged with any tokens produced by the
+   * streaming service's own inline-text scan so the detokenization transform can
+   * reverse PII from both inline text and document attachments.
+   */
+  precomputedInputTokenMappings?: TokenMapping[];
+
+  /**
+   * Optional request-scoped sink for mappings created after streaming begins,
+   * such as PII tokens introduced by a repository retrieval tool. The response
+   * detokenizer reads this sink dynamically; callers must create a new sink for
+   * every request.
+   */
+  inputTokenMappingSink?: TokenMappingSink;
 }
 
 export interface StreamResponse {
@@ -99,6 +130,14 @@ export interface StreamConfig {
   system?: string;
   maxTokens?: number;
   maxSteps?: number;
+  /** Per-run cost cap in whole US cents; stops the loop when reached (#926). */
+  costCapCents?: number | null;
+  /**
+   * Per-token cost rates (USD per single token) used to estimate accumulated cost
+   * for the `costCapCents` stop condition. Supplied by the caller from the model
+   * row; omitted = cost cap cannot be evaluated (it is then skipped). (#926.)
+   */
+  costRates?: { inputPerToken: number; outputPerToken: number } | null;
   temperature?: number;
   timeout?: number;
   tools?: ToolSet;
@@ -191,6 +230,13 @@ export interface ToolCallData {
   result?: unknown;  // Tool execution result for persistence
 }
 
+/** A single resolved streaming step for per-step persistence */
+export interface StepCallbackData {
+  text: string;
+  toolCalls: ToolCallData[];
+  finishReason: string;
+}
+
 export interface StreamingCallbacks {
   onProgress?: (event: StreamingProgress) => void;
   onReasoning?: (reasoning: string) => void;
@@ -207,6 +253,8 @@ export interface StreamingCallbacks {
     finishReason: string;
     /** Tool calls made during this response (from all steps) */
     toolCalls?: ToolCallData[];
+    /** Per-step breakdown — populated when maxSteps > 1 (MCP connector multi-step) */
+    steps?: StepCallbackData[];
   }) => void;
   onError?: (error: Error) => void;
 

@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState, startTransition } from "react"
-import { useForm } from "react-hook-form"
+import { useForm, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import {
@@ -49,13 +49,14 @@ interface SettingsFormProps {
   onSave: (data: FormValues) => Promise<void>
   setting: Setting | null
 }
-
 const categories = [
   { value: "ai", label: "AI Configuration" },
   { value: "ai_providers", label: "AI Providers" },
   { value: "branding", label: "Branding" },
   { value: "storage", label: "Storage" },
+  { value: "Content Platform", label: "Content Platform" },
   { value: "external_services", label: "External Services" },
+  { value: "embeddings", label: "Embeddings" },
   { value: "voice", label: "Voice Mode" },
 ]
 
@@ -69,8 +70,41 @@ const commonSettings = [
   { key: "GOOGLE_API_KEY", category: "ai_providers", description: "Google AI API key for Gemini models", isSecret: true },
   { key: "OPENAI_API_KEY", category: "ai_providers", description: "OpenAI API key for GPT models", isSecret: true },
   { key: "LATIMER_API_KEY", category: "ai_providers", description: "Latimer.ai API key", isSecret: true },
+  { key: "NEXUS_ROUTER_MODE", category: "ai", description: "Nexus model router mode: active, shadow, or off", isSecret: false },
+  { key: "ASSISTANT_ARCHITECT_ROUTER_MODE", category: "ai", description: "Assistant Architect model router mode: active, shadow, or off", isSecret: false },
+  { key: "NEXUS_ROUTER_CONFIG_V1", category: "ai", description: "JSON configuration for Nexus classifier, family/tier candidates, and web-search/image/PSD-data specialists", isSecret: false },
+  { key: "EMBEDDING_MODEL_PROVIDER", category: "embeddings", description: "Repository embedding provider: amazon-bedrock, openai, or azure", isSecret: false },
+  { key: "EMBEDDING_MODEL_ID", category: "embeddings", description: "Model ID used for repository indexing and semantic queries", isSecret: false },
+  { key: "EMBEDDING_DIMENSIONS", category: "embeddings", description: "Embedding dimensions; must match the selected model and database vector column", isSecret: false },
+  { key: "EMBEDDING_MAX_TOKENS", category: "embeddings", description: "Maximum embedding input tokens before segmentation", isSecret: false },
+  { key: "EMBEDDING_BATCH_SIZE", category: "embeddings", description: "Maximum texts per provider batch when batching is supported", isSecret: false },
   { key: "S3_BUCKET", category: "storage", description: "AWS S3 bucket name for document storage", isSecret: false },
   { key: "AWS_REGION", category: "storage", description: "AWS region for S3 operations", isSecret: false },
+  { key: "CONTENT_PLATFORM_ENABLED", category: "Content Platform", description: "Enable the unified repository content platform", isSecret: false },
+  { key: "CONTENT_DUAL_WRITE_ENABLED", category: "Content Platform", description: "Write canonical content records alongside legacy repository processing", isSecret: false },
+  { key: "CONTENT_READ_V2_ENABLED", category: "Content Platform", description: "Read repository search results from active canonical index generations", isSecret: false },
+  { key: "NEXUS_ATTACHMENT_RETENTION_DAYS", category: "Content Platform", description: "Days to retain private one-off Nexus attachment repositories", isSecret: false },
+  { key: "CONTENT_DELETION_GRACE_DAYS", category: "Content Platform", description: "Recovery window before expired content is physically deleted", isSecret: false },
+  { key: "CONTENT_MAX_FILE_SIZE_GB", category: "Content Platform", description: "Maximum source upload size in GiB", isSecret: false },
+  { key: "CONTENT_MAX_PDF_SIZE_MB", category: "Content Platform", description: "Maximum PDF size for the canonical PDF processor", isSecret: false },
+  { key: "CONTENT_MAX_OFFICE_SIZE_MB", category: "Content Platform", description: "Maximum DOCX, XLSX, or PPTX size for the canonical Office processor", isSecret: false },
+  { key: "CONTENT_MAX_IMAGE_SIZE_MB", category: "Content Platform", description: "Maximum JPEG, PNG, WebP, GIF, or TIFF size for the canonical image processor", isSecret: false },
+  { key: "CONTENT_MAX_MEDIA_HOURS", category: "Content Platform", description: "Maximum audio or video duration in hours (1-4, matching Bedrock Data Automation)", isSecret: false },
+  { key: "CONTENT_MALWARE_SCAN_REQUIRED", category: "Content Platform", description: "Require a successful malware policy decision before quarantine release", isSecret: false },
+  { key: "CONTENT_OCR_STRATEGY", category: "Content Platform", description: "OCR strategy: auto, textract, or disabled", isSecret: false },
+  { key: "CONTENT_IMAGE_CAPTION_MODEL_ID", category: "Content Platform", description: "Amazon Bedrock Nova model used for canonical image descriptions", isSecret: false },
+  { key: "CONTENT_VISUAL_INDEX_ENABLED", category: "Content Platform", description: "Enable visual artifact embeddings in canonical index generations", isSecret: false },
+  { key: "CONTENT_RETRIEVAL_RERANK_ENABLED", category: "Content Platform", description: "Rerank fused repository candidates with Amazon Bedrock", isSecret: false },
+  { key: "CONTENT_RETRIEVAL_RERANK_MODEL_ID", category: "Content Platform", description: "Amazon Bedrock reranking model ID", isSecret: false },
+  { key: "CONTENT_RETRIEVAL_CANDIDATE_LIMIT", category: "Content Platform", description: "Dense and lexical candidates considered before reranking (10-100)", isSecret: false },
+  { key: "CONTENT_RETRIEVAL_NEIGHBOR_COUNT", category: "Content Platform", description: "Adjacent segments expanded on each side of a result (0-3)", isSecret: false },
+  { key: "CONTENT_RETRIEVAL_CONTEXT_TOKENS", category: "Content Platform", description: "Maximum tokenizer-counted retrieval context (500-32000)", isSecret: false },
+  { key: "CONTENT_RETRIEVAL_RRF_K", category: "Content Platform", description: "Reciprocal-rank-fusion smoothing constant (1-200)", isSecret: false },
+  { key: "CONTENT_RETRIEVAL_MAX_PER_SOURCE", category: "Content Platform", description: "Maximum selected segments per immutable source version", isSecret: false },
+  { key: "CONTENT_VISUAL_EMBEDDING_MODEL_ID", category: "Content Platform", description: "Amazon Bedrock Cohere Embed v4 model for multimodal segments", isSecret: false },
+  { key: "CONTENT_VISUAL_EMBEDDING_DIMENSIONS", category: "Content Platform", description: "Visual embedding dimensions (currently 1536)", isSecret: false },
+  { key: "GOOGLE_CONTENT_SYNC_ENABLED", category: "Content Platform", description: "Enable Google Workspace repository synchronization", isSecret: false },
+  { key: "GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES", category: "Content Platform", description: "Google Workspace reconciliation interval in minutes", isSecret: false },
   { key: "GITHUB_ISSUE_TOKEN", category: "external_services", description: "GitHub personal access token for creating issues", isSecret: true },
   { key: "BRANDING_ORG_NAME", category: "branding", description: "Organization name displayed across the application", isSecret: false },
   { key: "BRANDING_APP_NAME", category: "branding", description: "Application name displayed in titles and headers", isSecret: false },
@@ -97,6 +131,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
       isSecret: false
     }
   })
+  const selectedKey = useWatch({ control: form.control, name: "key" })
 
   useEffect(() => {
     if (!open) {
@@ -150,7 +185,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[600px]" onInteractOutside={(e) => {
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[600px]" onInteractOutside={(e) => {
         if (isSubmitting) {
           e.preventDefault()
         }
@@ -233,8 +268,8 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
                           ? "Enter new value (leave empty to keep current value)" 
                           : "Enter the setting value"
                       }
-                      className="font-mono resize-none"
-                      rows={3}
+                      className="font-mono resize-y"
+                      rows={selectedKey === "NEXUS_ROUTER_CONFIG_V1" ? 14 : 3}
                     />
                   </FormControl>
                   <FormDescription>

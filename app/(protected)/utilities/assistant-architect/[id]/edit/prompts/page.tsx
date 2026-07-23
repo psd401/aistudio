@@ -75,6 +75,8 @@ export default async function PromptsPage({ params }: PromptsPageProps) {
           prompts={sortedPrompts}
           models={models}
           inputFields={sortedInputFields}
+          modelRoutingMode={tool.modelRoutingMode}
+          modelRoutingFamily={tool.modelRoutingFamily}
         />
       </div>
       <div className="flex justify-end mt-8">

@@ -1,0 +1,7 @@
+[mcp_servers.awslabs-postgres-mcp-server]
+command = "bash"
+args = [".codex/run-postgres-mcp.sh"]
+
+[mcp_servers.playwright]
+command = "bunx"
+args = ["@playwright/mcp@latest"]

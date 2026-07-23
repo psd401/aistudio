@@ -1,0 +1,26 @@
+# Issue #1161 — trace-export sample (scripts/agent-trace-export.ts)
+# Command: NODE_ENV=test bunx tsx scripts/agent-trace-export.ts <session-id>
+# (synthetic dev data; demonstrates migration-100 model_call_count/duration_ms/nudged populated)
+
+=== Agent trace: session trace-demo-1161 ===
+2 turn(s)
+
+TURN 1  [2026-07-10T16:00:55.702Z]  message_id=8
+  model=claude-sonnet-5  model_calls=8  duration=2.4m  latency=2.3m  nudged=true  guardrail=false
+  tokens: in=12000 out=3400 cache_read=8000 cache_write=200
+  tool invocations (3):
+    [1]   +0.5s  google_search            success     1.2s  {"q":"weather"}
+    [2]   +2.1s  read_file                success    340ms  {"path":"/notes.md"}
+    [3]   +5.0s  psd_github               error      800ms  {"repo":"x"}  ERROR: rate limited
+
+TURN 2  [2026-07-10T16:01:55.720Z]  message_id=9
+  model=claude-sonnet-5  model_calls=2  duration=8.3s  latency=8.1s  nudged=false  guardrail=false
+  tokens: in=4000 out=900 cache_read=3000 cache_write=0
+  (no tool invocations recorded)
+
+=== summary ===
+  turns:        2
+  model calls:  10
+  tool calls:   3
+  duration:     2.5m
+  total tokens: 31500

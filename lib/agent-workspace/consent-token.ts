@@ -15,7 +15,20 @@ import { createLogger, sanitizeForLogging } from "@/lib/logger"
 
 const log = createLogger({ module: "consent-token" })
 
-export type ConsentTokenKind = "agent_account" | "user_account"
+/**
+ * Which credential slot the consent flow is capturing.
+ *
+ *   'agent_account' — Google OAuth for agnt_<uniqname>@psd401.net (broad scopes)
+ *   'user_account'  — Google OAuth for the user themselves (narrow scopes)
+ *   'cognito_data'  — Cognito refresh token for the data-MCP integration.
+ *                     Captured by the /agent-connect-data page, stored at
+ *                     psd-agent-creds/{env}/user/{email}/cognito-refresh.
+ *   'plaud'         — Plaud OAuth refresh token (public client, PKCE).
+ *   'canva'         — Canva Connect OAuth refresh token (confidential client,
+ *                     PKCE). Captured by /agent-connect-canva, stored at
+ *                     psd-agent-creds/{env}/user/{email}/canva.
+ */
+export type ConsentTokenKind = "agent_account" | "user_account" | "cognito_data" | "plaud" | "canva"
 
 export interface ConsentTokenPayload {
   /** Human user email (e.g. hagelk@psd401.net) */
@@ -116,7 +129,13 @@ export async function verifyConsentToken(token: string): Promise<ConsentTokenPay
 
     // Validate kind if present. Absent = legacy token, treat as agent_account.
     let resolvedKind: ConsentTokenKind | undefined
-    if (kind === "agent_account" || kind === "user_account") {
+    if (
+      kind === "agent_account" ||
+      kind === "user_account" ||
+      kind === "cognito_data" ||
+      kind === "plaud" ||
+      kind === "canva"
+    ) {
       resolvedKind = kind
     } else if (kind !== undefined) {
       log.warn("Consent token has unknown kind", { kind })

@@ -4,8 +4,9 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { handleError, createSuccess } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
-import { executeQuery } from "@/lib/db/drizzle-client"
-import { desc, eq } from "drizzle-orm"
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
+import { and, desc, eq } from "drizzle-orm"
+import { isRedirectError } from "next/dist/client/components/redirect-error"
 import { psdAgentCredentialsAudit } from "@/lib/db/schema/tables/agent-credentials-audit"
 import { psdAgentCredentialReads } from "@/lib/db/schema/tables/agent-credential-reads"
 import { psdAgentCredentialRequests } from "@/lib/db/schema/tables/agent-credential-requests"
@@ -79,6 +80,7 @@ export async function getCredentialReads(
       }))
     )
   } catch (error) {
+    if (isRedirectError(error)) throw error
     timer({ status: "error" })
     return handleError(error, "Failed to load credential reads", {
       context: "getCredentialReads",
@@ -138,6 +140,7 @@ export async function getCredentialRequests(
       }))
     )
   } catch (error) {
+    if (isRedirectError(error)) throw error
     timer({ status: "error" })
     return handleError(error, "Failed to load credential requests", {
       context: "getCredentialRequests",
@@ -182,6 +185,7 @@ export async function resolveCredentialRequest(
 
     return createSuccess({ success: true }, `Request ${status}`)
   } catch (error) {
+    if (isRedirectError(error)) throw error
     timer({ status: "error" })
     return handleError(error, "Failed to resolve credential request", {
       context: "resolveCredentialRequest",
@@ -231,6 +235,7 @@ export async function getCredentialAuditLog(
       }))
     )
   } catch (error) {
+    if (isRedirectError(error)) throw error
     timer({ status: "error" })
     return handleError(error, "Failed to load credential audit log", {
       context: "getCredentialAuditLog",
@@ -276,11 +281,407 @@ export async function logCredentialProvisioningAction(
 
     return createSuccess({ success: true })
   } catch (error) {
+    if (isRedirectError(error)) throw error
     timer({ status: "error" })
     return handleError(error, "Failed to log credential provisioning", {
       context: "logCredentialProvisioningAction",
       requestId,
       operation: "logCredentialProvisioningAction",
+    })
+  }
+}
+
+// Lowercase alphanumeric, hyphens, and underscores; must start with a letter (1-128 chars)
+const CREDENTIAL_NAME_RE = /^[a-z][\d_a-z-]{0,127}$/
+// Sanitize requestedBy for safe inclusion in Secrets Manager paths — prevent
+// directory traversal (e.g. `attacker@x.com/../shared`). Only allow
+// characters that appear in email addresses + reasonable identifiers.
+const SAFE_PATH_SEGMENT_RE = /^[\w.@-]+$/
+
+// Module-scoped client — reuses the HTTP connection pool across calls
+let _smClient: InstanceType<typeof import("@aws-sdk/client-secrets-manager").SecretsManagerClient> | null = null
+
+async function getProvisionSecretsClient() {
+  if (_smClient) return _smClient
+  const { SecretsManagerClient } = await import("@aws-sdk/client-secrets-manager")
+  _smClient = new SecretsManagerClient({
+    region: process.env.AWS_REGION ?? process.env.CDK_DEFAULT_REGION,
+  })
+  return _smClient
+}
+
+function validateSecretInputs(name: string, value: string, requestId: string): ActionState<never> | null {
+  if (!name || !CREDENTIAL_NAME_RE.test(name)) {
+    return handleError(
+      new Error("Invalid credential name"),
+      "Credential name must start with a lowercase letter and contain only lowercase letters, numbers, hyphens, or underscores (1-128 chars).",
+      { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
+    )
+  }
+  if (!value.trim()) {
+    return handleError(
+      new Error("Empty secret value"),
+      "Secret value cannot be empty or whitespace-only.",
+      { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
+    )
+  }
+  if (value.length > 65536) {
+    return handleError(
+      new Error("Secret value too large"),
+      "Secret value must be 65,536 characters or fewer (AWS Secrets Manager limit).",
+      { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
+    )
+  }
+  return null
+}
+
+/**
+ * Provision the secret for a pending credential request in one atomic
+ * admin action:
+ *   1. Load the pending request row (must be status='pending').
+ *   2. Write the secret value to AWS Secrets Manager at the right path
+ *      (shared OR user scope, per the admin's choice in the modal).
+ *   3. Mark the request `fulfilled` with the admin's identity.
+ *   4. Write an audit entry.
+ *
+ * The previous flow let admins flip the request to `fulfilled` without
+ * ever creating the secret — the agent would then keep failing because
+ * the path it expected didn't exist. This action keeps the two writes
+ * coupled so the row never lies.
+ *
+ * `scope` defaults to `shared`. Use `user` when the credential is
+ * per-user (e.g. someone's personal GitHub PAT) — the secret then lands
+ * at `psd-agent-creds/<env>/user/<requestedBy>/<credentialName>`.
+ */
+export async function provisionCredentialFromRequest(
+  requestId: number,
+  secretValue: string,
+  scope: "shared" | "user" = "shared",
+): Promise<ActionState<{ secretId: string; action: "created" | "rotated" }>> {
+  const rid = generateRequestId()
+  const timer = startTimer("provisionCredentialFromRequest")
+  const log = createLogger({ requestId: rid, action: "provisionCredentialFromRequest" })
+  // Track whether the Secrets Manager write succeeded for partial-consistency detection
+  let smWriteSucceeded = false
+  let secretIdForErrorLog = ""
+  let adminUserIdForErrorLog: number | string = ""
+
+  try {
+    const currentUser = await requireRole("administrator")
+    const adminUserId = currentUser.user.id
+    adminUserIdForErrorLog = adminUserId
+
+    // Step 1: Load the request row.
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select()
+          .from(psdAgentCredentialRequests)
+          .where(eq(psdAgentCredentialRequests.id, requestId))
+          .limit(1),
+      "agentCredentials.loadRequest",
+    )
+    if (rows.length === 0) {
+      return handleError(
+        new Error("Request not found"),
+        "Credential request not found.",
+        { context: "provisionCredentialFromRequest", requestId: rid, operation: "provisionCredentialFromRequest" },
+      )
+    }
+    const request = rows[0]
+    if (request.status !== "pending") {
+      return handleError(
+        new Error("Request not pending"),
+        `Request is already ${request.status}. Reload and try again if you need to re-provision.`,
+        { context: "provisionCredentialFromRequest", requestId: rid, operation: "provisionCredentialFromRequest" },
+      )
+    }
+
+    // Validate inputs against the same rules as provisionSharedSecret.
+    const validationError = validateSecretInputs(
+      request.credentialName,
+      secretValue,
+      rid,
+    )
+    if (validationError) return validationError
+
+    // Validate requestedBy to prevent directory traversal in the secret path
+    if (!SAFE_PATH_SEGMENT_RE.test(request.requestedBy)) {
+      return handleError(
+        new Error("Invalid requestedBy"),
+        "The requesting user's identifier contains invalid characters.",
+        { context: "provisionCredentialFromRequest", requestId: rid, operation: "provisionCredentialFromRequest" },
+      )
+    }
+
+    const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+    const secretId =
+      scope === "user"
+        ? `psd-agent-creds/${environment}/user/${request.requestedBy}/${request.credentialName}`
+        : `psd-agent-creds/${environment}/shared/${request.credentialName}`
+    secretIdForErrorLog = secretId
+
+    log.info("Provisioning credential from request", {
+      requestId,
+      secretId,
+      scope,
+      adminUserId,
+    })
+
+    let action: "created" | "rotated"
+
+    if (process.env.NODE_ENV === "development") {
+      // Local dev shortcut — skip the actual Secrets Manager write so
+      // contributors can iterate on the UI without AWS creds.
+      log.info("Local dev — skipping Secrets Manager write", { secretId })
+      action = "created"
+    } else {
+      const {
+        PutSecretValueCommand,
+        CreateSecretCommand,
+        TagResourceCommand,
+        ResourceNotFoundException,
+      } = await import("@aws-sdk/client-secrets-manager")
+      const client = await getProvisionSecretsClient()
+      // Tags must align with the ECS task role's TagKeys condition
+      // (Environment, ManagedBy, OwnerEmail) — see ecs-service.ts.
+      // Extra tags like costCenter/requestedBy/scope would cause
+      // AccessDenied from the IAM boundary.
+      const tags = [
+        { Key: "Environment", Value: environment },
+        { Key: "ManagedBy", Value: "aistudio" },
+        { Key: "OwnerEmail", Value: request.requestedBy },
+      ]
+      try {
+        await client.send(
+          new PutSecretValueCommand({ SecretId: secretId, SecretString: secretValue }),
+        )
+        await client.send(new TagResourceCommand({ SecretId: secretId, Tags: tags }))
+        action = "rotated"
+        smWriteSucceeded = true
+        log.info("Secret rotated", { secretId })
+      } catch (putError) {
+        if (!(putError instanceof ResourceNotFoundException)) throw putError
+        try {
+          await client.send(
+            new CreateSecretCommand({
+              Name: secretId,
+              SecretString: secretValue,
+              Description: `Agent credential ${request.credentialName} (${scope}) — request #${requestId}`,
+              Tags: tags,
+            }),
+          )
+          action = "created"
+          smWriteSucceeded = true
+          log.info("Secret created", { secretId })
+        } catch (createError: unknown) {
+          if (!(createError instanceof Error) || createError.name !== "ResourceExistsException") {
+            throw createError
+          }
+          await client.send(
+            new PutSecretValueCommand({ SecretId: secretId, SecretString: secretValue }),
+          )
+          await client.send(new TagResourceCommand({ SecretId: secretId, Tags: tags }))
+          action = "rotated"
+          smWriteSucceeded = true
+          log.info("Secret rotated (race recovery)", { secretId })
+        }
+      }
+    }
+
+    // Step 3 + 4: atomically flip request to fulfilled + write audit
+    // entry. The WHERE includes status='pending' so a concurrent admin
+    // clicking the same button gets a clean "already fulfilled" error
+    // instead of silently overwriting the secret.
+    const updated = await executeTransaction(
+      async (tx) => {
+        const result = await tx
+          .update(psdAgentCredentialRequests)
+          .set({
+            status: "fulfilled",
+            resolvedBy: adminUserId,
+            resolvedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(psdAgentCredentialRequests.id, requestId),
+              eq(psdAgentCredentialRequests.status, "pending"),
+            ),
+          )
+          .returning({ id: psdAgentCredentialRequests.id })
+        if (result.length === 0) {
+          throw new Error("Request is no longer pending — another admin may have already provisioned it.")
+        }
+        await tx.insert(psdAgentCredentialsAudit).values({
+          credentialName: request.credentialName,
+          scope,
+          action,
+          actorUserId: adminUserId,
+          details: { secretId, requestId, requestedBy: request.requestedBy },
+        })
+        return result
+      },
+      "agentCredentials.fulfillAndAudit",
+    )
+    if (updated.length === 0) {
+      return handleError(
+        new Error("Concurrent provisioning"),
+        "Request was already fulfilled by another admin. Reload and verify.",
+        { context: "provisionCredentialFromRequest", requestId: rid, operation: "provisionCredentialFromRequest" },
+      )
+    }
+
+    timer({ status: "success" })
+    return createSuccess(
+      { secretId, action },
+      action === "created"
+        ? `Provisioned secret ${secretId} and marked request fulfilled.`
+        : `Rotated existing secret ${secretId} and marked request fulfilled.`,
+    )
+  } catch (error) {
+    if (isRedirectError(error)) throw error
+    timer({ status: "error" })
+    // Partial consistency window — if the DB transaction threw after
+    // the Secrets Manager write succeeded, the secret exists in AWS but the
+    // request row is still 'pending'. A retry will hit the
+    // PutSecretValueCommand path (rotation) and succeed. Emit a structured
+    // error so CloudWatch Alarms can detect this state.
+    if (smWriteSucceeded) {
+      log.error("PARTIAL_CONSISTENCY: Secrets Manager write succeeded but DB transaction failed", {
+        secretId: secretIdForErrorLog,
+        requestId,
+        scope,
+        adminUserId: adminUserIdForErrorLog,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+    return handleError(error, "Failed to provision credential from request", {
+      context: "provisionCredentialFromRequest",
+      requestId: rid,
+      operation: "provisionCredentialFromRequest",
+    })
+  }
+}
+
+/** Provision (create or rotate) a shared secret in AWS Secrets Manager. */
+export async function provisionSharedSecret(
+  name: string,
+  value: string
+): Promise<ActionState<{ action: "created" | "rotated" }>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("provisionSharedSecret")
+  const log = createLogger({ requestId, action: "provisionSharedSecret" })
+
+  try {
+    const currentUser = await requireRole("administrator")
+    const adminUserId = currentUser.user.id
+
+    const validationError = validateSecretInputs(name, value, requestId)
+    if (validationError) return validationError
+
+    const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+    const secretId = `psd-agent-creds/${environment}/shared/${name}`
+
+    log.info("Provisioning shared secret", { secretId, adminUserId })
+
+    // In local development, skip Secrets Manager but still log audit
+    if (process.env.NODE_ENV === "development") {
+      log.info("Local dev mode — skipping Secrets Manager write", { secretId })
+
+      await executeQuery(
+        (db) =>
+          db.insert(psdAgentCredentialsAudit).values({
+            credentialName: name,
+            scope: "shared",
+            action: "provisioned",
+            actorUserId: adminUserId,
+            details: { secretId, environment, localDevSkipped: true },
+          }),
+        "agentCredentials.provisionAudit"
+      )
+
+      timer({ status: "success" })
+      return createSuccess({ action: "created" as const }, "Secret provisioned (local dev — Secrets Manager write skipped)")
+    }
+
+    // Write to AWS Secrets Manager
+    const {
+      PutSecretValueCommand,
+      CreateSecretCommand,
+      TagResourceCommand,
+      ResourceNotFoundException,
+    } = await import("@aws-sdk/client-secrets-manager")
+    const client = await getProvisionSecretsClient()
+
+    const tags = [
+      { Key: "Environment", Value: environment },
+      { Key: "ManagedBy", Value: "aistudio" },
+    ]
+
+    let auditAction: "created" | "rotated"
+
+    try {
+      // Try to update existing secret first (rotation case)
+      await client.send(
+        new PutSecretValueCommand({ SecretId: secretId, SecretString: value })
+      )
+      // Ensure tags are consistent on rotation (secret may have been created manually)
+      await client.send(new TagResourceCommand({ SecretId: secretId, Tags: tags }))
+      auditAction = "rotated"
+      log.info("Shared secret rotated", { secretId })
+    } catch (putError) {
+      if (!(putError instanceof ResourceNotFoundException)) throw putError
+
+      // Secret doesn't exist — create it (handle race with ResourceExistsException)
+      try {
+        await client.send(
+          new CreateSecretCommand({
+            Name: secretId,
+            SecretString: value,
+            Description: `Shared agent credential: ${name}`,
+            Tags: tags,
+          })
+        )
+        auditAction = "created"
+        log.info("Shared secret created", { secretId })
+      } catch (createError: unknown) {
+        if (!(createError instanceof Error) || createError.name !== "ResourceExistsException") {
+          throw createError
+        }
+        // Race: another admin created between our PutSecretValue and CreateSecret
+        await client.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: value }))
+        await client.send(new TagResourceCommand({ SecretId: secretId, Tags: tags }))
+        auditAction = "rotated"
+        log.info("Shared secret rotated (race recovery)", { secretId })
+      }
+    }
+
+    // Write audit entry
+    await executeQuery(
+      (db) =>
+        db.insert(psdAgentCredentialsAudit).values({
+          credentialName: name,
+          scope: "shared",
+          action: auditAction,
+          actorUserId: adminUserId,
+          details: { secretId, environment },
+        }),
+      "agentCredentials.provisionAudit"
+    )
+
+    timer({ status: "success" })
+    const message = auditAction === "created"
+      ? `Shared secret "${name}" created at ${secretId}`
+      : `Shared secret "${name}" rotated at ${secretId}`
+    return createSuccess({ action: auditAction }, message)
+  } catch (error) {
+    if (isRedirectError(error)) throw error
+    timer({ status: "error" })
+    return handleError(error, "Failed to provision shared secret", {
+      context: "provisionSharedSecret",
+      requestId,
+      operation: "provisionSharedSecret",
     })
   }
 }

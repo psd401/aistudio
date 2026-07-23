@@ -34,7 +34,7 @@ that would let one user manage another user's schedules.
 ### `create_schedule` — create a new schedule
 
 ```bash
-node /home/node/.openclaw/skills/psd-schedules/create.js \
+node /opt/psd-skills/psd-schedules/create.js \
   --user <email> \
   --name "<display name>" \
   --prompt "<what to prompt the agent at fire time>" \
@@ -47,13 +47,13 @@ node /home/node/.openclaw/skills/psd-schedules/create.js \
 ### `list_schedules` — list the caller's schedules
 
 ```bash
-node /home/node/.openclaw/skills/psd-schedules/list.js --user <email>
+node /opt/psd-skills/psd-schedules/list.js --user <email>
 ```
 
 ### `update_schedule` — change fields on an existing schedule
 
 ```bash
-node /home/node/.openclaw/skills/psd-schedules/update.js \
+node /opt/psd-skills/psd-schedules/update.js \
   --user <email> --schedule-id <id> \
   [--name "<name>"] [--prompt "<prompt>"] [--cron "<cron>"] \
   [--timezone "<tz>"] [--enabled true|false]
@@ -62,7 +62,7 @@ node /home/node/.openclaw/skills/psd-schedules/update.js \
 ### `delete_schedule` — remove a schedule permanently
 
 ```bash
-node /home/node/.openclaw/skills/psd-schedules/delete.js \
+node /opt/psd-skills/psd-schedules/delete.js \
   --user <email> --schedule-id <id>
 ```
 
@@ -123,7 +123,7 @@ OpenClaw? Take your time."
 You (correct):
 
 ```bash
-node /home/node/.openclaw/skills/psd-schedules/create.js \
+node /opt/psd-skills/psd-schedules/create.js \
   --user hagelk@psd401.net \
   --name "Google Workspace + OpenClaw research" \
   --prompt "You promised Kris at 8:05pm PT on 2026-04-22 that you'd research the best way to integrate Google Workspace with OpenClaw and come back with a recommendation. Do the web research now (clawhub.ai, OpenClaw docs, community plugins). Compare the gog CLI approach vs a custom plugin. Give a concrete recommendation with trade-offs and next steps. The user is Kris, CIO of PSD — match the communication style in USER.md." \

@@ -1,6 +1,6 @@
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq, desc } from "drizzle-orm"
-import { assistantArchitects, users, toolInputFields, chainPrompts, tools, navigationItems } from "@/lib/db/schema"
+import { assistantArchitects, users, toolInputFields, chainPrompts, navigationItems } from "@/lib/db/schema"
 import { parseRepositoryIds } from "@/lib/utils/repository-utils"
 
 /**
@@ -154,29 +154,6 @@ export async function getPendingAssistantArchitects() {
     .where(eq(assistantArchitects.status, 'pending_approval'))
     .orderBy(desc(assistantArchitects.createdAt)),
     "getPendingAssistantArchitects"
-  )
-}
-
-/**
- * Update assistant architect status to pending and deactivate in tools table
- */
-export async function updateAssistantArchitectToPending(id: number) {
-  await executeQuery(
-    (db) => db.update(tools)
-      .set({ isActive: false })
-      .where(eq(tools.promptChainToolId, id)),
-    "updateAssistantArchitectToPending"
-  )
-}
-
-/**
- * Delete assistant architect from tools table
- */
-export async function deleteAssistantArchitectFromTools(id: number) {
-  await executeQuery(
-    (db) => db.delete(tools)
-      .where(eq(tools.promptChainToolId, id)),
-    "deleteAssistantArchitectFromTools"
   )
 }
 

@@ -14,6 +14,7 @@ import {
   FormMessage
 } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useState, useEffect, useCallback, memo, useMemo, useRef, startTransition } from "react"
@@ -31,6 +32,7 @@ import { AssistantRuntimeProvider, useThreadRuntime, useLocalRuntime, type ChatM
 import { Thread } from '@/components/assistant-ui/thread'
 import { createLogger } from '@/lib/client-logger'
 import { ExecutionProgress } from './execution-progress'
+import { ToolCallTimeline } from './tool-call-timeline'
 import {
   parseSSEEvent,
   isTextDeltaEvent,
@@ -59,6 +61,8 @@ import {
 import { createSSEMonitor } from '@/lib/streaming/sse-monitoring'
 import { validateSSEEvent } from '@/lib/streaming/sse-event-schemas'
 import { processUnknownEvent } from '@/lib/streaming/graceful-degradation'
+import { sanitizeOptionLabel } from '@/lib/utils/sanitize-option-label'
+import { isConfirmationRequiredText } from '@/lib/agents/confirmation'
 
 const log = createLogger({ moduleName: 'assistant-architect-streaming' })
 
@@ -86,16 +90,6 @@ function sanitizeImagePath(imagePath: string | null): string | null {
   return sanitized
 }
 
-/**
- * Sanitize option labels to prevent XSS attacks
- * @param label - The option label from the database
- * @returns Sanitized label or empty string if invalid
- */
-function sanitizeOptionLabel(label: string): string {
-  const SAFE_LABEL_REGEX = /^[\s\w(),.-]+$/
-  return SAFE_LABEL_REGEX.test(label) ? label.trim() : ''
-}
-
 interface AssistantArchitectStreamingProps {
   tool: AssistantArchitectWithRelations
 }
@@ -110,6 +104,72 @@ interface AssistantArchitectAdapterOptions {
   executionModelRef: React.MutableRefObject<{ modelId: string; provider: string } | null>
   onExecutionIdChangeRef: React.MutableRefObject<(id: number) => void>
   onPromptCountChangeRef: React.MutableRefObject<(count: number) => void>
+  /**
+   * Called for each tool-call lifecycle event so the UI can render an agentic
+   * tool-call timeline (Issue #926). Held in a ref so the stable adapter never
+   * re-initializes when the handler identity changes.
+   */
+  onToolEventRef: React.MutableRefObject<(event: ToolTimelineEvent) => void>
+  /**
+   * Per-run approval for destructive agent tools (Issue #926). Read at request
+   * time so toggling it doesn't re-create the adapter.
+   */
+  approveDestructiveRef: React.MutableRefObject<boolean>
+}
+
+/** A single tool-call timeline entry surfaced to the execution UI (#926). */
+export interface ToolTimelineEvent {
+  toolCallId: string
+  toolName: string
+  /**
+   * 'confirmation' = a destructive tool was gated pending human approval (it did
+   * not run). The other phases are the normal call lifecycle. (#926.)
+   */
+  phase: 'call' | 'output' | 'error' | 'confirmation'
+  /** Output/error/confirmation text when phase is not 'call'. */
+  detail?: string
+}
+
+/**
+ * Merge a tool-call event into the timeline: upsert by toolCallId, latest phase
+ * wins, but a late 'call' never clobbers a terminal 'output'/'error'. Pure so the
+ * setState updater stays a one-liner (keeps callback nesting shallow).
+ */
+function mergeToolTimelineEvent(
+  prev: ToolTimelineEvent[],
+  event: ToolTimelineEvent
+): ToolTimelineEvent[] {
+  const idx = prev.findIndex(e => e.toolCallId === event.toolCallId)
+  if (idx === -1) return [...prev, event]
+  const existing = prev[idx]
+  if (existing.phase !== 'call' && event.phase === 'call') return prev
+  const next = [...prev]
+  // Output/error SSE events don't carry the tool name (the AI SDK omits it on
+  // those parts), so they arrive with the placeholder 'tool'. Preserve the real
+  // name captured at the 'call' phase rather than clobbering it. (PR review.)
+  const toolName =
+    event.toolName && event.toolName !== 'tool' ? event.toolName : existing.toolName
+  next[idx] = { ...existing, ...event, toolName }
+  return next
+}
+
+/**
+ * Build the timeline event for a tool-output-available SSE event. A destructive
+ * tool gated for confirmation returns a sentinel-prefixed string instead of
+ * running (#926); surface it as a distinct 'confirmation' state. (Module-level so
+ * the streaming generator stays a single call site.)
+ */
+function toolOutputTimelineEvent(
+  toolCallId: string,
+  output: unknown
+): ToolTimelineEvent {
+  const gated = isConfirmationRequiredText(output)
+  return {
+    toolCallId,
+    toolName: 'tool',
+    phase: gated ? 'confirmation' : 'output',
+    ...(gated ? { detail: 'Awaiting confirmation — destructive action not run' } : {}),
+  }
 }
 
 // Factory function to create a stable ChatModelAdapter
@@ -122,7 +182,9 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
     conversationIdRef,
     executionModelRef,
     onExecutionIdChangeRef,
-    onPromptCountChangeRef
+    onPromptCountChangeRef,
+    onToolEventRef,
+    approveDestructiveRef
   } = options
 
   return {
@@ -190,7 +252,10 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
           // EXECUTION MODE: Initial assistant execution
           body = {
             toolId,
-            inputs: inputsRef.current
+            inputs: inputsRef.current,
+            // Per-run approval for destructive agent tools (#926); ignored in
+            // prompt-chain mode by the route.
+            approveDestructiveTools: approveDestructiveRef.current === true
           }
         }
 
@@ -347,11 +412,21 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
                       toolName: event.toolName,
                       type: event.type
                     })
-                    // Tool calls are handled by the UI components
+                    // Feed the agentic tool-call timeline (#926).
+                    onToolEventRef.current({
+                      toolCallId: event.toolCallId,
+                      toolName: event.toolName,
+                      phase: 'call',
+                    })
                   }
                   // Handle tool input events (from web_search_preview, etc.)
                   else if (isToolInputStartEvent(event)) {
                     log.debug('Tool input started', { toolCallId: event.toolCallId, toolName: event.toolName })
+                    onToolEventRef.current({
+                      toolCallId: event.toolCallId,
+                      toolName: event.toolName,
+                      phase: 'call',
+                    })
                   }
                   else if (isToolInputDeltaEvent(event)) {
                     log.debug('Tool input delta', { toolCallId: event.toolCallId })
@@ -361,12 +436,25 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
                   }
                   else if (isToolInputErrorEvent(event)) {
                     log.debug('Tool input error', { toolCallId: event.toolCallId, toolName: event.toolName })
+                    onToolEventRef.current({
+                      toolCallId: event.toolCallId,
+                      toolName: event.toolName ?? 'tool',
+                      phase: 'error',
+                      detail: 'Tool input error',
+                    })
                   }
                   else if (isToolOutputErrorEvent(event)) {
                     log.debug('Tool output error', { toolCallId: event.toolCallId, errorText: event.errorText })
+                    onToolEventRef.current({
+                      toolCallId: event.toolCallId,
+                      toolName: 'tool',
+                      phase: 'error',
+                      detail: event.errorText ?? 'Tool output error',
+                    })
                   }
                   else if (isToolOutputAvailableEvent(event)) {
                     log.debug('Tool output available', { toolCallId: event.toolCallId })
+                    onToolEventRef.current(toolOutputTimelineEvent(event.toolCallId, event.output))
                   }
                   // Handle errors
                   else if (isErrorEvent(event)) {
@@ -545,7 +633,9 @@ function AssistantArchitectRuntimeProvider({
   onPromptCountChange,
   onExecutionComplete,
   onExecutionError,
-  hasCompletedExecution
+  hasCompletedExecution,
+  onToolEvent,
+  approveDestructive
 }: {
   children: React.ReactNode
   tool: AssistantArchitectWithRelations
@@ -555,6 +645,8 @@ function AssistantArchitectRuntimeProvider({
   onExecutionComplete: () => void
   onExecutionError: (error: string) => void
   hasCompletedExecution: boolean
+  onToolEvent: (event: ToolTimelineEvent) => void
+  approveDestructive: boolean
 }) {
   const inputsRef = useRef(inputs)
 
@@ -565,11 +657,16 @@ function AssistantArchitectRuntimeProvider({
   // Use refs for callbacks to avoid dependency issues
   const onExecutionIdChangeRef = useRef(onExecutionIdChange)
   const onPromptCountChangeRef = useRef(onPromptCountChange)
+  const onToolEventRef = useRef(onToolEvent)
+  // Per-run destructive-tool approval, read at request time (#926).
+  const approveDestructiveRef = useRef(approveDestructive)
 
   useEffect(() => {
     onExecutionIdChangeRef.current = onExecutionIdChange
     onPromptCountChangeRef.current = onPromptCountChange
-  }, [onExecutionIdChange, onPromptCountChange])
+    onToolEventRef.current = onToolEvent
+    approveDestructiveRef.current = approveDestructive
+  }, [onExecutionIdChange, onPromptCountChange, onToolEvent, approveDestructive])
 
   // Track whether we're in execution or conversation mode
   const hasCompletedExecutionRef = useRef(hasCompletedExecution)
@@ -633,7 +730,9 @@ function AssistantArchitectRuntimeProvider({
       conversationIdRef,
       executionModelRef,
       onExecutionIdChangeRef,
-      onPromptCountChangeRef
+      onPromptCountChangeRef,
+      onToolEventRef,
+      approveDestructiveRef
     })
     startTransition(() => { setAdapter(newAdapter) })
   }, [currentToolId])
@@ -818,6 +917,46 @@ const ErrorAlert = memo(({ errorMessage }: { errorMessage: string }) => (
 ))
 ErrorAlert.displayName = "ErrorAlert"
 
+/**
+ * Per-run destructive-tool approval toggle (Issue #926). Renders nothing unless
+ * the assistant is agentic and exposes at least one tool. Default is unchecked:
+ * destructive tools are gated behind a confirmation message and skipped at runtime
+ * unless the executing user opts in here.
+ */
+const DestructiveApprovalToggle = memo(function DestructiveApprovalToggle({
+  tool,
+  isAgentic,
+  checked,
+  onChange,
+  disabled,
+}: {
+  tool: AssistantArchitectWithRelations
+  isAgentic: boolean
+  checked: boolean
+  onChange: (checked: boolean) => void
+  disabled: boolean
+}) {
+  const hasAgentTools = isAgentic && (tool.agentEnabledTools?.length ?? 0) > 0
+  if (!hasAgentTools) return null
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/50 dark:bg-amber-950/20 px-3 py-2 text-sm">
+      <Checkbox
+        checked={checked}
+        onCheckedChange={(value) => onChange(value === true)}
+        disabled={disabled}
+        aria-label="Allow destructive tool actions for this run"
+        className="mt-0.5"
+      />
+      <span className="text-muted-foreground">
+        Allow destructive tool actions (e.g. writes, deletions) to run without
+        per-action confirmation in this run. Leave unchecked to require approval —
+        destructive tools will be skipped and reported.
+      </span>
+    </div>
+  )
+})
+DestructiveApprovalToggle.displayName = "DestructiveApprovalToggle"
+
 export const AssistantArchitectStreaming = memo(function AssistantArchitectStreaming({
   tool
 }: AssistantArchitectStreamingProps) {
@@ -828,6 +967,19 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
   const [isExecuting, setIsExecuting] = useState(false)
   const [hasResults, setHasResults] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Agentic tool-call timeline (Issue #926). Latest phase per toolCallId wins so
+  // a tool's row updates call -> output/error in place rather than duplicating.
+  const [toolTimeline, setToolTimeline] = useState<ToolTimelineEvent[]>([])
+  const isAgentic = tool.mode === 'agentic'
+  // Per-run approval for destructive agent tools (#926). Default off: destructive
+  // tools are gated behind confirmation unless the user opts in for this run.
+  const [approveDestructive, setApproveDestructive] = useState(false)
+
+  // Stable callback (no deps) so the ref-based adapter never re-initializes.
+  // The merge is a module-level pure fn to keep nesting shallow.
+  const handleToolEvent = useCallback((event: ToolTimelineEvent) => {
+    setToolTimeline(prev => mergeToolTimelineEvent(prev, event))
+  }, [])
 
   // CRITICAL FIX: Reset hasResults when tool changes (user navigates to different assistant)
   // This was causing the bug where hasResults stayed true from a previous session
@@ -837,6 +989,7 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
       setHasResults(false)
       setIsExecuting(false)
       setError(null)
+      setToolTimeline([])
     })
   }, [tool.id])
 
@@ -1018,13 +1171,14 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
                                   }))
                                 }
                               }
-                              // Sanitize option labels and filter out invalid ones
+                              // Sanitize both label and value to block XSS and prompt injection
                               const sanitizedOptions = options
                                 .map(opt => ({
                                   ...opt,
-                                  label: sanitizeOptionLabel(opt.label)
+                                  label: sanitizeOptionLabel(opt.label),
+                                  value: sanitizeOptionLabel(opt.value ?? opt.label)
                                 }))
-                                .filter(opt => opt.label !== '')
+                                .filter(opt => opt.label !== '' && opt.value !== '')
 
                               return sanitizedOptions.map(option => (
                                 <SelectItem key={option.value} value={option.value}>
@@ -1038,6 +1192,7 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
                         <DocumentUploadButton
                           label="Add Document for Knowledge"
                           onContent={doc => formField.onChange(doc)}
+                          repositoryBacked
                           disabled={isExecuting}
                           className="w-full"
                           onError={err => {
@@ -1071,6 +1226,13 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
                 )}
               />
             ))}
+            <DestructiveApprovalToggle
+              tool={tool}
+              isAgentic={isAgentic}
+              checked={approveDestructive}
+              onChange={setApproveDestructive}
+              disabled={isExecuting}
+            />
             <div className="flex gap-2">
               <Button type="submit" disabled={isExecuting}>
                 {isExecuting ? (
@@ -1124,6 +1286,8 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
             onExecutionComplete={handleExecutionComplete}
             onExecutionError={handleExecutionError}
             hasCompletedExecution={hasResults}
+            onToolEvent={handleToolEvent}
+            approveDestructive={approveDestructive}
           >
             <div className="space-y-6">
               {/* Progress indicator for multi-prompt execution */}
@@ -1132,6 +1296,11 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
                   totalPrompts={promptCount}
                   prompts={tool.prompts || []}
                 />
+              )}
+
+              {/* Agentic tool-call timeline (Issue #926) */}
+              {isAgentic && (
+                <ToolCallTimeline events={toolTimeline} />
               )}
 
               {/* Execution in-progress status banner */}

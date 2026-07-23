@@ -1,9 +1,11 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
+
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
 
 test.describe('Schedule Modal for Assistant Architect', () => {
   test.beforeEach(async ({ page }) => {
     // Go to assistant architect page
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
 
     // Wait for authentication and page load
     try {

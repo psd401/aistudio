@@ -13,15 +13,18 @@
 #   bun run db:studio    # Open Drizzle Studio to inspect database
 #
 # This configuration provides:
-# - PostgreSQL 16 (matching Aurora version)
+# - PostgreSQL 16 with pgvector (matching Aurora, which bundles pgvector)
 # - Volume-mounted source code for hot reload
 # - Automatic migration execution on database startup
 # - Persistent database data between restarts
 
 services:
-  # PostgreSQL Database (matches Aurora PostgreSQL 16)
+  # PostgreSQL Database (matches Aurora PostgreSQL 16 + pgvector).
+  # pgvector/pgvector:pg16 replaced postgres:16-alpine for Issue #1252 —
+  # migration 115 needs the `vector` type (embedding column + HNSW index),
+  # which the plain alpine image cannot provide.
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: aistudio-postgres
     ports:
       - "5432:5432"
@@ -30,8 +33,11 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: aistudio
     volumes:
-      # Persistent data storage
-      - postgres_data:/var/lib/postgresql/data
+      # Persistent data storage. Named postgres_data_pgvector (not the old
+      # postgres_data) so the pre-pgvector alpine volume is left intact and the
+      # debian-based image initializes fresh — an alpine(musl) data dir must
+      # not be reused under glibc collations.
+      - postgres_data_pgvector:/var/lib/postgresql/data
       # Initialize database with schema on first run
       - ./scripts/db/init-local.sh:/docker-entrypoint-initdb.d/01-init-local.sh:ro
       - ./infra/database/schema:/docker-entrypoint-initdb.d/schema:ro
@@ -90,7 +96,7 @@ services:
     init: true
 
 volumes:
-  postgres_data:
+  postgres_data_pgvector:
     driver: local
 
 networks:

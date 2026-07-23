@@ -1,0 +1,14 @@
+{
+  "name": "hyperframes-render",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Container-image Lambda: render a HyperFrames HTML/CSS/JS composition to MP4 (headless Chromium + FFmpeg) and upload to the workspace S3 public-images/ prefix. Render half of the psd-hyperframes agent skill (#1175).",
+  "main": "handler.js",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.658.0",
+    "aws-lambda-ric": "^4.0.2"
+  }
+}

@@ -12,6 +12,19 @@ import type {
 const log = createLogger({ module: 'base-provider-adapter' });
 
 /**
+ * A cost-cap stop predicate (#926): receives the completed steps (with token
+ * usage) and returns true to stop the multi-step loop. Typed locally because the
+ * AI SDK `stopWhen` accepts a heterogeneous array of step-count guards and custom
+ * predicates.
+ */
+type CostStopPredicate = (opts: {
+  steps: ReadonlyArray<{ usage?: { inputTokens?: number; outputTokens?: number } }>;
+}) => boolean;
+
+/** A single AI SDK `stopWhen` condition: a step-count guard or a cost predicate. */
+type StopCondition = ReturnType<typeof stepCountIs> | CostStopPredicate;
+
+/**
  * Standalone transient error classifier used by both the streaming adapters
  * and the dual-stream merger to ensure consistent behavior across all paths.
  *
@@ -46,6 +59,99 @@ export type AccumulatedToolCall = {
   args: Record<string, unknown>;
   result?: unknown;
 };
+
+/**
+ * Usage shape reported by streamText's onFinish. AI SDK v6 reports
+ * `inputTokens`/`outputTokens` (LanguageModelUsage); the legacy
+ * `promptTokens`/`completionTokens` names are kept as fallbacks for provider
+ * adapters that still emit them. Reading only the legacy names silently zeroed
+ * the persisted prompt/completion split (epic #922 completion audit) — the
+ * cost-cap predicate already reads the v6 names.
+ */
+interface StreamFinishUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  reasoningTokens?: number;
+}
+
+/** Normalize onFinish usage to the internal prompt/completion shape. */
+export function transformFinishUsage(
+  rawUsage: unknown
+): { promptTokens: number; completionTokens: number; totalTokens: number } | undefined {
+  if (!rawUsage) return undefined;
+  const usage = rawUsage as StreamFinishUsage;
+  const promptTokens = usage.inputTokens ?? usage.promptTokens ?? 0;
+  const completionTokens = usage.outputTokens ?? usage.completionTokens ?? 0;
+  return {
+    promptTokens,
+    completionTokens,
+    // Derive the total when the provider omits it (or reports a bogus 0 while
+    // the components are non-zero) so downstream token accounting never sees a
+    // zero total for a real completion. (PR #1129 review.)
+    totalTokens: usage.totalTokens || promptTokens + completionTokens,
+  };
+}
+
+/** One normalized step of a multi-step tool-use run (Issue #977). */
+type TransformedStep = {
+  text: string;
+  toolCalls: AccumulatedToolCall[];
+  finishReason: string;
+};
+
+/** Validate + normalize a step's raw toolCalls array (drops malformed items). */
+function extractStepToolCalls(rawCalls: unknown): AccumulatedToolCall[] {
+  const stepToolCalls: AccumulatedToolCall[] = [];
+  if (!Array.isArray(rawCalls)) return stepToolCalls;
+  for (const tc of rawCalls) {
+    if (typeof tc !== 'object' || tc === null) continue;
+    const tcTyped = tc as { toolCallId?: string; toolName?: string; args?: unknown; input?: unknown };
+    if (typeof tcTyped.toolCallId !== 'string' || typeof tcTyped.toolName !== 'string') continue;
+    stepToolCalls.push({
+      toolCallId: tcTyped.toolCallId,
+      toolName: tcTyped.toolName,
+      args: ((tcTyped.input ?? tcTyped.args) as Record<string, unknown>) || {},
+    });
+  }
+  return stepToolCalls;
+}
+
+/** Match a step's raw toolResults back onto its (already extracted) toolCalls. */
+function attachStepToolResults(
+  stepToolCalls: AccumulatedToolCall[],
+  rawResults: unknown
+): void {
+  if (!Array.isArray(rawResults)) return;
+  for (const tr of rawResults) {
+    if (typeof tr !== 'object' || tr === null) continue;
+    const trTyped = tr as { toolCallId?: string; output?: unknown };
+    if (typeof trTyped.toolCallId !== 'string') continue;
+    const match = stepToolCalls.find(tc => tc.toolCallId === trTyped.toolCallId);
+    if (match) match.result = trTyped.output;
+  }
+}
+
+/**
+ * Normalize one raw onFinish step: validate its toolCalls, then match each
+ * step-local toolResult back to its call so callers can persist steps as
+ * separate messages and preserve multi-turn structure on replay (Issue #977).
+ */
+function transformFinishStep(rawStep: unknown): TransformedStep {
+  if (typeof rawStep !== 'object' || rawStep === null) {
+    return { text: '', toolCalls: [], finishReason: 'stop' };
+  }
+  const s = rawStep as Record<string, unknown>;
+  const stepToolCalls = extractStepToolCalls(s.toolCalls);
+  attachStepToolResults(stepToolCalls, s.toolResults);
+  return {
+    text: typeof s.text === 'string' ? s.text : '',
+    toolCalls: stepToolCalls,
+    finishReason: typeof s.finishReason === 'string' ? s.finishReason : 'stop',
+  };
+}
 
 /**
  * Base class for all provider adapters
@@ -162,6 +268,13 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       // Includes result field for persistence (required for assistant-ui to render completed tool calls)
       const accumulatedToolCalls: AccumulatedToolCall[] = [];
 
+      // Build the multi-step stop conditions. The step-count guard is the primary
+      // runaway bound; the cost guard (#926) additionally stops the loop once
+      // accumulated usage cost reaches the per-run cap. AI SDK `stopWhen` accepts
+      // an array — ANY condition stops the loop.
+      const stopConditions = this.buildStopConditions(enhancedConfig, logger);
+      const abortSignal = this.buildTimeoutSignal(enhancedConfig.timeout, logger); // #926
+
       // Start streaming with AI SDK
       const result = streamText({
         model: enhancedConfig.model,
@@ -170,7 +283,8 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
         tools: enhancedConfig.tools,
         toolChoice: enhancedConfig.toolChoice,
         temperature: enhancedConfig.temperature,
-        ...(enhancedConfig.maxSteps && { stopWhen: stepCountIs(enhancedConfig.maxSteps) }),
+        ...(abortSignal && { abortSignal }),
+        ...(stopConditions.length > 0 && { stopWhen: stopConditions }),
         ...(enhancedConfig.experimental_telemetry && enhancedConfig.experimental_telemetry.isEnabled && {
           experimental_telemetry: {
             isEnabled: enhancedConfig.experimental_telemetry.isEnabled,
@@ -226,28 +340,28 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             toolNames: accumulatedToolCalls.map(tc => tc.toolName)
           });
 
-          // Define proper type for usage
-          interface StreamUsage {
-            promptTokens?: number;
-            completionTokens?: number;
-            totalTokens?: number;
-            reasoningTokens?: number;
-          }
-
           // Extract tool results from event.steps (shared method handles runtime validation)
           this.extractToolResultsFromSteps(event, accumulatedToolCalls, logger);
 
-          // Transform to our expected format
-          const usage = event.usage as StreamUsage;
+          // Build per-step breakdown for multi-step tool-use persistence
+          // (transformFinishStep, Issue #977). AI SDK v6 TypeScript types don't
+          // declare `steps` on the onFinish event object, but the runtime value
+          // includes it for multi-step tool-use flows. Cast to access the field
+          // until the SDK's types are updated.
+          const rawSteps = (event as Record<string, unknown>).steps;
+          const steps = Array.isArray(rawSteps)
+            ? rawSteps.map(transformFinishStep)
+            : undefined;
+
           const transformedData = {
             text: event.text || '',
-            usage: usage ? {
-              promptTokens: usage.promptTokens || 0,
-              completionTokens: usage.completionTokens || 0,
-              totalTokens: usage.totalTokens || 0
-            } : undefined,
+            usage: transformFinishUsage(event.usage),
             finishReason: event.finishReason || 'stop',
-            toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
+            toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
+            // Pass steps whenever any exist (not only > 1): a single-step agentic
+            // run that calls one tool still needs its step data so onFinish can
+            // count tool calls. `> 1` dropped single-step tool data. (Correctness review.)
+            steps: steps && steps.length > 0 ? steps : undefined,
           };
 
           // Call provider-specific finish handler
@@ -318,11 +432,83 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       system: config.system,
       maxTokens: config.maxTokens,
       maxSteps: config.maxSteps,
+      // Preserve the cost-cap inputs (#926) so the agentic loop's stop condition
+      // survives provider-specific config enhancement.
+      costCapCents: config.costCapCents,
+      costRates: config.costRates,
+      // Preserve the per-run wall-clock timeout (#926) so the abortSignal is
+      // applied after enhancement (otherwise the timeout would be silently lost).
+      timeout: config.timeout,
       temperature: config.temperature,
       tools: config.tools,
       toolChoice: config.toolChoice,
       experimental_telemetry: config.experimental_telemetry
     };
+  }
+
+  /**
+   * Build a wall-clock abort signal for the per-run timeout (#926). Without it the
+   * configured `timeout` was inert: a hung model/tool loop ran until the
+   * route/platform ceiling (up to 900s). `AbortSignal.timeout` aborts the whole
+   * streamText call (model calls + tool loop) once the limit elapses. Returns
+   * undefined when no positive, finite timeout is configured. Shared by all
+   * adapters (base + provider overrides) so every path enforces the timeout.
+   */
+  protected buildTimeoutSignal(
+    timeoutMs: number | undefined,
+    logger: ReturnType<typeof createLogger>
+  ): AbortSignal | undefined {
+    if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return undefined;
+    }
+    logger.debug('Applying stream wall-clock timeout', {
+      provider: this.providerName,
+      timeoutMs,
+    });
+    return AbortSignal.timeout(timeoutMs);
+  }
+
+  /**
+   * Build the multi-step `stopWhen` conditions (Issue #926). Always includes the
+   * step-count bound when `maxSteps` is set. Adds a cost-cap condition when both a
+   * cap and per-token rates are provided: it sums each completed step's token
+   * usage × rates and stops once the estimated cost (in cents) reaches the cap.
+   * Token usage (not dollars) is what the AI SDK exposes per step, so cost is
+   * derived from the caller-supplied rates.
+   */
+  protected buildStopConditions(
+    config: StreamConfig,
+    logger: ReturnType<typeof createLogger>
+  ): StopCondition[] {
+    const conditions: StopCondition[] = [];
+    if (config.maxSteps) {
+      conditions.push(stepCountIs(config.maxSteps));
+    }
+    const cap = config.costCapCents;
+    const rates = config.costRates;
+    if (typeof cap === 'number' && cap > 0 && rates) {
+      const capDollars = cap / 100;
+      const costStop: CostStopPredicate = ({ steps }) => {
+        let costDollars = 0;
+        for (const step of steps) {
+          const inTok = step.usage?.inputTokens ?? 0;
+          const outTok = step.usage?.outputTokens ?? 0;
+          costDollars += inTok * rates.inputPerToken + outTok * rates.outputPerToken;
+        }
+        const exceeded = costDollars >= capDollars;
+        if (exceeded) {
+          logger.warn('Agentic run hit cost cap; stopping loop', {
+            provider: this.providerName,
+            capCents: cap,
+            estimatedCents: Math.round(costDollars * 100),
+            steps: steps.length,
+          });
+        }
+        return exceeded;
+      };
+      conditions.push(costStop);
+    }
+    return conditions;
   }
   
   /**

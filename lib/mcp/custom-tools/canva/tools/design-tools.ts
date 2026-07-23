@@ -63,7 +63,7 @@ export function createDesignTools(client: CanvaApiClient): Record<string, unknow
         "thumbnail URL, page count, and timestamps.",
       inputSchema: getDesignSchema,
       execute: async ({ design_id }) => {
-        return client.get(`/v1/designs/${design_id}`)
+        return client.get(`/v1/designs/${encodeURIComponent(design_id)}`)
       },
     }),
 

@@ -8,11 +8,15 @@ import {
   getRepositoryItemById,
   getRepositoryItems,
   getRepositoryItemChunks,
-  deleteRepositoryItem,
   updateRepositoryItemStatus
 } from "@/lib/db/drizzle"
+import {
+  assertRepositoryReadAccess,
+  assertItemRepositoryReadAccess,
+  assertNotSystemManagedRepository
+} from "@/lib/repositories/repository-access-guard"
 import { type ActionState } from "@/types/actions-types"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import {
   handleError,
   ErrorFactories,
@@ -24,19 +28,57 @@ import {
   startTimer
 } from "@/lib/logger"
 import { revalidatePath } from "next/cache"
-import { uploadDocument, deleteDocument } from "@/lib/aws/s3-client"
+import {
+  copyRepositorySourceToCanonicalNamespace,
+  uploadDocument,
+  getDocumentObjectMetadata,
+  getDocumentSignedUrl,
+} from "@/lib/aws/s3-client"
 import { queueFileForProcessing, processUrl } from "@/lib/services/file-processing-service"
 import { canModifyRepository, getUserIdFromSession } from "./repository-permissions"
+import { toContentDispositionValue } from "@/lib/repositories/content-disposition"
+import {
+  assertCanonicalRetryNotQuarantined,
+  deleteRepositoryItemStorage,
+  dispatchContentProcessingJob,
+  getCanonicalRepositoryItemStatuses,
+  isCanonicalUploadContentType,
+  isRepositorySourceObjectKey,
+  registerCanonicalTextIfEnabled,
+  registerCanonicalUploadIfEnabled,
+  retryCanonicalRepositoryItem,
+} from "@/lib/repositories/content-platform"
+import {
+  beginRepositoryItemDeletion,
+  finalizeRepositoryItemDeletion
+} from "@/lib/repositories/content-platform/deletion-service"
+
+// Runtime-validated processing-status union (REV-COR-068): actions are network
+// endpoints, so the TS parameter type is not enforced on the wire.
+const VALID_PROCESSING_STATUSES = ["pending", "processing", "completed", "failed"] as const
+type ProcessingStatus = (typeof VALID_PROCESSING_STATUSES)[number]
+function isProcessingStatus(s: string): s is ProcessingStatus {
+  return (VALID_PROCESSING_STATUSES as readonly string[]).includes(s)
+}
+
+type RepositoryItemType =
+  | 'document'
+  | 'image'
+  | 'audio'
+  | 'video'
+  | 'url'
+  | 'text'
 
 export interface RepositoryItem {
   id: number
   repositoryId: number
-  type: 'document' | 'url' | 'text'
+  type: RepositoryItemType
   name: string
   source: string
   metadata: Record<string, unknown>
   processingStatus: string
   processingError: string | null
+  canRetry?: boolean
   createdAt: Date
   updatedAt: Date
 }
@@ -86,14 +128,211 @@ export interface AddDocumentWithPresignedUrlInput {
   }
 }
 
+async function shadowWriteCanonicalText(
+  input: {
+    itemId: number
+    repositoryId: number
+    userId: number
+    name: string
+    content: string
+    traceId: string
+  },
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  try {
+    const canonical = await registerCanonicalTextIfEnabled(input)
+    if (!canonical) return
+
+    log.info("Canonical inline text version registered", {
+      itemId: input.itemId,
+      versionId: canonical.version.id,
+      processingJobId: canonical.inspectJob.id,
+      created: canonical.created,
+    })
+    await updateRepositoryItemStatus(input.itemId, "pending", null)
+    try {
+      await dispatchContentProcessingJob({
+        jobId: canonical.inspectJob.id,
+        itemVersionId: canonical.version.id,
+      })
+    } catch (dispatchError) {
+      log.warn("Canonical inline text processing is pending scheduled dispatch", {
+        processingJobId: canonical.inspectJob.id,
+        error:
+          dispatchError instanceof Error
+            ? dispatchError.message
+            : "Unknown error",
+      })
+    }
+  } catch (error) {
+    await updateRepositoryItemStatus(
+      input.itemId,
+      "failed",
+      "Canonical content registration failed. Retry this item."
+    ).catch((statusError) => {
+      log.error("Failed to expose canonical inline text registration failure", {
+        itemId: input.itemId,
+        error: statusError instanceof Error ? statusError.message : "Unknown error",
+      })
+    })
+    log.error("Canonical inline text shadow write failed", {
+      itemId: input.itemId,
+      error: error instanceof Error ? error.message : "Unknown error",
+    })
+  }
+}
+
+async function shadowWriteCanonicalUpload(
+  input: {
+    itemId: number
+    userId: number
+    objectKey: string
+    originalFileName: string
+    declaredContentType: string
+    byteSize: number
+    traceId: string
+  },
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  if (!isCanonicalUploadContentType(input.declaredContentType)) return
+  try {
+    const canonical = await registerCanonicalUploadIfEnabled(input)
+    if (!canonical) return
+
+    log.info("Canonical repository version registered", {
+      itemId: input.itemId,
+      versionId: canonical.version.id,
+      processingJobId: canonical.inspectJob.id,
+      created: canonical.created,
+    })
+    await updateRepositoryItemStatus(input.itemId, "pending", null)
+    try {
+      await dispatchContentProcessingJob({
+        jobId: canonical.inspectJob.id,
+        itemVersionId: canonical.version.id,
+      })
+    } catch (dispatchError) {
+      log.warn("Canonical processing is pending scheduled dispatch", {
+        processingJobId: canonical.inspectJob.id,
+        error:
+          dispatchError instanceof Error
+            ? dispatchError.message
+            : "Unknown error",
+      })
+    }
+  } catch (error) {
+    await updateRepositoryItemStatus(
+      input.itemId,
+      "failed",
+      "Canonical content registration failed. Retry this item."
+    ).catch((statusError) => {
+      log.error("Failed to expose canonical repository registration failure", {
+        itemId: input.itemId,
+        error: statusError instanceof Error ? statusError.message : "Unknown error",
+      })
+    })
+    log.error("Canonical repository shadow write failed", {
+      itemId: input.itemId,
+      error: error instanceof Error ? error.message : "Unknown error",
+    })
+  }
+}
+
 // Sanitize filename to prevent directory traversal and other security issues
 function sanitizeFilename(filename: string): string {
   // Remove any directory components and special characters
-  return filename
+  const sanitized = filename
     .replace(/[^\d.A-Za-z-]/g, '_') // Replace special chars with underscore
     .replace(/\.{2,}/g, '.') // Replace multiple dots with single dot
     .replace(/^\.+|\.+$/g, '') // Remove leading/trailing dots
     .slice(0, 255); // Limit length
+  return sanitized || "file"
+}
+
+// Raw repository item row shape returned by the Drizzle accessors
+type RawRepositoryItem = NonNullable<Awaited<ReturnType<typeof getRepositoryItemById>>>
+
+// Convert a raw Drizzle repository item row to the action-layer RepositoryItem type
+function mapToRepositoryItem(itemRaw: RawRepositoryItem): RepositoryItem {
+  return {
+    id: itemRaw.id,
+    repositoryId: itemRaw.repositoryId,
+    type: itemRaw.type as RepositoryItemType,
+    name: itemRaw.name,
+    source: itemRaw.source,
+    metadata: itemRaw.metadata ?? {},
+    processingStatus: itemRaw.processingStatus ?? 'pending',
+    processingError: itemRaw.processingError,
+    canRetry: false,
+    createdAt: itemRaw.createdAt ?? new Date(),
+    updatedAt: itemRaw.updatedAt ?? new Date()
+  }
+}
+
+// Validate addDocumentWithPresignedUrl input; returns a user-facing error message or null when valid
+function validatePresignedUrlInput(input: AddDocumentWithPresignedUrlInput): string | null {
+  if (!input.name || input.name.trim().length === 0) {
+    return "Name is required"
+  }
+
+  if (!input.s3Key || input.s3Key.trim().length === 0) {
+    return "S3 key is required"
+  }
+
+  return null
+}
+
+// Validate addDocumentItem input; returns a user-facing error message or null when valid
+function validateAddDocumentInput(input: AddDocumentInput): string | null {
+  if (!input.name || input.name.trim().length === 0) {
+    return "Name is required"
+  }
+
+  if (!input.file || !input.file.content) {
+    return "File content is required"
+  }
+
+  return null
+}
+
+// Normalize uploaded file content (base64 string from client or raw bytes) to a Buffer
+function toFileBuffer(content: Buffer | Uint8Array | string): Buffer {
+  if (typeof content === 'string') {
+    // It's a base64 string from the client
+    return Buffer.from(content, 'base64')
+  }
+  // It's already a Buffer or Uint8Array
+  return Buffer.from(content)
+}
+
+// Determine the file extension from original filename metadata, falling back to the S3 key
+function resolveDownloadExtension(item: RepositoryItem): string {
+  const metadata = item.metadata as Record<string, unknown> | null
+
+  if (metadata && typeof metadata === 'object' && 'originalFileName' in metadata && typeof metadata.originalFileName === 'string') {
+    // Use the original filename's extension
+    return metadata.originalFileName.split('.').pop() || ''
+  }
+
+  // Extract from S3 key
+  const urlParts = item.source.split('/')
+  const s3Filename = urlParts[urlParts.length - 1]
+  return s3Filename.split('.').pop() || ''
+}
+
+// Resolve the download filename, appending the source/original extension when missing
+function resolveDownloadFilename(item: RepositoryItem): string {
+  let filename = item.name
+
+  // Try to get extension from original filename or S3 key
+  const extension = resolveDownloadExtension(item)
+
+  // Add extension if not already present in the name
+  if (extension && !filename.toLowerCase().endsWith(`.${extension.toLowerCase()}`)) {
+    filename = `${filename}.${extension}`
+  }
+
+  return filename
 }
 
 
@@ -118,7 +357,7 @@ export async function addDocumentItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Document upload denied - insufficient permissions", {
         userId: session.sub,
@@ -126,22 +365,24 @@ export async function addDocumentItem(
       })
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
-    
+
     // Validate and sanitize inputs
-    if (!input.name || input.name.trim().length === 0) {
-      return { isSuccess: false, message: "Name is required" }
+    const validationError = validateAddDocumentInput(input)
+    if (validationError) {
+      return { isSuccess: false, message: validationError }
     }
-    
-    if (!input.file || !input.file.content) {
-      return { isSuccess: false, message: "File content is required" }
-    }
-    
+
     // Sanitize the filename
     const sanitizedFilename = sanitizeFilename(input.file.fileName || input.name);
 
     // Get the user ID from the cognito_sub
     log.debug("Getting user ID from session")
     const userId = await getUserIdFromSession(session.sub)
+
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API — a foreign item would pollute the retrieval
+    // index. Runs BEFORE the ownership check (404-mask precedes 403).
+    await assertNotSystemManagedRepository(input.repository_id)
 
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
@@ -155,14 +396,7 @@ export async function addDocumentItem(
     }
 
     // Convert base64 string back to Buffer if needed
-    let fileContent: Buffer
-    if (typeof input.file.content === 'string') {
-      // It's a base64 string from the client
-      fileContent = Buffer.from(input.file.content, 'base64')
-    } else {
-      // It's already a Buffer or Uint8Array
-      fileContent = Buffer.from(input.file.content)
-    }
+    const fileContent = toFileBuffer(input.file.content)
 
     // Upload to S3
     log.info("Uploading document to S3", {
@@ -173,6 +407,7 @@ export async function addDocumentItem(
     
     const { key, url } = await uploadDocument({
       userId: userId.toString(),
+      repositoryId: input.repository_id,
       fileName: sanitizedFilename,
       fileContent,
       contentType: input.file.contentType,
@@ -206,18 +441,20 @@ export async function addDocumentItem(
     })
 
     // Convert to action type
-    const item: RepositoryItem = {
-      id: itemRaw.id,
-      repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
-      name: itemRaw.name,
-      source: itemRaw.source,
-      metadata: itemRaw.metadata ?? {},
-      processingStatus: itemRaw.processingStatus ?? 'pending',
-      processingError: itemRaw.processingError,
-      createdAt: itemRaw.createdAt ?? new Date(),
-      updatedAt: itemRaw.updatedAt ?? new Date()
-    }
+    const item: RepositoryItem = mapToRepositoryItem(itemRaw)
+
+    await shadowWriteCanonicalUpload(
+      {
+        itemId: item.id,
+        userId,
+        objectKey: key,
+        originalFileName: sanitizedFilename,
+        declaredContentType: input.file.contentType,
+        byteSize: fileContent.byteLength,
+        traceId: requestId,
+      },
+      log
+    )
 
     // Queue the document for processing
     log.info("Queueing document for processing", {
@@ -282,7 +519,7 @@ export async function addDocumentWithPresignedUrl(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Presigned upload denied - insufficient permissions", {
         userId: session.sub,
@@ -292,16 +529,17 @@ export async function addDocumentWithPresignedUrl(
     }
     
     // Validate inputs
-    if (!input.name || input.name.trim().length === 0) {
-      return { isSuccess: false, message: "Name is required" }
-    }
-    
-    if (!input.s3Key || input.s3Key.trim().length === 0) {
-      return { isSuccess: false, message: "S3 key is required" }
+    const validationError = validatePresignedUrlInput(input)
+    if (validationError) {
+      return { isSuccess: false, message: validationError }
     }
 
     // Get the user ID from the cognito_sub
     const userId = await getUserIdFromSession(session.sub)
+
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
 
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
@@ -312,6 +550,43 @@ export async function addDocumentWithPresignedUrl(
         repositoryId: input.repository_id
       })
       throw ErrorFactories.authzOwnerRequired("add items to repository")
+    }
+
+    // S3-key namespace check (REV-SEC-062): the client echoes back a key, but the
+    // legitimate upload flow (generateUploadUrl) only ever mints keys under
+    // repositories/${repositoryId}/. Reject any other key so a user cannot register
+    // an arbitrary documents-bucket object onto their repo and presign-download it.
+    if (!isRepositorySourceObjectKey(input.repository_id, input.s3Key)) {
+      log.warn("Presigned upload denied - s3Key outside repository namespace", {
+        userId,
+        repositoryId: input.repository_id
+      })
+      return { isSuccess: false, message: "Invalid S3 key for this repository" }
+    }
+
+    // The client supplied size/type before the PUT. Verify the object that
+    // actually landed in S3 before persisting or queueing it. This closes the
+    // gap where a caller could request a small allowed upload, PUT different
+    // bytes, then register misleading metadata.
+    const objectMetadata = await getDocumentObjectMetadata(input.s3Key)
+    if (objectMetadata.contentLength !== input.metadata.size) {
+      log.warn("Presigned upload size mismatch", {
+        repositoryId: input.repository_id,
+        expectedSize: input.metadata.size,
+        actualSize: objectMetadata.contentLength,
+      })
+      return { isSuccess: false, message: "Uploaded file size did not match the request" }
+    }
+    if (
+      objectMetadata.contentType &&
+      objectMetadata.contentType !== input.metadata.contentType
+    ) {
+      log.warn("Presigned upload content type mismatch", {
+        repositoryId: input.repository_id,
+        expectedContentType: input.metadata.contentType,
+        actualContentType: objectMetadata.contentType,
+      })
+      return { isSuccess: false, message: "Uploaded file type did not match the request" }
     }
 
     // Create repository item with S3 key reference via Drizzle
@@ -330,7 +605,8 @@ export async function addDocumentWithPresignedUrl(
         contentType: input.metadata.contentType,
         size: input.metadata.size,
         originalFileName: input.metadata.originalFileName,
-        uploadedAt: new Date().toISOString()
+        uploadedAt: new Date().toISOString(),
+        eTag: objectMetadata.eTag,
       },
       processingStatus: 'pending'
     })
@@ -339,15 +615,35 @@ export async function addDocumentWithPresignedUrl(
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
+      type: itemRaw.type as RepositoryItemType,
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
+      canRetry: false,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
+
+    // Controlled migration path (#1265): when the platform and dual-write
+    // switches are enabled, record the immutable quarantined source version and
+    // its durable inspection job. The legacy queue remains authoritative until
+    // CONTENT_READ_V2_ENABLED is separately enabled. A shadow-write failure is
+    // observable but does not make the existing upload disappear from the user;
+    // the pending repository item can be reconciled and replayed safely.
+    await shadowWriteCanonicalUpload(
+      {
+        itemId: item.id,
+        userId,
+        objectKey: input.s3Key,
+        originalFileName: input.metadata.originalFileName,
+        declaredContentType: input.metadata.contentType,
+        byteSize: input.metadata.size,
+        traceId: requestId,
+      },
+      log
+    )
 
     // Queue for processing (embedding generation, etc.)
     log.info("Queueing document for processing", {
@@ -423,7 +719,7 @@ export async function addUrlItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("URL addition denied - insufficient permissions", {
         userId: session.sub,
@@ -443,6 +739,10 @@ export async function addUrlItem(
 
     // Get the user ID from the cognito_sub
     const userId = await getUserIdFromSession(session.sub)
+
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
 
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
@@ -475,12 +775,13 @@ export async function addUrlItem(
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
+      type: itemRaw.type as RepositoryItemType,
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
+      canRetry: false,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -549,7 +850,7 @@ export async function addTextItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Text addition denied - insufficient permissions", {
         userId: session.sub,
@@ -558,9 +859,20 @@ export async function addTextItem(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    if (!input.name.trim()) {
+      return { isSuccess: false, message: "Name is required" }
+    }
+    if (!input.content.trim()) {
+      return { isSuccess: false, message: "Text content is required" }
+    }
+
     // Get the user ID from the cognito_sub
     log.debug("Getting user ID from session")
     const userId = await getUserIdFromSession(session.sub)
+
+    // Never add items to a system-managed repo (the Atrium index, #1056)
+    // through the generic API. Runs BEFORE the ownership check (404 before 403).
+    await assertNotSystemManagedRepository(input.repository_id)
 
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: input.repository_id, userId })
@@ -613,6 +925,22 @@ export async function addTextItem(
       'addTextItem'
     )
 
+    // Inline text previously bypassed the canonical pipeline entirely. Keep
+    // the legacy row for rollback, but shadow-write a repository-scoped text
+    // object so Retrieval v2 receives an immutable version, generation,
+    // embeddings, and exact citation through the same worker as file uploads.
+    await shadowWriteCanonicalText(
+      {
+        itemId,
+        repositoryId: input.repository_id,
+        userId,
+        name: input.name,
+        content: input.content,
+        traceId: requestId,
+      },
+      log
+    )
+
     // Fetch the created item via Drizzle
     log.debug("Fetching created text item", { itemId })
     const itemRaw = await getRepositoryItemById(itemId)
@@ -625,12 +953,13 @@ export async function addTextItem(
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
+      type: itemRaw.type as RepositoryItemType,
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
+      canRetry: false,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -673,7 +1002,7 @@ export async function removeRepositoryItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Item removal denied - insufficient permissions", {
         userId: session.sub,
@@ -694,16 +1023,21 @@ export async function removeRepositoryItem(
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
 
+    // Never mutate a system-managed repo's items (the Atrium index, #1056)
+    // through the generic API — deleting one would desync the retrieval index.
+    await assertNotSystemManagedRepository(itemRaw.repositoryId)
+
     // Convert to action type
     const item: RepositoryItem = {
       id: itemRaw.id,
       repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
+      type: itemRaw.type as RepositoryItemType,
       name: itemRaw.name,
       source: itemRaw.source,
       metadata: itemRaw.metadata ?? {},
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
+      canRetry: false,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -720,31 +1054,34 @@ export async function removeRepositoryItem(
       throw ErrorFactories.authzOwnerRequired("remove items from repository")
     }
 
-    // Delete from S3 if it's a document
-    if (item.type === 'document') {
-      log.info("Deleting document from S3", {
-        itemId,
-        s3Key: item.source
-      })
-      
-      try {
-        await deleteDocument(item.source)
-        log.info("Document deleted from S3 successfully")
-      } catch (error) {
-        // Log error but continue with database deletion
-        log.error("Failed to delete from S3", {
-          itemId,
-          s3Key: item.source,
-          error: error instanceof Error ? error.message : "Unknown error"
-        })
-      }
-    }
+    // Fence completion/publication and cancel queued processing before taking
+    // the storage snapshot. A failed cleanup leaves this item in `deleting`;
+    // repeating the same action is the documented idempotent retry path.
+    const deletionItem = await beginRepositoryItemDeletion({
+      repositoryId: item.repositoryId,
+      itemId
+    })
+
+    // Clean every item type before cascading its version rows. The cleanup
+    // service distinguishes stored S3 sources from inline text/URLs and always
+    // removes canonical version artifacts. If cleanup fails, preserve the DB
+    // rows so the operation can be retried without losing the object manifest.
+    log.info("Deleting repository item objects from S3", {
+      itemId,
+      itemType: item.type,
+      repositoryId: item.repositoryId
+    })
+    const cleanup = await deleteRepositoryItemStorage({
+      ...item,
+      ...deletionItem
+    })
+    log.info("Repository item objects deleted from S3 successfully", cleanup)
 
     // Delete from database via Drizzle (cascades to chunks)
     log.info("Deleting item from database", { itemId })
-    const deletedCount = await deleteRepositoryItem(itemId)
+    const deleted = await finalizeRepositoryItemDeletion(itemId)
 
-    if (deletedCount === 0) {
+    if (!deleted) {
       log.warn("Item not found for deletion", { itemId })
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
@@ -787,7 +1124,7 @@ export async function listRepositoryItems(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("List items denied - insufficient permissions", {
         userId: session.sub,
@@ -796,23 +1133,47 @@ export async function listRepositoryItems(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
-    // Fetch repository items via Drizzle
+    // Per-repository authorization: the caller must be able to access this
+    // repository (public / owner / grant). Also excludes system-managed repos
+    // (the Atrium index, #1056). Closes the IDOR where any capability holder
+    // could list a private repo they don't own (REV-COR-061).
+    await assertRepositoryReadAccess(repositoryId, session.sub)
+
+    // Fetch repository items via Drizzle. Processing failures may contain
+    // storage keys, provider responses, or other operational details, so only
+    // repository managers may receive the raw error or retry affordance.
     log.debug("Fetching repository items from database", { repositoryId })
-    const itemsRaw = await getRepositoryItems(repositoryId)
+    const currentUserId = await getUserIdFromSession(session.sub)
+    const [itemsRaw, canonicalStatuses, canManageRepository] = await Promise.all([
+      getRepositoryItems(repositoryId),
+      getCanonicalRepositoryItemStatuses(repositoryId),
+      canModifyRepository(repositoryId, currentUserId),
+    ])
 
     // Convert to action type
-    const items: RepositoryItem[] = itemsRaw.map(item => ({
-      id: item.id,
-      repositoryId: item.repositoryId,
-      type: item.type as 'document' | 'url' | 'text',
-      name: item.name,
-      source: item.source,
-      metadata: item.metadata ?? {},
-      processingStatus: item.processingStatus ?? 'pending',
-      processingError: item.processingError,
-      createdAt: item.createdAt ?? new Date(),
-      updatedAt: item.updatedAt ?? new Date()
-    }))
+    const items: RepositoryItem[] = itemsRaw.map(item => {
+      const canonical = canonicalStatuses.get(item.id)
+      return {
+        id: item.id,
+        repositoryId: item.repositoryId,
+        type: item.type as RepositoryItemType,
+        name: item.name,
+        source: item.source,
+        metadata: item.metadata ?? {},
+        processingStatus:
+          canonical?.processingStatus ?? item.processingStatus ?? 'pending',
+        processingError: canManageRepository
+          ? canonical?.processingError ?? item.processingError
+          : null,
+        canRetry: canManageRepository
+          ? canonical?.canRetry ??
+            (item.processingStatus === "failed" &&
+              item.processingError?.startsWith("Canonical content registration failed") === true)
+          : false,
+        createdAt: item.createdAt ?? new Date(),
+        updatedAt: item.updatedAt ?? new Date()
+      }
+    })
 
     log.info("Repository items fetched successfully", {
       repositoryId,
@@ -830,6 +1191,148 @@ export async function listRepositoryItems(
       requestId,
       operation: "listRepositoryItems",
       metadata: { repositoryId }
+    })
+  }
+}
+
+interface RepositoryItemRetryTarget {
+  itemVersionId: string
+  processingJobId: string
+}
+
+async function prepareRepositoryItemRetry(
+  item: RawRepositoryItem,
+  userId: number,
+  requestId: string
+): Promise<RepositoryItemRetryTarget> {
+  if (item.currentVersionId) {
+    await assertCanonicalRetryNotQuarantined(item.currentVersionId)
+  }
+
+  if (item.type === "text") {
+    const canonical = await registerCanonicalTextIfEnabled({
+      itemId: item.id,
+      repositoryId: item.repositoryId,
+      userId,
+      name: item.name,
+      content: item.source,
+      traceId: requestId,
+    })
+    if (!canonical) {
+      throw ErrorFactories.sysConfigurationError(
+        "Canonical content processing is disabled"
+      )
+    }
+    return {
+      itemVersionId: canonical.version.id,
+      processingJobId: canonical.inspectJob.id,
+    }
+  }
+
+  if (
+    item.currentVersionId &&
+    isRepositorySourceObjectKey(item.repositoryId, item.source)
+  ) {
+    return retryCanonicalRepositoryItem(item.id, requestId)
+  }
+
+  if (!["document", "image", "audio", "video"].includes(item.type)) {
+    throw ErrorFactories.invalidInput(
+      "item.type",
+      item.type,
+      "Only stored files and inline text can be reprocessed"
+    )
+  }
+
+  const metadata = item.metadata ?? {}
+  const originalFileName =
+    typeof metadata.originalFileName === "string"
+      ? metadata.originalFileName
+      : item.name
+  const copied = await copyRepositorySourceToCanonicalNamespace({
+    repositoryId: item.repositoryId,
+    sourceKey: item.source,
+    fileName: originalFileName,
+  })
+  const copiedMetadata = await getDocumentObjectMetadata(copied.key)
+  const declaredContentType =
+    copiedMetadata.contentType ??
+    (typeof metadata.contentType === "string" ? metadata.contentType : null)
+  if (!declaredContentType || copiedMetadata.contentLength <= 0) {
+    throw ErrorFactories.invalidInput(
+      "storedSourceMetadata",
+      copiedMetadata,
+      "A positive content length and content type are required"
+    )
+  }
+  const canonical = await registerCanonicalUploadIfEnabled({
+    itemId: item.id,
+    userId,
+    objectKey: copied.key,
+    originalFileName,
+    declaredContentType,
+    byteSize: copiedMetadata.contentLength,
+    traceId: requestId,
+  })
+  if (!canonical) {
+    throw ErrorFactories.sysConfigurationError(
+      "Canonical content processing is disabled"
+    )
+  }
+  return {
+    itemVersionId: canonical.version.id,
+    processingJobId: canonical.inspectJob.id,
+  }
+}
+
+export async function retryRepositoryItemProcessing(
+  itemId: number
+): Promise<ActionState<void>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("retryRepositoryItemProcessing")
+  const log = createLogger({ requestId, action: "retryRepositoryItemProcessing" })
+
+  try {
+    const session = await getServerSession()
+    if (!session) throw ErrorFactories.authNoSession()
+    if (!(await hasCapabilityAccess("knowledge-repositories"))) {
+      throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
+    }
+
+    const item = await getRepositoryItemById(itemId)
+    if (!item) throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+    await assertNotSystemManagedRepository(item.repositoryId)
+    const userId = await getUserIdFromSession(session.sub)
+    if (!(await canModifyRepository(item.repositoryId, userId))) {
+      throw ErrorFactories.authzOwnerRequired("retry repository processing")
+    }
+
+    const retry = await prepareRepositoryItemRetry(item, userId, requestId)
+    try {
+      await dispatchContentProcessingJob({
+        jobId: retry.processingJobId,
+        itemVersionId: retry.itemVersionId,
+      })
+    } catch (dispatchError) {
+      // The durable pending job remains eligible for scheduled dispatch.
+      log.warn("Retried content is pending scheduled dispatch", {
+        itemId,
+        processingJobId: retry.processingJobId,
+        error:
+          dispatchError instanceof Error ? dispatchError.message : "Unknown error",
+      })
+    }
+
+    revalidatePath(`/repositories/${item.repositoryId}`)
+    timer({ status: "success", itemId })
+    return createSuccess(undefined as void, "Content processing restarted")
+  } catch (error) {
+    timer({ status: "error", itemId })
+    return handleError(error, "Failed to retry content processing.", {
+      context: "retryRepositoryItemProcessing",
+      requestId,
+      operation: "retryRepositoryItemProcessing",
+      metadata: { itemId },
     })
   }
 }
@@ -858,7 +1361,7 @@ export async function searchRepositoryItems(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Search denied - insufficient permissions", {
         userId: session.sub,
@@ -866,6 +1369,11 @@ export async function searchRepositoryItems(
       })
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
+
+    // Per-repository authorization (public / owner / grant); also excludes
+    // system-managed repos (#1056). Closes the IDOR on item search — this
+    // returns chunk CONTENT (REV-COR-061).
+    await assertRepositoryReadAccess(repositoryId, session.sub)
 
     // Search in item names via Drizzle
     log.debug("Searching item names", { repositoryId, query })
@@ -888,12 +1396,13 @@ export async function searchRepositoryItems(
     const items: RepositoryItem[] = itemsRaw.map(item => ({
       id: item.id,
       repositoryId: item.repositoryId,
-      type: item.type as 'document' | 'url' | 'text',
+      type: item.type as RepositoryItemType,
       name: item.name,
       source: item.source,
       metadata: item.metadata ?? {},
       processingStatus: item.processingStatus ?? 'pending',
       processingError: item.processingError,
+      canRetry: false,
       createdAt: item.createdAt ?? new Date(),
       updatedAt: item.updatedAt ?? new Date()
     }))
@@ -978,7 +1487,7 @@ export async function getItemChunks(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Get chunks denied - insufficient permissions", {
         userId: session.sub,
@@ -986,6 +1495,14 @@ export async function getItemChunks(
       })
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
+
+    // A chunk read is a DIRECT read of raw indexed text. Require access to the
+    // item's repository (public / owner / grant) — closes the IDOR where any
+    // capability holder could read another repo's chunks by item id (REV-COR-061).
+    // Also excludes system-managed repos (the Atrium index, #1056), whose
+    // per-object visibility is enforced by retrievalService/canView, not
+    // repo-level access.
+    await assertItemRepositoryReadAccess(itemId, session.sub)
 
     // Fetch chunks via Drizzle
     log.debug("Fetching chunks from database", { itemId })
@@ -1046,13 +1563,46 @@ export async function updateItemProcessingStatus(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Status update denied - insufficient permissions", {
         userId: session.sub,
         itemId
       })
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
+    }
+
+    // Validate the status string (REV-COR-068): actions are network endpoints, so
+    // the TS union is not enforced at runtime — reject anything outside the four
+    // states before any write instead of casting an arbitrary string in.
+    if (!isProcessingStatus(status)) {
+      log.warn("Invalid processing status", { itemId, status })
+      return { isSuccess: false, message: "Invalid processing status" }
+    }
+
+    // A status write keyed by itemId is a cross-repo write path: without a
+    // per-item guard any capability holder could flip processing status on an
+    // arbitrary item (IDOR), including rows of the system-managed Atrium index
+    // (#1056). Mirror removeRepositoryItem: resolve the item (404 on miss),
+    // reject system-managed repos (404-mask), then require ownership (403).
+    log.debug("Fetching item for status update", { itemId })
+    const itemRaw = await getRepositoryItemById(itemId)
+    if (!itemRaw) {
+      log.warn("Item not found for status update", { itemId })
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+    }
+    await assertNotSystemManagedRepository(itemRaw.repositoryId)
+
+    const userId = await getUserIdFromSession(session.sub)
+    log.debug("Checking repository ownership", { repositoryId: itemRaw.repositoryId, userId })
+    const canModify = await canModifyRepository(itemRaw.repositoryId, userId)
+    if (!canModify) {
+      log.warn("Status update denied - not owner", {
+        userId,
+        repositoryId: itemRaw.repositoryId,
+        itemId
+      })
+      throw ErrorFactories.authzOwnerRequired("update items in repository")
     }
 
     // Update processing status via Drizzle
@@ -1062,7 +1612,7 @@ export async function updateItemProcessingStatus(
       hasError: !!error
     })
 
-    await updateRepositoryItemStatus(itemId, status as "pending" | "processing" | "completed" | "failed", error ?? null)
+    await updateRepositoryItemStatus(itemId, status, error ?? null)
 
     log.info("Processing status updated successfully", { itemId, status })
 
@@ -1098,7 +1648,7 @@ export async function getDocumentDownloadUrl(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Download URL denied - insufficient permissions", {
         userId: session.sub,
@@ -1116,74 +1666,54 @@ export async function getDocumentDownloadUrl(
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
 
-    // Convert to action type
-    const item: RepositoryItem = {
-      id: itemRaw.id,
-      repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
-      name: itemRaw.name,
-      source: itemRaw.source,
-      metadata: itemRaw.metadata ?? {},
-      processingStatus: itemRaw.processingStatus ?? 'pending',
-      processingError: itemRaw.processingError,
-      createdAt: itemRaw.createdAt ?? new Date(),
-      updatedAt: itemRaw.updatedAt ?? new Date()
-    }
+    // A download URL is a content-access path. Require access to the item's
+    // repository (public / owner / grant) — closes the IDOR by item id. Also
+    // excludes system-managed repos (the Atrium index, #1056).
+    await assertRepositoryReadAccess(itemRaw.repositoryId, session.sub)
 
-    if (item.type !== 'document') {
-      log.warn("Download URL requested for non-document item", {
+    // Convert to action type
+    const item: RepositoryItem = mapToRepositoryItem(itemRaw)
+
+    if (
+      item.type !== 'document' &&
+      item.type !== 'image' &&
+      item.type !== 'audio' &&
+      item.type !== 'video'
+    ) {
+      log.warn("Download URL requested for non-file item", {
         itemId,
         itemType: item.type
       })
-      return { isSuccess: false, message: "Item is not a document" }
+      return { isSuccess: false, message: "Item is not a downloadable file" }
     }
 
-    // Generate a presigned URL for download
-    const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner')
-    const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3')
-    
-    const s3Client = new S3Client({})
-    const bucketName = process.env.DOCUMENTS_BUCKET_NAME
-    
-    if (!bucketName) {
-      return { isSuccess: false, message: "Storage not configured" }
+    // Defense in depth (REV-SEC-062): never presign a stored source outside this
+    // item's own repository namespace — blocks a client-planted key (via
+    // addDocumentWithPresignedUrl) from being signed against the shared bucket.
+    const expectedPrefix = `repositories/${item.repositoryId}/`
+    if (!item.source.startsWith(expectedPrefix)) {
+      log.warn("Download URL denied - source outside repository namespace", {
+        itemId,
+        repositoryId: item.repositoryId
+      })
+      return { isSuccess: false, message: "Item is not available for download" }
     }
 
-    // Extract file extension from the original S3 key or metadata
-    let filename = item.name
-    const metadata = item.metadata as Record<string, unknown> | null
-
-    // Try to get extension from original filename or S3 key
-    let extension = ''
-
-    if (metadata && typeof metadata === 'object' && 'originalFileName' in metadata && typeof metadata.originalFileName === 'string') {
-      // Use the original filename's extension
-      extension = metadata.originalFileName.split('.').pop() || ''
-    } else {
-      // Extract from S3 key
-      const urlParts = item.source.split('/')
-      const s3Filename = urlParts[urlParts.length - 1]
-      extension = s3Filename.split('.').pop() || ''
-    }
-    
-    // Add extension if not already present in the name
-    if (extension && !filename.toLowerCase().endsWith(`.${extension.toLowerCase()}`)) {
-      filename = `${filename}.${extension}`
-    }
-
-    const command = new GetObjectCommand({
-      Bucket: bucketName,
-      Key: item.source,
-      ResponseContentDisposition: `attachment; filename="${filename}"`
-    })
+    // Sanitize/encode the display filename before it lands in the reflected
+    // Content-Disposition header (REV-COR-071).
+    const contentDisposition = toContentDispositionValue(resolveDownloadFilename(item))
 
     log.info("Generating presigned download URL", {
       itemId,
       s3Key: item.source,
-      fileName: filename
+      contentDisposition
     })
     
-    const downloadUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 }) // 1 hour
+    const downloadUrl = await getDocumentSignedUrl({
+      key: item.source,
+      expiresIn: 3600,
+      responseContentDisposition: contentDisposition,
+    })
 
     log.info("Download URL generated successfully", {
       itemId,

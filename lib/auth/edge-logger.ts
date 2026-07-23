@@ -66,45 +66,48 @@ export function createEdgeLogger(context: LogContext): EdgeLogger {
     const timestamp = new Date().toISOString()
     const contextString = `${context.context}[${sanitizedTokenSub}]`
     const sanitizedMeta = sanitizeMetadata(meta)
+    const formattedMessage = `[${timestamp}] ${contextString} ${level}: ${message}`
+    const metaString = sanitizedMeta ? ` ${JSON.stringify(sanitizedMeta)}` : ''
 
-    // In development, attempt to output to available logging mechanism
-    if (process.env.NODE_ENV === 'development') {
-      try {
-        const formattedMessage = `[${timestamp}] ${contextString} ${level}: ${message}`
-        const metaString = sanitizedMeta ? ` ${JSON.stringify(sanitizedMeta)}` : ''
+    // Gate the debug-endpoint forward by the same rule as the console output below
+    // (warn/error always, info/debug dev-only) — otherwise info() calls (which can
+    // carry auth metadata like sub/email) would forward to DEBUG_LOG_ENDPOINT in
+    // production even though only warn/error were intended to leave development.
+    const shouldEmit = level === 'ERROR' || level === 'WARN' || process.env.NODE_ENV === 'development'
 
-        // Try to use fetch to send to a logging endpoint if available
-        // This is Edge Runtime compatible
-        if (process.env.DEBUG_LOG_ENDPOINT) {
-          const logEntry = {
+    try {
+      if (shouldEmit && process.env.DEBUG_LOG_ENDPOINT) {
+        fetch(process.env.DEBUG_LOG_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
             level,
             message,
             timestamp,
             context: contextString,
             meta: sanitizedMeta
-          }
-
-          fetch(process.env.DEBUG_LOG_ENDPOINT, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(logEntry)
-          }).catch(() => {
-            // Silently fail if logging endpoint unavailable
           })
-        }
-
-        // For development debugging - works in both Node.js and Edge Runtime
-        if (level === 'ERROR') {
-          // eslint-disable-next-line no-console
-          console.error(`${formattedMessage}${metaString}`)
-        } else {
-          // eslint-disable-next-line no-console
-          console.log(`${formattedMessage}${metaString}`)
-        }
-      } catch {
-        // Silently fail if any logging mechanism fails
-        // This ensures the logger never breaks the application
+        }).catch(() => {
+          // Silently fail if logging endpoint unavailable
+        })
       }
+
+      // warn/error MUST be visible in production. This logger was previously silent
+      // outside development, dropping every Edge-runtime auth/token-refresh failure
+      // (REV-COR-513). Metadata is already sanitized (sanitizeMetadata + tokenSub
+      // truncation), so tokens are never emitted. info/debug stay development-only.
+      if (level === 'ERROR') {
+        // eslint-disable-next-line no-console
+        console.error(`${formattedMessage}${metaString}`)
+      } else if (level === 'WARN') {
+        // eslint-disable-next-line no-console
+        console.warn(`${formattedMessage}${metaString}`)
+      } else if (process.env.NODE_ENV === 'development') {
+        // eslint-disable-next-line no-console
+        console.log(`${formattedMessage}${metaString}`)
+      }
+    } catch {
+      // Never let logging break the application (Edge runtime).
     }
   }
 

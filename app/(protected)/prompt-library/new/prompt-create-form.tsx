@@ -150,6 +150,7 @@ export function PromptCreateForm({
                 selectedModel={selectedModel}
                 enabledTools={enabledTools}
                 onToolsChange={onToolsChange}
+                disableAutoEnable
               />
               <MCPPopover
                 enabledConnectors={enabledConnectors}

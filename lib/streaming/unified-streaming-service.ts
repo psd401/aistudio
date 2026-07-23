@@ -4,8 +4,11 @@ import { getTelemetryConfig } from './telemetry-service';
 import { getProviderAdapter, type ProviderCapabilities } from './provider-adapters';
 import { CircuitBreaker, CircuitBreakerOpenError } from './circuit-breaker';
 import { getContentSafetyService, type ContentSafetyResult } from '@/lib/safety';
-import type { TokenMapping } from '@/lib/safety/types';
-import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, TelemetrySpan, TelemetryConfig } from './types';
+import {
+  createTokenMappingSink,
+  type TokenMappingSink,
+} from '@/lib/safety/token-mapping-sink';
+import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, TelemetrySpan, TelemetryConfig, StepCallbackData } from './types';
 import { ContentSafetyBlockedError } from './types';
 
 // Logger for PII transform debugging
@@ -49,16 +52,18 @@ function hasPartialPIITokenAtEnd(text: string): { hasPartial: boolean; startInde
  */
 function replacePIITokensWithRemainder(
   text: string,
-  tokenMap: Map<string, string>
+  tokenMappingSink: TokenMappingSink
 ): { processed: string; remainder: string } {
   // Replace all complete tokens
   const processed = text.replace(PII_TOKEN_REGEX, (match) => {
-    const replacement = tokenMap.get(match);
-    if (replacement) {
+    const replacement = tokenMappingSink.resolve(match);
+    if (replacement !== undefined) {
       return replacement;
     } else {
       // Log without exposing actual token patterns - just indicate a mismatch occurred
-      piiTransformLog.warn('PII token mismatch during detokenization', { tokenCount: tokenMap.size });
+      piiTransformLog.warn('PII token mismatch during detokenization', {
+        tokenCount: tokenMappingSink.size,
+      });
       return match;
     }
   });
@@ -82,7 +87,7 @@ function replacePIITokensWithRemainder(
  */
 function processSSEEventWithBuffer(
   event: string,
-  tokenMap: Map<string, string>,
+  tokenMappingSink: TokenMappingSink,
   textBuffer: string,
   SSE_DATA_PREFIX: string
 ): { output: string; newBuffer: string } {
@@ -105,7 +110,10 @@ function processSSEEventWithBuffer(
     if (parsed.type === 'text-delta' && parsed.delta && typeof parsed.delta === 'string') {
       // Prepend any buffered text from previous chunks
       const fullText = textBuffer + parsed.delta;
-      const { processed, remainder } = replacePIITokensWithRemainder(fullText, tokenMap);
+      const { processed, remainder } = replacePIITokensWithRemainder(
+        fullText,
+        tokenMappingSink
+      );
 
       // Update the delta with processed text (may be empty if all buffered)
       parsed.delta = processed;
@@ -121,7 +129,10 @@ function processSSEEventWithBuffer(
     // Handle reasoning-delta events similarly
     if (parsed.type === 'reasoning-delta' && parsed.delta && typeof parsed.delta === 'string') {
       const fullText = textBuffer + parsed.delta;
-      const { processed, remainder } = replacePIITokensWithRemainder(fullText, tokenMap);
+      const { processed, remainder } = replacePIITokensWithRemainder(
+        fullText,
+        tokenMappingSink
+      );
       parsed.delta = processed;
       return {
         output: SSE_DATA_PREFIX + JSON.stringify(parsed),
@@ -147,18 +158,9 @@ function processSSEEventWithBuffer(
  *
  * @see https://sdk.vercel.ai/docs/ai-sdk-ui/stream-protocol
  */
-function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformStream<Uint8Array, Uint8Array> {
-  // Build lookup map from token placeholder to original value
-  const tokenMap = new Map<string, string>();
-  for (const mapping of tokenMappings) {
-    tokenMap.set(mapping.placeholder, mapping.original);
-  }
-
-  // If no tokens to replace, return a pass-through transform
-  if (tokenMap.size === 0) {
-    return new TransformStream();
-  }
-
+function createPIIDetokenizeTransform(
+  tokenMappingSink: TokenMappingSink
+): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let sseBuffer = '';      // Buffer for incomplete SSE events
@@ -183,7 +185,7 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
         // Process event with text buffering for cross-chunk PII tokens
         const { output, newBuffer } = processSSEEventWithBuffer(
           event,
-          tokenMap,
+          tokenMappingSink,
           textBuffer,
           SSE_DATA_PREFIX
         );
@@ -203,7 +205,12 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
 
       // Output any remaining SSE buffer content (handles incomplete final event)
       if (sseBuffer.length > 0) {
-        const { output } = processSSEEventWithBuffer(sseBuffer, tokenMap, '', SSE_DATA_PREFIX);
+        const { output } = processSSEEventWithBuffer(
+          sseBuffer,
+          tokenMappingSink,
+          '',
+          SSE_DATA_PREFIX
+        );
         controller.enqueue(encoder.encode(output));
       }
     }
@@ -245,7 +252,7 @@ interface InputSafetyCheckOptions {
  * Options for output content safety check
  */
 interface OutputSafetyCheckOptions {
-  data: { text: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number; reasoningTokens?: number; totalCost?: number }; finishReason: string };
+  data: { text: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number; reasoningTokens?: number; totalCost?: number }; finishReason: string; steps?: StepCallbackData[] };
   request: StreamRequest;
   contentSafetyService: ReturnType<typeof getContentSafetyService>;
   log: ReturnType<typeof createLogger>;
@@ -262,16 +269,43 @@ interface OutputSafetyCheckResult {
 }
 
 /**
- * Extract text content from a UIMessage (AI SDK v5 format)
+ * Extract text content from a UIMessage (AI SDK v6 format).
+ * Handles both inline text parts and document/file parts that may still contain
+ * their extracted text (i.e. before they are moved to S3 by processMessagesWithAttachments).
  */
-function extractTextFromUIMessage(message: { parts?: Array<{ type: string; text?: string }> }): string {
+function extractTextFromUIMessage(
+  message: { parts?: Array<{ type: string; text?: string; content?: unknown; data?: unknown }> }
+): string {
   if (!message.parts || !Array.isArray(message.parts)) {
     return '';
   }
-  return message.parts
-    .filter((part) => part.type === 'text' && part.text)
-    .map((part) => part.text)
-    .join('\n');
+  const segments: string[] = [];
+  for (const part of message.parts) {
+    if (part.type === 'text' && part.text) {
+      segments.push(part.text);
+      continue;
+    }
+    // Extract text from document / file parts when their content is still present
+    // (i.e. the message has not yet been through processMessagesWithAttachments).
+    if (part.type === 'document' || part.type === 'file') {
+      const raw = (part as { content?: unknown; data?: unknown }).content
+        ?? (part as { content?: unknown; data?: unknown }).data;
+      if (typeof raw === 'string' && raw) {
+        segments.push(raw);
+      } else if (Array.isArray(raw)) {
+        for (const cp of raw) {
+          if (
+            typeof cp === 'object' && cp !== null &&
+            (cp as Record<string, unknown>).type === 'text' &&
+            typeof (cp as Record<string, unknown>).text === 'string'
+          ) {
+            segments.push((cp as { text: string }).text);
+          }
+        }
+      }
+    }
+  }
+  return segments.join('\n');
 }
 
 /**
@@ -412,7 +446,7 @@ async function checkOutputContentSafety(options: OutputSafetyCheckOptions): Prom
  */
 function wrapStreamWithPIIDetokenization(
   result: StreamResponse['result'],
-  tokenMappings: TokenMapping[]
+  tokenMappingSink: TokenMappingSink
 ): StreamResponse['result'] {
   return {
     ...result,
@@ -422,7 +456,7 @@ function wrapStreamWithPIIDetokenization(
         return originalResponse;
       }
       const transformedStream = originalResponse.body.pipeThrough(
-        createPIIDetokenizeTransform(tokenMappings)
+        createPIIDetokenizeTransform(tokenMappingSink)
       );
       return new Response(transformedStream, {
         status: originalResponse.status,
@@ -436,7 +470,7 @@ function wrapStreamWithPIIDetokenization(
         return originalResponse;
       }
       const transformedStream = originalResponse.body.pipeThrough(
-        createPIIDetokenizeTransform(tokenMappings)
+        createPIIDetokenizeTransform(tokenMappingSink)
       );
       return new Response(transformedStream, {
         status: originalResponse.status,
@@ -493,27 +527,90 @@ function validateAndCopyMessages(
 }
 
 /**
+ * Normalize assistant UIMessages so convertToModelMessages can produce the
+ * correct multi-turn structure required by Anthropic (and other providers).
+ *
+ * When MCP connectors are used with maxSteps > 1, all tool calls from every
+ * step may be consolidated into a single assistant UIMessage (both during live
+ * sessions and after conversation reload from the DB). If that message also
+ * contains a text part, convertToModelMessages emits the tool_use and text
+ * blocks in one assistant turn and then emits the tool_result blocks as a
+ * synthetic user turn — followed by the real user follow-up, creating two
+ * consecutive user turns which Anthropic rejects.
+ *
+ * Fix: split any assistant message that has BOTH resolved tool parts AND a
+ * text part into two separate UIMessages (tool-only first, text-only second).
+ * convertToModelMessages then produces the valid pattern:
+ *   assistant[tool_use…] → user[tool_result…] → assistant[text] → user[follow-up]
+ *
+ * This is safe for single-step responses too — splitting doesn't change the
+ * semantic meaning, it only separates concerns across turns.
+ */
+export function normalizeMultiStepMessages(messages: StreamRequest['messages']): StreamRequest['messages'] {
+  type AnyPart = Record<string, unknown>;
+  const normalized: StreamRequest['messages'] = [];
+
+  for (const msg of messages) {
+    if (msg.role !== 'assistant' || !Array.isArray(msg.parts) || msg.parts.length === 0) {
+      normalized.push(msg);
+      continue;
+    }
+
+    const parts = msg.parts as AnyPart[];
+    // At this point in the pipeline, messages have passed through convertContentToParts so
+    // tool parts use the static format type: 'tool-{toolName}' and always carry a `state`
+    // field (e.g. 'tool-query_db' with state: 'output-available'). Native AI SDK parts
+    // use type: 'tool-call' and never have a `state` field. Using `'state' in p` as the
+    // discriminator is safer than `p.type !== 'tool-call'` because it handles tools named
+    // "call" correctly (their static format is also `type: 'tool-call'` but WITH state).
+    const toolParts = parts.filter(p =>
+      typeof p.type === 'string' &&
+      (p.type as string).startsWith('tool-') &&
+      'state' in p
+    );
+    const textParts = parts.filter(p => p.type === 'text');
+
+    const hasResolvedTools = toolParts.some(p => p.state === 'output-available' || p.state === 'output-error');
+    const hasText = textParts.some(p => typeof p.text === 'string' && (p.text as string).length > 0);
+
+    if (hasResolvedTools && hasText) {
+      // Split: emit tool-only message first, then text-only message.
+      // Casting required because AnyPart[] is a narrower type than UIMessagePart[]
+      // but the structure is semantically valid for convertToModelMessages.
+      normalized.push({ ...msg, parts: toolParts as StreamRequest['messages'][0]['parts'] });
+      normalized.push({ ...msg, id: `${msg.id}-text`, parts: textParts as StreamRequest['messages'][0]['parts'] });
+    } else {
+      normalized.push(msg);
+    }
+  }
+
+  return normalized;
+}
+
+/**
  * Convert messages to model format with error handling
  */
 async function convertMessages(
   messages: StreamRequest['messages'],
   log: ReturnType<typeof createLogger>
 ) {
+  const normalizedMessages = normalizeMultiStepMessages(messages);
+
   log.info('Messages structure before conversion', {
-    messageCount: messages.length,
-    firstMessageRole: messages[0]?.role,
-    messageRoles: messages.map(m => m.role),
+    messageCount: normalizedMessages.length,
+    firstMessageRole: normalizedMessages[0]?.role,
+    messageRoles: normalizedMessages.map(m => m.role),
   });
 
   try {
-    return await convertToModelMessages(messages);
+    return await convertToModelMessages(normalizedMessages);
   } catch (conversionError) {
     const error = conversionError as Error;
     log.error('Failed to convert messages', {
       error: error.message,
       stack: error.stack,
-      messageCount: messages.length,
-      messageRoles: messages.map(m => m.role),
+      messageCount: normalizedMessages.length,
+      messageRoles: normalizedMessages.map(m => m.role),
     });
     throw new Error(`Message conversion failed: ${error.message}`);
   }
@@ -541,6 +638,8 @@ function buildStreamConfig(options: BuildConfigOptions): StreamConfig {
     system: request.systemPrompt,
     maxTokens: request.maxTokens,
     maxSteps: request.maxSteps,
+    costCapCents: request.costCapCents,
+    costRates: request.costRates,
     temperature: request.temperature,
     tools,
     toolChoice: tools && Object.keys(tools).length > 0 ? 'auto' : undefined,
@@ -611,57 +710,48 @@ async function getOrCreateTools(
   request: StreamRequest,
   adapter: Awaited<ReturnType<typeof getProviderAdapter>>
 ): Promise<StreamConfig['tools']> {
-  // When pre-resolved tools are provided (e.g., adapter + MCP connector tools
-  // already merged by the caller), use them directly and skip adapter.createTools()
-  // to avoid redundant work and unintended side effects.
+  // Build the adapter's tool set (universal + model-supported provider-native
+  // tools) from `enabledTools`, honoring the model's capability filter.
+  const buildAdapterTools = async (): Promise<StreamConfig['tools']> => {
+    const requestedTools = request.enabledTools || [];
+    if (requestedTools.length === 0) {
+      return adapter.createTools([]);
+    }
+    const supportedTools = adapter.getSupportedTools(request.modelId);
+    // If the adapter reports no supported tools, pass nothing to avoid
+    // "tool use in streaming mode" errors (e.g., Bedrock Claude models).
+    // createTools([]) still returns universal tools (show_chart) unconditionally.
+    if (supportedTools.length === 0) {
+      log.info('Model does not support provider-native tools, filtering all tool requests', {
+        modelId: request.modelId,
+        requestedCount: requestedTools.length,
+      });
+      return adapter.createTools([]);
+    }
+    const filteredTools = requestedTools.filter(tool => supportedTools.includes(tool));
+    if (filteredTools.length < requestedTools.length) {
+      log.info('Filtered unsupported tools for model', {
+        modelId: request.modelId,
+        requestedCount: requestedTools.length,
+        filteredCount: filteredTools.length,
+        droppedTools: requestedTools.filter(tool => !supportedTools.includes(tool)),
+      });
+    }
+    return adapter.createTools(filteredTools);
+  };
+
+  // When pre-resolved tools are provided (adapter + MCP connector + workspace
+  // tools merged by the caller), MERGE the adapter's provider-native tools UNDER
+  // them (pre-resolved tools win on a name collision) rather than replacing.
+  // Returning `request.tools` alone dropped provider-native tools (OpenAI web
+  // search / code interpreter) whenever a connector or workspace was active,
+  // even though the same `enabledTools` work without them (PR #1136 review).
   if (request.tools) {
-    return request.tools;
+    const adapterTools = await buildAdapterTools();
+    return { ...adapterTools, ...request.tools };
   }
 
-  const requestedTools = request.enabledTools || [];
-  if (requestedTools.length === 0) {
-    return adapter.createTools([]);
-  }
-
-  // Filter requested tools against model's supported capabilities
-  const supportedTools = adapter.getSupportedTools(request.modelId);
-
-  // If the adapter reports no supported tools, pass nothing to avoid
-  // "tool use in streaming mode" errors (e.g., Bedrock Claude models)
-  if (supportedTools.length === 0) {
-    log.info('Model does not support provider-native tools, filtering all tool requests', {
-      modelId: request.modelId,
-      requestedCount: requestedTools.length,
-    });
-    log.debug('Tool filtering detail (no provider-native tools)', {
-      modelId: request.modelId,
-      requestedTools,
-    });
-    // createTools([]) always returns universal tools (show_chart, etc.) regardless of
-    // the empty input — BaseProviderAdapter.createTools() calls createUniversalTools()
-    // unconditionally, and all concrete adapters call super or replicate this behaviour.
-    return adapter.createTools([]);
-  }
-
-  // Only pass through tools the model actually supports
-  const filteredTools = requestedTools.filter(tool => supportedTools.includes(tool));
-  if (filteredTools.length < requestedTools.length) {
-    const droppedTools = requestedTools.filter(tool => !supportedTools.includes(tool));
-    log.info('Filtered unsupported tools for model', {
-      modelId: request.modelId,
-      requestedCount: requestedTools.length,
-      filteredCount: filteredTools.length,
-      droppedTools,
-    });
-    log.debug('Tool filtering detail', {
-      modelId: request.modelId,
-      requestedTools,
-      supportedTools,
-      filteredTools,
-    });
-  }
-
-  return adapter.createTools(filteredTools);
+  return buildAdapterTools();
 }
 
 /**
@@ -672,7 +762,8 @@ interface BuildStreamResponseOptions {
   requestId: string;
   capabilities: ProviderCapabilities;
   telemetryConfig: TelemetryConfig;
-  tokenMappings: TokenMapping[];
+  tokenMappingSink: TokenMappingSink;
+  hasDynamicTokenMappings: boolean;
   log: ReturnType<typeof createLogger>;
 }
 
@@ -680,11 +771,25 @@ interface BuildStreamResponseOptions {
  * Build stream response with optional PII wrapping
  */
 function buildStreamResponse(options: BuildStreamResponseOptions): StreamResponse {
-  const { result, requestId, capabilities, telemetryConfig, tokenMappings, log } = options;
+  const {
+    result,
+    requestId,
+    capabilities,
+    telemetryConfig,
+    tokenMappingSink,
+    hasDynamicTokenMappings,
+    log,
+  } = options;
 
-  if (tokenMappings.length > 0) {
-    log.info('Wrapping stream with PII detokenization transform', { tokenCount: tokenMappings.length });
-    const wrappedResult = wrapStreamWithPIIDetokenization(result, tokenMappings);
+  if (tokenMappingSink.size > 0 || hasDynamicTokenMappings) {
+    log.info('Wrapping stream with PII detokenization transform', {
+      tokenCount: tokenMappingSink.size,
+      dynamic: hasDynamicTokenMappings,
+    });
+    const wrappedResult = wrapStreamWithPIIDetokenization(
+      result,
+      tokenMappingSink
+    );
     return { result: wrappedResult, requestId, capabilities, telemetryConfig };
   }
   return { result, requestId, capabilities, telemetryConfig };
@@ -821,9 +926,20 @@ export class UnifiedStreamingService {
           source: request.source
         });
 
+        // Merge inline-scan tokens with mappings pre-computed at the route and
+        // mappings that tools may add later in the same provider loop. A caller-
+        // supplied sink is request scoped; no mapping state is shared globally.
+        const tokenMappingSink =
+          request.inputTokenMappingSink ?? createTokenMappingSink();
+        tokenMappingSink.add([
+          ...(request.precomputedInputTokenMappings || []),
+          ...(inputSafetyResult?.tokens || []),
+        ]);
+
         return buildStreamResponse({
           result, requestId, capabilities, telemetryConfig,
-          tokenMappings: inputSafetyResult?.tokens || [],
+          tokenMappingSink,
+          hasDynamicTokenMappings: request.inputTokenMappingSink !== undefined,
           log
         });
         
@@ -867,7 +983,15 @@ export class UnifiedStreamingService {
    */
   private getAdaptiveTimeout(capabilities: ProviderCapabilities, request: StreamRequest): number {
     const baseTimeout = 30000; // 30 seconds
-    
+
+    // An explicitly configured timeout always wins (e.g. an agentic run's per-run
+    // wall-clock limit, #926). The adaptive values below are only fallbacks for
+    // callers that don't set one — otherwise a reasoning/thinking model would
+    // ignore the author-configured timeout entirely.
+    if (typeof request.timeout === 'number' && Number.isFinite(request.timeout) && request.timeout > 0) {
+      return request.timeout;
+    }
+
     // Extend timeout for reasoning models
     if (capabilities.supportsReasoning) {
       // o3/o4 models may need up to 5 minutes for complex reasoning

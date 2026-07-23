@@ -3,17 +3,26 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
+  ListObjectVersionsCommand,
   CreateBucketCommand,
   HeadBucketCommand,
   PutBucketCorsCommand,
+  CopyObjectCommand,
   BucketLocationConstraint,
 } from "@aws-sdk/client-s3"
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
 import { createError } from "@/lib/error-utils"
 import { Settings } from "@/lib/settings-manager"
 import { Readable } from "node:stream"
+import { randomUUID } from "node:crypto"
+import {
+  buildRepositorySourceObjectKey,
+  isRepositorySourceObjectKey,
+} from "@/lib/repositories/content-platform/object-key"
+import { sanitizeFileName } from "@/lib/aws/document-upload"
 
 // Cache S3 config to avoid repeated async calls
 let s3ConfigCache: { bucket: string | null; region: string | null } | null = null
@@ -58,6 +67,7 @@ export function clearS3Cache() {
 
 export interface UploadDocumentParams {
   userId: string
+  repositoryId?: number
   fileName: string
   fileContent: Buffer | Uint8Array | string
   contentType: string
@@ -67,6 +77,7 @@ export interface UploadDocumentParams {
 export interface DocumentUrlParams {
   key: string
   expiresIn?: number // seconds, default 3600 (1 hour)
+  responseContentDisposition?: string
 }
 
 export interface PresignedUploadUrlParams {
@@ -76,6 +87,20 @@ export interface PresignedUploadUrlParams {
   fileSize: number
   metadata?: Record<string, string>
   expiresIn?: number // seconds, default 3600 (1 hour)
+}
+
+export interface UploadRepositoryTextSourceParams {
+  repositoryId: number
+  itemId: number
+  userId: number
+  fileName: string
+  content: string
+}
+
+export interface CopyRepositorySourceToCanonicalNamespaceParams {
+  repositoryId: number
+  sourceKey: string
+  fileName: string
 }
 
 // Ensure the documents bucket exists
@@ -144,6 +169,7 @@ export async function ensureDocumentsBucket(): Promise<void> {
 // Upload a document to S3
 export async function uploadDocument({
   userId,
+  repositoryId,
   fileName,
   fileContent,
   contentType,
@@ -156,7 +182,9 @@ export async function uploadDocument({
   const bucketName = config.bucket!
 
   const timestamp = Date.now()
-  const key = `${userId}/${timestamp}-${fileName}`
+  const key = repositoryId == null
+    ? `${userId}/${timestamp}-${fileName}`
+    : buildRepositorySourceObjectKey(repositoryId, fileName)
 
   try {
     const command = new PutObjectCommand({
@@ -191,10 +219,85 @@ export async function uploadDocument({
   }
 }
 
+/**
+ * Persist inline repository text as an immutable canonical source object.
+ * Keeping it in the repository namespace lets the unified processor and
+ * storage cleanup use the same lifecycle as browser-uploaded files.
+ */
+export async function uploadRepositoryTextSource({
+  repositoryId,
+  itemId,
+  userId,
+  fileName,
+  content,
+}: UploadRepositoryTextSourceParams): Promise<{ key: string; byteSize: number }> {
+  await ensureDocumentsBucket()
+
+  const s3Client = await getS3Client()
+  const config = await getS3Config()
+  const body = Buffer.from(content, "utf8")
+  const key = buildRepositorySourceObjectKey(repositoryId, fileName, randomUUID())
+
+  await s3Client.send(
+    new PutObjectCommand({
+      Bucket: config.bucket!,
+      Key: key,
+      Body: body,
+      ContentType: "text/plain",
+      Metadata: {
+        repositoryId: repositoryId.toString(),
+        itemId: itemId.toString(),
+        userId: userId.toString(),
+        sourceKind: "text",
+        uploadedAt: new Date().toISOString(),
+      },
+    })
+  )
+
+  return { key, byteSize: body.byteLength }
+}
+
+/**
+ * Copy a legacy repository source into the immutable namespace accepted by the
+ * unified processor. S3 preserves source metadata, content type, and tags by
+ * default because this request supplies no replacement directives.
+ */
+export async function copyRepositorySourceToCanonicalNamespace({
+  repositoryId,
+  sourceKey,
+  fileName,
+}: CopyRepositorySourceToCanonicalNamespaceParams): Promise<{ key: string }> {
+  if (!sourceKey.trim() || sourceKey.includes("..")) {
+    throw new Error("A safe source object key is required")
+  }
+  await ensureDocumentsBucket()
+
+  const s3Client = await getS3Client()
+  const config = await getS3Config()
+  const bucketName = config.bucket!
+  const safeFileName = sanitizeFileName(fileName)
+  const key = buildRepositorySourceObjectKey(repositoryId, safeFileName)
+  const encodedSourceKey = sourceKey
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/")
+
+  await s3Client.send(
+    new CopyObjectCommand({
+      Bucket: bucketName,
+      Key: key,
+      CopySource: `/${bucketName}/${encodedSourceKey}`,
+    })
+  )
+
+  return { key }
+}
+
 // Get a signed URL for a document
 export async function getDocumentSignedUrl({
   key,
   expiresIn = 3600,
+  responseContentDisposition,
 }: DocumentUrlParams): Promise<string> {
   const s3Client = await getS3Client()
   const config = await getS3Config()
@@ -204,6 +307,7 @@ export async function getDocumentSignedUrl({
     const command = new GetObjectCommand({
       Bucket: bucketName,
       Key: key,
+      ResponseContentDisposition: responseContentDisposition,
     })
 
     const url = await getSignedUrl(s3Client, command, { expiresIn })
@@ -243,6 +347,158 @@ export async function deleteDocument(key: string): Promise<void> {
   }
 }
 
+interface RepositoryObjectVersion {
+  Key: string
+  VersionId: string
+}
+
+async function deleteRepositoryVersions(input: {
+  prefix: string
+  exactKey?: string
+}): Promise<number> {
+  const s3Client = await getS3Client()
+  const config = await getS3Config()
+  const bucketName = config.bucket!
+  let deleted = 0
+  let keyMarker: string | undefined
+  let versionIdMarker: string | undefined
+
+  try {
+    do {
+      const listed = await s3Client.send(
+        new ListObjectVersionsCommand({
+          Bucket: bucketName,
+          Prefix: input.prefix,
+          KeyMarker: keyMarker,
+          VersionIdMarker: versionIdMarker,
+        })
+      )
+      const versions = [...(listed.Versions ?? []), ...(listed.DeleteMarkers ?? [])]
+        .flatMap((object): RepositoryObjectVersion[] => {
+          if (
+            typeof object.Key !== "string" ||
+            typeof object.VersionId !== "string" ||
+            (input.exactKey != null && object.Key !== input.exactKey)
+          ) {
+            return []
+          }
+          return [{ Key: object.Key, VersionId: object.VersionId }]
+        })
+
+      for (let index = 0; index < versions.length; index += 1000) {
+        const batch = versions.slice(index, index + 1000)
+        const removed = await s3Client.send(
+          new DeleteObjectsCommand({
+            Bucket: bucketName,
+            Delete: {
+              Objects: batch,
+              Quiet: true,
+            },
+          })
+        )
+        if ((removed.Errors?.length ?? 0) > 0) {
+          throw createError("S3 rejected one or more repository object deletions", {
+            code: "S3_PREFIX_DELETE_PARTIAL_ERROR",
+            details: {
+              prefix: input.prefix,
+              failedKeys: removed.Errors?.flatMap((failure) =>
+                failure.Key ? [failure.Key] : []
+              ),
+            },
+          })
+        }
+        deleted += batch.length
+      }
+
+      if (listed.IsTruncated && !listed.NextKeyMarker) {
+        throw createError(
+          "S3 returned a truncated repository version listing without a cursor",
+          {
+            code: "S3_PREFIX_LIST_CURSOR_ERROR",
+            details: { prefix: input.prefix },
+          }
+        )
+      }
+      keyMarker = listed.IsTruncated ? listed.NextKeyMarker : undefined
+      versionIdMarker = listed.IsTruncated
+        ? listed.NextVersionIdMarker
+        : undefined
+    } while (keyMarker)
+
+    return deleted
+  } catch (error) {
+    throw createError("Failed to delete repository objects from S3", {
+      code: "S3_PREFIX_DELETE_ERROR",
+      details: {
+        error: error instanceof Error ? error.message : String(error),
+        prefix: input.prefix,
+      },
+    })
+  }
+}
+
+/**
+ * Permanently delete every version and delete marker for one exact document
+ * key. Exact-key filtering prevents a shared prefix from removing neighbors
+ * while retaining compatibility with legacy document namespaces.
+ */
+export async function deleteDocumentVersions(key: string): Promise<number> {
+  if (!key.trim() || key.startsWith("/") || key.includes("..")) {
+    throw createError("Invalid document object key", {
+      code: "S3_OBJECT_KEY_VALIDATION_ERROR",
+      details: { key },
+    })
+  }
+  return deleteRepositoryVersions({ prefix: key, exactKey: key })
+}
+
+/**
+ * Permanently delete every version and delete marker for one immutable
+ * repository source. A normal DeleteObject request only adds a delete marker
+ * to the versioned documents bucket and does not satisfy retention deletion.
+ */
+export async function deleteRepositoryObjectVersions(key: string): Promise<number> {
+  const repositoryIdMatch = /^repositories\/([1-9]\d*)\//.exec(key)
+  const repositoryId = repositoryIdMatch
+    ? Number.parseInt(repositoryIdMatch[1]!, 10)
+    : Number.NaN
+  if (!isRepositorySourceObjectKey(repositoryId, key)) {
+    throw createError("Invalid repository object key", {
+      code: "S3_OBJECT_KEY_VALIDATION_ERROR",
+      details: { key },
+    })
+  }
+  return deleteDocumentVersions(key)
+}
+
+/**
+ * Permanently delete every version and delete marker below a repository-owned
+ * artifact namespace or an exact repository root. Repository-root deletion is
+ * reserved for final lifecycle cleanup so abandoned upload objects cannot
+ * survive the database row that owned them.
+ */
+export async function deleteRepositoryObjectVersionsByPrefix(
+  prefix: string
+): Promise<number> {
+  const repositoryArtifactPrefix =
+    /^repositories\/[1-9]\d*\/artifacts\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/$/i
+  const repositoryRootPrefix = /^repositories\/[1-9]\d*\/$/
+  if (
+    !repositoryArtifactPrefix.test(prefix) &&
+    !repositoryRootPrefix.test(prefix)
+  ) {
+    throw createError("Invalid repository object prefix", {
+      code: "S3_PREFIX_VALIDATION_ERROR",
+      details: { prefix },
+    })
+  }
+  return deleteRepositoryVersions({ prefix })
+}
+
+/** Backwards-compatible name retained for existing repository cleanup callers. */
+export const deleteRepositoryObjectsByPrefix =
+  deleteRepositoryObjectVersionsByPrefix
+
 // Check if a document exists
 export async function documentExists(key: string): Promise<boolean> {
   const s3Client = await getS3Client()
@@ -269,6 +525,34 @@ export async function documentExists(key: string): Promise<boolean> {
         key,
       }
     })
+  }
+}
+
+export interface DocumentObjectMetadata {
+  contentLength: number;
+  contentType: string | null;
+  eTag: string | null;
+  metadata: Record<string, string>;
+}
+
+/**
+ * Read authoritative object metadata after a browser upload. Completion paths
+ * use this before registering a repository item so client-claimed size and MIME
+ * values cannot create a misleading or oversized database record.
+ */
+export async function getDocumentObjectMetadata(
+  key: string
+): Promise<DocumentObjectMetadata> {
+  const s3Client = await getS3Client()
+  const config = await getS3Config()
+  const response = await s3Client.send(
+    new HeadObjectCommand({ Bucket: config.bucket!, Key: key })
+  )
+  return {
+    contentLength: response.ContentLength ?? 0,
+    contentType: response.ContentType ?? null,
+    eTag: response.ETag ?? null,
+    metadata: response.Metadata ?? {},
   }
 }
 

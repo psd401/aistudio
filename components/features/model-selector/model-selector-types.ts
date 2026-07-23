@@ -5,17 +5,17 @@ export interface ModelSelectorProps {
   value?: SelectAiModel | null
   onChange: (model: SelectAiModel) => void
   requiredCapabilities?: string[]
+  /** Model must have at least one of these capabilities (OR logic). Combined with requiredCapabilities (AND). */
+  anyOfCapabilities?: string[]
   placeholder?: string
   disabled?: boolean
   className?: string
-  allowedRoles?: string[]
   groupByProvider?: boolean
   showDescription?: boolean
   virtualizeThreshold?: number
   searchable?: boolean
   loading?: boolean
   error?: string
-  hideRoleRestricted?: boolean
   hideCapabilityMissing?: boolean
   "aria-label"?: string
   "aria-describedby"?: string
@@ -34,17 +34,15 @@ export interface FilteredModel extends SelectAiModel {
   isAccessible: boolean
   accessDeniedReason?: string
   matchesCapabilities: boolean
-  hasRoleAccess: boolean
   missingCapabilities?: string[]
 }
 
 export interface UseFilteredModelsOptions {
   models: SelectAiModel[]
   requiredCapabilities?: string[]
-  allowedRoles?: string[]
-  userRoles?: string[]
+  /** Model must have at least one of these capabilities (OR logic). Combined with requiredCapabilities (AND). */
+  anyOfCapabilities?: string[]
   searchQuery?: string
-  hideRoleRestricted?: boolean
   hideCapabilityMissing?: boolean
 }
 

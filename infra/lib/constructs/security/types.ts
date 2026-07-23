@@ -79,6 +79,14 @@ export interface ServiceRoleProps {
   region: string
   account: string
   additionalPolicies?: iam.PolicyDocument[]
+  /**
+   * Set false ONLY for roles whose duties the account-wide
+   * AIStudio-PermissionBoundary cannot express (e.g. secretsmanager write
+   * actions — the boundary deliberately allows secrets READS only). The
+   * role's identity policies remain the sole grant, so keep them exact-ARN.
+   * Precedent: the AgentCore execution role (full factory bypass).
+   */
+  enablePermissionBoundary?: boolean
 }
 
 /**

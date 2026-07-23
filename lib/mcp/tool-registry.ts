@@ -1,23 +1,19 @@
 /**
  * MCP Tool Registry
- * Defines available MCP tools with schemas and required scopes.
+ * Defines available MCP tools (name / description / inputSchema).
  * Part of Issue #686 - MCP Server + OAuth2/OIDC Provider (Phase 3)
+ *
+ * NOTE (epic #922 audit): the legacy `TOOL_SCOPE_MAP` and the
+ * `getToolsForScopes()` / `hasToolScope()` helpers were REMOVED. They had no
+ * live callers and silently drifted from the real enforcement point: scope
+ * checks live exclusively in the unified tool catalog (`lib/tools/catalog/`),
+ * whose entries carry `requiredScopes` consumed by both `tools/list` and
+ * `tools/call` (#924). This module now only declares the MCP tool definitions
+ * the catalog manifest projects.
  */
 
 import type { McpToolDefinition } from "./types"
-import type { ApiScope } from "@/lib/api-keys/scopes"
-
-// ============================================
-// Tool-to-Scope Mapping
-// ============================================
-
-export const TOOL_SCOPE_MAP: Record<string, ApiScope> = {
-  search_decisions: "mcp:search_decisions",
-  capture_decision: "mcp:capture_decision",
-  execute_assistant: "mcp:execute_assistant",
-  list_assistants: "mcp:list_assistants",
-  get_decision_graph: "mcp:get_decision_graph",
-}
+import { CONTENT_MCP_TOOLS } from "./content-tools"
 
 // ============================================
 // Tool Definitions
@@ -27,13 +23,18 @@ export const MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "search_decisions",
     description:
-      "Search decision graph nodes by type, class, or text query. Returns paginated results.",
+      "Search decision graph nodes. Provide `q` for semantic (embedding-based) paraphrase search over decision nodes, or `query` for literal text (ILIKE) search. Returns paginated results.",
     inputSchema: {
       type: "object",
       properties: {
+        q: {
+          type: "string",
+          description:
+            "Semantic search query — returns paraphrase matches (embedding-based) over decision nodes. Falls back to literal search if embeddings are unavailable.",
+        },
         query: {
           type: "string",
-          description: "Text search across node names and descriptions",
+          description: "Literal text search (ILIKE) across node names and descriptions",
         },
         nodeType: {
           type: "string",
@@ -106,6 +107,21 @@ Example:
           items: { type: "string" },
           description: "Alternative options that were considered and rejected (max 20 items)",
         },
+        consulted: {
+          type: "array",
+          items: { type: "string" },
+          description: "DACI: people/roles consulted about the decision — each linked via a CONSULTED edge (max 20 items)",
+        },
+        notified: {
+          type: "array",
+          items: { type: "string" },
+          description: "DACI: people/roles notified/informed of the decision — each linked via a NOTIFIED edge (max 20 items)",
+        },
+        supersedes: {
+          type: "array",
+          items: { type: "string" },
+          description: "UUIDs of existing decision nodes this decision supersedes — each is marked status=superseded and linked SUPERSEDED_BY (max 20)",
+        },
         relatedTo: {
           type: "array",
           items: { type: "string" },
@@ -174,7 +190,7 @@ Example:
   {
     name: "get_decision_graph",
     description:
-      "Get details of a specific decision node and all its connections (incoming and outgoing edges).",
+      "Get a self-contained decision package for a node: the decision plus its evidence, constraints, reasoning, persons, conditions, outcomes, and supersession chain, gathered by a depth-bounded graph expansion.",
     inputSchema: {
       type: "object",
       properties: {
@@ -182,34 +198,49 @@ Example:
           type: "string",
           description: "UUID of the graph node to retrieve",
         },
+        depth: {
+          type: "number",
+          description: "Graph-expansion radius in hops (1-3, default 2)",
+          default: 2,
+        },
       },
       required: ["nodeId"],
     },
   },
+  {
+    // Platform capability catalog (Issue #1100). A read-only meta-tool: a LIVE
+    // projection of AI Studio's own source-of-truth registries so the agent's
+    // understanding of what the platform can do never drifts from the deployed
+    // code. Returns `actions[]` (invocable tools, each flagged `agentInvocable`
+    // when reachable over MCP), `features[]` (role-gated UI features the agent
+    // steers users to), and a `scopes[]` reference.
+    name: "describe_capabilities",
+    description:
+      "Describe what AI Studio can do, live from the app's own registries. Returns invocable actions (with the surfaces/scopes each needs and whether the agent can invoke it over MCP), role-gated UI features to steer users toward, and a scope reference. Use this to discover current capabilities instead of relying on a static list.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        section: {
+          type: "string",
+          description:
+            "Limit the response to one section. Defaults to 'all'.",
+          enum: ["actions", "features", "scopes", "all"],
+        },
+        surface: {
+          type: "string",
+          description:
+            "Only include actions exposed on this surface (does not affect features/scopes).",
+          enum: ["mcp", "ai_sdk", "rest", "internal"],
+        },
+        query: {
+          type: "string",
+          description:
+            "Case-insensitive substring filter across identifier, name, description, and scope.",
+        },
+      },
+    },
+  },
+  // Atrium content tools (Phase 5, Issue #1055) — listed so scoped callers
+  // discover them via tools/list.
+  ...CONTENT_MCP_TOOLS,
 ]
-
-// ============================================
-// Registry Helpers
-// ============================================
-
-/**
- * Get tool definitions filtered by the caller's scopes.
- */
-export function getToolsForScopes(scopes: string[]): McpToolDefinition[] {
-  const isWildcard = scopes.includes("*")
-
-  return MCP_TOOLS.filter((tool) => {
-    if (isWildcard) return true
-    const requiredScope = TOOL_SCOPE_MAP[tool.name]
-    return requiredScope && scopes.includes(requiredScope)
-  })
-}
-
-/**
- * Check if a scope list grants access to a specific tool.
- */
-export function hasToolScope(scopes: string[], toolName: string): boolean {
-  if (scopes.includes("*")) return true
-  const requiredScope = TOOL_SCOPE_MAP[toolName]
-  return !!requiredScope && scopes.includes(requiredScope)
-}

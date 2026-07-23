@@ -12,6 +12,32 @@
 import { customType } from "drizzle-orm/pg-core";
 
 /**
+ * PostgreSQL `bytea` (raw binary) column.
+ *
+ * The postgres.js driver returns `bytea` values as a Node `Buffer` (a
+ * `Uint8Array` subclass) and accepts a `Buffer`/`Uint8Array` on write, so no
+ * encode/decode hook is needed. Used by Atrium's live collaborative document
+ * state (`atrium_doc_state.y_state`), which stores an encoded Yjs CRDT update
+ * (`Y.encodeStateAsUpdate`) directly consumable by `Y.applyUpdate`.
+ *
+ * Usage:
+ * ```typescript
+ * import { bytea } from "./custom-types";
+ *
+ * export const myTable = pgTable("my_table", {
+ *   blob: bytea("blob").notNull(),
+ * });
+ * ```
+ */
+export function bytea(name: string) {
+  return customType<{ data: Buffer; driverData: Buffer }>({
+    dataType() {
+      return "bytea";
+    },
+  })(name);
+}
+
+/**
  * Custom JSONB type that properly serializes objects to JSON strings
  * for AWS Data API compatibility.
  *
@@ -131,9 +157,19 @@ export function vector(columnName: string, dimensions: number = 1536) {
         return parsed;
       } catch (error) {
         throw new Error(
-          `Vector column "${columnName}": failed to parse database value: ${error instanceof Error ? error.message : String(error)}`
+          `Vector column "${columnName}": failed to parse database value: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error }
         );
       }
+    },
+  })(columnName);
+}
+
+/** PostgreSQL full-text-search vector. Generated columns are read-only. */
+export function tsvector(columnName: string) {
+  return customType<{ data: string; driverData: string }>({
+    dataType() {
+      return "tsvector";
     },
   })(columnName);
 }

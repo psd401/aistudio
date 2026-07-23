@@ -23,17 +23,16 @@ export function ModelSelector({
   value,
   onChange,
   requiredCapabilities = [],
+  anyOfCapabilities = [],
   placeholder = "Select a model",
   disabled = false,
   className,
-  allowedRoles = [],
   groupByProvider = true,
   showDescription = true,
   virtualizeThreshold = 50,
   searchable = true,
   loading = false,
   error,
-  hideRoleRestricted = false,
   hideCapabilityMissing = false,
   "aria-label": ariaLabel = "Select AI model",
   "aria-describedby": ariaDescribedBy
@@ -41,7 +40,6 @@ export function ModelSelector({
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState("")
   const [debouncedSearch, setDebouncedSearch] = useState("")
-  const [userRoles, setUserRoles] = useState<string[]>([])
   const commandListRef = useRef<HTMLDivElement>(null)
   const debounceTimerRef = useRef<NodeJS.Timeout | undefined>(undefined)
 
@@ -62,34 +60,22 @@ export function ModelSelector({
     }
   }, [search])
 
-  // Fetch user roles on mount
-  useEffect(() => {
-    async function fetchUserRoles() {
-      try {
-        const response = await fetch('/api/user/roles')
-        if (response.ok) {
-          const data = await response.json()
-          setUserRoles(data.roles || [])
-        }
-      } catch {
-        // Silently fail - will just show all models without role filtering
-      }
-    }
-    fetchUserRoles()
-  }, [])
+  // NOTE (#1207): the ModelSelector no longer fetches the user's roles. Per-model
+  // role/group access is enforced server-side — GET /api/models filters the list
+  // through resource_access_grants (#1206), so an inaccessible model never reaches
+  // this component. The former /api/user/roles fetch existed only to drive the
+  // now-removed client-side role filter. Only capability filtering remains.
 
-  const { 
-    filteredModels, 
-    groupedModels, 
-    totalCount, 
-    accessibleCount 
+  const {
+    filteredModels,
+    groupedModels,
+    totalCount,
+    accessibleCount
   } = useFilteredModels({
     models,
     requiredCapabilities,
-    allowedRoles,
-    userRoles,
+    anyOfCapabilities,
     searchQuery: debouncedSearch,
-    hideRoleRestricted,
     hideCapabilityMissing
   })
 

@@ -23,12 +23,25 @@ export const psdAgentWorkspaceConsentNonces = pgTable("psd_agent_workspace_conse
   // identities from just the nonce (the OAuth `state` parameter no longer
   // carries the full consent JWT — the nonce alone is sufficient).
   agentEmail: varchar("agent_email", { length: 255 }).notNull(),
-  // Which OAuth identity is being consented (#912 Phase 1, migration 073).
-  // 'agent_account' = agnt_<uniqname>; 'user_account' = the user themself.
+  // Which credential slot is being consented.
+  //  - 'agent_account' = Google OAuth for agnt_<uniqname> (#912 Phase 1)
+  //  - 'user_account'  = Google OAuth for the user themself
+  //  - 'cognito_data'  = Cognito refresh-token capture for the agent's
+  //                      data-MCP integration. Reuses this table because
+  //                      the per-owner rate-limit + nonce-replay protection
+  //                      are exactly what we need; the consume step writes
+  //                      to a different secret path.
+  //  - 'plaud'         = Plaud OAuth refresh-token capture (public client, PKCE).
+  //  - 'canva'         = Canva Connect OAuth refresh-token capture (confidential
+  //                      client, PKCE). Migration 101 widens the CHECK constraint.
   tokenKind: varchar("token_kind", { length: 16 })
-    .$type<"agent_account" | "user_account">()
+    .$type<"agent_account" | "user_account" | "cognito_data" | "plaud" | "canva">()
     .notNull()
     .default("agent_account"),
+  // PKCE (S256) code_verifier for the PKCE kinds ('plaud', 'canva') — generated
+  // at mint time, read back at the callback to exchange the auth code. Never
+  // placed in a URL (only the S256 challenge is). Null for the non-PKCE kinds.
+  codeVerifier: varchar("code_verifier", { length: 128 }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   consumedAt: timestamp("consumed_at", { withTimezone: true }),
 }, (table) => [

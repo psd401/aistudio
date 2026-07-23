@@ -59,7 +59,7 @@ Bidirectional audio streaming for real-time voice conversations.
 
 ```
 1. Client → Server: WebSocket upgrade request (with session cookie)
-2. Server validates JWT, checks hasToolAccess("voice-mode")
+2. Server validates JWT, checks hasCapabilityAccess("voice-mode")
 3. Server connects to Gemini Live API
 4. Server → Client: { type: "ready" }
 5. Client → Server: { type: "audio", data: "<base64 PCM16 16kHz mono>" }
@@ -104,7 +104,7 @@ The Google API key is read from `GOOGLE_API_KEY` via `Settings.getGoogleAI()` an
 
 ## Permissions (Issue #876)
 
-Voice mode uses the existing `hasToolAccess()` permission system:
+Voice mode uses the `hasCapabilityAccess()` permission system:
 
 - **Tool identifier:** `voice-mode`
 - **Default:** Not assigned to any role (opt-in rollout)

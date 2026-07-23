@@ -2,7 +2,7 @@
 
 import { getServerSession } from "@/lib/auth/server-session"
 import { type ActionState } from "@/types/actions-types"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import { handleError, ErrorFactories } from "@/lib/error-utils"
 import {
   createLogger,
@@ -51,7 +51,7 @@ export async function getModelComparisons(
 
     log.debug("User authenticated", { userId: session.sub })
 
-    const hasAccess = await hasToolAccess("model-compare")
+    const hasAccess = await hasCapabilityAccess("model-compare")
     if (!hasAccess) {
       log.warn("Model comparisons access denied", { userId: session.sub })
       return { isSuccess: false, message: "Access denied" }
@@ -127,7 +127,7 @@ export async function getModelComparison(
       throw ErrorFactories.authNoSession()
     }
 
-    const hasAccess = await hasToolAccess("model-compare")
+    const hasAccess = await hasCapabilityAccess("model-compare")
     if (!hasAccess) {
       throw ErrorFactories.authzInsufficientPermissions("model-compare tool")
     }
@@ -199,7 +199,7 @@ export async function deleteModelComparison(
       return { isSuccess: false, message: "Unauthorized" }
     }
 
-    const hasAccess = await hasToolAccess("model-compare")
+    const hasAccess = await hasCapabilityAccess("model-compare")
     if (!hasAccess) {
       throw ErrorFactories.authzInsufficientPermissions("model-compare tool")
     }
@@ -260,7 +260,7 @@ export async function updateComparisonResults(
       throw ErrorFactories.authNoSession()
     }
 
-    const hasAccess = await hasToolAccess("model-compare")
+    const hasAccess = await hasCapabilityAccess("model-compare")
     if (!hasAccess) {
       log.warn("Model comparison update access denied", { userId: session.sub })
       return { isSuccess: false, message: "Access denied" }

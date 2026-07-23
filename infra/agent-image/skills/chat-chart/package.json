@@ -1,0 +1,12 @@
+{
+  "name": "chat-chart",
+  "version": "1.0.0",
+  "description": "OpenClaw skill: render a chart and emit a chat-card envelope so the Router Lambda displays it inline in Google Chat",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0"
+  }
+}

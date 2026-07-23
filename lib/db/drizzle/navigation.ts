@@ -10,7 +10,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, asc } from "drizzle-orm";
+import { eq, and, asc, isNull } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   navigationItems,
@@ -28,12 +28,14 @@ import { ErrorFactories } from "@/lib/error-utils";
 export interface NavigationItemData {
   label: string;
   icon: string;
-  link?: string;
-  description?: string;
+  link?: string | null;
+  description?: string | null;
   type: "link" | "section" | "page";
-  parentId?: number;
-  toolId?: number;
-  requiresRole?: string;
+  // Clearable relation/role fields accept null so an update can REMOVE the gate
+  // (e.g. ungate a nav item). The DB column is nullable; passing null clears it.
+  parentId?: number | null;
+  capabilityId?: number | null;
+  requiresRole?: string | null;
   position?: number;
   isActive?: boolean;
 }
@@ -43,7 +45,16 @@ export interface NavigationItemData {
 // ============================================
 
 /**
- * Get all navigation items ordered by position
+ * Get all navigation items ordered by position.
+ *
+ * EXCLUDES Atrium *content* nav items (rows with a non-null `content_object_id`,
+ * created by `navItemService.ensureNavItem` on publish — Issue #1054). The global
+ * navbar filters by ROLE/CAPABILITY, NOT by the content object's `canView`
+ * visibility, so surfacing a content row here would leak a visibility-restricted
+ * object's title to any authenticated user. Content is surfaced only through the
+ * visibility-filtered reader sidebar / `CollectionTree`. The `content_object_id`
+ * projection is retained for callers that inspect it; the row set never includes
+ * content items.
  *
  * @param activeOnly - If true, only return active items
  */
@@ -60,14 +71,21 @@ export async function getNavigationItems(activeOnly: boolean = false) {
             parentId: navigationItems.parentId,
             description: navigationItems.description,
             type: navigationItems.type,
-            toolId: navigationItems.toolId,
+            capabilityId: navigationItems.capabilityId,
             requiresRole: navigationItems.requiresRole,
             position: navigationItems.position,
             isActive: navigationItems.isActive,
             createdAt: navigationItems.createdAt,
+            contentObjectId: navigationItems.contentObjectId,
           })
           .from(navigationItems)
-          .where(eq(navigationItems.isActive, true))
+          .where(
+            and(
+              eq(navigationItems.isActive, true),
+              // Exclude Atrium content nav items (visibility-gated elsewhere).
+              isNull(navigationItems.contentObjectId)
+            )
+          )
           .orderBy(asc(navigationItems.position)),
       "getNavigationItems"
     );
@@ -84,13 +102,16 @@ export async function getNavigationItems(activeOnly: boolean = false) {
           parentId: navigationItems.parentId,
           description: navigationItems.description,
           type: navigationItems.type,
-          toolId: navigationItems.toolId,
+          capabilityId: navigationItems.capabilityId,
           requiresRole: navigationItems.requiresRole,
           position: navigationItems.position,
           isActive: navigationItems.isActive,
           createdAt: navigationItems.createdAt,
+          contentObjectId: navigationItems.contentObjectId,
         })
         .from(navigationItems)
+        // Exclude Atrium content nav items from the global navbar (see above).
+        .where(isNull(navigationItems.contentObjectId))
         .orderBy(asc(navigationItems.position)),
     "getNavigationItems"
   );
@@ -112,11 +133,12 @@ export async function getNavigationItemById(id: number) {
           parentId: navigationItems.parentId,
           description: navigationItems.description,
           type: navigationItems.type,
-          toolId: navigationItems.toolId,
+          capabilityId: navigationItems.capabilityId,
           requiresRole: navigationItems.requiresRole,
           position: navigationItems.position,
           isActive: navigationItems.isActive,
           createdAt: navigationItems.createdAt,
+          contentObjectId: navigationItems.contentObjectId,
         })
         .from(navigationItems)
         .where(eq(navigationItems.id, id))
@@ -135,6 +157,12 @@ export async function getNavigationItemById(id: number) {
  * Get navigation items accessible to a specific role
  * Uses navigation_item_roles junction table
  *
+ * EXCLUDES Atrium content nav items (`content_object_id IS NOT NULL`) for the same
+ * reason `getNavigationItems` does (Issue #1054): these role/capability-gated nav
+ * queries do NOT enforce the content object's `canView` visibility, so surfacing a
+ * content row here would leak a visibility-restricted object's title to a whole
+ * role. Content is surfaced only through the visibility-filtered `CollectionTree`.
+ *
  * @param roleName - Role name to filter by
  */
 export async function getNavigationItemsByRole(roleName: string) {
@@ -149,7 +177,8 @@ export async function getNavigationItemsByRole(roleName: string) {
           parentId: navigationItems.parentId,
           description: navigationItems.description,
           type: navigationItems.type,
-          toolId: navigationItems.toolId,
+          contentObjectId: navigationItems.contentObjectId,
+          capabilityId: navigationItems.capabilityId,
           requiresRole: navigationItems.requiresRole,
           position: navigationItems.position,
           isActive: navigationItems.isActive,
@@ -163,7 +192,9 @@ export async function getNavigationItemsByRole(roleName: string) {
         .where(
           and(
             eq(navigationItemRoles.roleName, roleName),
-            eq(navigationItems.isActive, true)
+            eq(navigationItems.isActive, true),
+            // Exclude Atrium content nav items (visibility-gated elsewhere).
+            isNull(navigationItems.contentObjectId)
           )
         )
         .orderBy(asc(navigationItems.position)),
@@ -174,6 +205,10 @@ export async function getNavigationItemsByRole(roleName: string) {
 /**
  * Get navigation items accessible to a user by their Cognito sub
  * Queries through user -> user_roles -> roles -> navigation_item_roles -> navigation_items
+ *
+ * EXCLUDES Atrium content nav items (`content_object_id IS NOT NULL`) — same
+ * rationale as `getNavigationItemsByRole`: this path is role-gated, not
+ * `canView`-gated, so a content row would leak a restricted object's title.
  *
  * @param cognitoSub - User's Cognito sub identifier
  */
@@ -189,7 +224,8 @@ export async function getNavigationItemsByUser(cognitoSub: string) {
           parentId: navigationItems.parentId,
           description: navigationItems.description,
           type: navigationItems.type,
-          toolId: navigationItems.toolId,
+          contentObjectId: navigationItems.contentObjectId,
+          capabilityId: navigationItems.capabilityId,
           requiresRole: navigationItems.requiresRole,
           position: navigationItems.position,
           isActive: navigationItems.isActive,
@@ -206,7 +242,9 @@ export async function getNavigationItemsByUser(cognitoSub: string) {
         .where(
           and(
             eq(users.cognitoSub, cognitoSub),
-            eq(navigationItems.isActive, true)
+            eq(navigationItems.isActive, true),
+            // Exclude Atrium content nav items (visibility-gated elsewhere).
+            isNull(navigationItems.contentObjectId)
           )
         )
         .orderBy(asc(navigationItems.position)),
@@ -233,7 +271,7 @@ export async function createNavigationItem(data: NavigationItemData) {
           description: data.description,
           type: data.type,
           parentId: data.parentId,
-          toolId: data.toolId,
+          capabilityId: data.capabilityId,
           requiresRole: data.requiresRole,
           position: data.position ?? 0,
           isActive: data.isActive ?? true,
@@ -271,7 +309,7 @@ export async function updateNavigationItem(
   if (data.description !== undefined) updateData.description = data.description;
   if (data.type !== undefined) updateData.type = data.type;
   if (data.parentId !== undefined) updateData.parentId = data.parentId;
-  if (data.toolId !== undefined) updateData.toolId = data.toolId;
+  if (data.capabilityId !== undefined) updateData.capabilityId = data.capabilityId;
   if (data.requiresRole !== undefined) updateData.requiresRole = data.requiresRole;
   if (data.position !== undefined) updateData.position = data.position;
   if (data.isActive !== undefined) updateData.isActive = data.isActive;

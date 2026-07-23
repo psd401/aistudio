@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import { getServerSession } from "@/lib/auth/server-session"
 import { NavbarNested } from "@/components/navigation/navbar-nested"
 
@@ -18,7 +18,7 @@ export default async function SchedulesLayout({
   }
 
   // Check if user has access to the assistant-architect tool
-  const hasAccess = await hasToolAccess("assistant-architect")
+  const hasAccess = await hasCapabilityAccess("assistant-architect")
   if (!hasAccess) {
     redirect("/dashboard")
   }

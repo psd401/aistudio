@@ -34,11 +34,13 @@ const formSchema = z.object({
   description: z.string().optional(),
   type: z.enum(["link", "section", "page"]),
   parentId: z.union([z.string(), z.number()]).optional(),
-  toolId: z.union([z.string(), z.number()]).optional().nullable(),
+  capabilityId: z.union([z.string(), z.number()]).optional().nullable(),
   requiresRole: z.string().optional().nullable(),
   position: z.number().optional(),
   isActive: z.boolean().optional()
 }).refine((data) => {
+  // Sections and pages group children and do not require a link; only plain
+  // links do.
   if (data.type === "section" || data.type === "page") {
     return true;
   }
@@ -58,7 +60,7 @@ export function NavigationItemForm({
 }: NavigationItemFormProps) {
   const router = useRouter()
   const [parents, setParents] = useState<SelectNavigationItem[]>([])
-  const [tools, setTools] = useState<{ id: string; name: string }[]>([])
+  const [capabilities, setCapabilities] = useState<{ id: string; name: string }[]>([])
   const [roles, setRoles] = useState<{ id: string; name: string }[]>([])
 
   const form = useForm<FormValues>({
@@ -71,7 +73,7 @@ export function NavigationItemForm({
       description: initialData?.description || "",
       type: (initialData?.type as "link" | "section" | "page") || "link",
       parentId: initialData?.parentId || undefined,
-      toolId: initialData?.toolId || null,
+      capabilityId: initialData?.capabilityId || null,
       requiresRole: initialData?.requiresRole || null,
       position: initialData?.position || 0,
       isActive: initialData?.isActive ?? true
@@ -96,16 +98,16 @@ export function NavigationItemForm({
             item.type === "section" && item.id !== initialData?.id
           ))
         } else if (form.getValues("type") === "section") {
-          // Sections cannot have parents (top-level only)
+          // Sections are top-level only.
           setParents([])
         }
       }
 
-      // Fetch tools
-      const toolsResponse = await fetch("/api/admin/tools")
-      const toolsData = await toolsResponse.json()
-      if (toolsData.isSuccess) {
-        setTools(toolsData.data)
+      // Fetch capabilities
+      const capabilitiesResponse = await fetch("/api/admin/tools")
+      const capabilitiesData = await capabilitiesResponse.json()
+      if (capabilitiesData.isSuccess) {
+        setCapabilities(capabilitiesData.data)
       }
 
       // Fetch roles
@@ -136,7 +138,7 @@ export function NavigationItemForm({
         // Only include id if we're updating an existing item
         ...(initialData?.id && { id: initialData.id }),
         link,
-        toolId: values.toolId || null,
+        capabilityId: values.capabilityId || null,
         parentId: values.parentId || null,
         requiresRole: values.requiresRole || null,
         position: values.position || 0,
@@ -347,24 +349,24 @@ export function NavigationItemForm({
 
                   <FormField<FormValues>
                     control={form.control}
-                    name="toolId"
+                    name="capabilityId"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Required Tool</FormLabel>
+                        <FormLabel>Required Capability</FormLabel>
                         <Select
                           onValueChange={(value) => field.onChange(value === "none" ? null : Number(value))}
                           defaultValue={field.value ? String(field.value) : "none"}
                         >
                           <FormControl>
                             <SelectTrigger>
-                              <SelectValue placeholder="Select tool" />
+                              <SelectValue placeholder="Select capability" />
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
                             <SelectItem value="none">None</SelectItem>
-                            {tools.map((tool) => (
-                              <SelectItem key={tool.id} value={String(tool.id)}>
-                                {tool.name}
+                            {capabilities.map((capability) => (
+                              <SelectItem key={capability.id} value={String(capability.id)}>
+                                {capability.name}
                               </SelectItem>
                             ))}
                           </SelectContent>

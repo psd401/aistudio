@@ -1,0 +1,7 @@
+{
+  "name": "chat-card",
+  "version": "1.0.0",
+  "description": "OpenClaw skill: emit a rich-output envelope so the Router Lambda renders a Google Chat cardsV2 message instead of plain text",
+  "private": true,
+  "dependencies": {}
+}

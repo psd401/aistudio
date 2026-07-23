@@ -21,7 +21,8 @@ import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { getDecisionFrameworkPrompt } from '@/lib/graph/decision-framework';
 import { getRequiredSetting } from '@/lib/settings-manager';
 import { createDecisionCaptureTools } from '@/lib/tools/decision-capture-tools';
-import { hasToolAccess } from '@/utils/roles';
+import { hasCapabilityAccess } from '@/utils/roles';
+import { getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 
 import {
   generateConversationTitle,
@@ -30,6 +31,8 @@ import {
   saveUserMessage,
   convertMessagesToPartsFormat,
   saveAssistantMessage,
+  saveConversationSteps,
+  type StepData,
 } from '../chat/chat-helpers';
 
 // Allow streaming responses up to 5 minutes
@@ -183,7 +186,7 @@ async function authenticateAndAuthorize(params: {
   const userId = currentUser.data.user.id;
 
   // Defense in depth — UI layout also checks, but API must enforce independently
-  const hasAccess = await hasToolAccess('decision-capture');
+  const hasAccess = await hasCapabilityAccess('decision-capture');
   if (!hasAccess) {
     log.warn('User does not have decision-capture tool access', { userId });
     timer({ status: 'error', reason: 'forbidden' });
@@ -241,8 +244,10 @@ async function setupConversation(params: {
   userId: number;
   modelId: string;
   dbModelId: number;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
 }): Promise<{ conversationId: string; conversationTitle: string } | { error: Response }> {
-  const { conversationIdValue, messages, userId, modelId, dbModelId } = params;
+  const { conversationIdValue, messages, userId, modelId, dbModelId, requestId, log } = params;
 
   let conversationId = conversationIdValue || '';
   let conversationTitle = 'New Decision Capture';
@@ -257,6 +262,22 @@ async function setupConversation(params: {
     });
     if ('error' in convResult) return convResult;
     conversationId = convResult.conversationId;
+  } else {
+    // Verify the authenticated user owns this conversation before writing to it
+    // (REV-SEC-141). nexus_conversations/nexus_messages are shared across all Nexus
+    // surfaces, so an unverified client-supplied conversationId would let any user
+    // inject messages/attachments into another user's conversation. Mirrors the
+    // main chat route's ownership gate; getConversationById filters by id AND userId.
+    const conversation = await getConversationById(conversationId, userId);
+    if (!conversation) {
+      log.warn('Conversation ownership check failed — access denied', { conversationId, userId });
+      return {
+        error: new Response(
+          JSON.stringify({ error: 'Conversation not found or access denied', requestId }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
+        )
+      };
+    }
   }
 
   // Save user message
@@ -288,7 +309,7 @@ You are analyzing meeting transcripts to extract decisions. Follow these steps:
    - Implicit decisions (agreements reached, options selected)
    - Rejected alternatives (these are also valuable context)
 
-3. **Propose structured subgraphs**: For each decision, use \`propose_decision\` to create a structured proposal with nodes and edges. The completeness check will tell you what's missing.
+3. **Propose structured subgraphs**: For each decision, use \`propose_decision\` to create a structured proposal with nodes and edges. The completeness check will tell you what's missing. When a proposal contains more than one "decision"-typed node (rejected alternatives are also typed "decision"), set \`isPrimary: true\` on the decision that was actually adopted — committing multiple decision nodes without it is rejected.
 
 4. **Ask follow-up questions** when the transcript is vague about:
    - Who proposed or approved the decision
@@ -334,6 +355,7 @@ async function executeStreaming(params: {
     usage,
     finishReason,
     toolCalls,
+    steps,
   }: {
     text: string;
     usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
@@ -344,16 +366,28 @@ async function executeStreaming(params: {
       args: Record<string, unknown>;
       result?: unknown;
     }>;
+    steps?: StepData[];
   }) => {
     log.info('Stream finished, saving assistant message', {
       conversationId,
       hasText: !!text,
       textLength: text?.length || 0,
       toolCallCount: toolCalls?.length || 0,
+      stepCount: steps?.length ?? 0,
     });
 
     try {
-      await saveAssistantMessage({ conversationId, text, usage, finishReason, toolCalls, dbModelId });
+      if (steps && steps.length > 1) {
+        // Multi-step agentic loop (search_graph_nodes → propose_decision → …):
+        // save each step as a separate assistant message to preserve the correct
+        // turn structure for replay. Consolidating into one message breaks
+        // convertToModelMessages — it cannot reconstruct multi-turn
+        // tool_use/tool_result pairs, throwing AI_MissingToolResultsError on the
+        // next user turn. Mirrors the main chat route (REV-COR-228 / Issue #977).
+        await saveConversationSteps({ conversationId, steps, dbModelId, usage, finishReason });
+      } else {
+        await saveAssistantMessage({ conversationId, text, usage, finishReason, toolCalls, dbModelId });
+      }
     } catch (saveError) {
       log.error('Failed to save assistant message', { error: saveError, conversationId });
     }
@@ -440,6 +474,7 @@ export async function POST(req: Request) {
     const convSetup = await setupConversation({
       conversationIdValue, messages, userId,
       modelId: modelConfig.model_id, dbModelId,
+      requestId, log,
     });
     if ('error' in convSetup) return convSetup.error;
     const { conversationId, conversationTitle } = convSetup;

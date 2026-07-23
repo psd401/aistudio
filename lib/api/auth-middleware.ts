@@ -8,13 +8,14 @@
  *     Yes → SHA-256 prefix lookup → Argon2id verify → AuthContext { authType: "api_key" }
  *     No  → Has "Authorization: Bearer <jwt>" (not sk- prefix)?
  *       Yes → Verify JWT via JWKS → AuthContext { authType: "jwt" }
- *       No  → getServerSession() → AuthContext { authType: "session", scopes: ["*"] }
+ *       No  → getServerSession() → AuthContext { authType: "session", scopes: <role-derived> }
  *     Neither → 401
  *
  * Security:
  * - Raw API keys are NEVER logged
  * - Consistent error messages prevent key existence leakage
- * - Session users get wildcard scopes (full access for their role)
+ * - Session users get scopes derived from their roles via getScopesForRoles() (REV-SEC-161) —
+ *   not a wildcard; a student session cannot satisfy admin-only scopes
  * - API key auth does NOT bypass role-based access checks
  */
 
@@ -22,6 +23,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { validateApiKey, hasScope, updateKeyLastUsed } from "@/lib/api-keys/key-service";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle/utils";
+import { getUserRolesByCognitoSub } from "@/lib/db/drizzle/users";
+import { getScopesForRoles } from "@/lib/api-keys/scopes";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 
 // ============================================
@@ -35,6 +38,13 @@ export interface ApiAuthContext {
   scopes: string[];
   apiKeyId?: number;
   oauthClientId?: string;
+  /**
+   * The human a delegated agent acts for (Atrium §26.1). Set only when an OIDC
+   * token carries a `delegated_for` claim (RFC 8693-style actor delegation): the
+   * agent's `client_id` identifies the agent, `delegated_for` the human whose
+   * grants it inherits. Absent for ordinary user / autonomous tokens.
+   */
+  delegatedForUserId?: number;
 }
 
 export interface ApiErrorResponse {
@@ -158,6 +168,7 @@ export async function authenticateRequest(
         authType: "jwt",
         scopes: jwtResult.scopes,
         oauthClientId: jwtResult.clientId,
+        delegatedForUserId: jwtResult.delegatedForUserId,
       };
     } catch (error) {
       timer({ status: "error" });
@@ -185,6 +196,14 @@ export async function authenticateRequest(
       return createErrorResponse(requestId, 401, "UNAUTHORIZED", "Authentication required");
     }
 
+    // Derive session scopes from the caller's roles (single source of truth:
+    // ROLE_SCOPES), mirroring API-key and nexus/chat auth. Previously every session
+    // received ["*"], letting any logged-in user satisfy admin-only scope-gated
+    // routes (e.g. graph:write) with just their browser cookie (REV-SEC-161).
+    // Resolved before the success timer/log so a thrown lookup is recorded as
+    // the error it is, not double-counted as a success followed by an error.
+    const roleNames = await getUserRolesByCognitoSub(session.sub);
+
     timer({ status: "success" });
     log.info("Authenticated via session", {
       userId,
@@ -195,7 +214,7 @@ export async function authenticateRequest(
       userId,
       cognitoSub: session.sub,
       authType: "session",
-      scopes: ["*"], // Session users get full access (role-based checks still apply)
+      scopes: getScopesForRoles(roleNames),
     };
   } catch (error) {
     timer({ status: "error" });
@@ -214,7 +233,8 @@ export async function authenticateRequest(
  * Check if the auth context has the required scope.
  * Returns a 403 NextResponse if the scope is missing, or null if allowed.
  *
- * Session users always pass (scopes: ["*"]).
+ * Session users pass only if their role-derived scopes (REV-SEC-161) include
+ * this scope — administrators map to ALL_SCOPES, other roles do not.
  *
  * Usage:
  * ```typescript
@@ -342,7 +362,35 @@ interface JwtAuthResult {
   userId: number;
   cognitoSub: string;
   scopes: string[];
-  clientId: string;
+  /**
+   * The OIDC `client_id`/`azp`, or `undefined` when the token carries neither.
+   * NOT a sentinel string — `requesterFromApiAuth` does a truthy check on
+   * `oauthClientId`, so a literal `"unknown"` would be treated as a real client
+   * id and route the caller down the agent-resolution branch.
+   */
+  clientId?: string;
+  /** The human a delegated agent acts for, from a `delegated_for` claim. */
+  delegatedForUserId?: number;
+}
+
+/**
+ * Extract the Atrium delegated-agent marker (§26.1) from a verified token payload.
+ *
+ * The delegation trigger is EXCLUSIVELY a numeric `delegated_for` claim — the one
+ * the delegated minter (`POST /api/v1/agents/delegated-token`) always stamps
+ * directly. We deliberately do NOT fall back to the RFC-8693 `act.sub` actor claim:
+ * a broad `act.sub` fallback would silently promote ANY future token carrying a
+ * numeric `act.sub` (an audit actor, another subsystem's use of `act`) into Atrium
+ * delegation — with no `content:delegate` authorization anywhere on that path. The
+ * minted token keeps `act.sub` for audit only (a non-numeric agent client id).
+ *
+ * Returns the numeric user id, or `undefined` for an absent / non-integer value.
+ */
+export function parseDelegatedForClaim(
+  payload: Record<string, unknown>
+): number | undefined {
+  const raw = payload.delegated_for as string | number | undefined;
+  return raw != null && Number.isInteger(Number(raw)) ? Number(raw) : undefined;
 }
 
 /**
@@ -356,9 +404,18 @@ async function verifyJwtToken(
   try {
     const { jwtVerify } = await import("jose");
     const { getJwksKeySet } = await import("@/lib/oauth/jwks-cache");
+    const { getIssuerUrl } = await import("@/lib/oauth/issuer-config");
 
     const jwks = await getJwksKeySet();
-    const { payload } = await jwtVerify(token, jwks);
+    const issuer = getIssuerUrl();
+    // Constrain to API access tokens minted by our provider for this API audience.
+    // The provider stamps aud=issuer on JWT access tokens (getResourceServerInfo)
+    // and iss=issuer; ID tokens carry aud=client_id, so requiring audience=issuer
+    // rejects token-confusion replays. exp/nbf remain enforced by jose (REV-SEC-164).
+    const { payload } = await jwtVerify(token, jwks, {
+      issuer,
+      audience: issuer,
+    });
 
     // Extract user ID from sub claim
     const userId = Number.parseInt(payload.sub ?? "", 10);
@@ -378,6 +435,9 @@ async function verifyJwtToken(
     const scopeStr = (payload.scope as string) ?? "";
     const scopes = scopeStr ? scopeStr.split(" ") : [];
 
+    // Atrium delegated-agent marker (§26.1) — see `parseDelegatedForClaim`.
+    const delegatedForUserId = parseDelegatedForClaim(payload);
+
     return {
       userId,
       cognitoSub,
@@ -387,8 +447,10 @@ async function verifyJwtToken(
         if (!cid) {
           log.warn("JWT missing client_id and azp claims")
         }
-        return cid ?? "unknown"
+        // undefined (not a sentinel) when absent — see JwtAuthResult.clientId.
+        return cid || undefined
       })(),
+      delegatedForUserId,
     };
   } catch (error) {
     log.warn("JWT verification error", {

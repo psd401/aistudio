@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getRoleTools } from "@/lib/db/drizzle"
+import { getRoleCapabilities } from "@/lib/db/drizzle"
 import { requireAdmin } from "@/lib/auth/admin-check"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { getErrorMessage } from "@/types/errors";
@@ -24,8 +24,8 @@ export async function GET(
     }
     
     const { roleId } = await params
-    log.debug("Fetching tools for role", { roleId });
-    const tools = await getRoleTools(Number.parseInt(roleId, 10))
+    log.debug("Fetching capabilities for role", { roleId });
+    const tools = await getRoleCapabilities(Number.parseInt(roleId, 10))
     
     log.info("Role tools fetched successfully", { roleId, toolCount: tools.length });
     timer({ status: "success", count: tools.length });

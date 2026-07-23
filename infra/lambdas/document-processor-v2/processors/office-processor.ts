@@ -5,41 +5,22 @@ import {
   ProcessorConfig 
 } from './factory';
 import * as mammoth from 'mammoth';
-import * as XLSX from 'xlsx';
+import * as XLSX from '@e965/xlsx';
 import JSZip from 'jszip';
 import { parseString } from 'xml2js';
 import { createLambdaLogger } from '../utils/lambda-logger';
+import { sanitizeHtml } from '../utils/html-sanitizer';
 
-/**
- * Securely removes HTML tags to prevent injection attacks
- * This function handles malformed HTML and prevents bypassing attempts
- */
-function sanitizeHTML(html: string): string {
-  // First, iteratively remove HTML tags until none remain
-  // This prevents bypassing through nested or malformed tags
-  let sanitized = html;
-  let previousLength = 0;
-  
-  while (sanitized.length !== previousLength && /<[^>]*>/g.test(sanitized)) {
-    previousLength = sanitized.length;
-    sanitized = sanitized.replace(/<[^>]*>/g, ' ');
-  }
-  
-  // AFTER tags are removed, safely decode HTML entities (prevents security bypass)
-  sanitized = sanitized
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#x27;/g, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, '&');
-  
-  // Clean up extra whitespace created by tag removal
-  sanitized = sanitized
-    .replace(/\s+/g, ' ')
-    .trim();
-    
-  return sanitized;
+interface XlsxSheetData {
+  name: unknown;
+  json: unknown[][];
+  rowCount: number;
+  columnCount: number;
+  truncated: boolean;
+}
+
+interface XlsxContent {
+  sheets?: XlsxSheetData[];
 }
 
 export class OfficeProcessor implements DocumentProcessor {
@@ -130,16 +111,30 @@ export class OfficeProcessor implements DocumentProcessor {
   private async processDocx(buffer: Buffer): Promise<any> {
     const logger = createLambdaLogger({ operation: 'OfficeProcessor.processDocx' });
     logger.info('Processing DOCX document');
-    
-    // Extract raw text
+
+    // mammoth.convertToHtml re-unzips and fully re-parses the DOCX; its output is only
+    // consumed by convertDocxToMarkdown. Skip it entirely on the common text-only path,
+    // and when markdown IS requested run both parses concurrently (REV-PERF-032).
+    if (this.config.convertToMarkdown) {
+      const [textResult, htmlResult] = await Promise.all([
+        mammoth.extractRawText({ buffer }),
+        mammoth.convertToHtml({ buffer }),
+      ]);
+      return {
+        text: textResult.value,
+        html: htmlResult.value,
+        metadata: {
+          messages: textResult.messages,
+          wordCount: textResult.value.split(/\s+/).length,
+          characterCount: textResult.value.length,
+        }
+      };
+    }
+
     const textResult = await mammoth.extractRawText({ buffer });
-    
-    // Also extract with HTML for better structure understanding
-    const htmlResult = await mammoth.convertToHtml({ buffer });
-    
     return {
       text: textResult.value,
-      html: htmlResult.value,
+      html: undefined,
       metadata: {
         messages: textResult.messages,
         wordCount: textResult.value.split(/\s+/).length,
@@ -148,35 +143,59 @@ export class OfficeProcessor implements DocumentProcessor {
     };
   }
 
+  private static readonly MAX_XLSX_BYTES = 25 * 1024 * 1024; // 25 MB
+  private static readonly MAX_XLSX_ROWS_PARSE = 10000; // hard cap at parse time
+
   private async processXlsx(buffer: Buffer): Promise<any> {
     const logger = createLambdaLogger({ operation: 'OfficeProcessor.processXlsx' });
     logger.info('Processing XLSX document');
-    
-    const workbook = XLSX.read(buffer);
+
+    if (buffer.length > OfficeProcessor.MAX_XLSX_BYTES) {
+      throw new Error(`XLSX file exceeds maximum allowed size of ${OfficeProcessor.MAX_XLSX_BYTES} bytes`);
+    }
+
+    const workbook = XLSX.read(buffer, {
+      cellFormula: false,
+      sheetRows: OfficeProcessor.MAX_XLSX_ROWS_PARSE,
+    });
     let combinedText = '';
     const sheetData: any[] = [];
-    
+
     workbook.SheetNames.forEach((sheetName: string, index: number) => {
       const sheet = workbook.Sheets[sheetName];
-      
+
       // Convert to CSV for text extraction
       const csv = XLSX.utils.sheet_to_csv(sheet);
-      
-      // Convert to JSON for structured data
-      const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      
-      combinedText += `\n\n## Sheet: ${sheetName}\n${csv}`;
-      
+
+      // Convert to JSON for structured data — { header: 1 } returns array-of-arrays,
+      // avoiding prototype pollution through column-named __proto__ keys
+      const json = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
+
+      const safeSheetName = OfficeProcessor.sanitizeSheetName(sheetName);
+      // A row count that hits the parse-time cap doesn't mean the sheet HAS exactly
+      // that many rows — it means parsing stopped there, so the true count is unknown
+      // (REV-INFRA-099). Surface that rather than silently reporting a row/text subset
+      // as if it were the complete sheet.
+      const truncated = json.length >= OfficeProcessor.MAX_XLSX_ROWS_PARSE;
+      combinedText += `\n\n## Sheet: ${safeSheetName}\n${csv}`;
+      if (truncated) {
+        combinedText += `\n\n> ⚠️ This sheet has ${OfficeProcessor.MAX_XLSX_ROWS_PARSE}+ rows; parsing stopped at the ${OfficeProcessor.MAX_XLSX_ROWS_PARSE}-row cap. The content and row count above are incomplete.`;
+      }
+
       sheetData.push({
         name: sheetName,
         index,
         csv,
         json,
         rowCount: json.length,
-        columnCount: json.length > 0 ? Math.max(...json.map((row: any) => Array.isArray(row) ? row.length : 0)) : 0,
+        truncated,
+        // Cap spread to avoid stack overflow on sheets with thousands of columns
+        columnCount: json.length > 0
+          ? Math.min(10000, Math.max(0, ...json.map((row) => Array.isArray(row) ? row.length : 0)))
+          : 0,
       });
     });
-    
+
     return {
       text: combinedText.trim(),
       sheets: sheetData,
@@ -184,6 +203,8 @@ export class OfficeProcessor implements DocumentProcessor {
         sheetCount: workbook.SheetNames.length,
         sheetNames: workbook.SheetNames,
         totalRows: sheetData.reduce((sum, sheet) => sum + sheet.rowCount, 0),
+        // True total may be higher than totalRows above — see per-sheet `truncated`.
+        anySheetTruncated: sheetData.some((sheet) => sheet.truncated),
       }
     };
   }
@@ -199,26 +220,34 @@ export class OfficeProcessor implements DocumentProcessor {
       
       // Extract text from all slides
       const slides: any[] = [];
-      let slideIndex = 1;
       let combinedText = '';
-      
-      // Process slides sequentially
-      while (true) {
-        const slideFile = zipData.file(`ppt/slides/slide${slideIndex}.xml`);
-        if (!slideFile) break;
-        
+
+      // Enumerate the slide entries actually present in the archive, sorted by their
+      // numeric index (REV-COR-413). PPTX does not guarantee contiguous slide file
+      // numbering — deleting a slide can leave a gap (slide1, slide2, slide4) — so
+      // the old `while(true)` that broke at the first missing index silently dropped
+      // every slide after a gap.
+      const slideNames = Object.keys(zipData.files)
+        .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+        .sort((a, b) =>
+          Number(a.match(/slide(\d+)\.xml$/)![1]) - Number(b.match(/slide(\d+)\.xml$/)![1])
+        );
+
+      for (const name of slideNames) {
+        const slideFile = zipData.file(name);
+        if (!slideFile) continue;
+
+        const slideNumber = Number(name.match(/slide(\d+)\.xml$/)![1]);
         const slideXml = await slideFile.async('text');
-        const slideText = await this.extractTextFromSlideXml(slideXml, slideIndex);
-        
+        const slideText = await this.extractTextFromSlideXml(slideXml, slideNumber);
+
         if (slideText && slideText.length > 0) {
           slides.push({
-            id: slideIndex,
+            id: slideNumber,
             text: slideText
           });
-          combinedText += `\n\n## Slide ${slideIndex}\n\n${slideText.join('\n')}`;
+          combinedText += `\n\n## Slide ${slideNumber}\n\n${slideText.join('\n')}`;
         }
-        
-        slideIndex++;
       }
       
       if (slides.length === 0) {
@@ -345,9 +374,12 @@ export class OfficeProcessor implements DocumentProcessor {
           .replace(/<\/em>/g, '*')
           .replace(/<br[^>]*>/g, '\n')
           .replace(/\n{3,}/g, '\n\n'); // Clean up excessive newlines
-        
-        // Apply secure HTML sanitization to prevent injection attacks
-        const sanitizedMarkdown = sanitizeHTML(markdown);
+
+        // Apply secure HTML sanitization to prevent injection attacks. Preserve
+        // newlines (REV-COR-408) so the paragraph/heading structure just built above
+        // survives — the default sanitizer collapses every \n into a space, which
+        // flattened DOCX markdown to a single line.
+        const sanitizedMarkdown = sanitizeHtml(markdown, { preserveNewlines: true });
         return sanitizedMarkdown.trim();
       } catch (error) {
         const logger = createLambdaLogger({ operation: 'OfficeProcessor.convertDocxToMarkdown' });
@@ -359,33 +391,61 @@ export class OfficeProcessor implements DocumentProcessor {
     return this.convertTextToMarkdown(content.text);
   }
 
-  private convertXlsxToMarkdown(content: any): string {
+  // Cap rows per sheet so the Markdown payload stays within API route body limits.
+  private static readonly MAX_ROWS_PER_SHEET = 500;
+
+  private static escapeMdTableCell(value: unknown): string {
+    return String(value ?? '')
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/\\/g, '\\\\')
+      .replace(/\|/g, '\\|');
+  }
+
+  // Sanitize a sheet name before interpolating into a Markdown heading.
+  private static sanitizeSheetName(name: string): string {
+    return name
+      .replace(/\\/g, '\\\\')
+      .replace(/[\r\n|#`]/g, ' ')
+      .trim() || 'Sheet';
+  }
+
+  private convertXlsxToMarkdown(content: XlsxContent): string {
     let markdown = '# Spreadsheet Data\n\n';
-    
+
     if (content.sheets) {
-      content.sheets.forEach((sheet: any) => {
-        markdown += `## ${sheet.name}\n\n`;
-        
+      content.sheets.forEach((sheet: XlsxSheetData) => {
+        const safeSheetName = OfficeProcessor.sanitizeSheetName(String(sheet.name ?? ''));
+        markdown += `## ${safeSheetName}\n\n`;
+
         if (sheet.json && sheet.json.length > 0) {
-          // Convert JSON to markdown table
-          const rows = sheet.json as any[][];
+          const rows = sheet.json;
           if (rows.length > 0) {
-            // Header row
             const headers = rows[0];
-            markdown += '| ' + headers.join(' | ') + ' |\n';
+            markdown += '| ' + headers.map(OfficeProcessor.escapeMdTableCell).join(' | ') + ' |\n';
             markdown += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
-            
-            // Include all data rows for complete AI context
-            // Use array.map().join() for better performance with large datasets
-            const dataRows = rows.slice(1);
-            markdown += dataRows.map((row: any[]) => '| ' + row.join(' | ') + ' |\n').join('');
+
+            const allDataRows = rows.slice(1);
+            const truncated = allDataRows.length > OfficeProcessor.MAX_ROWS_PER_SHEET;
+            const dataRows = truncated
+              ? allDataRows.slice(0, OfficeProcessor.MAX_ROWS_PER_SHEET)
+              : allDataRows;
+            markdown += dataRows
+              .map((row: unknown[]) => '| ' + row.map(OfficeProcessor.escapeMdTableCell).join(' | ') + ' |\n')
+              .join('');
+
+            if (truncated) {
+              markdown += `\n> ⚠️ **Showing first ${OfficeProcessor.MAX_ROWS_PER_SHEET} of ${allDataRows.length} rows.** Upload a filtered version of this sheet to analyze the full dataset.\n`;
+            }
           }
         }
-        
-        markdown += `\n**Sheet Stats:** ${sheet.rowCount} rows, ${sheet.columnCount} columns\n\n`;
+
+        const rowStats = sheet.truncated
+          ? `${sheet.rowCount}+ rows (parsing capped here — true count unknown)`
+          : `${sheet.rowCount} rows`;
+        markdown += `\n**Sheet Stats:** ${rowStats}, ${sheet.columnCount} columns\n\n`;
       });
     }
-    
+
     return markdown;
   }
 
@@ -394,9 +454,13 @@ export class OfficeProcessor implements DocumentProcessor {
     
     // Use structured slide data from node-pptx-parser if available
     if (content.slides && Array.isArray(content.slides)) {
-      content.slides.forEach((slide: any, index: number) => {
+      content.slides.forEach((slide: any) => {
         if (slide.text && slide.text.length > 0) {
-          markdown += `## Slide ${index + 1}\n\n`;
+          // Use the slide's actual archive-derived id (REV-COR-413), not its position in
+          // the array — when slide numbering has a gap (slide1, slide2, slide4), `index`
+          // would mislabel slide 4 as "Slide 3" here even though `combinedText` and
+          // `slides[].id` both correctly show 4.
+          markdown += `## Slide ${slide.id}\n\n`;
           
           // Join slide text with proper formatting
           const slideContent = slide.text.join('\n').trim();
@@ -473,16 +537,18 @@ export class OfficeProcessor implements DocumentProcessor {
     while (startIndex < text.length) {
       let endIndex = Math.min(startIndex + chunkSize, text.length);
       
-      // Try to break at sentence boundary
+      // Try to break at a sentence boundary — but only when the break still leaves
+      // a chunk larger than the overlap. Otherwise `endIndex - overlap` would move
+      // the next window BACKWARD and the loop would never terminate (REV-COR-406).
       if (endIndex < text.length) {
         const lastSentenceEnd = text.lastIndexOf('.', endIndex);
-        if (lastSentenceEnd > startIndex) {
+        if (lastSentenceEnd > startIndex && (lastSentenceEnd + 1 - startIndex) > overlap) {
           endIndex = lastSentenceEnd + 1;
         }
       }
-      
+
       const chunkContent = text.substring(startIndex, endIndex).trim();
-      
+
       if (chunkContent.length > 0) {
         chunks.push({
           chunkIndex,
@@ -496,9 +562,17 @@ export class OfficeProcessor implements DocumentProcessor {
         });
         chunkIndex++;
       }
-      
-      startIndex = endIndex - overlap;
-      if (startIndex >= endIndex) break;
+
+      // Once a chunk reaches the end of the text, everything is covered — stop
+      // (REV-COR-406). Without this the loop would keep emitting tiny overlapping
+      // tail windows because `endIndex - overlap` sits behind `startIndex` near the end.
+      if (endIndex >= text.length) break;
+
+      // Advance with guaranteed forward progress (REV-COR-406): never regress and
+      // always move at least one character past the previous start.
+      const nextStart = Math.max(startIndex + 1, endIndex - overlap);
+      if (nextStart <= startIndex) break; // defensive; should be unreachable
+      startIndex = nextStart;
     }
     
     const logger = createLambdaLogger({ operation: 'OfficeProcessor.chunkText' });

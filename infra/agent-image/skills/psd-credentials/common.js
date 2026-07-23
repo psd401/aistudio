@@ -19,6 +19,9 @@ const {
   SecretsManagerClient,
   GetSecretValueCommand,
   ListSecretsCommand,
+  CreateSecretCommand,
+  PutSecretValueCommand,
+  ResourceExistsException,
 } = require('@aws-sdk/client-secrets-manager');
 
 const {
@@ -53,11 +56,20 @@ function validateEnv() {
   if (!ENVIRONMENT) fail('ENVIRONMENT env var not set');
 }
 
+// Keep email validation in sync with: psd-freshservice/lib/api.js and
+// psd-image-gen/generate.js.
 function validateUserEmail(email) {
   if (!email) fail('--user is required (authenticated caller email)');
   const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!EMAIL.test(email)) {
     fail(`Invalid --user "${email}". Must be a valid email address.`);
+  }
+  // Defense-in-depth: reject path separators in the email since the value
+  // is interpolated into Secrets Manager secret paths. SM treats names as
+  // flat strings (no filesystem traversal), but blocking `/` prevents
+  // unintended namespace crossings in the psd-agent-creds path hierarchy.
+  if (email.includes('/')) {
+    fail('Email must not contain path separators (/).');
   }
 }
 
@@ -114,14 +126,25 @@ function resolveSecretId(name, userEmail) {
 /**
  * Fetch a secret value from Secrets Manager, checking user scope first,
  * then falling back to shared scope. Uses in-memory cache.
+ *
+ * @param {string} name       - Credential name (alphanumeric/hyphens/underscores/dots).
+ * @param {string} userEmail  - Authenticated caller's email.
+ * @param {object} [options]  - Optional flags.
+ * @param {boolean} [options.sharedOnly=false] - If true, skip user scope and
+ *   read only from the shared namespace. Use this for district-funded keys
+ *   (e.g. openai_api_key) where a user-scoped override must not be honored.
  */
-async function getCredential(name, userEmail) {
+async function getCredential(name, userEmail, options) {
+  const sharedOnly = options && options.sharedOnly === true;
+
   // H1 fix: Validate credential name to prevent path traversal in SM paths
   validateCredentialName(name);
 
   // Use a null byte as delimiter — cannot appear in an email or a
   // SAFE_CRED_NAME_RE-validated name, so (user, name) pairs are unambiguous.
-  const cacheKey = `${userEmail}\x00${name}`;
+  // Append scope mode to distinguish cached entries between shared-only and
+  // normal lookups for the same credential name.
+  const cacheKey = `${userEmail}\x00${name}\x00${sharedOnly ? 's' : 'a'}`;
   if (cacheKey in _cache) {
     const cached = _cache[cacheKey];
     if (Date.now() - cached.cachedAt < CACHE_TTL_MS) {
@@ -133,11 +156,16 @@ async function getCredential(name, userEmail) {
 
   const { userPath, sharedPath } = resolveSecretId(name, userEmail);
 
-  // Try user-scoped first
-  let value = await tryGetSecret(userPath);
-  let scope = 'user';
+  let value = null;
+  let scope = 'shared';
 
-  // Fall back to shared
+  if (!sharedOnly) {
+    // Try user-scoped first
+    value = await tryGetSecret(userPath);
+    scope = 'user';
+  }
+
+  // Fall back to (or exclusively use) shared
   if (value === null) {
     value = await tryGetSecret(sharedPath);
     scope = 'shared';
@@ -271,6 +299,223 @@ async function logCredentialRead(credentialName, userEmail, sessionId) {
 }
 
 /**
+ * Write a per-user credential to Secrets Manager. Always scoped to the
+ * caller's email path (psd-agent-creds/{env}/user/{email}/{name}). The
+ * shared scope cannot be written by skills — admins provision shared
+ * secrets out of band.
+ *
+ * Uses CreateSecret on first write and falls back to PutSecretValue when
+ * the secret already exists. Minimal validation on value contents is
+ * performed by the caller (put.js): length cap, placeholder detection,
+ * and minimum-length check.
+ *
+ * The caller (put.js) appends an audit row to psd_agent_credentials_audit
+ * via logCredentialPut() with action='created' or 'rotated'.
+ * The credential value is never logged.
+ */
+async function putUserCredential(name, value, userEmail) {
+  validateCredentialName(name);
+  if (typeof value !== 'string' || value.length === 0) {
+    fail('--value must be a non-empty string');
+  }
+
+  const secretId = `${CREDS_PREFIX}/user/${userEmail}/${name}`;
+  const tags = [
+    { Key: 'Environment', Value: ENVIRONMENT },
+    { Key: 'ManagedBy', Value: 'psd-credentials-skill' },
+    { Key: 'Scope', Value: 'user' },
+  ];
+
+  let action = 'created';
+  try {
+    await smClient.send(new CreateSecretCommand({
+      Name: secretId,
+      SecretString: value,
+      Tags: tags,
+      Description: `Per-user agent credential ${name} for ${userEmail}`,
+    }));
+  } catch (err) {
+    // Both checks are needed for AWS SDK v3 resilience: `instanceof` works
+    // when the exact class is imported from the same package version, but
+    // fails in edge cases (transitive dependency version skew, bundler
+    // deduplication). The string `.name` check covers those cases.
+    const isExists = err instanceof ResourceExistsException
+      || err.name === 'ResourceExistsException';
+    if (!isExists) {
+      throw err;
+    }
+    await smClient.send(new PutSecretValueCommand({
+      SecretId: secretId,
+      SecretString: value,
+    }));
+    action = 'rotated';
+  }
+
+  // Bust the in-memory cache so subsequent get() calls in the same
+  // session see the new value rather than the prior cached miss.
+  // Cache keys use three-part format: email + NUL + name + NUL + scope flag.
+  // Delete both scope variants ('a' = all-scopes, 's' = shared-only).
+  delete _cache[`${userEmail}\x00${name}\x00a`];
+  delete _cache[`${userEmail}\x00${name}\x00s`];
+
+  return { name, scope: 'user', action };
+}
+
+/**
+ * Append an audit row recording a per-user credential write. Best-effort.
+ * Never logs the credential value — only the name, scope, and action.
+ */
+async function logCredentialPut(credentialName, userEmail, action) {
+  if (!rdsClient || !DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
+    return;
+  }
+  try {
+    await rdsClient.send(new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: 'aistudio',
+      sql: `INSERT INTO psd_agent_credentials_audit
+              (credential_name, scope, action, details)
+            VALUES (:name, 'user', :action, CAST(:details AS JSONB))`,
+      parameters: [
+        { name: 'name', value: { stringValue: credentialName } },
+        { name: 'action', value: { stringValue: action } },
+        {
+          name: 'details',
+          value: { stringValue: JSON.stringify({ user_email: userEmail }) },
+        },
+      ],
+    }));
+  } catch (err) {
+    console.error(`Audit log failed (non-fatal): ${err.message}`);
+  }
+}
+
+/**
+ * Check whether a given user email has been granted a capability via
+ * their role assignments. Source-of-truth tables are `users` (email →
+ * id), `user_roles` (id → role_id), `role_capabilities` (role_id →
+ * capability_id), and `capabilities` (capability identifier).
+ *
+ * Returns `true` if at least one matching grant exists and the
+ * capability is still active. Returns `false` if no grant is found or
+ * if the database is not configured (fail-closed for restricted skills
+ * — better to refuse the action than to expose it on a misconfig).
+ */
+async function userHasCapability(userEmail, capabilityIdentifier) {
+  if (!rdsClient || !DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
+    return false;
+  }
+  try {
+    const resp = await rdsClient.send(new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: 'aistudio',
+      sql: `SELECT 1
+              FROM users u
+              JOIN user_roles ur ON ur.user_id = u.id
+              JOIN role_capabilities rc ON rc.role_id = ur.role_id
+              JOIN capabilities c ON c.id = rc.capability_id
+             WHERE u.email = :email
+               AND c.identifier = :cap
+               AND c.is_active = true
+             LIMIT 1`,
+      parameters: [
+        { name: 'email', value: { stringValue: userEmail } },
+        { name: 'cap', value: { stringValue: capabilityIdentifier } },
+      ],
+    }));
+    return Array.isArray(resp.records) && resp.records.length > 0;
+  } catch (err) {
+    console.error(`Capability check failed (treating as denied): ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Whether a user email matches an EXPLICIT per-resource access grant on a
+ * resource (Epic #1202 Phase 3, #1206). Mirrors the app-side
+ * `userCanAccessResource` role/group predicates (lib/db/drizzle/resource-access.ts)
+ * but keyed by EMAIL (the skill only has the caller's email, not a numeric id) and
+ * WITHOUT the "zero grants = unrestricted" / admin-bypass branches: for a skill the
+ * grant is PURELY ADDITIVE — it is OR-ed with the capability gate by the caller, so
+ * "no grant rows" here must mean "no grant match" (false), never "everyone".
+ *
+ *   - a `role` grant matches when the user holds that role (by NAME,
+ *     case-insensitively — users→user_roles→roles joined on lower(email)), OR
+ *   - a `group` grant matches when the user is a member of that ACTIVE synced group
+ *     (groups→group_members joined on lower(member_email)).
+ *
+ * Returns false when the DB is unconfigured or on any error (fail-closed, matching
+ * `userHasCapability`). `resourceId` is passed as text (the storage form); a
+ * numeric skill id is stringified by the caller — skills use a uuid string.
+ */
+async function userMatchesResourceGrant(userEmail, resourceType, resourceId) {
+  if (!rdsClient || !DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
+    return false;
+  }
+  if (!userEmail || !resourceType || resourceId === undefined || resourceId === null) {
+    return false;
+  }
+  try {
+    const resp = await rdsClient.send(new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: 'aistudio',
+      sql: `SELECT 1
+              FROM resource_access_grants g
+             WHERE g.resource_type = :rtype
+               AND g.resource_id = :rid
+               AND (
+                 (g.grant_kind = 'role' AND EXISTS (
+                    SELECT 1 FROM users u
+                      JOIN user_roles ur ON ur.user_id = u.id
+                      JOIN roles r ON r.id = ur.role_id
+                     WHERE lower(u.email) = lower(:email)
+                       AND lower(r.name) = lower(g.grant_value)
+                 ))
+                 OR
+                 (g.grant_kind = 'group' AND EXISTS (
+                    SELECT 1 FROM groups grp
+                      JOIN group_members gm ON gm.group_id = grp.id
+                     WHERE grp.is_active = true
+                       AND lower(grp.group_email) = lower(g.grant_value)
+                       AND lower(gm.member_email) = lower(:email)
+                 ))
+               )
+             LIMIT 1`,
+      parameters: [
+        { name: 'email', value: { stringValue: userEmail } },
+        { name: 'rtype', value: { stringValue: String(resourceType) } },
+        { name: 'rid', value: { stringValue: String(resourceId) } },
+      ],
+    }));
+    return Array.isArray(resp.records) && resp.records.length > 0;
+  } catch (err) {
+    console.error(`Resource-grant check failed (treating as denied): ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Fail-closed skill access gate (#1206): a caller may use a restricted skill when
+ * they satisfy its `required_capability` OR match an explicit per-skill
+ * resource_access_grant (role/group). Either alone suffices; both are checked
+ * fail-closed. `capabilityIdentifier` and/or `skillId` may be omitted — omitting
+ * capability leaves the grant as the sole gate; omitting skillId reproduces the
+ * pre-#1206 capability-only behavior. With BOTH omitted this returns false.
+ */
+async function userCanAccessSkill(userEmail, capabilityIdentifier, skillId) {
+  if (capabilityIdentifier && (await userHasCapability(userEmail, capabilityIdentifier))) {
+    return true;
+  }
+  if (skillId && (await userMatchesResourceGrant(userEmail, 'skill', skillId))) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Insert a credential request into the database.
  */
 async function insertCredentialRequest(credentialName, reason, skillContext, userEmail) {
@@ -316,4 +561,9 @@ module.exports = {
   listCredentials,
   logCredentialRead,
   insertCredentialRequest,
+  putUserCredential,
+  logCredentialPut,
+  userHasCapability,
+  userMatchesResourceGrant,
+  userCanAccessSkill,
 };

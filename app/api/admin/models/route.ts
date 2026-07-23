@@ -1,71 +1,13 @@
 import { NextResponse } from 'next/server';
-import { getAIModels, createAIModel, updateAIModel, deleteAIModel, getRoles } from '@/lib/db/drizzle';
+import { getAIModels, createAIModel, updateAIModel, deleteAIModel } from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { normalizeBoolean } from '@/lib/validations/api-schemas';
 
-/**
- * Validate and sanitize allowedRoles field
- * @param allowedRoles - The roles to validate (can be string or array)
- * @param log - Logger instance for warnings
- * @returns Validated array of role names or null (Drizzle handles serialization)
- */
-async function validateAllowedRoles(
-  allowedRoles: unknown,
-  log: ReturnType<typeof createLogger>
-): Promise<string[] | null> {
-  if (!allowedRoles) return null;
-
-  try {
-    // Parse if string
-    let roles: unknown;
-    if (typeof allowedRoles === 'string') {
-      // Try to parse as JSON
-      try {
-        roles = JSON.parse(allowedRoles);
-      } catch {
-        // Not JSON, treat as single role
-        roles = [allowedRoles];
-      }
-    } else {
-      roles = allowedRoles;
-    }
-
-    // Validate it's an array of strings
-    if (!Array.isArray(roles)) {
-      log.warn('Invalid allowedRoles format - not an array', { allowedRoles });
-      return null;
-    }
-
-    const validRoles = roles.filter(r => typeof r === 'string' && r.trim().length > 0);
-
-    if (validRoles.length === 0) {
-      return null;
-    }
-
-    // Validate against existing roles in the system
-    const existingRoles = await getRoles();
-    const existingRoleNames = existingRoles.map(r => r.name);
-    const filteredRoles = validRoles.filter(r => existingRoleNames.includes(r));
-
-    if (filteredRoles.length !== validRoles.length) {
-      const invalidRoles = validRoles.filter(r => !existingRoleNames.includes(r));
-      log.warn('Some roles do not exist in the system', {
-        invalidRoles,
-        validRoles: filteredRoles
-      });
-    }
-
-    // Return validated roles as array - Drizzle handles serialization
-    return filteredRoles.length > 0 ? filteredRoles : null;
-  } catch (error) {
-    log.warn('Failed to validate allowedRoles', {
-      allowedRoles,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    });
-    return null;
-  }
-}
+// NOTE (#1207): per-model role/group access is set ONLY via the ResourceGrantsEditor
+// (resource_access_grants — see actions/db/resource-grants-actions.ts). The legacy
+// ai_models.allowed_roles column and its write-time grant bridge were removed here;
+// this route no longer reads, validates, writes, or bridges allowedRoles.
 
 /**
  * Validate and sanitize capabilities field
@@ -211,17 +153,15 @@ export async function POST(request: Request) {
 
     log.debug("Creating model", { modelName: body.name, provider: body.provider });
 
-    // Validate and sanitize capabilities and allowedRoles
+    // Validate and sanitize capabilities
     const validatedCapabilities = validateCapabilities(body.capabilities, log);
-    const validatedAllowedRoles = await validateAllowedRoles(body.allowedRoles, log);
-    
+
     const modelData = {
       name: body.name,
       modelId: body.modelId,
       provider: body.provider,
       description: body.description,
       capabilities: validatedCapabilities || undefined,
-      allowedRoles: validatedAllowedRoles || undefined,
       maxTokens: body.maxTokens ? Number.parseInt(body.maxTokens) : undefined,
       active: body.active ?? true,
       nexusEnabled: body.nexusEnabled ?? true,
@@ -230,6 +170,9 @@ export async function POST(request: Request) {
       inputCostPer1kTokens: body.inputCostPer1kTokens || undefined,
       outputCostPer1kTokens: body.outputCostPer1kTokens || undefined,
       cachedInputCostPer1kTokens: body.cachedInputCostPer1kTokens || undefined,
+      // Cache-WRITE rate (issue #1089) — without this the create path silently
+      // drops the admin form's cache-write price (update persists it via spread).
+      cacheWriteCostPer1kTokens: body.cacheWriteCostPer1kTokens || undefined,
       pricingUpdatedAt: body.pricingUpdatedAt ? new Date(body.pricingUpdatedAt) : undefined,
       // Performance fields
       averageLatencyMs: body.averageLatencyMs || undefined,
@@ -287,12 +230,15 @@ export async function PUT(request: Request) {
     if ('capabilities' in updates) {
       updates.capabilities = validateCapabilities(updates.capabilities, log);
     }
-    
-    // Validate and sanitize allowedRoles if present
+
+    // NOTE (#1207): allowedRoles is no longer accepted here — role/group access
+    // is edited via the ResourceGrantsEditor (resource_access_grants). Strip any
+    // allowedRoles key an older client still echoes so it can never reach the
+    // (now-dropped) column via updateAIModel's `.set({ ...updates })` spread.
     if ('allowedRoles' in updates) {
-      updates.allowedRoles = await validateAllowedRoles(updates.allowedRoles, log);
+      delete updates.allowedRoles;
     }
-    
+
     // Convert maxTokens to number if present
     if (updates.maxTokens !== undefined) {
       updates.maxTokens = updates.maxTokens ? Number.parseInt(updates.maxTokens) : null;

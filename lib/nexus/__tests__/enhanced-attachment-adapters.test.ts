@@ -27,9 +27,21 @@ jest.mock('@/lib/utils/uuid', () => ({
   generateUUID: () => 'test-uuid-123',
 }));
 
+const mockUploadTemporaryAttachment = jest.fn();
+const mockWaitForTemporaryAttachment = jest.fn();
+jest.mock('@/lib/repositories/temporary-attachment-client', () => ({
+  uploadTemporaryAttachment: (...args: unknown[]) =>
+    mockUploadTemporaryAttachment(...args),
+  waitForTemporaryAttachment: (...args: unknown[]) =>
+    mockWaitForTemporaryAttachment(...args),
+}));
+
 // Import after mocking
 // eslint-disable-next-line import/first
-import { HybridDocumentAdapter } from '../enhanced-attachment-adapters';
+import {
+  HybridDocumentAdapter,
+  VisionImageAdapter,
+} from '../enhanced-attachment-adapters';
 
 // Polyfill File.arrayBuffer() for Jest environment
 if (typeof File !== 'undefined' && !File.prototype.arrayBuffer) {
@@ -47,7 +59,54 @@ describe('HybridDocumentAdapter', () => {
   let adapter: HybridDocumentAdapter;
 
   beforeEach(() => {
+    jest.clearAllMocks();
     adapter = new HybridDocumentAdapter();
+  });
+
+  describe('repository-backed processing', () => {
+    it('returns only an opaque marker when canonical ingestion is active', async () => {
+      mockUploadTemporaryAttachment.mockResolvedValue({
+        mode: 'canonical',
+        reference: {
+          bindingId: '123e4567-e89b-42d3-a456-426614174000',
+          itemId: 42,
+          name: 'notes.txt',
+        },
+        repositoryId: 8,
+        itemVersionId: 'version',
+        processingJobId: 'job',
+      });
+      mockWaitForTemporaryAttachment.mockResolvedValue(
+        '[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:42:notes.txt]]'
+      );
+      const repositoryAdapter = new HybridDocumentAdapter(undefined, {
+        repositoryBacked: true,
+        getConversationId: () =>
+          '123e4567-e89b-42d3-a456-426614174111',
+      });
+      const file = new File(['private source text'], 'notes.txt', {
+        type: 'text/plain',
+      });
+
+      const pending = await repositoryAdapter.add({ file });
+      const complete = await repositoryAdapter.send(pending);
+
+      expect(mockUploadTemporaryAttachment).toHaveBeenCalledWith({
+        file,
+        draftKey: 'test-uuid-123',
+        purpose: 'nexus',
+        conversationId: '123e4567-e89b-42d3-a456-426614174111',
+      });
+      expect(JSON.stringify(complete.content)).not.toContain(
+        'private source text'
+      );
+      expect(complete.content).toEqual([
+        {
+          type: 'text',
+          text: '[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:42:notes.txt]]',
+        },
+      ]);
+    });
   });
 
   describe('validateFileType', () => {
@@ -150,6 +209,52 @@ describe('HybridDocumentAdapter', () => {
 
       it('should reject files with .pdf extension but wrong magic bytes', async () => {
         const file = new File(['not a pdf file'], 'fake.pdf', {
+          type: 'application/pdf',
+        });
+        const result = await validateFileType(file);
+        expect(result).toBe(false);
+      });
+
+      it('should accept PDFs with leading \\r\\n before %PDF header (ISO 32000-1 §7.5.2)', async () => {
+        // Some print-to-PDF drivers emit \r\n before the %PDF signature.
+        // PDF spec allows the header anywhere within the first 1024 bytes.
+        const leading = new Uint8Array([0x0d, 0x0a]); // \r\n
+        const pdfSig = new Uint8Array([
+          0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34,
+          0x0a, 0x25, 0xe2, 0xe3, 0xcf, 0xd3, 0x0a
+        ]);
+        const combined = new Uint8Array(leading.length + pdfSig.length);
+        combined.set(leading, 0);
+        combined.set(pdfSig, leading.length);
+        const file = new File([combined], 'document.pdf', {
+          type: 'application/pdf',
+        });
+        const result = await validateFileType(file);
+        expect(result).toBe(true);
+      });
+
+      it('should accept PDFs with %PDF header at arbitrary offset within first 1024 bytes', async () => {
+        // 512 zero bytes followed by %PDF header
+        const prefix = new Uint8Array(512);
+        const pdfSig = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]);
+        const combined = new Uint8Array(prefix.length + pdfSig.length);
+        combined.set(prefix, 0);
+        combined.set(pdfSig, prefix.length);
+        const file = new File([combined], 'offset.pdf', {
+          type: 'application/pdf',
+        });
+        const result = await validateFileType(file);
+        expect(result).toBe(true);
+      });
+
+      it('should reject PDFs whose %PDF header starts beyond the 1024-byte scan window', async () => {
+        // 1025 zero bytes, then %PDF — past the allowed scan region
+        const prefix = new Uint8Array(1025);
+        const pdfSig = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+        const combined = new Uint8Array(prefix.length + pdfSig.length);
+        combined.set(prefix, 0);
+        combined.set(pdfSig, prefix.length);
+        const file = new File([combined], 'toolate.pdf', {
           type: 'application/pdf',
         });
         const result = await validateFileType(file);
@@ -267,5 +372,94 @@ describe('HybridDocumentAdapter', () => {
       const result = HybridDocumentAdapter.toSafeErrorMessage('something completely unexpected');
       expect(result).toBe('An unexpected error occurred during processing.');
     });
+
+    it('should return scanned-PDF message for "scanned pdf detected" pattern', () => {
+      const result = HybridDocumentAdapter.toSafeErrorMessage(
+        'Scanned PDF detected - no text content extractable, may need OCR'
+      );
+      expect(result).toBe('This PDF appears to be scanned (image-only) and cannot be read. Please upload a text-based PDF.');
+    });
+
+    it('should NOT match scanned-PDF message for generic "may need OCR" phrases (avoids broad matching)', () => {
+      const result = HybridDocumentAdapter.toSafeErrorMessage(
+        'Some unrelated error that mentions OCR processing pipeline'
+      );
+      expect(result).toBe('An unexpected error occurred during processing.');
+    });
+  });
+});
+
+describe('VisionImageAdapter repository-backed processing', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('retains inline pixels and adds an opaque canonical reference', async () => {
+    mockUploadTemporaryAttachment.mockResolvedValue({
+      mode: 'canonical',
+      reference: {
+        bindingId: '123e4567-e89b-42d3-a456-426614174000',
+        itemId: 43,
+        name: 'diagram.png',
+      },
+      repositoryId: 8,
+      itemVersionId: 'version',
+      processingJobId: 'job',
+    });
+    mockWaitForTemporaryAttachment.mockResolvedValue(
+      '[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:43:diagram.png]]'
+    );
+    const repositoryAdapter = new VisionImageAdapter(undefined, {
+      repositoryBacked: true,
+      getConversationId: () =>
+        '123e4567-e89b-42d3-a456-426614174111',
+    });
+    const file = new File(
+      [new Uint8Array([0x89, 0x50, 0x4e, 0x47])],
+      'diagram.png',
+      { type: 'image/png' }
+    );
+
+    const pending = await repositoryAdapter.add({ file });
+    const complete = await repositoryAdapter.send(pending);
+
+    expect(mockUploadTemporaryAttachment).toHaveBeenCalledWith({
+      file,
+      draftKey: 'test-uuid-123',
+      purpose: 'nexus',
+      conversationId: '123e4567-e89b-42d3-a456-426614174111',
+    });
+    expect(complete.content).toEqual([
+      {
+        type: 'image',
+        image: expect.stringMatching(/^data:image\/png;base64,/),
+      },
+      {
+        type: 'text',
+        text: '[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:43:diagram.png]]',
+      },
+    ]);
+  });
+
+  it('preserves the legacy inline-only image path when rollback is selected', async () => {
+    mockUploadTemporaryAttachment.mockResolvedValue({ mode: 'legacy' });
+    const repositoryAdapter = new VisionImageAdapter(undefined, {
+      repositoryBacked: true,
+    });
+    const file = new File(
+      [new Uint8Array([0x89, 0x50, 0x4e, 0x47])],
+      'diagram.png',
+      { type: 'image/png' }
+    );
+
+    const pending = await repositoryAdapter.add({ file });
+    const complete = await repositoryAdapter.send(pending);
+
+    expect(complete.content).toEqual([
+      {
+        type: 'image',
+        image: expect.stringMatching(/^data:image\/png;base64,/),
+      },
+    ]);
   });
 });

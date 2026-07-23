@@ -62,6 +62,11 @@ export interface ProviderMetadata {
   max_context_length?: number;
   supports_streaming?: boolean;
   supports_function_calling?: boolean;
+  supports_vision?: boolean;
+  /** Preferred shared automatic-routing tier. */
+  modelRouterTier?: "light" | "medium" | "high";
+  /** Legacy Nexus-specific routing tier retained for backward compatibility. */
+  nexusRouterTier?: "light" | "medium" | "high";
   /** Allow additional provider-specific fields */
   [key: string]: unknown;
 }
@@ -106,6 +111,7 @@ export interface AssistantArchitectMessageMetadata extends NexusConversationMeta
   promptName: string;
   position: number;
   executionTimeMs?: number;
+  modelRouting?: Record<string, unknown>;
   failed?: boolean;
   error?: string;
 }
@@ -131,6 +137,8 @@ export interface AssistantArchitectConversationMetadata extends NexusConversatio
   assistantId?: number;
   /** Name of the assistant architect that created this conversation */
   assistantName?: string;
+  /** Owner-resolved temporary repositories available to API follow-up turns. */
+  runtimeRepositoryIds?: number[];
   /** Current execution status for display in conversation list */
   executionStatus?: 'running' | 'completed' | 'failed';
 }
@@ -152,6 +160,10 @@ export interface NexusUserSettings {
   theme?: "light" | "dark" | "system";
   notifications?: boolean;
   shortcuts?: Record<string, string>;
+  /** Standard hides model/tool routing controls; Advanced exposes a family constraint. */
+  nexusMode?: "standard" | "advanced";
+  /** Optional provider-family constraint used only in Advanced mode. */
+  preferredModelFamily?: "auto" | "openai" | "anthropic" | "google";
   [key: string]: unknown;
 }
 
@@ -272,12 +284,63 @@ export interface PromptLibrarySettings {
 // ============================================
 
 /**
+ * PROV-O-idiom provenance recorded on agent-authored graph nodes/edges
+ * (Issue #1252). Written by the shared decision-capture write path.
+ */
+export interface GraphProvenance {
+  /**
+   * Which channel produced this node/edge:
+   * "api" (external REST key), "agent" (agentId-tagged capture), or
+   * "decision-capture" (conversational commit).
+   */
+  extractionMethod: string;
+  /** Reference to the originating actor/request (agentId when present, else the requestId). */
+  sourceRef: string;
+  /**
+   * Confidence in the capture (0-1). Structured translation of caller-supplied
+   * fields is deterministic, so this is 1 for structured captures; kept as a
+   * field so LLM-scored captures can lower it later without a type change.
+   */
+  confidence: number;
+}
+
+/**
+ * Non-destructive entity-resolution audit recorded on a captured node when it
+ * was auto-reused (>= the auto-reuse similarity threshold) instead of created
+ * (Issue #1252). Never triggers a destructive merge.
+ */
+export interface GraphDedupMetadata {
+  /** The existing node that this mention was resolved to. */
+  matchedNodeId: string;
+  /** Cosine similarity (0-1) that drove the reuse. */
+  similarity: number;
+}
+
+/** Persisted completeness snapshot stored on the primary decision node. */
+export interface GraphCompletenessMetadata {
+  score: number;
+  method: "rule-based" | "llm-enhanced";
+  warnings: string[];
+}
+
+/**
  * Metadata for graph nodes
  * Flexible structure for storing node-specific properties
  * Part of Context Graph Foundation epic (Issues #665, #666)
  */
 export interface GraphNodeMetadata {
-  // Example fields - can be extended as needed
+  /** Legacy provenance conventions (Issue #675). */
+  source?: string;
+  agentId?: string;
+  /** Alternative decisions carry rejected: true (translator). */
+  rejected?: boolean;
+  /** Typed PROV-O provenance (Issue #1252). */
+  provenance?: GraphProvenance;
+  /** Entity-resolution reuse audit (Issue #1252). */
+  dedup?: GraphDedupMetadata;
+  /** Completeness snapshot (primary decision node only). */
+  completeness?: GraphCompletenessMetadata;
+  // Additional node-specific properties may be attached.
   [key: string]: unknown;
 }
 
@@ -287,6 +350,10 @@ export interface GraphNodeMetadata {
  * Part of Context Graph Foundation epic (Issues #665, #666)
  */
 export interface GraphEdgeMetadata {
-  // Example fields - can be extended as needed
+  /** Capture channel that created the edge. */
+  source?: string;
+  /** Typed PROV-O provenance (Issue #1252). */
+  provenance?: GraphProvenance;
+  // Additional edge-specific properties may be attached.
   [key: string]: unknown;
 }

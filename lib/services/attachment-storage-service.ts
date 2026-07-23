@@ -2,24 +2,20 @@ import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3
 import { createLogger } from '@/lib/logger';
 import type { UIMessage } from 'ai';
 import { generateUUID } from '@/lib/utils/uuid';
+import { Settings } from '@/lib/settings-manager';
 
 const s3Client = new S3Client({});
 const log = createLogger({ service: 'attachment-storage' });
 
-// Environment validation with test environment support
-function getDocumentsBucket(): string {
-  if (process.env.NODE_ENV === 'test') {
-    return process.env.DOCUMENTS_BUCKET_NAME || 'test-documents-bucket';
+// Resolve at request time so the database-first admin setting remains the source
+// of truth and importing a route never requires infrastructure configuration.
+async function getDocumentsBucket(): Promise<string> {
+  const { bucket } = await Settings.getS3();
+  if (!bucket) {
+    throw new Error('S3_BUCKET setting or DOCUMENTS_BUCKET_NAME environment variable is required');
   }
-  
-  if (!process.env.DOCUMENTS_BUCKET_NAME) {
-    throw new Error('DOCUMENTS_BUCKET_NAME environment variable is required but not configured');
-  }
-  
-  return process.env.DOCUMENTS_BUCKET_NAME;
+  return bucket;
 }
-
-const DOCUMENTS_BUCKET = getDocumentsBucket();
 
 // Use the proper UIMessage structure with parts array
 
@@ -92,7 +88,7 @@ export async function storeAttachmentInS3(
     
     // Store in S3
     await s3Client.send(new PutObjectCommand({
-      Bucket: DOCUMENTS_BUCKET,
+      Bucket: await getDocumentsBucket(),
       Key: s3Key,
       Body: JSON.stringify(contentToStore),
       ContentType: contentType,
@@ -137,7 +133,7 @@ export async function storeAttachmentInS3(
 export async function getAttachmentFromS3(s3Key: string): Promise<AttachmentContent> {
   try {
     const response = await s3Client.send(new GetObjectCommand({
-      Bucket: DOCUMENTS_BUCKET,
+      Bucket: await getDocumentsBucket(),
       Key: s3Key,
     }));
     
@@ -211,9 +207,9 @@ export async function processMessagesWithAttachments(
             partData as AttachmentContent,
             attachmentIndex++
           );
-          
+
           attachmentReferences.push(metadata);
-          
+
           // Replace with lightweight S3 reference for Lambda reconstruction
           lightweightParts.push({
             type: 'file' as const,
@@ -223,6 +219,28 @@ export async function processMessagesWithAttachments(
             s3Key: metadata.s3Key,
             attachmentId: metadata.attachmentId
           } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
+        } else if (
+          partData.type === 'file' &&
+          typeof partData.url === 'string' &&
+          partData.url.startsWith('data:')
+        ) {
+          // toCreateMessage wraps image attachments as type:"file" with a url property containing
+          // the base64 data URL. It hardcodes mediaType:"image/png" regardless of actual format.
+          // Extract the correct media type from the data URL prefix so providers receive the
+          // right MIME type (e.g. image/jpeg for phone photos rather than image/png).
+          const actualMediaType = extractDataUrlMediaType(partData.url);
+          if (actualMediaType && actualMediaType !== partData.mediaType) {
+            log.debug('Correcting mediaType for file part from data URL', {
+              detected: actualMediaType,
+              declared: partData.mediaType,
+            });
+            lightweightParts.push({
+              ...part,
+              mediaType: actualMediaType,
+            } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
+          } else {
+            lightweightParts.push(part);
+          }
         } else {
           // Keep text and other parts as-is
           lightweightParts.push(part);
@@ -287,4 +305,30 @@ export async function reconstructMessagesWithAttachments(
 
 function sanitizeFileName(name: string): string {
   return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
+}
+
+// Allowlist of image MIME types that Nexus vision adapters are known to produce.
+// We only forward types on this list to AI providers so a crafted data URL cannot
+// inject arbitrary strings into provider API requests or server logs.
+const ALLOWED_IMAGE_MEDIA_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'image/bmp',
+  'image/tiff',
+]);
+
+/**
+ * Extract media type from a data URL (e.g. "data:image/jpeg;base64,..." → "image/jpeg").
+ * Returns null when the input is not a valid data URL or the extracted type is not
+ * in the allowlist of supported image MIME types.
+ * CRLF characters are excluded from the capture group to prevent log/header injection.
+ */
+function extractDataUrlMediaType(url: string): string | null {
+  // Exclude ;,\r\n from the captured segment to prevent header/log injection
+  const match = /^data:([^;,\r\n]+)[;,]/.exec(url);
+  if (!match) return null;
+  const mediaType = match[1].toLowerCase().trim();
+  return ALLOWED_IMAGE_MEDIA_TYPES.has(mediaType) ? mediaType : null;
 }

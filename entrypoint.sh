@@ -53,8 +53,23 @@ else
   # Non-fatal: Container can still start, but image optimization will be disabled
 fi
 
+# Force the Next.js standalone server to bind all interfaces (issue: Nexus/Atrium
+# agent-bridge loopback).
+#
+# The Dockerfile sets ENV HOSTNAME=0.0.0.0, but at runtime the container gets
+# HOSTNAME=<task hostname> (ECS/Docker inject it; a shell can re-set it too), and
+# Next.js standalone server.js binds to process.env.HOSTNAME. The result: the app
+# listened ONLY on the task's eth0 interface (boot log showed
+# "Local: http://ip-10-0-1-86.ec2.internal:3000" instead of "Local: http://localhost:3000"),
+# so nothing listened on 127.0.0.1 and every server-to-itself connection — the
+# Atrium agent-bridge collab websocket (ws://127.0.0.1:$PORT/api/atrium-collab) —
+# was refused ("collab websocket error"). ALB traffic still worked, which is why
+# only the agent read/write path failed. Exporting here, at the last step before
+# exec, wins over every earlier layer.
+export HOSTNAME=0.0.0.0
+
 # Execute the container's original command as the nextjs user
 # su-exec switches to nextjs user and execs the command, replacing this shell process
 # This ensures proper signal handling (SIGTERM, SIGINT) and runs app as non-root
-echo "[entrypoint] Starting application as nextjs user: $@"
+echo "[entrypoint] Starting application as nextjs user: $@ (HOSTNAME=$HOSTNAME)"
 exec su-exec nextjs "$@"

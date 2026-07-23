@@ -6,18 +6,23 @@ import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { getErrorMessage } from "@/types/errors"
 import { ErrorFactories } from "@/lib/error-utils"
+import {
+  getContentPlatformConfig,
+  isCanonicalRepositoryUploadActive,
+} from "@/lib/repositories/content-platform/config"
 
 // Easily change the model id here
 const PDF_TO_MARKDOWN_MODEL_ID = 20
 
-// Limit request body size to 25MB for uploads
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: "25mb"
-    }
-  }
-}
+// NOTE: `export const config = { api: { bodyParser } }` was removed (REV-COR-201).
+// That is a Pages-Router API config; App Router route handlers ignore it, so it
+// enforced nothing. Size is capped by an early Content-Length check plus the
+// authoritative post-formData file.size check below.
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+// The early Content-Length guard below sees the whole multipart body (boundaries,
+// headers, other fields), not just the file bytes, so it needs slack above the
+// authoritative file.size limit or a file right at the limit gets rejected early.
+const MAX_UPLOAD_CONTENT_LENGTH_BYTES = MAX_UPLOAD_BYTES + 64 * 1024
 
 export const runtime = 'nodejs'
 
@@ -55,8 +60,60 @@ export async function POST(req: NextRequest) {
       { status: 401, headers }
     );
   }
-  
+
+  return processAuthenticatedPdfUpload(
+    req,
+    currentUser.data.user.id,
+    headers,
+    log,
+    timer
+  );
+}
+
+async function processAuthenticatedPdfUpload(
+  req: NextRequest,
+  currentUserId: number,
+  headers: Record<string, string>,
+  log: ReturnType<typeof createLogger>,
+  timer: ReturnType<typeof startTimer>
+) {
   try {
+    // New Assistant Architect uploads belong in repositories. Keep this legacy
+    // POST available only while the canonical repository upload cutover is off,
+    // so disabling the rollout flags remains an immediate rollback. Historical
+    // job status stays readable through the separate status route.
+    const contentPlatformConfig = await getContentPlatformConfig()
+    if (isCanonicalRepositoryUploadActive(contentPlatformConfig)) {
+      log.warn("Legacy PDF conversion rejected after repository cutover")
+      timer({ status: "error", reason: "legacy_endpoint_disabled" })
+      return new NextResponse(
+        JSON.stringify({
+          error:
+            "Direct PDF conversion has been retired. Upload the PDF to a knowledge repository.",
+        }),
+        {
+          status: 410,
+          headers: {
+            ...headers,
+            Deprecation: "true",
+          },
+        }
+      )
+    }
+
+    // Reject obviously-oversized uploads via Content-Length BEFORE buffering the
+    // whole body (REV-COR-201). Content-Length can be spoofed/absent, so the
+    // post-formData file.size check below stays the authoritative guard.
+    const contentLength = Number(req.headers.get('content-length') || 0);
+    if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_CONTENT_LENGTH_BYTES) {
+      log.warn('Upload rejected by Content-Length', { contentLength });
+      timer({ status: "error", reason: "file_too_large" });
+      return new NextResponse(
+        JSON.stringify({ error: 'File size exceeds 25MB limit.' }),
+        { status: 413, headers }
+      );
+    }
+
     // Parse multipart form data
     log.debug('Parsing form data');
     const formData = await req.formData()
@@ -80,7 +137,7 @@ export async function POST(req: NextRequest) {
         { status: 400, headers }
       );
     }
-    if (file.size > 25 * 1024 * 1024) {
+    if (file.size > MAX_UPLOAD_BYTES) {
       log.warn('File too large', { fileSize: file.size });
       timer({ status: "error", reason: "file_too_large" });
       return new NextResponse(
@@ -105,7 +162,7 @@ export async function POST(req: NextRequest) {
     };
 
     const job = await createGenericJob({
-      userId: currentUser.data.user.id,
+      userId: currentUserId,
       type: 'pdf-to-markdown',
       status: 'pending',
       input: JSON.stringify(jobInput)

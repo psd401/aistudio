@@ -9,12 +9,36 @@ import {
 import { createLogger } from "@/lib/client-logger";
 import { generateUUID } from "@/lib/utils/uuid";
 import { UploadClassifiedError, toValidErrorCode, type UploadErrorCode } from "@/lib/errors/upload-errors";
+import {
+  uploadTemporaryAttachment,
+  waitForTemporaryAttachment,
+} from "@/lib/repositories/temporary-attachment-client";
 
 const log = createLogger({ moduleName: 'enhanced-attachment-adapters' });
 
 export interface AttachmentProcessingCallbacks {
   onProcessingStart?: (attachmentId: string) => void;
   onProcessingComplete?: (attachmentId: string) => void;
+  /**
+   * Called when background processing fails (network error, 401, 5xx, etc.).
+   * The caller can show a toast, redirect to sign-in, or take other recovery actions.
+   * The error is the original (unredacted) error — do NOT pass to LLM context.
+   */
+  onError?: (attachmentId: string, error: UploadClassifiedError | Error) => void;
+}
+
+export interface NexusAttachmentAdapterOptions {
+  /**
+   * Enables the unified repository-backed attachment path. The server still
+   * owns the rollout decision and may return legacy mode when cutover flags are
+   * disabled.
+   */
+  repositoryBacked?: boolean;
+  /**
+   * Read lazily so a null -> UUID conversation transition never recreates the
+   * adapter or the assistant-ui runtime.
+   */
+  getConversationId?: () => string | null | undefined;
 }
 
 /**
@@ -67,6 +91,9 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
     { pattern: 'processing timeout', message: 'Processing timed out.' },
     { pattern: 'network error during upload', message: 'Network error during upload.' },
     { pattern: 'failed to check processing status', message: 'Could not check processing status.' },
+    // Scanned/image-only PDFs cannot be processed without OCR.
+    // Pattern is intentionally specific to avoid accidental overlap with future errors.
+    { pattern: 'scanned pdf detected', message: 'This PDF appears to be scanned (image-only) and cannot be read. Please upload a text-based PDF.' },
     // Intentionally broad catch-all for server-side failures. New error categories
     // that deserve their own message should be added as specific entries above this one.
     { pattern: 'server processing failed', message: 'Server processing failed.' },
@@ -89,9 +116,14 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
   private processedCache = new Map<string, CompleteAttachment>();
   private processingPromises = new Map<string, Promise<CompleteAttachment>>();
   private callbacks?: AttachmentProcessingCallbacks;
+  private readonly options: NexusAttachmentAdapterOptions;
 
-  constructor(callbacks?: AttachmentProcessingCallbacks) {
+  constructor(
+    callbacks?: AttachmentProcessingCallbacks,
+    options: NexusAttachmentAdapterOptions = {}
+  ) {
     this.callbacks = callbacks;
+    this.options = options;
   }
 
   async add({ file }: { file: File }): Promise<PendingAttachment> {
@@ -187,11 +219,35 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
         fileSize: attachment.file.size
       });
 
-      // Use server-side upload to bypass school network restrictions on S3 presigned URLs
-      // See: https://github.com/psd401/aistudio/issues/632
-      const uploadResult = await this.uploadViaServer(attachment);
+      if (this.options.repositoryBacked) {
+        const repositoryUpload = await uploadTemporaryAttachment({
+          file: attachment.file,
+          // One binding per source keeps promotion precise and prevents a
+          // stable adapter from accidentally reusing a promoted repository or
+          // a repository already bound to another conversation.
+          draftKey: generateUUID(),
+          purpose: "nexus",
+          conversationId: this.options.getConversationId?.() ?? undefined,
+        });
+        if (repositoryUpload.mode === "canonical") {
+          const marker = await waitForTemporaryAttachment(repositoryUpload);
+          return {
+            id: attachment.id,
+            type: "document",
+            name: attachment.name,
+            contentType: attachment.contentType,
+            file: attachment.file,
+            // Only this opaque reference crosses the chat boundary. Source bytes
+            // and extracted text remain in the repository service.
+            content: [{ type: "text" as const, text: marker }],
+            status: { type: "complete" },
+          };
+        }
+      }
 
-      // Poll for processing results
+      // Flag-off compatibility path. The product calls the unified endpoint
+      // first; legacy processing remains available solely as a rollback.
+      const uploadResult = await this.uploadViaServer(attachment);
       const processedContent = await this.pollForResults(uploadResult.jobId, attachment.name);
       
       // Step 5: Return in assistant-ui format
@@ -219,6 +275,14 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
       // Only controlled strings reach the LLM — unknown errors get a generic
       // message to prevent indirect prompt injection (OWASP LLM Top 10).
       const safeMessage = HybridDocumentAdapter.toSafeErrorMessage(rawMessage, errorCode);
+
+      // Notify caller of the error so they can show a toast or redirect.
+      // Pass the original error (not the redacted message) so callers can
+      // distinguish auth failures (UploadClassifiedError with code UNAUTHORIZED)
+      // from transient infrastructure errors and act accordingly.
+      if (this.callbacks?.onError) {
+        this.callbacks.onError(attachment.id, error instanceof Error ? error : new Error(rawMessage));
+      }
 
       return {
         id: attachment.id,
@@ -485,8 +549,23 @@ Please try re-uploading. If the issue persists, contact support.`
 
       // For binary formats, check magic bytes
       const buffer = await file.arrayBuffer();
-      const bytes = new Uint8Array(buffer).subarray(0, 8);
-      const header = Array.from(bytes)
+
+      // PDF spec (ISO 32000-1:2008 §7.5.2) permits the %PDF header anywhere
+      // within the first 1024 bytes.  Some print-to-PDF drivers and web exporters
+      // emit a leading \r\n or BOM before the signature, which would cause a
+      // byte-0 check to silently reject valid PDFs.
+      const scanLength = Math.min(buffer.byteLength, 1024);
+      const scanBytes = new Uint8Array(buffer, 0, scanLength);
+      const PDF_SIGNATURE = [0x25, 0x50, 0x44, 0x46]; // %PDF
+      const pdfOffset = HybridDocumentAdapter.findByteSequence(scanBytes, PDF_SIGNATURE);
+      if (pdfOffset !== -1 && ext === 'pdf') {
+        log.debug('PDF magic bytes found', { fileName: file.name, offset: pdfOffset });
+        return true;
+      }
+
+      // Office/OLE magic bytes are always at byte 0 per their specs
+      const headerBytes = new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 8));
+      const header = Array.from(headerBytes)
         .map(byte => byte.toString(16).padStart(2, '0'))
         .join('');
 
@@ -497,13 +576,9 @@ Please try re-uploading. If the issue persists, contact support.`
 
       // Check magic bytes for supported binary formats
       const magicBytes = {
-        pdf: '25504446',      // %PDF
         office: '504b0304',   // ZIP-based format (Office 2007+)
         ole: 'd0cf11e0',      // OLE format (Office 97-2003)
       };
-
-      // Check PDF
-      if (header.startsWith(magicBytes.pdf)) return true;
 
       // Check Office formats
       if (header.startsWith(magicBytes.office) || header.startsWith(magicBytes.ole)) {
@@ -533,7 +608,16 @@ Please try re-uploading. If the issue persists, contact support.`
     return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
   }
 
-   
+  private static findByteSequence(haystack: Uint8Array, needle: number[]): number {
+    outer: for (let i = 0; i <= haystack.length - needle.length; i++) {
+      for (let j = 0; j < needle.length; j++) {
+        if (haystack[i + j] !== needle[j]) continue outer;
+      }
+      return i;
+    }
+    return -1;
+  }
+
   async remove(_attachment: PendingAttachment): Promise<void> {
     // Cleanup if needed
   }
@@ -548,9 +632,14 @@ export class VisionImageAdapter implements AttachmentAdapter {
   accept = "image/jpeg,image/png,image/webp,image/gif";
   
   private callbacks?: AttachmentProcessingCallbacks;
+  private readonly options: NexusAttachmentAdapterOptions;
 
-  constructor(callbacks?: AttachmentProcessingCallbacks) {
+  constructor(
+    callbacks?: AttachmentProcessingCallbacks,
+    options: NexusAttachmentAdapterOptions = {}
+  ) {
     this.callbacks = callbacks;
+    this.options = options;
   }
 
   async add({ file }: { file: File }): Promise<PendingAttachment> {
@@ -592,6 +681,19 @@ export class VisionImageAdapter implements AttachmentAdapter {
   async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
     // Convert image to base64 data URL
     const base64 = await this.fileToBase64DataURL(attachment.file);
+    let repositoryMarker: string | null = null;
+
+    if (this.options.repositoryBacked) {
+      const repositoryUpload = await uploadTemporaryAttachment({
+        file: attachment.file,
+        draftKey: generateUUID(),
+        purpose: "nexus",
+        conversationId: this.options.getConversationId?.() ?? undefined,
+      });
+      if (repositoryUpload.mode === "canonical") {
+        repositoryMarker = await waitForTemporaryAttachment(repositoryUpload);
+      }
+    }
 
     log.info('VisionImageAdapter.send() called', {
       attachmentId: attachment.id,
@@ -613,6 +715,9 @@ export class VisionImageAdapter implements AttachmentAdapter {
           type: "image",
           image: base64, // data:image/jpeg;base64,... format
         },
+        ...(repositoryMarker
+          ? [{ type: "text" as const, text: repositoryMarker }]
+          : []),
       ],
       status: { type: "complete" },
     };
@@ -672,11 +777,14 @@ export class VisionImageAdapter implements AttachmentAdapter {
  * - Hybrid document adapter (client/server processing)
  * - Simple text adapter
  */
-export function createEnhancedNexusAttachmentAdapter(callbacks?: AttachmentProcessingCallbacks) {
+export function createEnhancedNexusAttachmentAdapter(
+  callbacks?: AttachmentProcessingCallbacks,
+  options: NexusAttachmentAdapterOptions = {}
+) {
   return new CompositeAttachmentAdapter([
-    new VisionImageAdapter(callbacks),           // For vision-capable models
+    new VisionImageAdapter(callbacks, options),  // Canonical shadow + vision pixels
     new SimpleImageAttachmentAdapter(), // For display-only images (RESTORED)
-    new HybridDocumentAdapter(callbacks),        // Smart document processing (client/server)
+    new HybridDocumentAdapter(callbacks, options), // Smart document processing (client/server)
     new SimpleTextAttachmentAdapter(),  // Text files
   ]);
 }

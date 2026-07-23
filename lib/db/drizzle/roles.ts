@@ -12,7 +12,7 @@
 
 import { eq, and, asc, inArray } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
-import { roles, roleTools, tools } from "@/lib/db/schema";
+import { roles, capabilities } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
 
 // ============================================
@@ -191,161 +191,37 @@ export async function deleteRole(id: number) {
 }
 
 // ============================================
-// Role-Tool Assignment Operations
+// Capability id -> identifier resolution
 // ============================================
 
 /**
- * Get all tools assigned to a role
+ * Resolve a set of capability database IDs to their stable identifiers.
+ * Returns a map of capability id -> identifier.
+ *
+ * Issue #928: the sole caller is the navigation API, which resolves
+ * `navigation_items.capability_id` (migrated from the legacy `tools.id` FK in
+ * migration 084) to a capability identifier, then runs `hasCapabilityAccess`
+ * to decide whether the nav item is visible.
  */
-export async function getRoleTools(roleId: number) {
-  return executeQuery(
-    (db) =>
-      db
-        .select({
-          id: tools.id,
-          identifier: tools.identifier,
-          name: tools.name,
-          description: tools.description,
-          isActive: tools.isActive,
-          createdAt: tools.createdAt,
-          updatedAt: tools.updatedAt,
-        })
-        .from(tools)
-        .innerJoin(roleTools, eq(tools.id, roleTools.toolId))
-        .where(eq(roleTools.roleId, roleId))
-        .orderBy(asc(tools.name)),
-    "getRoleTools"
-  );
-}
-
-/**
- * Get all active tools (for tool selection UI)
- */
-export async function getTools() {
-  return executeQuery(
-    (db) =>
-      db
-        .select({
-          id: tools.id,
-          identifier: tools.identifier,
-          name: tools.name,
-          description: tools.description,
-          promptChainToolId: tools.promptChainToolId,
-          isActive: tools.isActive,
-          createdAt: tools.createdAt,
-          updatedAt: tools.updatedAt,
-        })
-        .from(tools)
-        .where(eq(tools.isActive, true))
-        .orderBy(asc(tools.name)),
-    "getTools"
-  );
-}
-
-/**
- * Get tools by their IDs
- * Returns a map of tool IDs to their identifiers for efficient lookup
- */
-export async function getToolsByIds(
-  toolIds: number[]
+export async function getCapabilitiesByIdsMap(
+  capabilityIds: number[]
 ): Promise<Map<number, string>> {
-  if (toolIds.length === 0) {
+  if (capabilityIds.length === 0) {
     return new Map();
   }
 
   const result = await executeQuery(
     (db) =>
       db
-        .select({
-          id: tools.id,
-          identifier: tools.identifier,
-        })
-        .from(tools)
-        .where(inArray(tools.id, toolIds)),
-    "getToolsByIds"
+        .select({ id: capabilities.id, identifier: capabilities.identifier })
+        .from(capabilities)
+        .where(inArray(capabilities.id, capabilityIds)),
+    "getCapabilitiesByIdsMap"
   );
 
-  const toolsMap = new Map<number, string>();
-  for (const tool of result) {
-    toolsMap.set(tool.id, tool.identifier);
+  const map = new Map<number, string>();
+  for (const row of result) {
+    map.set(row.id, row.identifier);
   }
-  return toolsMap;
-}
-
-/**
- * Assign a tool to a role
- * Idempotent operation - succeeds even if already assigned
- *
- * @param roleId - Role database ID
- * @param toolId - Tool database ID
- * @returns Always true (conflict means already assigned)
- */
-export async function assignToolToRole(
-  roleId: number,
-  toolId: number
-): Promise<boolean> {
-  await executeQuery(
-    (db) =>
-      db
-        .insert(roleTools)
-        .values({ roleId, toolId })
-        .onConflictDoNothing(),
-    "assignToolToRole"
-  );
-
-  return true; // Success (including if already assigned)
-}
-
-/**
- * Remove a tool from a role
- *
- * @param roleId - Role database ID
- * @param toolId - Tool database ID
- */
-export async function removeToolFromRole(
-  roleId: number,
-  toolId: number
-): Promise<boolean> {
-  const result = await executeQuery(
-    (db) =>
-      db
-        .delete(roleTools)
-        .where(and(eq(roleTools.roleId, roleId), eq(roleTools.toolId, toolId)))
-        .returning(),
-    "removeToolFromRole"
-  );
-
-  return result.length > 0;
-}
-
-/**
- * Set all tools for a role (replaces existing assignments)
- *
- * @param roleId - Role database ID
- * @param toolIds - Array of tool database IDs
- */
-export async function setRoleTools(
-  roleId: number,
-  toolIds: number[]
-): Promise<{ success: boolean }> {
-  return executeQuery(
-    (db) =>
-      db.transaction(async (tx) => {
-        // Delete existing tool assignments
-        await tx.delete(roleTools).where(eq(roleTools.roleId, roleId));
-
-        // Insert new tool assignments
-        if (toolIds.length > 0) {
-          await tx.insert(roleTools).values(
-            toolIds.map((toolId) => ({
-              roleId,
-              toolId,
-            }))
-          );
-        }
-
-        return { success: true };
-      }),
-    "setRoleTools"
-  );
+  return map;
 }

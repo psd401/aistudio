@@ -18,62 +18,37 @@ import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-wor
 import { sql } from "drizzle-orm"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
-import { getSecretString } from "@/lib/agent-workspace/secrets-manager"
-import { randomBytes, timingSafeEqual } from "node:crypto"
+import { validateInternalSecret } from "@/lib/agent-workspace/internal-auth"
+import { randomBytes } from "node:crypto"
 
 const log = createLogger({ module: "agent-consent-link" })
 
 /**
- * Resolve the shared secret. Prefers AGENT_INTERNAL_API_KEY env var (local
- * dev) and falls back to Secrets Manager at AGENT_INTERNAL_API_KEY_SECRET_ID
- * (ECS). The SM read is cached for 5 minutes, so repeated calls are cheap.
- * Returns null if the secret isn't configured yet — caller treats that as
- * unauthorized so the endpoint fails closed.
+ * The credential slot a consent link is capturing.
+ *
+ * `agent_account` is RETIRED (#1232): the agent slot no longer uses a
+ * user-facing consent flow — access tokens are minted on demand by the DWD
+ * token broker (POST /api/agent/workspace-token). This route rejects it.
  */
-async function getExpectedSecret(): Promise<string | null> {
-  const envVal = process.env.AGENT_INTERNAL_API_KEY
-  if (envVal) return envVal
-
-  // Env var name is `_SECRET_ID` (not `_ARN`) — Secrets Manager accepts a
-  // bare secret name *or* a full ARN; we use the name. Misnaming as `_ARN`
-  // led to operator confusion during rollout.
-  const id = process.env.AGENT_INTERNAL_API_KEY_SECRET_ID
-  if (!id) return null
-
-  return getSecretString(id)
-}
+type Kind = "user_account" | "cognito_data" | "plaud" | "canva"
+const ALLOWED_KINDS: Kind[] = ["user_account", "cognito_data", "plaud", "canva"]
 
 /**
- * Validate the shared secret from the Authorization header.
- * In production, this secret lives in Secrets Manager at
- * psd-agent/{env}/internal-api-key and is fetched lazily. For local dev,
- * set AGENT_INTERNAL_API_KEY directly.
+ * Map a consent kind to its public start page. cognito_data captures a
+ * NextAuth session's Cognito refresh token; plaud/canva start their own
+ * OAuth flow; everything else routes to the Google Workspace OAuth page.
  */
-async function validateSharedSecret(request: NextRequest): Promise<boolean> {
-  const authHeader = request.headers.get("authorization")
-  if (!authHeader?.startsWith("Bearer ")) {
-    return false
+function resolveConsentPath(kind: Kind): string {
+  switch (kind) {
+    case "cognito_data":
+      return "/agent-connect-data"
+    case "plaud":
+      return "/agent-connect-plaud"
+    case "canva":
+      return "/agent-connect-canva"
+    default:
+      return "/agent-connect"
   }
-
-  const token = authHeader.slice(7)
-  const expectedSecret = await getExpectedSecret()
-  if (!expectedSecret) {
-    log.error("consent-link internal secret is not configured — rejecting request")
-    return false
-  }
-
-  // Constant-time comparison. The expected secret is a CDK-generated
-  // 48-char token with fixed length per environment, so a length mismatch
-  // does not leak anything an attacker couldn't already derive from the
-  // deploy manifest. On mismatch we still run timingSafeEqual against
-  // itself so the code path has stable wall-clock regardless of outcome.
-  const tokenBuf = Buffer.from(token)
-  const expectedBuf = Buffer.from(expectedSecret)
-  if (tokenBuf.length !== expectedBuf.length) {
-    timingSafeEqual(expectedBuf, expectedBuf)
-    return false
-  }
-  return timingSafeEqual(tokenBuf, expectedBuf)
 }
 
 /**
@@ -113,7 +88,7 @@ export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
 
   // Auth
-  if (!(await validateSharedSecret(request))) {
+  if (!(await validateInternalSecret(request))) {
     log.warn("Unauthorized consent-link request", { requestId })
     return NextResponse.json(
       { error: "Unauthorized" },
@@ -140,19 +115,32 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  // Validate kind. Default to 'agent_account' for backwards compatibility
-  // with skills that haven't been updated to pass kind explicitly.
-  const kind: "agent_account" | "user_account" = body.kind === "user_account"
-    ? "user_account"
-    : body.kind === "agent_account" || body.kind === undefined
-      ? "agent_account"
-      : (() => { return "invalid" as never })()
-  if (body.kind !== undefined && body.kind !== "agent_account" && body.kind !== "user_account") {
+  // The agent slot no longer has a consent flow (#1232) — reject it explicitly
+  // with a pointer to the broker so an un-updated skill fails loudly rather than
+  // minting a dead nonce.
+  if (body.kind === "agent_account") {
     return NextResponse.json(
-      { error: "kind must be 'agent_account' or 'user_account' if provided" },
+      {
+        error:
+          "agent_account consent is retired. The agent slot now uses the DWD token broker " +
+          "(POST /api/agent/workspace-token) — no consent link is issued for it.",
+      },
       { status: 400 }
     )
   }
+
+  // Validate kind. Default to 'user_account' (the only Google-Workspace consent
+  // slot that remains) for skills that don't pass kind explicitly.
+  if (body.kind !== undefined && !(ALLOWED_KINDS as readonly string[]).includes(body.kind)) {
+    return NextResponse.json(
+      { error: "kind must be 'user_account', 'cognito_data', 'plaud', or 'canva' if provided" },
+      { status: 400 }
+    )
+  }
+  const kind: Kind =
+    body.kind !== undefined && (ALLOWED_KINDS as readonly string[]).includes(body.kind)
+      ? (body.kind as Kind)
+      : "user_account"
 
   // Rate limit
   const withinLimit = await checkRateLimit(ownerEmail)
@@ -174,6 +162,12 @@ export async function POST(request: NextRequest) {
   // see migration 072).
   const nonce = randomBytes(32).toString("hex")
 
+  // PKCE (S256) code_verifier for the PKCE-based flows (Plaud, Canva).
+  // base64url(32 bytes) = 43 chars, within RFC 7636's 43–128 range. Stored
+  // server-side; only the S256 challenge ever leaves in a URL.
+  const codeVerifier =
+    kind === "plaud" || kind === "canva" ? randomBytes(32).toString("base64url") : null
+
   await executeQuery(
     (db) =>
       db
@@ -183,6 +177,7 @@ export async function POST(request: NextRequest) {
           ownerEmail,
           agentEmail,
           tokenKind: kind,
+          codeVerifier,
         }),
     "insertConsentNonce"
   )
@@ -198,9 +193,11 @@ export async function POST(request: NextRequest) {
     kind,
   })
 
-  // Build the consent URL
+  // Build the consent URL. cognito_data has its own dedicated page that
+  // captures a NextAuth session's Cognito refresh token; the other kinds
+  // route to the Google Workspace OAuth start page.
   const baseUrl = getIssuerUrl()
-  const url = `${baseUrl}/agent-connect?token=${encodeURIComponent(token)}`
+  const url = `${baseUrl}${resolveConsentPath(kind)}?token=${encodeURIComponent(token)}`
 
   log.info("Consent link generated", sanitizeForLogging({ ownerEmail, agentEmail, kind, requestId }))
 

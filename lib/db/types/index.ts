@@ -28,8 +28,6 @@ import {
   users,
   roles,
   userRoles,
-  tools,
-  roleTools,
   // AI Models
   aiModels,
   aiStreamingJobs,
@@ -54,6 +52,7 @@ import {
   nexusTemplates,
   nexusUserPreferences,
   nexusProviderMetrics,
+  nexusRepositoryBindings,
   // Nexus MCP
   nexusMcpServers,
   nexusMcpConnections,
@@ -68,6 +67,11 @@ import {
   repositoryItems,
   repositoryItemChunks,
   repositoryAccess,
+  repositoryItemVersions,
+  repositoryUploadSessions,
+  repositoryProcessingJobs,
+  repositoryArtifacts,
+  repositoryIndexGenerations,
   // Prompt Library
   promptLibrary,
   promptTags,
@@ -127,8 +131,6 @@ export type {
 export type SelectUser = InferSelectModel<typeof users>;
 export type SelectRole = InferSelectModel<typeof roles>;
 export type SelectUserRole = InferSelectModel<typeof userRoles>;
-export type SelectTool = InferSelectModel<typeof tools>;
-export type SelectRoleTool = InferSelectModel<typeof roleTools>;
 
 // ============================================
 // Core Tables - Insert Types
@@ -136,8 +138,6 @@ export type SelectRoleTool = InferSelectModel<typeof roleTools>;
 export type InsertUser = InferInsertModel<typeof users>;
 export type InsertRole = InferInsertModel<typeof roles>;
 export type InsertUserRole = InferInsertModel<typeof userRoles>;
-export type InsertTool = InferInsertModel<typeof tools>;
-export type InsertRoleTool = InferInsertModel<typeof roleTools>;
 
 // ============================================
 // AI Models - Select Types
@@ -212,6 +212,9 @@ export type SelectNexusUserPreferences = InferSelectModel<
 export type SelectNexusProviderMetrics = InferSelectModel<
   typeof nexusProviderMetrics
 >;
+export type SelectNexusRepositoryBinding = InferSelectModel<
+  typeof nexusRepositoryBindings
+>;
 
 // ============================================
 // Nexus Conversations - Insert Types
@@ -235,6 +238,9 @@ export type InsertNexusUserPreferences = InferInsertModel<
 >;
 export type InsertNexusProviderMetrics = InferInsertModel<
   typeof nexusProviderMetrics
+>;
+export type InsertNexusRepositoryBinding = InferInsertModel<
+  typeof nexusRepositoryBindings
 >;
 
 // ============================================
@@ -290,6 +296,21 @@ export type SelectRepositoryItemChunk = InferSelectModel<
   typeof repositoryItemChunks
 >;
 export type SelectRepositoryAccess = InferSelectModel<typeof repositoryAccess>;
+export type SelectRepositoryItemVersion = InferSelectModel<
+  typeof repositoryItemVersions
+>;
+export type SelectRepositoryUploadSession = InferSelectModel<
+  typeof repositoryUploadSessions
+>;
+export type SelectRepositoryProcessingJob = InferSelectModel<
+  typeof repositoryProcessingJobs
+>;
+export type SelectRepositoryArtifact = InferSelectModel<
+  typeof repositoryArtifacts
+>;
+export type SelectRepositoryIndexGeneration = InferSelectModel<
+  typeof repositoryIndexGenerations
+>;
 
 // ============================================
 // Knowledge Repositories - Insert Types
@@ -302,6 +323,21 @@ export type InsertRepositoryItemChunk = InferInsertModel<
   typeof repositoryItemChunks
 >;
 export type InsertRepositoryAccess = InferInsertModel<typeof repositoryAccess>;
+export type InsertRepositoryItemVersion = InferInsertModel<
+  typeof repositoryItemVersions
+>;
+export type InsertRepositoryUploadSession = InferInsertModel<
+  typeof repositoryUploadSessions
+>;
+export type InsertRepositoryProcessingJob = InferInsertModel<
+  typeof repositoryProcessingJobs
+>;
+export type InsertRepositoryArtifact = InferInsertModel<
+  typeof repositoryArtifacts
+>;
+export type InsertRepositoryIndexGeneration = InferInsertModel<
+  typeof repositoryIndexGenerations
+>;
 
 // ============================================
 // Prompt Library - Select Types

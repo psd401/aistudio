@@ -126,8 +126,9 @@ export class EmailNotificationStack extends cdk.Stack {
               const sourceDir = path.join(__dirname, '../lambdas/notification-sender');
 
               try {
-                // Build TypeScript
+                // Build TypeScript (install first so a clean checkout has tsc/@types)
                 console.log('Building TypeScript...');
+                execSync('npm install', { cwd: sourceDir, stdio: 'inherit' });
                 execSync('npm run build', { cwd: sourceDir, stdio: 'inherit' });
 
                 // Copy the compiled index.js to output root
@@ -135,19 +136,17 @@ export class EmailNotificationStack extends cdk.Stack {
                 const destFile = path.join(outputDir, 'index.js');
                 fs.copyFileSync(sourceFile, destFile);
 
-                // Copy package files
+                // Copy package.json only. Lambda lockfiles are gitignored and none is
+                // committed, so we do NOT copy a package-lock.json and use
+                // `npm install` (not `npm ci`, which requires a lockfile) — REV-COR-435-OVF3.
                 fs.copyFileSync(
                   path.join(sourceDir, 'package.json'),
                   path.join(outputDir, 'package.json')
                 );
-                fs.copyFileSync(
-                  path.join(sourceDir, 'package-lock.json'),
-                  path.join(outputDir, 'package-lock.json')
-                );
 
                 // Install production dependencies only
                 console.log('Installing production dependencies...');
-                execSync('npm ci --omit=dev', { cwd: outputDir, stdio: 'inherit' });
+                execSync('npm install --omit=dev', { cwd: outputDir, stdio: 'inherit' });
 
                 console.log('Bundling complete');
                 return true;
@@ -156,7 +155,20 @@ export class EmailNotificationStack extends cdk.Stack {
                 return false;
               }
             }
-          }
+          },
+          // Docker fallback so a failed local bundle still produces a valid asset
+          // (REV-COR-435-OVF3 — previously the fallback had no command, so a local
+          // failure was unrecoverable). Mirrors embedding-generator.
+          command: [
+            'bash', '-c',
+            [
+              'npm install',
+              'npm run build',
+              'cp dist/index.js /asset-output/index.js',
+              'cp package.json /asset-output/',
+              'cd /asset-output && npm install --omit=dev',
+            ].join(' && '),
+          ],
         }
       }),
       functionName: `aistudio-${props.environment}-notification-sender`,

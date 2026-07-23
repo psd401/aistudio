@@ -12,6 +12,7 @@
  * @see lib/db/schema/tables/nexus-mcp-user-tokens.ts for token storage (Issue #776)
  */
 
+import { isIP } from "node:net"
 import { createMCPClient } from "@ai-sdk/mcp"
 import { eq, and, or, sql } from "drizzle-orm"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
@@ -95,10 +96,31 @@ export async function getAvailableConnectors(
     "getAvailableConnectors"
   )
 
-  timer({ status: "success", count: accessible.length })
-  log.info("Connectors retrieved", { requestId, count: accessible.length })
+  // Isolate per-row failures: a single malformed row (unknown transport/authType — e.g.
+  // a new enum from a future migration or a manual DB edit) must not fail the whole
+  // listing (REV-COR-620). toMcpConnector keeps its invariant guard; we skip + warn the
+  // offending row and return the rest.
+  const connectors: ReturnType<typeof toMcpConnector>[] = []
+  for (const row of accessible) {
+    try {
+      connectors.push(toMcpConnector(row))
+    } catch (err) {
+      log.warn("Skipping malformed MCP server row", {
+        requestId,
+        serverId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
 
-  return accessible.map(toMcpConnector)
+  timer({ status: "success", count: connectors.length })
+  log.info("Connectors retrieved", {
+    requestId,
+    count: connectors.length,
+    rowCount: accessible.length,
+  })
+
+  return connectors
 }
 
 // ─── Connection Status ───────────────────────────────────────────────────────
@@ -864,6 +886,14 @@ function truncateForAudit(
  * Validates that a server URL is safe for outbound requests (SSRF prevention).
  * Blocks private/internal addresses and non-HTTPS schemes in production.
  *
+ * PRIVILEGE (REV-COR-623 SEC referral): the `server.url` this guards is set only by
+ * administrators via the connector-management server actions
+ * (actions/admin/connector.actions.ts, which apply the same private-range checks at
+ * write time); the OAuth endpoint URLs also passed here derive from that
+ * admin-registered server's configuration/metadata. Exploiting the residual
+ * DNS-rebinding gap below therefore requires an administrator (or a malicious,
+ * admin-registered MCP server) — not an ordinary end user.
+ *
  * LIMITATION: This performs hostname-based validation only. It does NOT resolve
  * DNS to verify the target IP, so it is vulnerable to DNS rebinding attacks
  * (where a public hostname resolves to a private IP after validation). For
@@ -896,7 +926,33 @@ export function rejectUnsafeMcpUrl(rawUrl: string): void {
     throw new Error("MCP server URL must use HTTP or HTTPS")
   }
 
-  const hostname = parsed.hostname.toLowerCase()
+  // WHATWG URL brackets IPv6 hostnames (e.g. "[::1]", "[fe80::1]") per spec — strip
+  // them so the IPv6 private-range patterns below (anchored without brackets) match
+  // real IPv6 literal URLs instead of silently never firing.
+  const rawHostname = parsed.hostname.toLowerCase()
+  const hostname =
+    rawHostname.startsWith("[") && rawHostname.endsWith("]")
+      ? rawHostname.slice(1, -1)
+      : rawHostname
+
+  // Defense-in-depth against non-standard IPv4 encodings — decimal (2130706433),
+  // hex (0x7f000001), and octal (0177.0.0.1) all denote 127.0.0.1 (REV-COR-623).
+  // NOTE: for the http(s) URLs this validator accepts, `new URL()` above ALREADY
+  // canonicalizes these encodings to dotted-quad (e.g. `new URL("https://2130706433/")`
+  // yields hostname "127.0.0.1"), so the private-range patterns below block them in
+  // production even without this guard. This explicit check is therefore a redundant
+  // safety net that only bites if a future caller inspects a raw, non-normalized host.
+  // A canonical dotted-quad IPv4 (isIP === 4) is deferred to the private-range patterns;
+  // a numeric-looking host that is NOT canonical IPv4 is rejected outright.
+  const ipKind = isIP(hostname)
+  const isNumericEncoding =
+    /^0x[\da-f]+$/i.test(hostname) || // hex, e.g. 0x7f000001
+    /^\d+$/.test(hostname) || // bare decimal, e.g. 2130706433
+    (/^[\d.]+$/.test(hostname) && ipKind !== 4) // octal / short-dotted that is not a canonical IPv4
+  if (isNumericEncoding) {
+    throw new Error("MCP server URL must not use a non-standard IP address encoding")
+  }
+
   const privatePatterns = [
     /^127\./,
     /^10\./,
@@ -905,6 +961,7 @@ export function rejectUnsafeMcpUrl(rawUrl: string): void {
     /^169\.254\./, // link-local / AWS IMDS
     /^0\.0\.0\.0$/,
     /^localhost$/,
+    /^::$/, // IPv6 unspecified address
     /^::1$/,
     /^fc[\da-f]{2}:/i, // IPv6 unique-local (fc00::/7)
     /^fd[\da-f]{2}:/i,

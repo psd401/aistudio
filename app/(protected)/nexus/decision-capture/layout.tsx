@@ -1,6 +1,6 @@
 import { ReactNode } from 'react'
 import { redirect } from 'next/navigation'
-import { hasToolAccess } from '@/utils/roles'
+import { hasCapabilityAccess } from '@/utils/roles'
 
 /**
  * Decision Capture Layout
@@ -11,7 +11,7 @@ import { hasToolAccess } from '@/utils/roles'
  * Part of Epic #675 (Context Graph Decision Capture Layer) - Issue #681
  */
 export default async function DecisionCaptureLayout({ children }: { children: ReactNode }) {
-  const hasAccess = await hasToolAccess('decision-capture')
+  const hasAccess = await hasCapabilityAccess('decision-capture')
   if (!hasAccess) {
     redirect('/dashboard')
   }

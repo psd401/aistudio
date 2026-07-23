@@ -39,8 +39,10 @@ export { withApiAuth } from "./with-api-auth";
 export {
   extractNumericParam,
   extractStringParam,
+  truncateForError,
   isAdminByUserId,
   verifyAssistantAccess,
+  verifyAssistantResourceGrants,
   parseRequestBody,
   isErrorResponse,
 } from "./route-helpers";

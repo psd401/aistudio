@@ -16,12 +16,15 @@ The AI Studio platform includes a comprehensive embedding generation system for 
 
 2. **Embedding Generator Lambda**
    - Receives chunks from SQS queue
-   - Generates embeddings using configured AI provider
+   - Generates embeddings using the configured provider
+   - Defaults to Amazon Bedrock through the Lambda workload role (no static AWS keys)
    - Stores embeddings in PostgreSQL
    - Updates item status to "embedded"
 
 3. **Database Schema**
-   - `repository_item_chunks.embedding_vector`: PostgreSQL `real[]` array
+   - `repository_item_chunks.embedding`: PostgreSQL `vector(1536)`
+   - `repository_index_generations.embedding_model`: provider-qualified model descriptor
+   - `repository_index_generations.embedding_dimensions`: vector-space size
    - `settings` table: Stores embedding configuration
    - Supports vectors of varying dimensions (typically 1536 for OpenAI)
 
@@ -38,16 +41,18 @@ Embedding settings are stored in the database and can be configured via the admi
 ```sql
 -- Example configuration
 INSERT INTO settings (category, key, value) VALUES
-('embeddings', 'provider', '"openai"'),
-('embeddings', 'modelId', '"text-embedding-ada-002"'),
-('embeddings', 'dimensions', '1536'),
-('embeddings', 'batchSize', '100');
+('embeddings', 'EMBEDDING_MODEL_PROVIDER', 'amazon-bedrock'),
+('embeddings', 'EMBEDDING_MODEL_ID', 'amazon.titan-embed-text-v1'),
+('embeddings', 'EMBEDDING_DIMENSIONS', '1536'),
+('embeddings', 'EMBEDDING_BATCH_SIZE', '100');
 ```
 
 ### Supported Providers
 
 - **OpenAI**: text-embedding-ada-002, text-embedding-3-small, text-embedding-3-large
-- **AWS Bedrock**: amazon.titan-embed-text-v1, cohere.embed-english-v3
+- **AWS Bedrock**: `amazon.titan-embed-text-v1` is the compatibility default;
+  Titan V2 is supported by the worker when the database vector dimension is
+  migrated to 1024, 512, or 256.
 - **Azure OpenAI**: Configured deployment names
 
 ## Implementation Details
@@ -75,16 +80,16 @@ export async function generateEmbedding(
 
 ### PostgreSQL Storage
 
-Embeddings are stored as PostgreSQL arrays for efficient operations:
+Embeddings are stored with pgvector for indexed cosine similarity:
 
 ```sql
 -- Creating the column
-ALTER TABLE repository_item_chunks 
-ADD COLUMN embedding_vector real[];
+ALTER TABLE repository_item_chunks
+ADD COLUMN embedding vector(1536);
 
 -- Storing embeddings (with proper casting)
 UPDATE repository_item_chunks 
-SET embedding_vector = '{0.123, 0.456, ...}'::real[] 
+SET embedding = '[0.123, 0.456, ...]'::vector
 WHERE id = :id;
 ```
 
@@ -97,13 +102,19 @@ Repository items progress through these statuses:
 - `embedded`: Successfully embedded
 - `embedding_failed`: Error during embedding generation
 
-## Environment Variables
+## Authentication and model changes
 
-Required for Lambda functions:
-- `DB_CLUSTER_ARN`: RDS cluster ARN
-- `DB_SECRET_ARN`: Database secret ARN
-- `DB_NAME`: Database name (default: 'aistudio')
-- `EMBEDDING_QUEUE_URL`: SQS queue URL for embedding jobs
+In AWS, Bedrock uses the Lambda execution role and `AWS_REGION`. Stored
+`BEDROCK_ACCESS_KEY_ID` / `BEDROCK_SECRET_ACCESS_KEY` values are ignored by the
+Lambda and remain only a local-development compatibility option.
+
+Every canonical index generation records a provider-qualified descriptor such
+as `amazon-bedrock:amazon.titan-embed-text-v1`. When a publication changes the
+model or dimensions, copied chunks have their prior vectors cleared and the
+whole new generation is queued for re-embedding. Semantic queries use the
+active generation's descriptor, so different embedding spaces are never mixed.
+Hybrid search falls back to lexical results if its embedding provider is
+temporarily unavailable.
 
 ## Error Handling
 
@@ -120,7 +131,7 @@ Required for Lambda functions:
 
 ## Future Enhancements
 
-- Vector similarity search implementation
+- Titan Text Embeddings V2 dimensional migration and controlled backfill
 - Hybrid search combining keywords and semantics
 - Embedding model comparison and A/B testing
 - Incremental embedding updates

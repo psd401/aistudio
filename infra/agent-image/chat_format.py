@@ -31,8 +31,9 @@ don't mangle examples the agent might be quoting.
 
 from __future__ import annotations
 
+import json
 import re
-from typing import List
+from typing import List, Optional, Tuple
 
 # Patterns compiled once at import.
 _HEADER_RE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -178,3 +179,76 @@ def _apply_inline(text: str) -> str:
 
     text = re.sub(r"\x00(\d+)\x00", restore, text)
     return text
+
+
+# ---------------------------------------------------------------------------
+# Rich-output envelope (PSD_AGENT_RICH_V1)
+#
+# Skills like chat-card / chat-chart emit a structured payload that the Router
+# Lambda lifts into the Chat `messages.create` request alongside (or in place
+# of) the plain `text` field. The envelope sits inside the agent's final
+# response, wrapped by deterministic sentinels so it's robust to the model
+# accidentally regenerating prose around it. Last envelope wins if the model
+# emits more than one (defensive — should not happen with a single skill
+# call, but cheap to handle).
+# ---------------------------------------------------------------------------
+
+RICH_ENVELOPE_OPEN = "<<<PSD_AGENT_RICH_V1>>>"
+RICH_ENVELOPE_CLOSE = "<<<END_PSD_AGENT_RICH_V1>>>"
+
+
+def extract_rich_envelope(text: str) -> Tuple[Optional[dict], str]:
+    """Pull a rich-output envelope out of an agent reply.
+
+    Returns (envelope_or_None, remaining_text). When no envelope is present
+    or the JSON inside the sentinels is malformed, the envelope slot is None
+    and the original text is returned unchanged. On malformed JSON we leave
+    the sentinels in the returned text so the upstream caller can log it —
+    silently dropping a broken envelope would mask agent bugs.
+
+    If the agent emits multiple envelopes, the LAST one wins (latest model
+    intent) and all sentinel blocks are stripped from the returned text.
+    """
+    if not text or RICH_ENVELOPE_OPEN not in text:
+        return None, text
+
+    remaining = text
+    last_envelope: Optional[dict] = None
+    malformed = False
+
+    while True:
+        open_idx = remaining.find(RICH_ENVELOPE_OPEN)
+        if open_idx == -1:
+            break
+        close_idx = remaining.find(RICH_ENVELOPE_CLOSE, open_idx + len(RICH_ENVELOPE_OPEN))
+        if close_idx == -1:
+            # Missing close marker — bail without further mutation so the
+            # caller sees the dangling open token and can log it.
+            malformed = True
+            break
+
+        payload_start = open_idx + len(RICH_ENVELOPE_OPEN)
+        payload = remaining[payload_start:close_idx].strip()
+        try:
+            parsed = json.loads(payload)
+            if isinstance(parsed, dict):
+                last_envelope = parsed
+            else:
+                malformed = True
+        except (json.JSONDecodeError, ValueError):
+            malformed = True
+
+        # Strip this envelope block (including sentinels) from the working
+        # text. Drop a single neighbouring newline on each side so we don't
+        # leave a blank gap where the block was.
+        before = remaining[:open_idx].rstrip("\n")
+        after = remaining[close_idx + len(RICH_ENVELOPE_CLOSE):].lstrip("\n")
+        joiner = "\n" if before and after else ""
+        remaining = before + joiner + after
+
+    if malformed and last_envelope is None:
+        # Couldn't parse anything — return original text untouched so the
+        # caller can log + fall back to plain-text send.
+        return None, text
+
+    return last_envelope, remaining.strip()

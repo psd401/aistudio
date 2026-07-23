@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#
+# Committed pre-push hook (travels with the repo via core.hooksPath=.githooks,
+# set by the package.json "prepare" script on `bun install`).
+#
+# Runs the authenticated Playwright E2E suite locally before every push (except
+# delete-only pushes — see below) — this replaces the GitHub E2E job, which a
+# clean CI runner cannot run without seeded data, provider keys, and a committed
+# AUTH_SECRET. See scripts/test/e2e-local.sh.
+#
+# Bypass one push intentionally: SKIP_E2E=1 git push
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+
+# Skip the suite when this push ONLY deletes refs — a deletion has nothing to
+# test, yet `git push origin --delete <branch>` would otherwise run the whole
+# E2E suite (a multi-minute hang for a no-op). Git feeds the pre-push hook one
+# line per ref on stdin: "<local ref> <local sha> <remote ref> <remote sha>".
+# A deletion sends an all-zero <local sha>. If every ref on stdin is all-zero,
+# this is a delete-only push, so skip. (No refs on stdin -> fall through and run,
+# the safe default.)
+only_deletes=1
+saw_ref=0
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  saw_ref=1
+  case "$local_sha" in
+    *[!0]*) only_deletes=0 ;; # any non-zero char => a real update; must test
+  esac
+done
+if [ "$saw_ref" = 1 ] && [ "$only_deletes" = 1 ]; then
+  echo "pre-push: delete-only push — skipping E2E suite"
+  exit 0
+fi
+
+exec bash "$ROOT/scripts/test/e2e-local.sh"

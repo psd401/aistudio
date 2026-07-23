@@ -3,12 +3,19 @@ import { streamText } from 'ai';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
+import { ErrorFactories } from '@/lib/error-utils';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { eq, inArray } from 'drizzle-orm';
 import { modelComparisons, aiModels } from '@/lib/db/schema';
-import { hasToolAccess } from '@/utils/roles';
+import { hasCapabilityAccess } from '@/utils/roles';
 import { createProviderModel } from '@/lib/ai/provider-factory';
-import { mergeStreamsWithIdentifiers, asyncGeneratorToStream } from '@/lib/compare/dual-stream-merger';
+import { filterAccessibleResourceIds } from '@/lib/db/drizzle/resource-access';
+import { hasCapability } from '@/lib/ai/capability-utils';
+import { generateImageForNexus } from '@/lib/ai/image-generation-service';
+import type { ImageGenerationError } from '@/lib/ai/image-generation-service';
+import { mergeResponseGenerators, asyncGeneratorToStream, type DualStreamEvent } from '@/lib/compare/dual-stream-merger';
+import { isTransientStreamError } from '@/lib/streaming/provider-adapters/base-adapter'
+import { isSafeImageUrl } from '@/lib/utils/image-validation';
 
 // Allow streaming responses up to 5 minutes
 export const maxDuration = 300;
@@ -22,9 +29,423 @@ const CompareRequestSchema = z.object({
   model2Name: z.string().optional()
 });
 
+/** DB model config row returned by the model query */
+interface ModelConfig {
+  id: number | string;
+  provider: string | null;
+  modelId: string | null;
+  name: string | null;
+  nexusEnabled: boolean | null;
+  capabilities: string | null;
+}
+
+/** Shared options for the per-model response generators. */
+interface GeneratorOptions {
+  modelSlot: 'model1' | 'model2';
+  modelConfig: ModelConfig;
+  prompt: string;
+  comparisonId: number;
+  timerStartTime: number;
+  log: ReturnType<typeof createLogger>;
+}
+
+/** Options for the image-generation generator (adds the requesting user id). */
+interface ImageGeneratorOptions extends GeneratorOptions {
+  userId: string;
+}
+
+/** Options for persisting a completed text response to the comparison record. */
+interface SaveTextResponseOptions {
+  slotNum: 1 | 2;
+  text: string;
+  totalTokens: number;
+  finishReason: string | undefined;
+  comparisonId: number;
+  timerStartTime: number;
+  log: ReturnType<typeof createLogger>;
+}
+
+/**
+ * Persists a completed text response to the comparison record. DB failures are
+ * logged but never thrown so the stream can still emit its finish event.
+ */
+async function saveTextResponse(options: SaveTextResponseOptions): Promise<void> {
+  const { slotNum, text, totalTokens, finishReason, comparisonId, timerStartTime, log } = options;
+  try {
+    if (slotNum === 1) {
+      await executeQuery(
+        (db) => db.update(modelComparisons)
+          .set({
+            response1: text,
+            executionTimeMs1: Date.now() - timerStartTime,
+            tokensUsed1: totalTokens,
+            updatedAt: new Date()
+          })
+          .where(eq(modelComparisons.id, comparisonId)),
+        'saveModel1Response'
+      );
+    } else {
+      await executeQuery(
+        (db) => db.update(modelComparisons)
+          .set({
+            response2: text,
+            executionTimeMs2: Date.now() - timerStartTime,
+            tokensUsed2: totalTokens,
+            updatedAt: new Date()
+          })
+          .where(eq(modelComparisons.id, comparisonId)),
+        'saveModel2Response'
+      );
+    }
+
+    log.info(`Model ${slotNum} text response saved`, {
+      comparisonId,
+      textLength: text.length,
+      finishReason
+    });
+  } catch (dbError) {
+    log.error(`Failed to save model ${slotNum} text response`, {
+      comparisonId,
+      error: dbError instanceof Error ? dbError.message : String(dbError)
+    });
+  }
+}
+
+/**
+ * Async generator for a text-based model response.
+ * Streams text chunks, then saves to DB and emits finish.
+ */
+async function* createTextGenerator(
+  options: GeneratorOptions
+): AsyncGenerator<DualStreamEvent> {
+  const { modelSlot, modelConfig, prompt, comparisonId, timerStartTime, log } = options;
+  const slotNum = modelSlot === 'model1' ? 1 : 2;
+
+  try {
+    const model = await createProviderModel(
+      String(modelConfig.provider),
+      String(modelConfig.modelId)
+    );
+
+    const streamResult = streamText({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    for await (const chunk of streamResult.textStream) {
+      yield { modelId: modelSlot, type: 'content', chunk };
+    }
+
+    const result = await streamResult;
+    const usage = await result.usage;
+    const finishReason = await result.finishReason;
+    const text = await result.text;
+
+    // Persist response to DB
+    await saveTextResponse({
+      slotNum,
+      text,
+      totalTokens: usage?.totalTokens || 0,
+      finishReason,
+      comparisonId,
+      timerStartTime,
+      log
+    });
+
+    const finishEvent: DualStreamEvent = {
+      modelId: modelSlot,
+      type: 'finish',
+      finishReason: finishReason ?? 'stop',
+      usage: usage
+        ? {
+            promptTokens: usage.inputTokens || 0,
+            completionTokens: usage.outputTokens || 0,
+            totalTokens: (usage.inputTokens || 0) + (usage.outputTokens || 0)
+          }
+        : undefined
+    };
+    yield finishEvent;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const isTransient = error instanceof Error && isTransientStreamError(error);
+
+    if (isTransient) {
+      log.warn(`Model ${slotNum} text stream failed (transient)`, { comparisonId, error: errorMessage });
+      yield { modelId: modelSlot, type: 'warning', warning: 'Comparison unavailable — model response could not be generated' };
+    } else {
+      log.error(`Model ${slotNum} text stream failed`, { comparisonId, error: errorMessage });
+      yield { modelId: modelSlot, type: 'error', error: 'Stream processing failed' };
+    }
+    yield { modelId: modelSlot, type: 'finish', finishReason: 'error' };
+  }
+}
+
+/** Options for persisting a generated image URL to the comparison record. */
+interface SaveImageResponseOptions {
+  slotNum: 1 | 2;
+  imageUrl: string;
+  s3Key: string;
+  comparisonId: number;
+  timerStartTime: number;
+  log: ReturnType<typeof createLogger>;
+}
+
+/**
+ * Persists a generated image URL to the comparison record. DB failures are
+ * logged but never thrown so the stream can still emit its finish event.
+ */
+async function saveImageResponse(options: SaveImageResponseOptions): Promise<void> {
+  const { slotNum, imageUrl, s3Key, comparisonId, timerStartTime, log } = options;
+  try {
+    if (slotNum === 1) {
+      await executeQuery(
+        (db) => db.update(modelComparisons)
+          .set({
+            response1: imageUrl,
+            executionTimeMs1: Date.now() - timerStartTime,
+            tokensUsed1: 0, // image generation is priced per-image, not per-token
+            updatedAt: new Date()
+          })
+          .where(eq(modelComparisons.id, comparisonId)),
+        'saveModel1ImageResponse'
+      );
+    } else {
+      await executeQuery(
+        (db) => db.update(modelComparisons)
+          .set({
+            response2: imageUrl,
+            executionTimeMs2: Date.now() - timerStartTime,
+            tokensUsed2: 0, // image generation is priced per-image, not per-token
+            updatedAt: new Date()
+          })
+          .where(eq(modelComparisons.id, comparisonId)),
+        'saveModel2ImageResponse'
+      );
+    }
+
+    log.info(`Model ${slotNum} image response saved`, { comparisonId, s3Key });
+  } catch (dbError) {
+    log.error(`Failed to save model ${slotNum} image response`, {
+      comparisonId,
+      error: dbError instanceof Error ? dbError.message : String(dbError)
+    });
+  }
+}
+
+/**
+ * Async generator for an image-generation model response.
+ * Emits a single image event, then saves to DB and emits finish.
+ */
+async function* createImageGenerator(
+  options: ImageGeneratorOptions
+): AsyncGenerator<DualStreamEvent> {
+  const { modelSlot, modelConfig, prompt, userId, comparisonId, timerStartTime, log } = options;
+  const slotNum = modelSlot === 'model1' ? 1 : 2;
+  const rawProvider = String(modelConfig.provider);
+
+  try {
+    // Validate and narrow the provider type — generateImageForNexus only supports
+    // 'openai' and 'google'. Throw inside the try so the catch converts unsupported
+    // providers to a graceful error event rather than crashing the generator.
+    if (rawProvider !== 'openai' && rawProvider !== 'google') {
+      throw ErrorFactories.invalidInput(
+        'provider',
+        rawProvider,
+        'Provider does not support image generation. Supported providers: openai, google.'
+      );
+    }
+    const provider = rawProvider as 'openai' | 'google';
+
+    log.info(`Model ${slotNum} image generation started`, {
+      comparisonId,
+      provider,
+      modelId: String(modelConfig.modelId)
+    });
+
+    const result = await generateImageForNexus({
+      prompt,
+      modelId: String(modelConfig.modelId),
+      provider,
+      conversationId: `compare-${comparisonId}`,
+      userId,
+    });
+
+    // Persist image URL to DB
+    await saveImageResponse({
+      slotNum,
+      imageUrl: result.imageUrl,
+      s3Key: result.s3Key,
+      comparisonId,
+      timerStartTime,
+      log
+    });
+
+    // Validate imageUrl is an HTTPS S3 URL before emitting to client (shared
+    // guard from lib/utils/image-validation — same check runs client-side in
+    // model-compare.tsx before the URL is rendered).
+    if (!isSafeImageUrl(result.imageUrl)) {
+      log.error(`Model ${slotNum} returned unexpected image URL origin, blocking emit`, {
+        comparisonId,
+        imageUrl: result.imageUrl.slice(0, 80)
+      });
+      yield { modelId: modelSlot, type: 'error', error: 'Image generation failed. Please try again.' };
+      yield { modelId: modelSlot, type: 'finish', finishReason: 'error' };
+      return;
+    }
+
+    yield { modelId: modelSlot, type: 'image', imageUrl: result.imageUrl };
+    yield { modelId: modelSlot, type: 'finish', finishReason: 'stop' };
+  } catch (error) {
+    const errorType: string =
+      error instanceof Error && 'type' in error
+        ? String((error as Error & Partial<ImageGenerationError>).type ?? 'UNKNOWN')
+        : 'UNKNOWN';
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    log.error(`Model ${slotNum} image generation failed`, {
+      comparisonId,
+      errorType,
+      error: errorMessage
+    });
+
+    // Send user-friendly error message based on failure type
+    let clientMessage: string;
+    if (errorType === 'CONTENT_POLICY') {
+      clientMessage = 'Image prompt was rejected by content policy. Please revise your prompt.';
+    } else if (errorType === 'RATE_LIMIT') {
+      clientMessage = 'Image generation rate limit reached. Please try again in a moment.';
+    } else {
+      clientMessage = 'Image generation failed. Please try again or select a different model.';
+    }
+
+    yield { modelId: modelSlot, type: 'error', error: clientMessage };
+    yield { modelId: modelSlot, type: 'finish', finishReason: 'error' };
+  }
+}
+
+/**
+ * Validates that both requested models exist, matched, and are enabled for
+ * Nexus/Compare. Returns the two resolved configs on success, or a ready-to-send
+ * error `Response` (with the exact status/body the route returns) on failure.
+ */
+async function validateComparisonModels(
+  model1Id: string,
+  model2Id: string,
+  log: ReturnType<typeof createLogger>
+): Promise<
+  | { ok: true; model1Config: ModelConfig; model2Config: ModelConfig }
+  | { ok: false; response: Response }
+> {
+  log.debug('Querying for models', { model1Id, model2Id });
+
+  const modelsResult = await executeQuery(
+    (db) => db.select({
+      id: aiModels.id,
+      provider: aiModels.provider,
+      modelId: aiModels.modelId,
+      name: aiModels.name,
+      nexusEnabled: aiModels.nexusEnabled,
+      capabilities: aiModels.capabilities,
+    })
+    .from(aiModels)
+    .where(inArray(aiModels.modelId, [model1Id, model2Id])),
+    'getModelsForComparison'
+  );
+
+  log.debug('Database query results', {
+    foundCount: modelsResult.length,
+    foundModels: modelsResult.map(m => ({
+      id: m.id,
+      modelId: m.modelId,
+      name: m.name,
+      provider: m.provider,
+      nexusEnabled: m.nexusEnabled
+    }))
+  });
+
+  if (modelsResult.length === 0) {
+    log.error('No models found', { model1Id, model2Id });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({ error: 'No models found with the provided IDs' }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
+  if (modelsResult.length !== 2) {
+    log.error('Incomplete model set found', {
+      model1Id,
+      model2Id,
+      foundCount: modelsResult.length,
+      foundModelIds: modelsResult.map(m => String(m.modelId))
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'One or both selected models not found',
+          details: {
+            requested: [model1Id, model2Id],
+            found: modelsResult.map(m => String(m.modelId))
+          }
+        }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
+  // Use String() to ensure type consistency for comparison
+  const model1Config = modelsResult.find(m => String(m.modelId) === String(model1Id));
+  const model2Config = modelsResult.find(m => String(m.modelId) === String(model2Id));
+
+  if (!model1Config || !model2Config) {
+    log.error('Model configuration mismatch after type conversion', {
+      model1Id: String(model1Id),
+      model2Id: String(model2Id),
+      foundModelIds: modelsResult.map(m => String(m.modelId)),
+      model1Found: !!model1Config,
+      model2Found: !!model2Config
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Model configuration error - found models but failed to match',
+          details: {
+            requested: [String(model1Id), String(model2Id)],
+            found: modelsResult.map(m => String(m.modelId))
+          }
+        }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
+  // Check if models are enabled for Nexus/Compare
+  // Explicit !== true check handles null/undefined from older data
+  if (model1Config.nexusEnabled !== true || model2Config.nexusEnabled !== true) {
+    log.error('One or both models not enabled for Nexus/Compare', {
+      model1Enabled: model1Config.nexusEnabled,
+      model2Enabled: model2Config.nexusEnabled
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({ error: 'One or both models not enabled for comparison' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
+  return { ok: true, model1Config, model2Config };
+}
+
 /**
  * Compare Models API - Native Dual Streaming
- * Streams responses from two models in parallel using Server-Sent Events
+ * Streams responses from two models in parallel using Server-Sent Events.
+ * Supports both text-generation and image-generation models.
  */
 export async function POST(req: Request) {
   const requestId = generateRequestId();
@@ -75,7 +496,7 @@ export async function POST(req: Request) {
     }
 
     // 3. Check tool access
-    const hasAccess = await hasToolAccess("model-compare");
+    const hasAccess = await hasCapabilityAccess("model-compare");
     if (!hasAccess) {
       log.warn('Model compare access denied', { userId: session.sub });
       timer({ status: 'error', reason: 'access_denied' });
@@ -91,109 +512,56 @@ export async function POST(req: Request) {
 
     const userId = currentUser.data.user.id;
 
-    // 5. Validate both models exist and are active
-    log.debug('Querying for models', { model1Id, model2Id });
+    // 5. Validate both models exist, matched, and are enabled for Compare
+    const modelsValidation = await validateComparisonModels(model1Id, model2Id, log);
+    if (!modelsValidation.ok) {
+      return modelsValidation.response;
+    }
+    const { model1Config, model2Config } = modelsValidation;
 
-    const modelsResult = await executeQuery(
-      (db) => db.select({
-        id: aiModels.id,
-        provider: aiModels.provider,
-        modelId: aiModels.modelId,
-        name: aiModels.name,
-        nexusEnabled: aiModels.nexusEnabled
-      })
-      .from(aiModels)
-      .where(inArray(aiModels.modelId, [model1Id, model2Id])),
-      'getModelsForComparison'
+    // 5b. Per-resource access enforcement (#1206). Model ids arrive in the
+    // request body, so a crafted call can name a restricted model even though the
+    // client dropdown hid it. Reject if the user lacks a role/group grant on
+    // either model (zero grants = unrestricted; admins always pass).
+    const accessibleModelIds = await filterAccessibleResourceIds(
+      userId,
+      'model',
+      [Number(model1Config.id), Number(model2Config.id)]
     );
-
-    log.debug('Database query results', {
-      foundCount: modelsResult.length,
-      foundModels: modelsResult.map(m => ({
-        id: m.id,
-        modelId: m.modelId,
-        name: m.name,
-        provider: m.provider,
-        nexusEnabled: m.nexusEnabled
-      }))
-    });
-
-    if (modelsResult.length === 0) {
-      log.error('No models found', { model1Id, model2Id });
-      return new Response(
-        JSON.stringify({ error: 'No models found with the provided IDs' }),
-        { status: 404, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    if (modelsResult.length !== 2) {
-      log.error('Incomplete model set found', {
-        model1Id,
-        model2Id,
-        foundCount: modelsResult.length,
-        foundModelIds: modelsResult.map(m => String(m.modelId))
+    // Checked independently (not accessibleModelIds.size !== 2) so comparing a
+    // model against itself doesn't false-deny on the Set dedup.
+    const model1Allowed = accessibleModelIds.has(String(model1Config.id));
+    const model2Allowed = accessibleModelIds.has(String(model2Config.id));
+    if (!model1Allowed || !model2Allowed) {
+      log.warn('Forbidden model in comparison', {
+        userId,
+        model1Allowed,
+        model2Allowed,
       });
       return new Response(
-        JSON.stringify({
-          error: 'One or both selected models not found',
-          details: {
-            requested: [model1Id, model2Id],
-            found: modelsResult.map(m => String(m.modelId))
-          }
-        }),
-        { status: 404, headers: { 'Content-Type': 'application/json' } }
+        JSON.stringify({ error: 'You do not have access to one or both selected models' }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
       );
     }
 
-    // Use String() to ensure type consistency for comparison
-    const model1Config = modelsResult.find(m => String(m.modelId) === String(model1Id));
-    const model2Config = modelsResult.find(m => String(m.modelId) === String(model2Id));
-
-    if (!model1Config || !model2Config) {
-      log.error('Model configuration mismatch after type conversion', {
-        model1Id: String(model1Id),
-        model2Id: String(model2Id),
-        foundModelIds: modelsResult.map(m => String(m.modelId)),
-        model1Found: !!model1Config,
-        model2Found: !!model2Config
-      });
-      return new Response(
-        JSON.stringify({
-          error: 'Model configuration error - found models but failed to match',
-          details: {
-            requested: [String(model1Id), String(model2Id)],
-            found: modelsResult.map(m => String(m.modelId))
-          }
-        }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Check if models are enabled for Nexus/Compare
-    // Explicit !== true check handles null/undefined from older data
-    if (model1Config.nexusEnabled !== true || model2Config.nexusEnabled !== true) {
-      log.error('One or both models not enabled for Nexus/Compare', {
-        model1Enabled: model1Config.nexusEnabled,
-        model2Enabled: model2Config.nexusEnabled
-      });
-      return new Response(
-        JSON.stringify({ error: 'One or both models not enabled for comparison' }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
+    // 6. Detect image generation models
+    const isModel1Image = hasCapability(model1Config.capabilities, 'imageGeneration');
+    const isModel2Image = hasCapability(model2Config.capabilities, 'imageGeneration');
 
     log.info('Both models validated', sanitizeForLogging({
       model1: {
         provider: String(model1Config.provider),
-        modelId: String(model1Config.modelId)
+        modelId: String(model1Config.modelId),
+        isImageModel: isModel1Image
       },
       model2: {
         provider: String(model2Config.provider),
-        modelId: String(model2Config.modelId)
+        modelId: String(model2Config.modelId),
+        isImageModel: isModel2Image
       }
     }));
 
-    // 6. Create comparison record for tracking
+    // 7. Create comparison record for tracking
     const now = new Date();
     const comparisonResult = await executeQuery(
       (db) => db.insert(modelComparisons)
@@ -220,107 +588,17 @@ export async function POST(req: Request) {
 
     log.info('Comparison record created', sanitizeForLogging({ comparisonId }));
 
-    // 7. Create provider models for streaming
-    const model1 = await createProviderModel(
-      String(model1Config.provider),
-      String(model1Config.modelId)
-    );
+    // 8. Create per-model response generators (text or image)
+    const gen1 = isModel1Image
+      ? createImageGenerator({ modelSlot: 'model1', modelConfig: model1Config, prompt, userId: String(userId), comparisonId, timerStartTime, log })
+      : createTextGenerator({ modelSlot: 'model1', modelConfig: model1Config, prompt, comparisonId, timerStartTime, log });
 
-    const model2 = await createProviderModel(
-      String(model2Config.provider),
-      String(model2Config.modelId)
-    );
+    const gen2 = isModel2Image
+      ? createImageGenerator({ modelSlot: 'model2', modelConfig: model2Config, prompt, userId: String(userId), comparisonId, timerStartTime, log })
+      : createTextGenerator({ modelSlot: 'model2', modelConfig: model2Config, prompt, comparisonId, timerStartTime, log });
 
-    log.info('Provider models created', {
-      model1Provider: String(model1Config.provider),
-      model2Provider: String(model2Config.provider)
-    });
-
-    // 8. Create streaming responses for both models
-    const stream1Promise = streamText({
-      model: model1,
-      messages: [
-        {
-          role: 'user',
-          content: prompt
-        }
-      ],
-      onFinish: async ({ text, usage, finishReason }) => {
-        // Save Model 1 response
-        try {
-          await executeQuery(
-            (db) => db.update(modelComparisons)
-              .set({
-                response1: text,
-                executionTimeMs1: Date.now() - timerStartTime,
-                tokensUsed1: usage?.totalTokens || 0,
-                updatedAt: new Date()
-              })
-              .where(eq(modelComparisons.id, comparisonId)),
-            'saveModel1Response'
-          );
-
-          log.info('Model 1 response saved', {
-            comparisonId,
-            textLength: text.length,
-            usage,
-            finishReason
-          });
-        } catch (error) {
-          log.error('Failed to save Model 1 response', {
-            comparisonId,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
-      }
-    });
-
-    const stream2Promise = streamText({
-      model: model2,
-      messages: [
-        {
-          role: 'user',
-          content: prompt
-        }
-      ],
-      onFinish: async ({ text, usage, finishReason }) => {
-        // Save Model 2 response
-        try {
-          await executeQuery(
-            (db) => db.update(modelComparisons)
-              .set({
-                response2: text,
-                executionTimeMs2: Date.now() - timerStartTime,
-                tokensUsed2: usage?.totalTokens || 0,
-                updatedAt: new Date()
-              })
-              .where(eq(modelComparisons.id, comparisonId)),
-            'saveModel2Response'
-          );
-
-          log.info('Model 2 response saved', {
-            comparisonId,
-            textLength: text.length,
-            usage,
-            finishReason
-          });
-        } catch (error) {
-          log.error('Failed to save Model 2 response', {
-            comparisonId,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
-      }
-    });
-
-    // 9. Merge both streams with model identification
-    // StreamTextResult is both a Promise and has async iterable properties
-    const mergedGenerator = mergeStreamsWithIdentifiers(
-      stream1Promise,
-      stream2Promise
-    );
-
-    // Convert AsyncGenerator to ReadableStream
+    // 9. Merge both generators into a single SSE stream
+    const mergedGenerator = mergeResponseGenerators(gen1, gen2);
     const mergedStream = asyncGeneratorToStream(mergedGenerator);
 
     timer({

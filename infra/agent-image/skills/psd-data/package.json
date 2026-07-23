@@ -1,0 +1,7 @@
+{
+  "name": "psd-data",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenClaw skill: PSD data warehouse access via psd-data-mcp. Cognito-authenticated, row-level-security-enforced. @aws-sdk/client-secrets-manager is resolved at runtime via a symlink to psd-workspace's node_modules (see Dockerfile).",
+  "main": "run.js"
+}

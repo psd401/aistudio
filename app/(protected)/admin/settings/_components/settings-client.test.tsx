@@ -2,6 +2,12 @@ import { render } from '@testing-library/react'
 import { screen, fireEvent, waitFor } from '@testing-library/dom'
 import '@testing-library/jest-dom'
 
+jest.mock('./settings-table', () => ({
+  SettingsTable: ({ settings }: { settings: Array<{ key: string }> }) => (
+    <div>{settings.map((setting) => <span key={setting.key}>{setting.key}</span>)}</div>
+  ),
+}))
+
 // Mock the entire dropdown-menu UI component to avoid displayName issues
 jest.mock('@/components/ui/dropdown-menu', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -254,6 +260,7 @@ jest.mock('react-hook-form', () => {
       }),
       formState: { errors: {} }
     }),
+    useWatch: ({ name }: { name: string }) => globalFormData[name],
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     Controller: ({ render }: any) => render({ field: { onChange: jest.fn(), value: '' } })
   }
@@ -302,6 +309,24 @@ describe('SettingsClient', () => {
       category: null,
       isSecret: false
     };
+  })
+
+  it('renders seeded Content Platform settings in their own category', () => {
+    render(<SettingsClient initialSettings={[{
+      id: 2,
+      key: 'CONTENT_PLATFORM_ENABLED',
+      value: 'false',
+      description: 'Enable the unified repository content platform.',
+      category: 'Content Platform',
+      isSecret: false,
+      hasValue: true,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    }]} />)
+
+    expect(screen.getAllByText('Content Platform')).toHaveLength(2)
+    expect(screen.getByText('CONTENT_PLATFORM_ENABLED')).toBeInTheDocument()
+    expect(screen.getByText(/Unified document ingestion/)).toBeInTheDocument()
   })
 
   it('should close the modal after successful save', async () => {

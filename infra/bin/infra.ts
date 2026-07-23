@@ -14,6 +14,8 @@ import { PowerTuningStack } from '../lib/power-tuning-stack';
 import { SecretsManagerStack } from '../lib/secrets-manager-stack';
 import { GuardrailsStack } from '../lib/guardrails-stack';
 import { AgentPlatformStack } from '../lib/agent-platform-stack';
+import { AtriumSandboxStack } from '../lib/atrium-sandbox-stack';
+import { AtriumEventsStack } from '../lib/atrium-events-stack';
 import { SecretValue } from 'aws-cdk-lib';
 import { PermissionBoundaryConstruct } from '../lib/constructs/security';
 import { AccessAnalyzerStack } from '../lib/stacks/access-analyzer-stack';
@@ -32,6 +34,34 @@ const baseDomain = app.node.tryGetContext('baseDomain');
 const alertEmail = app.node.tryGetContext('alertEmail');
 const brandingOrgName = app.node.tryGetContext('brandingOrgName');
 const brandingAppName = app.node.tryGetContext('brandingAppName');
+
+// Atrium artifact sandbox (#1052): comma-separated CDN origins the sandbox CSP
+// permits for artifact script-src/style-src (e.g. "https://cdnjs.cloudflare.com").
+// Empty => inline-only artifacts. Same value should be set as
+// ATRIUM_ALLOWED_ARTIFACT_CDNS on the app for parity.
+const atriumAllowedArtifactCdns: string[] = String(
+  app.node.tryGetContext('atriumAllowedArtifactCdns') || ''
+)
+  .split(',')
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
+
+// Workspace media bucket origin(s) for the Atrium sandbox `media-src` CSP.
+// Agent skills (psd-tts, psd-hyperframes, psd-html-artifact, psd-image-gen)
+// upload generated MP3/MP4/images to the deterministically-named workspace
+// bucket (AgentPlatformStack: `psd-agents-${env}-${account}`, the source of
+// truth for this name) and hand out unsigned path-style URLs
+// `https://{bucket}.s3.{region}.amazonaws.com/public-images/...` (no CloudFront,
+// no presigning). Scope the sandbox media-src to exactly that origin so a
+// psd-learning-page artifact can play its explainer video + narration in the
+// reader — never a wildcard. Returns [] (data: only in the CSP) when the CDK
+// account/region are unknown at synth.
+function workspaceMediaOrigins(environment: 'dev' | 'prod'): string[] {
+  const account = process.env.CDK_DEFAULT_ACCOUNT;
+  const region = process.env.CDK_DEFAULT_REGION;
+  if (!account || !region) return [];
+  return [`https://psd-agents-${environment}-${account}.s3.${region}.amazonaws.com`];
+}
 
 // Helper to get callback/logout URLs for any environment
 function getCallbackAndLogoutUrls(environment: string, baseDomain?: string): { callbackUrls: string[], logoutUrls: string[] } {
@@ -146,6 +176,39 @@ const devStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Dev', {
 cdk.Tags.of(devStorageStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devStorageStack).add(key, value));
 
+// Atrium artifact sandbox origin (#1052): separate-origin static host for the
+// cross-origin sandboxed artifact iframe. Decoupled from the app/ECS stack so the
+// two never share an origin. The app reads its origin from the SSM param this
+// stack writes (wired to ATRIUM_SANDBOX_ORIGIN / NEXT_PUBLIC_ mirror).
+const devAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandboxStack-Dev', {
+  environment: 'dev',
+  allowedParentOrigins: [
+    ...(baseDomain ? [`https://dev.${baseDomain}`] : []),
+    // DEV ONLY — plain HTTP localhost is intentional for local development.
+    // This origin is baked into the sandbox's parent-origin allowlist and its
+    // CSP frame-ancestors directive. It must NEVER appear in staging or prod
+    // configs (the prod stack below enforces https-only). HTTP origins mean a
+    // local page at :3000 could drive the sandbox, but the sandbox serves no
+    // real user data and has no credentials in this dev deployment.
+    'http://localhost:3000',
+  ],
+  allowedArtifactCdns: atriumAllowedArtifactCdns,
+  allowedMediaOrigins: workspaceMediaOrigins('dev'),
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(devAtriumSandboxStack).add('Environment', 'Dev');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAtriumSandboxStack).add(key, value));
+
+// Atrium content events (#1055): SNS topic the app publishes content lifecycle
+// events to (injected as ATRIUM_EVENTS_TOPIC_ARN). Dedicated stack for clean
+// separation; downstream subscribers (Phase 6 retrieval indexer, notifiers) attach here.
+const devAtriumEventsStack = new AtriumEventsStack(app, 'AIStudio-AtriumEventsStack-Dev', {
+  environment: 'dev',
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(devAtriumEventsStack).add('Environment', 'Dev');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAtriumEventsStack).add(key, value));
+
 // K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
 const guardrailNotificationEmail = app.node.tryGetContext('guardrailNotificationEmail') || alertEmail;
 const devGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-Dev', {
@@ -173,6 +236,9 @@ const devAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatfor
 });
 devAgentPlatformStack.addDependency(devDbStack);
 devAgentPlatformStack.addDependency(devGuardrailsStack);
+// Cognito user-pool exports are imported via Fn.importValue for the
+// psd-data skill env vars (AUTH_COGNITO_USER_POOL_ID, AUTH_COGNITO_CLIENT_ID).
+devAgentPlatformStack.addDependency(devAuthStack);
 cdk.Tags.of(devAgentPlatformStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAgentPlatformStack).add(key, value));
 
@@ -180,6 +246,8 @@ const devProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-De
   environment: 'dev',
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
+devProcessingStack.addDependency(devDbStack); // Reads database SSM parameters and uses the shared VPC
+devProcessingStack.addDependency(devStorageStack); // Reads the documents bucket SSM parameter
 cdk.Tags.of(devProcessingStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devProcessingStack).add(key, value));
 
@@ -287,6 +355,25 @@ const prodStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Prod', {
 cdk.Tags.of(prodStorageStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodStorageStack).add(key, value));
 
+// Atrium artifact sandbox origin (#1052): separate-origin static host (prod).
+const prodAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandboxStack-Prod', {
+  environment: 'prod',
+  allowedParentOrigins: baseDomain ? [`https://${baseDomain}`] : [],
+  allowedArtifactCdns: atriumAllowedArtifactCdns,
+  allowedMediaOrigins: workspaceMediaOrigins('prod'),
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(prodAtriumSandboxStack).add('Environment', 'Prod');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAtriumSandboxStack).add(key, value));
+
+// Atrium content events (#1055) — prod SNS topic.
+const prodAtriumEventsStack = new AtriumEventsStack(app, 'AIStudio-AtriumEventsStack-Prod', {
+  environment: 'prod',
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(prodAtriumEventsStack).add('Environment', 'Prod');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAtriumEventsStack).add(key, value));
+
 // K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
 const prodGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-Prod', {
   environment: 'prod',
@@ -317,6 +404,7 @@ const prodAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatfo
 });
 prodAgentPlatformStack.addDependency(prodDbStack);
 prodAgentPlatformStack.addDependency(prodGuardrailsStack);
+prodAgentPlatformStack.addDependency(prodAuthStack);
 cdk.Tags.of(prodAgentPlatformStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAgentPlatformStack).add(key, value));
 
@@ -324,6 +412,8 @@ const prodProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-P
   environment: 'prod',
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
+prodProcessingStack.addDependency(prodDbStack); // Reads database SSM parameters and uses the shared VPC
+prodProcessingStack.addDependency(prodStorageStack); // Reads the documents bucket SSM parameter
 cdk.Tags.of(prodProcessingStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodProcessingStack).add(key, value));
 
@@ -395,6 +485,9 @@ if (baseDomain) {
     baseDomain, // Passed via CDK context (e.g., aistudio.psd401.ai)
     customSubdomain: 'dev', // Creates dev.<baseDomain>
     documentsBucketName: devStorageStack.documentsBucketName,
+    agentWorkspaceBucketName: devAgentPlatformStack.workspaceBucket.bucketName, // #925
+    atriumSandboxOrigin: devAtriumSandboxStack.sandboxOrigin, // #1052
+    atriumEventsTopicArn: devAtriumEventsStack.topicArn, // #1055
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -403,6 +496,14 @@ if (baseDomain) {
   devFrontendStack.addDependency(devStorageStack); // Need bucket name
   devFrontendStack.addDependency(devAuthStack); // Need auth secret ARN export
   devFrontendStack.addDependency(devGuardrailsStack); // Need guardrails config exports
+  devFrontendStack.addDependency(devAgentPlatformStack); // Need agent workspace bucket name (#925)
+  devFrontendStack.addDependency(devAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
+  devFrontendStack.addDependency(devAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
+  devFrontendStack.addDependency(devProcessingStack); // Need processing queue and Lambda exports
+  devFrontendStack.addDependency(devDocumentProcessingStack); // Need document queue and table exports
+  if (devEmailNotificationStack) {
+    devFrontendStack.addDependency(devEmailNotificationStack); // Need notification queue export
+  }
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devFrontendStack).add(key, value));
 
@@ -414,6 +515,9 @@ if (baseDomain) {
     baseDomain, // Passed via CDK context (e.g., aistudio.psd401.ai)
     // No customSubdomain for prod - uses root baseDomain
     documentsBucketName: prodStorageStack.documentsBucketName,
+    agentWorkspaceBucketName: prodAgentPlatformStack.workspaceBucket.bucketName, // #925
+    atriumSandboxOrigin: prodAtriumSandboxStack.sandboxOrigin, // #1052
+    atriumEventsTopicArn: prodAtriumEventsStack.topicArn, // #1055
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -422,6 +526,14 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodStorageStack); // Need bucket name
   prodFrontendStack.addDependency(prodAuthStack); // Need auth secret ARN export
   prodFrontendStack.addDependency(prodGuardrailsStack); // Need guardrails config exports
+  prodFrontendStack.addDependency(prodAgentPlatformStack); // Need agent workspace bucket name (#925)
+  prodFrontendStack.addDependency(prodAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
+  prodFrontendStack.addDependency(prodAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
+  prodFrontendStack.addDependency(prodProcessingStack); // Need processing queue and Lambda exports
+  prodFrontendStack.addDependency(prodDocumentProcessingStack); // Need document queue and table exports
+  if (prodEmailNotificationStack) {
+    prodFrontendStack.addDependency(prodEmailNotificationStack); // Need notification queue export
+  }
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodFrontendStack).add(key, value));
 

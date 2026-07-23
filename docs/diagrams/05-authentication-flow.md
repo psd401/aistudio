@@ -29,8 +29,8 @@ sequenceDiagram
     Cognito->>NextJS: Return ID token + Access token
     NextJS->>Aurora: Check/create user from cognito_sub
     Aurora->>NextJS: Return user record
-    NextJS->>Aurora: Fetch user roles and tools
-    Aurora->>NextJS: Return roles + tools
+    NextJS->>Aurora: Fetch user roles and capabilities
+    Aurora->>NextJS: Return roles + capabilities
     NextJS->>NextAuth: Create session with JWT
     NextAuth->>Browser: Set HTTP-only session cookie
     Browser->>User: Redirect to dashboard
@@ -65,7 +65,7 @@ graph TB
     ISSUE_TOKENS --> APP_CB[Redirect to app callback]
     APP_CB --> EXCHANGE[Exchange auth code for tokens]
     EXCHANGE --> DB_UPSERT[Upsert user in Aurora]
-    DB_UPSERT --> LOAD_ROLES[Load user roles + tools]
+    DB_UPSERT --> LOAD_ROLES[Load user roles + capabilities]
     LOAD_ROLES --> CREATE_SESSION[Create NextAuth session]
     CREATE_SESSION --> SET_COOKIE[Set HTTP-only cookie]
     SET_COOKIE --> COMPLETE[Redirect to dashboard]
@@ -212,10 +212,10 @@ export async function executeAssistantArchitectAction(params) {
       throw ErrorFactories.authNoSession()
     }
 
-    // 2. Check tool permission
-    const hasAccess = await hasToolAccess("assistant-architect")
+    // 2. Check capability
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
-      log.warn("Forbidden - no tool access", {
+      log.warn("Forbidden - no capability access", {
         userId: session.user.id
       })
       throw ErrorFactories.authInsufficientPermissions()
@@ -250,12 +250,12 @@ export async function executeAssistantArchitectAction(params) {
         "name": "administrator"
       }
     ],
-    "tools": [
-      "nexus-chat",
+    "capabilities": [
       "assistant-architect",
       "model-compare",
       "knowledge-repositories",
-      "admin-panel"
+      "decision-capture",
+      "voice-mode"
     ],
     "iat": 1704067200,
     "exp": 1704153600,
@@ -311,8 +311,8 @@ sequenceDiagram
     Aurora->>NextJS: User created (id: 123)
     NextJS->>Aurora: INSERT INTO user_roles (user_id: 123, role_id: 3) -- "User" role
     Aurora->>NextJS: Role assigned
-    NextJS->>Aurora: SELECT role_tools WHERE role_id = 3
-    Aurora->>NextJS: Return default tool permissions
+    NextJS->>Aurora: SELECT role_capabilities WHERE role_id = 3
+    Aurora->>NextJS: Return default capability grants
     NextJS->>User: Create session with basic permissions
     User->>NextJS: Can access: Nexus Chat, Ideas Board
     User->>NextJS: Cannot access: Admin Panel, Model Compare
@@ -341,11 +341,11 @@ FROM users u, roles r
 WHERE u.email = 'admin@example.com'
   AND r.name = 'administrator';
 
--- 4. Verify tool access (auto-granted via role_tools)
-SELECT t.identifier, t.name
-FROM tools t
-JOIN role_tools rt ON t.id = rt.tool_id
-JOIN roles r ON rt.role_id = r.id
+-- 4. Verify capability access (auto-granted via role_capabilities)
+SELECT c.identifier, c.name
+FROM capabilities c
+JOIN role_capabilities rc ON c.id = rc.capability_id
+JOIN roles r ON rc.role_id = r.id
 WHERE r.name = 'administrator';
 ```
 

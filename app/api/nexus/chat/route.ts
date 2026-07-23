@@ -3,26 +3,51 @@ import { z } from 'zod';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
-import { getAIModelById } from '@/lib/db/drizzle';
 import { hasCapability } from '@/lib/ai/capability-utils';
 import { processMessagesWithAttachments } from '@/lib/services/attachment-storage-service';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
+import { getContentSafetyService } from '@/lib/safety';
+import type { TokenMapping } from '@/lib/safety/types';
+import {
+  createTokenMappingSink,
+  type TokenMappingSink,
+} from '@/lib/safety/token-mapping-sink';
 import { getModelConfig } from '@/lib/ai/model-config';
+import { userCanAccessResource } from '@/lib/db/drizzle/resource-access';
 import { getConnectorTools } from '@/lib/mcp/connector-service';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
+import { createNexusAttachmentTools } from '@/lib/nexus/attachment-repository-tool';
+import { prepareRepositoryAttachmentMessages } from '@/lib/nexus/repository-attachment-messages';
+import {
+  resolveNexusAttachmentImageSources,
+  resolveNexusConversationRepositoryIds,
+  type NexusAttachmentReference,
+} from '@/lib/nexus/ephemeral-repository-service';
+import {
+  bindNexusRequestAttachmentReferences,
+  NexusAttachmentBindingCleanupError,
+  NexusAttachmentBindingRejectedError,
+  rollbackNewNexusAttachmentConversation,
+} from '@/lib/nexus/request-attachment-binding';
+import {
+  NexusAttachmentTurnLimitError,
+  preflightNexusAttachmentReferences,
+  type NexusAttachmentRequestPreflight,
+} from '@/lib/nexus/request-attachment-preflight';
 
 import {
   extractImagePrompt,
   validateImagePrompt,
   getOrCreateImageConversation,
-  saveImageUserMessage,
   extractReferenceImages,
+  extractCanonicalRepositoryImages,
   getPreviousGeneratedImages,
-  saveImageAssistantMessage,
-  updateImageConversationStats,
+  getImageRoutingContext,
+  persistImageExchange,
+  deleteUnpersistedGeneratedImage,
   createImageStreamResponse,
   handleImageGenerationError,
 } from './image-generation-handler';
@@ -34,7 +59,30 @@ import {
   saveUserMessage,
   convertMessagesToPartsFormat,
   saveAssistantMessage,
+  saveConversationSteps,
+  type StepData,
 } from './chat-helpers';
+
+import { eq, and } from 'drizzle-orm';
+import { executeQuery } from '@/lib/db/drizzle-client';
+import { nexusConversations } from '@/lib/db/schema';
+import { getScopesForRoles } from '@/lib/api-keys/scopes';
+import { toolCatalogInstance } from '@/lib/tools/catalog/catalog';
+import {
+  intersectSkillAllowedTools,
+  getApprovedSkillSession,
+  filterConnectorToolsByPin,
+  type ApprovedSkillSession,
+} from '@/lib/skills/skill-tool-enforcement';
+import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
+import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
+import { mergeRoutedToolNames, routeNexusRequest } from '@/lib/nexus/model-router/router';
+import { NexusSpecialistUnavailableError } from '@/lib/nexus/model-router/errors';
+import {
+  nexusExperienceModeSchema,
+  nexusModelFamilySchema,
+  type NexusRoutingMetadata,
+} from '@/lib/nexus/model-router/types';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -65,14 +113,16 @@ function createOnFinishCallback(params: {
   connectorToolResults: McpConnectorToolsResult[];
   log: ReturnType<typeof createLogger>;
   timer: (data: Record<string, unknown>) => void;
+  routingMetadata: NexusRoutingMetadata;
 }) {
-  const { conversationId, dbModelId, connectorToolResults, log, timer } = params;
+  const { conversationId, dbModelId, connectorToolResults, log, timer, routingMetadata } = params;
 
   return async ({
     text,
     usage,
     finishReason,
-    toolCalls
+    toolCalls,
+    steps,
   }: {
     text: string;
     usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
@@ -83,16 +133,32 @@ function createOnFinishCallback(params: {
       args: Record<string, unknown>;
       result?: unknown;
     }>;
+    steps?: StepData[];
   }) => {
     log.info('Stream finished, saving assistant message', {
       conversationId,
       hasText: !!text,
       textLength: text?.length || 0,
-      toolCallCount: toolCalls?.length || 0
+      toolCallCount: toolCalls?.length || 0,
+      stepCount: steps?.length ?? 0,
     });
 
     try {
-      await saveAssistantMessage({ conversationId, text, usage, finishReason, toolCalls, dbModelId });
+      if (steps && steps.length > 1) {
+        // Multi-step agentic loop (MCP connectors): save each step as a separate
+        // assistant message to preserve the correct turn structure for replay.
+        // Consolidating into one message breaks convertToModelMessages — it cannot
+        // reconstruct multi-turn tool_use/tool_result pairs. (Issue #977)
+        await saveConversationSteps({
+          conversationId, steps, dbModelId, usage, finishReason,
+          metadata: { routing: routingMetadata },
+        });
+      } else {
+        await saveAssistantMessage({
+          conversationId, text, usage, finishReason, toolCalls, dbModelId,
+          metadata: { routing: routingMetadata },
+        });
+      }
     } catch (saveError) {
       log.error('Failed to save assistant message', { error: saveError, conversationId });
     }
@@ -104,6 +170,51 @@ function createOnFinishCallback(params: {
 
     timer({ status: 'success', conversationId, tokensUsed: usage?.totalTokens });
   };
+}
+
+/**
+ * Pre-merge the adapter (universal) tools with per-user MCP connector tools and
+ * the open-workspace content tools (§1087). Returns undefined when neither
+ * connectors nor workspace tools are active (the streaming service then builds
+ * adapter tools itself from `enabledTools`). Connector + workspace tools take
+ * precedence over adapter tools on a name collision.
+ */
+async function buildMergedChatTools(params: {
+  enabledTools: string[];
+  connectorToolResults: McpConnectorToolsResult[];
+  workspaceTools?: ToolSet;
+  attachmentTools?: ToolSet;
+}): Promise<ToolSet | undefined> {
+  const {
+    enabledTools,
+    connectorToolResults,
+    workspaceTools,
+    attachmentTools,
+  } = params;
+  const hasWorkspaceTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
+  const hasAttachmentTools =
+    !!attachmentTools && Object.keys(attachmentTools).length > 0;
+  if (
+    connectorToolResults.length === 0 &&
+    !hasWorkspaceTools &&
+    !hasAttachmentTools
+  ) {
+    return undefined;
+  }
+  const merged: ToolSet = { ...(await createUniversalTools(enabledTools)) };
+  for (const result of connectorToolResults) {
+    Object.assign(merged, result.tools);
+  }
+  if (hasWorkspaceTools) {
+    Object.assign(merged, workspaceTools);
+  }
+  if (hasAttachmentTools) {
+    // This server-built tool is scoped to owner-validated conversation
+    // bindings. It is core input handling (like image input), not a client
+    // selectable capability, so a skill pin cannot remove or widen it.
+    Object.assign(merged, attachmentTools);
+  }
+  return merged;
 }
 
 /**
@@ -121,33 +232,58 @@ async function executeStreaming(params: {
   enabledConnectors: string[];
   connectorToolResults: McpConnectorToolsResult[];
   failedConnectorIds: string[];
+  /** Bound skill's SKILL.md content, injected into the system prompt (#925). */
+  skillInstructions?: string;
+  /** Bound skill's name (labels the injected instruction block). */
+  skillName?: string;
+  /** Server-built AI SDK tools for the open workspace object (Atrium §1087). */
+  workspaceTools?: ToolSet;
+  /** System-prompt line describing the open workspace object + how to edit it. */
+  workspacePromptFragment?: string;
+  /** Owner-validated search over repositories attached to this conversation. */
+  attachmentTools?: ToolSet;
   reasoningEffort: 'minimal' | 'low' | 'medium' | 'high';
   responseMode: 'standard' | 'flex' | 'priority';
   requestId: string;
   dbModelId: number;
   log: ReturnType<typeof createLogger>;
   timer: (data: Record<string, unknown>) => void;
+  precomputedInputTokenMappings?: TokenMapping[];
+  inputTokenMappingSink?: TokenMappingSink;
+  routingMetadata: NexusRoutingMetadata;
 }): Promise<Response> {
   const {
     messages, modelConfig, userId, sessionId, conversationId,
     conversationIdValue, conversationTitle, enabledTools, enabledConnectors,
-    connectorToolResults, failedConnectorIds, reasoningEffort, responseMode, requestId, dbModelId, log, timer
+    connectorToolResults, failedConnectorIds, skillInstructions, skillName,
+    workspaceTools, workspacePromptFragment, attachmentTools,
+    reasoningEffort, responseMode,
+    requestId, dbModelId, log, timer, precomputedInputTokenMappings,
+    inputTokenMappingSink, routingMetadata
   } = params;
 
-  const systemPrompt = `You are a helpful AI assistant in the Nexus interface.`;
+  const hasAttachmentTools =
+    !!attachmentTools && Object.keys(attachmentTools).length > 0;
+  const systemPrompt = buildNexusSystemPrompt(
+    skillInstructions,
+    skillName,
+    workspacePromptFragment,
+    hasAttachmentTools
+  );
 
-  // When MCP connectors are enabled, pre-merge adapter tools + connector tools
-  // and pass as request.tools so the streaming service uses them directly
-  // (skipping adapter.createTools to avoid redundant work).
-  // Connector tools take precedence on name collision.
-  let mergedTools: ToolSet | undefined;
-  if (connectorToolResults.length > 0) {
-    const adapterTools = await createUniversalTools(enabledTools);
-    mergedTools = { ...adapterTools };
-    for (const result of connectorToolResults) {
-      Object.assign(mergedTools, result.tools);
-    }
-  }
+  const hasWorkspaceTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
+  const multiStepToolsActive =
+    connectorToolResults.length > 0 ||
+    hasWorkspaceTools ||
+    hasAttachmentTools;
+
+  // Pre-merge adapter + connector + workspace tools (undefined when none active).
+  const mergedTools = await buildMergedChatTools({
+    enabledTools,
+    connectorToolResults,
+    workspaceTools: hasWorkspaceTools ? workspaceTools : undefined,
+    attachmentTools: hasAttachmentTools ? attachmentTools : undefined,
+  });
 
   const streamRequest: StreamRequest = {
     messages,
@@ -158,16 +294,26 @@ async function executeStreaming(params: {
     conversationId,
     source: 'nexus',
     systemPrompt,
-    enabledTools: mergedTools ? undefined : enabledTools,
+    // Always pass the scoped enabledTools: when `tools` is also set (connector /
+    // workspace merge), the streaming service now merges the model's
+    // provider-native tools UNDER the pre-merged set so web search / code
+    // interpreter aren't dropped just because a connector or workspace is active
+    // (PR #1136 review). Without `tools`, this is the sole tool source as before.
+    enabledTools,
     enabledConnectors,
     tools: mergedTools,
-    // maxSteps enables multi-step tool use (agent loop). Only needed when MCP connector
-    // tools are active — without connectors, the model uses single-step tool calls only.
-    // 10 steps is a reasonable upper bound for MCP tool chains (fetch→process→respond).
-    maxSteps: connectorToolResults.length > 0 ? 10 : undefined,
+    // maxSteps enables multi-step tool use (agent loop). Needed when MCP connector
+    // tools OR workspace content tools (§1087: read→edit→confirm) are active —
+    // without them the model uses single-step tool calls only. 10 steps is a
+    // reasonable upper bound for a read→edit→respond chain.
+    maxSteps: multiStepToolsActive ? 10 : undefined,
     options: { reasoningEffort, responseMode },
+    precomputedInputTokenMappings,
+    inputTokenMappingSink,
     callbacks: {
-      onFinish: createOnFinishCallback({ conversationId, dbModelId, connectorToolResults, log, timer }),
+      onFinish: createOnFinishCallback({
+        conversationId, dbModelId, connectorToolResults, log, timer, routingMetadata,
+      }),
       onError: async (error: Error) => {
         log.warn('Stream error — closing MCP clients', { conversationId, error: error.message });
         await closeMcpClients(connectorToolResults, log, 'onError');
@@ -193,6 +339,9 @@ async function executeStreaming(params: {
     'X-Unified-Streaming': 'true',
     'X-Supports-Reasoning': streamResponse.capabilities.supportsReasoning.toString()
   };
+
+  const encodedRouting = encodeURIComponent(JSON.stringify(routingMetadata));
+  if (encodedRouting.length <= 4096) responseHeaders['X-Nexus-Routing'] = encodedRouting;
 
   if (!conversationIdValue && conversationId) {
     responseHeaders['X-Conversation-Id'] = conversationId;
@@ -245,15 +394,29 @@ const ChatRequestSchema = z.object({
   conversationId: z.string().nullable().optional(),
   enabledTools: z.array(z.string()).optional(),
   enabledConnectors: z.array(z.string().uuid()).max(10).optional(),
+  // When the session is bound to a published skill ("use in chat"), the skill's
+  // `allowed-tools` pin is enforced server-side over the client tool list (#925 AC#6).
+  skillId: z.string().uuid().optional(),
+  // When a workspace document/artifact is open beside the chat (`?workspace=<id|slug>`),
+  // the server binds read/edit tools for THAT object (Atrium §1087). Loose validation
+  // only — the tool builder canView/canEdit-gates server-side; cap length like other params.
+  workspaceId: z.string().min(1).max(200).optional(),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
-  responseMode: z.enum(['standard', 'priority', 'flex']).optional()
-});
+  responseMode: z.enum(['standard', 'priority', 'flex']).optional(),
+  nexusMode: nexusExperienceModeSchema.default('standard'),
+  modelFamily: nexusModelFamilySchema.default('auto'),
+}).refine(
+  value => value.nexusMode === 'standard' || value.modelFamily !== 'auto',
+  { path: ['modelFamily'], message: 'Advanced mode requires ChatGPT, Claude, or Gemini' }
+);
 
 /**
  * Handle image generation models
  */
 async function handleImageGeneration(params: {
   messages: z.infer<typeof ChatRequestSchema>['messages'];
+  persistenceMessages: z.infer<typeof ChatRequestSchema>['messages'];
+  attachmentReferences: NexusAttachmentReference[];
   modelConfig: { provider: string; model_id: string };
   modelId: string;
   dbModelId: number;
@@ -262,10 +425,12 @@ async function handleImageGeneration(params: {
   requestId: string;
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
+  routingMetadata: NexusRoutingMetadata;
 }): Promise<Response> {
   const {
-    messages, modelConfig, modelId, dbModelId, userId,
-    existingConversationId, requestId, timer, log
+    messages, persistenceMessages, attachmentReferences,
+    modelConfig, modelId, dbModelId, userId,
+    existingConversationId, requestId, timer, log, routingMetadata
   } = params;
 
   log.info('Image generation model detected - using direct API call');
@@ -284,7 +449,8 @@ async function handleImageGeneration(params: {
     imagePrompt,
     imageProvider,
     modelId,
-    userId
+    userId,
+    requestId
   });
 
   if ('error' in convResult) {
@@ -293,17 +459,51 @@ async function handleImageGeneration(params: {
 
   const { conversationId, title: conversationTitle } = convResult;
 
-  // Save user message
-  await saveImageUserMessage({ conversationId, imagePrompt, dbModelId });
-
   try {
-    // Extract reference images from message
+    const bindingError = await bindAttachmentReferencesOrError({
+      ownerId: userId,
+      conversationId,
+      references: attachmentReferences,
+      conversationCreated: !existingConversationId,
+      requestId,
+      timer,
+      log,
+    });
+    if (bindingError) return bindingError;
+
+    // Canonical markers are paired only with their server-resolved immutable
+    // source objects. Inline pixels remain supported for legacy/noncanonical
+    // image turns, but cannot impersonate the bytes named by a marker.
     const lastMessage = messages[messages.length - 1];
-    let referenceImages = await extractReferenceImages(lastMessage);
+    let referenceImages;
+    if (attachmentReferences.length > 0) {
+      const canonicalSources = await resolveNexusAttachmentImageSources({
+        ownerId: userId,
+        conversationId,
+        references: attachmentReferences,
+      });
+      if (!canonicalSources) {
+        throw Object.assign(
+          new Error('Canonical image attachment is unavailable'),
+          { type: 'INVALID_ATTACHMENT' }
+        );
+      }
+      referenceImages =
+        await extractCanonicalRepositoryImages(canonicalSources);
+    } else {
+      referenceImages = await extractReferenceImages(
+        lastMessage,
+        conversationId
+      );
+    }
 
     // If no reference images and existing conversation, check previous messages
-    if (existingConversationId && referenceImages.length === 0) {
-      referenceImages = await getPreviousGeneratedImages(existingConversationId);
+    if (
+      attachmentReferences.length === 0 &&
+      existingConversationId &&
+      referenceImages.length === 0
+    ) {
+      referenceImages = await getPreviousGeneratedImages(existingConversationId, userId);
     }
 
     log.info('Image generation - extracted reference images', {
@@ -331,9 +531,41 @@ async function handleImageGeneration(params: {
       referenceImages: referenceImages.length > 0 ? referenceImages : undefined
     });
 
-    // Save assistant message and update stats
-    await saveImageAssistantMessage({ conversationId, imageResult, dbModelId });
-    await updateImageConversationStats(conversationId);
+    // Persist the user prompt + assistant image + stats atomically (REV-DB-047 /
+    // REV-COR-220). Kept after generation (a side effect) so a generation failure
+    // leaves no partial rows and no desynced message_count.
+    const lastPersistenceMessage =
+      persistenceMessages[persistenceMessages.length - 1];
+    const persistedUser = lastPersistenceMessage?.role === 'user'
+      ? extractUserContent(lastPersistenceMessage as UIMessage)
+      : { content: imagePrompt, parts: [{ type: 'text', text: imagePrompt }] };
+    try {
+      await persistImageExchange({
+        conversationId,
+        imagePrompt,
+        userContent: persistedUser.content,
+        userParts: persistedUser.parts,
+        imageResult,
+        dbModelId,
+        routingMetadata: { ...routingMetadata },
+      });
+    } catch (persistenceError) {
+      try {
+        await deleteUnpersistedGeneratedImage({
+          conversationId,
+          s3Key: imageResult.s3Key,
+        });
+      } catch (cleanupError) {
+        log.error('Failed to remove an unpersisted generated image', {
+          conversationId,
+          error:
+            cleanupError instanceof Error
+              ? cleanupError.message
+              : 'Unknown cleanup error',
+        });
+      }
+      throw persistenceError;
+    }
 
     timer({ status: 'success', conversationId });
 
@@ -342,10 +574,41 @@ async function handleImageGeneration(params: {
       conversationId,
       conversationTitle,
       isNewConversation: !existingConversationId,
-      requestId
+      requestId,
+      routingMetadata: { ...routingMetadata },
     });
 
   } catch (imageError) {
+    if (!existingConversationId && attachmentReferences.length > 0) {
+      try {
+        await rollbackNewNexusAttachmentConversation({
+          ownerId: userId,
+          conversationId,
+        });
+      } catch (cleanupError) {
+        log.error('Failed to compensate a failed image attachment turn', {
+          conversationId,
+          error:
+            cleanupError instanceof Error
+              ? cleanupError.message
+              : 'Unknown cleanup error',
+        });
+        timer({
+          status: 'error',
+          reason: 'attachment_binding_cleanup_failed',
+        });
+        return new Response(
+          JSON.stringify({
+            error: 'Unable to attach repository content',
+            requestId,
+          }),
+          {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
+      }
+    }
     return handleImageGenerationError(imageError, conversationId, requestId);
   }
 }
@@ -395,10 +658,11 @@ async function handleDeepResearch(params: {
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
   abortSignal: AbortSignal;
+  routingMetadata: NexusRoutingMetadata;
 }): Promise<Response> {
   const {
     messages, modelConfig, modelId, dbModelId, userId,
-    existingConversationId, requestId, timer, log, abortSignal,
+    existingConversationId, requestId, timer, log, abortSignal, routingMetadata,
   } = params;
 
   log.info('Deep Research model detected — using Interactions API', {
@@ -435,10 +699,12 @@ async function handleDeepResearch(params: {
     userId,
     provider: modelConfig.provider,
     modelId,
-    dbModelId,
+    requestId,
+    log,
   });
   if ('error' in convSetup) return convSetup.error;
   const { conversationId, conversationTitle } = convSetup;
+  await persistLastUserMessage({ conversationId, messages, dbModelId });
 
   const messageId = `dr-${Date.now()}`;
   const isNewConversation = !existingConversationId;
@@ -447,6 +713,7 @@ async function handleDeepResearch(params: {
     'X-Request-Id': requestId,
     'X-Conversation-Id': conversationId,
     'X-Deep-Research': 'true',
+    'X-Nexus-Routing': encodeURIComponent(JSON.stringify(routingMetadata)),
   };
   if (isNewConversation) {
     responseHeaders['X-Conversation-Title'] = encodeURIComponent(conversationTitle);
@@ -513,6 +780,7 @@ async function handleDeepResearch(params: {
               text: persisted,
               finishReason: 'stop',
               dbModelId,
+              metadata: { routing: routingMetadata },
             });
           } catch (persistErr) {
             log.error('Failed to persist Deep Research message', {
@@ -561,6 +829,8 @@ async function routeSpecialModel(params: {
   isImageGenerationModel: boolean;
   isDeepResearchModel: boolean;
   messages: z.infer<typeof ChatRequestSchema>['messages'];
+  persistenceMessages: z.infer<typeof ChatRequestSchema>['messages'];
+  attachmentReferences: NexusAttachmentReference[];
   modelConfig: { provider: string; model_id: string };
   modelId: string;
   dbModelId: number;
@@ -570,6 +840,7 @@ async function routeSpecialModel(params: {
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
   abortSignal: AbortSignal;
+  routingMetadata: NexusRoutingMetadata;
 }): Promise<Response | null> {
   if (params.isImageGenerationModel) {
     // Note: abortSignal is intentionally not forwarded to handleImageGeneration.
@@ -578,6 +849,8 @@ async function routeSpecialModel(params: {
     // that requires abort propagation due to its 5–25 minute polling lifecycle.
     return handleImageGeneration({
       messages: params.messages,
+      persistenceMessages: params.persistenceMessages,
+      attachmentReferences: params.attachmentReferences,
       modelConfig: params.modelConfig,
       modelId: params.modelId,
       dbModelId: params.dbModelId,
@@ -586,6 +859,7 @@ async function routeSpecialModel(params: {
       requestId: params.requestId,
       timer: params.timer,
       log: params.log,
+      routingMetadata: params.routingMetadata,
     });
   }
   if (params.isDeepResearchModel) {
@@ -600,6 +874,7 @@ async function routeSpecialModel(params: {
       timer: params.timer,
       log: params.log,
       abortSignal: params.abortSignal,
+      routingMetadata: params.routingMetadata,
     });
   }
   return null;
@@ -653,6 +928,26 @@ function validateConversationId(id: string | undefined, requestId: string, log: 
   return null;
 }
 
+function withProtectedLastUserText(
+  messages: z.infer<typeof ChatRequestSchema>['messages'],
+  protectedText: string
+): z.infer<typeof ChatRequestSchema>['messages'] {
+  const lastUserIndex = messages.findLastIndex(message => message.role === 'user');
+  if (lastUserIndex < 0) return messages;
+  return messages.map((message, index) => {
+    if (index !== lastUserIndex) return message;
+    const nonTextParts = (message.parts ?? []).filter(part => {
+      if (!part || typeof part !== 'object') return true;
+      return (part as Record<string, unknown>).type !== 'text';
+    });
+    return {
+      ...message,
+      content: protectedText,
+      parts: [{ type: 'text', text: protectedText }, ...nonTextParts],
+    };
+  });
+}
+
 /**
  * Authenticate user and return user ID or error response
  */
@@ -675,6 +970,68 @@ async function authenticateUser(
 
   const userRoleNames = currentUser.data.roles.map(r => r.name);
   return { userId: currentUser.data.user.id, userRoleNames, session };
+}
+
+/**
+ * Protect classifier traffic with the same K-12 guardrail and PII tokenization
+ * boundary as response-model traffic. The main stream performs its own pass so
+ * it can retain token mappings for output detokenization; this preflight exists
+ * specifically to ensure the internal router never receives raw PII.
+ */
+async function prepareRoutingText(text: string, sessionId: string): Promise<{
+  text: string;
+  contentModified: boolean;
+}> {
+  if (!text.trim()) return { text, contentModified: false };
+  const result = await getContentSafetyService().processInput(text, sessionId);
+  if (!result.allowed) {
+    throw new ContentSafetyBlockedError(
+      result.blockedMessage || 'Content blocked by safety guardrails',
+      result.blockedCategories || [],
+      'input'
+    );
+  }
+  return { text: result.processedContent, contentModified: result.contentModified };
+}
+
+async function resolveRequestRouting(args: {
+  messages: z.infer<typeof ChatRequestSchema>['messages'];
+  fallbackModelId: string;
+  nexusMode: z.infer<typeof nexusExperienceModeSchema>;
+  modelFamily: z.infer<typeof nexusModelFamilySchema>;
+  manuallyEnabledConnectors: string[];
+  manuallyEnabledTools: string[];
+  userId: number;
+  sessionId: string;
+  existingConversationId?: string;
+}): Promise<{
+  routing: Awaited<ReturnType<typeof routeNexusRequest>>;
+  specialRouteMessages: z.infer<typeof ChatRequestSchema>['messages'];
+}> {
+  const rawRoutingText = extractImagePrompt(args.messages);
+  const protectedRoutingInput = await prepareRoutingText(rawRoutingText, args.sessionId);
+  const imageContext = await getImageRoutingContext({
+    messages: args.messages,
+    conversationId: args.existingConversationId,
+    userId: args.userId,
+  });
+  const routing = await routeNexusRequest({
+    text: protectedRoutingInput.text,
+    fallbackModelId: args.fallbackModelId,
+    experienceMode: args.nexusMode,
+    requestedFamily: args.nexusMode === 'advanced' ? args.modelFamily : 'auto',
+    enabledConnectorIds: args.manuallyEnabledConnectors,
+    enabledToolNames: args.manuallyEnabledTools,
+    userId: args.userId,
+    hasImageInput: imageContext.hasImageInput,
+    hasPreviousGeneratedImage: imageContext.hasPreviousGeneratedImage,
+  });
+  return {
+    routing,
+    specialRouteMessages: protectedRoutingInput.contentModified
+      ? withProtectedLastUserText(args.messages, protectedRoutingInput.text)
+      : args.messages,
+  };
 }
 
 /**
@@ -701,37 +1058,181 @@ async function getValidatedModelConfig(
   }
 
   const dbModelId = modelConfig.id;
-  const modelWithCapabilities = await getAIModelById(dbModelId);
-  const isImageGenerationModel = hasCapability(modelWithCapabilities?.capabilities, 'imageGeneration');
-  const isDeepResearchModel = hasCapability(modelWithCapabilities?.capabilities, 'deepResearch');
+  // REV-PERF-002: derive capability flags from the row getModelConfig already
+  // fetched — the previous getAIModelById(dbModelId) here was a second SELECT of the
+  // identical ai_models row on every chat/image/deep-research request.
+  const isImageGenerationModel = hasCapability(modelConfig.capabilities, 'imageGeneration');
+  const isDeepResearchModel = hasCapability(modelConfig.capabilities, 'deepResearch');
 
   return { modelConfig, dbModelId, isImageGenerationModel, isDeepResearchModel };
 }
 
-/**
- * Setup conversation - create new or use existing, save user message
- */
+/** Create a conversation or verify ownership of an existing one. */
 async function setupConversation(params: {
   conversationIdValue?: string;
   messages: z.infer<typeof ChatRequestSchema>['messages'];
   userId: number;
   provider: string;
   modelId: string;
-  dbModelId: number;
-}): Promise<{ conversationId: string; conversationTitle: string } | { error: Response }> {
-  const { conversationIdValue, messages, userId, provider, modelId, dbModelId } = params;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+}): Promise<{
+  conversationId: string;
+  conversationTitle: string;
+  created: boolean;
+} | { error: Response }> {
+  const { conversationIdValue, messages, userId, provider, modelId, requestId, log } = params;
 
   let conversationId = conversationIdValue || '';
   let conversationTitle = 'New Conversation';
+  let created = false;
 
   if (!conversationId) {
     conversationTitle = generateConversationTitle(messages as UIMessage[]);
     const convResult = await createConversation({ userId, provider, modelId, title: conversationTitle });
     if ('error' in convResult) return convResult;
     conversationId = convResult.conversationId;
+    created = true;
+  } else {
+    // Verify the authenticated user owns this conversation before appending messages.
+    // Without this check any authenticated user can inject messages into any conversation.
+    const owned = await executeQuery(
+      (db) => db
+        .select({ id: nexusConversations.id })
+        .from(nexusConversations)
+        .where(and(
+          eq(nexusConversations.id, conversationId),
+          eq(nexusConversations.userId, userId)
+        ))
+        .limit(1),
+      'verifyConversationOwnership'
+    );
+    if (!owned || owned.length === 0) {
+      log.warn('Conversation ownership check failed — access denied', { conversationId, userId });
+      return {
+        error: new Response(
+          JSON.stringify({ error: 'Conversation not found or access denied', requestId }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
+        )
+      };
+    }
   }
 
-  // Save user message — guard against truly empty messages (no parts, no content)
+  return { conversationId, conversationTitle, created };
+}
+
+async function bindAttachmentReferencesOrError(params: {
+  ownerId: number;
+  conversationId: string;
+  references: NexusAttachmentReference[];
+  conversationCreated: boolean;
+  requestId: string;
+  timer: (data: Record<string, unknown>) => void;
+  log: ReturnType<typeof createLogger>;
+}): Promise<Response | null> {
+  if (params.references.length === 0) return null;
+  try {
+    await bindNexusRequestAttachmentReferences({
+      ownerId: params.ownerId,
+      conversationId: params.conversationId,
+      references: params.references,
+      conversationCreated: params.conversationCreated,
+    });
+    return null;
+  } catch (error) {
+    params.log.warn("Nexus attachment binding rejected", {
+      ownerId: params.ownerId,
+      conversationId: params.conversationId,
+      referenceCount: params.references.length,
+    });
+    if (error instanceof NexusAttachmentBindingCleanupError) {
+      params.log.error("Failed to remove rejected empty Nexus conversation", {
+        conversationId: params.conversationId,
+        error: error.message,
+      });
+      params.timer({
+        status: "error",
+        reason: "attachment_binding_cleanup_failed",
+      });
+      return new Response(
+        JSON.stringify({
+          error: "Unable to attach repository content",
+          requestId: params.requestId,
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+    if (!(error instanceof NexusAttachmentBindingRejectedError)) throw error;
+    params.timer({ status: "error", reason: "attachment_not_found" });
+    return new Response(
+      JSON.stringify({
+        error: "Attachment not found or access denied",
+        requestId: params.requestId,
+      }),
+      {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+}
+
+async function preflightAttachmentReferencesOrError(params: {
+  ownerId: number;
+  messages: z.infer<typeof ChatRequestSchema>['messages'];
+  requestId: string;
+  timer: (data: Record<string, unknown>) => void;
+}): Promise<
+  | { preflight: NexusAttachmentRequestPreflight }
+  | { error: Response }
+> {
+  try {
+    const preflight = await preflightNexusAttachmentReferences({
+      ownerId: params.ownerId,
+      messages: params.messages,
+    });
+    if (preflight) return { preflight };
+    params.timer({ status: "error", reason: "attachment_not_found" });
+    return {
+      error: new Response(
+        JSON.stringify({
+          error: "Attachment not found or access denied",
+          requestId: params.requestId,
+        }),
+        {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }
+      ),
+    };
+  } catch (error) {
+    if (!(error instanceof NexusAttachmentTurnLimitError)) throw error;
+    params.timer({ status: "error", reason: "attachment_limit" });
+    return {
+      error: new Response(
+        JSON.stringify({
+          error: error.message,
+          requestId: params.requestId,
+        }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }
+      ),
+    };
+  }
+}
+
+async function persistLastUserMessage(params: {
+  conversationId: string;
+  messages: z.infer<typeof ChatRequestSchema>['messages'];
+  dbModelId: number;
+}): Promise<void> {
+  const { conversationId, messages, dbModelId } = params;
+  // Guard against truly empty messages (no parts, no content)
   // while preserving attachment-only turns. The guard checks the ORIGINAL message
   // from the client (which includes file/attachment parts), not the extracted content.
   // extractUserContent() only serializes text/image parts, so attachment-only messages
@@ -748,8 +1249,417 @@ async function setupConversation(params: {
       await saveUserMessage({ conversationId, content, parts, dbModelId });
     }
   }
+}
 
-  return { conversationId, conversationTitle };
+/**
+ * Extract plain text from a single message part (document or file type).
+ * Returns null when the part has no accessible text (e.g. an S3-only reference).
+ */
+function extractPartText(part: Record<string, unknown>): string | null {
+  const raw = part.content ?? part.data;
+  if (typeof raw === 'string' && raw.trim()) return raw;
+  if (Array.isArray(raw)) {
+    const segments = raw
+      .filter(
+        (cp): cp is { type: string; text: string } =>
+          typeof cp === 'object' && cp !== null &&
+          (cp as Record<string, unknown>).type === 'text' &&
+          typeof (cp as Record<string, unknown>).text === 'string'
+      )
+      .map(cp => cp.text);
+    if (segments.length > 0) return segments.join('\n');
+  }
+  return null;
+}
+
+/**
+ * Collect extractable text from document/file parts of a message, paired with
+ * their part index. Extracted from scanAttachmentPII to keep that function's
+ * cyclomatic complexity within bounds.
+ */
+function collectAttachmentTexts(
+  parts: unknown[]
+): Array<{ partIdx: number; text: string }> {
+  const out: Array<{ partIdx: number; text: string }> = [];
+  for (const [partIdx, part] of parts.entries()) {
+    const p = part as Record<string, unknown>;
+    if (p.type === 'document' || p.type === 'file') {
+      const text = extractPartText(p);
+      if (text) out.push({ partIdx, text });
+    }
+  }
+  return out;
+}
+
+/**
+ * Scan PII in file / document attachment parts of the last user message BEFORE
+ * processMessagesWithAttachments moves their content to S3. Returns token
+ * mappings produced by the scan and mutates `messagesWithParts` in-place so
+ * that document text is tokenized before being stored.
+ *
+ * This runs at the route level so that:
+ * 1. The extracted document text is available (not yet replaced with s3:// refs).
+ * 2. Token mappings can be passed to executeStreaming as `precomputedInputTokenMappings`
+ *    and merged with inline-text tokens from the streaming service's own scan.
+ */
+async function scanAttachmentPII(
+  messagesWithParts: UIMessage[],
+  sessionId: string,
+  log: ReturnType<typeof createLogger>,
+  requestId: string
+): Promise<TokenMapping[]> {
+  const contentSafetyService = getContentSafetyService();
+  if (!contentSafetyService.isPiiTokenizationEnabled()) return [];
+
+  // findIndex returns -1 when no user message exists; check before computing the index
+  // to avoid the silent out-of-bounds: length-1-(-1) = length (always positive).
+  const reversedIdx = [...messagesWithParts].reverse().findIndex(m => m.role === 'user');
+  if (reversedIdx === -1) return [];
+  const lastUserIdx = messagesWithParts.length - 1 - reversedIdx;
+
+  const lastUserMsg = messagesWithParts[lastUserIdx];
+  if (!Array.isArray(lastUserMsg.parts)) return [];
+
+  const attachmentTexts = collectAttachmentTexts(lastUserMsg.parts);
+
+  if (attachmentTexts.length === 0) return [];
+
+  const combinedText = attachmentTexts.map(a => a.text).join('\n');
+  log.info('Running pre-flight PII scan on attachment text', {
+    requestId,
+    attachmentCount: attachmentTexts.length,
+    combinedLength: combinedText.length,
+  });
+
+  const scanResult = await contentSafetyService.processInput(combinedText, sessionId)
+    .catch((err: unknown) => {
+      log.warn('Pre-flight attachment PII scan failed — continuing without tokenization', {
+        requestId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    });
+
+  if (!scanResult || !scanResult.tokens || scanResult.tokens.length === 0) return [];
+
+  // Build a quick-lookup map: original value → placeholder string (e.g. "[PII:uuid]")
+  // TokenMapping.token is the raw UUID; TokenMapping.placeholder is the formatted
+  // [PII:uuid] string that the model receives and the detokenizer looks up.
+  const replacements = new Map(scanResult.tokens.map(t => [t.original, t.placeholder]));
+
+  // Apply tokenization to each attachment part text in-place
+  const updatedParts = [...lastUserMsg.parts];
+  for (const { partIdx, text } of attachmentTexts) {
+    let tokenizedText = text;
+    for (const [original, placeholder] of replacements) {
+      tokenizedText = tokenizedText.replaceAll(original, placeholder);
+    }
+    if (tokenizedText === text) continue;
+
+    const originalPart = updatedParts[partIdx] as Record<string, unknown>;
+    // Preserve whichever field held the text (content vs data)
+    const field = originalPart.content !== undefined ? 'content' : 'data';
+    const rawValue = originalPart[field];
+
+    if (typeof rawValue === 'string') {
+      updatedParts[partIdx] = { ...originalPart, [field]: tokenizedText } as typeof updatedParts[number];
+    } else if (Array.isArray(rawValue)) {
+      const tokenizedArray = rawValue.map(cp => {
+        const cpObj = cp as Record<string, unknown>;
+        if (cpObj.type === 'text' && typeof cpObj.text === 'string') {
+          let tokenizedSegment = cpObj.text;
+          for (const [orig, ph] of replacements) tokenizedSegment = tokenizedSegment.replaceAll(orig, ph);
+          return { ...cpObj, text: tokenizedSegment };
+        }
+        return cp;
+      });
+      updatedParts[partIdx] = { ...originalPart, [field]: tokenizedArray } as typeof updatedParts[number];
+    }
+  }
+
+  messagesWithParts[lastUserIdx] = { ...lastUserMsg, parts: updatedParts };
+  log.info('Pre-flight attachment PII tokenized', {
+    requestId,
+    tokenCount: scanResult.tokens.length,
+  });
+
+  return scanResult.tokens;
+}
+
+/**
+ * Resolve MCP connector tools for all enabled connectors (parallel fetch). Pure:
+ * returns the resolved results and the list of connector IDs that failed, without
+ * mutating any caller-supplied array. Extracted from POST to keep the route
+ * handler's cyclomatic complexity within bounds.
+ */
+async function resolveConnectorTools(params: {
+  enabledConnectors: string[];
+  userId: number;
+  userRoleNames: string[];
+  idToken?: string;
+  log: ReturnType<typeof createLogger>;
+}): Promise<{ resolved: McpConnectorToolsResult[]; failedIds: string[] }> {
+  const { enabledConnectors, userId, userRoleNames, idToken, log } = params;
+  const resolved: McpConnectorToolsResult[] = [];
+  const failedIds: string[] = [];
+  if (enabledConnectors.length === 0) return { resolved, failedIds };
+
+  log.info('Resolving MCP connector tools', { connectorCount: enabledConnectors.length });
+  const connectorOptions = idToken ? { idToken } : undefined;
+  const results = await Promise.allSettled(
+    enabledConnectors.map(serverId => getConnectorTools(serverId, userId, userRoleNames, connectorOptions))
+  );
+  for (const [i, result] of results.entries()) {
+    if (result.status === 'fulfilled') {
+      resolved.push(result.value);
+    } else {
+      failedIds.push(enabledConnectors[i]);
+      log.warn('Failed to resolve connector tools', {
+        serverId: enabledConnectors[i],
+        error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+      });
+    }
+  }
+  log.info('MCP connector tools resolved', {
+    requested: enabledConnectors.length,
+    resolved: resolved.length,
+    failed: failedIds.length,
+    totalTools: resolved.reduce((sum, r) => sum + Object.keys(r.tools).length, 0)
+  });
+  return { resolved, failedIds };
+}
+
+/**
+ * Scope-gate built-in (AI SDK) tools via the unified tool catalog (#924). The
+ * client-supplied `enabledTools` is untrusted; the catalog drops any AI SDK tool
+ * the caller's role-derived scopes don't permit. Uncataloged tool names pass
+ * through unchanged (downstream model-capability filtering still applies).
+ */
+async function scopeFilterEnabledTools(
+  enabledTools: string[],
+  userRoleNames: string[],
+  log: ReturnType<typeof createLogger>
+): Promise<string[]> {
+  const callerScopes = getScopesForRoles(userRoleNames);
+  const scoped = await toolCatalogInstance.filterAiSdkToolNames(enabledTools, callerScopes);
+  if (scoped.length !== enabledTools.length) {
+    log.info('Tool catalog filtered enabled tools by scope', {
+      requested: enabledTools.length,
+      allowed: scoped.length,
+    });
+  }
+  return scoped;
+}
+
+function assertAutomaticToolsAvailable(
+  automaticToolNames: string[],
+  availableToolNames: string[]
+): void {
+  const available = new Set(availableToolNames);
+  if (automaticToolNames.some(toolName => !available.has(toolName))) {
+    throw new NexusSpecialistUnavailableError(
+      'web-search',
+      'Web search is not available for your account or the currently loaded skill. Ask an administrator to enable the Web Search tool.'
+    );
+  }
+}
+
+async function scopeRoutedEnabledTools(args: {
+  manuallyEnabledToolNames: string[];
+  automaticToolNames: string[];
+  userRoleNames: string[];
+  log: ReturnType<typeof createLogger>;
+}): Promise<string[]> {
+  const requested = mergeRoutedToolNames(
+    args.manuallyEnabledToolNames,
+    args.automaticToolNames
+  );
+  const scoped = await scopeFilterEnabledTools(requested, args.userRoleNames, args.log);
+  assertAutomaticToolsAvailable(args.automaticToolNames, scoped);
+  return scoped;
+}
+
+const NEXUS_BASE_SYSTEM_PROMPT = `You are a helpful AI assistant in the Nexus interface.
+
+When discussing hardware, networking equipment, or technical specifications, treat model numbers, part numbers, and product identifiers as publicly available product information. Do not suggest that such identifiers have been redacted or withheld.
+
+IMPORTANT: If text contains privacy tokens like [PII:xxxx-xxxx-xxxx-xxxx], preserve them exactly as written. Do not modify, expand, or interpret these tokens.`;
+
+/**
+ * Build the session system prompt. Skill session binding (#925): the bound
+ * skill's SKILL.md is appended so the session follows the skill's instructions
+ * (the tool pin alone restricted tools without changing behavior — epic #922
+ * completion audit). The content is the scanned, admin-approved artifact loaded
+ * server-side; it is never taken from the client.
+ */
+function buildNexusSystemPrompt(
+  skillInstructions: string | undefined,
+  skillName: string | undefined,
+  workspacePromptFragment?: string,
+  hasAttachmentTools = false
+): string {
+  let prompt = NEXUS_BASE_SYSTEM_PROMPT;
+  if (skillInstructions) {
+    prompt += `\n\n---\n\nThe user has loaded the skill "${skillName ?? 'skill'}" into this session. Follow its instructions below for this conversation.\n\n${skillInstructions}`;
+  }
+  // Atrium §1087: when a workspace document/artifact is open beside the chat,
+  // tell the model it can act on that object via the workspace tools.
+  if (workspacePromptFragment) {
+    prompt += `\n\n---\n\n${workspacePromptFragment}`;
+  }
+  if (hasAttachmentTools) {
+    prompt +=
+      "\n\n---\n\nThe user attached private repository content to this conversation. " +
+      "Use searchNexusAttachments before making claims about those attachments. " +
+      "Cite the returned source labels and never invent content that was not returned.";
+  }
+  return prompt;
+}
+
+/**
+ * Load the session's bound skill (#925 AC#4/#6 — epic #922 completion audit).
+ * Returns the approved skill's session data (allowed-tools pin + name + s3Key)
+ * plus its SKILL.md instructions, or null when no skill is bound or the id is
+ * unknown/unapproved (callers must then neither loosen tools nor inject
+ * instructions). The SKILL.md read is best-effort: a missing artifact still
+ * enforces the pin, it just injects nothing.
+ */
+async function loadBoundSkill(
+  skillId: string | undefined,
+  log: ReturnType<typeof createLogger>
+): Promise<(ApprovedSkillSession & { instructions: string | null }) | null> {
+  if (!skillId) return null;
+  const session = await getApprovedSkillSession(skillId);
+  if (!session) {
+    log.warn('Session bound to unknown/unapproved skill; not enforcing tool pin', { skillId });
+    return null;
+  }
+  const instructions = await readSkillMarkdown(session.s3Key);
+  if (instructions === null) {
+    log.warn('Bound skill has no readable SKILL.md; enforcing pin without instructions', {
+      skillId,
+    });
+  }
+  return { ...session, instructions };
+}
+
+/**
+ * Apply a bound skill's session binding over the already-scope-filtered tool
+ * list (#925 — epic #922 completion audit): intersect the built-in tools with
+ * the skill's `allowed-tools`, filter the MCP connector tool sets by the same
+ * pin (leaving connectors unpinned let a skill-bound session call any external
+ * tool), and surface the skill's SKILL.md for system-prompt injection. With no
+ * skillId (or an unknown/unapproved one) everything passes through unchanged.
+ */
+async function applySkillSessionBinding(args: {
+  scopedEnabledTools: string[];
+  connectorToolResults: McpConnectorToolsResult[];
+  skillId: string | undefined;
+  log: ReturnType<typeof createLogger>;
+}): Promise<{
+  scopedEnabledTools: string[];
+  effectiveConnectorToolResults: McpConnectorToolsResult[];
+  skillInstructions: string | undefined;
+  skillName: string | undefined;
+  /**
+   * The bound skill's `allowed-tools` pin (empty = no pin / no skill). Callers
+   * apply it to ANY additional tool set they add after this binding — e.g. the
+   * workspace content tools (§1087) — so a restrictive skill can't be widened by
+   * opening a workspace (PR #1136 review, codex P2).
+   */
+  skillAllowedTools: string[];
+}> {
+  const { connectorToolResults, skillId, log } = args;
+  const boundSkill = await loadBoundSkill(skillId, log);
+  if (!boundSkill) {
+    return {
+      scopedEnabledTools: args.scopedEnabledTools,
+      effectiveConnectorToolResults: connectorToolResults,
+      skillInstructions: undefined,
+      skillName: undefined,
+      skillAllowedTools: [],
+    };
+  }
+  const scopedEnabledTools = intersectSkillAllowedTools(
+    args.scopedEnabledTools,
+    boundSkill.allowedTools
+  );
+  const effectiveConnectorToolResults = filterConnectorToolsByPin(
+    connectorToolResults,
+    boundSkill.allowedTools
+  );
+  log.info('Skill session binding applied', {
+    skillId,
+    toolsBefore: args.scopedEnabledTools.length,
+    toolsAfter: scopedEnabledTools.length,
+    connectorToolsAfter: effectiveConnectorToolResults.reduce(
+      (n, r) => n + Object.keys(r.tools).length,
+      0
+    ),
+    hasInstructions: boundSkill.instructions !== null,
+  });
+  return {
+    scopedEnabledTools,
+    effectiveConnectorToolResults,
+    skillInstructions: boundSkill.instructions ?? undefined,
+    skillName: boundSkill.name,
+    skillAllowedTools: boundSkill.allowedTools,
+  };
+}
+
+/**
+ * Apply a bound skill's `allowed-tools` pin to the workspace content tools
+ * (§1087 — PR #1136 review): with a non-empty pin, keep only workspace tools the
+ * skill explicitly allows (by tool name); an empty pin (no skill / unpinned)
+ * leaves them untouched. Prevents a restrictive skill from being silently widened
+ * with document/artifact-edit tools just because a workspace is open.
+ */
+function filterWorkspaceToolsBySkillPin(
+  tools: ToolSet | undefined,
+  skillAllowedTools: string[]
+): ToolSet | undefined {
+  if (!tools || skillAllowedTools.length === 0) return tools;
+  const allowedNames = intersectSkillAllowedTools(Object.keys(tools), skillAllowedTools);
+  const allowed = new Set(allowedNames);
+  return Object.fromEntries(
+    Object.entries(tools).filter(([name]) => allowed.has(name))
+  ) as ToolSet;
+}
+
+/**
+ * Bind the open-workspace content tools for the chat request (Atrium §1087), or
+ * null when no workspace is open. Extracted so POST stays under the complexity
+ * budget; `buildWorkspaceChatTools` already canView/canEdit-gates and returns
+ * null on a bad/unviewable id.
+ */
+async function bindWorkspaceTools(
+  workspaceId: string | undefined,
+  userId: number,
+  requestId: string
+): Promise<Awaited<ReturnType<typeof buildWorkspaceChatTools>>> {
+  if (!workspaceId) return null;
+  return buildWorkspaceChatTools({ workspaceIdOrSlug: workspaceId, userId, requestId });
+}
+
+/**
+ * Bind the §1087 workspace tools AND apply the bound skill's allowed-tools pin to
+ * them, returning the (possibly empty) tool set + the matching prompt fragment.
+ * Extracted so POST stays under the complexity budget (PR #1136 review).
+ */
+async function bindWorkspaceToolsForChat(args: {
+  workspaceId: string | undefined;
+  userId: number;
+  requestId: string;
+  skillAllowedTools: string[];
+}): Promise<{ workspaceTools: ToolSet | undefined; workspacePromptFragment: string | undefined }> {
+  const workspace = await bindWorkspaceTools(args.workspaceId, args.userId, args.requestId);
+  const workspaceTools = filterWorkspaceToolsBySkillPin(workspace?.tools, args.skillAllowedTools);
+  // Drop the prompt fragment when the pin filtered every workspace tool away.
+  const hasTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
+  return {
+    workspaceTools,
+    workspacePromptFragment: hasTools ? workspace?.systemPromptFragment : undefined,
+  };
 }
 
 /**
@@ -771,21 +1681,109 @@ export async function POST(req: Request) {
     const validation = validateRequest(body, requestId, log);
     if (!validation.valid) return validation.error;
 
-    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [], enabledConnectors = [] } = validation.data;
+    const {
+      messages,
+      modelId: fallbackModelId,
+      conversationId: existingConversationId,
+      enabledTools = [],
+      enabledConnectors: manuallyEnabledConnectors = [],
+      skillId,
+      workspaceId,
+      nexusMode,
+      modelFamily,
+    } = validation.data;
     const conversationIdValue = existingConversationId || undefined;
 
     // 2. Validate conversation ID format
     const convIdError = validateConversationId(conversationIdValue, requestId, log);
     if (convIdError) return convIdError;
 
-    log.info('Request parsed', sanitizeForLogging({ messageCount: messages.length, modelId, provider, hasConversationId: !!conversationIdValue, enabledTools }));
+    log.info('Request parsed', sanitizeForLogging({
+      messageCount: messages.length, fallbackModelId, nexusMode, modelFamily,
+      hasConversationId: !!conversationIdValue, enabledTools,
+    }));
 
     // 3. Authenticate user
     const authResult = await authenticateUser(log, timer);
     if ('error' in authResult) return authResult.error;
     const { userId, userRoleNames, session } = authResult;
 
-    // 4. Get model configuration
+    // Resolve the current turn's opaque references before routing or creating a
+    // conversation. Forged, expired, and foreign markers therefore leave no
+    // durable conversation/message side effects.
+    const attachmentPreflightResult =
+      await preflightAttachmentReferencesOrError({
+        ownerId: userId,
+        messages,
+        requestId,
+        timer,
+      });
+    if ('error' in attachmentPreflightResult) {
+      return attachmentPreflightResult.error;
+    }
+    const attachmentPreflight = attachmentPreflightResult.preflight;
+    const preparedRequestMessages = prepareRepositoryAttachmentMessages(
+      messages as UIMessage[],
+      attachmentPreflight.resolutions.map((resolution) => ({
+        bindingId: resolution.bindingId,
+        itemId: resolution.itemId,
+        name: resolution.itemName,
+      }))
+    );
+    // From this point forward every request representation is server-canonical:
+    // caller-controlled names are replaced with repository item names. The
+    // provider copy removes opaque ids before safety/routing/model calls; the
+    // persistence copy retains validated metadata for durable UI reconstruction.
+    const safePersistenceMessages =
+      preparedRequestMessages.messages as z.infer<
+        typeof ChatRequestSchema
+      >['messages'];
+    const safeModelMessages =
+      preparedRequestMessages.modelMessages as z.infer<
+        typeof ChatRequestSchema
+      >['messages'];
+
+    // Model routing happens before the first-turn repository is bound, so
+    // account for both opaque references on this request and repositories
+    // already bound to a resumed conversation. This keeps specialist-only or
+    // explicitly non-function-calling models away from a required retrieval
+    // tool path.
+    const preboundAttachmentRepositoryIds = conversationIdValue
+      ? await resolveNexusConversationRepositoryIds({
+          ownerId: userId,
+          conversationId: conversationIdValue,
+        })
+      : [];
+    const requiresAttachmentTools =
+      preboundAttachmentRepositoryIds.length > 0 ||
+      attachmentPreflight.requiresAttachmentTools;
+    const routingEnabledTools = requiresAttachmentTools
+      ? [...new Set([...enabledTools, 'searchNexusAttachments'])]
+      : enabledTools;
+
+    // 4. Classify and resolve the model. In shadow mode this records the proposed
+    // route while continuing to execute the client's existing safe fallback.
+    const { routing, specialRouteMessages } = await resolveRequestRouting({
+      messages: safeModelMessages,
+      fallbackModelId,
+      nexusMode,
+      modelFamily,
+      manuallyEnabledConnectors,
+      manuallyEnabledTools: routingEnabledTools,
+      userId,
+      sessionId: session.sub,
+      existingConversationId: conversationIdValue,
+    });
+    const modelId = routing.modelId;
+    const enabledConnectors = routing.connectorIds;
+    const catalogScopedEnabledTools = await scopeRoutedEnabledTools({
+      manuallyEnabledToolNames: enabledTools,
+      automaticToolNames: routing.automaticToolNames,
+      userRoleNames,
+      log,
+    });
+
+    // 4a. Get selected model configuration
     const modelResult = await getValidatedModelConfig(modelId, log);
     if ('error' in modelResult) return modelResult.error;
     const { modelConfig, dbModelId, isImageGenerationModel, isDeepResearchModel } = modelResult;
@@ -798,57 +1796,149 @@ export async function POST(req: Request) {
       isDeepResearch: isDeepResearchModel,
     }));
 
+    // 4b. Per-resource access enforcement (#1206). The model selector is
+    // client-side and bypassable (a crafted request can name any model id), so
+    // the server must reject a model the user has no role/group grant for. A
+    // model with zero grants is unrestricted; administrators always pass. This
+    // gates ALL downstream paths (special routes AND standard streaming).
+    if (!(await userCanAccessResource(userId, 'model', dbModelId))) {
+      log.warn('Forbidden model for user', { userId, dbModelId, modelId: modelConfig.model_id });
+      timer({ status: 'error', reason: 'forbidden_model' });
+      return new Response(
+        JSON.stringify({ success: false, message: 'You do not have access to this model' }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Deep Research uses a provider-specific polling API and has no repository
+    // tool loop. Canonical inputs must never be silently persisted as opaque
+    // prompt text while their repositories remain unbound. Image generation is
+    // the only specialist path that explicitly binds inline-shadow references.
+    if (
+      isDeepResearchModel &&
+      attachmentPreflight.references.length > 0
+    ) {
+      timer({ status: 'error', reason: 'deep_research_attachment_unsupported' });
+      return new Response(
+        JSON.stringify({
+          error:
+            'Deep Research does not support attached repository content. Choose a chat model for this request.',
+          requestId,
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
     // 5. Capability-based routing — image gen and Deep Research bypass
     // the standard streaming pipeline.
     const specialRoute = await routeSpecialModel({
       isImageGenerationModel, isDeepResearchModel,
-      messages, modelConfig, modelId, dbModelId, userId,
+      messages: specialRouteMessages,
+      persistenceMessages: safePersistenceMessages,
+      attachmentReferences: attachmentPreflight.references,
+      modelConfig, modelId, dbModelId, userId,
       existingConversationId: conversationIdValue,
       requestId, timer, log,
       abortSignal: req.signal,
+      routingMetadata: routing.metadata,
     });
     if (specialRoute) return specialRoute;
 
     // 6. Setup conversation and save user message
     const convSetup = await setupConversation({
-      conversationIdValue, messages, userId, provider, modelId, dbModelId
+      conversationIdValue, messages: safeModelMessages, userId, provider: modelConfig.provider,
+      modelId, requestId, log
     });
     if ('error' in convSetup) return convSetup.error;
-    const { conversationId, conversationTitle } = convSetup;
+    const { conversationId, conversationTitle, created: conversationCreated } =
+      convSetup;
 
-    // 7. Convert messages and process attachments
-    const messagesWithParts = convertMessagesToPartsFormat(messages as UIMessage[]);
+    try {
+    // 7. Convert messages and process attachments.
+    // Run a pre-flight PII scan on attachment text BEFORE calling
+    // processMessagesWithAttachments so we can tokenize document content while
+    // it is still accessible (the call below replaces it with S3 references).
+    const messagesWithParts = convertMessagesToPartsFormat(
+      safeModelMessages as UIMessage[]
+    );
+    const bindingError = await bindAttachmentReferencesOrError({
+      ownerId: userId,
+      conversationId,
+      references: attachmentPreflight.references,
+      conversationCreated,
+      requestId,
+      timer,
+      log,
+    });
+    if (bindingError) return bindingError;
+    await persistLastUserMessage({
+      conversationId,
+      messages: safePersistenceMessages,
+      dbModelId,
+    });
+    const attachmentRepositoryIds =
+      await resolveNexusConversationRepositoryIds({
+        ownerId: userId,
+        conversationId,
+      });
+    const attachmentTokenMappingSink =
+      attachmentRepositoryIds.length > 0
+        ? createTokenMappingSink()
+        : undefined;
+    const attachmentTools = attachmentTokenMappingSink
+      ? createNexusAttachmentTools({
+          repositoryIds: attachmentRepositoryIds,
+          userCognitoSub: session.sub,
+          tokenMappingSink: attachmentTokenMappingSink,
+        })
+      : {};
+    const precomputedInputTokenMappings = await scanAttachmentPII(
+      messagesWithParts, session.sub, log, requestId
+    );
     const { lightweightMessages } = await processMessagesWithAttachments(
       conversationId,
       messagesWithParts
     );
 
-    // 8. Resolve MCP connector tools (parallel fetch for all enabled connectors)
-    const failedConnectorIds: string[] = [];
-    if (enabledConnectors.length > 0) {
-      log.info('Resolving MCP connector tools', { connectorCount: enabledConnectors.length });
-      const connectorOptions = session.idToken ? { idToken: session.idToken } : undefined;
-      const results = await Promise.allSettled(
-        enabledConnectors.map(serverId => getConnectorTools(serverId, userId, userRoleNames, connectorOptions))
-      );
-      for (const [i, result] of results.entries()) {
-        if (result.status === 'fulfilled') {
-          connectorToolResults.push(result.value);
-        } else {
-          failedConnectorIds.push(enabledConnectors[i]);
-          log.warn('Failed to resolve connector tools', {
-            serverId: enabledConnectors[i],
-            error: result.reason instanceof Error ? result.reason.message : String(result.reason)
-          });
-        }
-      }
-      log.info('MCP connector tools resolved', {
-        requested: enabledConnectors.length,
-        resolved: connectorToolResults.length,
-        failed: failedConnectorIds.length,
-        totalTools: connectorToolResults.reduce((sum, r) => sum + Object.keys(r.tools).length, 0)
+    // 8. Resolve MCP connector tools (parallel fetch for all enabled connectors).
+    // connectorToolResults is hoisted for catch-block cleanup; append the resolved
+    // results rather than mutating inside the helper.
+    const { resolved: resolvedConnectorTools, failedIds: failedConnectorIds } =
+      await resolveConnectorTools({
+        enabledConnectors, userId, userRoleNames, idToken: session.idToken, log,
       });
+    connectorToolResults.push(...resolvedConnectorTools);
+    const failedAutomaticConnectorIds = routing.automaticConnectorIds.filter(
+      connectorId => failedConnectorIds.includes(connectorId)
+    );
+    if (failedAutomaticConnectorIds.length > 0) {
+      throw new NexusSpecialistUnavailableError(
+        'psd-data',
+        'PSD Data could not be connected for this request. Reconnect the service or try again shortly.',
+        failedAutomaticConnectorIds
+      );
     }
+
+    // 8b. Scope-gate built-in (AI SDK) tools via the unified tool catalog (#924),
+    // then apply the bound skill's session binding (#925): allowed-tools pin over
+    // built-in AND connector tools, plus SKILL.md instruction injection.
+    const skillBinding = await applySkillSessionBinding({
+      scopedEnabledTools: catalogScopedEnabledTools,
+      connectorToolResults,
+      skillId,
+      log,
+    });
+    const { scopedEnabledTools, effectiveConnectorToolResults, skillInstructions, skillName, skillAllowedTools } = skillBinding;
+    assertAutomaticToolsAvailable(routing.automaticToolNames, scopedEnabledTools);
+
+    // 8c. Bind workspace content tools when a document/artifact is open beside the
+    // chat (Atrium §1087). Server-built + canView/canEdit-gated; a bad/unviewable
+    // `?workspace=` yields no tools (never breaks chat). A bound skill's
+    // allowed-tools pin still applies (a restrictive skill can't be widened by
+    // opening a workspace — PR #1136 review).
+    const { workspaceTools, workspacePromptFragment } = await bindWorkspaceToolsForChat({
+      workspaceId, userId, requestId, skillAllowedTools,
+    });
 
     // 9. Execute streaming and return response
     // Once executeStreaming returns successfully, the streaming Response is in flight.
@@ -862,17 +1952,50 @@ export async function POST(req: Request) {
       conversationId,
       conversationIdValue,
       conversationTitle,
-      enabledTools,
+      enabledTools: scopedEnabledTools,
       enabledConnectors,
-      connectorToolResults,
+      // Pin-filtered copies; they share `close` handles with the hoisted
+      // originals, so pre-stream catch cleanup is unaffected.
+      connectorToolResults: effectiveConnectorToolResults,
       failedConnectorIds,
+      skillInstructions,
+      skillName,
+      workspaceTools,
+      workspacePromptFragment,
+      attachmentTools,
       reasoningEffort: validation.data.reasoningEffort || 'medium',
       responseMode: validation.data.responseMode || 'standard',
       requestId,
       dbModelId,
       log,
-      timer
+      timer,
+      precomputedInputTokenMappings,
+      inputTokenMappingSink: attachmentTokenMappingSink,
+      routingMetadata: routing.metadata,
     });
+    } catch (turnError) {
+      if (
+        conversationCreated &&
+        attachmentPreflight.references.length > 0
+      ) {
+        try {
+          await rollbackNewNexusAttachmentConversation({
+            ownerId: userId,
+            conversationId,
+          });
+        } catch (cleanupError) {
+          log.error('Failed to compensate a failed repository attachment turn', {
+            conversationId,
+            error:
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : 'Unknown cleanup error',
+          });
+          throw cleanupError;
+        }
+      }
+      throw turnError;
+    }
 
   } catch (error) {
     // Clean up MCP clients only for pre-stream errors (e.g., auth failure, model not found,
@@ -880,35 +2003,70 @@ export async function POST(req: Request) {
     // is handled by onFinish inside the stream — AI SDK v6 guarantees onFinish is called
     // for all terminal states including errors (verified against ai@6.x).
     await closeMcpClients(connectorToolResults, log, 'catch');
+    return buildChatErrorResponse(error, requestId, log, timer);
+  }
+}
 
-    if (error instanceof ContentSafetyBlockedError) {
-      log.warn('Content blocked by safety guardrails', {
-        error: { message: error.message, name: error.name },
-        categories: error.blockedCategories,
-        source: error.source
-      });
-      timer({ status: 'blocked' });
-      return new Response(
-        JSON.stringify({
-          error: error.message,
-          code: 'CONTENT_BLOCKED',
-          categories: error.blockedCategories,
-          source: error.source,
-          requestId,
-        }),
-        { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
-      );
-    }
-
-    log.error('Nexus chat API error', {
-      error: error instanceof Error ? { message: error.message, name: error.name } : String(error)
+/**
+ * Map a pre-stream POST error to an HTTP Response. Content-safety blocks return
+ * 400 with category detail; everything else returns a generic 500. Extracted
+ * from POST to keep the route handler's cyclomatic complexity within bounds.
+ */
+function buildChatErrorResponse(
+  error: unknown,
+  requestId: string,
+  log: ReturnType<typeof createLogger>,
+  timer: (data: Record<string, unknown>) => void
+): Response {
+  if (error instanceof NexusSpecialistUnavailableError) {
+    log.warn('Nexus specialist unavailable', {
+      specialist: error.specialist,
+      reconnectConnectorCount: error.reconnectConnectorIds.length,
     });
-
-    timer({ status: 'error' });
-
+    timer({ status: 'error', reason: `${error.specialist}_unavailable` });
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Request-Id': requestId,
+    };
+    if (error.reconnectConnectorIds.length > 0) {
+      headers['X-Connector-Reconnect'] = error.reconnectConnectorIds.join(',');
+    }
     return new Response(
-      JSON.stringify({ error: 'Failed to process chat request', requestId }),
-      { status: 500, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
+      JSON.stringify({
+        error: error.message,
+        code: 'NEXUS_SPECIALIST_UNAVAILABLE',
+        specialist: error.specialist,
+        requestId,
+      }),
+      { status: 503, headers }
     );
   }
+
+  if (error instanceof ContentSafetyBlockedError) {
+    log.warn('Content blocked by safety guardrails', {
+      error: { message: error.message, name: error.name },
+      categories: error.blockedCategories,
+      source: error.source
+    });
+    timer({ status: 'blocked' });
+    return new Response(
+      JSON.stringify({
+        error: error.message,
+        code: 'CONTENT_BLOCKED',
+        categories: error.blockedCategories,
+        source: error.source,
+        requestId,
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
+    );
+  }
+
+  log.error('Nexus chat API error', {
+    error: error instanceof Error ? { message: error.message, name: error.name } : String(error)
+  });
+  timer({ status: 'error' });
+  return new Response(
+    JSON.stringify({ error: 'Failed to process chat request', requestId }),
+    { status: 500, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
+  );
 }

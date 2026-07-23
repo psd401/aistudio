@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback, useMemo } from "react"
+import { useState, useCallback, useMemo } from "react"
 import { useToast } from "@/components/ui/use-toast"
 import { Button } from "@/components/ui/button"
 import { IconRefresh, IconPlus, IconFileImport } from "@tabler/icons-react"
@@ -14,18 +14,10 @@ import { ModelsDataTable, type ModelTableRow } from "./models-data-table"
 import { ModelDetailModal, type ModelFormData } from "./model-detail-modal"
 
 import type { SelectAiModel } from "@/types/db-types"
-import type { MultiSelectOption } from "@/components/ui/multi-select"
 
 interface ModelsPageClientProps {
   initialModels: SelectAiModel[]
 }
-
-// Fallback role options
-const fallbackRoleOptions: MultiSelectOption[] = [
-  { value: "administrator", label: "Administrator", description: "Full system access" },
-  { value: "staff", label: "Staff", description: "Staff member access" },
-  { value: "student", label: "Student", description: "Basic user access" },
-]
 
 export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
   const { toast } = useToast()
@@ -33,8 +25,6 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
   // State
   const [models, setModels] = useState<SelectAiModel[]>(initialModels)
   const [loading, setLoading] = useState(false)
-  const [roleOptions, setRoleOptions] = useState<MultiSelectOption[]>(fallbackRoleOptions)
-  const [roleLoading, setRoleLoading] = useState(true)
   const [loadingToggles, setLoadingToggles] = useState<Set<number>>(new Set())
 
   // Filters
@@ -149,68 +139,10 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
     architectEnabled: model.architectEnabled ?? true,
   }))
 
-  // Fetch roles on mount
-  useEffect(() => {
-    let cancelled = false
-    const controller = new AbortController()
-
-    const fetchRoles = async () => {
-      try {
-        setRoleLoading(true)
-        const response = await fetch("/api/admin/roles", {
-          signal: controller.signal,
-        })
-
-        if (!response.ok || cancelled) {
-          setRoleOptions(fallbackRoleOptions)
-          return
-        }
-
-        const data = await response.json()
-
-        if (!data.isSuccess || !Array.isArray(data.data)) {
-          setRoleOptions(fallbackRoleOptions)
-          return
-        }
-
-        const options: MultiSelectOption[] = data.data
-          .filter(
-            (role: unknown): role is { id: string; name: string; description?: string } =>
-              role != null &&
-              typeof role === "object" &&
-              "id" in role &&
-              "name" in role &&
-              typeof (role as { id: unknown }).id === "string" &&
-              typeof (role as { name: unknown }).name === "string"
-          )
-          .map((role: { name: string; description?: string }) => ({
-            value: role.name,
-            label: role.name,
-            description: role.description || "User role",
-          }))
-
-        if (!cancelled) {
-          setRoleOptions(options.length > 0 ? options : fallbackRoleOptions)
-        }
-      } catch {
-        // Failed to fetch roles - fallback to defaults
-        if (!cancelled) {
-          setRoleOptions(fallbackRoleOptions)
-        }
-      } finally {
-        if (!cancelled) {
-          setRoleLoading(false)
-        }
-      }
-    }
-
-    fetchRoles()
-
-    return () => {
-      cancelled = true
-      controller.abort()
-    }
-  }, [])
+  // NOTE (#1207): the roles fetch (/api/admin/roles) was removed — it existed
+  // only to populate the legacy "Allowed Roles" model field, which is gone.
+  // Per-model role/group access is edited via the ResourceGrantsEditor inside the
+  // model modal (resource_access_grants).
 
   // Refresh data
   const loadData = useCallback(async () => {
@@ -559,7 +491,6 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
             data.capabilitiesList.length > 0
               ? JSON.stringify(data.capabilitiesList)
               : null,
-          allowedRoles: data.allowedRoles.length > 0 ? data.allowedRoles : null,
           nexusCapabilities:
             Object.keys(syncedNexusCapabilities).length > 0 ? syncedNexusCapabilities : null,
           providerMetadata:
@@ -703,8 +634,6 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         onOpenChange={setModalOpen}
         onSave={handleSaveModel}
         onDelete={handleDeleteFromModal}
-        roleOptions={roleOptions}
-        roleLoading={roleLoading}
       />
 
       {/* Replacement Dialog */}

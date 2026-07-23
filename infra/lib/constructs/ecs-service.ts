@@ -12,11 +12,35 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatch_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as autoscaling from 'aws-cdk-lib/aws-applicationautoscaling';
+import { RedisCache } from './cache/redis-cache';
+import { usGuardrailProfileArns } from './security';
 
 export interface EcsServiceConstructProps {
   vpc: ec2.IVpc;
   environment: 'dev' | 'prod';
   documentsBucketName: string;
+  /**
+   * Agent workspace bucket name (holds published SKILL.md folders, #925).
+   * Passed as a cross-stack prop from AgentPlatformStack — same pattern as
+   * documentsBucketName — so the dependency + Export/Import is explicit.
+   */
+  agentWorkspaceBucketName: string;
+  /**
+   * Atrium artifact sandbox origin (#1052) — the SEPARATE CloudFront origin that
+   * serves the locked-down artifact host page. Passed as a cross-stack prop from
+   * AtriumSandboxStack (same pattern as documentsBucketName) so the dependency +
+   * Export/Import is explicit. Injected as the `ATRIUM_SANDBOX_ORIGIN` runtime env
+   * var; the app resolves the iframe src server-side and the middleware CSP
+   * frame-src from it (no build-time NEXT_PUBLIC value required).
+   */
+  atriumSandboxOrigin: string;
+  /**
+   * Atrium content events SNS topic ARN (#1055). Injected as
+   * `ATRIUM_EVENTS_TOPIC_ARN`; the task role is granted `sns:Publish` on it. The
+   * app's events publisher is best-effort and no-ops when unset, so this is
+   * optional for back-compat with deployments before the events stack lands.
+   */
+  atriumEventsTopicArn?: string;
   enableContainerInsights?: boolean;
   enableFargateSpot?: boolean;
   /**
@@ -102,6 +126,18 @@ export interface EcsServiceConstructProps {
    */
   internalApiSecretArn: string;
   /**
+   * Atrium collab token signing secret ARN from Secrets Manager (#1051).
+   * Dedicated key for collab session tokens that ride in the websocket URL —
+   * kept separate from AUTH_SECRET so a session-key leak can't forge collab tokens.
+   */
+  collabJwtSecretArn: string;
+  /**
+   * Guardrail violation-log hash secret ARN from Secrets Manager (#727).
+   * HMAC key for pseudonymizing session/user ids in guardrail-violation logs;
+   * without it the app logs a fixed 'redacted' placeholder (uncorrelatable).
+   */
+  guardrailHashSecretArn: string;
+  /**
    * K-12 Content Safety: Bedrock Guardrail ARN (from GuardrailsStack)
    * If provided, enables precise IAM scoping instead of wildcard
    */
@@ -133,7 +169,7 @@ export class EcsServiceConstruct extends Construct {
   constructor(scope: Construct, id: string, props: EcsServiceConstructProps) {
     super(scope, id);
 
-    const { vpc, environment, documentsBucketName } = props;
+    const { vpc, environment, documentsBucketName, agentWorkspaceBucketName } = props;
 
     // ============================================================================
     // ECR Repository for container images
@@ -259,6 +295,8 @@ export class EcsServiceConstruct extends Construct {
         // Explicit permissions for both secrets
         props.authSecretArn,
         props.internalApiSecretArn,
+        props.collabJwtSecretArn,
+        props.guardrailHashSecretArn,
       ],
     }));
 
@@ -294,6 +332,8 @@ export class EcsServiceConstruct extends Construct {
                 props.rdsSecretArn, // Include actual database secret ARN
                 props.authSecretArn, // Include auth secret
                 props.internalApiSecretArn, // Include internal API secret
+                props.collabJwtSecretArn, // Include Atrium collab token signing secret (#1051)
+                props.guardrailHashSecretArn, // Include guardrail hash secret (#727)
               ],
             }),
             // Agent Workspace OAuth secrets — read+update for refresh tokens (#912).
@@ -355,6 +395,18 @@ export class EcsServiceConstruct extends Construct {
                 `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent/${environment}/*`,
               ],
             }),
+            // Write ONLY the Plaud OAuth client_id secret. The /agent-connect-plaud
+            // flow auto-registers a Plaud OAuth client via Dynamic Client
+            // Registration (using the app's own issuer URL as redirect_uri) and
+            // stores the client_id here on first use — no manual step. Scoped to
+            // just this secret so the app can't overwrite google-oauth-client etc.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:PutSecretValue'],
+              resources: [
+                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent/${environment}/plaud-oauth-client-*`,
+              ],
+            }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [
@@ -369,6 +421,30 @@ export class EcsServiceConstruct extends Construct {
                 `arn:aws:s3:::${documentsBucketName}`,
                 `arn:aws:s3:::${documentsBucketName}/*`,
               ],
+            }),
+            // Permanent canonical cleanup is restricted to the unified content
+            // namespace. Keep legacy document permissions above unchanged while
+            // preventing version deletion outside repositories/*.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                's3:PutObjectTagging',
+                's3:DeleteObjectVersion',
+                's3:AbortMultipartUpload',
+              ],
+              resources: [
+                `arn:aws:s3:::${documentsBucketName}/repositories/*`,
+              ],
+            }),
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:ListBucketVersions'],
+              resources: [`arn:aws:s3:::${documentsBucketName}`],
+              conditions: {
+                StringLike: {
+                  's3:prefix': ['repositories/*'],
+                },
+              },
             }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
@@ -387,6 +463,43 @@ export class EcsServiceConstruct extends Construct {
               actions: ['lambda:InvokeFunction'],
               resources: [
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:aistudio-${environment}-schedule-executor`,
+                // Issue #925: skill-builder scans/promotes published skill drafts
+                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
+                // #1203: admin "Sync now" async-invokes the hourly group-sync Lambda
+                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-group-sync-${environment}`,
+                // #1232 confused-deputy isolation: the /api/agent/workspace-token
+                // and /api/agent/account-request routes invoke the isolated mint
+                // Lambda instead of running WIF/signJwt in-process. INVOKE-ONLY —
+                // the frontend never holds the WIF credential; the mint Lambda's
+                // own role is the sole principal the Google WIF provider trusts.
+                // Constructed ARN (deterministic function name) to avoid a
+                // FrontendStack ↔ AgentPlatformStack circular dependency — the
+                // Lambda object is intentionally NOT imported cross-stack.
+                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-mint-${environment}`,
+              ],
+            }),
+            // Issue #925: write SKILL.md draft folders to the agent workspace
+            // bucket so the existing scan pipeline can pick them up. Scoped to
+            // the skills/ prefix.
+            //
+            // ListBucket must target the bucket ARN (not the object-prefix ARN);
+            // ListObjectsV2 (used by listSkillObjectKeys for the detail-page
+            // SKILL.md preview and the zip export) fails with AccessDenied
+            // without it. The s3:prefix condition keeps the grant scoped to the
+            // skills/ tree.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:ListBucket'],
+              resources: [`arn:aws:s3:::${agentWorkspaceBucketName}`],
+              conditions: {
+                StringLike: { 's3:prefix': ['skills/*'] },
+              },
+            }),
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:PutObject', 's3:PutObjectTagging', 's3:GetObject'],
+              resources: [
+                `arn:aws:s3:::${agentWorkspaceBucketName}/skills/*`,
               ],
             }),
             new iam.PolicyStatement({
@@ -403,6 +516,33 @@ export class EcsServiceConstruct extends Construct {
                 `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/AIStudio-*-${environment}`,
               ],
             }),
+            // Agent platform tables (psd-agent-*-<env>) — the admin
+            // dashboard's Triage tab scans psd-agent-triage-<env>. Other
+            // agent platform tables (users, signals, skills) are admin
+            // read-only too. Update/Put limited to triage so the admin
+            // Pause/Reset actions in /admin/agents/[userEmail]/triage
+            // can write back; everything else is read-only.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'dynamodb:GetItem',
+                'dynamodb:Query',
+                'dynamodb:Scan',
+              ],
+              resources: [
+                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-*-${environment}`,
+              ],
+            }),
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'dynamodb:UpdateItem',
+                'dynamodb:DeleteItem',
+              ],
+              resources: [
+                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-triage-${environment}`,
+              ],
+            }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [
@@ -415,8 +555,23 @@ export class EcsServiceConstruct extends Construct {
                 'arn:aws:bedrock:*:*:provisioned-model/*',
               ],
             }),
-            // K-12 Content Safety: Bedrock Guardrails API access
-            // Uses specific ARN from GuardrailsStack when provided, falls back to wildcard
+            // Bedrock does not support resource-level permissions for Rerank.
+            // The underlying model invocation remains scoped to the ARNs above.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['bedrock:Rerank'],
+              resources: ['*'],
+            }),
+            // K-12 Content Safety: Bedrock Guardrails API access.
+            // CROSS-REGION-INFERENCE GOTCHA (2026-07-06 prod outage): ApplyGuardrail
+            // on a guardrail that uses a cross-region inference PROFILE authorizes
+            // against BOTH the guardrail ARN AND the guardrail-PROFILE ARN
+            // (e.g. .../guardrail-profile/us.guardrail.v1:0). Granting only the
+            // guardrail ARN yields 100% AccessDenied on the profile — which made
+            // ContentSafetyService fail and, worse, made Atrium §28.3 agent-write
+            // screening fail CLOSED (every workspace/agent content edit rejected).
+            // Grant the profile ARNs alongside the guardrail. (See PR #1093 for the
+            // agent-router equivalent.)
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [
@@ -424,8 +579,20 @@ export class EcsServiceConstruct extends Construct {
                 'bedrock:GetGuardrail',
               ],
               resources: props.guardrailArn
-                ? [props.guardrailArn]
-                : [`arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`],
+                ? [
+                    props.guardrailArn,
+                    // The system-defined cross-region inference profile the
+                    // guardrail resolves to at apply time. Pinned to the exact
+                    // profile id (NOT a wildcard) but granted in every region
+                    // the profile fans out to — ApplyGuardrail authorizes
+                    // against the DESTINATION region, so a single-region grant
+                    // fails whenever routing leaves it (issue #1138 F5).
+                    ...usGuardrailProfileArns(cdk.Stack.of(this).account),
+                  ]
+                : [
+                    `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`,
+                    ...usGuardrailProfileArns(cdk.Stack.of(this).account),
+                  ],
             }),
             // K-12 Content Safety: Amazon Comprehend for PII detection
             new iam.PolicyStatement({
@@ -487,6 +654,26 @@ export class EcsServiceConstruct extends Construct {
       },
     });
 
+    // Atrium content events (#1055): grant the app task role sns:Publish on the
+    // content events topic so lib/content/events.ts can emit. Tag-conditioned to
+    // the environment, mirroring ServiceRoleFactory.buildSNSAccessPolicy. Only
+    // added when a topic ARN is wired (back-compat with pre-events deployments).
+    if (props.atriumEventsTopicArn) {
+      this.taskRole.addToPolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['sns:Publish'],
+          resources: [props.atriumEventsTopicArn],
+          conditions: {
+            StringEquals: {
+              'aws:ResourceTag/Environment': environment,
+              'aws:ResourceTag/ManagedBy': 'cdk',
+            },
+          },
+        })
+      );
+    }
+
     // Task Definition
     const cpu = environment === 'prod' ? 1024 : 512; // 1 vCPU prod, 0.5 dev
     const memory = environment === 'prod' ? 2048 : 1024; // 2GB prod, 1GB dev
@@ -533,6 +720,16 @@ export class EcsServiceConstruct extends Construct {
             'tests/',         // Exclude test files
             '*.md',           // Exclude documentation
             '.env*',          // Exclude environment files (use secrets instead)
+            // Claude Code session worktrees — a full second copy of the repo
+            // (own node_modules / .next-e2e) that can be ACTIVELY CHURNING while
+            // another session works there; asset fingerprinting races the file
+            // deletions (lstat ENOENT aborts `cdk deploy`) and bloats the context.
+            '.claude/',
+            // Local E2E runner build dir (NEXT_DIST_DIR=.next-e2e) — volatile
+            // turbopack cache during suite runs, multi-GB when idle. Already in
+            // .dockerignore; must ALSO be here because this exclude list governs
+            // the CDK fingerprint walk.
+            '.next-e2e/',
           ],
         });
 
@@ -566,6 +763,26 @@ export class EcsServiceConstruct extends Construct {
         // shape is honest.
         GOOGLE_WORKSPACE_OAUTH_SECRET_ID: `psd-agent/${environment}/google-oauth-client`,
         AGENT_INTERNAL_API_KEY_SECRET_ID: `psd-agent/${environment}/internal-api-key`,
+        // DWD token broker (#1232) + agnt_ auto-provisioning (#1233) config —
+        // the GCP project number, WIF pool/provider ids, DWD service-account
+        // email, and the OneSync provisioning sheet id all live in ONE JSON
+        // secret `psd-agent/{env}/gcp-dwd-config`, populated out-of-band by IT
+        // (Reese). aistudio is a PUBLIC repo, so these values must not land in
+        // cdk.json / CDK context. The app reads the secret lazily at request time
+        // (loadBrokerConfig / getProvisioningSheetId, 5-min cached) and fails
+        // CLOSED (BrokerNotConfiguredError / not-configured) until it's populated
+        // — the same deploy-cleanly-before-values pattern as the OAuth secret IDs
+        // above. The ECS task role already holds GetSecretValue on
+        // psd-agent/${environment}/* (below), so no new IAM grant is required.
+        GCP_DWD_CONFIG_SECRET_ID: `psd-agent/${environment}/gcp-dwd-config`,
+        // #1232 confused-deputy isolation: the DWD workspace-token + account-
+        // request routes proxy to this dedicated mint Lambda (IAM-authed
+        // InvokeFunction) instead of performing WIF/signJwt in-process. Setting
+        // this env var switches the routes into Lambda mode; when it is UNSET
+        // (local dev) they fall back to running the broker in-process (no real
+        // WIF locally). The task role's lambda:InvokeFunction grant above is
+        // scoped to exactly this function.
+        AGENT_MINT_LAMBDA_NAME: `psd-agent-mint-${environment}`,
         // Memory optimization - 70% of container memory
         NODE_OPTIONS: `--max-old-space-size=${Math.floor(memory * 0.7)}`,
         // Application configuration
@@ -588,6 +805,7 @@ export class EcsServiceConstruct extends Construct {
         // Queue URLs from Processing Stack exports
         EMBEDDING_QUEUE_URL: cdk.Fn.importValue(`${environment}-EmbeddingQueueUrl`),
         FILE_PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-FileProcessingQueueUrl`),
+        CONTENT_PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-ContentProcessingQueueUrl`),
         // Queue URLs from Document Processing Stack exports
         PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-ProcessingQueueUrl`),
         HIGH_MEMORY_QUEUE_URL: cdk.Fn.importValue(`${environment}-HighMemoryQueueUrl`),
@@ -616,6 +834,20 @@ export class EcsServiceConstruct extends Construct {
         GUARDRAIL_VIOLATION_TOPIC_ARN: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
         CONTENT_SAFETY_ENABLED: 'true',
         PII_TOKENIZATION_ENABLED: 'true',
+        // Issue #925: Skill publishing pipeline. The agent workspace bucket
+        // (published to SSM by AgentPlatformStack) holds SKILL.md folders, and
+        // the skill-builder Lambda scans/promotes drafts. Both are optional at
+        // runtime — if absent, publishing falls back to a reviewable draft row.
+        AGENT_WORKSPACE_BUCKET: agentWorkspaceBucketName,
+        SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
+        // Atrium artifact sandbox origin (#1052). Server-only runtime var (NOT
+        // NEXT_PUBLIC): the reader/edit Server Components resolve the iframe src
+        // from it and pass it down as a prop, and the middleware builds the CSP
+        // frame-src from it at request time. Sourced from AtriumSandboxStack.
+        ATRIUM_SANDBOX_ORIGIN: props.atriumSandboxOrigin,
+        // Atrium content events SNS topic (#1055). The app publishes content
+        // lifecycle events here; the publisher no-ops when this is empty.
+        ATRIUM_EVENTS_TOPIC_ARN: props.atriumEventsTopicArn ?? '',
       },
       // Secrets injected from Secrets Manager at runtime
       secrets: {
@@ -627,6 +859,21 @@ export class EcsServiceConstruct extends Construct {
         INTERNAL_API_SECRET: ecs.Secret.fromSecretsManager(
           secretsmanager.Secret.fromSecretCompleteArn(this, 'InternalApiSecret', props.internalApiSecretArn),
           'INTERNAL_API_SECRET'
+        ),
+        // Atrium collab token signing secret (#1051). Dedicated key so collab
+        // tokens (which ride in the websocket URL and land in ALB/proxy logs)
+        // don't share AUTH_SECRET; a session-key leak then can't forge them.
+        COLLAB_JWT_SECRET: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretCompleteArn(this, 'CollabJwtSecret', props.collabJwtSecretArn),
+          'COLLAB_JWT_SECRET'
+        ),
+        // Guardrail violation-log hash secret (#727 / 2026-07-06 chat outage):
+        // enables real per-session HMAC pseudonymization in violation logs.
+        // The app degrades to a 'redacted' placeholder if this is ever missing —
+        // it must never take chat down again.
+        GUARDRAIL_HASH_SECRET: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretCompleteArn(this, 'GuardrailHashSecret', props.guardrailHashSecretArn),
+          'GUARDRAIL_HASH_SECRET'
         ),
         // Issue #603: Database credentials for postgres.js driver
         // The RDS secret contains a JSON object with: username, password, host, port, dbname
@@ -711,6 +958,30 @@ export class EcsServiceConstruct extends Construct {
       albSecurityGroup,
       ec2.Port.tcp(3000),
       'Allow traffic from ALB'
+    );
+
+    // ============================================================================
+    // Atrium collaboration Redis cache (#1051)
+    // ============================================================================
+    // The Atrium collab server (lib/content/collab/collab-server.ts) only enables
+    // Redis fan-out when REDIS_HOST is set, which is what lets Yjs document updates
+    // fan out across multiple ECS tasks. The cache is created here (after
+    // ecsSecurityGroup exists) so its ingress can be scoped to the ECS service only,
+    // then REDIS_HOST/REDIS_PORT/REDIS_TLS are injected into the container.
+    // REDIS_TLS=1 matches the transitEncryptionEnabled flag on the cluster.
+    const redisCache = new RedisCache(this, 'AtriumRedis', {
+      vpc,
+      environment,
+      ingressSecurityGroup: ecsSecurityGroup,
+    });
+    container.addEnvironment('REDIS_HOST', redisCache.endpointAddress);
+    container.addEnvironment('REDIS_PORT', redisCache.endpointPort);
+    container.addEnvironment('REDIS_TLS', '1');
+    // REDIS_PASSWORD is the ElastiCache AUTH token, injected from Secrets Manager.
+    // Required: without it the cache accepts unauthenticated VPC connections.
+    container.addSecret(
+      'REDIS_PASSWORD',
+      ecs.Secret.fromSecretsManager(redisCache.authSecret)
     );
 
     this.service = new ecs.FargateService(this, 'Service', {

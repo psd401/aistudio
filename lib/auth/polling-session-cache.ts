@@ -171,6 +171,10 @@ export class PollingSessionCache {
         log.debug('Cache cleanup completed', { cleaned, remaining: this.cache.size });
       }
     }, this.options.cleanupInterval);
+    // The cache is an optimization, not a lifecycle owner. Do not keep a
+    // serverless invocation, CLI command, or test process alive solely for the
+    // periodic cleanup timer.
+    this.cleanupTimer.unref();
   }
 
   private estimateMemoryUsage(): string {
@@ -203,11 +207,22 @@ export const pollingSessionCache = new PollingSessionCache({
 });
 
 /**
- * Generate cache key from session data
+ * Single source of truth for a user's polling-cache key. Keyed on `sub` alone (one
+ * entry per user). The previous `:${iat}` suffix always fell back to `Date.now()`
+ * because CognitoSession never carries `iat`, so every call produced a unique key —
+ * a 0% cache hit rate AND an invalidation key that could never match the stored one
+ * (REV-COR-512 / REV-SEC-165 / REV-SEC-181). Producer and invalidator both derive
+ * keys through this function so the two formats cannot drift again. Safe because
+ * `authenticatePollingRequest` re-validates the JWT via `getServerSession()` before
+ * ever consulting the cache — an expired/rotated token can't produce a stale hit.
+ */
+export function sessionCacheKeyForSub(sub: string): string {
+  return `session:${sub}`;
+}
+
+/**
+ * Generate cache key from session data.
  */
 export function generateSessionCacheKey(session: CognitoSession): string {
-  // Use sub (user ID) + iat (issued at time) for uniqueness and security
-  // This prevents cache key collisions and adds session-specific entropy
-  const iat = (session as CognitoSession & { iat?: number }).iat || Date.now();
-  return `session:${session.sub}:${iat}`;
+  return sessionCacheKeyForSub(session.sub);
 }
