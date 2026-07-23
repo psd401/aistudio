@@ -19,6 +19,7 @@ export interface ProcessingFailureDecision {
   terminal: boolean;
   code: string;
   message: string;
+  resetManagedService?: "textract" | "bedrock-data-automation";
 }
 
 const DEFER_DEADLINE_MS: Readonly<Record<DeferredProcessingReason, number>> = {
@@ -75,6 +76,28 @@ export class PermanentContentProcessingError extends Error {
 }
 
 /**
+ * A managed asynchronous provider accepted the request but finished its job in
+ * a failed state. Retrying the same provider id/client token can only replay
+ * that failure, so the durable retry must clear provider state and start a new
+ * processing run with a fresh idempotency token.
+ */
+export class RetryableManagedServiceJobError extends Error {
+  readonly code: string;
+  readonly provider: "textract" | "bedrock-data-automation";
+
+  constructor(
+    provider: "textract" | "bedrock-data-automation",
+    code: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "RetryableManagedServiceJobError";
+    this.provider = provider;
+    this.code = normalizedErrorCode(code, "MANAGED_SERVICE_JOB_FAILED");
+  }
+}
+
+/**
  * Treat deterministic source/contract failures and non-retryable AWS 4xx errors
  * as terminal. Unknown infrastructure/database failures retain the bounded retry
  * budget because they are commonly transient.
@@ -85,6 +108,14 @@ export function classifyContentProcessingError(
   const message = errorMessage(error);
   if (error instanceof PermanentContentProcessingError) {
     return { terminal: true, code: error.code, message };
+  }
+  if (error instanceof RetryableManagedServiceJobError) {
+    return {
+      terminal: false,
+      code: error.code,
+      message,
+      resetManagedService: error.provider,
+    };
   }
 
   const name = error instanceof Error ? error.name : "";

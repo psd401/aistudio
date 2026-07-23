@@ -11,6 +11,8 @@ import { CONTENT_PROCESSING_MAX_ATTEMPTS } from "./job-state";
 
 export const POST_DEPLOY_RECOVERY_MARKER =
   "unified-content-runtime-v2" as const;
+export const POST_DEPLOY_ARTIFACT_RECOVERY_MARKER =
+  "unified-content-artifact-v3" as const;
 export const POST_DEPLOY_RECOVERY_BATCH_SIZE = 25;
 /** Let every invocation of the previous 15-minute Lambda runtime drain first. */
 export const POST_DEPLOY_RECOVERY_GRACE_MINUTES = 20;
@@ -57,7 +59,10 @@ export async function releasePostDeployRecoveryJobs(
             ON item.current_version_id = version.id
           WHERE job.stage = 'inspect'
             AND job.status IN ('cancelled', 'failed', 'pending', 'queued', 'running')
-            AND job.post_deploy_recovery = ${POST_DEPLOY_RECOVERY_MARKER}
+            AND job.post_deploy_recovery IN (
+              ${POST_DEPLOY_RECOVERY_MARKER},
+              ${POST_DEPLOY_ARTIFACT_RECOVERY_MARKER}
+            )
             AND job.updated_at <= ${eligibleBefore}::timestamptz
             AND item.lifecycle_status = 'active'
             AND version.storage_status <> 'blocked'
@@ -65,14 +70,6 @@ export async function releasePostDeployRecoveryJobs(
             AND version.object_key ~ (
               '^repositories/' || item.repository_id::text ||
               '/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}/[^/]+$'
-            )
-            AND NOT EXISTS (
-              SELECT 1
-              FROM repository_item_chunks active_chunk
-              JOIN knowledge_repositories repository
-                ON repository.id = item.repository_id
-              WHERE active_chunk.item_version_id = version.id
-                AND active_chunk.index_generation_id = repository.active_index_generation_id
             )
           ORDER BY job.updated_at, job.id
           FOR UPDATE OF job SKIP LOCKED
@@ -110,7 +107,23 @@ export async function releasePostDeployRecoveryJobs(
           inspectionDetails: {},
           processingStatus: "pending",
         })
-        .where(inArray(repositoryItemVersions.id, itemVersionIds));
+        .where(
+          and(
+            inArray(repositoryItemVersions.id, itemVersionIds),
+            sql`NOT EXISTS (
+              SELECT 1
+              FROM repository_item_chunks active_chunk
+              JOIN repository_items active_item
+                ON active_item.id = active_chunk.item_id
+              JOIN knowledge_repositories active_repository
+                ON active_repository.id = active_item.repository_id
+              WHERE active_chunk.item_version_id = ${repositoryItemVersions.id}
+                AND active_chunk.index_generation_id = active_repository.active_index_generation_id
+                AND active_item.current_version_id = ${repositoryItemVersions.id}
+                AND active_item.lifecycle_status = 'active'
+            )`
+          )
+        );
       await tx
         .update(repositoryItems)
         .set({
@@ -121,7 +134,16 @@ export async function releasePostDeployRecoveryJobs(
         .where(
           and(
             eq(repositoryItems.lifecycleStatus, "active"),
-            inArray(repositoryItems.currentVersionId, itemVersionIds)
+            inArray(repositoryItems.currentVersionId, itemVersionIds),
+            sql`NOT EXISTS (
+              SELECT 1
+              FROM repository_item_chunks active_chunk
+              JOIN knowledge_repositories active_repository
+                ON active_repository.id = ${repositoryItems.repositoryId}
+              WHERE active_chunk.item_id = ${repositoryItems.id}
+                AND active_chunk.item_version_id = ${repositoryItems.currentVersionId}
+                AND active_chunk.index_generation_id = active_repository.active_index_generation_id
+            )`
           )
         );
 

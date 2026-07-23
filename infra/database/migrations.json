@@ -117,6 +117,7 @@
     "120-bedrock-repository-embeddings.sql",
     "121-unified-content-retrieval-v2.sql",
     "122-unified-content-runtime-recovery.sql",
-    "123-unified-content-postdeploy-handoff.sql"
+    "123-unified-content-postdeploy-handoff.sql",
+    "124-unified-content-artifact-state-recovery.sql"
   ]
 }

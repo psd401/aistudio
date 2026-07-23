@@ -9,6 +9,7 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { knowledgeRepositories } from "./knowledge-repositories";
 
 export type RepositoryIndexGenerationStatus =
@@ -39,6 +40,12 @@ export const repositoryIndexGenerations = pgTable(
     sourceVersionCount: integer("source_version_count").default(0).notNull(),
     segmentCount: integer("segment_count").default(0).notNull(),
     errorMessage: text("error_message"),
+    embeddingRecoveryQueuedAt: timestamp("embedding_recovery_queued_at", {
+      withTimezone: true,
+    }),
+    embeddingRecoveryAttempts: integer("embedding_recovery_attempts")
+      .default(0)
+      .notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     publishedAt: timestamp("published_at", { withTimezone: true }),
   },
@@ -47,6 +54,14 @@ export const repositoryIndexGenerations = pgTable(
       t.repositoryId,
       t.createdAt
     ),
+    index("idx_repository_index_generations_embedding_recovery")
+      .on(
+        t.embeddingRecoveryQueuedAt,
+        t.embeddingRecoveryAttempts,
+        t.createdAt,
+        t.id
+      )
+      .where(sql`${t.status} IN ('building', 'active', 'failed')`),
   ]
 );
 

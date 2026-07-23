@@ -31,20 +31,25 @@ function policyStatements(value: unknown): PolicyStatement[] {
   return [...direct, ...Object.values(value).flatMap(policyStatements)];
 }
 
+function synthesizeProcessingStack(): Template {
+  const app = new cdk.App();
+  const stack = new ProcessingStack(app, 'ProcessingEmbeddingAccessTest', {
+    env: { account: '123456789012', region: 'us-east-1' },
+    environment: 'dev',
+    documentsBucketName: 'aistudio-dev-documents',
+    databaseResourceArn:
+      'arn:aws:rds:us-east-1:123456789012:cluster:aistudio-dev',
+    databaseSecretArn:
+      'arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio-dev',
+  });
+  return Template.fromStack(stack);
+}
+
 describe('ProcessingStack embedding visual-artifact access', () => {
+  const template = synthesizeProcessingStack();
+  const statements = policyStatements(template.toJSON());
+
   it('grants read-only access to repository artifacts without the broken generic S3 condition', () => {
-    const app = new cdk.App();
-    const stack = new ProcessingStack(app, 'ProcessingAccessTest', {
-      env: { account: '123456789012', region: 'us-east-1' },
-      environment: 'dev',
-      documentsBucketName: 'aistudio-dev-documents',
-      databaseResourceArn:
-        'arn:aws:rds:us-east-1:123456789012:cluster:aistudio-dev',
-      databaseSecretArn:
-        'arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio-dev',
-    });
-    const template = Template.fromStack(stack);
-    const statements = policyStatements(template.toJSON());
     const statement = statements.find(
       (candidate) => candidate.Sid === 'RepositoryVisualArtifactRead',
     );
@@ -65,19 +70,23 @@ describe('ProcessingStack embedding visual-artifact access', () => {
     );
   });
 
-  it('alarms on embedding backlog, terminal DLQ records, and worker failures', () => {
-    const app = new cdk.App();
-    const stack = new ProcessingStack(app, 'ProcessingAlarmTest', {
-      env: { account: '123456789012', region: 'us-east-1' },
-      environment: 'dev',
-      documentsBucketName: 'aistudio-dev-documents',
-      databaseResourceArn:
-        'arn:aws:rds:us-east-1:123456789012:cluster:aistudio-dev',
-      databaseSecretArn:
-        'arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio-dev',
-    });
-    const template = Template.fromStack(stack);
+  it('grants the embedding worker every configured Bedrock model and no wildcard model access', () => {
+    const statement = statements.find(
+      (candidate) => candidate.Sid === 'RepositoryTitanEmbeddingAccess',
+    );
+    const resources = Array.isArray(statement?.Resource)
+      ? statement.Resource
+      : [statement?.Resource];
+    const serializedResources = JSON.stringify(resources);
 
+    expect(statement?.Action).toBe('bedrock:InvokeModel');
+    expect(serializedResources).toContain('/amazon.titan-embed-text-v1');
+    expect(serializedResources).toContain('/amazon.titan-embed-text-v2:0');
+    expect(serializedResources).toContain('/cohere.embed-v4:0');
+    expect(resources).not.toContain('*');
+  });
+
+  it('alarms on embedding backlog, terminal DLQ records, and worker failures', () => {
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       AlarmName: 'aistudio-dev-embedding-dlq-visible',
       Threshold: 1,

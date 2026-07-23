@@ -80,3 +80,58 @@ describe("unified-content post-deployment handoff migration", () => {
     expect(migration).toContain("repository.active_index_generation_id");
   });
 });
+
+describe("unified-content artifact and embedding recovery migration", () => {
+  const migration = readFileSync(
+    resolve(
+      process.cwd(),
+      "infra/database/schema/124-unified-content-artifact-state-recovery.sql"
+    ),
+    "utf8"
+  );
+
+  it("quarantines every known broken artifact runtime signature", () => {
+    expect(migration).toContain("%PDFParse%is not a constructor%");
+    expect(migration).toContain("%DOMMatrix is not defined%");
+    expect(migration).toContain("%@napi-rs/canvas%");
+    expect(migration).toContain(
+      "%Textract job does not match the normalized image artifact%"
+    );
+    expect(migration).toContain(
+      "post_deploy_recovery = 'unified-content-artifact-v3'"
+    );
+    expect(migration).toContain(
+      "'{\"postDeployRecovery\":\"unified-content-artifact-v3\"}'::jsonb"
+    );
+    expect(migration).toContain("available_at = 'infinity'::timestamptz");
+  });
+
+  it("preserves active searchable snapshots while rebuilding them", () => {
+    expect(migration).toContain(
+      "job.post_deploy_recovery = 'unified-content-artifact-v3'"
+    );
+    expect(migration).not.toContain(
+      "job.post_deploy_recovery = 'unified-content-runtime-v2'"
+    );
+    expect(migration).toContain(
+      "active_chunk.index_generation_id = repository.active_index_generation_id"
+    );
+    expect(migration).toContain("SET storage_status = 'available'");
+    expect(migration).toContain("processing_status = 'embedded'");
+    expect(migration).not.toContain(
+      "AND NOT EXISTS (\n        SELECT 1\n        FROM repository_item_chunks active_chunk"
+    );
+  });
+
+  it("adds bounded failed-generation recovery state to the scheduler index", () => {
+    expect(migration).toContain(
+      "ADD COLUMN IF NOT EXISTS embedding_recovery_queued_at timestamptz"
+    );
+    expect(migration).toContain(
+      "ADD COLUMN IF NOT EXISTS embedding_recovery_attempts integer NOT NULL DEFAULT 0"
+    );
+    expect(migration).toContain(
+      "WHERE status IN ('building', 'active', 'failed')"
+    );
+  });
+});

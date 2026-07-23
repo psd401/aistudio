@@ -7,6 +7,7 @@
  * matches the stored entry.
  */
 import {
+  PollingSessionCache,
   pollingSessionCache,
   generateSessionCacheKey,
   sessionCacheKeyForSub,
@@ -18,6 +19,16 @@ const makeSession = (sub: string): SessionArg =>
   ({ sub, email: `${sub}@example.com` } as unknown as SessionArg)
 
 describe("polling session cache (REV-COR-512 / SEC-165 / SEC-181)", () => {
+  it("does not keep a Node process alive solely for cache cleanup", () => {
+    const cache = new PollingSessionCache({ cleanupInterval: 60_000 })
+    const timer = (
+      cache as unknown as { cleanupTimer?: NodeJS.Timeout }
+    ).cleanupTimer
+
+    expect(timer?.hasRef()).toBe(false)
+    cache.destroy()
+  })
+
   it("generates a deterministic, Date.now()-free key for the same session", () => {
     const s = makeSession("user-1")
     expect(generateSessionCacheKey(s)).toBe(generateSessionCacheKey(s))

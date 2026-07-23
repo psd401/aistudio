@@ -21,6 +21,7 @@ export interface UnifiedContentProcessingProps {
   databaseHost: string;
   databaseSecretArn: string;
   embeddingQueue: sqs.IQueue;
+  embeddingDeadLetterQueue: sqs.IQueue;
   vpc: ec2.IVpc;
 }
 
@@ -286,6 +287,16 @@ export class UnifiedContentProcessing extends Construct {
                 resources: [props.embeddingQueue.queueArn],
               }),
               new iam.PolicyStatement({
+                sid: "CanonicalEmbeddingDlqRecovery",
+                actions: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
+                resources: [props.embeddingDeadLetterQueue.queueArn],
+              }),
+              new iam.PolicyStatement({
+                sid: "CanonicalProcessingDlqRecovery",
+                actions: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
+                resources: [this.deadLetterQueue.queueArn],
+              }),
+              new iam.PolicyStatement({
                 // Do not use ServiceRoleFactory's generic s3Buckets grant here.
                 // Its bucket-tag condition is not evaluated for S3 object ARNs,
                 // so GetObject fails closed even when the bucket is tagged. This
@@ -382,7 +393,9 @@ export class UnifiedContentProcessing extends Construct {
         NODE_OPTIONS: "--enable-source-maps",
         DOCUMENTS_BUCKET_NAME: props.documentsBucket.bucketName,
         CONTENT_PROCESSING_QUEUE_URL: this.queue.queueUrl,
+        CONTENT_PROCESSING_DLQ_URL: this.deadLetterQueue.queueUrl,
         EMBEDDING_QUEUE_URL: props.embeddingQueue.queueUrl,
+        EMBEDDING_DLQ_URL: props.embeddingDeadLetterQueue.queueUrl,
         BDA_DATA_AUTOMATION_PROJECT_ARN: mediaProject.attrProjectArn,
         BDA_DATA_AUTOMATION_PROFILE_ARN: dataAutomationProfileArn,
         DATABASE_HOST: props.databaseHost,
@@ -399,6 +412,10 @@ export class UnifiedContentProcessing extends Construct {
         externalModules: ["@aws-sdk/*"],
         nodeModules: [
           "sharp",
+          // pdf-parse's ESM package uses runtime initialization that esbuild
+          // rewrites incorrectly when inlined (PDFParse becomes a non-class).
+          // Install the pinned package for Linux/ARM64 and load it natively.
+          "pdf-parse",
           "@aws-sdk/client-bedrock-data-automation-runtime",
         ],
         // CDK's local bundler installs native modules for the synth host. Re-run
@@ -426,7 +443,7 @@ export class UnifiedContentProcessing extends Construct {
     const workerErrorAlarm = new cloudwatch.Alarm(this, "WorkerErrorAlarm", {
       alarmName: `aistudio-${props.environment}-content-processing-worker-errors`,
       alarmDescription:
-        "Unified repository content worker could not persist durable failure/retry state",
+        "Unified repository content processing or scheduled recovery failed",
       metric: this.worker.metricErrors({
         period: cdk.Duration.minutes(5),
         statistic: "Sum",

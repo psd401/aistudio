@@ -171,6 +171,10 @@ export class PollingSessionCache {
         log.debug('Cache cleanup completed', { cleaned, remaining: this.cache.size });
       }
     }, this.options.cleanupInterval);
+    // The cache is an optimization, not a lifecycle owner. Do not keep a
+    // serverless invocation, CLI command, or test process alive solely for the
+    // periodic cleanup timer.
+    this.cleanupTimer.unref();
   }
 
   private estimateMemoryUsage(): string {

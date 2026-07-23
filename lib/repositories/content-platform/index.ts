@@ -13,3 +13,6 @@ export * from "./text-processing";
 export * from "./status-service";
 export * from "./object-key";
 export * from "./post-deploy-recovery";
+export * from "./worker-job-service";
+export * from "./embedding-recovery";
+export * from "./legacy-inline-recovery";

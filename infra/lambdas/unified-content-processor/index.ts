@@ -1,4 +1,5 @@
-import type { EventBridgeEvent, SQSBatchItemFailure, SQSBatchResponse, SQSEvent, SQSRecord } from "aws-lambda";
+import type { Context, EventBridgeEvent, SQSBatchItemFailure, SQSBatchResponse, SQSEvent, SQSRecord } from "aws-lambda";
+import { createHash } from "node:crypto";
 import {
   GetObjectCommand,
   GetObjectTaggingCommand,
@@ -19,7 +20,12 @@ import {
   type Block,
 } from "@aws-sdk/client-textract";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
+import {
+  DeleteMessageBatchCommand,
+  ReceiveMessageCommand,
+  SendMessageCommand,
+  SQSClient,
+} from "@aws-sdk/client-sqs";
 import { and, asc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "../../../lib/db/drizzle-client";
 import {
@@ -38,10 +44,16 @@ import {
   isImageContentType,
   prepareRepositoryImage,
 } from "../../../lib/repositories/content-platform/image-processing";
+export {
+  prepareRepositoryImage as prepareRepositoryImageForRuntimeSmoke,
+} from "../../../lib/repositories/content-platform/image-processing";
 import {
   PDF_PROCESSOR_VERSION,
   extractPdfText,
   segmentPdfPages,
+} from "../../../lib/repositories/content-platform/pdf-processing";
+export {
+  extractPdfText as extractPdfTextForRuntimeSmoke,
 } from "../../../lib/repositories/content-platform/pdf-processing";
 import {
   MEDIA_PROCESSOR_VERSION,
@@ -53,13 +65,22 @@ import {
   type MediaKind,
   type ProcessedMediaOutput,
 } from "../../../lib/repositories/content-platform/media-processing";
+export {
+  processBdaMediaOutput as processBdaMediaOutputForRuntimeSmoke,
+} from "../../../lib/repositories/content-platform/media-processing";
 import {
   extractOfficeDocument,
   isOfficeContentType,
 } from "../../../lib/repositories/content-platform/office-processing";
+export {
+  extractOfficeDocument as extractOfficeDocumentForRuntimeSmoke,
+} from "../../../lib/repositories/content-platform/office-processing";
 import {
   extractCanonicalTextDocument,
   isCanonicalTextContentType,
+} from "../../../lib/repositories/content-platform/text-processing";
+export {
+  extractCanonicalTextDocument as extractCanonicalTextDocumentForRuntimeSmoke,
 } from "../../../lib/repositories/content-platform/text-processing";
 import {
   MAX_INLINE_ARTIFACT_CHARACTERS,
@@ -84,12 +105,43 @@ import {
 import { CONTENT_SWEEP_REDISPATCHABLE_STATUSES } from "../../../lib/repositories/content-platform/job-state";
 import { releasePostDeployRecoveryJobs } from "../../../lib/repositories/content-platform/post-deploy-recovery";
 import {
+  claimRepositoryProcessingJob,
+  reconcileRepositoryProcessingDlqMessage,
+  recordRepositoryProcessingFailure,
+  recordRepositorySecurityBlock,
+} from "../../../lib/repositories/content-platform/worker-job-service";
+import {
+  claimIncompleteEmbeddingGenerations,
+  canAcknowledgeCanonicalEmbeddingDlqMessage,
+  parseCanonicalEmbeddingDlqMessage,
+  releaseIncompleteEmbeddingGenerationClaim,
+} from "../../../lib/repositories/content-platform/embedding-recovery";
+import {
+  claimLegacyInlineTextRecoveries,
+  completeLegacyInlineTextRecovery,
+  failLegacyInlineTextRecovery,
+} from "../../../lib/repositories/content-platform/legacy-inline-recovery";
+import { buildRepositorySourceObjectKey } from "../../../lib/repositories/content-platform/object-key";
+import {
   classifyContentProcessingError,
   PermanentContentProcessingError,
   prepareDeferredProcessingMetrics,
   processingRetryDelaySeconds,
+  RetryableManagedServiceJobError,
   type DeferredProcessingReason,
 } from "./lifecycle";
+import {
+  attachBdaInvocation,
+  attachTextractJob,
+  buildManagedServiceClientToken,
+  reconcileBdaState,
+  reconcileTextractState,
+} from "./provider-state";
+import { runScheduledMaintenance } from "./scheduled-maintenance";
+import {
+  dispatchClaimedEmbeddingGeneration,
+  EmbeddingRecoveryDispatchError,
+} from "./embedding-recovery-dispatch";
 import {
   repositoryEmbeddingConfigurationFromSettings,
   repositoryVisualEmbeddingConfiguration,
@@ -114,14 +166,13 @@ const dataAutomation = new BedrockDataAutomationRuntimeClient({});
 const secrets = new SecretsManagerClient({});
 const bucket = requiredEnvironment("DOCUMENTS_BUCKET_NAME");
 const queueUrl = requiredEnvironment("CONTENT_PROCESSING_QUEUE_URL");
+const processingDlqUrl = requiredEnvironment("CONTENT_PROCESSING_DLQ_URL");
 const embeddingQueueUrl = requiredEnvironment("EMBEDDING_QUEUE_URL");
+const embeddingDlqUrl = requiredEnvironment("EMBEDDING_DLQ_URL");
 const dataAutomationProjectArn = requiredEnvironment("BDA_DATA_AUTOMATION_PROJECT_ARN");
 const dataAutomationProfileArn = requiredEnvironment("BDA_DATA_AUTOMATION_PROFILE_ARN");
 const databaseSecretArn = requiredEnvironment("DATABASE_SECRET_ARN");
 const databaseHost = requiredEnvironment("DATABASE_HOST");
-// The lease outlives the 15-minute Lambda timeout. A timed-out invocation is
-// recovered by the scheduled sweep without racing its final minute of work.
-const LEASE_DURATION_MS = 16 * 60 * 1000;
 const DEFER_SECONDS = 60;
 const DISPATCH_BATCH_SIZE = 25;
 
@@ -203,108 +254,6 @@ async function getEmbeddingConfiguration() {
   return repositoryEmbeddingConfigurationFromSettings(Object.fromEntries(rows.map((row) => [row.key, row.value])));
 }
 
-async function claimJob(message: ContentProcessingMessage, workerId: string) {
-  return executeTransaction(async (tx) => {
-    const [job] = await tx
-      .select()
-      .from(repositoryProcessingJobs)
-      .where(eq(repositoryProcessingJobs.id, message.jobId))
-      .limit(1)
-      .for("update");
-    if (!job || job.itemVersionId !== message.itemVersionId) {
-      throw new Error("Processing job does not match its item version");
-    }
-    if (job.status === "succeeded" || job.status === "cancelled") return null;
-    if (job.status === "running" && job.leaseExpiresAt && job.leaseExpiresAt.getTime() > Date.now()) {
-      return null;
-    }
-    if (job.status === "pending" && job.availableAt.getTime() > Date.now()) {
-      return null;
-    }
-    if (job.attempt >= job.maxAttempts) {
-      const errorMessage = "Processing job exhausted its retry budget";
-      await tx
-        .update(repositoryItemVersions)
-        .set({ inspectionStatus: "error", processingStatus: "failed" })
-        .where(eq(repositoryItemVersions.id, message.itemVersionId));
-      const [version] = await tx
-        .select({ itemId: repositoryItemVersions.itemId })
-        .from(repositoryItemVersions)
-        .where(eq(repositoryItemVersions.id, message.itemVersionId))
-        .limit(1);
-      if (version) {
-        await tx
-          .update(repositoryItems)
-          .set({
-            processingStatus: "failed",
-            processingError: errorMessage,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(repositoryItems.id, version.itemId),
-              eq(repositoryItems.currentVersionId, message.itemVersionId)
-            )
-          );
-      }
-      await tx
-        .update(repositoryProcessingJobs)
-        .set({
-          status: "failed",
-          lastErrorCode: "RETRY_BUDGET_EXHAUSTED",
-          lastErrorMessage: errorMessage,
-          leaseOwner: null,
-          leaseExpiresAt: null,
-          finishedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(repositoryProcessingJobs.id, job.id));
-      return null;
-    }
-    const now = new Date();
-    const [claimed] = await tx
-      .update(repositoryProcessingJobs)
-      .set({
-        status: "running",
-        attempt: job.attempt + 1,
-        leaseOwner: workerId,
-        leaseExpiresAt: new Date(now.getTime() + LEASE_DURATION_MS),
-        startedAt: job.startedAt ?? now,
-        finishedAt: null,
-        updatedAt: now,
-      })
-      .where(eq(repositoryProcessingJobs.id, job.id))
-      .returning();
-    if (claimed && job.stage === "inspect") {
-      await tx
-        .update(repositoryItemVersions)
-        .set({ processingStatus: "processing" })
-        .where(eq(repositoryItemVersions.id, message.itemVersionId));
-      const [version] = await tx
-        .select({ itemId: repositoryItemVersions.itemId })
-        .from(repositoryItemVersions)
-        .where(eq(repositoryItemVersions.id, message.itemVersionId))
-        .limit(1);
-      if (version) {
-        await tx
-          .update(repositoryItems)
-          .set({
-            processingStatus: "processing",
-            processingError: null,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(repositoryItems.id, version.itemId),
-              eq(repositoryItems.currentVersionId, message.itemVersionId)
-            )
-          );
-      }
-    }
-    return claimed ?? null;
-  }, "contentProcessor.claimJob");
-}
-
 async function deferJob(
   message: ContentProcessingMessage,
   metrics: JobMetrics,
@@ -362,46 +311,7 @@ async function getMalwareStatus(objectKey: string): Promise<string | null> {
 }
 
 async function blockVersion(message: ContentProcessingMessage, status: string): Promise<void> {
-  await executeTransaction(async (tx) => {
-    await tx
-      .update(repositoryItemVersions)
-      .set({
-        inspectionStatus: "blocked",
-        inspectionDetails: { provider: "guardduty", status },
-        storageStatus: "blocked",
-        processingStatus: "failed",
-      })
-      .where(eq(repositoryItemVersions.id, message.itemVersionId));
-    const [version] = await tx
-      .select({ itemId: repositoryItemVersions.itemId })
-      .from(repositoryItemVersions)
-      .where(eq(repositoryItemVersions.id, message.itemVersionId))
-      .limit(1);
-    if (version) {
-      await tx
-        .update(repositoryItems)
-        .set({
-          lifecycleStatus: "unavailable",
-          processingStatus: "failed",
-          processingError: `Security inspection result: ${status}`,
-          updatedAt: new Date(),
-        })
-        .where(eq(repositoryItems.id, version.itemId));
-    }
-    await tx
-      .update(repositoryProcessingJobs)
-      .set({
-        status: "failed",
-        attempt: sql`${repositoryProcessingJobs.maxAttempts}`,
-        lastErrorCode: "SECURITY_INSPECTION_BLOCKED",
-        lastErrorMessage: status,
-        leaseOwner: null,
-        leaseExpiresAt: null,
-        finishedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(repositoryProcessingJobs.id, message.jobId));
-  }, "contentProcessor.blockVersion");
+  await recordRepositorySecurityBlock(message, status);
 }
 
 async function downloadObject(objectKey: string): Promise<Uint8Array> {
@@ -420,13 +330,14 @@ async function downloadJsonObject(objectKey: string): Promise<unknown> {
 }
 
 async function startMediaAnalysis(input: {
+  clientToken: string;
   jobId: string;
   sourceObjectKey: string;
   outputPrefix: string;
 }): Promise<string> {
   const result = await dataAutomation.send(
     new InvokeDataAutomationAsyncCommand({
-      clientToken: input.jobId,
+      clientToken: input.clientToken,
       inputConfiguration: {
         s3Uri: `s3://${bucket}/${input.sourceObjectKey}`,
       },
@@ -519,8 +430,16 @@ async function pollMediaAnalysis(input: {
   }
   if (result.status !== "Success") {
     const detail = [result.errorType, result.errorMessage].filter(Boolean).join(": ");
-    throw new Error(
-      `Bedrock Data Automation failed with status ${result.status ?? "UNKNOWN"}` + `${detail ? ` (${detail})` : ""}`,
+    const message =
+      `Bedrock Data Automation failed with status ${result.status ?? "UNKNOWN"}` +
+      `${detail ? ` (${detail})` : ""}`;
+    if (result.status === "ClientError") {
+      throw new PermanentContentProcessingError("BDA_CLIENT_ERROR", message);
+    }
+    throw new RetryableManagedServiceJobError(
+      "bedrock-data-automation",
+      "BDA_JOB_FAILED",
+      message
     );
   }
   if (!result.outputConfiguration?.s3Uri) {
@@ -548,7 +467,11 @@ async function pollTextract(
     );
     if (result.JobStatus === "IN_PROGRESS") return { status: "pending" };
     if (result.JobStatus !== "SUCCEEDED") {
-      throw new Error(`Textract OCR failed with status ${result.JobStatus ?? "UNKNOWN"}`);
+      throw new RetryableManagedServiceJobError(
+        "textract",
+        "TEXTRACT_JOB_FAILED",
+        `Textract OCR failed with status ${result.JobStatus ?? "UNKNOWN"}`
+      );
     }
     blocks.push(...(result.Blocks ?? []));
     nextToken = result.NextToken;
@@ -556,11 +479,14 @@ async function pollTextract(
   return { status: "complete", blocks };
 }
 
-async function startTextract(objectKey: string): Promise<string> {
+async function startTextract(
+  objectKey: string,
+  clientRequestToken: string
+): Promise<string> {
   const result = await textract.send(
     new StartDocumentTextDetectionCommand({
       DocumentLocation: { S3Object: { Bucket: bucket, Name: objectKey } },
-      ClientRequestToken: objectKey.replace(/[^a-zA-Z0-9-_]/g, "-").slice(-64),
+      ClientRequestToken: clientRequestToken,
       JobTag: "aistudio-unified-content",
     }),
   );
@@ -645,8 +571,8 @@ async function captionImage(
 
 async function queueEmbeddings(
   generationId: string,
-  itemId: number,
   visualEnabled: boolean,
+  onMessageSent: () => void = () => undefined,
 ): Promise<void> {
   let lastChunkId = 0;
   for (;;) {
@@ -655,6 +581,7 @@ async function queueEmbeddings(
         db
           .select({
             id: repositoryItemChunks.id,
+            itemId: repositoryItemChunks.itemId,
             content: repositoryItemChunks.content,
             contextPrefix: repositoryItemChunks.contextPrefix,
             modality: repositoryItemChunks.modality,
@@ -696,17 +623,255 @@ async function queueEmbeddings(
       "contentProcessor.embeddingChunks",
     );
     if (chunks.length === 0) break;
-    for (const message of batchEmbeddingMessages(itemId, generationId, chunks)) {
-      await sqs.send(
-        new SendMessageCommand({
-          QueueUrl: embeddingQueueUrl,
-          MessageBody: JSON.stringify(message),
-        }),
-      );
+    const byItem = new Map<number, Array<(typeof chunks)[number]>>();
+    for (const chunk of chunks) {
+      const itemChunks = byItem.get(chunk.itemId) ?? [];
+      itemChunks.push(chunk);
+      byItem.set(chunk.itemId, itemChunks);
+    }
+    for (const [itemId, itemChunks] of byItem) {
+      for (const message of batchEmbeddingMessages(
+        itemId,
+        generationId,
+        itemChunks
+      )) {
+        await sqs.send(
+          new SendMessageCommand({
+            QueueUrl: embeddingQueueUrl,
+            MessageBody: JSON.stringify(message),
+          }),
+        );
+        onMessageSent();
+      }
     }
     const lastChunk = chunks.at(-1);
     if (!lastChunk) break;
     lastChunkId = lastChunk.id;
+  }
+}
+
+async function queueGenerationActivation(
+  generationId: string,
+  onMessageSent: () => void = () => undefined
+): Promise<void> {
+  const [chunk] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: repositoryItemChunks.id,
+          itemId: repositoryItemChunks.itemId,
+        })
+        .from(repositoryItemChunks)
+        .where(eq(repositoryItemChunks.indexGenerationId, generationId))
+        .orderBy(asc(repositoryItemChunks.id))
+        .limit(1),
+    "contentProcessor.embeddingActivationProbe"
+  );
+  if (!chunk) {
+    throw new Error("A completed embedding generation has no activation chunk");
+  }
+  await sqs.send(
+    new SendMessageCommand({
+      QueueUrl: embeddingQueueUrl,
+      MessageBody: JSON.stringify({
+        itemId: chunk.itemId,
+        generationId,
+        chunkIds: [],
+        texts: [],
+        modalities: [],
+        visualSources: [],
+        activationOnly: true,
+      }),
+    })
+  );
+  onMessageSent();
+}
+
+async function dispatchIncompleteGenerationEmbeddings(): Promise<void> {
+  const generations = await claimIncompleteEmbeddingGenerations();
+  let firstError: unknown = null;
+  for (const generation of generations) {
+    try {
+      await dispatchClaimedEmbeddingGeneration(
+        (recordDurableDispatch) =>
+          generation.activationOnly
+            ? queueGenerationActivation(
+                generation.id,
+                recordDurableDispatch
+              )
+            : queueEmbeddings(
+                generation.id,
+                generation.visualEmbeddingEnabled,
+                recordDurableDispatch
+              ),
+        () => releaseIncompleteEmbeddingGenerationClaim(generation)
+      );
+    } catch (error) {
+      firstError ??= error;
+      log.error("Incomplete embedding generation redispatch failed", {
+        generationId: generation.id,
+        dispatchedMessages:
+          error instanceof EmbeddingRecoveryDispatchError
+            ? error.dispatchedMessages
+            : 0,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  log.info("Dispatched incomplete embedding generations", {
+    count: generations.length,
+  });
+  if (firstError) throw firstError;
+}
+
+async function drainRecoveredEmbeddingDlq(): Promise<void> {
+  const received = await sqs.send(
+    new ReceiveMessageCommand({
+      QueueUrl: embeddingDlqUrl,
+      MaxNumberOfMessages: 10,
+      WaitTimeSeconds: 0,
+      VisibilityTimeout: 60,
+    })
+  );
+  const deletable: Array<{ Id: string; ReceiptHandle: string }> = [];
+  for (const message of received.Messages ?? []) {
+    if (!message.Body || !message.MessageId || !message.ReceiptHandle) continue;
+    const canonical = parseCanonicalEmbeddingDlqMessage(message.Body);
+    if (!canonical) {
+      log.error("Retaining malformed or legacy embedding DLQ record", {
+        messageId: message.MessageId,
+      });
+      continue;
+    }
+    if (
+      await canAcknowledgeCanonicalEmbeddingDlqMessage(
+        canonical.generationId
+      )
+    ) {
+      deletable.push({
+        Id: message.MessageId,
+        ReceiptHandle: message.ReceiptHandle,
+      });
+    }
+  }
+  if (deletable.length === 0) return;
+  const deleted = await sqs.send(
+    new DeleteMessageBatchCommand({
+      QueueUrl: embeddingDlqUrl,
+      Entries: deletable,
+    })
+  );
+  if ((deleted.Failed ?? []).length > 0) {
+    throw new Error(
+      `Failed to acknowledge ${deleted.Failed?.length ?? 0} recovered embedding DLQ records`
+    );
+  }
+  log.info("Acknowledged recovered embedding DLQ records", {
+    count: deletable.length,
+  });
+}
+
+async function drainRecoveredProcessingDlq(): Promise<void> {
+  const received = await sqs.send(
+    new ReceiveMessageCommand({
+      QueueUrl: processingDlqUrl,
+      MaxNumberOfMessages: 10,
+      WaitTimeSeconds: 0,
+      VisibilityTimeout: 60,
+    })
+  );
+  const deletable: Array<{ Id: string; ReceiptHandle: string }> = [];
+  for (const message of received.Messages ?? []) {
+    if (!message.Body || !message.MessageId || !message.ReceiptHandle) continue;
+    let canonical: ContentProcessingMessage;
+    try {
+      canonical = parseContentProcessingMessage(message.Body);
+    } catch {
+      log.error("Retaining malformed unified-content DLQ record", {
+        messageId: message.MessageId,
+      });
+      continue;
+    }
+    const reconciliation =
+      await reconcileRepositoryProcessingDlqMessage(canonical);
+    if (reconciliation.recovered) {
+      log.info("Recovered queued unified-content job from the DLQ", {
+        messageId: message.MessageId,
+        jobId: canonical.jobId,
+      });
+    }
+    if (reconciliation.acknowledge) {
+      deletable.push({
+        Id: message.MessageId,
+        ReceiptHandle: message.ReceiptHandle,
+      });
+    }
+  }
+  if (deletable.length === 0) return;
+  const deleted = await sqs.send(
+    new DeleteMessageBatchCommand({
+      QueueUrl: processingDlqUrl,
+      Entries: deletable,
+    })
+  );
+  if ((deleted.Failed ?? []).length > 0) {
+    throw new Error(
+      `Failed to acknowledge ${deleted.Failed?.length ?? 0} recovered unified-content DLQ records`
+    );
+  }
+  log.info("Acknowledged recovered unified-content DLQ records", {
+    count: deletable.length,
+  });
+}
+
+async function recoverLegacyInlineTextSources(leaseOwner: string): Promise<void> {
+  const claims = await claimLegacyInlineTextRecoveries({ leaseOwner });
+  for (const claim of claims) {
+    try {
+      const body = Buffer.from(claim.content, "utf8");
+      const objectKey = buildRepositorySourceObjectKey(
+        claim.repositoryId,
+        `inline-${claim.itemId}.txt`,
+        claim.itemVersionId
+      );
+      await s3.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: objectKey,
+          Body: body,
+          ContentType: "text/plain; charset=utf-8",
+          Metadata: {
+            repositoryId: claim.repositoryId.toString(),
+            itemId: claim.itemId.toString(),
+            sourceKind: "text",
+            recoveryKind: "legacy-inline-source",
+          },
+        })
+      );
+      const completed = await completeLegacyInlineTextRecovery({
+        claim,
+        objectKey,
+        byteSize: body.byteLength,
+        sha256: createHash("sha256").update(body).digest("hex"),
+      });
+      if (!completed) {
+        log.error("Legacy inline source recovery lost its durable lease", {
+          jobId: claim.jobId,
+          itemVersionId: claim.itemVersionId,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await failLegacyInlineTextRecovery(claim, message);
+      log.error("Legacy inline source recovery failed", {
+        jobId: claim.jobId,
+        itemVersionId: claim.itemVersionId,
+        error: message,
+      });
+    }
+  }
+  if (claims.length > 0) {
+    log.info("Recovered legacy inline text sources", { count: claims.length });
   }
 }
 
@@ -732,9 +897,12 @@ async function storeCanonicalText(
 }
 
 async function processMessage(message: ContentProcessingMessage, workerId: string): Promise<void> {
-  const job = await claimJob(message, workerId);
+  const job = await claimRepositoryProcessingJob(message, workerId);
   if (!job) return;
-  const metrics = (job.metrics ?? {}) as JobMetrics;
+  if (!job.startedAt) {
+    throw new Error("Claimed processing job has no durable run start time");
+  }
+  let metrics = (job.metrics ?? {}) as JobMetrics;
 
   const [context] = await executeQuery(
     (db) =>
@@ -835,23 +1003,45 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
   let artifactMetadata: Record<string, unknown>;
   let additionalArtifacts: PublishableArtifact[] | undefined;
   if (mediaKind) {
-    const outputPrefix = mediaArtifactObjectPrefix(context.repositoryId, message.itemVersionId);
-    if (metrics.bdaOutputPrefix && metrics.bdaOutputPrefix !== outputPrefix) {
-      throw new Error("BDA invocation does not match the item version namespace");
+    const clientToken = buildManagedServiceClientToken(
+      "bedrock-data-automation",
+      message.jobId,
+      job.startedAt,
+      context.objectKey
+    );
+    const bdaState = reconcileBdaState(
+      metrics,
+      context.objectKey,
+      mediaArtifactObjectPrefix(context.repositoryId, message.itemVersionId),
+      clientToken
+    );
+    metrics = bdaState.metrics;
+    if (bdaState.reset) {
+      log.info("Discarded incompatible BDA invocation state", {
+        jobId: message.jobId,
+        itemVersionId: message.itemVersionId,
+      });
     }
-    metrics.bdaOutputPrefix = outputPrefix;
-    if (!metrics.bdaInvocationArn) {
-      metrics.bdaInvocationArn = await startMediaAnalysis({
+    let invocationArn = bdaState.invocationArn;
+    if (!invocationArn) {
+      invocationArn = await startMediaAnalysis({
+        clientToken,
         jobId: message.jobId,
         sourceObjectKey: context.objectKey,
-        outputPrefix,
+        outputPrefix: bdaState.outputPrefix,
       });
+      metrics = attachBdaInvocation(
+        metrics,
+        context.objectKey,
+        bdaState.outputPrefix,
+        invocationArn
+      );
       await deferJob(message, metrics, "AWAITING_MEDIA_ANALYSIS", job.attempt);
       return;
     }
     const analysis = await pollMediaAnalysis({
-      invocationArn: metrics.bdaInvocationArn,
-      outputPrefix,
+      invocationArn,
+      outputPrefix: bdaState.outputPrefix,
       modality: mediaKind,
     });
     if (analysis.status === "pending") {
@@ -863,7 +1053,7 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
       throw new Error(`Media duration exceeds the configured ${config.maxMediaHours} hour limit`);
     }
 
-    const transcriptObjectKey = `${outputPrefix}transcript.txt`;
+    const transcriptObjectKey = `${bdaState.outputPrefix}transcript.txt`;
     const largeTranscript = analysis.output.transcriptText.length > MAX_INLINE_ARTIFACT_CHARACTERS;
     if (largeTranscript) {
       await storeTextDerivative(transcriptObjectKey, analysis.output.transcriptText);
@@ -954,12 +1144,35 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
         if (config.ocrStrategy === "disabled") {
           throw new Error("PDF contains scanned pages but OCR is disabled");
         }
-        if (!metrics.textractJobId) {
-          metrics.textractJobId = await startTextract(context.objectKey);
+        const textractState = reconcileTextractState(
+          metrics,
+          context.objectKey
+        );
+        metrics = textractState.metrics;
+        if (textractState.reset) {
+          log.info("Discarded incompatible PDF Textract state", {
+            jobId: message.jobId,
+            itemVersionId: message.itemVersionId,
+          });
+        }
+        if (!textractState.jobId) {
+          metrics = attachTextractJob(
+            metrics,
+            context.objectKey,
+            await startTextract(
+              context.objectKey,
+              buildManagedServiceClientToken(
+                "textract",
+                message.jobId,
+                job.startedAt,
+                context.objectKey
+              )
+            )
+          );
           await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
           return;
         }
-        const ocr = await pollTextract(metrics.textractJobId);
+        const ocr = await pollTextract(textractState.jobId);
         if (ocr.status === "pending") {
           await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
           return;
@@ -1007,16 +1220,35 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
 
       let ocrBlocks: Block[] = [];
       if (config.ocrStrategy !== "disabled") {
-        if (!metrics.textractJobId) {
-          metrics.textractObjectKey = ocrSourceObjectKey;
-          metrics.textractJobId = await startTextract(ocrSourceObjectKey);
+        const textractState = reconcileTextractState(
+          metrics,
+          ocrSourceObjectKey
+        );
+        metrics = textractState.metrics;
+        if (textractState.reset) {
+          log.info("Discarded incompatible image Textract state", {
+            jobId: message.jobId,
+            itemVersionId: message.itemVersionId,
+          });
+        }
+        if (!textractState.jobId) {
+          metrics = attachTextractJob(
+            metrics,
+            ocrSourceObjectKey,
+            await startTextract(
+              ocrSourceObjectKey,
+              buildManagedServiceClientToken(
+                "textract",
+                message.jobId,
+                job.startedAt,
+                ocrSourceObjectKey
+              )
+            )
+          );
           await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
           return;
         }
-        if (metrics.textractObjectKey && metrics.textractObjectKey !== ocrSourceObjectKey) {
-          throw new Error("Textract job does not match the normalized image artifact");
-        }
-        const ocr = await pollTextract(metrics.textractJobId);
+        const ocr = await pollTextract(textractState.jobId);
         if (ocr.status === "pending") {
           await deferJob(message, metrics, "AWAITING_OCR", job.attempt);
           return;
@@ -1142,7 +1374,6 @@ async function processMessage(message: ContentProcessingMessage, workerId: strin
   });
   await queueEmbeddings(
     published.generationId,
-    context.itemId,
     visualEmbeddingConfiguration !== null,
   );
   await executeQuery(
@@ -1169,88 +1400,9 @@ async function handleProcessingFailure(
   error: unknown
 ): Promise<void> {
   const decision = classifyContentProcessingError(error);
-  const failure = await executeTransaction(async (tx) => {
-    const [job] = await tx
-      .select()
-      .from(repositoryProcessingJobs)
-      .where(eq(repositoryProcessingJobs.id, message.jobId))
-      .limit(1)
-      .for("update");
-    if (!job) return { action: "ignore" as const };
-    if (job.itemVersionId !== message.itemVersionId) {
-      log.error("Ignoring processing message with a mismatched item version", {
-        jobId: message.jobId,
-      });
-      return { action: "ignore" as const };
-    }
-    if (job.status === "succeeded" || job.status === "cancelled") {
-      return { action: "ignore" as const };
-    }
-
-    const terminal = decision.terminal || job.attempt >= job.maxAttempts;
-    const now = new Date();
-    if (terminal) {
-      const code = decision.terminal
-        ? decision.code
-        : "RETRY_BUDGET_EXHAUSTED";
-      await tx
-        .update(repositoryProcessingJobs)
-        .set({
-          status: "failed",
-          // Close the budget so a stale/duplicate queue delivery cannot revive a
-          // deterministic or exhausted failure.
-          attempt: job.maxAttempts,
-          leaseOwner: null,
-          leaseExpiresAt: null,
-          lastErrorCode: code,
-          lastErrorMessage: decision.message,
-          finishedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(repositoryProcessingJobs.id, job.id));
-      await tx
-        .update(repositoryItemVersions)
-        .set({ inspectionStatus: "error", processingStatus: "failed" })
-        .where(eq(repositoryItemVersions.id, message.itemVersionId));
-      const [version] = await tx
-        .select({ itemId: repositoryItemVersions.itemId })
-        .from(repositoryItemVersions)
-        .where(eq(repositoryItemVersions.id, message.itemVersionId))
-        .limit(1);
-      if (version) {
-        await tx
-          .update(repositoryItems)
-          .set({
-            processingStatus: "failed",
-            processingError: decision.message,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(repositoryItems.id, version.itemId),
-              eq(repositoryItems.currentVersionId, message.itemVersionId)
-            )
-          );
-      }
-      return { action: "terminal" as const, code };
-    }
-
-    const delaySeconds = processingRetryDelaySeconds(job.attempt);
-    await tx
-      .update(repositoryProcessingJobs)
-      .set({
-        status: "pending",
-        availableAt: new Date(now.getTime() + delaySeconds * 1_000),
-        leaseOwner: null,
-        leaseExpiresAt: null,
-        lastErrorCode: decision.code,
-        lastErrorMessage: decision.message,
-        finishedAt: null,
-        updatedAt: now,
-      })
-      .where(eq(repositoryProcessingJobs.id, job.id));
-    return { action: "retry" as const, delaySeconds };
-  }, "contentProcessor.handleProcessingFailure");
+  const failure = await recordRepositoryProcessingFailure(message, decision, {
+    retryDelaySeconds: processingRetryDelaySeconds,
+  });
 
   if (failure.action !== "retry") {
     log.info("Unified content failure recorded", {
@@ -1366,16 +1518,53 @@ function isSqsEvent(event: SQSEvent | EventBridgeEvent<string, unknown>): event 
   return "Records" in event;
 }
 
-export async function handler(event: SQSEvent | EventBridgeEvent<string, unknown>): Promise<SQSBatchResponse | void> {
+export async function handler(
+  event: SQSEvent | EventBridgeEvent<string, unknown>,
+  context: Context
+): Promise<SQSBatchResponse | void> {
   await ensureDatabaseCredentials();
   if (!isSqsEvent(event)) {
-    const released = await releasePostDeployRecoveryJobs();
-    if (released.length > 0) {
-      log.info("Released post-deployment unified content recovery jobs", {
-        count: released.length,
-      });
-    }
-    await dispatchPendingJobs();
+    await runScheduledMaintenance(
+      [
+        {
+          name: "post-deploy-recovery",
+          run: async () => {
+            const released = await releasePostDeployRecoveryJobs();
+            if (released.length > 0) {
+              log.info("Released post-deployment unified content recovery jobs", {
+                count: released.length,
+              });
+            }
+          },
+        },
+        {
+          name: "legacy-source-recovery",
+          run: () =>
+            recoverLegacyInlineTextSources(
+              `legacy-inline-source-recovery:${context.awsRequestId}`
+            ),
+        },
+        {
+          name: "processing-dlq-reconciliation",
+          run: drainRecoveredProcessingDlq,
+        },
+        { name: "processing-outbox", run: dispatchPendingJobs },
+        {
+          name: "embedding-recovery",
+          run: dispatchIncompleteGenerationEmbeddings,
+        },
+        {
+          name: "embedding-dlq-reconciliation",
+          run: drainRecoveredEmbeddingDlq,
+        },
+      ],
+      (taskName, error) => {
+        log.error("Unified content maintenance stage failed", {
+          taskName,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    );
     return;
   }
 

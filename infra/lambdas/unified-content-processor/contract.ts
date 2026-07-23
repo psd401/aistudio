@@ -38,6 +38,8 @@ export interface EmbeddingQueueMessage {
   visualSources: Array<
     { objectKey: string; mediaType: "image/jpeg" | "image/png" | "image/webp" | "image/gif" } | null
   >;
+  /** Re-run only atomic generation activation; every required vector exists. */
+  activationOnly?: boolean;
 }
 
 export interface EmbeddingChunk {
@@ -50,6 +52,8 @@ export interface EmbeddingChunk {
 }
 
 export const MAX_EMBEDDING_MESSAGE_BYTES = 220_000;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type MalwareInspectionDecision =
   | { status: "not_required" }
@@ -63,9 +67,9 @@ export function parseContentProcessingMessage(
   const parsed = JSON.parse(body) as Partial<ContentProcessingMessage>;
   if (
     typeof parsed.jobId !== "string" ||
-    parsed.jobId.length === 0 ||
+    !UUID_PATTERN.test(parsed.jobId) ||
     typeof parsed.itemVersionId !== "string" ||
-    parsed.itemVersionId.length === 0
+    !UUID_PATTERN.test(parsed.itemVersionId)
   ) {
     throw new Error("Content processing message is missing jobId or itemVersionId");
   }

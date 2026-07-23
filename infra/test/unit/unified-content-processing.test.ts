@@ -19,6 +19,11 @@ function synthesize(): Template {
   const embeddingQueue = new sqs.Queue(stack, "EmbeddingQueue", {
     queueName: "aistudio-dev-embedding-queue",
   });
+  const embeddingDeadLetterQueue = new sqs.Queue(
+    stack,
+    "EmbeddingDeadLetterQueue",
+    { queueName: "aistudio-dev-embedding-dlq" }
+  );
   cdk.Tags.of(embeddingQueue).add("Environment", "dev");
   cdk.Tags.of(embeddingQueue).add("ManagedBy", "cdk");
 
@@ -29,6 +34,7 @@ function synthesize(): Template {
     databaseSecretArn:
       "arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio-dev-db-AbCdEf",
     embeddingQueue,
+    embeddingDeadLetterQueue,
     vpc,
   });
   return Template.fromStack(stack);
@@ -112,6 +118,8 @@ describe("UnifiedContentProcessing", () => {
           DOCUMENTS_BUCKET_NAME: "aistudio-dev-documents",
           DATABASE_HOST: "database.example.test",
           DATABASE_NAME: "aistudio",
+          CONTENT_PROCESSING_DLQ_URL: Match.anyValue(),
+          EMBEDDING_DLQ_URL: Match.anyValue(),
           BDA_DATA_AUTOMATION_PROJECT_ARN: Match.anyValue(),
           BDA_DATA_AUTOMATION_PROFILE_ARN: Match.anyValue(),
         }),
@@ -247,6 +255,73 @@ describe("UnifiedContentProcessing", () => {
     });
     expect(JSON.stringify(embeddingDispatch?.Resource)).not.toContain("*");
     expect(embeddingDispatch?.Condition).toBeUndefined();
+  });
+
+  test("reconciles only the exact embedding DLQ through bounded receive/delete access", () => {
+    type PolicyStatement = {
+      Sid?: string;
+      Effect?: string;
+      Action?: string | string[];
+      Resource?: unknown;
+    };
+    const workerRoles = template.findResources("AWS::IAM::Role", {
+      Properties: {
+        RoleName:
+          "aistudio-dev-unified-content-processor-execution-role-dev",
+      },
+    });
+    const statements = Object.values(workerRoles).flatMap((role) =>
+      (role.Properties?.Policies ?? []).flatMap(
+        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+          policy.PolicyDocument?.Statement ?? []
+      )
+    );
+    const recovery = statements.find(
+      (statement) => statement.Sid === "CanonicalEmbeddingDlqRecovery"
+    );
+    expect(recovery).toMatchObject({
+      Effect: "Allow",
+      Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
+    });
+    expect(recovery?.Resource).toEqual({
+      "Fn::GetAtt": [
+        expect.stringMatching(/^EmbeddingDeadLetterQueue/),
+        "Arn",
+      ],
+    });
+    expect(JSON.stringify(recovery?.Resource)).not.toContain("*");
+  });
+
+  test("reconciles only the exact processing DLQ through bounded receive/delete access", () => {
+    type PolicyStatement = {
+      Sid?: string;
+      Effect?: string;
+      Action?: string | string[];
+      Resource?: unknown;
+    };
+    const workerRoles = template.findResources("AWS::IAM::Role", {
+      Properties: {
+        RoleName:
+          "aistudio-dev-unified-content-processor-execution-role-dev",
+      },
+    });
+    const statements = Object.values(workerRoles).flatMap((role) =>
+      (role.Properties?.Policies ?? []).flatMap(
+        (policy: { PolicyDocument?: { Statement?: PolicyStatement[] } }) =>
+          policy.PolicyDocument?.Statement ?? []
+      )
+    );
+    const recovery = statements.find(
+      (statement) => statement.Sid === "CanonicalProcessingDlqRecovery"
+    );
+    expect(recovery).toMatchObject({
+      Effect: "Allow",
+      Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
+    });
+    expect(recovery?.Resource).toEqual({
+      "Fn::GetAtt": [expect.stringMatching(/DeadLetterQueue/), "Arn"],
+    });
+    expect(JSON.stringify(recovery?.Resource)).not.toContain("*");
   });
 
   test("grants only the documented wildcard APIs", () => {

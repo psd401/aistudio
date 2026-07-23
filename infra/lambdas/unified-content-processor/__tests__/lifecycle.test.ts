@@ -3,6 +3,7 @@ import {
   PermanentContentProcessingError,
   prepareDeferredProcessingMetrics,
   processingRetryDelaySeconds,
+  RetryableManagedServiceJobError,
 } from "../lifecycle";
 
 describe("unified content lifecycle policy", () => {
@@ -38,6 +39,40 @@ describe("unified content lifecycle policy", () => {
     expect(classifyContentProcessingError(throttled)).toMatchObject({
       terminal: false,
       code: "TRANSIENT_PROCESSING_ERROR",
+    });
+  });
+
+  test("restarts a managed-service run after the provider job itself fails", () => {
+    expect(
+      classifyContentProcessingError(
+        new RetryableManagedServiceJobError(
+          "bedrock-data-automation",
+          "BDA_JOB_FAILED",
+          "BDA returned ServiceError"
+        )
+      )
+    ).toEqual({
+      terminal: false,
+      code: "BDA_JOB_FAILED",
+      message: "BDA returned ServiceError",
+      resetManagedService: "bedrock-data-automation",
+    });
+  });
+
+  test("restarts a failed Textract run with a fresh provider token", () => {
+    expect(
+      classifyContentProcessingError(
+        new RetryableManagedServiceJobError(
+          "textract",
+          "TEXTRACT_JOB_FAILED",
+          "Textract returned FAILED"
+        )
+      )
+    ).toEqual({
+      terminal: false,
+      code: "TEXTRACT_JOB_FAILED",
+      message: "Textract returned FAILED",
+      resetManagedService: "textract",
     });
   });
 
