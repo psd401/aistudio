@@ -187,7 +187,7 @@
     "mdast-util-to-string": "^4.0.0",
     "mermaid": "^11.12.1",
     "nanoid": "^5.1.6",
-    "next": "16.2.9",
+    "next": "16.2.11",
     "next-auth": "^5.0.0-beta.30",
     "oidc-provider": "^9.6.0",
     "openai": "^6.17.0",
