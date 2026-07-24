@@ -27,7 +27,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Dirent } from "node:fs";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { Settings } from "@/lib/settings-manager";
 import { ErrorFactories } from "@/lib/error-utils";
@@ -166,6 +166,28 @@ async function readStreamToBoundedUtf8(
   }
 }
 
+async function readLocalFileBounded(
+  target: string,
+  maxBytes: number,
+  field: "body" | "asset",
+  message: string
+): Promise<Uint8Array> {
+  const handle = await open(target, "r");
+  try {
+    const metadata = await handle.stat();
+    if (metadata.size > maxBytes) {
+      throw ErrorFactories.validationFailed([{ field, message }]);
+    }
+    const bytes = await handle.readFile();
+    if (bytes.byteLength > maxBytes) {
+      throw ErrorFactories.validationFailed([{ field, message }]);
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
 export const s3Store = {
   /**
    * Build the canonical S3 key for a content object's per-version file.
@@ -273,16 +295,12 @@ export const s3Store = {
     const localRoot = getLocalStorageRoot();
     if (localRoot) {
       const target = resolveLocalKey(localRoot, key);
-      const metadata = await stat(target);
-      if (metadata.size > maxBytes) {
-        throw ErrorFactories.validationFailed([
-          {
-            field: "body",
-            message: `Stored content exceeds the ${maxBytes}-byte read limit`,
-          },
-        ]);
-      }
-      const bytes = await readFile(target);
+      const bytes = await readLocalFileBounded(
+        target,
+        maxBytes,
+        "body",
+        `Stored content exceeds the ${maxBytes}-byte read limit`
+      );
       try {
         return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
       } catch {
@@ -320,13 +338,12 @@ export const s3Store = {
     const localRoot = getLocalStorageRoot();
     if (localRoot) {
       const target = resolveLocalKey(localRoot, key);
-      const metadata = await stat(target);
-      if (metadata.size > maxBytes) {
-        throw ErrorFactories.validationFailed([
-          { field: "asset", message: "Stored asset exceeds its byte limit" },
-        ]);
-      }
-      return readFile(target);
+      return readLocalFileBounded(
+        target,
+        maxBytes,
+        "asset",
+        "Stored asset exceeds its byte limit"
+      );
     }
     const client = await getClient();
     const { bucket } = await getConfig();

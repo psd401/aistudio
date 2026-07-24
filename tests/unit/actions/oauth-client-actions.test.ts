@@ -131,4 +131,20 @@ describe('revokeOAuthClient (REV-COR-055)', () => {
     expect(pkceResult.isSuccess).toBe(false)
     expect(mockExecuteQuery).not.toHaveBeenCalled()
   })
+
+  it('rejects malformed runtime profile data before touching the database', async () => {
+    const malformed = {
+      clientName: '   ',
+      applicationType: 'native',
+      redirectUris: ['com.example.atrium:/oauth/callback'],
+      allowedScopes: ['openid'],
+      tokenEndpointAuthMethod: 'client_secret_post',
+      requirePkce: false,
+    } as unknown as import('@/actions/oauth/oauth-client.actions').CreateOAuthClientInput
+
+    const result = await createOAuthClient(malformed)
+
+    expect(result.isSuccess).toBe(false)
+    expect(mockExecuteQuery).not.toHaveBeenCalled()
+  })
 })

@@ -16,10 +16,11 @@ import { oauthClients } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { randomBytes, randomUUID } from "node:crypto"
 import { hashArgon2 } from "@/lib/api-keys/argon2-loader"
+import { z } from "zod"
 import {
-  isOAuthApplicationType,
   isPublicApplicationType,
   validateOAuthRedirectUris,
+  OAUTH_APPLICATION_TYPES,
   type OAuthApplicationType,
 } from "@/lib/oauth/redirect-uri-policy"
 import type { ActionState } from "@/types"
@@ -45,16 +46,43 @@ export interface OAuthClientRow {
   updatedAt: Date
 }
 
-export interface CreateOAuthClientInput {
-  clientName: string
-  applicationType: OAuthApplicationType
-  redirectUris: string[]
-  allowedScopes: string[]
-  tokenEndpointAuthMethod?: "none" | "client_secret_post"
-  requirePkce?: boolean
-  accessTokenTtl?: number
-  refreshTokenTtl?: number
+const oauthClientBaseFields = {
+  clientName: z.string().trim().min(1).max(255),
+  redirectUris: z.array(z.string()),
+  allowedScopes: z.array(z.string()),
+  requirePkce: z.literal(true).optional(),
+  accessTokenTtl: z.number().int().positive().optional(),
+  refreshTokenTtl: z.number().int().positive().optional(),
 }
+
+/**
+ * Runtime boundary for the server action. Public application profiles only
+ * admit `none`, while confidential authentication is available exclusively to
+ * the web profile. PKCE is either omitted or explicitly true for every profile.
+ */
+const createOAuthClientInputSchema = z.discriminatedUnion("applicationType", [
+  z.object({
+    ...oauthClientBaseFields,
+    applicationType: z.literal(OAUTH_APPLICATION_TYPES[0]),
+    tokenEndpointAuthMethod: z
+      .enum(["none", "client_secret_post"])
+      .optional(),
+  }),
+  z.object({
+    ...oauthClientBaseFields,
+    applicationType: z.literal(OAUTH_APPLICATION_TYPES[1]),
+    tokenEndpointAuthMethod: z.literal("none").optional(),
+  }),
+  z.object({
+    ...oauthClientBaseFields,
+    applicationType: z.literal(OAUTH_APPLICATION_TYPES[2]),
+    tokenEndpointAuthMethod: z.literal("none").optional(),
+  }),
+])
+
+export type CreateOAuthClientInput = z.input<
+  typeof createOAuthClientInputSchema
+>
 
 export interface CreateOAuthClientResult {
   client: OAuthClientRow
@@ -135,96 +163,32 @@ export async function createOAuthClient(
 
     const session = await getServerSession()
     const userId = session?.sub ? await getUserIdByCognitoSubAsNumber(session.sub) : null
-    const clientName =
-      typeof input.clientName === "string" ? input.clientName.trim() : ""
+    const validated = createOAuthClientInputSchema.parse(input)
+    const clientName = validated.clientName
 
     log.info("Creating OAuth client", {
       name: sanitizeForLogging(clientName),
-      applicationType: input.applicationType,
+      applicationType: validated.applicationType,
     })
 
-    if (!isOAuthApplicationType(input.applicationType)) {
-      throw ErrorFactories.invalidInput(
-        "applicationType",
-        input.applicationType,
-        "Application type must be web, browser_extension, or native"
-      )
-    }
-    if (clientName.length === 0 || clientName.length > 255) {
-      throw ErrorFactories.invalidInput(
-        "clientName",
-        input.clientName,
-        "Client name must be between 1 and 255 characters"
-      )
-    }
-    if (input.requirePkce === false) {
-      throw ErrorFactories.invalidInput(
-        "requirePkce",
-        input.requirePkce,
-        "All authorization-code clients require S256 PKCE"
-      )
-    }
-    if (
-      input.tokenEndpointAuthMethod !== undefined &&
-      input.tokenEndpointAuthMethod !== "none" &&
-      input.tokenEndpointAuthMethod !== "client_secret_post"
-    ) {
-      throw ErrorFactories.invalidInput(
-        "tokenEndpointAuthMethod",
-        input.tokenEndpointAuthMethod,
-        "Token endpoint authentication must be none or client_secret_post"
-      )
-    }
-    if (
-      isPublicApplicationType(input.applicationType) &&
-      input.tokenEndpointAuthMethod !== undefined &&
-      input.tokenEndpointAuthMethod !== "none"
-    ) {
-      throw ErrorFactories.invalidInput(
-        "tokenEndpointAuthMethod",
-        input.tokenEndpointAuthMethod,
-        "Browser-extension and native clients are public, have no secret, and require S256 PKCE"
-      )
-    }
-    if (
-      !Array.isArray(input.redirectUris) ||
-      !input.redirectUris.every((uri) => typeof uri === "string")
-    ) {
-      throw ErrorFactories.invalidInput(
-        "redirectUris",
-        input.redirectUris,
-        "Redirect URIs must be a list of strings"
-      )
-    }
-    if (
-      !Array.isArray(input.allowedScopes) ||
-      !input.allowedScopes.every((scope) => typeof scope === "string")
-    ) {
-      throw ErrorFactories.invalidInput(
-        "allowedScopes",
-        input.allowedScopes,
-        "Allowed scopes must be a list of strings"
-      )
-    }
-
     const uriValidation = validateOAuthRedirectUris(
-      input.applicationType,
-      input.redirectUris
+      validated.applicationType,
+      validated.redirectUris
     )
     if (!uriValidation.valid) {
       log.warn("Invalid redirect URIs", { errors: uriValidation.errors })
       throw ErrorFactories.invalidInput(
         "redirectUris",
-        input.redirectUris,
+        validated.redirectUris,
         uriValidation.errors.join("; ")
       )
     }
 
     const clientId = randomUUID()
-    const publicApplication = isPublicApplicationType(input.applicationType)
+    const publicApplication = isPublicApplicationType(validated.applicationType)
     const authMethod = publicApplication
       ? "none"
-      : (input.tokenEndpointAuthMethod ?? "none")
+      : (validated.tokenEndpointAuthMethod ?? "none")
     const isConfidential = authMethod === "client_secret_post"
 
     let clientSecret: string | undefined
@@ -242,16 +206,16 @@ export async function createOAuthClient(
           .values({
             clientId,
             clientName,
-            applicationType: input.applicationType,
+            applicationType: validated.applicationType,
             clientSecretHash,
             redirectUris: uriValidation.normalizedUris,
-            allowedScopes: input.allowedScopes,
+            allowedScopes: validated.allowedScopes,
             grantTypes: ["authorization_code", "refresh_token"],
             responseTypes: ["code"],
             tokenEndpointAuthMethod: authMethod,
             requirePkce: true,
-            accessTokenTtl: input.accessTokenTtl ?? 900,
-            refreshTokenTtl: input.refreshTokenTtl ?? 86400,
+            accessTokenTtl: validated.accessTokenTtl ?? 900,
+            refreshTokenTtl: validated.refreshTokenTtl ?? 86400,
             createdBy: userId,
           })
           .returning(),
