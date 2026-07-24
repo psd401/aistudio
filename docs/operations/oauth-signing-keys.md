@@ -12,6 +12,11 @@ AI Studio deliberately uses two signing systems:
 | OIDC access and ID tokens | RSA-3072 JWK set in AWS Secrets Manager | Exportable to the ECS task because `oidc-provider` requires a private JWK |
 | Atrium delegated-agent tokens | AWS KMS asymmetric key | Non-exportable; signing occurs inside KMS |
 
+The OIDC provider also uses a separate symmetric
+`OIDC_COOKIE_SECRET` for its interaction, session, and state cookies. It must
+not reuse `AUTH_SECRET` in production. `FrontendStackEcs` creates the cookie
+secret and injects only its value into the ECS task at startup.
+
 The OIDC key is not a fallback for the KMS signer. It is a separate,
 OIDC-only key with a narrower purpose. Secrets Manager encrypts it at rest,
 CloudTrail records reads and writes, and IAM grants `GetSecretValue` only to the
@@ -26,9 +31,10 @@ token) is database-backed, so ALB routing and task restarts do not break a flow.
 
 ## Provisioning and deployment
 
-`AIStudio-FrontendStack-{environment}` creates and tags:
+`AIStudio-FrontendStack-ECS-{environment}` creates and tags:
 
 - `aistudio/{environment}/oauth/oidc-signing-jwks`
+- `aistudio/{environment}/oauth/oidc-cookie-secret`
 - `aistudio-oidc-key-bootstrap-{environment}`
 
 The custom resource generates the first RSA-3072 key only when the secret does
@@ -39,9 +45,10 @@ cannot start against the placeholder.
 Deploy in this order:
 
 1. Apply database migration `129-oauth-production-hardening.sql`.
-2. Run `cd infra && bunx cdk synth AIStudio-FrontendStack-Dev` (or Prod).
+2. Run `cd infra && bunx cdk synth AIStudio-FrontendStack-ECS-Dev --context baseDomain=<domain>` (or Prod).
 3. Deploy the frontend stack.
-4. Check `/api/health`; `checks.oauthSigning.status` must be `healthy`.
+4. Check `/api/health`; `checks.oauthSigning.status` must be `healthy`. This
+   verifies both the dedicated cookie key and the shared signing-key set.
 5. Check `/.well-known/openid-configuration` and `/api/oauth/jwks`.
 6. Complete a public-client S256 authorization-code flow and call one read and
    one write endpoint with the access JWT.
@@ -49,6 +56,12 @@ Deploy in this order:
 The OAuth route fails closed with HTTP 500 if the signing secret is absent,
 unreadable, malformed, or lacks exactly one active private RSA/RS256 key.
 There is no production local-key fallback.
+
+On the first deployment that introduces the dedicated cookie secret, any
+interactive OIDC authorization flow already in progress still carries cookies
+protected by the former session secret. Those short-lived flows must restart
+after deployment; issued access/ID tokens and future authorization flows are
+unaffected. Schedule the rollout accordingly and verify a fresh S256 flow.
 
 ## Rotation
 
@@ -93,14 +106,18 @@ issued-token lifetime causes valid in-flight tokens to fail.
 
 ## Incident response
 
-### Health reports a missing/unreadable secret
+### Health reports missing/unreadable OIDC cryptographic configuration
 
-1. Inspect the ECS task log for `OIDC signing key set unavailable`.
-2. Verify `OIDC_SIGNING_JWKS_SECRET_ARN` points to the environment's secret.
-3. Verify the ECS task role has `secretsmanager:GetSecretValue` for that ARN.
-4. Verify tags are `Environment={environment}` and `ManagedBy=cdk`.
-5. Validate the JSON structure without logging private fields.
-6. Restore the most recent known-good secret version, then force a new ECS
+1. Confirm the task definition injects `OIDC_COOKIE_SECRET` from
+   `aistudio/{environment}/oauth/oidc-cookie-secret`.
+2. Inspect the ECS task log for `OIDC provider cryptographic health check
+   failed` or `OIDC signing key set unavailable`.
+3. Verify `OIDC_SIGNING_JWKS_SECRET_ARN` points to the environment's secret.
+4. Verify the ECS task/execution roles have `secretsmanager:GetSecretValue` for
+   the corresponding secret ARNs.
+5. Verify tags are `Environment={environment}` and `ManagedBy=cdk`.
+6. Validate the signing-key JSON structure without logging private fields.
+7. Restore the most recent known-good secret version, then force a new ECS
    deployment or wait for the five-minute cache.
 
 ### Suspected OIDC private-key compromise

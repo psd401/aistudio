@@ -211,13 +211,18 @@ export async function GET() {
     }
   }
 
-  // 4. Verify that every task can load the shared OIDC signing key set. The
-  // check reports metadata only; private JWK material and the secret ARN are
-  // never included in the response or logs.
+  // 4. Verify that every task has the dedicated production cookie secret and
+  // can load the shared OIDC signing key set. The check reports metadata only;
+  // private key material, secret values, and secret ARNs are never included in
+  // the response or logs.
   try {
+    const { getOidcCookieSecret } = await import(
+      "@/lib/oauth/oidc-cookie-secret"
+    )
     const { getOidcSigningKeySet } = await import(
       "@/lib/oauth/oidc-signing-key-store"
     )
+    getOidcCookieSecret()
     const keySet = await getOidcSigningKeySet()
     healthCheck.checks.oauthSigning = {
       status: "healthy",
@@ -227,15 +232,18 @@ export async function GET() {
       source: keySet.source,
     }
   } catch (error) {
-    log.error("OIDC signing key health check failed", {
+    log.error("OIDC provider cryptographic health check failed", {
       errorType: error instanceof Error ? error.name : "UnknownError",
     })
     healthCheck.checks.oauthSigning = {
       status: "unhealthy",
-      configured: Boolean(process.env.OIDC_SIGNING_JWKS_SECRET_ARN),
-      error: "OIDC signing keys are unavailable",
+      configured: Boolean(
+        process.env.OIDC_COOKIE_SECRET &&
+          process.env.OIDC_SIGNING_JWKS_SECRET_ARN
+      ),
+      error: "OIDC provider cryptographic configuration is unavailable",
       hint:
-        "Check application logs and the deployment's signing-key configuration.",
+        "Check application logs and the deployment's cookie/signing-key configuration.",
     }
   }
 
@@ -281,7 +289,7 @@ export async function GET() {
 
     if (healthCheck.checks.oauthSigning.status !== "healthy") {
       healthCheck.diagnostics.hints.push(
-        "OAuth signing keys are unavailable. Token issuance fails closed until the shared OIDC key-set secret and ECS permissions are repaired."
+        "OAuth provider cryptographic configuration is unavailable. Token issuance fails closed until the dedicated cookie secret, shared OIDC key-set secret, and ECS permissions are repaired."
       )
     }
     

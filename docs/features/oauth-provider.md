@@ -130,7 +130,7 @@ authenticateRequest() → token starts with "sk-"?
 | `OIDC_SIGNING_JWKS_SECRET_ARN` | Production | — | Secrets Manager ARN for the shared OIDC-only RSA JWK set |
 | `KMS_SIGNING_KEY_ARN` | Prod only | — | Separate KMS key for delegated-agent JWT signing |
 | `KMS_SIGNING_KEY_KID` | Prod only | — | Delegated-token KMS key ID |
-| `OIDC_COOKIE_SECRET` | Recommended | NEXTAUTH_SECRET | Cookie encryption |
+| `OIDC_COOKIE_SECRET` | Production | AUTH_SECRET (local only) | Dedicated provider cookie encryption/signing key; provisioned and injected by `FrontendStackEcs` |
 | `NEXTAUTH_URL` | Yes | — | Issuer URL |
 
 See [OIDC signing-key operations](../operations/oauth-signing-keys.md) for the

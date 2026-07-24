@@ -45,6 +45,7 @@ function synthTemplate(): Template {
     internalApiSecretArn: secretArn('internal-api'),
     collabJwtSecretArn: secretArn('collab-jwt'),
     guardrailHashSecretArn: secretArn('guardrail-hash'),
+    oidcCookieSecretArn: secretArn('oidc-cookie'),
     oidcSigningJwksSecretArn: secretArn('oidc-signing'),
   });
 
@@ -124,6 +125,36 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     const mintEnv = envPairs.find((e) => e.Name === 'AGENT_MINT_LAMBDA_NAME');
     expect(mintEnv).toBeDefined();
     expect(mintEnv!.Value).toBe(MINT_FN);
+  });
+
+  it('injects the dedicated OIDC cookie secret into the frontend container', () => {
+    const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+    const secretPairs: Array<{ Name?: string; ValueFrom?: unknown }> = [];
+    for (const td of Object.values(taskDefs)) {
+      const containers = (
+        td as {
+          Properties?: {
+            ContainerDefinitions?: Array<{
+              Secrets?: Array<{ Name?: string; ValueFrom?: unknown }>;
+            }>;
+          };
+        }
+      ).Properties?.ContainerDefinitions ?? [];
+      for (const container of containers) {
+        if (Array.isArray(container.Secrets)) {
+          secretPairs.push(...container.Secrets);
+        }
+      }
+    }
+
+    const oidcCookieSecret = secretPairs.find(
+      (secret) => secret.Name === 'OIDC_COOKIE_SECRET'
+    );
+    expect(oidcCookieSecret).toBeDefined();
+    expect(JSON.stringify(oidcCookieSecret!.ValueFrom)).toContain('oidc-cookie');
+    expect(JSON.stringify(oidcCookieSecret!.ValueFrom)).toContain(
+      'OIDC_COOKIE_SECRET'
+    );
   });
 
   it('keeps legacy document storage permissions separate from permanent cleanup', () => {
