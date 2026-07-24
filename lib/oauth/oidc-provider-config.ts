@@ -10,6 +10,7 @@ import { DrizzleOidcAdapter } from "./drizzle-adapter"
 import { getOidcSigningKeySet } from "./oidc-signing-key-store"
 import { getIssuerUrl } from "./issuer-config"
 import { ALL_OAUTH_SCOPES } from "./oauth-scopes"
+import { getOidcCookieSecret } from "./oidc-cookie-secret"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -283,19 +284,7 @@ export async function getOidcProvider(
     // Cookies
     // ==========================================
     cookies: {
-      keys: (() => {
-        const secret = process.env.OIDC_COOKIE_SECRET ?? process.env.NEXTAUTH_SECRET
-        if (!secret) {
-          if (process.env.NODE_ENV === "production") {
-            throw new Error(
-              "OIDC_COOKIE_SECRET or NEXTAUTH_SECRET must be set in production. " +
-              "Generate with: openssl rand -base64 32"
-            )
-          }
-          return ["dev-oidc-cookie-secret-change-in-production"]
-        }
-        return [secret]
-      })(),
+      keys: [getOidcCookieSecret()],
     },
   })
 

@@ -174,6 +174,27 @@ export class FrontendStackEcs extends cdk.Stack {
     });
 
     // ============================================================================
+    // OIDC Provider Cookie Secret (#1285 deployment readiness)
+    // ============================================================================
+    // oidc-provider encrypts/signs its own interaction, session, and state
+    // cookies. Keep this key separate from AUTH_SECRET so a NextAuth session-key
+    // compromise does not extend to the OAuth provider. The value is injected
+    // into ECS at task start; operators never need to hand-configure it.
+    const oidcCookieSecret = new secretsmanager.Secret(this, 'OidcCookieSecret', {
+      secretName: `aistudio/${environment}/oauth/oidc-cookie-secret`,
+      description: 'Dedicated oidc-provider cookie encryption and signing secret',
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({}),
+        generateStringKey: 'OIDC_COOKIE_SECRET',
+        excludePunctuation: true,
+        passwordLength: 32,
+      },
+      removalPolicy: environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(oidcCookieSecret).add('Environment', environment);
+    cdk.Tags.of(oidcCookieSecret).add('ManagedBy', 'cdk');
+
+    // ============================================================================
     // OIDC Signing JWK Set (#1285)
     // ============================================================================
     // oidc-provider needs private JWK material at its JOSE boundary, while the
@@ -316,6 +337,8 @@ export class FrontendStackEcs extends cdk.Stack {
       collabJwtSecretArn: collabJwtSecret.secretArn,
       // Guardrail violation-log hash secret (#727, created above)
       guardrailHashSecretArn: guardrailHashSecret.secretArn,
+      // Dedicated oidc-provider cookie key (created above)
+      oidcCookieSecretArn: oidcCookieSecret.secretArn,
       // OIDC-only signing key set (#1285, created and bootstrapped above)
       oidcSigningJwksSecretArn: oidcSigningJwksSecret.secretArn,
       // K-12 Content Safety: Guardrails resources from GuardrailsStack

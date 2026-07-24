@@ -49,6 +49,7 @@ describe("ECS Service — ALB stickiness regression guard (#1105)", () => {
       internalApiSecretArn: secretArn("internal-api"),
       collabJwtSecretArn: secretArn("collab-jwt"),
       guardrailHashSecretArn: secretArn("guardrail-hash"),
+      oidcCookieSecretArn: secretArn("oidc-cookie"),
       oidcSigningJwksSecretArn: secretArn("oidc-signing"),
     })
 

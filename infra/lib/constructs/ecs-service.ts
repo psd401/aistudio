@@ -138,6 +138,11 @@ export interface EcsServiceConstructProps {
    */
   guardrailHashSecretArn: string;
   /**
+   * Dedicated oidc-provider cookie encryption/signing secret ARN.
+   * Injected at task startup as OIDC_COOKIE_SECRET.
+   */
+  oidcCookieSecretArn: string;
+  /**
    * Shared private OIDC JWK set in Secrets Manager (#1285). Read lazily by the
    * application task role; never injected as an environment secret value.
    */
@@ -302,6 +307,7 @@ export class EcsServiceConstruct extends Construct {
         props.internalApiSecretArn,
         props.collabJwtSecretArn,
         props.guardrailHashSecretArn,
+        props.oidcCookieSecretArn,
         props.oidcSigningJwksSecretArn,
       ],
     }));
@@ -884,6 +890,12 @@ export class EcsServiceConstruct extends Construct {
         GUARDRAIL_HASH_SECRET: ecs.Secret.fromSecretsManager(
           secretsmanager.Secret.fromSecretCompleteArn(this, 'GuardrailHashSecret', props.guardrailHashSecretArn),
           'GUARDRAIL_HASH_SECRET'
+        ),
+        // Dedicated oidc-provider cookie key. This is intentionally separate
+        // from AUTH_SECRET and is required by production readiness checks.
+        OIDC_COOKIE_SECRET: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretCompleteArn(this, 'OidcCookieSecret', props.oidcCookieSecretArn),
+          'OIDC_COOKIE_SECRET'
         ),
         // Issue #603: Database credentials for postgres.js driver
         // The RDS secret contains a JSON object with: username, password, host, port, dbname

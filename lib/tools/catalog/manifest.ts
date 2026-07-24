@@ -172,16 +172,16 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "content:create",
     internalScopes: ["content:create"],
     destructive: true,
-    // v2: `codeEncoding` added to the input schema (#1245 E2BIG fix).
-    version: "v2",
+    // v3: #1290 added `sourceRef`; v2 added `codeEncoding` (#1245).
+    version: "v3",
   },
   create_artifact: {
     identifier: "content.create_artifact",
     requiredScope: "content:create",
     internalScopes: ["content:create"],
     destructive: true,
-    // v2: `codeEncoding` added to the input schema (#1245 E2BIG fix).
-    version: "v2",
+    // v3: #1290 added `sourceRef`; v2 added `codeEncoding` (#1245).
+    version: "v3",
   },
   get_content: {
     identifier: "content.get",

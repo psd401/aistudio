@@ -12,6 +12,7 @@ This document provides a comprehensive guide to all environment variables requir
 | `AUTH_SECRET` | Secret for NextAuth.js session encryption | Generate with: `openssl rand -base64 32` | ✅ |
 | `AUTH_COGNITO_CLIENT_ID` | AWS Cognito client ID | From Auth stack outputs | ✅ |
 | `AUTH_COGNITO_ISSUER` | AWS Cognito issuer URL | `https://cognito-idp.us-east-1.amazonaws.com/<pool-id>` | ✅ |
+| `OIDC_COOKIE_SECRET` | Dedicated oidc-provider cookie encryption/signing key; created and injected by `FrontendStackEcs` | Generate with: `openssl rand -base64 32` | ✅ in production |
 
 ### Token Configuration
 
