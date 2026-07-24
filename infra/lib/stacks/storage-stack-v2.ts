@@ -45,6 +45,12 @@ export class StorageStackV2 extends BaseStack {
       autoDeleteObjects: this.deploymentEnvironment !== "prod",
       lifecycleRules: [
         {
+          id: "AtriumPendingAssetCleanup",
+          enabled: true,
+          prefix: "atrium/pending-assets/",
+          expiration: cdk.Duration.days(1),
+        },
+        {
           // Reap ONLY noncurrent (superseded/deleted) versions. Do NOT set `expiration`
           // on this versioned bucket — it adds a delete marker to every live object,
           // silently 404-ing current data once it ages out (REV-COR-486). Retention is

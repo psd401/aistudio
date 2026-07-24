@@ -66,6 +66,68 @@ export interface CollectionTreeNode {
   children: CollectionTreeNode[];
 }
 
+/** Public authoring-client projection with display-path and create eligibility. */
+export interface CollectionDiscoveryNode {
+  id: string;
+  name: string;
+  slug: string;
+  parentId: string | null;
+  path: string[];
+  defaultVisibilityLevel: VisibilityLevel;
+  visibleObjectCount: number;
+  /**
+   * Present only when the caller also holds `content:create`. Kept at the service
+   * boundary so future collection author ACLs can change this decision without
+   * changing the external API shape.
+   */
+  selectableForCreate?: boolean;
+  children: CollectionDiscoveryNode[];
+}
+
+export type FlatCollectionDiscoveryNode = Omit<
+  CollectionDiscoveryNode,
+  "children"
+>;
+
+function discoveryTree(
+  nodes: CollectionTreeNode[],
+  parentPath: string[],
+  includeCreateSelection: boolean
+): CollectionDiscoveryNode[] {
+  return nodes.map((node) => {
+    const path = [...parentPath, node.name];
+    return {
+      id: node.id,
+      name: node.name,
+      slug: node.slug,
+      parentId: node.parentId,
+      path,
+      defaultVisibilityLevel: node.defaultVisibilityLevel,
+      visibleObjectCount: node.visibleObjectCount,
+      ...(includeCreateSelection ? { selectableForCreate: true } : {}),
+      children: discoveryTree(
+        node.children,
+        path,
+        includeCreateSelection
+      ),
+    };
+  });
+}
+
+function flattenDiscoveryTree(
+  nodes: CollectionDiscoveryNode[]
+): FlatCollectionDiscoveryNode[] {
+  const flat: FlatCollectionDiscoveryNode[] = [];
+  const visit = (items: CollectionDiscoveryNode[]) => {
+    for (const { children, ...node } of items) {
+      flat.push(node);
+      visit(children);
+    }
+  };
+  visit(nodes);
+  return flat;
+}
+
 /**
  * Whether a principal may enter a collection based on its default visibility
  * LEVEL alone (no object/grant lookup). Mirrors the level rules in
@@ -239,5 +301,24 @@ export const collectionService = {
         }));
 
     return build(null);
+  },
+
+  /**
+   * External picker projection. Visibility comes exclusively from `tree(req)`;
+   * this method only adds stable display paths and an authoring eligibility flag.
+   */
+  async discover(
+    req: Requester,
+    options: {
+      shape: "tree" | "flat";
+      includeCreateSelection: boolean;
+    }
+  ): Promise<CollectionDiscoveryNode[] | FlatCollectionDiscoveryNode[]> {
+    const tree = discoveryTree(
+      await this.tree(req),
+      [],
+      options.includeCreateSelection
+    );
+    return options.shape === "flat" ? flattenDiscoveryTree(tree) : tree;
   },
 };

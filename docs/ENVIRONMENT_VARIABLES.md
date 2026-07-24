@@ -12,6 +12,7 @@ This document provides a comprehensive guide to all environment variables requir
 | `AUTH_SECRET` | Secret for NextAuth.js session encryption | Generate with: `openssl rand -base64 32` | ✅ |
 | `AUTH_COGNITO_CLIENT_ID` | AWS Cognito client ID | From Auth stack outputs | ✅ |
 | `AUTH_COGNITO_ISSUER` | AWS Cognito issuer URL | `https://cognito-idp.us-east-1.amazonaws.com/<pool-id>` | ✅ |
+| `OIDC_COOKIE_SECRET` | Dedicated oidc-provider cookie encryption/signing key; created and injected by `FrontendStackEcs` | Generate with: `openssl rand -base64 32` | ✅ in production |
 
 ### Token Configuration
 
@@ -152,10 +153,15 @@ aws amplify update-app \
    - See `/docs/FIX_SSR_COMPUTE_ROLE.md` for detailed fix instructions
 
 ### Health Check
-Use the `/api/health` endpoint to verify:
+Use the unauthenticated `/api/health` endpoint to verify readiness status for:
 - Environment variable configuration
 - Database connectivity
-- AWS credentials chain
+- Authentication configuration
+- OAuth signing-key availability
+
+The response intentionally exposes only pass/fail status. Resource identifiers,
+account details, secret names, database configuration, and exception messages
+remain in sanitized server logs and are never returned by the public endpoint.
 
 ## Security Best Practices
 

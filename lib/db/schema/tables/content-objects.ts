@@ -37,11 +37,13 @@ import {
   integer,
   jsonb,
   pgTable,
+  uniqueIndex,
   text,
   timestamp,
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { users } from "./users";
 import { contentCollections } from "./content-collections";
 import {
@@ -62,6 +64,15 @@ export type SourceRef =
   // OKF import provenance (Phase 8, §36.3): the object was created from an
   // imported Open Knowledge Format bundle. `generator` records the producer id.
   | { type: "okf"; generator: string }
+  | {
+      type: "capture";
+      provider: string;
+      externalId: string;
+      clientSurface: "browser" | "mac";
+      clientVersion: string;
+      capturedAt: string;
+      sourceOrigins?: string[];
+    }
   | { type: "none" };
 
 export const contentObjects = pgTable(
@@ -105,6 +116,16 @@ export const contentObjects = pgTable(
     // GIN index backing the `tags && ...` array-overlap filter in listVisible
     // (migration 085 line 109: `CREATE INDEX idx_content_tags ... USING gin(tags)`).
     index("idx_content_tags").using("gin", t.tags),
+    // Permanent owner-scoped correlation for recorder retries/support. The
+    // partial expression index applies only to the typed capture variant and
+    // never makes external ids globally enumerable.
+    uniqueIndex("uq_content_capture_source")
+      .on(
+        t.ownerUserId,
+        sql`(${t.sourceRef}->>'provider')`,
+        sql`(${t.sourceRef}->>'externalId')`
+      )
+      .where(sql`${t.sourceRef}->>'type' = 'capture'`),
   ]
 );
 

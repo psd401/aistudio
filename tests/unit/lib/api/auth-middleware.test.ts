@@ -65,10 +65,22 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 
 jest.mock("drizzle-orm", () => ({
   eq: jest.fn(),
+  and: jest.fn(),
+  gt: jest.fn(),
+  isNull: jest.fn(),
 }))
 
 jest.mock("@/lib/db/schema", () => ({
   users: { id: "id", cognitoSub: "cognito_sub" },
+  oauthAccessTokens: {
+    jti: "jti",
+    userId: "user_id",
+    clientId: "client_id",
+    scopes: "scopes",
+    revokedAt: "revoked_at",
+    expiresAt: "expires_at",
+  },
+  oauthClients: { clientId: "client_id", isActive: "is_active" },
 }))
 
 // Import after mocks — use require() to ensure mocks are registered first
@@ -392,9 +404,21 @@ describe("API Auth Middleware", () => {
   describe("JWT bearer authentication", () => {
     it("verifies the token with explicit issuer + audience constraints (REV-SEC-164)", async () => {
       mockJwtVerify.mockResolvedValue({
-        payload: { sub: "5", scope: "chat:read chat:write", client_id: "agent-1" },
+        payload: {
+          sub: "5",
+          jti: "token-1",
+          scope: "chat:read chat:write",
+          client_id: "agent-1",
+        },
       })
-      mockExecuteQuery.mockResolvedValue([{ cognitoSub: "cognito-5" }])
+      mockExecuteQuery.mockResolvedValue([
+        {
+          cognitoSub: "cognito-5",
+          userId: 5,
+          clientId: "agent-1",
+          scopes: ["chat:read", "chat:write"],
+        },
+      ])
 
       const request = createMockRequest({ authorization: "Bearer eyJhdGVzdC5qd3Q" })
       const result = await authenticateRequest(request as never)
@@ -420,6 +444,60 @@ describe("API Auth Middleware", () => {
       expect(isAuthContext(result)).toBe(false)
       expect((result as unknown as { status: number }).status).toBe(401)
       expect(mockGetServerSession).not.toHaveBeenCalled()
+    })
+
+    it("returns 401 for an expired signed token", async () => {
+      mockJwtVerify.mockRejectedValue(new Error('"exp" claim timestamp check failed'))
+
+      const result = await authenticateRequest(
+        createMockRequest({
+          authorization: "Bearer eyJleHBpcmVkLnRva2Vu",
+        }) as never
+      )
+
+      expect(isAuthContext(result)).toBe(false)
+      expect((result as unknown as { status: number }).status).toBe(401)
+    })
+
+    it("returns 401 when a valid JWT has been revoked or its client is inactive", async () => {
+      mockJwtVerify.mockResolvedValue({
+        payload: {
+          sub: "5",
+          jti: "revoked-token",
+          scope: "chat:read",
+          client_id: "agent-1",
+        },
+      })
+      mockExecuteQuery.mockResolvedValue([])
+
+      const result = await authenticateRequest(
+        createMockRequest({
+          authorization: "Bearer eyJyZXZva2VkLnRva2Vu",
+        }) as never
+      )
+
+      expect(isAuthContext(result)).toBe(false)
+      expect((result as unknown as { status: number }).status).toBe(401)
+    })
+
+    it("rejects non-canonical numeric subjects", async () => {
+      mockJwtVerify.mockResolvedValue({
+        payload: {
+          sub: "5garbage",
+          jti: "token-1",
+          scope: "chat:read",
+          client_id: "agent-1",
+        },
+      })
+
+      const result = await authenticateRequest(
+        createMockRequest({
+          authorization: "Bearer eyJiYWQuc3Vi",
+        }) as never
+      )
+
+      expect(isAuthContext(result)).toBe(false)
+      expect(mockExecuteQuery).not.toHaveBeenCalled()
     })
   })
 

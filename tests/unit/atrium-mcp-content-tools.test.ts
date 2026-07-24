@@ -120,4 +120,17 @@ describe("Atrium MCP content tools registry", () => {
       expect(tool?.inputSchema.required ?? []).not.toContain("codeEncoding");
     }
   });
+
+  it("publishes sourceRef additions as v3 create-tool contracts", () => {
+    for (const name of ["create_document", "create_artifact"]) {
+      const tool = CONTENT_MCP_TOOLS.find((candidate) => candidate.name === name);
+      const manifestEntry = TOOL_MANIFEST.find(
+        (candidate) => candidate.name === name
+      );
+
+      expect(tool?.inputSchema.properties.sourceRef?.type).toBe("object");
+      expect(tool?.inputSchema.required ?? []).not.toContain("sourceRef");
+      expect(manifestEntry?.version).toBe("v3");
+    }
+  });
 });

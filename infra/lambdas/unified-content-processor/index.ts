@@ -151,6 +151,7 @@ import {
 } from "../../../lib/repositories/embedding-configuration";
 import { enforceNexusRepositoryLifecycle } from "../../../lib/repositories/content-platform/lifecycle-service";
 import { cleanupExpiredRepositoryUploads } from "../../../lib/repositories/content-platform/upload-lifecycle-service";
+import { cleanupExpiredContentIdempotencyRecords } from "../../../lib/content/idempotency-cleanup";
 
 type JobMetrics = RepositoryProcessingMetrics;
 
@@ -1640,6 +1641,18 @@ export async function handler(
               log.info("Enforced Nexus ephemeral repository lifecycle", {
                 expired: result.expired,
                 purged: result.purged,
+              });
+            }
+          },
+        },
+        {
+          name: "content-idempotency-cleanup",
+          run: async () => {
+            const deleted =
+              await cleanupExpiredContentIdempotencyRecords();
+            if (deleted > 0) {
+              log.info("Removed expired Atrium idempotency records", {
+                deleted,
               });
             }
           },

@@ -292,6 +292,7 @@ import {
   ForbiddenError,
   NotFoundError,
   ValidationError,
+  VersionPreconditionFailedError,
 } from "@/lib/content/errors";
 import type { Requester } from "@/lib/content/types";
 
@@ -367,6 +368,28 @@ describe("publishService.publish", () => {
     await expect(
       publishService.publish(owner, "o1", { destination: "public_web" })
     ).rejects.toThrow(ApprovalRequiredError);
+  });
+
+  it("rejects a stale public publish under lock before queuing approval", async () => {
+    txResults = [
+      [
+        {
+          id: "o1",
+          currentVersionId: "v2",
+        },
+      ],
+    ];
+
+    await expect(
+      publishService.publish(
+        owner,
+        "o1",
+        { destination: "public_web" },
+        { expectedVersionId: "v1" }
+      )
+    ).rejects.toThrow(VersionPreconditionFailedError);
+    expect(publicWebPublishCalls).toBe(0);
+    expect(indexObjectMock).not.toHaveBeenCalled();
   });
 
   it("throws ApprovalRequiredError when widening visibility to public without publish_public", async () => {
@@ -508,6 +531,29 @@ describe("publishService.publish", () => {
     expect(adapterPublishCalls).toBe(1);
     // No visibility provided -> setLevelInTx must NOT run (publish doesn't widen).
     expect(setLevelInTxCalls).toBe(0);
+  });
+
+  it("rejects a head changed after preflight under the publish row lock", async () => {
+    txResults = [
+      [
+        {
+          id: "o1",
+          visibilityLevel: "private",
+          currentVersionId: "v2",
+        },
+      ],
+    ];
+
+    await expect(
+      publishService.publish(
+        owner,
+        "o1",
+        { destination: "intranet" },
+        { expectedVersionId: "v1" }
+      )
+    ).rejects.toThrow(VersionPreconditionFailedError);
+    expect(adapterPublishCalls).toBe(0);
+    expect(indexObjectMock).not.toHaveBeenCalled();
   });
 
   it("publishes a PINNED version (input.versionId), not the head — approval replay (issue #1118 item 1)", async () => {

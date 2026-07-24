@@ -16,6 +16,13 @@ import { oauthClients } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { randomBytes, randomUUID } from "node:crypto"
 import { hashArgon2 } from "@/lib/api-keys/argon2-loader"
+import { z } from "zod"
+import {
+  isPublicApplicationType,
+  validateOAuthRedirectUris,
+  OAUTH_APPLICATION_TYPES,
+  type OAuthApplicationType,
+} from "@/lib/oauth/redirect-uri-policy"
 import type { ActionState } from "@/types"
 
 // ============================================
@@ -26,6 +33,7 @@ export interface OAuthClientRow {
   id: number
   clientId: string
   clientName: string
+  applicationType: OAuthApplicationType
   redirectUris: string[]
   allowedScopes: string[]
   grantTypes: string[]
@@ -38,8 +46,48 @@ export interface OAuthClientRow {
   updatedAt: Date
 }
 
+const oauthClientBaseFields = {
+  clientName: z.string().trim().min(1).max(255),
+  redirectUris: z.array(z.string()),
+  allowedScopes: z.array(z.string()),
+  requirePkce: z.literal(true).optional(),
+  accessTokenTtl: z.number().int().positive().optional(),
+  refreshTokenTtl: z.number().int().positive().optional(),
+}
+
+/**
+ * Runtime boundary for the server action. Public application profiles only
+ * admit `none`, while confidential authentication is available exclusively to
+ * the web profile. PKCE is either omitted or explicitly true for every profile.
+ */
+const createOAuthClientInputSchema = z.discriminatedUnion("applicationType", [
+  z.object({
+    ...oauthClientBaseFields,
+    applicationType: z.literal(OAUTH_APPLICATION_TYPES[0]),
+    tokenEndpointAuthMethod: z
+      .enum(["none", "client_secret_post"])
+      .optional(),
+  }),
+  z.object({
+    ...oauthClientBaseFields,
+    applicationType: z.literal(OAUTH_APPLICATION_TYPES[1]),
+    tokenEndpointAuthMethod: z.literal("none").optional(),
+  }),
+  z.object({
+    ...oauthClientBaseFields,
+    applicationType: z.literal(OAUTH_APPLICATION_TYPES[2]),
+    tokenEndpointAuthMethod: z.literal("none").optional(),
+  }),
+])
+
+/**
+ * Untrusted server-action boundary. Keep this wider than the parsed profile
+ * union so callers can submit form state and the runtime schema—not TypeScript—
+ * remains the security authority for rejecting invalid combinations.
+ */
 export interface CreateOAuthClientInput {
   clientName: string
+  applicationType: OAuthApplicationType
   redirectUris: string[]
   allowedScopes: string[]
   tokenEndpointAuthMethod?: "none" | "client_secret_post"
@@ -72,6 +120,7 @@ export async function listOAuthClients(): Promise<ActionState<OAuthClientRow[]>>
             id: oauthClients.id,
             clientId: oauthClients.clientId,
             clientName: oauthClients.clientName,
+            applicationType: oauthClients.applicationType,
             redirectUris: oauthClients.redirectUris,
             allowedScopes: oauthClients.allowedScopes,
             grantTypes: oauthClients.grantTypes,
@@ -114,53 +163,6 @@ export async function listOAuthClients(): Promise<ActionState<OAuthClientRow[]>>
 // Create OAuth Client
 // ============================================
 
-// ============================================
-// Redirect URI Validation
-// ============================================
-
-function validateRedirectUris(uris: string[]): { valid: boolean; errors: string[] } {
-  const errors: string[] = []
-  const isProduction = process.env.NODE_ENV === "production"
-
-  for (const uri of uris) {
-    let parsed: URL
-    try {
-      parsed = new URL(uri)
-    } catch {
-      errors.push(`Invalid URL format: ${uri}`)
-      continue
-    }
-
-    if (!["http:", "https:"].includes(parsed.protocol)) {
-      errors.push(`Invalid protocol (must be http/https): ${uri}`)
-      continue
-    }
-
-    // Production: enforce HTTPS except localhost
-    if (isProduction && parsed.protocol === "http:") {
-      if (!["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)) {
-        errors.push(`Production requires HTTPS: ${uri}`)
-      }
-    }
-
-    // No wildcards in hostname
-    if (parsed.hostname.includes("*")) {
-      errors.push(`Wildcards not allowed in hostname: ${uri}`)
-    }
-
-    // Fragment not allowed per OAuth spec
-    if (parsed.hash) {
-      errors.push(`Fragments not allowed in redirect URI: ${uri}`)
-    }
-  }
-
-  return { valid: errors.length === 0, errors }
-}
-
-// ============================================
-// Create OAuth Client
-// ============================================
-
 export async function createOAuthClient(
   input: CreateOAuthClientInput
 ): Promise<ActionState<CreateOAuthClientResult>> {
@@ -173,25 +175,33 @@ export async function createOAuthClient(
 
     const session = await getServerSession()
     const userId = session?.sub ? await getUserIdByCognitoSubAsNumber(session.sub) : null
+    const validated = createOAuthClientInputSchema.parse(input)
+    const clientName = validated.clientName
 
-    log.info("Creating OAuth client", { name: sanitizeForLogging(input.clientName) })
+    log.info("Creating OAuth client", {
+      name: sanitizeForLogging(clientName),
+      applicationType: validated.applicationType,
+    })
 
-    // Validate redirect URIs
-    if (input.redirectUris.length === 0) {
-      throw ErrorFactories.invalidInput("redirectUris", input.redirectUris, "At least one redirect URI is required")
-    }
-    const uriValidation = validateRedirectUris(input.redirectUris)
+    const uriValidation = validateOAuthRedirectUris(
+      validated.applicationType,
+      validated.redirectUris
+    )
     if (!uriValidation.valid) {
       log.warn("Invalid redirect URIs", { errors: uriValidation.errors })
       throw ErrorFactories.invalidInput(
         "redirectUris",
-        input.redirectUris,
+        validated.redirectUris,
         uriValidation.errors.join("; ")
       )
     }
 
     const clientId = randomUUID()
-    const isConfidential = input.tokenEndpointAuthMethod === "client_secret_post"
+    const publicApplication = isPublicApplicationType(validated.applicationType)
+    const authMethod = publicApplication
+      ? "none"
+      : (validated.tokenEndpointAuthMethod ?? "none")
+    const isConfidential = authMethod === "client_secret_post"
 
     let clientSecret: string | undefined
     let clientSecretHash: string | null = null
@@ -207,16 +217,17 @@ export async function createOAuthClient(
           .insert(oauthClients)
           .values({
             clientId,
-            clientName: input.clientName.trim(),
+            clientName,
+            applicationType: validated.applicationType,
             clientSecretHash,
-            redirectUris: input.redirectUris,
-            allowedScopes: input.allowedScopes,
+            redirectUris: uriValidation.normalizedUris,
+            allowedScopes: validated.allowedScopes,
             grantTypes: ["authorization_code", "refresh_token"],
             responseTypes: ["code"],
-            tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
-            requirePkce: input.requirePkce ?? true,
-            accessTokenTtl: input.accessTokenTtl ?? 900,
-            refreshTokenTtl: input.refreshTokenTtl ?? 86400,
+            tokenEndpointAuthMethod: authMethod,
+            requirePkce: true,
+            accessTokenTtl: validated.accessTokenTtl ?? 900,
+            refreshTokenTtl: validated.refreshTokenTtl ?? 86400,
             createdBy: userId,
           })
           .returning(),
@@ -232,6 +243,7 @@ export async function createOAuthClient(
           id: created.id,
           clientId: created.clientId,
           clientName: created.clientName,
+          applicationType: created.applicationType,
           redirectUris: created.redirectUris as string[],
           allowedScopes: created.allowedScopes as string[],
           grantTypes: created.grantTypes as string[],

@@ -2,12 +2,45 @@ import * as iam from "aws-cdk-lib/aws-iam"
 import * as cdk from "aws-cdk-lib"
 import { Construct } from "constructs"
 import { BaseIAMRole } from "./base-iam-role"
-import { LambdaRoleProps, ECSTaskRoleProps } from "./types"
+import {
+  LambdaRoleProps,
+  ECSTaskRoleProps,
+  IAMResourceReference,
+} from "./types"
 
 /**
  * Factory for creating service-specific IAM roles with least privilege
  */
 export class ServiceRoleFactory {
+  /**
+   * Resolve an explicit ARN/name reference to an IAM resource ARN.
+   *
+   * Literal strings retain the legacy convenience behavior: complete ARNs are
+   * preserved and literal names are formatted. Unresolved strings are rejected
+   * because CDK cannot tell whether they represent an ARN or a bare name;
+   * callers must wrap those as { arn } or { name }.
+   */
+  private static resolveResourceArn(
+    resource: IAMResourceReference,
+    fromName: (name: string) => string
+  ): string {
+    if (typeof resource !== "string") {
+      if (typeof resource.arn === "string") {
+        return resource.arn
+      }
+      return fromName(resource.name)
+    }
+    if (resource.startsWith("arn:")) {
+      return resource
+    }
+    if (cdk.Token.isUnresolved(resource)) {
+      throw new Error(
+        "Ambiguous unresolved IAM resource reference; wrap token values as { arn } or { name }"
+      )
+    }
+    return fromName(resource)
+  }
+
   /**
    * Create a Lambda execution role with least privilege
    */
@@ -290,7 +323,7 @@ export class ServiceRoleFactory {
    * Build Secrets Manager access policy with tag-based conditions for enhanced security
    */
   private static buildSecretsAccessPolicy(
-    secretArns: string[],
+    secretArns: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     return new iam.PolicyDocument({
@@ -299,9 +332,11 @@ export class ServiceRoleFactory {
           effect: iam.Effect.ALLOW,
           actions: ["secretsmanager:GetSecretValue"],
           resources: secretArns.map((secretName) =>
-            secretName.startsWith("arn:")
-              ? secretName
-              : `arn:aws:secretsmanager:${props.region}:${props.account}:secret:${secretName}*`
+            this.resolveResourceArn(
+              secretName,
+              (name) =>
+                `arn:aws:secretsmanager:${props.region}:${props.account}:secret:${name}*`
+            )
           ),
           conditions: {
             StringEquals: {
@@ -324,11 +359,11 @@ export class ServiceRoleFactory {
    * - Avoids requiring object tagging in application code
    */
   private static buildS3AccessPolicy(
-    bucketNames: string[],
+    bucketNames: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const bucketArns = bucketNames.map((bucket) =>
-      bucket.startsWith("arn:") ? bucket : `arn:aws:s3:::${bucket}`
+      this.resolveResourceArn(bucket, (name) => `arn:aws:s3:::${name}`)
     )
 
     return new iam.PolicyDocument({
@@ -377,13 +412,15 @@ export class ServiceRoleFactory {
    * Build DynamoDB access policy with tag-based conditions for enhanced security
    */
   private static buildDynamoDBAccessPolicy(
-    tableNames: string[],
+    tableNames: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const tableArns = tableNames.map((table) =>
-      table.startsWith("arn:")
-        ? table
-        : `arn:aws:dynamodb:${props.region}:${props.account}:table/${table}`
+      this.resolveResourceArn(
+        table,
+        (name) =>
+          `arn:aws:dynamodb:${props.region}:${props.account}:table/${name}`
+      )
     )
 
     return new iam.PolicyDocument({
@@ -414,13 +451,14 @@ export class ServiceRoleFactory {
    * Build SQS access policy with tag-based conditions for enhanced security
    */
   private static buildSQSAccessPolicy(
-    queueNames: string[],
+    queueNames: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const queueArns = queueNames.map((queue) =>
-      queue.startsWith("arn:")
-        ? queue
-        : `arn:aws:sqs:${props.region}:${props.account}:${queue}`
+      this.resolveResourceArn(
+        queue,
+        (name) => `arn:aws:sqs:${props.region}:${props.account}:${name}`
+      )
     )
 
     return new iam.PolicyDocument({
@@ -449,13 +487,14 @@ export class ServiceRoleFactory {
    * Build SNS access policy with tag-based conditions for enhanced security
    */
   private static buildSNSAccessPolicy(
-    topicNames: string[],
+    topicNames: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const topicArns = topicNames.map((topic) =>
-      topic.startsWith("arn:")
-        ? topic
-        : `arn:aws:sns:${props.region}:${props.account}:${topic}`
+      this.resolveResourceArn(
+        topic,
+        (name) => `arn:aws:sns:${props.region}:${props.account}:${name}`
+      )
     )
 
     return new iam.PolicyDocument({
@@ -479,13 +518,15 @@ export class ServiceRoleFactory {
    * Build ECR access policy with tag-based conditions for enhanced security
    */
   private static buildECRAccessPolicy(
-    repositoryNames: string[],
+    repositoryNames: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const repositoryArns = repositoryNames.map((repo) =>
-      repo.startsWith("arn:")
-        ? repo
-        : `arn:aws:ecr:${props.region}:${props.account}:repository/${repo}`
+      this.resolveResourceArn(
+        repo,
+        (name) =>
+          `arn:aws:ecr:${props.region}:${props.account}:repository/${name}`
+      )
     )
 
     return new iam.PolicyDocument({

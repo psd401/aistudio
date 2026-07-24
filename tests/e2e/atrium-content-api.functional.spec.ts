@@ -1,4 +1,7 @@
 import { test, expect } from './fixtures'
+import { createHash } from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
 import {
   authenticateContext,
   SEEDED_ADMIN_EMAIL,
@@ -6,6 +9,19 @@ import {
   SEEDED_NO_CAPABILITY_EMAIL,
   SEEDED_NO_CAPABILITY_SUB,
 } from './helpers/session-auth'
+
+const authoredAssetPng = Buffer.from(
+  fs
+    .readFileSync(
+      path.join(
+        process.cwd(),
+        'tests/fixtures/unified-content/images/red-pixel.png.base64'
+      ),
+      'utf8'
+    )
+    .trim(),
+  'base64'
+)
 
 /**
  * E2E functional coverage for the Atrium Phase 5 REST v1 capability gate (#1055).
@@ -69,6 +85,27 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     expect(res.status()).toBe(403)
   })
 
+  test('session WITHOUT the capability (student) -> 403 on asset initiation', async ({
+    page,
+  }) => {
+    await authenticateContext(
+      page.context(),
+      SEEDED_NO_CAPABILITY_EMAIL,
+      SEEDED_NO_CAPABILITY_SUB
+    )
+    const someId = '00000000-0000-0000-0000-000000000000'
+    const res = await page.request.post(`/api/v1/content/${someId}/assets`, {
+      data: {
+        filename: 'probe.png',
+        contentType: 'image/png',
+        byteLength: 1,
+        sha256: 'A'.repeat(43),
+        purpose: 'document_image',
+      },
+    })
+    expect(res.status()).toBe(403)
+  })
+
   test('session WITH every capability (admin) -> create succeeds', async ({ page }) => {
     await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
     const res = await page.request.post('/api/v1/content', {
@@ -79,6 +116,35 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     expect(res.ok()).toBeTruthy()
     const body = await res.json()
     expect(body?.data?.id).toBeTruthy()
+  })
+
+  test('external authoring picker discovers a collection without hard-coded ids', async ({
+    page,
+  }) => {
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    const picker = await page.request.get(
+      '/api/v1/content/collections?shape=flat'
+    )
+    expect(picker.ok()).toBeTruthy()
+    const payload = await picker.json()
+    expect(payload?.meta?.shape).toBe('flat')
+    expect(payload?.data?.length).toBeGreaterThan(0)
+    const target = payload.data.find(
+      (collection: { selectableForCreate?: boolean }) =>
+        collection.selectableForCreate
+    )
+    expect(target?.slug).toBeTruthy()
+    expect(target?.path?.length).toBeGreaterThan(0)
+
+    const created = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'document',
+        title: 'e2e discovered collection target',
+        collectionId: target.slug,
+      },
+    })
+    expect(created.status()).toBe(201)
+    expect((await created.json())?.data?.collectionId).toBe(target.id)
   })
 
   test('codeEncoding base64 -> a <script>/<style> artifact round-trips as the DECODED code', async ({
@@ -117,6 +183,151 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     expect(fetched?.data?.version?.bodyInline).toBe(code)
   })
 
+  test('canonical current and historic source reads return exact bodies and 304 ETags', async ({
+    page,
+  }) => {
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    const markdown = '# Source read e2e\n\nImmutable body.'
+    const create = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'document',
+        title: 'e2e source read',
+        body: markdown,
+        bodyFormat: 'markdown',
+      },
+    })
+    expect(create.status()).toBe(201)
+    const created = await create.json()
+    const id = created.data.id as string
+    const versionId = created.data.version.id as string
+
+    const current = await page.request.get(`/api/v1/content/${id}/source`)
+    expect(current.status()).toBe(200)
+    expect((await current.json()).data.body).toBe(markdown)
+    expect(current.headers()['etag']).toBe(`"${versionId}"`)
+
+    const historic = await page.request.get(
+      `/api/v1/content/${id}/versions/${versionId}/source`,
+      { headers: { 'If-None-Match': `"${versionId}"` } }
+    )
+    expect(historic.status()).toBe(304)
+    expect(await historic.text()).toBe('')
+  })
+
+  test('authorized readers can list asset metadata without storage keys', async ({
+    page,
+  }) => {
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    const create = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'document',
+        title: 'e2e asset metadata list',
+        body: '# Asset list',
+        bodyFormat: 'markdown',
+      },
+    })
+    expect(create.status()).toBe(201)
+    const objectId = (await create.json()).data.id as string
+    const list = await page.request.get(`/api/v1/content/${objectId}/assets`)
+    expect(list.status()).toBe(200)
+    const payload = await list.json()
+    expect(payload.data).toEqual([])
+    expect(JSON.stringify(payload)).not.toContain('objectKey')
+    expect(JSON.stringify(payload)).not.toContain('uploadKey')
+  })
+
+  test('direct asset upload, retry, audience denial, and public-version pinning', async ({
+    page,
+    request,
+  }) => {
+    test.skip(
+      process.env.ATRIUM_E2E_ASSET_UPLOAD_ENABLED !== 'true',
+      'Requires a deployed documents bucket and browser-reachable S3 CORS; set ATRIUM_E2E_ASSET_UPLOAD_ENABLED=true'
+    )
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    const create = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'document',
+        title: 'e2e immutable authored asset',
+        body: '# Authored asset',
+        bodyFormat: 'markdown',
+      },
+    })
+    expect(create.status()).toBe(201)
+    const created = await create.json()
+    const objectId = created.data.id as string
+    const sha256 = createHash('sha256').update(authoredAssetPng).digest('base64url')
+
+    const initiate = await page.request.post(
+      `/api/v1/content/${objectId}/assets`,
+      {
+        data: {
+          filename: 'red-pixel.png',
+          contentType: 'image/png',
+          byteLength: authoredAssetPng.byteLength,
+          sha256,
+          purpose: 'capture_step',
+          width: 4,
+          height: 3,
+        },
+      }
+    )
+    expect(initiate.status()).toBe(201)
+    const initiated = (await initiate.json()).data
+    expect(JSON.stringify(initiated)).not.toContain('objectKey')
+    const uploaded = await page.request.put(initiated.upload.url, {
+      headers: initiated.upload.headers,
+      data: authoredAssetPng,
+    })
+    expect(uploaded.ok()).toBeTruthy()
+
+    const wrongChecksum = await page.request.post(
+      `/api/v1/content/${objectId}/assets/${initiated.id}/complete`,
+      { data: { sha256: 'B'.repeat(43) } }
+    )
+    expect(wrongChecksum.status()).toBe(409)
+    const completeUrl =
+      `/api/v1/content/${objectId}/assets/${initiated.id}/complete`
+    const completed = await page.request.post(completeUrl, {
+      data: { sha256, etag: uploaded.headers().etag },
+    })
+    expect(completed.status()).toBe(200)
+    const completedAsset = (await completed.json()).data
+    expect(completedAsset.state).toBe('ready')
+    expect((await page.request.post(completeUrl, { data: { sha256 } })).status())
+      .toBe(200)
+
+    const directive =
+      `::atrium-asset{id="${initiated.id}" alt="Red pixel"}`
+    const version = await page.request.post(
+      `/api/v1/content/${objectId}/versions`,
+      { data: { body: `# Authored asset\n\n${directive}` } }
+    )
+    expect(version.status()).toBe(201)
+    const bytesUrl = completedAsset.bytesUrl as string
+    expect((await page.request.get(bytesUrl)).status()).toBe(200)
+    expect((await request.get(bytesUrl)).status()).toBe(404)
+
+    expect(
+      (
+        await page.request.patch(`/api/v1/content/${objectId}/visibility`, {
+          data: { level: 'public' },
+        })
+      ).status()
+    ).toBe(200)
+    expect(
+      (
+        await page.request.post(`/api/v1/content/${objectId}/publish`, {
+          data: { destination: 'public_web' },
+        })
+      ).status()
+    ).toBe(200)
+    const publicBytes = await request.get(bytesUrl)
+    expect(publicBytes.status()).toBe(200)
+    expect(publicBytes.headers()['content-type']).toBe('image/png')
+    expect(publicBytes.headers()['cache-control']).toBe('private, no-store')
+  })
+
   test('codeEncoding base64 with an invalid body -> 400 (never silently stored)', async ({
     page,
   }) => {
@@ -133,5 +344,40 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
       },
     })
     expect(res.status()).toBe(400)
+  })
+})
+
+test.describe('Atrium content v1 — deployed OAuth access JWT (#1285)', () => {
+  test.skip(
+    !process.env.ATRIUM_E2E_OAUTH_ACCESS_TOKEN,
+    'Requires a deployed public-client OAuth access JWT in ATRIUM_E2E_OAUTH_ACCESS_TOKEN'
+  )
+
+  test('public PKCE access JWT performs a write and subsequent GET', async ({
+    request,
+  }) => {
+    const authorization = `Bearer ${process.env.ATRIUM_E2E_OAUTH_ACCESS_TOKEN}`
+    const created = await request.post('/api/v1/content', {
+      headers: { authorization },
+      data: {
+        kind: 'document',
+        title: `OAuth PKCE e2e ${Date.now()}`,
+        body: '# OAuth write/read verification',
+        bodyFormat: 'markdown',
+      },
+    })
+    expect(created.status()).toBe(201)
+    const id = (await created.json()).data.id as string
+
+    const read = await request.get(`/api/v1/content/${id}`, {
+      headers: { authorization },
+    })
+    expect(read.status()).toBe(200)
+    expect((await read.json()).data.id).toBe(id)
+
+    const cleanup = await request.delete(`/api/v1/content/${id}`, {
+      headers: { authorization },
+    })
+    expect([200, 204]).toContain(cleanup.status())
   })
 })

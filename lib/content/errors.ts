@@ -73,6 +73,34 @@ export class ConflictError extends ContentError {
   }
 }
 
+/** 412 — If-Match did not match the object's current version head. */
+export class VersionPreconditionFailedError extends ContentError {
+  constructor(
+    expectedVersionId: string | null,
+    currentVersionId: string | null
+  ) {
+    super(
+      "The content version changed before this update was applied",
+      "VERSION_PRECONDITION_FAILED",
+      412,
+      {
+        expectedVersionId: expectedVersionId ?? "none",
+        currentVersionId: currentVersionId ?? "none",
+      }
+    );
+  }
+}
+
+/** 503 — canonical content storage is temporarily unavailable or corrupt. */
+export class StorageError extends ContentError {
+  constructor(
+    message = "Content source is temporarily unavailable",
+    details?: Record<string, unknown>
+  ) {
+    super(message, "CONTENT_STORAGE_ERROR", 503, details);
+  }
+}
+
 /**
  * 409 — a public-facing publish was requested by a caller that lacks
  * `content:publish_public`; the request enters the approval queue rather than

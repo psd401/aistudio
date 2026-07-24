@@ -41,6 +41,23 @@ export function contentErrorToResponse(
 }
 
 /**
+ * Map a deterministic client failure inside an idempotency reservation.
+ *
+ * Server/storage failures are deliberately rethrown so the coordinator leaves
+ * the reservation pending. A content transaction may have committed before a
+ * post-commit S3 flush failed; releasing that ambiguous reservation could run
+ * the mutation twice. Explicit 5xx responses returned by an executor remain
+ * retryable and are released by `runIdempotentMutation`.
+ */
+export function contentIdempotentMutationErrorToResponse(
+  err: unknown,
+  requestId: string
+): NextResponse {
+  if (!isContentError(err) || err.status >= 500) throw err;
+  return contentErrorToResponse(err, requestId);
+}
+
+/**
  * Resolve a REST caller into a content `Requester`, or an error `Response`. The
  * mutating content routes share this instead of hand-rolling the same try/catch
  * (mirrors the MCP-side `resolveReq`). A resolution failure (e.g. a token for a

@@ -864,6 +864,37 @@ than block, it uses **create-as-private** (issue #1118) — the object is create
 `data.visibilityLevel` in the `201` body to see whether the requested `public` was
 applied or downgraded.
 
+**Mutation idempotency and optimistic concurrency (#1287):**
+
+- `POST /content`, `POST /content/{id}/versions`, and
+  `POST /content/{id}/publish` accept `Idempotency-Key` (1-255 visible ASCII
+  characters).
+- Keys are scoped by deployment environment, authenticated principal,
+  OAuth-client/API-key identity, method, and canonical route. Only SHA-256 key
+  and semantic-request digests are stored; raw keys and request bodies are not.
+- Repeating the same scoped key and request within seven days returns the original
+  status/body and safe response headers with `Idempotency-Replayed: true`.
+  Reusing it with different input returns `409 IDEMPOTENCY_KEY_REUSED`.
+- Terminal responses below HTTP 500 are retained. A returned 5xx releases the
+  reservation so retrying with the same key can execute again; a thrown or
+  interrupted execution remains pending so an ambiguous mutation is not repeated.
+- A concurrent or interrupted request keeps its durable reservation and returns
+  retryable `409 IDEMPOTENCY_IN_PROGRESS` (`Retry-After: 1`) rather than running a
+  second mutation. Completed response payloads are field-encrypted with the
+  existing Secrets Manager-backed application DEK. Expired records are removed
+  in bounded 500-row sweeps by hourly scheduled maintenance, with opportunistic
+  sweeps retained as a fallback.
+- `GET /content/{id}` returns a strong ETag containing `currentVersionId` (or
+  `"none"`). Send that ETag as `If-Match` on version creation to prevent lost
+  updates. A stale value returns `412 VERSION_PRECONDITION_FAILED` before body
+  screening, S3 writes, audit/event emission, or DB mutation. The successful
+  `201` returns the new head ETag. Omitting `If-Match` preserves existing
+  last-writer behavior for older clients.
+- Publish accepts the same `If-Match` precondition. The service rechecks it while
+  holding the object lock, so a concurrent version advance returns `412` without
+  publishing or queuing approval. A successful `200` returns the pinned version
+  as the response ETag.
+
 **Content error codes** (in addition to the shared `INVALID_TOKEN`,
 `INSUFFICIENT_SCOPE`, `RATE_LIMIT_EXCEEDED`, and `INTERNAL_ERROR`):
 
@@ -875,10 +906,56 @@ applied or downgraded.
 | 403 | `CONTENT_FORBIDDEN` | The caller may not edit / act on this object. |
 | 404 | `CONTENT_NOT_FOUND` | The object does not exist — or is not visible to the caller (reads are 404-masked). |
 | 409 | `CONTENT_CONFLICT` | Slug collision or version-number race. |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | The scoped key was already used for different semantic input. |
+| 409 | `IDEMPOTENCY_IN_PROGRESS` | The scoped operation is pending/interrupted; retry later without changing the key. |
+| 412 | `VERSION_PRECONDITION_FAILED` | `If-Match` does not match the current version; details include expected/current ids. |
+| 503 | `CONTENT_STORAGE_ERROR` | Canonical source storage is unavailable, oversized, or invalid; storage coordinates are not exposed. |
 
 > The public-publish gate surfaces as a `202` **success** whose body is
 > `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
 > `approval_required` is a `data.status` value, not an `error.code`.
+
+---
+
+### Collection discovery (#1286)
+
+#### `GET /api/v1/content/collections?shape=tree|flat`
+
+Returns the same requester-visible hierarchy as `collectionService.tree(req)`.
+Requires `content:read`. Filtering and visible-object counts are permission-pushed
+on the server; a hidden collection is never loaded into the client or exposed
+through a secondary id/name lookup.
+
+- `shape=tree` (default) retains nested `children`.
+- `shape=flat` walks that tree in stable Atrium position/name pre-order, omits
+  `children`, and retains the full name `path` for compact extension/native pickers.
+- A token that also holds `content:create` receives `selectableForCreate` on every
+  returned node. The decision lives in the collection service so future collection
+  author ACLs can narrow it without an API contract change.
+
+```json
+{
+  "data": [
+    {
+      "id": "c0ffee00-0000-4000-8000-000000000001",
+      "name": "Technology Guides",
+      "slug": "technology-guides",
+      "parentId": null,
+      "path": ["Technology Guides"],
+      "defaultVisibilityLevel": "internal",
+      "visibleObjectCount": 42,
+      "selectableForCreate": true,
+      "children": []
+    }
+  ],
+  "meta": { "requestId": "req_abc123", "shape": "tree", "count": 1 }
+}
+```
+
+`400 VALIDATION_ERROR` is returned for an invalid `shape`; normal auth/scope
+failures are `401`/`403`. A slug/UUID selected from this response is passed to
+`POST /content` unchanged. If it is deleted before create, the existing typed
+`400 CONTENT_VALIDATION` collection-not-found response is returned.
 
 ---
 
@@ -952,6 +1029,20 @@ initial version (v1) is snapshotted. Requires `content:create`.
 | `codeEncoding` | `base64` | no | Transit encoding for `body` (see below) |
 | `visibility` | object | no | `{ level, grants? }` (see Visibility below). Defaults to the collection default, else `private` |
 | `tags` | string[] | no | — |
+| `sourceRef` | object | no | Create-only typed provenance; see Capture provenance below |
+
+**Capture provenance (#1290):** Atrium Capture may send
+`sourceRef: { type: "capture", provider, externalId, clientSurface, clientVersion,
+capturedAt, sourceOrigins? }`. `clientSurface` is `browser` or `mac`; identifiers
+are bounded and unknown fields are rejected. At most 20 `sourceOrigins` may be
+sent. Only HTTP(S) origins are retained: paths, queries, and fragments are
+discarded, credentials and invalid/non-network URLs are rejected, duplicates are
+removed, and district policy can disable origin retention entirely with
+`ATRIUM_CAPTURE_SOURCE_ORIGINS_ENABLED=false`. The reference is immutable through
+metadata updates. `(owner, provider, externalId)` is unique for capture references,
+so a permanently repeated recorder session returns `409 CONTENT_CONFLICT` without
+creating a second object. Audit/support records include only the provider,
+external id, and client surface—never captured steps, typed values, or page text.
 
 **Artifact code with JS/CSS — `codeEncoding: "base64"`:** artifacts are self-contained
 HTML/JS/CSS, so their code legitimately contains `<script>`, `<style>`, and inline
@@ -971,6 +1062,7 @@ sandboxed iframe (§28.1), never on the app origin.
 ```bash
 curl -X POST -H "Authorization: Bearer sk-your-key" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: create-policy-2026-07-23" \
   -d '{
     "kind": "document",
     "title": "AI Acceptable Use Policy",
@@ -1161,6 +1253,9 @@ before the list is exposed. Requires `content:read`.
 #### `POST /api/v1/content/{id}/versions`
 
 Snapshot a new version from `body` and make it the current version. Requires `content:update`.
+For lossless optimistic concurrency, first read `ETag` from
+`GET /api/v1/content/{id}` and send it as `If-Match`. Use `If-Match: "none"` only
+when the object must not yet have a head version.
 
 **Request body:**
 
@@ -1176,13 +1271,137 @@ Snapshot a new version from `body` and make it the current version. Requires `co
 ```bash
 curl -X POST -H "Authorization: Bearer sk-your-key" \
   -H "Content-Type: application/json" \
+  -H 'If-Match: "11111111-2222-4333-8444-555555555555"' \
+  -H "Idempotency-Key: update-policy-rev-2" \
   -d '{ "body": "# Acceptable Use (rev 2)...", "summary": "Tightened data retention" }' \
   "https://your-domain/api/v1/content/a1b2c3d4-e5f6-7890-abcd-ef1234567890/versions"
 ```
 
-**Response `201`** — the object joined with its new current `version` (no `url`).
+**Response `201`** — the object joined with its new current `version` (no `url`);
+the `ETag` header is the new `currentVersionId`.
 **Response `404`** — `CONTENT_NOT_FOUND`.
 **Response `409`** — `CONTENT_CONFLICT` (version-number race).
+**Response `412`** — `VERSION_PRECONDITION_FAILED`; no screening or side effects
+occurred.
+
+---
+
+### Canonical source reads (#1288)
+
+- `GET /api/v1/content/{id}/source` reads the current committed snapshot.
+- `GET /api/v1/content/{id}/versions/{versionId}/source` reads a specific retained
+  immutable version.
+
+Both require `content:read` and run the normal object `canView` check before the
+version lookup or storage read. An invisible object, missing version, or a version
+that belongs to another object all return `404 CONTENT_NOT_FOUND`; version ids
+cannot be used to probe unrelated content.
+
+```json
+{
+  "data": {
+    "objectId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "versionId": "22222222-3333-4444-8555-666666666666",
+    "versionNumber": 4,
+    "bodyFormat": "markdown",
+    "body": "# Guide title\n...",
+    "sha256": "base64url-sha256"
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+The body is the exact UTF-8 string supplied at snapshot time: document markdown
+comes from its immutable `source.md`, small artifacts from `body_inline`, and
+larger artifacts from their immutable Atrium object. Storage is uncompressed; no
+decompression or content-encoding transform occurs. Reads are capped at the
+existing 5,000,000-byte decoded-body limit. A storage failure returns typed
+`503 CONTENT_STORAGE_ERROR` without bucket names, object keys, or presigned URLs.
+
+The `ETag` is the quoted version id. `If-None-Match` (including weak/list
+validators) returns `304` with no body. The current alias uses
+`Cache-Control: private, no-store` because its head can change. Specific immutable
+versions use `private, no-cache, must-revalidate`: their bytes and ETag do not
+change, but every reuse revalidates permission so a visibility revocation takes
+effect. These endpoints expose committed snapshots only, never unsnapshotted live
+Proof/collaborative state.
+
+---
+
+### Immutable authored assets (#1284)
+
+Documents reference uploaded PNG/JPEG/WebP images with a canonical, portable
+Markdown directive:
+
+```md
+::atrium-asset{id="11111111-2222-4333-8444-555555555555" alt="Enrollment chart"}
+```
+
+The editor, internal reader, and public reader all resolve that directive through
+the same same-origin byte route. A storage URL is never persisted in Markdown or
+returned in metadata.
+
+Upload flow:
+
+1. `POST /api/v1/content/{id}/assets` with `content:update`, object edit
+   permission, filename, MIME, byte length, base64url SHA-256, purpose, and
+   optional pixel dimensions.
+2. `PUT` the exact bytes to the 15-minute presigned URL using the exact
+   `Content-Type` and `x-amz-checksum-sha256` headers returned by step 1.
+3. `POST /api/v1/content/{id}/assets/{assetId}/complete` with the same SHA-256.
+   Completion is idempotent once the asset is `ready`.
+4. Insert the returned `embedRef` into document Markdown and create a version.
+   Snapshot creation rejects references that are unready, missing, or owned by a
+   different object, then pins the authoritative asset set in
+   `content_version_assets`.
+
+```json
+{
+  "filename": "enrollment.png",
+  "contentType": "image/png",
+  "byteLength": 48321,
+  "sha256": "base64url-sha256",
+  "purpose": "document_image",
+  "width": 1600,
+  "height": 900
+}
+```
+
+Initiation returns safe asset metadata plus:
+
+```json
+{
+  "upload": {
+    "method": "PUT",
+    "url": "https://s3-presigned.example/...",
+    "headers": {
+      "content-type": "image/png",
+      "x-amz-checksum-sha256": "base64-sha256"
+    },
+    "expiresAt": "2026-07-24T12:15:00.000Z"
+  }
+}
+```
+
+Completion verifies the exact declared byte length and digest, byte-signature MIME,
+decodability, single-frame constraint, 12,000-pixel dimension cap, and 40-million
+pixel cap. It then applies orientation, strips EXIF/XMP/IPTC and other metadata,
+and re-encodes a normalized image. The untrusted original lives only under the
+short-lived `atrium/pending-assets/` prefix; lifecycle policy expires that prefix
+after one day. Ready bytes are written once under the immutable
+`atrium/objects/{objectId}/assets/{assetId}` key. A hard object delete removes both
+prefixes.
+
+`GET /api/v1/content/{id}/assets` and
+`GET /api/v1/content/{id}/assets/{assetId}` require `content:read` and the normal
+object audience check. They never expose storage keys. The same-origin
+`GET /api/v1/content/assets/{assetId}/bytes` route rechecks authorization on every
+read and masks all denied cases as `404`: authenticated readers must be in the
+current object audience; anonymous readers are admitted only when the asset is
+pinned to the exact version in a live `public_web` publication and the object is
+currently public. Unpublished, private, unready, or unreferenced assets are never
+publicly readable. Responses are `nosniff`, `private, no-store`, and carry an
+ETag derived from the normalized digest.
 
 ---
 
@@ -1238,6 +1457,9 @@ Body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ..
 #### `POST /api/v1/content/{id}/publish`
 
 Publish the object's current version to a destination. Requires `content:publish_internal`.
+Supply the strong ETag from `GET /content/{id}` in `If-Match` to prevent a
+concurrent head change from publishing an unintended version. The service checks
+the precondition again under lock.
 
 **Request body:**
 
@@ -1255,6 +1477,8 @@ returns `202` with `data.status = "approval_required"` and enters the review que
 ```bash
 curl -X POST -H "Authorization: Bearer sk-your-key" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: publish-policy-intranet" \
+  -H 'If-Match: "11111111-2222-4333-8444-555555555555"' \
   -d '{ "destination": "intranet" }' \
   "https://your-domain/api/v1/content/a1b2c3d4-e5f6-7890-abcd-ef1234567890/publish"
 ```
@@ -1286,6 +1510,7 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 **Response `403`** — API key lacks `content:publish_internal`, or `CONTENT_FORBIDDEN`.
 **Response `404`** — `CONTENT_NOT_FOUND`.
+**Response `412`** — `VERSION_PRECONDITION_FAILED`; the object head changed.
 
 ---
 
@@ -1519,7 +1744,7 @@ curl -X POST -H "Authorization: Bearer <agent-oidc-jwt>" \
 | `collectionId` | UUID \| null | Owning collection |
 | `visibilityLevel` | `private` \| `group` \| `internal` \| `public` | Effective visibility level |
 | `currentVersionId` | UUID \| null | Current version pointer |
-| `sourceRef` | object \| null | Provenance reference when imported |
+| `sourceRef` | typed object \| null | Create-only provenance (`capture`, `upload`, `object`, `chat`, `okf`, or `none`); known variants reject additional properties |
 | `tags` | string[] | Free-form tags |
 | `status` | `draft` \| `published` \| `archived` | Lifecycle status |
 | `indexedAt` | ISO 8601 \| null | Last search-index time |

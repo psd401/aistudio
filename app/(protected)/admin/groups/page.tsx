@@ -1,3 +1,4 @@
+import { adminPageMetadata } from "../_lib/admin-pages"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { PageBranding } from "@/components/ui/page-branding"
 import { getGroupsAdminDataAction } from "@/actions/db/groups-actions"
@@ -14,6 +15,8 @@ import { GroupsAdmin } from "./_components/groups-admin"
  * child. The nav entry (migration 107) is administrator-gated to match.
  */
 export const dynamic = "force-dynamic"
+
+export const metadata = adminPageMetadata("/admin/groups")
 
 export default async function GroupsAdminPage() {
   await requireRole("administrator")

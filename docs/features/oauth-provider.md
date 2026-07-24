@@ -37,9 +37,13 @@ Returns the standard OpenID Connect discovery document with all endpoint URLs.
 ## Security
 
 - **PKCE required** (S256 only) per OAuth 2.1 best practices
-- **JWT signing**: AWS KMS (RS256) in production, local RSA in dev
+- **OIDC JWT signing**: shared RSA-3072 JWK set in Secrets Manager; local RSA only in non-production development
+- **Delegated-token signing**: separate non-exportable AWS KMS key
 - **Token TTLs**: Access=15min, AuthCode=60s, Refresh=24hr
-- **Client types**: Public (PKCE only) and Confidential (with client_secret)
+- **Public-client refresh rotation**: every refresh is single-use; replay revokes the grant family
+- **Durability**: provider sessions, interactions, grants, codes, and tokens persist in PostgreSQL across ECS tasks/restarts
+- **Application types**: web, browser extension, and native
+- **Public clients**: browser extensions and native apps have no secret and always use S256 PKCE
 - Client secrets hashed with Argon2id
 
 ## JWT Claims
@@ -61,9 +65,23 @@ Returns the standard OpenID Connect discovery document with all endpoint URLs.
 ## Admin UI
 
 OAuth clients are managed at `/admin/oauth-clients`:
-- Register new clients (public or confidential)
+- Register web, browser-extension, and native clients
 - Configure redirect URIs and allowed scopes
 - Revoke clients (deactivates all issued tokens)
+
+Redirect URI validation is application-aware:
+
+| Application type | Accepted redirects |
+|---|---|
+| Web | Hosted HTTPS URI; no localhost or loopback |
+| Browser extension | Exact `https://<32-character-extension-id>.chromiumapp.org/<fixed-path>` |
+| Native | Claimed HTTPS DNS URI, reverse-domain private scheme with a fixed path, or HTTP on literal `127.0.0.1`/`[::1]` |
+
+Native loopback redirects may choose an ephemeral port at runtime; scheme,
+literal host, path, and query must still match the registration. All profiles
+reject fragments, userinfo, wildcards, and dangerous schemes. Stored client
+metadata is revalidated when the OIDC provider loads it, so direct database
+writes cannot bypass the registration policy.
 
 ## Database Tables
 
@@ -95,6 +113,7 @@ authenticateRequest() → token starts with "sk-"?
 |------|---------|
 | `lib/oauth/oidc-provider-config.ts` | Provider initialization |
 | `lib/oauth/drizzle-adapter.ts` | Database adapter for oidc-provider |
+| `lib/oauth/redirect-uri-policy.ts` | Application-aware redirect security policy |
 | `lib/oauth/jwt-signer.ts` | JWT signing factory (KMS or local) |
 | `lib/oauth/kms-jwt-service.ts` | AWS KMS signing implementation |
 | `lib/oauth/jwks-cache.ts` | JWKS key caching for verification |
@@ -108,7 +127,11 @@ authenticateRequest() → token starts with "sk-"?
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `KMS_SIGNING_KEY_ARN` | Prod only | — | AWS KMS key for JWT signing |
-| `KMS_SIGNING_KEY_KID` | Prod only | — | Key ID for JWKS |
-| `OIDC_COOKIE_SECRET` | Recommended | NEXTAUTH_SECRET | Cookie encryption |
+| `OIDC_SIGNING_JWKS_SECRET_ARN` | Production | — | Secrets Manager ARN for the shared OIDC-only RSA JWK set |
+| `KMS_SIGNING_KEY_ARN` | Prod only | — | Separate KMS key for delegated-agent JWT signing |
+| `KMS_SIGNING_KEY_KID` | Prod only | — | Delegated-token KMS key ID |
+| `OIDC_COOKIE_SECRET` | Production | AUTH_SECRET (local only) | Dedicated provider cookie encryption/signing key; provisioned and injected by `FrontendStackEcs` |
 | `NEXTAUTH_URL` | Yes | — | Issuer URL |
+
+See [OIDC signing-key operations](../operations/oauth-signing-keys.md) for the
+threat model, bootstrap, rotation, overlap, health check, and incident runbook.

@@ -1535,17 +1535,15 @@ export class AgentPlatformStack extends cdk.Stack {
       account: this.account,
       vpcEnabled: false,
       dynamodbTables: [
-        this.usersTable.tableName,
-        this.signalsTable.tableName,
-        this.messageDedupTable.tableName,
-        this.sessionLocksTable.tableName,
-        interAgentTable.tableName,
+        { name: this.usersTable.tableName },
+        { name: this.signalsTable.tableName },
+        { name: this.messageDedupTable.tableName },
+        { name: this.sessionLocksTable.tableName },
+        { name: interAgentTable.tableName },
       ],
-      s3Buckets: [this.workspaceBucket.bucketName],
-      // WORKAROUND: ServiceRoleFactory checks startsWith("arn:") to detect full
-      // ARNs vs names. CDK cross-stack refs and new Secret() produce tokens that
-      // don't start with "arn:" at synth time, causing double-wrapped ARNs.
-      // Grant read access directly instead of going through the factory.
+      s3Buckets: [{ name: this.workspaceBucket.bucketName }],
+      // The constructed secret read is granted directly after the Lambda is
+      // created, keeping its KMS-aware CDK grant colocated with the grantee.
       secrets: [],
       additionalPolicies: [
         // Guardrails invoke
@@ -1638,7 +1636,7 @@ export class AgentPlatformStack extends cdk.Stack {
       region: this.region,
       account: this.account,
       vpcEnabled: false,
-      dynamodbTables: [this.usersTable.tableName],
+      dynamodbTables: [{ name: this.usersTable.tableName }],
       additionalPolicies: [
         // AgentCore session invoke
         new iam.PolicyDocument({
@@ -1887,7 +1885,7 @@ export class AgentPlatformStack extends cdk.Stack {
       region: this.region,
       account: this.account,
       vpcEnabled: false,
-      s3Buckets: [this.workspaceBucket.bucketName],
+      s3Buckets: [{ name: this.workspaceBucket.bucketName }],
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [new iam.PolicyStatement({
@@ -2217,7 +2215,10 @@ export class AgentPlatformStack extends cdk.Stack {
       // ServiceRoleFactory grants base DynamoDB CRUD on the named tables;
       // the additional resources policy below covers per-user OAuth
       // secrets and Bedrock invocation.
-      dynamodbTables: [this.usersTable.tableName, this.triageTable.tableName],
+      dynamodbTables: [
+        { name: this.usersTable.tableName },
+        { name: this.triageTable.tableName },
+      ],
       additionalPolicies: [
         // Per-user OAuth refresh tokens + the shared OAuth client creds.
         // Wildcard on per-user path because we evaluate every opted-in
@@ -2424,7 +2425,7 @@ export class AgentPlatformStack extends cdk.Stack {
       region: this.region,
       account: this.account,
       vpcEnabled: false,
-      dynamodbTables: [this.triageTable.tableName],
+      dynamodbTables: [{ name: this.triageTable.tableName }],
     });
 
     const triageDispatcherLogGroup = new logs.LogGroup(this, 'TriageDispatcherLogGroup', {
@@ -2528,7 +2529,7 @@ export class AgentPlatformStack extends cdk.Stack {
       region: this.region,
       account: this.account,
       vpcEnabled: false,
-      dynamodbTables: [this.triageTable.tableName],
+      dynamodbTables: [{ name: this.triageTable.tableName }],
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [new iam.PolicyStatement({
@@ -2838,9 +2839,8 @@ export class AgentPlatformStack extends cdk.Stack {
       region: this.region,
       account: this.account,
       vpcEnabled: false,
-      // Grant the one secret read directly (exact scoped ARN) rather than via the
-      // factory `secrets` array, whose startsWith("arn:") token heuristic
-      // double-wraps constructed ARNs (same reason the router does this).
+      // Grant the one constructed-secret read directly below so the KMS-aware
+      // CDK grant remains colocated with the Lambda grantee.
       secrets: [],
       additionalPolicies: [
         new iam.PolicyDocument({
@@ -3539,8 +3539,8 @@ export class AgentPlatformStack extends cdk.Stack {
       // vpcEnabled: false — VPC access added manually via managed policy below
       // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
       vpcEnabled: false,
-      dynamodbTables: [this.usersTable.tableName],
-      s3Buckets: [this.workspaceBucket.bucketName],
+      dynamodbTables: [{ name: this.usersTable.tableName }],
+      s3Buckets: [{ name: this.workspaceBucket.bucketName }],
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [new iam.PolicyStatement({
@@ -3748,7 +3748,7 @@ export class AgentPlatformStack extends cdk.Stack {
       // vpcEnabled: false — VPC access added manually via managed policy below
       // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
       vpcEnabled: false,
-      dynamodbTables: [this.signalsTable.tableName],
+      dynamodbTables: [{ name: this.signalsTable.tableName }],
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [new iam.PolicyStatement({

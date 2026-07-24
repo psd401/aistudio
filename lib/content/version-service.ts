@@ -25,6 +25,7 @@
  */
 
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import {
   executeQuery,
   executeTransaction,
@@ -32,6 +33,7 @@ import {
 } from "@/lib/db/drizzle-client";
 import { contentEmbedLinks, contentObjects, contentVersions } from "@/lib/db/schema";
 import { parseEmbeddedArtifactIds } from "./embed-directive";
+import { pinVersionAssetsInTx } from "./asset-references";
 import { pgTimestampAsText } from "@/lib/db/drizzle-helpers";
 import { createLogger } from "@/lib/logger";
 import { actorKindOf, agentIdOf, assertCanEdit, authorUserIdOf } from "./helpers";
@@ -49,11 +51,15 @@ import {
   ConflictError,
   ForbiddenError,
   NotFoundError,
+  StorageError,
   ValidationError,
+  VersionPreconditionFailedError,
 } from "./errors";
+import { MAX_DECODED_BODY_BYTES } from "./code-encoding";
 import type {
   BodyFormat,
   ContentVersionDTO,
+  ContentSourceDTO,
   Requester,
   SnapshotInput,
 } from "./types";
@@ -186,6 +192,35 @@ export interface SnapshotResult {
   s3Writes: PendingS3Write[];
 }
 
+interface SnapshotWriteOptions {
+  proof: ScreeningProof;
+  expectedVersionId?: string | null;
+}
+
+async function assertExpectedVersionHead(
+  tx: DbTransaction,
+  objectId: string,
+  expectedVersionId: string | null | undefined
+): Promise<void> {
+  if (expectedVersionId === undefined) return;
+  // Serialize conditional writers on the object row. The service performs the
+  // same comparison before external screening for the ordinary stale case; this
+  // in-transaction check closes the race between that check and insert.
+  const locked = await tx
+    .select({ currentVersionId: contentObjects.currentVersionId })
+    .from(contentObjects)
+    .where(eq(contentObjects.id, objectId))
+    .limit(1)
+    .for("update");
+  const currentVersionId = locked[0]?.currentVersionId ?? null;
+  if (currentVersionId !== expectedVersionId) {
+    throw new VersionPreconditionFailedError(
+      expectedVersionId,
+      currentVersionId
+    );
+  }
+}
+
 /**
  * Enforce the DB invariant `actor_kind = 'human' ⟹ author_user_id IS NOT NULL`
  * at the snapshot boundary. Current callers guard upstream (ownerFor /
@@ -234,8 +269,9 @@ export async function snapshotInTx(
   req: Requester,
   obj: { id: string; kind: "document" | "artifact" },
   input: SnapshotInput,
-  proof: ScreeningProof
+  options: SnapshotWriteOptions
 ): Promise<SnapshotResult> {
+  await assertExpectedVersionHead(tx, obj.id, options.expectedVersionId);
   // Reject empty AND whitespace-only bodies, mirroring the `.trim()` title check
   // in content-service so "   " is not silently snapshotted as content.
   if (typeof input.body !== "string" || input.body.trim().length === 0) {
@@ -243,7 +279,7 @@ export async function snapshotInTx(
   }
   // §28.3 defense in depth (issue #1118 item 3): agent content must have been
   // screened before reaching this shared write primitive. No-op for human writers.
-  assertScreened(req, input.body, proof, obj.id);
+  assertScreened(req, input.body, options.proof, obj.id);
   const bodyFormat = input.bodyFormat ?? defaultBodyFormat(obj.kind);
   // The downstream branches assume documents are markdown (rendered via
   // renderMarkdownToHtml) and artifacts are html/jsx (content-type + filename).
@@ -348,6 +384,18 @@ export async function snapshotInTx(
     throw new ValidationError("Failed to create version", { objectId: obj.id });
   }
 
+  if (isDocument) {
+    // Resolve canonical ::atrium-asset directives against READY assets owned by
+    // this object before advancing the head. These immutable join rows are the
+    // authoritative asset set a publication pins with its version id.
+    await pinVersionAssetsInTx(
+      tx,
+      obj.id,
+      versionRow.id,
+      input.body
+    );
+  }
+
   // Advance the object's working head.
   await tx
     .update(contentObjects)
@@ -420,10 +468,12 @@ async function snapshotScreened(
   req: Requester,
   obj: { id: string; kind: "document" | "artifact" },
   input: SnapshotInput,
-  proof: ScreeningProof
+  proof: ScreeningProof,
+  expectedVersionId?: string | null
 ): Promise<ContentVersionDTO> {
   const { version, s3Writes } = await executeTransaction(
-    (tx) => snapshotInTx(tx, req, obj, input, proof),
+    (tx) =>
+      snapshotInTx(tx, req, obj, input, { proof, expectedVersionId }),
     "content.snapshot"
   );
   await flushSnapshotWrites(s3Writes);
@@ -524,6 +574,61 @@ export const versionService = {
       "content.versionById"
     );
     return rows[0] ? rowToVersionDTO(rows[0] as VersionRowAsText) : null;
+  },
+
+  /**
+   * Read the exact canonical UTF-8 source for one committed version, regardless
+   * of whether it is inline, an artifact S3 object, or a Proof-backed document
+   * whose immutable markdown snapshot lives at `source.md`.
+   */
+  async loadSource(version: ContentVersionDTO): Promise<ContentSourceDTO> {
+    try {
+      let body: string;
+      if (version.bodyFormat === "markdown") {
+        body = await s3Store.getTextBounded(
+          s3Store.key(
+            version.objectId,
+            version.versionNumber,
+            "source.md"
+          ),
+          MAX_DECODED_BODY_BYTES
+        );
+      } else if (version.bodyLocation === "inline") {
+        body = version.bodyInline ?? "";
+        if (Buffer.byteLength(body, "utf8") > MAX_DECODED_BODY_BYTES) {
+          throw new StorageError();
+        }
+      } else {
+        body = await s3Store.getTextBounded(
+          version.bodyLocation,
+          MAX_DECODED_BODY_BYTES
+        );
+      }
+      return {
+        objectId: version.objectId,
+        versionId: version.id,
+        versionNumber: version.versionNumber,
+        bodyFormat: version.bodyFormat,
+        body,
+        sha256: createHash("sha256")
+          .update(body, "utf8")
+          .digest("base64url"),
+      };
+    } catch (error) {
+      if (error instanceof StorageError) throw error;
+      createLogger({ action: "content.loadSource" }).warn(
+        "Canonical source storage read failed",
+        {
+          objectId: version.objectId,
+          versionId: version.id,
+          errorName:
+            error instanceof Error ? error.name : "UnknownStorageError",
+        }
+      );
+      // Do not expose bucket names, object keys, presigned credentials, or raw
+      // SDK messages through the API error.
+      throw new StorageError();
+    }
   },
 
   /**

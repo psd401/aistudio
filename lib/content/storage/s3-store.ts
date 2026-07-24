@@ -18,6 +18,7 @@
  */
 
 import {
+  DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
   ListObjectsV2Command,
@@ -26,7 +27,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Dirent } from "node:fs";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { Settings } from "@/lib/settings-manager";
 import { ErrorFactories } from "@/lib/error-utils";
@@ -135,6 +136,58 @@ async function readStreamToString(body: unknown): Promise<string> {
   );
 }
 
+async function readStreamToBoundedUtf8(
+  body: unknown,
+  maxBytes: number
+): Promise<string> {
+  const maybe = body as {
+    transformToByteArray?: () => Promise<Uint8Array>;
+  } | null;
+  if (!maybe || typeof maybe.transformToByteArray !== "function") {
+    throw ErrorFactories.sysInternalError(
+      "S3 object body does not support bounded reads"
+    );
+  }
+  const bytes = await maybe.transformToByteArray();
+  if (bytes.byteLength > maxBytes) {
+    throw ErrorFactories.validationFailed([
+      {
+        field: "body",
+        message: `Stored content exceeds the ${maxBytes}-byte read limit`,
+      },
+    ]);
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw ErrorFactories.validationFailed([
+      { field: "body", message: "Stored content is not valid UTF-8" },
+    ]);
+  }
+}
+
+async function readLocalFileBounded(
+  target: string,
+  maxBytes: number,
+  field: "body" | "asset",
+  message: string
+): Promise<Uint8Array> {
+  const handle = await open(target, "r");
+  try {
+    const metadata = await handle.stat();
+    if (metadata.size > maxBytes) {
+      throw ErrorFactories.validationFailed([{ field, message }]);
+    }
+    const bytes = await handle.readFile();
+    if (bytes.byteLength > maxBytes) {
+      throw ErrorFactories.validationFailed([{ field, message }]);
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
 export const s3Store = {
   /**
    * Build the canonical S3 key for a content object's per-version file.
@@ -156,6 +209,13 @@ export const s3Store = {
     assertSafeSegment(objectId, "objectId");
     assertSafeSegment(assetId, "assetId");
     return `${ATRIUM_PREFIX}/objects/${objectId}/assets/${assetId}`;
+  },
+
+  /** Temporary, lifecycle-reaped key used only before image normalization. */
+  assetUploadKey(objectId: string, assetId: string): string {
+    assertSafeSegment(objectId, "objectId");
+    assertSafeSegment(assetId, "assetId");
+    return `${ATRIUM_PREFIX}/pending-assets/${objectId}/${assetId}`;
   },
 
   /**
@@ -223,6 +283,165 @@ export const s3Store = {
   },
 
   /**
+   * Read a UTF-8 object with a hard byte cap. Checks metadata before materializing
+   * the body and re-checks the received bytes for stores that omit ContentLength.
+   */
+  async getTextBounded(key: string, maxBytes: number): Promise<string> {
+    if (!Number.isInteger(maxBytes) || maxBytes < 1) {
+      throw ErrorFactories.validationFailed([
+        { field: "maxBytes", message: "maxBytes must be a positive integer" },
+      ]);
+    }
+    const localRoot = getLocalStorageRoot();
+    if (localRoot) {
+      const target = resolveLocalKey(localRoot, key);
+      const bytes = await readLocalFileBounded(
+        target,
+        maxBytes,
+        "body",
+        `Stored content exceeds the ${maxBytes}-byte read limit`
+      );
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw ErrorFactories.validationFailed([
+          { field: "body", message: "Stored content is not valid UTF-8" },
+        ]);
+      }
+    }
+    const client = await getClient();
+    const { bucket } = await getConfig();
+    const response = await client.send(
+      new GetObjectCommand({ Bucket: bucket, Key: key })
+    );
+    if (response.ContentLength != null && response.ContentLength > maxBytes) {
+      throw ErrorFactories.validationFailed([
+        {
+          field: "body",
+          message: `Stored content exceeds the ${maxBytes}-byte read limit`,
+        },
+      ]);
+    }
+    if (!response.Body) {
+      throw ErrorFactories.sysInternalError("S3 object has no body");
+    }
+    return readStreamToBoundedUtf8(response.Body, maxBytes);
+  },
+
+  /** Read an object as bytes with a metadata and materialized-size bound. */
+  async getBytesBounded(key: string, maxBytes: number): Promise<Uint8Array> {
+    if (!Number.isInteger(maxBytes) || maxBytes < 1) {
+      throw ErrorFactories.validationFailed([
+        { field: "maxBytes", message: "maxBytes must be a positive integer" },
+      ]);
+    }
+    const localRoot = getLocalStorageRoot();
+    if (localRoot) {
+      const target = resolveLocalKey(localRoot, key);
+      return readLocalFileBounded(
+        target,
+        maxBytes,
+        "asset",
+        "Stored asset exceeds its byte limit"
+      );
+    }
+    const client = await getClient();
+    const { bucket } = await getConfig();
+    const response = await client.send(
+      new GetObjectCommand({ Bucket: bucket, Key: key })
+    );
+    if (response.ContentLength != null && response.ContentLength > maxBytes) {
+      throw ErrorFactories.validationFailed([
+        { field: "asset", message: "Stored asset exceeds its byte limit" },
+      ]);
+    }
+    const body = response.Body as {
+      transformToByteArray?: () => Promise<Uint8Array>;
+    } | null;
+    if (!body || typeof body.transformToByteArray !== "function") {
+      throw ErrorFactories.sysInternalError("S3 asset body is not readable");
+    }
+    const bytes = await body.transformToByteArray();
+    if (bytes.byteLength > maxBytes) {
+      throw ErrorFactories.validationFailed([
+        { field: "asset", message: "Stored asset exceeds its byte limit" },
+      ]);
+    }
+    return bytes;
+  },
+
+  /** Persist normalized immutable bytes at their canonical key. */
+  async putBytes(
+    key: string,
+    body: Uint8Array,
+    contentType: string
+  ): Promise<void> {
+    const localRoot = getLocalStorageRoot();
+    if (localRoot) {
+      const target = resolveLocalKey(localRoot, key);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, body);
+      return;
+    }
+    const client = await getClient();
+    const { bucket } = await getConfig();
+    await client.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: body,
+        ContentType: contentType,
+        ContentLength: body.byteLength,
+        CacheControl: "private, no-store",
+      })
+    );
+  },
+
+  /** Delete one temporary/canonical object. Missing keys are a no-op. */
+  async deleteKey(key: string): Promise<void> {
+    const localRoot = getLocalStorageRoot();
+    if (localRoot) {
+      await rm(resolveLocalKey(localRoot, key), { force: true });
+      return;
+    }
+    const client = await getClient();
+    const { bucket } = await getConfig();
+    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  },
+
+  /**
+   * Presign a direct raster upload. The checksum/content type/length are bound
+   * into the request so the browser never receives AWS credentials.
+   */
+  async signedAssetUploadUrl(input: {
+    key: string;
+    contentType: string;
+    contentLength: number;
+    checksumSha256: string;
+    ttlSeconds?: number;
+  }): Promise<string> {
+    if (getLocalStorageRoot()) {
+      throw ErrorFactories.sysInternalError(
+        "Signed asset uploads are unavailable with local Atrium storage"
+      );
+    }
+    const client = await getClient();
+    const { bucket } = await getConfig();
+    return getSignedUrl(
+      client,
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: input.key,
+        ContentType: input.contentType,
+        ContentLength: input.contentLength,
+        ChecksumSHA256: input.checksumSha256,
+        CacheControl: "private, no-store",
+      }),
+      { expiresIn: input.ttlSeconds ?? 900 }
+    );
+  },
+
+  /**
    * Delete EVERY object under a content object's `atrium/objects/{objectId}/`
    * prefix — all versions (`v{n}/…`) and assets. Used by the hard-delete path
    * AFTER the DB rows are removed (issue: Atrium hard delete). Paginates the
@@ -242,42 +461,53 @@ export const s3Store = {
         localRoot,
         `${ATRIUM_PREFIX}/objects/${objectId}`
       );
-      const deleted = await countLocalFiles(objectDirectory);
+      const pendingDirectory = resolveLocalKey(
+        localRoot,
+        `${ATRIUM_PREFIX}/pending-assets/${objectId}`
+      );
+      const deleted =
+        (await countLocalFiles(objectDirectory)) +
+        (await countLocalFiles(pendingDirectory));
       await rm(objectDirectory, { recursive: true, force: true });
+      await rm(pendingDirectory, { recursive: true, force: true });
       return deleted;
     }
     const client = await getClient();
     const { bucket } = await getConfig();
-    const prefix = `${ATRIUM_PREFIX}/objects/${objectId}/`;
-
     let deleted = 0;
-    let continuationToken: string | undefined;
-    do {
-      const listed = await client.send(
-        new ListObjectsV2Command({
-          Bucket: bucket,
-          Prefix: prefix,
-          ContinuationToken: continuationToken,
-        })
-      );
-      const keys = (listed.Contents ?? [])
-        .map((o) => o.Key)
-        .filter((k): k is string => typeof k === "string");
-      // Batch delete in chunks of 1000 (the DeleteObjects hard limit).
-      for (let i = 0; i < keys.length; i += 1000) {
-        const chunk = keys.slice(i, i + 1000);
-        await client.send(
-          new DeleteObjectsCommand({
+    const prefixes = [
+      `${ATRIUM_PREFIX}/objects/${objectId}/`,
+      `${ATRIUM_PREFIX}/pending-assets/${objectId}/`,
+    ];
+    for (const prefix of prefixes) {
+      let continuationToken: string | undefined;
+      do {
+        const listed = await client.send(
+          new ListObjectsV2Command({
             Bucket: bucket,
-            Delete: { Objects: chunk.map((Key) => ({ Key })), Quiet: true },
+            Prefix: prefix,
+            ContinuationToken: continuationToken,
           })
         );
-        deleted += chunk.length;
-      }
-      continuationToken = listed.IsTruncated
-        ? listed.NextContinuationToken
-        : undefined;
-    } while (continuationToken);
+        const keys = (listed.Contents ?? [])
+          .map((o) => o.Key)
+          .filter((k): k is string => typeof k === "string");
+        // Batch delete in chunks of 1000 (the DeleteObjects hard limit).
+        for (let i = 0; i < keys.length; i += 1000) {
+          const chunk = keys.slice(i, i + 1000);
+          await client.send(
+            new DeleteObjectsCommand({
+              Bucket: bucket,
+              Delete: { Objects: chunk.map((Key) => ({ Key })), Quiet: true },
+            })
+          );
+          deleted += chunk.length;
+        }
+        continuationToken = listed.IsTruncated
+          ? listed.NextContinuationToken
+          : undefined;
+      } while (continuationToken);
+    }
 
     return deleted;
   },

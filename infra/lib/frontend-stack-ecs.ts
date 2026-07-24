@@ -7,8 +7,11 @@ import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as targets from 'aws-cdk-lib/aws-route53-targets';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { EcsServiceConstruct } from './constructs/ecs-service';
 import { VPCProvider, EnvironmentConfig } from './constructs';
+import { ServiceRoleFactory } from './constructs/security';
 
 export interface FrontendStackEcsProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
@@ -171,6 +174,113 @@ export class FrontendStackEcs extends cdk.Stack {
     });
 
     // ============================================================================
+    // OIDC Provider Cookie Secret (#1285 deployment readiness)
+    // ============================================================================
+    // oidc-provider encrypts/signs its own interaction, session, and state
+    // cookies. Keep this key separate from AUTH_SECRET so a NextAuth session-key
+    // compromise does not extend to the OAuth provider. The value is injected
+    // into ECS at task start; operators never need to hand-configure it.
+    const oidcCookieSecret = new secretsmanager.Secret(this, 'OidcCookieSecret', {
+      secretName: `aistudio/${environment}/oauth/oidc-cookie-secret`,
+      description: 'Dedicated oidc-provider cookie encryption and signing secret',
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({}),
+        generateStringKey: 'OIDC_COOKIE_SECRET',
+        excludePunctuation: true,
+        passwordLength: 32,
+      },
+      removalPolicy: environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(oidcCookieSecret).add('Environment', environment);
+    cdk.Tags.of(oidcCookieSecret).add('ManagedBy', 'cdk');
+
+    // ============================================================================
+    // OIDC Signing JWK Set (#1285)
+    // ============================================================================
+    // oidc-provider needs private JWK material at its JOSE boundary, while the
+    // application/delegated-token signer remains non-exportable KMS. This
+    // dedicated encrypted secret is shared by every task and initialized once
+    // by a least-privilege custom resource. The bootstrap never overwrites an
+    // initialized key set, so deployments and task restarts do not rotate keys.
+    const oidcSigningJwksSecret = new secretsmanager.Secret(
+      this,
+      'OidcSigningJwksSecret',
+      {
+        secretName: `aistudio/${environment}/oauth/oidc-signing-jwks`,
+        description:
+          'Exportable OIDC-only RSA JWK set; separate from the application KMS signer',
+        generateSecretString: {
+          secretStringTemplate: JSON.stringify({ version: 0 }),
+          generateStringKey: 'bootstrap',
+          excludePunctuation: true,
+          passwordLength: 32,
+        },
+        removalPolicy:
+          environment === 'prod'
+            ? cdk.RemovalPolicy.RETAIN
+            : cdk.RemovalPolicy.DESTROY,
+      }
+    );
+    cdk.Tags.of(oidcSigningJwksSecret).add('Environment', environment);
+    cdk.Tags.of(oidcSigningJwksSecret).add('ManagedBy', 'cdk');
+
+    const oidcBootstrapFunctionName = `aistudio-oidc-key-bootstrap-${environment}`;
+    const oidcBootstrapRole = ServiceRoleFactory.createLambdaRole(
+      this,
+      'OidcKeyBootstrapRole',
+      {
+        functionName: oidcBootstrapFunctionName,
+        environment,
+        region: this.region,
+        account: this.account,
+        secrets: [{ arn: oidcSigningJwksSecret.secretArn }],
+        additionalPolicies: [
+          new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                actions: ['secretsmanager:PutSecretValue'],
+                resources: [oidcSigningJwksSecret.secretArn],
+              }),
+            ],
+          }),
+        ],
+        // The account boundary intentionally permits only secret reads. This
+        // one-shot bootstrap role needs exact-ARN PutSecretValue.
+        enablePermissionBoundary: false,
+      }
+    );
+    const oidcKeyBootstrap = new lambda.Function(
+      this,
+      'OidcKeyBootstrapFunction',
+      {
+        functionName: oidcBootstrapFunctionName,
+        runtime: lambda.Runtime.NODEJS_22_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromAsset('lambdas/oidc-key-bootstrap'),
+        role: oidcBootstrapRole,
+        timeout: cdk.Duration.seconds(30),
+        memorySize: 256,
+      }
+    );
+    const oidcKeyBootstrapResource = new cdk.CustomResource(
+      this,
+      'OidcKeyBootstrap',
+      {
+        serviceToken: oidcKeyBootstrap.functionArn,
+        properties: {
+          SecretId: oidcSigningJwksSecret.secretArn,
+          // AWS::CloudFormation::CustomResource has no standard Tags property.
+          // Carry the same governance metadata in its provider properties.
+          Environment: environment,
+          ManagedBy: 'cdk',
+        },
+      }
+    );
+    cdk.Tags.of(oidcKeyBootstrap).add('Environment', environment);
+    cdk.Tags.of(oidcKeyBootstrap).add('ManagedBy', 'cdk');
+    oidcKeyBootstrapResource.node.addDependency(oidcSigningJwksSecret);
+
+    // ============================================================================
     // MCP Token Encryption Key (AES-256-GCM DEK)
     // ============================================================================
     // Random 64-character alphanumeric password used as HKDF input key material.
@@ -227,12 +337,17 @@ export class FrontendStackEcs extends cdk.Stack {
       collabJwtSecretArn: collabJwtSecret.secretArn,
       // Guardrail violation-log hash secret (#727, created above)
       guardrailHashSecretArn: guardrailHashSecret.secretArn,
+      // Dedicated oidc-provider cookie key (created above)
+      oidcCookieSecretArn: oidcCookieSecret.secretArn,
+      // OIDC-only signing key set (#1285, created and bootstrapped above)
+      oidcSigningJwksSecretArn: oidcSigningJwksSecret.secretArn,
       // K-12 Content Safety: Guardrails resources from GuardrailsStack
       // These enable precise IAM scoping and DynamoDB access for PII tokenization
       guardrailArn: cdk.Fn.importValue(`${environment}-GuardrailArn`),
       piiTokenTableArn: cdk.Fn.importValue(`${environment}-PIITokenTableArn`),
       violationTopicArn: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
     });
+    this.ecsService.node.addDependency(oidcKeyBootstrapResource);
 
     // ============================================================================
     // DNS and SSL Certificate

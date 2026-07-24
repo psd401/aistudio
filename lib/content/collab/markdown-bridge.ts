@@ -41,6 +41,11 @@ import {
   isSafeMediaUrl,
   parseVideoDirectiveAttrs,
 } from "../block-directives";
+import {
+  CONTENT_ASSET_DATA_ATTR,
+  contentAssetBytesPath,
+  parseContentAssetDirectiveAttrs,
+} from "../asset-directive";
 
 /**
  * A `marked` instance whose renderer DROPS raw HTML tokens (both block and inline)
@@ -118,6 +123,35 @@ const artifactEmbedMarkedExtension: TokenizerAndRendererExtension = {
   },
 };
 editorMarked.use({ extensions: [artifactEmbedMarkedExtension] });
+
+/** markdown → editor for immutable authored-image directives (#1284). */
+const contentAssetMarkedExtension: TokenizerAndRendererExtension = {
+  name: "atriumAsset",
+  level: "block",
+  start(src: string) {
+    const match = /(?:^|\n)[ \t]*::atrium-asset\{/.exec(src);
+    if (!match) return undefined;
+    return match[0].startsWith("\n") ? match.index + 1 : match.index;
+  },
+  tokenizer(src: string) {
+    const match =
+      /^[ \t]*::atrium-asset\{([^}]*)\}[ \t]*(?:\n|$)/.exec(src);
+    if (!match) return undefined;
+    const asset = parseContentAssetDirectiveAttrs(match[1]);
+    if (!asset) return undefined;
+    return { type: "atriumAsset", raw: match[0], asset };
+  },
+  renderer(token: Tokens.Generic) {
+    const asset = token.asset as
+      | { assetId: string; alt: string }
+      | undefined;
+    if (!asset) return "";
+    const src = contentAssetBytesPath(asset.assetId);
+    if (!src) return "";
+    return `<img ${CONTENT_ASSET_DATA_ATTR}="${asset.assetId}" src="${src}" alt="${escapeAttr(asset.alt)}">\n`;
+  },
+};
+editorMarked.use({ extensions: [contentAssetMarkedExtension] });
 
 /** Escape a string for safe interpolation into a double-quoted HTML attribute. */
 function escapeAttr(value: string): string {

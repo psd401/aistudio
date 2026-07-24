@@ -1,10 +1,16 @@
+import { adminPageMetadata } from "../_lib/admin-pages"
 import { Suspense } from "react"
+import { requireRole } from "@/lib/auth/role-helpers"
 import { Card, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { AssistantsTable } from "./_components/assistants-table"
 import { PageBranding } from "@/components/ui/page-branding"
 
+export const metadata = adminPageMetadata("/admin/assistants")
+
 export default async function AssistantsPage() {
+  await requireRole("administrator")
+
   return (
     <div className="container mx-auto px-6 py-8">
       <div className="mb-6">

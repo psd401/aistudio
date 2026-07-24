@@ -1,3 +1,4 @@
+import { adminPageMetadata } from "../_lib/admin-pages"
 import { Suspense } from "react"
 import { SettingsClient } from "./_components/settings-client"
 import { requireRole } from "@/lib/auth/role-helpers"
@@ -9,6 +10,8 @@ import { executeQuery } from "@/lib/db/drizzle-client"
 import { nexusMcpServers } from "@/lib/db/schema"
 import { hasCapability } from "@/lib/ai/capability-utils"
 import { inferFamily } from "@/lib/nexus/model-router/router"
+
+export const metadata = adminPageMetadata("/admin/settings")
 
 export default async function SettingsPage() {
   await requireRole("administrator")

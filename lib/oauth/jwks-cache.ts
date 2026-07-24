@@ -10,6 +10,7 @@
 import { createLocalJWKSet } from "jose"
 import type { FlattenedJWSInput, JWSHeaderParameters, GetKeyFunction } from "jose"
 import { getJwtSigner } from "./jwt-signer"
+import { getOidcSigningKeySet } from "./oidc-signing-key-store"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -43,15 +44,16 @@ export async function getJwksKeySet(): Promise<JWKSKeySet> {
 
   const log = createLogger({ action: "jwksCache.refresh" })
 
-  const signer = await getJwtSigner()
-  const jwk = await signer.getPublicKeyJwk()
+  const keys = await getVerificationKeys()
 
   cachedKeySet = createLocalJWKSet({
-    keys: [jwk],
+    keys,
   })
 
   cacheTimestamp = now
-  log.info("JWKS cache refreshed", { kid: jwk.kid })
+  log.info("JWKS cache refreshed", {
+    kids: keys.map((key) => key.kid),
+  })
 
   return cachedKeySet
 }
@@ -64,14 +66,24 @@ export async function refreshJwksCache(): Promise<void> {
   await getJwksKeySet()
 }
 
-/**
- * Get the JWKS document as JSON (for the JWKS endpoint).
- */
-export async function getJwksDocument(): Promise<{ keys: object[] }> {
-  const signer = await getJwtSigner()
-  const jwk = await signer.getPublicKeyJwk()
+async function getVerificationKeys(): Promise<
+  Array<Record<string, unknown>>
+> {
+  const oidcKeys = await getOidcSigningKeySet()
+  const keys = oidcKeys.publicKeys.map((key) => ({
+    ...key,
+  })) as Array<Record<string, unknown>>
 
-  return {
-    keys: [jwk],
+  // Delegated-agent tokens continue to use the non-exportable application KMS
+  // key. Include that public key in the API verifier without exposing or
+  // coupling it to oidc-provider's private OIDC key set.
+  if (process.env.KMS_SIGNING_KEY_ARN) {
+    const signer = await getJwtSigner()
+    const delegatedKey = await signer.getPublicKeyJwk()
+    if (!keys.some((key) => key.kid === delegatedKey.kid)) {
+      keys.push({ ...delegatedKey })
+    }
   }
+
+  return keys
 }

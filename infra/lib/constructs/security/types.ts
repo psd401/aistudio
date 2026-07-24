@@ -90,16 +90,28 @@ export interface ServiceRoleProps {
 }
 
 /**
+ * IAM resource input accepted by ServiceRoleFactory.
+ *
+ * Literal strings remain convenient for literal names and complete ARNs.
+ * Token-valued references must declare whether they resolve to an ARN or a
+ * name, because CDK cannot infer that distinction from an unresolved string.
+ */
+export type IAMResourceReference =
+  | string
+  | { arn: string; name?: never }
+  | { name: string; arn?: never }
+
+/**
  * Lambda role specific props
  */
 export interface LambdaRoleProps extends ServiceRoleProps {
   functionName: string
   vpcEnabled?: boolean
-  secrets?: string[]
-  s3Buckets?: string[]
-  dynamodbTables?: string[]
-  sqsQueues?: string[]
-  snsTopics?: string[]
+  secrets?: IAMResourceReference[]
+  s3Buckets?: IAMResourceReference[]
+  dynamodbTables?: IAMResourceReference[]
+  sqsQueues?: IAMResourceReference[]
+  snsTopics?: IAMResourceReference[]
 }
 
 /**
@@ -107,12 +119,12 @@ export interface LambdaRoleProps extends ServiceRoleProps {
  */
 export interface ECSTaskRoleProps extends ServiceRoleProps {
   taskName: string
-  secrets?: string[]
-  s3Buckets?: string[]
-  dynamodbTables?: string[]
-  sqsQueues?: string[]
-  snsTopics?: string[]
-  ecrRepositories?: string[]
+  secrets?: IAMResourceReference[]
+  s3Buckets?: IAMResourceReference[]
+  dynamodbTables?: IAMResourceReference[]
+  sqsQueues?: IAMResourceReference[]
+  snsTopics?: IAMResourceReference[]
+  ecrRepositories?: IAMResourceReference[]
 }
 
 /**

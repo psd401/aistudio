@@ -4,6 +4,7 @@
   "private": true,
   "packageManager": "bun@1.2.23",
   "scripts": {
+    "test:oauth-public-flow": "tsx scripts/test/oauth-public-client-flow.smoke.ts",
     "prepare": "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git config core.hooksPath .githooks || true",
     "test:e2e:local": "bash scripts/test/e2e-local.sh",
     "dev": "next dev",
@@ -57,6 +58,7 @@
     "migration:prepare": "tsx scripts/drizzle-helpers/prepare-migration.ts",
     "migration:create": "tsx scripts/drizzle-helpers/create-migration.ts",
     "migration:list": "tsx scripts/drizzle-helpers/list-migrations.ts",
+    "oauth:rotate-signing-keys": "tsx scripts/oauth/rotate-oidc-signing-keys.ts",
     "openapi:generate": "bun scripts/openapi/generate-from-catalog.ts",
     "openapi:check": "bun scripts/openapi/generate-from-catalog.ts --check",
     "capabilities:generate": "bun scripts/capabilities/generate-catalog.ts",

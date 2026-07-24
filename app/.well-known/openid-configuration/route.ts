@@ -26,11 +26,21 @@ export async function GET(): Promise<NextResponse> {
       introspection_endpoint: `${issuer}/api/oauth/introspection`,
       revocation_endpoint: `${issuer}/api/oauth/revocation`,
       response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code", "refresh_token"],
+      grant_types_supported: [
+        "authorization_code",
+        "refresh_token",
+        "client_credentials",
+      ],
       code_challenge_methods_supported: ["S256"],
       subject_types_supported: ["public"],
       id_token_signing_alg_values_supported: ["RS256"],
-      token_endpoint_auth_methods_supported: ["none", "client_secret_post"],
+      token_endpoint_auth_methods_supported: [
+        "none",
+        "client_secret_post",
+        "client_secret_basic",
+      ],
+      access_token_format: "jwt",
+      access_token_signing_alg_values_supported: ["RS256"],
       scopes_supported: ALL_OAUTH_SCOPES,
       claims_supported: ["sub", "email", "name"],
     }

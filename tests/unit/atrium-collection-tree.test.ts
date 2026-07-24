@@ -183,3 +183,66 @@ describe("collectionService.tree visibility filtering", () => {
     expect(ids.has("prv")).toBe(true);
   });
 });
+
+describe("collectionService.discover external picker projection (#1286)", () => {
+  beforeEach(() => {
+    allCollections = [
+      {
+        id: "root",
+        name: "Technology Guides",
+        slug: "technology-guides",
+        parentId: null,
+        defaultVisibilityLevel: "internal",
+        navItemId: null,
+        position: 0,
+      },
+      {
+        id: "child",
+        name: "Classroom",
+        slug: "classroom",
+        parentId: "root",
+        defaultVisibilityLevel: "internal",
+        navItemId: null,
+        position: 0,
+      },
+    ];
+  });
+
+  it("adds stable paths and create selection to the existing visible tree", async () => {
+    const result = await collectionService.discover(staff, {
+      shape: "tree",
+      includeCreateSelection: true,
+    });
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        id: "root",
+        path: ["Technology Guides"],
+        selectableForCreate: true,
+        children: [
+          expect.objectContaining({
+            id: "child",
+            path: ["Technology Guides", "Classroom"],
+            selectableForCreate: true,
+          }),
+        ],
+      }),
+    ]);
+  });
+
+  it("flattens in the tree's stable pre-order and omits create selection for read-only callers", async () => {
+    const result = await collectionService.discover(staff, {
+      shape: "flat",
+      includeCreateSelection: false,
+    });
+
+    expect(result.map((node) => node.id)).toEqual(["root", "child"]);
+    expect(result[1]).toEqual(
+      expect.objectContaining({
+        path: ["Technology Guides", "Classroom"],
+      })
+    );
+    expect(result[0]).not.toHaveProperty("children");
+    expect(result[0]).not.toHaveProperty("selectableForCreate");
+  });
+});

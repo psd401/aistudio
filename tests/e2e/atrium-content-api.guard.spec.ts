@@ -20,6 +20,12 @@ test.describe("Atrium content v1 endpoints — unauthenticated 401 (always-run)"
     expect((await request.get("/api/v1/content")).status()).toBe(401);
   });
 
+  test("GET /api/v1/content/collections -> 401", async ({ request }) => {
+    expect(
+      (await request.get("/api/v1/content/collections?shape=flat")).status()
+    ).toBe(401);
+  });
+
   test("POST /api/v1/content -> 401 (auth before body parse)", async ({ request }) => {
     const res = await request.post("/api/v1/content", {
       data: { kind: "document", title: "probe" },
@@ -44,11 +50,70 @@ test.describe("Atrium content v1 endpoints — unauthenticated 401 (always-run)"
     ).toBe(401);
   });
 
+  test("GET /api/v1/content/[id]/source -> 401", async ({ request }) => {
+    expect(
+      (await request.get(`/api/v1/content/${SOME_ID}/source`)).status()
+    ).toBe(401);
+  });
+
+  test("GET /api/v1/content/[id]/versions/[versionId]/source -> 401", async ({
+    request,
+  }) => {
+    expect(
+      (
+        await request.get(
+          `/api/v1/content/${SOME_ID}/versions/${SOME_ID}/source`
+        )
+      ).status()
+    ).toBe(401);
+  });
+
   test("POST /api/v1/content/[id]/versions -> 401", async ({ request }) => {
     const res = await request.post(`/api/v1/content/${SOME_ID}/versions`, {
       data: { body: "# probe" },
     });
     expect(res.status()).toBe(401);
+  });
+
+  test("authored asset metadata and upload endpoints -> 401", async ({
+    request,
+  }) => {
+    expect(
+      (await request.get(`/api/v1/content/${SOME_ID}/assets`)).status()
+    ).toBe(401);
+    expect(
+      (
+        await request.post(`/api/v1/content/${SOME_ID}/assets`, {
+          data: {
+            filename: "probe.png",
+            contentType: "image/png",
+            byteLength: 1,
+            sha256: "A".repeat(43),
+            purpose: "document_image",
+          },
+        })
+      ).status()
+    ).toBe(401);
+    expect(
+      (
+        await request.post(
+          `/api/v1/content/${SOME_ID}/assets/${SOME_ID}/complete`,
+          { data: { sha256: "A".repeat(43) } }
+        )
+      ).status()
+    ).toBe(401);
+  });
+
+  test("anonymous asset bytes mask an absent asset with 404", async ({
+    request,
+  }) => {
+    expect(
+      (
+        await request.get(
+          `/api/v1/content/assets/${SOME_ID}/bytes`
+        )
+      ).status()
+    ).toBe(404);
   });
 
   test("PATCH /api/v1/content/[id]/visibility -> 401", async ({ request }) => {

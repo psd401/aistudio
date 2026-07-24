@@ -20,10 +20,26 @@ AI Studio acts as an OAuth2/OIDC Provider, allowing external applications to:
 3. Click **Register New Client**
 4. Fill in:
    - **Client Name**: Display name shown during consent
-   - **Redirect URIs**: Where users return after authorization (e.g., `http://localhost:3000/callback`)
-   - **Client Type**: Public (PKCE only, for SPAs/mobile) or Confidential (with client secret, for backends)
+   - **Application Type**: Web, Browser extension, or Native application
+   - **Redirect URIs**: Exact callbacks allowed for that application profile
+   - **Auth Method**: Web apps may be public or confidential; browser extensions and native apps are always public
    - **Allowed Scopes**: Select which permissions the client can request
 5. Save — copy the **Client ID** (and **Client Secret** for confidential clients) immediately
+
+### Redirect URI profiles
+
+| Application type | Registration examples | Requirements |
+|---|---|---|
+| Web | `https://app.example.org/oauth/callback` | Hosted HTTPS only |
+| Browser extension | `https://<extension-id>.chromiumapp.org/atrium` | Exact 32-character Chromium extension id and fixed path |
+| Native — claimed HTTPS | `https://mobile.example.org/oauth/callback` | Non-loopback DNS hostname |
+| Native — private scheme | `com.example.atrium:/oauth/callback` | Reverse-domain scheme and single-slash fixed path |
+| Native — loopback | `http://127.0.0.1/oauth/callback`, `http://[::1]/oauth/callback` | Literal loopback host; an ephemeral runtime port is allowed |
+
+`localhost`, non-loopback HTTP addresses, claimed-HTTPS IP addresses, fragments,
+userinfo, wildcards, and `file:`, `javascript:`, or `data:` callbacks are
+rejected. Native loopback matching ignores only the port; the scheme, literal
+host, path, and query remain exact.
 
 ## OIDC Discovery
 
@@ -35,6 +51,29 @@ https://your-domain.com/.well-known/openid-configuration
 ## Authorization Code Flow with PKCE
 
 All clients must use PKCE (S256). Plain challenge method is disabled.
+
+### Chrome extension launch flow
+
+Register the client as **Browser extension**. It is public
+(`token_endpoint_auth_method: none`) and uses the exact redirect URI returned
+by `chrome.identity.getRedirectURL("atrium")`:
+
+```text
+https://<extension-id>.chromiumapp.org/atrium
+```
+
+Start the authorization page with `chrome.identity.launchWebAuthFlow`, using
+`response_type=code`, `code_challenge_method=S256`, and only registered scopes.
+The Atrium extension profile uses:
+
+```text
+openid profile content:read content:create content:update content:publish_internal
+```
+
+Exchange the returned code from the extension with `client_id`,
+`redirect_uri`, and `code_verifier`; do not send a client secret. Validate the
+OAuth `state` before exchanging the code. The redirect URI must match the
+registered extension id and `/atrium` path exactly.
 
 ### Step 1: Generate PKCE Parameters
 
@@ -58,7 +97,7 @@ const codeChallenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
 GET https://your-domain.com/api/oauth/auth?
   client_id=YOUR_CLIENT_ID
   &response_type=code
-  &redirect_uri=http://localhost:3000/callback
+  &redirect_uri=https://app.example.org/oauth/callback
   &scope=openid profile mcp:search_decisions
   &code_challenge=CODE_CHALLENGE
   &code_challenge_method=S256
@@ -78,7 +117,7 @@ curl -X POST https://your-domain.com/api/oauth/token \
   -d "code=AUTH_CODE" \
   -d "code_verifier=CODE_VERIFIER" \
   -d "client_id=YOUR_CLIENT_ID" \
-  -d "redirect_uri=http://localhost:3000/callback"
+  -d "redirect_uri=https://app.example.org/oauth/callback"
 ```
 
 For confidential clients, also include `-d "client_secret=YOUR_SECRET"`.
@@ -114,7 +153,9 @@ curl -X POST https://your-domain.com/api/oauth/token \
   -d "client_id=YOUR_CLIENT_ID"
 ```
 
-Refresh tokens are valid for 24 hours.
+Refresh tokens are valid for 24 hours. Public clients receive a new refresh
+token on every successful refresh and must atomically replace the old value.
+Reusing an old refresh token is treated as replay and revokes the grant family.
 
 ## Token Lifetimes
 
