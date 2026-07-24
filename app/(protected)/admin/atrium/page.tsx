@@ -1,3 +1,4 @@
+import { adminPageMetadata } from "../_lib/admin-pages"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { PageBranding } from "@/components/ui/page-branding"
 import { listPendingApprovalsAction } from "@/actions/db/atrium/approvals"
@@ -11,6 +12,8 @@ import { AtriumAdminTabs } from "@/components/atrium/admin/atrium-admin-tabs"
  * admin page convention (e.g. /admin/connectors): `requireRole` gate in the
  * server component, initial data fetched here, interactivity in a client child.
  */
+export const metadata = adminPageMetadata("/admin/atrium")
+
 export default async function AtriumAdminPage() {
   await requireRole("administrator")
 

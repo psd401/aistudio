@@ -1,7 +1,10 @@
+import { adminPageMetadata } from "../_lib/admin-pages"
 import { RolesPageClient } from "./_components/roles-page-client"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { getRoles, getCapabilities } from "@/lib/db/drizzle"
 import { PageBranding } from "@/components/ui/page-branding"
+
+export const metadata = adminPageMetadata("/admin/roles")
 
 export default async function RolesPage() {
   await requireRole("administrator");

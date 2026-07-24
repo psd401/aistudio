@@ -1,14 +1,11 @@
-import { Metadata } from 'next'
 import { redirect } from 'next/navigation'
 import { getServerSession } from '@/lib/auth/server-session'
 import { hasRole } from '@/utils/roles'
 import { ModerationDashboard } from './_components/moderation-dashboard'
 import { PageBranding } from "@/components/ui/page-branding"
+import { adminPageMetadata } from "../_lib/admin-pages"
 
-export const metadata: Metadata = {
-  title: 'Prompt Moderation | Admin',
-  description: 'Moderate and manage public prompts'
-}
+export const metadata = adminPageMetadata("/admin/prompts")
 
 export default async function AdminPromptsPage() {
   const session = await getServerSession()

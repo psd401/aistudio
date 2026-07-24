@@ -1,3 +1,4 @@
+import { adminPageMetadata } from "../_lib/admin-pages"
 /**
  * OAuth Clients Admin Page
  * Manage OAuth2 client applications.
@@ -10,6 +11,8 @@ import { listOAuthClients } from "@/actions/oauth/oauth-client.actions"
 import { OAuthClientsPageClient } from "./_components/oauth-clients-page-client"
 import { Skeleton } from "@/components/ui/skeleton"
 import { PageBranding } from "@/components/ui/page-branding"
+
+export const metadata = adminPageMetadata("/admin/oauth-clients")
 
 export default async function OAuthClientsPage() {
   await requireRole("administrator")
