@@ -23,6 +23,7 @@ import {
   OAUTH_APPLICATION_TYPES,
   type OAuthApplicationType,
 } from "@/lib/oauth/redirect-uri-policy"
+import { withPublicClientRequiredScopes } from "@/lib/oauth/oauth-scopes"
 import type { ActionState } from "@/types"
 
 // ============================================
@@ -202,6 +203,10 @@ export async function createOAuthClient(
       ? "none"
       : (validated.tokenEndpointAuthMethod ?? "none")
     const isConfidential = authMethod === "client_secret_post"
+    const allowedScopes =
+      authMethod === "none"
+        ? withPublicClientRequiredScopes(validated.allowedScopes)
+        : [...new Set(validated.allowedScopes)]
 
     let clientSecret: string | undefined
     let clientSecretHash: string | null = null
@@ -221,7 +226,7 @@ export async function createOAuthClient(
             applicationType: validated.applicationType,
             clientSecretHash,
             redirectUris: uriValidation.normalizedUris,
-            allowedScopes: validated.allowedScopes,
+            allowedScopes,
             grantTypes: ["authorization_code", "refresh_token"],
             responseTypes: ["code"],
             tokenEndpointAuthMethod: authMethod,

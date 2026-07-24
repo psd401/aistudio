@@ -40,7 +40,7 @@ This drops the `{env}-NotificationQueueUrl` CloudFormation import. CloudFormatio
 blocks deleting an export while it is still imported, so the frontend stack must land
 **before** the two stacks are destroyed. The migration Lambda drops the three tables
 (`user_notifications`, `execution_results`, `scheduled_executions`) in the same deploy
-via migration `132-decommission-scheduled-executions.sql`.
+via migration `133-decommission-scheduled-executions.sql`.
 
 ```bash
 cd infra

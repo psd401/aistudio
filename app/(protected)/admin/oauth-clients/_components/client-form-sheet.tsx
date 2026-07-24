@@ -20,6 +20,12 @@ import {
 } from "@/components/ui/select"
 import { createOAuthClient } from "@/actions/oauth/oauth-client.actions"
 import { API_SCOPES } from "@/lib/api-keys/scopes"
+import {
+  getScopeLabel,
+  OIDC_SCOPES,
+  PUBLIC_CLIENT_REQUIRED_OIDC_SCOPES,
+  withPublicClientRequiredScopes,
+} from "@/lib/oauth/oauth-scopes"
 import type { OAuthApplicationType } from "@/lib/oauth/redirect-uri-policy"
 
 // ============================================
@@ -31,8 +37,12 @@ interface Props {
 }
 
 // ============================================
-// Available MCP Scopes
+// Available Scopes
 // ============================================
+
+const OIDC_SCOPE_OPTIONS = OIDC_SCOPES.map(
+  (scope) => [scope, getScopeLabel(scope)] as const
+)
 
 const MCP_SCOPES = Object.entries(API_SCOPES).filter(([key]) =>
   key.startsWith("mcp:")
@@ -40,6 +50,10 @@ const MCP_SCOPES = Object.entries(API_SCOPES).filter(([key]) =>
 
 const OTHER_SCOPES = Object.entries(API_SCOPES).filter(
   ([key]) => !key.startsWith("mcp:")
+)
+
+const REQUIRED_PUBLIC_SCOPE_SET = new Set<string>(
+  PUBLIC_CLIENT_REQUIRED_OIDC_SCOPES
 )
 
 // ============================================
@@ -52,7 +66,9 @@ export function ClientFormSheet({ onSuccess }: Props) {
     useState<OAuthApplicationType>("web")
   const [redirectUri, setRedirectUri] = useState("")
   const [authMethod, setAuthMethod] = useState<"none" | "client_secret_post">("none")
-  const [selectedScopes, setSelectedScopes] = useState<string[]>([])
+  const [selectedScopes, setSelectedScopes] = useState<string[]>(() =>
+    withPublicClientRequiredScopes([])
+  )
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [createdSecret, setCreatedSecret] = useState<string | null>(null)
@@ -149,7 +165,12 @@ export function ClientFormSheet({ onSuccess }: Props) {
           onValueChange={(value) => {
             const nextType = value as OAuthApplicationType
             setApplicationType(nextType)
-            if (nextType !== "web") setAuthMethod("none")
+            if (nextType !== "web") {
+              setAuthMethod("none")
+              setSelectedScopes((scopes) =>
+                withPublicClientRequiredScopes(scopes)
+              )
+            }
           }}
         >
           <SelectTrigger id="applicationType">
@@ -198,7 +219,15 @@ export function ClientFormSheet({ onSuccess }: Props) {
         <Select
           value={authMethod}
           disabled={applicationType !== "web"}
-          onValueChange={(v) => setAuthMethod(v as "none" | "client_secret_post")}
+          onValueChange={(v) => {
+            const nextAuthMethod = v as "none" | "client_secret_post"
+            setAuthMethod(nextAuthMethod)
+            if (nextAuthMethod === "none") {
+              setSelectedScopes((scopes) =>
+                withPublicClientRequiredScopes(scopes)
+              )
+            }
+          }}
         >
           <SelectTrigger id="authMethod">
             <SelectValue />
@@ -216,6 +245,34 @@ export function ClientFormSheet({ onSuccess }: Props) {
             is mandatory.
           </p>
         )}
+      </div>
+
+      <div>
+        <Label className="mb-2 block">OIDC Scopes</Label>
+        <div className="space-y-2">
+          {OIDC_SCOPE_OPTIONS.map(([scope, description]) => {
+            const isRequiredPublicScope =
+              authMethod === "none" && REQUIRED_PUBLIC_SCOPE_SET.has(scope)
+
+            return (
+              <label
+                key={scope}
+                className="flex items-center gap-2 text-sm cursor-pointer"
+              >
+                <Checkbox
+                  checked={selectedScopes.includes(scope)}
+                  disabled={isRequiredPublicScope}
+                  onCheckedChange={() => toggleScope(scope)}
+                />
+                <span className="font-mono text-xs">{scope}</span>
+                <span className="text-muted-foreground">
+                  — {description}
+                  {isRequiredPublicScope ? " (required for public clients)" : ""}
+                </span>
+              </label>
+            )
+          })}
+        </div>
       </div>
 
       <div>

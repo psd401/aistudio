@@ -126,6 +126,7 @@
     "129-oauth-production-hardening.sql",
     "130-oauth-application-types.sql",
     "131-admin-hub-nav-cleanup.sql",
-    "132-decommission-scheduled-executions.sql"
+    "132-oauth-public-client-scopes.sql",
+    "133-decommission-scheduled-executions.sql"
   ]
 }

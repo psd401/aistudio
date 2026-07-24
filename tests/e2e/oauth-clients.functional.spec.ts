@@ -22,7 +22,7 @@ test.describe("OAuth client application profiles (#1289)", () => {
       "Requires the authenticated local E2E harness",
     )
 
-    test("registration UI exposes and explains all application types", async ({
+    test("registration UI exposes application types and public OIDC scopes", async ({
       page,
     }) => {
       await authenticateContext(
@@ -55,6 +55,15 @@ test.describe("OAuth client application profiles (#1289)", () => {
         "placeholder",
         /com\.example\.app:/
       )
+      for (const scope of ["openid", "profile", "offline_access"]) {
+        const scopeRow = page.getByText(scope, { exact: true }).locator("..")
+        await expect(scopeRow.getByRole("checkbox")).toBeChecked()
+        await expect(scopeRow.getByRole("checkbox")).toBeDisabled()
+        await expect(scopeRow).toContainText("required for public clients")
+      }
+      await expect(
+        page.getByText("email", { exact: true }).locator("..").getByRole("checkbox")
+      ).toBeEnabled()
     })
   })
 })
