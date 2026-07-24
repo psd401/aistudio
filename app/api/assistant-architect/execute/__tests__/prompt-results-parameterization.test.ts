@@ -1,17 +1,18 @@
 /**
- * REV-DB-023 / REV-SEC-105 / REV-COR-210: the four `prompt_results` inserts in the
- * interactive and scheduled execute routes previously embedded user-influenced
- * JSON (`input_data`, which contains `processedContent` after user-input variable
- * substitution) and the `execution_status` enum into SQL via `sql.raw()` with
- * hand-rolled single-quote-only escaping — a fragile, GUC-dependent,
- * injection-adjacent pattern. The fix binds every value as a parameter
- * (`${json}::jsonb`, `${status}::execution_status`), matching the sibling
- * `tool_executions` inserts.
+ * REV-DB-023 / REV-SEC-105 / REV-COR-210: the `prompt_results` inserts in the
+ * interactive execute route previously embedded user-influenced JSON (`input_data`,
+ * which contains `processedContent` after user-input variable substitution) and the
+ * `execution_status` enum into SQL via `sql.raw()` with hand-rolled
+ * single-quote-only escaping — a fragile, GUC-dependent, injection-adjacent pattern.
+ * The fix binds every value as a parameter (`${json}::jsonb`,
+ * `${status}::execution_status`), matching the sibling `tool_executions` inserts.
+ *
+ * (The scheduled execute route that shared this pattern was removed in #1322.)
  *
  * These tests need no live database:
  *  1. Behavioral proof — the fixed binding pattern parameterizes adversarial input
  *     (the payload becomes a bound `$N` parameter; the raw SQL never contains it).
- *  2. Regression guard — neither route file may reintroduce a real `sql.raw(...)`
+ *  2. Regression guard — the route file may not reintroduce a real `sql.raw(...)`
  *     call for these inserts (the Done-when "grep returns zero matches").
  */
 
@@ -24,7 +25,6 @@ const dialect = new PgDialect()
 
 const ROUTE_FILES = {
   interactive: join(__dirname, "..", "route.ts"),
-  scheduled: join(__dirname, "..", "scheduled", "route.ts"),
 }
 
 describe("prompt_results insert parameterization (REV-DB-023 / REV-SEC-105 / REV-COR-210)", () => {
