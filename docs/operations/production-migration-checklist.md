@@ -30,7 +30,6 @@ cd infra
 # Destroy in reverse dependency order
 bunx cdk destroy AIStudio-FrontendStack-ECS-Prod --force
 bunx cdk destroy AIStudio-DocumentProcessingStack-Prod --force
-bunx cdk destroy AIStudio-SchedulerStack-Prod --force
 bunx cdk destroy AIStudio-DatabaseStack-Prod --force
 ```
 
@@ -77,11 +76,6 @@ aws rds-data execute-statement \
 ### Phase 3: Deploy Application Stacks (20 minutes)
 
 ```bash
-# Deploy Scheduler Stack
-bunx cdk deploy AIStudio-SchedulerStack-Prod \
-  --context snapshotIdentifier=<YOUR-SNAPSHOT-ID> \
-  --require-approval never
-
 # Deploy Document Processing Stack
 bunx cdk deploy AIStudio-DocumentProcessingStack-Prod \
   --context snapshotIdentifier=<YOUR-SNAPSHOT-ID> \
@@ -125,7 +119,6 @@ aws rds-data execute-statement \
 - [ ] Test login with Cognito
 - [ ] Create a test conversation
 - [ ] Upload a test document
-- [ ] Create a test scheduled execution
 - [ ] Verify all features work as expected
 
 ### Phase 5: Monitor (First 24 hours)
@@ -186,7 +179,6 @@ If critical issues occur within first hour:
 **Key ARNs (after migration):**
 - Database: `/aistudio/prod/db-cluster-arn` (SSM)
 - Secret: `/aistudio/prod/db-secret-arn` (SSM)
-- Internal API Secret: `/aistudio/prod/internal-api-secret-arn` (SSM)
 
 **Support Contacts:**
 - Primary: Kris Hagel (CIO)
@@ -195,7 +187,7 @@ If critical issues occur within first hour:
 ## Success Criteria
 
 Migration is successful when:
-- [ ] All 4 stacks deployed without errors
+- [ ] All 3 stacks deployed without errors
 - [ ] ECS service shows 2+ running tasks (prod uses multi-AZ)
 - [ ] Database shows "available" status
 - [ ] Application accessible via HTTPS

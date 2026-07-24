@@ -27,8 +27,6 @@ This document tracks the progress of migrating from AWS RDS Data API (`executeSQ
 
 ### Drizzle Modules Created
 - ✅ **lib/db/drizzle/ideas.ts** - Ideas, votes, and notes operations
-- ✅ **lib/db/drizzle/notifications.ts** - User notification operations
-- ✅ **lib/db/drizzle/execution-results.ts** - Tool execution results
 - ✅ **lib/db/drizzle/settings.ts** - Application settings operations
 
 ### API Routes
@@ -51,21 +49,20 @@ All remaining executeSQL usage has been eliminated! 🎉
 ### API Routes - ALL MIGRATED
 1. ✅ **app/api/nexus/chat/route.ts** - Main chat endpoint (7 occurrences)
 2. ✅ **app/api/assistant-architect/execute/route.ts** - Tool execution (8 occurrences)
-3. ✅ **app/api/assistant-architect/execute/scheduled/route.ts** - Scheduled execution (14 occurrences)
-4. ✅ **app/api/compare/route.ts** - Model comparison (5 occurrences)
+3. ✅ **app/api/compare/route.ts** - Model comparison (5 occurrences)
 
 ### Library Functions - ALL MIGRATED
-5. ✅ **lib/streaming/nexus/db-helpers.ts** - Nexus DB wrapper (wrapper for 4 dependent files)
-6. ✅ **lib/prompt-library/access-control.ts** - Prompt permissions (5 occurrences)
-7. ✅ **lib/repositories/search-service.ts** - Vector/hybrid search (4 occurrences)
-8. ✅ **lib/assistant-export-import.ts** - Tool import/export (4 occurrences)
+4. ✅ **lib/streaming/nexus/db-helpers.ts** - Nexus DB wrapper (wrapper for 4 dependent files)
+5. ✅ **lib/prompt-library/access-control.ts** - Prompt permissions (5 occurrences)
+6. ✅ **lib/repositories/search-service.ts** - Vector/hybrid search (4 occurrences)
+7. ✅ **lib/assistant-export-import.ts** - Tool import/export (4 occurrences)
 
 ### Query Helpers - ALL MIGRATED
-9. ✅ **lib/db/queries/documents.ts** - Document queries (10 occurrences)
-10. ✅ **lib/db/queries/assistant-architect.ts** - Assistant queries (8 occurrences)
-11. ✅ **lib/assistant-architect/knowledge-retrieval.ts** - Knowledge retrieval (1 occurrence)
+8. ✅ **lib/db/queries/documents.ts** - Document queries (10 occurrences)
+9. ✅ **lib/db/queries/assistant-architect.ts** - Assistant queries (8 occurrences)
+10. ✅ **lib/assistant-architect/knowledge-retrieval.ts** - Knowledge retrieval (1 occurrence)
 
-**Total: 11 files, 66+ executeSQL calls eliminated**
+**Total: 10 files, 52+ executeSQL calls eliminated**
 
 ### ✅ Legacy Files Removed
 
@@ -122,9 +119,7 @@ The following legacy files have been permanently deleted:
 
 ### ✅ Completed Cleanup Steps
 
-6. ✅ **Update test mocks** (4 test files updated):
-   - `tests/api/execution-results/[id]/download.test.ts` (skipped, needs Drizzle rewrite)
-   - `tests/integration/execution-results-download.test.ts` (skipped, needs Drizzle rewrite)
+6. ✅ **Update test mocks** (2 test files updated):
    - `tests/unit/actions/assistant-architect-delete.test.ts` (skipped, needs Drizzle rewrite)
    - `tests/unit/actions/user-creation-upsert.test.ts` (skipped, needs Drizzle rewrite)
    - All test files now mock `executeQuery` from drizzle-client
@@ -140,9 +135,7 @@ The following legacy files have been permanently deleted:
    - ✅ Zero imports from legacy files in production code
 
 ### 🚧 Remaining Work
-9. **Rewrite skipped tests** (4 test files need complete rewrites for Drizzle):
-   - `tests/api/execution-results/[id]/download.test.ts`
-   - `tests/integration/execution-results-download.test.ts`
+9. **Rewrite skipped tests** (2 test files need complete rewrites for Drizzle):
    - `tests/unit/actions/assistant-architect-delete.test.ts`
    - `tests/unit/actions/user-creation-upsert.test.ts`
    - Match new Drizzle-based implementation with callback-style executeQuery

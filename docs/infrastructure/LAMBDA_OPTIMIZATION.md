@@ -29,9 +29,7 @@ AI Studio uses AWS CDK for infrastructure as code, organized into modular stacks
 1. **Database Stack** - Aurora Serverless v2 PostgreSQL
 2. **Frontend Stack** - AWS Amplify SSR hosting
 3. **Processing Stack** - Document processing with SQS + Lambda
-4. **Scheduler Stack** - EventBridge scheduled tasks
-5. **Storage Stack** - S3 buckets for files and repositories
-6. **Email Stack** - SES for notifications
+4. **Storage Stack** - S3 buckets for files and repositories
 
 ### Shared Infrastructure
 

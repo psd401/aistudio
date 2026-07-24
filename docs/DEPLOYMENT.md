@@ -186,8 +186,7 @@ Stacks have dependencies and should be deployed in this order:
 5. **DocumentProcessingStack** - Creates document processing pipeline
 6. **GuardrailsStack** - Creates Bedrock Guardrails, DynamoDB config table, and SNS alerts
 7. **FrontendStack-ECS** - Creates ECS Fargate service with ALB
-8. **SchedulerStack** - Creates scheduled task execution (depends on Frontend)
-9. **MonitoringStack** - Creates CloudWatch dashboards and alarms
+8. **MonitoringStack** - Creates CloudWatch dashboards and alarms
 
 ### Deploy All Development Stacks
 
@@ -202,7 +201,6 @@ cdk deploy \
   AIStudio-DocumentProcessingStack-Dev \
   AIStudio-GuardrailsStack-Dev \
   AIStudio-FrontendStack-ECS-Dev \
-  AIStudio-SchedulerStack-Dev \
   AIStudio-MonitoringStack-Dev \
   --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_DEV_CLIENT_ID \
   --context baseDomain=aistudio.psd401.ai
@@ -221,7 +219,6 @@ cdk deploy \
   AIStudio-DocumentProcessingStack-Prod \
   AIStudio-GuardrailsStack-Prod \
   AIStudio-FrontendStack-ECS-Prod \
-  AIStudio-SchedulerStack-Prod \
   AIStudio-MonitoringStack-Prod \
   --parameters AIStudio-AuthStack-Prod:GoogleClientId=YOUR_PROD_CLIENT_ID \
   --context baseDomain=aistudio.psd401.ai
