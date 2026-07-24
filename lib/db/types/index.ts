@@ -81,11 +81,8 @@ import {
   ideas,
   ideaVotes,
   ideaNotes,
-  // Jobs & Scheduling
+  // Jobs
   jobs,
-  scheduledExecutions,
-  executionResults,
-  userNotifications,
   // Navigation
   navigationItems,
   navigationItemRoles,
@@ -119,7 +116,6 @@ export type {
   NexusMcpSchema,
   NexusMcpAuditData,
   NexusTemplateVariable,
-  ScheduleConfig,
   GraphNodeMetadata,
   GraphEdgeMetadata,
   UserProfile,
@@ -370,24 +366,14 @@ export type InsertIdeaVote = InferInsertModel<typeof ideaVotes>;
 export type InsertIdeaNote = InferInsertModel<typeof ideaNotes>;
 
 // ============================================
-// Jobs & Scheduling - Select Types
+// Jobs - Select Types
 // ============================================
 export type SelectJob = InferSelectModel<typeof jobs>;
-export type SelectScheduledExecution = InferSelectModel<
-  typeof scheduledExecutions
->;
-export type SelectExecutionResult = InferSelectModel<typeof executionResults>;
-export type SelectUserNotification = InferSelectModel<typeof userNotifications>;
 
 // ============================================
-// Jobs & Scheduling - Insert Types
+// Jobs - Insert Types
 // ============================================
 export type InsertJob = InferInsertModel<typeof jobs>;
-export type InsertScheduledExecution = InferInsertModel<
-  typeof scheduledExecutions
->;
-export type InsertExecutionResult = InferInsertModel<typeof executionResults>;
-export type InsertUserNotification = InferInsertModel<typeof userNotifications>;
 
 // ============================================
 // Navigation - Select Types

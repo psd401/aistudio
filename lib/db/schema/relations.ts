@@ -69,11 +69,8 @@ import { promptTags } from "./tables/prompt-tags";
 import { promptLibraryTags } from "./tables/prompt-library-tags";
 import { promptUsageEvents } from "./tables/prompt-usage-events";
 
-// Scheduling
+// Jobs
 import { jobs } from "./tables/jobs";
-import { scheduledExecutions } from "./tables/scheduled-executions";
-import { executionResults } from "./tables/execution-results";
-import { userNotifications } from "./tables/user-notifications";
 
 // Ideas
 import { ideas } from "./tables/ideas";
@@ -121,8 +118,6 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   repositoryAccess: many(repositoryAccess),
   promptLibrary: many(promptLibrary),
   promptUsageEvents: many(promptUsageEvents),
-  scheduledExecutions: many(scheduledExecutions),
-  userNotifications: many(userNotifications),
   jobs: many(jobs),
   aiStreamingJobs: many(aiStreamingJobs),
   ideas: many(ideas),
@@ -196,7 +191,6 @@ export const assistantArchitectsRelations = relations(
     toolInputFields: many(toolInputFields),
     toolExecutions: many(toolExecutions),
     toolEdits: many(toolEdits),
-    scheduledExecutions: many(scheduledExecutions),
   })
 );
 
@@ -583,47 +577,6 @@ export const promptUsageEventsRelations = relations(promptUsageEvents, ({ one })
   conversation: one(nexusConversations, {
     fields: [promptUsageEvents.conversationId],
     references: [nexusConversations.id],
-  }),
-}));
-
-// ============================================
-// Scheduling Relations
-// ============================================
-
-export const scheduledExecutionsRelations = relations(
-  scheduledExecutions,
-  ({ one, many }) => ({
-    user: one(users, {
-      fields: [scheduledExecutions.userId],
-      references: [users.id],
-    }),
-    assistantArchitect: one(assistantArchitects, {
-      fields: [scheduledExecutions.assistantArchitectId],
-      references: [assistantArchitects.id],
-    }),
-    results: many(executionResults),
-  })
-);
-
-export const executionResultsRelations = relations(
-  executionResults,
-  ({ one, many }) => ({
-    scheduledExecution: one(scheduledExecutions, {
-      fields: [executionResults.scheduledExecutionId],
-      references: [scheduledExecutions.id],
-    }),
-    notifications: many(userNotifications),
-  })
-);
-
-export const userNotificationsRelations = relations(userNotifications, ({ one }) => ({
-  user: one(users, {
-    fields: [userNotifications.userId],
-    references: [users.id],
-  }),
-  executionResult: one(executionResults, {
-    fields: [userNotifications.executionResultId],
-    references: [executionResults.id],
   }),
 }));
 

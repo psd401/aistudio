@@ -7,7 +7,6 @@ Complete database schema for AI Studio with 40+ tables organized by domain.
 ```mermaid
 erDiagram
     users ||--o{ user_roles : has
-    users ||--o{ user_notifications : receives
     users ||--o{ nexus_user_preferences : has
     users {
         int id PK
@@ -214,7 +213,6 @@ erDiagram
     assistant_architects ||--o{ tool_executions : executed
     assistant_architects ||--o{ tool_input_fields : "has inputs"
     assistant_architects ||--o{ tool_edits : "edited via"
-    assistant_architects ||--o{ scheduled_executions : scheduled
 
     assistant_architects {
         int id PK
@@ -294,28 +292,6 @@ erDiagram
         int user_id FK
         jsonb changes
         timestamp created_at
-    }
-
-    scheduled_executions ||--o{ execution_results : produces
-    scheduled_executions {
-        int id PK
-        int user_id FK
-        int assistant_architect_id FK
-        text name
-        jsonb schedule_config
-        jsonb input_data
-        boolean active
-        timestamp created_at
-    }
-
-    execution_results {
-        int id PK
-        int scheduled_execution_id FK
-        jsonb result_data
-        text status
-        text error_message
-        int execution_duration_ms
-        timestamp executed_at
     }
 ```
 
@@ -672,7 +648,7 @@ erDiagram
 |--------|--------|--------------|
 | **Users & Auth** | 5 | RBAC, tool permissions |
 | **Nexus Chat** | 11 | Conversations, folders, caching, metrics |
-| **Assistant Architect** | 9 | Multi-prompt chains, executions, scheduling |
+| **Assistant Architect** | 7 | Multi-prompt chains, executions |
 | **Knowledge** | 7 | Repositories, documents, embeddings (pgvector) |
 | **MCP Integration** | 4 | Server registry, capabilities, audit logs |
 | **Prompt Library** | 5 | Templates, tagging, usage tracking |
@@ -681,7 +657,7 @@ erDiagram
 | **Navigation** | 2 | Dynamic menu, role-based display |
 | **Ideas** | 3 | Voting system, notes |
 | **Audit/Migration** | 3 | Schema versioning, model replacements |
-| **Total** | **54 tables** | **PostgreSQL 15 with pgvector extension** |
+| **Total** | **52 tables** | **PostgreSQL 15 with pgvector extension** |
 
 ## Key Relationships
 
@@ -717,9 +693,6 @@ CREATE INDEX idx_repository_item_chunks_embedding ON repository_item_chunks
 -- Execution tracking
 CREATE INDEX idx_tool_executions_user_id ON tool_executions(user_id);
 CREATE INDEX idx_tool_executions_status ON tool_executions(status);
-
--- Scheduled jobs
-CREATE INDEX idx_scheduled_executions_active ON scheduled_executions(active);
 ```
 
 ## Database Features
@@ -763,7 +736,7 @@ CREATE INDEX idx_scheduled_executions_active ON scheduled_executions(active);
 ---
 
 **Last Updated**: November 2025
-**Total Tables**: 54
+**Total Tables**: 52
 **Database Size**: ~500 MB (dev), ~5 GB (prod projected)
 **PostgreSQL Version**: 15.4
 **Extensions**: pgvector, uuid-ossp, pg_trgm

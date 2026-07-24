@@ -62,7 +62,6 @@ See `/docs/diagrams/01-cdk-stack-dependencies.md` for complete dependency graph.
     ├── file-processor/
     ├── textract-processor/
     ├── embedding-generator/
-    ├── schedule-executor/
     └── document-processor-v2/
 ```
 

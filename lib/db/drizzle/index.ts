@@ -159,28 +159,6 @@ export {
 } from "./tool-catalog";
 
 // ============================================
-// Notification Operations
-// ============================================
-
-export {
-  getUserNotifications,
-  markNotificationAsRead,
-  markAllNotificationsAsRead,
-  getNotificationById,
-} from "./notifications";
-
-// ============================================
-// Execution Results Operations
-// ============================================
-
-export {
-  getRecentExecutionResults,
-  getExecutionResultById,
-  getExecutionResultForDownload,
-  deleteExecutionResult,
-} from "./execution-results";
-
-// ============================================
 // Ideas Operations
 // ============================================
 
@@ -564,33 +542,6 @@ export {
   estimateTextractCost,
   getTextractUsageWithCost,
 } from "./textract";
-
-// ============================================
-// Schedule Operations
-// ============================================
-
-export {
-  // Types
-  type ScheduleConfig,
-  type CreateScheduleData,
-  type UpdateScheduleData,
-  type ScheduleWithExecution,
-  type CreateExecutionResultData,
-  // Schedule query operations
-  getScheduleById,
-  getScheduleByIdForUser,
-  getSchedulesByUserId,
-  getUserIdByCognitoSub as getScheduleUserIdByCognitoSub,
-  checkAssistantArchitectOwnership,
-  // Schedule CRUD operations
-  createSchedule,
-  updateSchedule,
-  deleteSchedule,
-  // Execution result operations
-  createExecutionResult,
-  getExecutionHistory,
-  getExecutionHistoryCount,
-} from "./schedules";
 
 // ============================================
 // Prompt Library Operations

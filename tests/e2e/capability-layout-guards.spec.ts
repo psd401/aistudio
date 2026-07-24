@@ -33,7 +33,6 @@ function isAuthOrHome(href: string): boolean {
 const GUARDED_LAYOUTS: ReadonlyArray<{ path: string; capability: string }> = [
   { path: '/repositories', capability: 'knowledge-repositories' },
   { path: '/prompt-library', capability: 'knowledge-repositories' },
-  { path: '/schedules', capability: 'assistant-architect' },
   { path: '/compare', capability: 'model-compare' },
   { path: '/nexus/decision-capture', capability: 'decision-capture' },
 ]

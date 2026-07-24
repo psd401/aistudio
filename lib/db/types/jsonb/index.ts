@@ -232,21 +232,6 @@ export interface NexusTemplateVariable {
 }
 
 // ============================================
-// Schedule Management JSONB Types
-// ============================================
-
-/**
- * Configuration for scheduled executions
- */
-export interface ScheduleConfig {
-  frequency: "daily" | "weekly" | "monthly" | "custom";
-  time?: string;
-  timezone?: string;
-  cron?: string;
-  [key: string]: unknown;
-}
-
-// ============================================
 // User Profile JSONB Types
 // ============================================
 

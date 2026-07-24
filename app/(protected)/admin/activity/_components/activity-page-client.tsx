@@ -18,23 +18,19 @@ import { ActivityStatsCards, ActivityStatsCardsSkeleton } from "./activity-stats
 import { ActivityFiltersComponent } from "./activity-filters"
 import { ActivityPagination } from "./activity-pagination"
 import { NexusActivityTable } from "./nexus-activity-table"
-import { ExecutionActivityTable } from "./execution-activity-table"
 import { AssistantConversationTable } from "./assistant-conversation-table"
 import { ComparisonActivityTable } from "./comparison-activity-table"
 import { NexusDetailSheet } from "./nexus-detail-sheet"
-import { ExecutionDetailSheet } from "./execution-detail-sheet"
 import { ComparisonDetailSheet } from "./comparison-detail-sheet"
 
 import {
   getActivityStats,
   getNexusActivity,
-  getExecutionActivity,
   getAssistantConversationActivity,
   getComparisonActivity,
   type ActivityStats,
   type ActivityFilters,
   type NexusActivityItem,
-  type ExecutionActivityItem,
   type AssistantConversationItem,
   type ComparisonActivityItem,
   type StatsDateRange,
@@ -69,10 +65,6 @@ export function ActivityPageClient() {
   const [nexusTotal, setNexusTotal] = useState(0)
   const [nexusLoading, setNexusLoading] = useState(false)
 
-  const [executionData, setExecutionData] = useState<ExecutionActivityItem[]>([])
-  const [executionTotal, setExecutionTotal] = useState(0)
-  const [executionLoading, setExecutionLoading] = useState(false)
-
   const [assistantConvData, setAssistantConvData] = useState<AssistantConversationItem[]>([])
   const [assistantConvTotal, setAssistantConvTotal] = useState(0)
   const [assistantConvLoading, setAssistantConvLoading] = useState(false)
@@ -84,9 +76,6 @@ export function ActivityPageClient() {
   // Detail sheet state
   const [selectedNexus, setSelectedNexus] = useState<NexusActivityItem | null>(null)
   const [nexusDetailOpen, setNexusDetailOpen] = useState(false)
-
-  const [selectedExecution, setSelectedExecution] = useState<ExecutionActivityItem | null>(null)
-  const [executionDetailOpen, setExecutionDetailOpen] = useState(false)
 
   const [selectedComparison, setSelectedComparison] = useState<ComparisonActivityItem | null>(null)
   const [comparisonDetailOpen, setComparisonDetailOpen] = useState(false)
@@ -126,39 +115,21 @@ export function ActivityPageClient() {
     setNexusLoading(false)
   }, [filters, page, pageSize, toast])
 
-  // Load Execution data (scheduled + assistant conversations in parallel)
-  const loadExecutionData = useCallback(async () => {
-    setExecutionLoading(true)
+  // Load Assistant Architect conversation data
+  const loadAssistantConvData = useCallback(async () => {
     setAssistantConvLoading(true)
+    const result = await getAssistantConversationActivity({ ...filters, page, pageSize })
 
-    const [execResult, convResult] = await Promise.all([
-      getExecutionActivity({ ...filters, page, pageSize }),
-      getAssistantConversationActivity({ ...filters, page, pageSize }),
-    ])
-
-    if (execResult.isSuccess && execResult.data) {
-      setExecutionData(execResult.data.items)
-      setExecutionTotal(execResult.data.total)
-    } else {
-      toast({
-        variant: "destructive",
-        title: "Error loading execution activity",
-        description: execResult.message,
-      })
-    }
-
-    if (convResult.isSuccess && convResult.data) {
-      setAssistantConvData(convResult.data.items)
-      setAssistantConvTotal(convResult.data.total)
+    if (result.isSuccess && result.data) {
+      setAssistantConvData(result.data.items)
+      setAssistantConvTotal(result.data.total)
     } else {
       toast({
         variant: "destructive",
         title: "Error loading assistant conversations",
-        description: convResult.message,
+        description: result.message,
       })
     }
-
-    setExecutionLoading(false)
     setAssistantConvLoading(false)
   }, [filters, page, pageSize, toast])
 
@@ -190,7 +161,7 @@ export function ActivityPageClient() {
     if (activeTab === "nexus") {
       loadNexusData()
     } else if (activeTab === "executions") {
-      loadExecutionData()
+      loadAssistantConvData()
     } else if (activeTab === "comparisons") {
       loadComparisonData()
     }
@@ -208,7 +179,7 @@ export function ActivityPageClient() {
     if (activeTab === "nexus") {
       loadNexusData()
     } else if (activeTab === "executions") {
-      loadExecutionData()
+      loadAssistantConvData()
     } else if (activeTab === "comparisons") {
       loadComparisonData()
     }
@@ -222,10 +193,10 @@ export function ActivityPageClient() {
       activeTab === "nexus"
         ? loadNexusData()
         : activeTab === "executions"
-          ? loadExecutionData()
+          ? loadAssistantConvData()
           : loadComparisonData(),
     ])
-  }, [activeTab, loadStats, loadNexusData, loadExecutionData, loadComparisonData])
+  }, [activeTab, loadStats, loadNexusData, loadAssistantConvData, loadComparisonData])
 
   // Handle tab change
   const handleTabChange = useCallback((value: string) => {
@@ -248,11 +219,6 @@ export function ActivityPageClient() {
   const handleViewNexus = useCallback((item: NexusActivityItem) => {
     setSelectedNexus(item)
     setNexusDetailOpen(true)
-  }, [])
-
-  const handleViewExecution = useCallback((item: ExecutionActivityItem) => {
-    setSelectedExecution(item)
-    setExecutionDetailOpen(true)
   }, [])
 
   // View assistant conversation detail via the Nexus detail sheet (same underlying conversation)
@@ -285,7 +251,7 @@ export function ActivityPageClient() {
     activeTab === "nexus"
       ? nexusLoading
       : activeTab === "executions"
-        ? executionLoading
+        ? assistantConvLoading
         : comparisonLoading
 
   // Get current total
@@ -293,7 +259,7 @@ export function ActivityPageClient() {
     activeTab === "nexus"
       ? nexusTotal
       : activeTab === "executions"
-        ? executionTotal
+        ? assistantConvTotal
         : comparisonTotal
 
   return (
@@ -366,29 +332,13 @@ export function ActivityPageClient() {
           />
         </TabsContent>
 
-        {/* Executions Tab */}
-        <TabsContent value="executions" className="mt-4 space-y-6">
-          <div>
-            <h3 className="text-sm font-medium text-muted-foreground mb-3">Scheduled Executions</h3>
-            <ExecutionActivityTable
-              data={executionData}
-              loading={executionLoading}
-              onViewDetail={handleViewExecution}
-            />
-          </div>
-          <div>
-            <h3 className="text-sm font-medium text-muted-foreground mb-3">
-              Manual Assistant Conversations
-              {assistantConvTotal > 0 && (
-                <span className="ml-2 text-xs">({assistantConvTotal})</span>
-              )}
-            </h3>
-            <AssistantConversationTable
-              data={assistantConvData}
-              loading={assistantConvLoading}
-              onViewDetail={handleViewAssistantConv}
-            />
-          </div>
+        {/* Assistant Architect Tab */}
+        <TabsContent value="executions" className="mt-4">
+          <AssistantConversationTable
+            data={assistantConvData}
+            loading={assistantConvLoading}
+            onViewDetail={handleViewAssistantConv}
+          />
         </TabsContent>
 
         {/* Comparisons Tab */}
@@ -418,12 +368,6 @@ export function ActivityPageClient() {
         open={nexusDetailOpen}
         onOpenChange={setNexusDetailOpen}
         conversation={selectedNexus}
-      />
-
-      <ExecutionDetailSheet
-        open={executionDetailOpen}
-        onOpenChange={setExecutionDetailOpen}
-        execution={selectedExecution}
       />
 
       <ComparisonDetailSheet

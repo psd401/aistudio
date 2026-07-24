@@ -122,10 +122,6 @@ export interface EcsServiceConstructProps {
    */
   authSecretArn: string;
   /**
-   * Internal API secret ARN from Secrets Manager (for scheduled execution authentication)
-   */
-  internalApiSecretArn: string;
-  /**
    * Atrium collab token signing secret ARN from Secrets Manager (#1051).
    * Dedicated key for collab session tokens that ride in the websocket URL —
    * kept separate from AUTH_SECRET so a session-key leak can't forge collab tokens.
@@ -304,7 +300,6 @@ export class EcsServiceConstruct extends Construct {
         `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:aistudio/${environment}/*`,
         // Explicit permissions for both secrets
         props.authSecretArn,
-        props.internalApiSecretArn,
         props.collabJwtSecretArn,
         props.guardrailHashSecretArn,
         props.oidcCookieSecretArn,
@@ -343,7 +338,6 @@ export class EcsServiceConstruct extends Construct {
                 `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:aistudio/${environment}/*`,
                 props.rdsSecretArn, // Include actual database secret ARN
                 props.authSecretArn, // Include auth secret
-                props.internalApiSecretArn, // Include internal API secret
                 props.collabJwtSecretArn, // Include Atrium collab token signing secret (#1051)
                 props.guardrailHashSecretArn, // Include guardrail hash secret (#727)
                 props.oidcSigningJwksSecretArn, // Shared OIDC-only JWK set (#1285)
@@ -475,7 +469,6 @@ export class EcsServiceConstruct extends Construct {
               effect: iam.Effect.ALLOW,
               actions: ['lambda:InvokeFunction'],
               resources: [
-                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:aistudio-${environment}-schedule-executor`,
                 // Issue #925: skill-builder scans/promotes published skill drafts
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
                 // #1203: admin "Sync now" async-invokes the hourly group-sync Lambda
@@ -822,8 +815,6 @@ export class EcsServiceConstruct extends Construct {
         // Queue URLs from Document Processing Stack exports
         PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-ProcessingQueueUrl`),
         HIGH_MEMORY_QUEUE_URL: cdk.Fn.importValue(`${environment}-HighMemoryQueueUrl`),
-        // Notification Queue URL from Email Notification Stack
-        NOTIFICATION_QUEUE_URL: cdk.Fn.importValue(`${environment}-NotificationQueueUrl`),
         // Table names from stack exports
         DOCUMENT_JOBS_TABLE: cdk.Fn.importValue(`${environment}-DocumentJobsTableName`),
         JOB_STATUS_TABLE_NAME: cdk.Fn.importValue(`${environment}-JobStatusTableName`),
@@ -870,11 +861,6 @@ export class EcsServiceConstruct extends Construct {
         AUTH_SECRET: ecs.Secret.fromSecretsManager(
           secretsmanager.Secret.fromSecretCompleteArn(this, 'AuthSecret', props.authSecretArn),
           'AUTH_SECRET'
-        ),
-        // NEW: Internal API secret for scheduled execution authentication
-        INTERNAL_API_SECRET: ecs.Secret.fromSecretsManager(
-          secretsmanager.Secret.fromSecretCompleteArn(this, 'InternalApiSecret', props.internalApiSecretArn),
-          'INTERNAL_API_SECRET'
         ),
         // Atrium collab token signing secret (#1051). Dedicated key so collab
         // tokens (which ride in the websocket URL and land in ALB/proxy logs)

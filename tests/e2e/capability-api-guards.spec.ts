@@ -24,16 +24,6 @@ import {
  */
 
 test.describe('Capability API guards — unauthenticated 401 (always-run)', () => {
-  test('GET /api/schedules -> 401', async ({ request }) => {
-    const res = await request.get('/api/schedules')
-    expect(res.status()).toBe(401)
-  })
-
-  test('POST /api/schedules -> 401 (session checked before body parse)', async ({ request }) => {
-    const res = await request.post('/api/schedules', { data: {} })
-    expect(res.status()).toBe(401)
-  })
-
   test('GET /api/assistant-architects -> 401', async ({ request }) => {
     const res = await request.get('/api/assistant-architects')
     expect(res.status()).toBe(401)
@@ -64,17 +54,6 @@ test.describe('Capability API guards — authenticated 403 (no-capability user)'
     process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires authenticated session — set PLAYWRIGHT_AUTH_ENABLED=true and run against the host dev server (see docs/guides/e2e-authenticated-testing.md)'
   )
-
-  test('GET /api/schedules -> 403 (assistant-architect denied)', async ({ browser }) => {
-    const context = await browser.newContext()
-    await authenticateContext(context, SEEDED_NO_CAPABILITY_EMAIL, SEEDED_NO_CAPABILITY_SUB)
-    try {
-      const res = await context.request.get('/api/schedules')
-      expect(res.status()).toBe(403)
-    } finally {
-      await context.close()
-    }
-  })
 
   test('GET /api/assistant-architects -> 403 (assistant-architect denied)', async ({ browser }) => {
     const context = await browser.newContext()

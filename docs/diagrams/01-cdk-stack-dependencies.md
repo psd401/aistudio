@@ -15,7 +15,6 @@ graph TB
     subgraph "Processing Layer"
         PROC[ProcessingStack]
         DOCPROC[DocumentProcessingStack]
-        EMAIL[EmailNotificationStack]
     end
 
     subgraph "Frontend Layer"
@@ -24,13 +23,11 @@ graph TB
 
     subgraph "Monitoring & Optimization"
         MON[MonitoringStack]
-        SCHED[SchedulerStack]
     end
 
     %% Dependencies
     DB --> PROC
     DB --> FE
-    DB --> SCHED
 
     STORAGE --> PROC
     STORAGE --> DOCPROC
@@ -38,14 +35,9 @@ graph TB
 
     AUTH --> FE
 
-    PROC --> SCHED
-    DOCPROC --> SCHED
-
     FE --> MON
     PROC --> MON
     DOCPROC --> MON
-
-    EMAIL -.optional.-> SCHED
 
     classDef foundation fill:#e1f5ff,stroke:#0288d1,stroke-width:2px
     classDef processing fill:#fff9c4,stroke:#f57f17,stroke-width:2px
@@ -53,9 +45,9 @@ graph TB
     classDef monitoring fill:#f8bbd0,stroke:#c2185b,stroke-width:2px
 
     class DB,AUTH,STORAGE foundation
-    class PROC,DOCPROC,EMAIL processing
+    class PROC,DOCPROC processing
     class FE frontend
-    class MON,SCHED monitoring
+    class MON monitoring
 ```
 
 ## SSM Parameter Store Flow
@@ -84,7 +76,6 @@ graph LR
     subgraph "Consuming Stacks"
         FE[FrontendStack]
         PROC[ProcessingStack]
-        SCHED[SchedulerStack]
     end
 
     SSM1 --> |reads| FE
@@ -98,16 +89,13 @@ graph LR
     SSM2 --> |reads| PROC
     SSM4 --> |reads| PROC
 
-    SSM1 --> |reads| SCHED
-    SSM2 --> |reads| SCHED
-
     classDef export fill:#e1f5ff,stroke:#0288d1,stroke-width:2px
     classDef param fill:#fff9c4,stroke:#f57f17,stroke-width:2px
     classDef consumer fill:#c8e6c9,stroke:#388e3c,stroke-width:2px
 
     class DB,STORAGE,AUTH export
     class SSM1,SSM2,SSM3,SSM4,SSM5,SSM6,SSM7 param
-    class FE,PROC,SCHED consumer
+    class FE,PROC consumer
 ```
 
 ## Deployment Commands
@@ -126,7 +114,7 @@ bunx cdk deploy AIStudio-ProcessingStack-Dev AIStudio-DocumentProcessingStack-De
 bunx cdk deploy AIStudio-FrontendStack-ECS-Dev
 
 # Step 4: Monitoring (after all services deployed)
-bunx cdk deploy AIStudio-MonitoringStack-Dev AIStudio-SchedulerStack-Dev
+bunx cdk deploy AIStudio-MonitoringStack-Dev
 ```
 
 ### Deploy Single Stack (For Incremental Updates)
@@ -160,7 +148,6 @@ bunx cdk deploy AIStudio-ProcessingStack-Dev
 | **DocumentProcessingStack** | Document upload, Textract, embedding generation | ~4-6 min | Storage |
 | **FrontendStack-ECS** | ECS Fargate, ALB, auto-scaling, CloudFront | ~10-12 min | Database, Auth, Storage |
 | **MonitoringStack** | CloudWatch dashboards, alarms, ADOT | ~3-4 min | All services |
-| **SchedulerStack** | EventBridge scheduled tasks, cron jobs | ~2-3 min | Database, Processing |
 
 ## Troubleshooting
 

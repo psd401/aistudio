@@ -53,9 +53,6 @@ import {
   capabilities,
   users,
   toolEdits,
-  scheduledExecutions,
-  executionResults,
-  userNotifications,
   navigationItems,
   navigationItemRoles,
   resourceAccessGrants,
@@ -521,34 +518,6 @@ export async function deleteAssistantArchitect(id: number) {
   // in a broken state (e.g. tools gone but assistant row still present).
   return executeTransaction(
     async (tx) => {
-      // 0a. Gather scheduled_execution IDs so we can cascade through child tables.
-      const schedIds = await tx
-        .select({ id: scheduledExecutions.id })
-        .from(scheduledExecutions)
-        .where(eq(scheduledExecutions.assistantArchitectId, id));
-
-      if (schedIds.length > 0) {
-        const schedIdList = schedIds.map((r) => r.id);
-
-        // 0b. Gather execution_result IDs so we can cascade to user_notifications.
-        const execResultIds = await tx
-          .select({ id: executionResults.id })
-          .from(executionResults)
-          .where(inArray(executionResults.scheduledExecutionId, schedIdList));
-
-        if (execResultIds.length > 0) {
-          // 0c. Delete user_notifications (FK to execution_results, no cascade).
-          await tx
-            .delete(userNotifications)
-            .where(inArray(userNotifications.executionResultId, execResultIds.map((r) => r.id)));
-        }
-
-        // 0d. Delete execution_results (FK to scheduled_executions, no cascade).
-        await tx
-          .delete(executionResults)
-          .where(inArray(executionResults.scheduledExecutionId, schedIdList));
-      }
-
       // 0e. Delete capabilities linked to this assistant via prompt_chain_tool_id.
       // role_capabilities rows cascade (FK ON DELETE CASCADE); navigation_items
       // referencing this capability have their capability_id nulled (FK ON DELETE
@@ -602,11 +571,6 @@ export async function deleteAssistantArchitect(id: number) {
       await tx
         .delete(toolEdits)
         .where(eq(toolEdits.assistantArchitectId, id));
-
-      // 6. Delete scheduled_executions (FK with no onDelete cascade)
-      await tx
-        .delete(scheduledExecutions)
-        .where(eq(scheduledExecutions.assistantArchitectId, id));
 
       // 6b. Delete per-resource access grants for this assistant (#1206) so no
       // orphan grant lingers and matches a recycled serial id.

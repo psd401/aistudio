@@ -103,12 +103,9 @@ export * from "./tables/idea-votes";
 export * from "./tables/idea-notes";
 
 // ============================================
-// Jobs & Scheduling
+// Jobs
 // ============================================
 export * from "./tables/jobs";
-export * from "./tables/scheduled-executions";
-export * from "./tables/execution-results";
-export * from "./tables/user-notifications";
 
 // ============================================
 // Navigation

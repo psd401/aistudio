@@ -288,45 +288,6 @@ Results:
 └── Chunks span 3 different documents
 ```
 
-## Scheduled Execution (EventBridge → Lambda → ECS)
-
-```mermaid
-sequenceDiagram
-    participant EB as EventBridge
-    participant Lambda as scheduled-executor Lambda
-    participant Secrets as Secrets Manager
-    participant ECS as ECS Fargate
-    participant Aurora
-
-    EB->>Lambda: Trigger (cron: daily at 6 AM)
-    Lambda->>Aurora: SELECT scheduled_executions WHERE active = true
-    Aurora->>Lambda: Return active schedules
-
-    loop For each schedule
-        Lambda->>Secrets: Get internal API secret
-        Secrets->>Lambda: Return JWT signing key
-        Lambda->>Lambda: Generate JWT token (short-lived)
-        Lambda->>ECS: POST /api/internal/execute-tool (with JWT)
-        ECS->>ECS: Validate JWT signature
-        ECS->>Aurora: INSERT INTO tool_executions
-        Aurora->>ECS: Execution created
-        ECS->>ECS: Execute tool (same as manual execution)
-        ECS->>Aurora: Save results
-        Aurora->>ECS: Results saved
-        ECS->>Lambda: Return execution summary
-    end
-
-    Lambda->>Aurora: INSERT INTO execution_results (for each schedule)
-    Aurora->>Lambda: Saved
-    Lambda->>EB: Complete (with metrics)
-```
-
-### Scheduled Execution Security
-- JWT tokens generated per-request with 5-minute expiry
-- Internal API endpoint not exposed to public internet
-- Security group restricts Lambda → ECS to specific port
-- All executions logged with scheduler context
-
 ## Error Handling & Recovery
 
 ### Network Error Recovery

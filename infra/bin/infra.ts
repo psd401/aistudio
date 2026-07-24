@@ -8,8 +8,6 @@ import { FrontendStackEcs } from '../lib/frontend-stack-ecs';
 import { ProcessingStack } from '../lib/processing-stack';
 import { DocumentProcessingStack } from '../lib/document-processing-stack';
 import { MonitoringStack } from '../lib/monitoring-stack';
-import { SchedulerStack } from '../lib/scheduler-stack';
-import { EmailNotificationStack } from '../lib/email-notification-stack';
 import { PowerTuningStack } from '../lib/power-tuning-stack';
 import { SecretsManagerStack } from '../lib/secrets-manager-stack';
 import { GuardrailsStack } from '../lib/guardrails-stack';
@@ -32,8 +30,6 @@ const standardTags = {
 // Get configuration from context
 const baseDomain = app.node.tryGetContext('baseDomain');
 const alertEmail = app.node.tryGetContext('alertEmail');
-const brandingOrgName = app.node.tryGetContext('brandingOrgName');
-const brandingAppName = app.node.tryGetContext('brandingAppName');
 
 // Atrium artifact sandbox (#1052): comma-separated CDN origins the sandbox CSP
 // permits for artifact script-src/style-src (e.g. "https://cdnjs.cloudflare.com").
@@ -263,51 +259,6 @@ devDocumentProcessingStack.addDependency(devStorageStack);
 cdk.Tags.of(devDocumentProcessingStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devDocumentProcessingStack).add(key, value));
 
-const devSchedulerStack = new SchedulerStack(app, 'AIStudio-SchedulerStack-Dev', {
-  environment: 'dev',
-  databaseResourceArn: devDbStack.databaseResourceArn,
-  databaseSecretArn: devDbStack.databaseSecretArn,
-  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
-});
-devSchedulerStack.addDependency(devDbStack);
-// Note: FrontendStack-ECS dependency added below (after FrontendStack is created)
-cdk.Tags.of(devSchedulerStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devSchedulerStack).add(key, value));
-
-// Get email configuration from context (environment-specific with fallback)
-const devEmailDomain = app.node.tryGetContext('devEmailDomain') || app.node.tryGetContext('emailDomain');
-const devSesIdentityExists = app.node.tryGetContext('devSesIdentityExists') === 'true' ||
-                             app.node.tryGetContext('sesIdentityExists') === 'true';
-
-// Only create dev email notification stack if emailDomain is provided
-if (devEmailDomain && !baseDomain) {
-  throw new Error(
-    'CDK context: baseDomain is required when emailDomain is set (used for appBaseUrl). ' +
-    'Deploy with: --context baseDomain=<your-domain> --context devEmailDomain=<email-domain>'
-  );
-}
-let devEmailNotificationStack: EmailNotificationStack | undefined;
-if (devEmailDomain) {
-  devEmailNotificationStack = new EmailNotificationStack(app, 'AIStudio-EmailNotificationStack-Dev', {
-    environment: 'dev',
-    databaseResourceArn: devDbStack.databaseResourceArn,
-    databaseSecretArn: devDbStack.databaseSecretArn,
-    // SES configuration from context
-    createSesIdentity: !devSesIdentityExists,
-    emailDomain: devEmailDomain,
-    fromEmail: `noreply@${devEmailDomain}`,
-    appBaseUrl: `https://dev.${baseDomain}`, // baseDomain is guaranteed non-null by guard above
-    useDomainIdentity: false, // Dev uses email identity by default
-    // Branding for email templates (passed as Lambda env vars)
-    brandingOrgName,
-    brandingAppName,
-    env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
-  });
-  devEmailNotificationStack.addDependency(devDbStack);
-  cdk.Tags.of(devEmailNotificationStack).add('Environment', 'Dev');
-  Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devEmailNotificationStack!).add(key, value));
-}
-
 // Prod environment
 // Permission Boundary Stack - must be deployed first before other stacks
 const prodPermissionBoundaryStack = new cdk.Stack(app, 'AIStudio-PermissionBoundary-Prod', {
@@ -429,51 +380,6 @@ prodDocumentProcessingStack.addDependency(prodStorageStack);
 cdk.Tags.of(prodDocumentProcessingStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodDocumentProcessingStack).add(key, value));
 
-const prodSchedulerStack = new SchedulerStack(app, 'AIStudio-SchedulerStack-Prod', {
-  environment: 'prod',
-  databaseResourceArn: prodDbStack.databaseResourceArn,
-  databaseSecretArn: prodDbStack.databaseSecretArn,
-  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
-});
-prodSchedulerStack.addDependency(prodDbStack);
-// Note: FrontendStack-ECS dependency added below (after FrontendStack is created)
-cdk.Tags.of(prodSchedulerStack).add('Environment', 'Prod');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodSchedulerStack).add(key, value));
-
-// Get prod email configuration from context (environment-specific with fallback)
-const prodEmailDomain = app.node.tryGetContext('prodEmailDomain') || app.node.tryGetContext('emailDomain');
-const prodSesIdentityExists = app.node.tryGetContext('prodSesIdentityExists') === 'true' ||
-                              app.node.tryGetContext('sesIdentityExists') === 'true';
-const prodUseDomainIdentity = app.node.tryGetContext('prodUseDomainIdentity') !== 'false';
-
-// Only create prod email notification stack if emailDomain is provided
-if (prodEmailDomain && !baseDomain) {
-  throw new Error(
-    'CDK context: baseDomain is required when emailDomain is set (used for appBaseUrl). ' +
-    'Deploy with: --context baseDomain=<your-domain> --context prodEmailDomain=<email-domain>'
-  );
-}
-let prodEmailNotificationStack: EmailNotificationStack | undefined;
-if (prodEmailDomain) {
-  prodEmailNotificationStack = new EmailNotificationStack(app, 'AIStudio-EmailNotificationStack-Prod', {
-    environment: 'prod',
-    databaseResourceArn: prodDbStack.databaseResourceArn,
-    databaseSecretArn: prodDbStack.databaseSecretArn,
-    // Production SES configuration from context
-    createSesIdentity: !prodSesIdentityExists,
-    emailDomain: prodEmailDomain,
-    fromEmail: `noreply@${prodEmailDomain}`,
-    appBaseUrl: `https://${baseDomain}`, // baseDomain is guaranteed non-null by guard above
-    useDomainIdentity: prodUseDomainIdentity, // Defaults to true for production
-    // Branding for email templates (passed as Lambda env vars)
-    brandingOrgName,
-    brandingAppName,
-    env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
-  });
-  prodEmailNotificationStack.addDependency(prodDbStack);
-  cdk.Tags.of(prodEmailNotificationStack).add('Environment', 'Prod');
-  Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodEmailNotificationStack!).add(key, value));
-}
 // Frontend stacks - ECS Fargate with ALB for streaming support
 if (baseDomain) {
   // Skip DNS/certificate setup in CI (when baseDomain is a dummy value like example.com)
@@ -501,14 +407,8 @@ if (baseDomain) {
   devFrontendStack.addDependency(devAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   devFrontendStack.addDependency(devProcessingStack); // Need processing queue and Lambda exports
   devFrontendStack.addDependency(devDocumentProcessingStack); // Need document queue and table exports
-  if (devEmailNotificationStack) {
-    devFrontendStack.addDependency(devEmailNotificationStack); // Need notification queue export
-  }
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devFrontendStack).add(key, value));
-
-  // SchedulerStack depends on FrontendStack-ECS to read SSM parameters (ECS security group ID, internal endpoint)
-  devSchedulerStack.addDependency(devFrontendStack);
 
   const prodFrontendStack = new FrontendStackEcs(app, 'AIStudio-FrontendStack-ECS-Prod', {
     environment: 'prod',
@@ -531,14 +431,8 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodAtriumEventsStack); // Need topic ARN for ATRIUM_EVENTS_TOPIC_ARN (#1055)
   prodFrontendStack.addDependency(prodProcessingStack); // Need processing queue and Lambda exports
   prodFrontendStack.addDependency(prodDocumentProcessingStack); // Need document queue and table exports
-  if (prodEmailNotificationStack) {
-    prodFrontendStack.addDependency(prodEmailNotificationStack); // Need notification queue export
-  }
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodFrontendStack).add(key, value));
-
-  // SchedulerStack depends on FrontendStack-ECS to read SSM parameters (ECS security group ID, internal endpoint)
-  prodSchedulerStack.addDependency(prodFrontendStack);
 
   // To deploy, use:
   // cdk deploy AIStudio-FrontendStack-ECS-Dev --context baseDomain=yourdomain.com

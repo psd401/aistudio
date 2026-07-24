@@ -34,7 +34,6 @@ export type {
   NexusMcpSchema,
   NexusMcpAuditData,
   NexusTemplateVariable,
-  ScheduleConfig,
   // Core Tables
   SelectUser,
   InsertUser,
@@ -126,15 +125,9 @@ export type {
   InsertIdeaVote,
   SelectIdeaNote,
   InsertIdeaNote,
-  // Jobs & Scheduling
+  // Jobs
   SelectJob,
   InsertJob,
-  SelectScheduledExecution,
-  InsertScheduledExecution,
-  SelectExecutionResult,
-  InsertExecutionResult,
-  SelectUserNotification,
-  InsertUserNotification,
   // Navigation
   SelectNavigationItem,
   InsertNavigationItem,

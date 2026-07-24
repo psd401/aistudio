@@ -47,7 +47,6 @@ AI Studio eliminates these barriers by:
   - Visual prompt chain designer
   - Variable substitution between prompts
   - Knowledge repository integration
-  - Scheduled execution
 
 - 📚 **Knowledge Repositories** - Upload and search documents
   - PDF, DOCX, TXT support with OCR

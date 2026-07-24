@@ -186,8 +186,7 @@ Stacks have dependencies and should be deployed in this order:
 5. **DocumentProcessingStack** - Creates document processing pipeline
 6. **GuardrailsStack** - Creates Bedrock Guardrails, DynamoDB config table, and SNS alerts
 7. **FrontendStack-ECS** - Creates ECS Fargate service with ALB
-8. **SchedulerStack** - Creates scheduled task execution (depends on Frontend)
-9. **MonitoringStack** - Creates CloudWatch dashboards and alarms
+8. **MonitoringStack** - Creates CloudWatch dashboards and alarms
 
 ### Deploy All Development Stacks
 
@@ -202,7 +201,6 @@ cdk deploy \
   AIStudio-DocumentProcessingStack-Dev \
   AIStudio-GuardrailsStack-Dev \
   AIStudio-FrontendStack-ECS-Dev \
-  AIStudio-SchedulerStack-Dev \
   AIStudio-MonitoringStack-Dev \
   --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_DEV_CLIENT_ID \
   --context baseDomain=aistudio.psd401.ai
@@ -221,7 +219,6 @@ cdk deploy \
   AIStudio-DocumentProcessingStack-Prod \
   AIStudio-GuardrailsStack-Prod \
   AIStudio-FrontendStack-ECS-Prod \
-  AIStudio-SchedulerStack-Prod \
   AIStudio-MonitoringStack-Prod \
   --parameters AIStudio-AuthStack-Prod:GoogleClientId=YOUR_PROD_CLIENT_ID \
   --context baseDomain=aistudio.psd401.ai
@@ -251,6 +248,18 @@ cdk deploy AIStudio-DatabaseStack-Dev
 ```
 
 **Deployment time:** ~3-5 minutes per stack (vs 15-20 minutes for all stacks)
+
+### Decommissioning a stack
+
+Removing a stack's registration from `infra/bin/infra.ts` only stops future
+synthesis from including it — `cdk deploy --all` will **not** delete an
+already-deployed CloudFormation stack, so its resources and cost linger until an
+explicit teardown. Note that once a stack is removed from the app, `cdk destroy
+<name>` no longer finds it either; delete it by name with `aws cloudformation
+delete-stack` (or `cdk destroy` from a checkout of the pre-removal commit). When
+retiring a stack, follow (and persist) an ordered teardown runbook. Example: the
+scheduled-assistant-executions decommission (#1322) is documented in
+[operations/decommission-scheduled-executions.md](operations/decommission-scheduled-executions.md).
 
 ---
 

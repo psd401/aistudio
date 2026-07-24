@@ -10,11 +10,6 @@ import { assistantArchitects } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { createLogger, generateRequestId } from "@/lib/logger"
 import { encodingForModel } from "js-tiktoken"
-// Import the requester builder from its concrete module (NOT the `@/lib/content`
-// barrel), so this module — loaded by every assistant execution path — does not
-// statically pull the content/embedding stack the barrel re-exports. This chain
-// only reaches db + logger + SNS, never the embedding/vector-search modules.
-import { requesterForUserId } from "@/lib/content/requester-from-auth"
 import type { Requester } from "@/lib/content/types"
 import type { RetrievalHit } from "@/lib/content/retrieval-service"
 
@@ -251,34 +246,6 @@ export async function retrieveKnowledgeForPrompt(
     log.error('Error retrieving knowledge for prompt', { error })
     return []
   }
-}
-
-/**
- * Resolve the requester a SCHEDULED assistant run uses for Atrium content
- * RETRIEVAL (§16, Phase 6).
- *
- * Prefer the schedule's agent service identity (§25) when one was resolved. When
- * NONE is set — the common case, since nothing populates
- * `scheduled_executions.agent_identity_id` — fall back to the schedule OWNER's own
- * `user` requester. This is SAFE precisely because retrieval is READ-ONLY and
- * every hit is re-checked against the requester's `canView` inside
- * `searchForAssistant`: the owner can only ever retrieve content they may already
- * see. It is deliberately NOT the same as borrowing the owner's authority for a
- * WRITE (which the design forbids) — the caller resolves the write/execution
- * identity separately and leaves it untouched.
- *
- * Fails CLOSED: returns `null` (retrieval skipped) when there is no agent identity
- * AND the owner cannot be resolved (deleted/invalid user — `requesterForUserId`
- * returns null). Without this owner fallback, scheduled Atrium retrieval was
- * unreachable dead code (Epic #1059): `agentRequester` is always null in practice,
- * so `retrieveAtriumKnowledgeForPrompt` always fail-closed to nothing.
- */
-export async function resolveScheduledAtriumRetrievalRequester(
-  agentRequester: Requester | null,
-  ownerUserId: number
-): Promise<Requester | null> {
-  if (agentRequester) return agentRequester
-  return requesterForUserId(ownerUserId)
 }
 
 /** Options for Atrium content retrieval (same caps as the repository path). */

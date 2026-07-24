@@ -19,8 +19,6 @@
         "rds-data:*",
         "secretsmanager:GetSecretValue",
         "secretsmanager:DescribeSecret",
-        "ses:SendEmail",
-        "ses:SendRawEmail",
         "sqs:*",
         "sns:*",
         "ecr:GetAuthorizationToken",
@@ -41,13 +39,7 @@
         "bedrock-agentcore:InvokeAgentRuntimeForUser",
         "ssm:GetParameter",
         "ssm:GetParameters",
-        "ssm:GetParametersByPath",
-        "scheduler:CreateSchedule",
-        "scheduler:UpdateSchedule",
-        "scheduler:DeleteSchedule",
-        "scheduler:GetSchedule",
-        "scheduler:ListSchedules",
-        "scheduler:ListScheduleGroups"
+        "ssm:GetParametersByPath"
       ],
       "Resource": "*"
     },
