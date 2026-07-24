@@ -7,7 +7,10 @@
 
 import Provider from "oidc-provider"
 import { DrizzleOidcAdapter } from "./drizzle-adapter"
-import { getOidcSigningKeySet } from "./oidc-signing-key-store"
+import {
+  getOidcSigningKeySet,
+  type OidcSigningKeySet,
+} from "./oidc-signing-key-store"
 import { getIssuerUrl } from "./issuer-config"
 import { ALL_OAUTH_SCOPES } from "./oauth-scopes"
 import { getOidcCookieSecret } from "./oidc-cookie-secret"
@@ -27,6 +30,24 @@ interface OidcProviderOptions {
 
 let providerInstance: InstanceType<typeof Provider> | null = null
 let providerKeyFingerprint: string | null = null
+
+/**
+ * Rebuild the cached provider whenever its issuer, active signing key, or
+ * published verification-key material changes. In particular, a standby key
+ * becoming active does not change the set of key ids, so activeKid must be part
+ * of the identity or scheduled rotations keep signing with the retired key
+ * until the task restarts.
+ */
+export function createOidcProviderCacheFingerprint(
+  issuer: string,
+  oidcKeys: Pick<OidcSigningKeySet, "activeKid" | "publicKeys">
+): string {
+  return JSON.stringify({
+    issuer,
+    activeKid: oidcKeys.activeKid,
+    publicKeys: oidcKeys.publicKeys,
+  })
+}
 
 /**
  * Security guard (#1055): a client-credentials token is stamped
@@ -80,9 +101,7 @@ export async function getOidcProvider(
   const log = createLogger({ action: "oidcProvider.init" })
   const issuer = getIssuerUrl(options?.issuer)
   const oidcKeys = await getOidcSigningKeySet()
-  const keyFingerprint = oidcKeys.publicKeys
-    .map((key) => key.kid)
-    .join(":")
+  const keyFingerprint = createOidcProviderCacheFingerprint(issuer, oidcKeys)
   if (
     providerInstance &&
     providerKeyFingerprint === keyFingerprint
