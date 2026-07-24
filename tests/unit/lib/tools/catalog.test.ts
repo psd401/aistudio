@@ -435,10 +435,14 @@ describe("ToolCatalog", () => {
       // The REST execute route reads entry.isActive to deny when an admin disables
       // the tool (the MCP surface gates via dispatch()). get() must therefore return
       // the inactive entry rather than hiding it.
+      const manifestEntry = TOOL_MANIFEST.find(
+        (entry) => entry.identifier === "assistants.execute"
+      )
+      expect(manifestEntry).toBeDefined()
       dbRows = [
         {
           identifier: "assistants.execute",
-          version: "v1",
+          version: manifestEntry?.version ?? "v1",
           name: "execute_assistant",
           description: "x",
           inputSchema: { type: "object", properties: {} },

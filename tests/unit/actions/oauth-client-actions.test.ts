@@ -95,6 +95,60 @@ describe('revokeOAuthClient (REV-COR-055)', () => {
     expect(res.data?.clientSecret).toBeUndefined()
   })
 
+  it('persists every required OIDC scope when a public caller omits them', async () => {
+    const createdAt = new Date('2026-07-24T12:00:00.000Z')
+    const createdRow = {
+      id: 10,
+      clientId: 'browser-client',
+      clientName: 'Atrium Capture Browser',
+      applicationType: 'browser_extension',
+      clientSecretHash: null,
+      redirectUris: ['https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/atrium'],
+      allowedScopes: ['openid', 'profile', 'offline_access', 'content:create'],
+      grantTypes: ['authorization_code', 'refresh_token'],
+      responseTypes: ['code'],
+      tokenEndpointAuthMethod: 'none',
+      requirePkce: true,
+      accessTokenTtl: 900,
+      refreshTokenTtl: 86400,
+      isActive: true,
+      createdAt,
+      updatedAt: createdAt,
+    }
+    let insertedValues: Record<string, unknown> | undefined
+    type InsertDb = {
+      insert: (table: unknown) => {
+        values: (values: Record<string, unknown>) => {
+          returning: () => Promise<unknown[]>
+        }
+      }
+    }
+    mockExecuteQuery.mockImplementationOnce(async (...args: unknown[]) => {
+      const operation = args[0] as (db: InsertDb) => Promise<unknown[]>
+      return operation({
+        insert: () => ({
+          values: (values) => {
+            insertedValues = values
+            return {
+              returning: async () => [createdRow],
+            }
+          },
+        }),
+      })
+    })
+
+    const result = await createOAuthClient({
+      clientName: 'Atrium Capture Browser',
+      applicationType: 'browser_extension',
+      redirectUris: ['https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/atrium'],
+      allowedScopes: ['content:create'],
+      tokenEndpointAuthMethod: 'none',
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(insertedValues?.allowedScopes).toEqual(createdRow.allowedScopes)
+  })
+
   it('rejects native localhost callbacks before touching the database', async () => {
     const res = await createOAuthClient({
       clientName: 'Unsafe Desktop',

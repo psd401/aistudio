@@ -21,6 +21,27 @@ const OIDC_SCOPE_LABELS: Record<string, string> = {
 
 export const OIDC_SCOPES = Object.keys(OIDC_SCOPE_LABELS)
 
+/**
+ * Public authorization-code clients cannot silently omit these scopes. `openid`
+ * starts an OIDC flow, `profile` supplies the signed-in Atrium identity, and
+ * `offline_access` permits the refresh-token grant already registered for these
+ * clients.
+ */
+export const PUBLIC_CLIENT_REQUIRED_OIDC_SCOPES = [
+  "openid",
+  "profile",
+  "offline_access",
+] as const
+
+/**
+ * Return a stable, duplicate-free scope list with the public-client OIDC
+ * baseline first. This is enforced server-side; the admin UI is only a
+ * presentation of the same policy.
+ */
+export function withPublicClientRequiredScopes(scopes: readonly string[]): string[] {
+  return [...new Set([...PUBLIC_CLIENT_REQUIRED_OIDC_SCOPES, ...scopes])]
+}
+
 // ============================================
 // Combined Scopes (OIDC + MCP)
 // ============================================
