@@ -125,6 +125,7 @@
     "128-atrium-content-assets.sql",
     "129-oauth-production-hardening.sql",
     "130-oauth-application-types.sql",
-    "131-admin-hub-nav-cleanup.sql"
+    "131-admin-hub-nav-cleanup.sql",
+    "132-oauth-public-client-scopes.sql"
   ]
 }
