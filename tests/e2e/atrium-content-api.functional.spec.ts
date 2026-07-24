@@ -1,4 +1,7 @@
 import { test, expect } from './fixtures'
+import { createHash } from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
 import {
   authenticateContext,
   SEEDED_ADMIN_EMAIL,
@@ -6,6 +9,19 @@ import {
   SEEDED_NO_CAPABILITY_EMAIL,
   SEEDED_NO_CAPABILITY_SUB,
 } from './helpers/session-auth'
+
+const authoredAssetPng = Buffer.from(
+  fs
+    .readFileSync(
+      path.join(
+        process.cwd(),
+        'tests/fixtures/unified-content/images/red-pixel.png.base64'
+      ),
+      'utf8'
+    )
+    .trim(),
+  'base64'
+)
 
 /**
  * E2E functional coverage for the Atrium Phase 5 REST v1 capability gate (#1055).
@@ -66,6 +82,27 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     })
     // Denied by the capability gate before the (missing) object is ever loaded,
     // so this is 403 rather than the 404 an authorized caller would get.
+    expect(res.status()).toBe(403)
+  })
+
+  test('session WITHOUT the capability (student) -> 403 on asset initiation', async ({
+    page,
+  }) => {
+    await authenticateContext(
+      page.context(),
+      SEEDED_NO_CAPABILITY_EMAIL,
+      SEEDED_NO_CAPABILITY_SUB
+    )
+    const someId = '00000000-0000-0000-0000-000000000000'
+    const res = await page.request.post(`/api/v1/content/${someId}/assets`, {
+      data: {
+        filename: 'probe.png',
+        contentType: 'image/png',
+        byteLength: 1,
+        sha256: 'A'.repeat(43),
+        purpose: 'document_image',
+      },
+    })
     expect(res.status()).toBe(403)
   })
 
@@ -175,6 +212,120 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     )
     expect(historic.status()).toBe(304)
     expect(await historic.text()).toBe('')
+  })
+
+  test('authorized readers can list asset metadata without storage keys', async ({
+    page,
+  }) => {
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    const create = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'document',
+        title: 'e2e asset metadata list',
+        body: '# Asset list',
+        bodyFormat: 'markdown',
+      },
+    })
+    expect(create.status()).toBe(201)
+    const objectId = (await create.json()).data.id as string
+    const list = await page.request.get(`/api/v1/content/${objectId}/assets`)
+    expect(list.status()).toBe(200)
+    const payload = await list.json()
+    expect(payload.data).toEqual([])
+    expect(JSON.stringify(payload)).not.toContain('objectKey')
+    expect(JSON.stringify(payload)).not.toContain('uploadKey')
+  })
+
+  test('direct asset upload, retry, audience denial, and public-version pinning', async ({
+    page,
+    request,
+  }) => {
+    test.skip(
+      process.env.ATRIUM_E2E_ASSET_UPLOAD_ENABLED !== 'true',
+      'Requires a deployed documents bucket and browser-reachable S3 CORS; set ATRIUM_E2E_ASSET_UPLOAD_ENABLED=true'
+    )
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    const create = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'document',
+        title: 'e2e immutable authored asset',
+        body: '# Authored asset',
+        bodyFormat: 'markdown',
+      },
+    })
+    expect(create.status()).toBe(201)
+    const created = await create.json()
+    const objectId = created.data.id as string
+    const sha256 = createHash('sha256').update(authoredAssetPng).digest('base64url')
+
+    const initiate = await page.request.post(
+      `/api/v1/content/${objectId}/assets`,
+      {
+        data: {
+          filename: 'red-pixel.png',
+          contentType: 'image/png',
+          byteLength: authoredAssetPng.byteLength,
+          sha256,
+          purpose: 'capture_step',
+          width: 4,
+          height: 3,
+        },
+      }
+    )
+    expect(initiate.status()).toBe(201)
+    const initiated = (await initiate.json()).data
+    expect(JSON.stringify(initiated)).not.toContain('objectKey')
+    const uploaded = await page.request.put(initiated.upload.url, {
+      headers: initiated.upload.headers,
+      data: authoredAssetPng,
+    })
+    expect(uploaded.ok()).toBeTruthy()
+
+    const wrongChecksum = await page.request.post(
+      `/api/v1/content/${objectId}/assets/${initiated.id}/complete`,
+      { data: { sha256: 'B'.repeat(43) } }
+    )
+    expect(wrongChecksum.status()).toBe(409)
+    const completeUrl =
+      `/api/v1/content/${objectId}/assets/${initiated.id}/complete`
+    const completed = await page.request.post(completeUrl, {
+      data: { sha256, etag: uploaded.headers().etag },
+    })
+    expect(completed.status()).toBe(200)
+    const completedAsset = (await completed.json()).data
+    expect(completedAsset.state).toBe('ready')
+    expect((await page.request.post(completeUrl, { data: { sha256 } })).status())
+      .toBe(200)
+
+    const directive =
+      `::atrium-asset{id="${initiated.id}" alt="Red pixel"}`
+    const version = await page.request.post(
+      `/api/v1/content/${objectId}/versions`,
+      { data: { body: `# Authored asset\n\n${directive}` } }
+    )
+    expect(version.status()).toBe(201)
+    const bytesUrl = completedAsset.bytesUrl as string
+    expect((await page.request.get(bytesUrl)).status()).toBe(200)
+    expect((await request.get(bytesUrl)).status()).toBe(404)
+
+    expect(
+      (
+        await page.request.patch(`/api/v1/content/${objectId}/visibility`, {
+          data: { level: 'public' },
+        })
+      ).status()
+    ).toBe(200)
+    expect(
+      (
+        await page.request.post(`/api/v1/content/${objectId}/publish`, {
+          data: { destination: 'public_web' },
+        })
+      ).status()
+    ).toBe(200)
+    const publicBytes = await request.get(bytesUrl)
+    expect(publicBytes.status()).toBe(200)
+    expect(publicBytes.headers()['content-type']).toBe('image/png')
+    expect(publicBytes.headers()['cache-control']).toBe('private, no-store')
   })
 
   test('codeEncoding base64 with an invalid body -> 400 (never silently stored)', async ({

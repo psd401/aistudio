@@ -868,7 +868,7 @@ applied or downgraded.
 
 - `POST /content`, `POST /content/{id}/versions`, and
   `POST /content/{id}/publish` accept `Idempotency-Key` (1-255 visible ASCII
-  characters). Asset initiate/complete endpoints use the same contract.
+  characters).
 - Keys are scoped by deployment environment, authenticated principal,
   OAuth-client/API-key identity, method, and canonical route. Only SHA-256 key
   and semantic-request digests are stored; raw keys and request bodies are not.
@@ -1317,6 +1317,83 @@ versions use `private, no-cache, must-revalidate`: their bytes and ETag do not
 change, but every reuse revalidates permission so a visibility revocation takes
 effect. These endpoints expose committed snapshots only, never unsnapshotted live
 Proof/collaborative state.
+
+---
+
+### Immutable authored assets (#1284)
+
+Documents reference uploaded PNG/JPEG/WebP images with a canonical, portable
+Markdown directive:
+
+```md
+::atrium-asset{id="11111111-2222-4333-8444-555555555555" alt="Enrollment chart"}
+```
+
+The editor, internal reader, and public reader all resolve that directive through
+the same same-origin byte route. A storage URL is never persisted in Markdown or
+returned in metadata.
+
+Upload flow:
+
+1. `POST /api/v1/content/{id}/assets` with `content:update`, object edit
+   permission, filename, MIME, byte length, base64url SHA-256, purpose, and
+   optional pixel dimensions.
+2. `PUT` the exact bytes to the 15-minute presigned URL using the exact
+   `Content-Type` and `x-amz-checksum-sha256` headers returned by step 1.
+3. `POST /api/v1/content/{id}/assets/{assetId}/complete` with the same SHA-256.
+   Completion is idempotent once the asset is `ready`.
+4. Insert the returned `embedRef` into document Markdown and create a version.
+   Snapshot creation rejects references that are unready, missing, or owned by a
+   different object, then pins the authoritative asset set in
+   `content_version_assets`.
+
+```json
+{
+  "filename": "enrollment.png",
+  "contentType": "image/png",
+  "byteLength": 48321,
+  "sha256": "base64url-sha256",
+  "purpose": "document_image",
+  "width": 1600,
+  "height": 900
+}
+```
+
+Initiation returns safe asset metadata plus:
+
+```json
+{
+  "upload": {
+    "method": "PUT",
+    "url": "https://s3-presigned.example/...",
+    "headers": {
+      "content-type": "image/png",
+      "x-amz-checksum-sha256": "base64-sha256"
+    },
+    "expiresAt": "2026-07-24T12:15:00.000Z"
+  }
+}
+```
+
+Completion verifies the exact declared byte length and digest, byte-signature MIME,
+decodability, single-frame constraint, 12,000-pixel dimension cap, and 40-million
+pixel cap. It then applies orientation, strips EXIF/XMP/IPTC and other metadata,
+and re-encodes a normalized image. The untrusted original lives only under the
+short-lived `atrium/pending-assets/` prefix; lifecycle policy expires that prefix
+after one day. Ready bytes are written once under the immutable
+`atrium/objects/{objectId}/assets/{assetId}` key. A hard object delete removes both
+prefixes.
+
+`GET /api/v1/content/{id}/assets` and
+`GET /api/v1/content/{id}/assets/{assetId}` require `content:read` and the normal
+object audience check. They never expose storage keys. The same-origin
+`GET /api/v1/content/assets/{assetId}/bytes` route rechecks authorization on every
+read and masks all denied cases as `404`: authenticated readers must be in the
+current object audience; anonymous readers are admitted only when the asset is
+pinned to the exact version in a live `public_web` publication and the object is
+currently public. Unpublished, private, unready, or unreferenced assets are never
+publicly readable. Responses are `nosniff`, `private, no-store`, and carry an
+ETag derived from the normalized digest.
 
 ---
 

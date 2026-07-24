@@ -18,6 +18,7 @@
  */
 
 import {
+  DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
   ListObjectsV2Command,
@@ -188,6 +189,13 @@ export const s3Store = {
     return `${ATRIUM_PREFIX}/objects/${objectId}/assets/${assetId}`;
   },
 
+  /** Temporary, lifecycle-reaped key used only before image normalization. */
+  assetUploadKey(objectId: string, assetId: string): string {
+    assertSafeSegment(objectId, "objectId");
+    assertSafeSegment(assetId, "assetId");
+    return `${ATRIUM_PREFIX}/pending-assets/${objectId}/${assetId}`;
+  },
+
   /**
    * Build the S3 key for an exported OKF bundle (Phase 8, §36.5). Bundles live
    * under `atrium/okf/{collectionId}/{exportId}.json` — collection-scoped rather
@@ -302,6 +310,120 @@ export const s3Store = {
     return readStreamToBoundedUtf8(response.Body, maxBytes);
   },
 
+  /** Read an object as bytes with a metadata and materialized-size bound. */
+  async getBytesBounded(key: string, maxBytes: number): Promise<Uint8Array> {
+    if (!Number.isInteger(maxBytes) || maxBytes < 1) {
+      throw ErrorFactories.validationFailed([
+        { field: "maxBytes", message: "maxBytes must be a positive integer" },
+      ]);
+    }
+    const localRoot = getLocalStorageRoot();
+    if (localRoot) {
+      const target = resolveLocalKey(localRoot, key);
+      const metadata = await stat(target);
+      if (metadata.size > maxBytes) {
+        throw ErrorFactories.validationFailed([
+          { field: "asset", message: "Stored asset exceeds its byte limit" },
+        ]);
+      }
+      return readFile(target);
+    }
+    const client = await getClient();
+    const { bucket } = await getConfig();
+    const response = await client.send(
+      new GetObjectCommand({ Bucket: bucket, Key: key })
+    );
+    if (response.ContentLength != null && response.ContentLength > maxBytes) {
+      throw ErrorFactories.validationFailed([
+        { field: "asset", message: "Stored asset exceeds its byte limit" },
+      ]);
+    }
+    const body = response.Body as {
+      transformToByteArray?: () => Promise<Uint8Array>;
+    } | null;
+    if (!body || typeof body.transformToByteArray !== "function") {
+      throw ErrorFactories.sysInternalError("S3 asset body is not readable");
+    }
+    const bytes = await body.transformToByteArray();
+    if (bytes.byteLength > maxBytes) {
+      throw ErrorFactories.validationFailed([
+        { field: "asset", message: "Stored asset exceeds its byte limit" },
+      ]);
+    }
+    return bytes;
+  },
+
+  /** Persist normalized immutable bytes at their canonical key. */
+  async putBytes(
+    key: string,
+    body: Uint8Array,
+    contentType: string
+  ): Promise<void> {
+    const localRoot = getLocalStorageRoot();
+    if (localRoot) {
+      const target = resolveLocalKey(localRoot, key);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, body);
+      return;
+    }
+    const client = await getClient();
+    const { bucket } = await getConfig();
+    await client.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: body,
+        ContentType: contentType,
+        ContentLength: body.byteLength,
+        CacheControl: "private, no-store",
+      })
+    );
+  },
+
+  /** Delete one temporary/canonical object. Missing keys are a no-op. */
+  async deleteKey(key: string): Promise<void> {
+    const localRoot = getLocalStorageRoot();
+    if (localRoot) {
+      await rm(resolveLocalKey(localRoot, key), { force: true });
+      return;
+    }
+    const client = await getClient();
+    const { bucket } = await getConfig();
+    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  },
+
+  /**
+   * Presign a direct raster upload. The checksum/content type/length are bound
+   * into the request so the browser never receives AWS credentials.
+   */
+  async signedAssetUploadUrl(input: {
+    key: string;
+    contentType: string;
+    contentLength: number;
+    checksumSha256: string;
+    ttlSeconds?: number;
+  }): Promise<string> {
+    if (getLocalStorageRoot()) {
+      throw ErrorFactories.sysInternalError(
+        "Signed asset uploads are unavailable with local Atrium storage"
+      );
+    }
+    const client = await getClient();
+    const { bucket } = await getConfig();
+    return getSignedUrl(
+      client,
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: input.key,
+        ContentType: input.contentType,
+        ContentLength: input.contentLength,
+        ChecksumSHA256: input.checksumSha256,
+        CacheControl: "private, no-store",
+      }),
+      { expiresIn: input.ttlSeconds ?? 900 }
+    );
+  },
+
   /**
    * Delete EVERY object under a content object's `atrium/objects/{objectId}/`
    * prefix — all versions (`v{n}/…`) and assets. Used by the hard-delete path
@@ -322,42 +444,53 @@ export const s3Store = {
         localRoot,
         `${ATRIUM_PREFIX}/objects/${objectId}`
       );
-      const deleted = await countLocalFiles(objectDirectory);
+      const pendingDirectory = resolveLocalKey(
+        localRoot,
+        `${ATRIUM_PREFIX}/pending-assets/${objectId}`
+      );
+      const deleted =
+        (await countLocalFiles(objectDirectory)) +
+        (await countLocalFiles(pendingDirectory));
       await rm(objectDirectory, { recursive: true, force: true });
+      await rm(pendingDirectory, { recursive: true, force: true });
       return deleted;
     }
     const client = await getClient();
     const { bucket } = await getConfig();
-    const prefix = `${ATRIUM_PREFIX}/objects/${objectId}/`;
-
     let deleted = 0;
-    let continuationToken: string | undefined;
-    do {
-      const listed = await client.send(
-        new ListObjectsV2Command({
-          Bucket: bucket,
-          Prefix: prefix,
-          ContinuationToken: continuationToken,
-        })
-      );
-      const keys = (listed.Contents ?? [])
-        .map((o) => o.Key)
-        .filter((k): k is string => typeof k === "string");
-      // Batch delete in chunks of 1000 (the DeleteObjects hard limit).
-      for (let i = 0; i < keys.length; i += 1000) {
-        const chunk = keys.slice(i, i + 1000);
-        await client.send(
-          new DeleteObjectsCommand({
+    const prefixes = [
+      `${ATRIUM_PREFIX}/objects/${objectId}/`,
+      `${ATRIUM_PREFIX}/pending-assets/${objectId}/`,
+    ];
+    for (const prefix of prefixes) {
+      let continuationToken: string | undefined;
+      do {
+        const listed = await client.send(
+          new ListObjectsV2Command({
             Bucket: bucket,
-            Delete: { Objects: chunk.map((Key) => ({ Key })), Quiet: true },
+            Prefix: prefix,
+            ContinuationToken: continuationToken,
           })
         );
-        deleted += chunk.length;
-      }
-      continuationToken = listed.IsTruncated
-        ? listed.NextContinuationToken
-        : undefined;
-    } while (continuationToken);
+        const keys = (listed.Contents ?? [])
+          .map((o) => o.Key)
+          .filter((k): k is string => typeof k === "string");
+        // Batch delete in chunks of 1000 (the DeleteObjects hard limit).
+        for (let i = 0; i < keys.length; i += 1000) {
+          const chunk = keys.slice(i, i + 1000);
+          await client.send(
+            new DeleteObjectsCommand({
+              Bucket: bucket,
+              Delete: { Objects: chunk.map((Key) => ({ Key })), Quiet: true },
+            })
+          );
+          deleted += chunk.length;
+        }
+        continuationToken = listed.IsTruncated
+          ? listed.NextContinuationToken
+          : undefined;
+      } while (continuationToken);
+    }
 
     return deleted;
   },

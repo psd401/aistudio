@@ -121,6 +121,7 @@
     "124-unified-content-artifact-state-recovery.sql",
     "125-nexus-ephemeral-repositories.sql",
     "126-atrium-capture-source-ref.sql",
-    "127-atrium-idempotency.sql"
+    "127-atrium-idempotency.sql",
+    "128-atrium-content-assets.sql"
   ]
 }

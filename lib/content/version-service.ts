@@ -33,6 +33,7 @@ import {
 } from "@/lib/db/drizzle-client";
 import { contentEmbedLinks, contentObjects, contentVersions } from "@/lib/db/schema";
 import { parseEmbeddedArtifactIds } from "./embed-directive";
+import { pinVersionAssetsInTx } from "./asset-references";
 import { pgTimestampAsText } from "@/lib/db/drizzle-helpers";
 import { createLogger } from "@/lib/logger";
 import { actorKindOf, agentIdOf, assertCanEdit, authorUserIdOf } from "./helpers";
@@ -381,6 +382,18 @@ export async function snapshotInTx(
   if (!versionRow) {
     // INSERT ... RETURNING should always yield a row; guard rather than crash.
     throw new ValidationError("Failed to create version", { objectId: obj.id });
+  }
+
+  if (isDocument) {
+    // Resolve canonical ::atrium-asset directives against READY assets owned by
+    // this object before advancing the head. These immutable join rows are the
+    // authoritative asset set a publication pins with its version id.
+    await pinVersionAssetsInTx(
+      tx,
+      obj.id,
+      versionRow.id,
+      input.body
+    );
   }
 
   // Advance the object's working head.

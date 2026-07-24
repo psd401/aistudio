@@ -75,6 +75,47 @@ test.describe("Atrium content v1 endpoints — unauthenticated 401 (always-run)"
     expect(res.status()).toBe(401);
   });
 
+  test("authored asset metadata and upload endpoints -> 401", async ({
+    request,
+  }) => {
+    expect(
+      (await request.get(`/api/v1/content/${SOME_ID}/assets`)).status()
+    ).toBe(401);
+    expect(
+      (
+        await request.post(`/api/v1/content/${SOME_ID}/assets`, {
+          data: {
+            filename: "probe.png",
+            contentType: "image/png",
+            byteLength: 1,
+            sha256: "A".repeat(43),
+            purpose: "document_image",
+          },
+        })
+      ).status()
+    ).toBe(401);
+    expect(
+      (
+        await request.post(
+          `/api/v1/content/${SOME_ID}/assets/${SOME_ID}/complete`,
+          { data: { sha256: "A".repeat(43) } }
+        )
+      ).status()
+    ).toBe(401);
+  });
+
+  test("anonymous asset bytes mask an absent asset with 404", async ({
+    request,
+  }) => {
+    expect(
+      (
+        await request.get(
+          `/api/v1/content/assets/${SOME_ID}/bytes`
+        )
+      ).status()
+    ).toBe(404);
+  });
+
   test("PATCH /api/v1/content/[id]/visibility -> 401", async ({ request }) => {
     const res = await request.patch(`/api/v1/content/${SOME_ID}/visibility`, {
       data: { level: "internal" },

@@ -46,6 +46,8 @@ export interface ContentAuditDetails {
   sourceProvider?: string;
   sourceExternalId?: string;
   clientSurface?: "browser" | "mac";
+  /** Immutable authored asset correlation; never contains bytes or object keys. */
+  assetId?: string;
 }
 
 export const contentAuditLogs = pgTable("content_audit_logs", {

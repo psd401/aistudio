@@ -44,7 +44,8 @@ export const VIDEO_DIRECTIVE = "video";
 export type CalloutVariant = "note" | "warn";
 
 /**
- * Whether a URL is a safe media source: an absolute http/https URL only. This is
+ * Whether a URL is a safe media source: an absolute http/https URL or the exact
+ * same-origin authored-asset byte route. This is
  * the SAME allowlist the reader's rehype-sanitize pins `src` to
  * (`markdown-render.ts` `protocols.src`), enforced here at the editor/seeding
  * boundary too so a bad URL never even serializes into a directive. Rejects
@@ -53,6 +54,13 @@ export type CalloutVariant = "note" | "warn";
 export function isSafeMediaUrl(url: string): boolean {
   if (typeof url !== "string" || url.length === 0 || url.length > 2048) {
     return false;
+  }
+  if (
+    /^\/api\/v1\/content\/assets\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/bytes$/i.test(
+      url
+    )
+  ) {
+    return true;
   }
   let parsed: URL;
   try {

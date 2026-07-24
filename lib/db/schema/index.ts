@@ -198,6 +198,7 @@ export * from "./tables/agent-identities";
 export * from "./tables/content-index-links";
 export * from "./tables/content-audit-logs";
 export * from "./tables/content-idempotency-records";
+export * from "./tables/content-assets";
 // Epic #1059 completion: §26.4 public-publish approval queue
 export * from "./tables/content-publish-requests";
 // Phase 1 (#1051): live collaborative document state (Yjs CRDT)

@@ -19,6 +19,21 @@ export {
 export { visibilityService } from "./visibility-service";
 export { collectionService } from "./collection-service";
 export type { CollectionTreeNode } from "./collection-service";
+export {
+  cleanupExpiredContentAssets,
+  contentAssetService,
+} from "./asset-service";
+export type {
+  ContentAssetDTO,
+  InitiateContentAssetInput,
+  InitiatedContentAsset,
+} from "./asset-service";
+export {
+  contentAssetBytesPath,
+  parseContentAssetDirectiveAttrs,
+  parseContentAssetIds,
+  serializeContentAssetDirective,
+} from "./asset-directive";
 export { navItemService } from "./nav-item-service";
 export type { NavObject } from "./nav-item-service";
 export { publishService } from "./publish-service";

@@ -188,6 +188,7 @@ New tables: `content_objects` (spine), `content_versions` (history), `content_co
 | Data | Store | Why |
 |---|---|---|
 | Object envelope, version index, grants, publications | **Postgres** | Powers listing, nav, permission checks, search filtering |
+| Authored-asset metadata + authoritative version references | **Postgres** | Enforces ownership, readiness, public-version pinning, and auditability without exposing storage keys |
 | Document **live** state (collaborative CRDT, per-char authorship) | **Proof doc-store adapter** (Postgres-backed) | Proof owns its document model; not a flat blob |
 | Document canonical markdown + rendered HTML snapshot | **S3** (on save/publish) | Agent-legible source + fast reader render |
 | Artifact code (per version) | **S3** (>4 KB) or `body_inline` (small) | Static text blob; no CRDT |
@@ -199,8 +200,18 @@ New tables: `content_objects` (spine), `content_versions` (history), `content_co
 atrium/objects/{objectId}/v{n}/source.md          # document markdown
 atrium/objects/{objectId}/v{n}/render.html        # document rendered HTML
 atrium/objects/{objectId}/v{n}/artifact.{html|jsx}# artifact code
-atrium/objects/{objectId}/assets/{assetId}        # embedded images, uploads
+atrium/objects/{objectId}/assets/{assetId}        # immutable normalized authored image
+atrium/pending-assets/{objectId}/{assetId}        # temporary untrusted direct upload (1-day lifecycle)
 ```
+
+Authored images use `::atrium-asset{id="<uuid>" alt="<text>"}` in canonical
+Markdown. Initiation writes only to the temporary prefix through a checksum- and
+length-constrained presigned PUT. Completion decodes, bounds, metadata-strips, and
+re-encodes PNG/JPEG/WebP before writing the separate immutable key. Version
+snapshots populate `content_version_assets`; the anonymous same-origin reader
+serves an asset only when that join points to the exact live public-web version of
+a currently public object. See the API reference's “Immutable authored assets”
+section for the full contract.
 
 ## 7. Drizzle schema (complete)
 

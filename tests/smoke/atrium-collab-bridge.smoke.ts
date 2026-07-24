@@ -23,7 +23,7 @@ import { AUTHORED_MARK } from "@/lib/content/collab/provenance";
 import { AtriumArtifactEmbed } from "@/lib/content/collab/artifact-embed-node";
 import { serializeArtifactEmbedDirective } from "@/lib/content/embed-directive";
 import { AtriumCallout } from "@/lib/content/collab/callout-node";
-import { AtriumVideo } from "@/lib/content/collab/media-nodes";
+import { AtriumImage, AtriumVideo } from "@/lib/content/collab/media-nodes";
 
 /** Invoke a node's tiptap-markdown serializer headlessly (no DOM). */
 function serializeNode(
@@ -166,6 +166,7 @@ check("legitimate markdown formatting still parses (no over-stripping)", () => {
 // generateJSON parses it into the atriumArtifactEmbed node (carrying the id).
 // node → markdown : the node's tiptap-markdown serializer re-emits that directive.
 const EMBED_UUID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+const ASSET_UUID = "11111111-2222-4333-8444-555555555555";
 
 function findNodes(node: unknown, type: string, out: unknown[] = []): unknown[] {
   const n = node as { type?: string; content?: unknown[] };
@@ -224,6 +225,34 @@ check("the embed node serializes back to its canonical directive line", () => {
   storage!.markdown.serialize(state, { attrs: { artifactId: EMBED_UUID } });
   assert.equal(out, serializeArtifactEmbedDirective(EMBED_UUID));
   assert.match(out, /^::atrium-artifact\{id="[0-9a-f-]+"\}$/);
+});
+
+check("authored asset directive seeds an atriumImage with immutable identity", () => {
+  const json = markdownToProseMirrorJSON(
+    `::atrium-asset{id="${ASSET_UUID}" alt="Enrollment chart"}`
+  );
+  const images = findNodes(json, "atriumImage") as Array<{
+    attrs?: { assetId?: string; src?: string; alt?: string };
+  }>;
+  assert.equal(images.length, 1, "one authored image node parsed");
+  assert.equal(images[0].attrs?.assetId, ASSET_UUID);
+  assert.equal(
+    images[0].attrs?.src,
+    `/api/v1/content/assets/${ASSET_UUID}/bytes`
+  );
+  assert.equal(images[0].attrs?.alt, "Enrollment chart");
+});
+
+check("authored asset image serializes back to the canonical directive", () => {
+  const markdown = serializeNode(AtriumImage, {
+    assetId: ASSET_UUID,
+    src: `/api/v1/content/assets/${ASSET_UUID}/bytes`,
+    alt: "Enrollment chart",
+  });
+  assert.equal(
+    markdown,
+    `::atrium-asset{id="${ASSET_UUID}" alt="Enrollment chart"}`
+  );
 });
 
 // --- Meridian slice F: rich-block directive round-trip ------------------------

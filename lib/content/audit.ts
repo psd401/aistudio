@@ -32,7 +32,9 @@ export type ContentAuditAction =
   // OKF interoperability (Phase 8, #1103, §36.4). `export_okf` serializes a
   // collection to a portable bundle; `import_okf` writes a bundle into content.
   | "export_okf"
-  | "import_okf";
+  | "import_okf"
+  | "initiate_asset"
+  | "complete_asset";
 
 /**
  * The surface the mutation arrived on. `ui` is a human acting through an in-app

@@ -35,6 +35,11 @@ import {
   isSafeMediaUrl,
   serializeVideoDirective,
 } from "../block-directives";
+import {
+  CONTENT_ASSET_DATA_ATTR,
+  assetIdFromBytesPath,
+  serializeContentAssetDirective,
+} from "../asset-directive";
 
 /** The subset of tiptap-markdown's serializer state these nodes' serializers use. */
 interface MarkdownSerializeState {
@@ -91,6 +96,16 @@ export const AtriumImage = Node.create<Record<string, never>, SerializeStorage>(
         parseHTML: (el) => el.getAttribute("alt") ?? "",
         renderHTML: (attrs) => (attrs.alt ? { alt: attrs.alt } : {}),
       },
+      assetId: {
+        default: null,
+        parseHTML: (el) =>
+          el.getAttribute(CONTENT_ASSET_DATA_ATTR) ??
+          assetIdFromBytesPath(el.getAttribute("src") ?? ""),
+        renderHTML: (attrs) =>
+          attrs.assetId
+            ? { [CONTENT_ASSET_DATA_ATTR]: attrs.assetId }
+            : {},
+      },
     };
   },
 
@@ -121,6 +136,19 @@ export const AtriumImage = Node.create<Record<string, never>, SerializeStorage>(
       markdown: {
         serialize(state, node) {
           const src = typeof node.attrs.src === "string" ? node.attrs.src : "";
+          const assetId =
+            typeof node.attrs.assetId === "string"
+              ? node.attrs.assetId
+              : assetIdFromBytesPath(src);
+          if (assetId) {
+            const directive = serializeContentAssetDirective(
+              assetId,
+              cleanAlt(node.attrs.alt)
+            );
+            if (directive) state.write(directive);
+            state.closeBlock(node);
+            return;
+          }
           if (!isSafeMediaUrl(src)) return;
           state.write(`![${cleanAlt(node.attrs.alt)}](${src})`);
           state.closeBlock(node);

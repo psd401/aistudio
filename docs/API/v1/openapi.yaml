@@ -1796,6 +1796,202 @@ paths:
         "503":
           $ref: "#/components/responses/ContentStorageUnavailable"
 
+  /content/{id}/assets:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+    get:
+      operationId: listContentAssets
+      tags: [Content]
+      summary: List authored asset metadata
+      description: |
+        Lists the object's authored raster assets after enforcing normal object
+        visibility. Storage keys are never returned. Requires `content:read`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      responses:
+        "200":
+          description: Permission-checked asset metadata in creation order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentAssetListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    post:
+      operationId: initiateContentAsset
+      tags: [Content]
+      summary: Initiate an immutable authored raster upload
+      description: |
+        Reserves an asset and returns a 15-minute presigned S3 `PUT` URL.
+        The caller must send the exact returned `Content-Type` and
+        `x-amz-checksum-sha256` headers. The untrusted upload lands in a
+        temporary namespace and is never served. Requires `content:update` plus
+        object edit permission; session callers also require the Atrium content
+        capability.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InitiateContentAssetRequest"
+      responses:
+        "201":
+          description: Upload reservation and constrained direct-upload request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InitiatedContentAssetResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ContentStorageUnavailable"
+
+  /content/{id}/assets/{assetId}:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+      - $ref: "#/components/parameters/contentAssetIdPath"
+    get:
+      operationId: getContentAsset
+      tags: [Content]
+      summary: Get authored asset metadata
+      description: |
+        Returns masked, permission-checked metadata for an asset belonging to
+        the object. Storage keys and upload credentials are never returned.
+        Requires `content:read`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      responses:
+        "200":
+          description: Authored asset metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentAssetResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /content/{id}/assets/{assetId}/complete:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+      - $ref: "#/components/parameters/contentAssetIdPath"
+    post:
+      operationId: completeContentAsset
+      tags: [Content]
+      summary: Validate and complete an authored raster upload
+      description: |
+        Reads the temporary upload, verifies exact bytes and SHA-256, verifies
+        MIME signature and decodability, enforces dimension/pixel/frame limits,
+        strips metadata, and writes normalized bytes to the immutable asset
+        namespace. Completion is idempotent after the asset reaches `ready`.
+        Requires `content:update` plus object edit permission; session callers
+        also require the Atrium content capability.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompleteContentAssetRequest"
+      responses:
+        "200":
+          description: Ready, immutable asset metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentAssetResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ContentStorageUnavailable"
+
+  /content/assets/{assetId}/bytes:
+    parameters:
+      - $ref: "#/components/parameters/contentAssetIdPath"
+    get:
+      operationId: getContentAssetBytes
+      tags: [Content]
+      summary: Read normalized authored asset bytes
+      description: |
+        Same-origin raster reader. Authenticated callers must be in the
+        containing object's current audience. An anonymous caller receives bytes
+        only when the asset is pinned by the exact version in a live
+        `public_web` publication whose object is currently public. Every other
+        absent, private, unpublished, unready, or unreferenced case is masked as
+        `404`. Only normalized PNG/JPEG/WebP bytes are served; temporary uploads
+        and storage keys are never exposed.
+      security:
+        - {}
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Permission-checked normalized raster bytes.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema:
+                { type: string, example: "private, no-store" }
+            X-Content-Type-Options:
+              schema: { type: string, enum: [nosniff] }
+        "304":
+          description: The normalized byte digest matches `If-None-Match`.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ContentStorageUnavailable"
+
   /content/{id}/versions/{versionId}/source:
     parameters:
       - $ref: "#/components/parameters/contentIdPath"
@@ -2454,6 +2650,15 @@ components:
       in: path
       required: true
       description: Content object UUID
+      schema:
+        type: string
+        format: uuid
+
+    contentAssetIdPath:
+      name: assetId
+      in: path
+      required: true
+      description: Immutable authored asset UUID
       schema:
         type: string
         format: uuid
@@ -3704,6 +3909,163 @@ components:
           properties:
             requestId:
               type: string
+
+    ContentAsset:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - objectId
+        - filename
+        - contentType
+        - byteLength
+        - sha256
+        - purpose
+        - state
+        - uploadExpiresAt
+        - createdAt
+        - embedRef
+      properties:
+        id: { type: string, format: uuid }
+        objectId: { type: string, format: uuid }
+        filename: { type: string, maxLength: 255 }
+        contentType:
+          type: string
+          enum: [image/png, image/jpeg, image/webp]
+        byteLength:
+          type: integer
+          minimum: 1
+          maximum: 20971520
+          description: Original upload byte length.
+        sha256:
+          type: string
+          description: Base64url SHA-256 of the original upload.
+        width: { type: integer, nullable: true }
+        height: { type: integer, nullable: true }
+        purpose:
+          type: string
+          enum: [capture_step, document_image]
+        state:
+          type: string
+          enum: [pending, quarantined, ready, rejected, deleted]
+        inspection:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Safe validator output; never raw metadata or storage keys.
+        uploadExpiresAt: { type: string, format: date-time }
+        readyAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        embedRef:
+          type: string
+          description: |
+            Canonical Markdown directive:
+            `::atrium-asset{id="<uuid>" alt="<text>"}`
+        bytesUrl:
+          type: string
+          nullable: true
+          description: Same-origin reader URL; present only when state is ready.
+
+    InitiateContentAssetRequest:
+      type: object
+      additionalProperties: false
+      required: [filename, contentType, byteLength, sha256, purpose]
+      properties:
+        filename: { type: string, minLength: 1, maxLength: 255 }
+        contentType:
+          type: string
+          enum: [image/png, image/jpeg, image/webp]
+        byteLength:
+          type: integer
+          minimum: 1
+          maximum: 20971520
+        sha256:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+          description: Base64url SHA-256 of the bytes that will be uploaded.
+        purpose:
+          type: string
+          enum: [capture_step, document_image]
+        width:
+          type: integer
+          minimum: 1
+          maximum: 12000
+        height:
+          type: integer
+          minimum: 1
+          maximum: 12000
+
+    CompleteContentAssetRequest:
+      type: object
+      additionalProperties: false
+      required: [sha256]
+      properties:
+        sha256:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+          description: Must exactly match the digest supplied at initiation.
+        etag:
+          type: string
+          maxLength: 512
+          description: Optional upload ETag retained for client correlation.
+
+    ContentAssetResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ContentAsset"
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId: { type: string }
+
+    ContentAssetListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContentAsset"
+        meta:
+          type: object
+          required: [requestId, count]
+          properties:
+            requestId: { type: string }
+            count: { type: integer }
+
+    InitiatedContentAssetResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          allOf:
+            - $ref: "#/components/schemas/ContentAsset"
+            - type: object
+              required: [upload]
+              properties:
+                upload:
+                  type: object
+                  additionalProperties: false
+                  required: [method, url, headers, expiresAt]
+                  properties:
+                    method: { type: string, enum: [PUT] }
+                    url: { type: string, format: uri }
+                    headers:
+                      type: object
+                      additionalProperties: false
+                      required: [content-type, x-amz-checksum-sha256]
+                      properties:
+                        content-type: { type: string }
+                        x-amz-checksum-sha256: { type: string }
+                    expiresAt: { type: string, format: date-time }
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId: { type: string }
 
     ContentVisibilityResponse:
       type: object
