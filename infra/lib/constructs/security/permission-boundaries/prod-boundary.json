@@ -191,10 +191,25 @@
       "Effect": "Deny",
       "Action": [
         "s3:DeleteObject",
-        "dynamodb:DeleteItem",
         "lambda:DeleteFunction"
       ],
       "Resource": "*",
+      "Condition": {
+        "BoolIfExists": {
+          "aws:MultiFactorAuthPresent": "false"
+        }
+      }
+    },
+    {
+      "Sid": "RequireMFAForDynamoDBDeleteExceptAgentLocks",
+      "_comment": "The agent router (a Lambda service role, never MFA-present) must DeleteItem to release per-session locks (agent-router index.ts releaseSessionLock). The blanket MFA-deny above previously blocked it, so locks only expired via TTL (14m) causing same-session serialization. Keep the MFA requirement for every other table; carve out only the session-locks tables.",
+      "Effect": "Deny",
+      "Action": [
+        "dynamodb:DeleteItem"
+      ],
+      "NotResource": [
+        "arn:aws:dynamodb:*:*:table/psd-agent-session-locks-*"
+      ],
       "Condition": {
         "BoolIfExists": {
           "aws:MultiFactorAuthPresent": "false"
