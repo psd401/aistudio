@@ -208,7 +208,7 @@
         "dynamodb:DeleteItem"
       ],
       "NotResource": [
-        "arn:aws:dynamodb:*:390844780692:table/psd-agent-session-locks-*"
+        "arn:aws:dynamodb:*:*:table/psd-agent-session-locks-*"
       ],
       "Condition": {
         "BoolIfExists": {
