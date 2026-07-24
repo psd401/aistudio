@@ -26,6 +26,11 @@ export const oauthAccessTokens = pgTable("oauth_access_tokens", {
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
   scopes: jsonb("scopes").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  grantId: varchar("grant_id", { length: 255 }),
+  adapterPayload: jsonb("adapter_payload")
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

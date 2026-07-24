@@ -29,6 +29,11 @@ export const oauthRefreshTokens = pgTable("oauth_refresh_tokens", {
   accessTokenJti: varchar("access_token_jti", { length: 255 })
     .references(() => oauthAccessTokens.jti, { onDelete: "set null" }),
   scopes: jsonb("scopes").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  grantId: varchar("grant_id", { length: 255 }),
+  adapterPayload: jsonb("adapter_payload")
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
   rotatedAt: timestamp("rotated_at", { withTimezone: true }),
   rotatedToId: integer("rotated_to_id"),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),

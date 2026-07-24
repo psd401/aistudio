@@ -346,3 +346,38 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     expect(res.status()).toBe(400)
   })
 })
+
+test.describe('Atrium content v1 — deployed OAuth access JWT (#1285)', () => {
+  test.skip(
+    !process.env.ATRIUM_E2E_OAUTH_ACCESS_TOKEN,
+    'Requires a deployed public-client OAuth access JWT in ATRIUM_E2E_OAUTH_ACCESS_TOKEN'
+  )
+
+  test('public PKCE access JWT performs a write and subsequent GET', async ({
+    request,
+  }) => {
+    const authorization = `Bearer ${process.env.ATRIUM_E2E_OAUTH_ACCESS_TOKEN}`
+    const created = await request.post('/api/v1/content', {
+      headers: { authorization },
+      data: {
+        kind: 'document',
+        title: `OAuth PKCE e2e ${Date.now()}`,
+        body: '# OAuth write/read verification',
+        bodyFormat: 'markdown',
+      },
+    })
+    expect(created.status()).toBe(201)
+    const id = (await created.json()).data.id as string
+
+    const read = await request.get(`/api/v1/content/${id}`, {
+      headers: { authorization },
+    })
+    expect(read.status()).toBe(200)
+    expect((await read.json()).data.id).toBe(id)
+
+    const cleanup = await request.delete(`/api/v1/content/${id}`, {
+      headers: { authorization },
+    })
+    expect([200, 204]).toContain(cleanup.status())
+  })
+})

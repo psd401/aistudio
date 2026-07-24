@@ -60,6 +60,15 @@ export async function GET() {
         error?: unknown;
         [key: string]: unknown;
       };
+      oauthSigning: {
+        status: string;
+        configured?: boolean;
+        activeKid?: string;
+        verificationKeyCount?: number;
+        source?: string;
+        error?: string;
+        hint?: string;
+      };
     };
     diagnostics?: {
       hints: string[];
@@ -73,7 +82,8 @@ export async function GET() {
     checks: {
       environment: { status: "pending" },
       authentication: { status: "pending" },
-      database: { status: "pending" }
+      database: { status: "pending" },
+      oauthSigning: { status: "pending" }
     }
   }
 
@@ -192,7 +202,35 @@ export async function GET() {
     }
   }
 
-  // 4. Overall health status
+  // 4. Verify that every task can load the shared OIDC signing key set. The
+  // check reports metadata only; private JWK material and the secret ARN are
+  // never included in the response or logs.
+  try {
+    const { getOidcSigningKeySet } = await import(
+      "@/lib/oauth/oidc-signing-key-store"
+    )
+    const keySet = await getOidcSigningKeySet()
+    healthCheck.checks.oauthSigning = {
+      status: "healthy",
+      configured: true,
+      activeKid: keySet.activeKid,
+      verificationKeyCount: keySet.publicKeys.length,
+      source: keySet.source,
+    }
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown OIDC signing-key error"
+    log.error("OIDC signing key health check failed", { error: message })
+    healthCheck.checks.oauthSigning = {
+      status: "unhealthy",
+      configured: Boolean(process.env.OIDC_SIGNING_JWKS_SECRET_ARN),
+      error: message,
+      hint:
+        "Verify OIDC_SIGNING_JWKS_SECRET_ARN, the secret JSON, and ECS task-role secretsmanager:GetSecretValue access.",
+    }
+  }
+
+  // 5. Overall health status
   const allHealthy = Object.values(healthCheck.checks).every(
     (check) => check.status === "healthy"
   )
@@ -208,7 +246,7 @@ export async function GET() {
   
   timer({ status: allHealthy ? "success" : "unhealthy" });
   
-  // 5. Add diagnostic hints if unhealthy
+  // 6. Add diagnostic hints if unhealthy
   if (!allHealthy) {
     healthCheck.diagnostics = {
       hints: []
@@ -243,6 +281,12 @@ export async function GET() {
           "Database connectivity issue. Check DATABASE_URL or DB_HOST/DB_USER/DB_PASSWORD values."
         )
       }
+    }
+
+    if (healthCheck.checks.oauthSigning.status !== "healthy") {
+      healthCheck.diagnostics.hints.push(
+        "OAuth signing keys are unavailable. Token issuance fails closed until the shared OIDC key-set secret and ECS permissions are repaired."
+      )
     }
     
     // Add deployment checklist

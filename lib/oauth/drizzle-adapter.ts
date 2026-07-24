@@ -8,44 +8,23 @@
  * - AuthorizationCode: oauth_authorization_codes table
  * - AccessToken: oauth_access_tokens table
  * - RefreshToken: oauth_refresh_tokens table
- * - Session, Interaction, Grant: in-memory (ephemeral, acceptable for v1)
+ * - Session, Interaction, Grant, and other provider records:
+ *   oauth_provider_records (durable across ECS tasks/restarts)
  */
 
 import type { Adapter, AdapterPayload } from "oidc-provider"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { eq, and, isNull } from "drizzle-orm"
+import { eq, and, isNull, gt, or } from "drizzle-orm"
 import {
   oauthClients,
   oauthAuthorizationCodes,
   oauthAccessTokens,
   oauthRefreshTokens,
+  oauthProviderRecords,
 } from "@/lib/db/schema"
 import { createLogger } from "@/lib/logger"
 import { systemUserIdOrNull } from "@/lib/content/helpers"
 import { createHash } from "node:crypto"
-
-// ============================================
-// In-Memory Store (for ephemeral models)
-// ============================================
-
-const ephemeralStore = new Map<string, { payload: AdapterPayload; expiresAt?: number }>()
-
-function ephemeralKey(model: string, id: string): string {
-  return `${model}:${id}`
-}
-
-function cleanupEphemeral(): void {
-  const now = Date.now() / 1000
-  for (const [key, entry] of ephemeralStore) {
-    if (entry.expiresAt && entry.expiresAt < now) {
-      ephemeralStore.delete(key)
-    }
-  }
-}
-
-// Run cleanup periodically
-const cleanupInterval = setInterval(cleanupEphemeral, 60_000)
-if (cleanupInterval.unref) cleanupInterval.unref()
 
 // ============================================
 // Hash Helper
@@ -64,6 +43,26 @@ function asStringArray(val: unknown): string[] {
     return val
   }
   return []
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function toAdapterJson(payload: AdapterPayload): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(payload))
+}
+
+function withConsumed(
+  payload: Record<string, unknown>,
+  consumedAt: Date | null
+): AdapterPayload {
+  return {
+    ...payload,
+    consumed: consumedAt
+      ? Math.floor(consumedAt.getTime() / 1000)
+      : payload.consumed,
+  } as AdapterPayload
 }
 
 // ============================================
@@ -96,11 +95,7 @@ class DrizzleAdapter implements Adapter {
         await this.upsertRefreshToken(id, payload, expiresAt)
         break
       default:
-        // Ephemeral: Session, Interaction, Grant, etc.
-        ephemeralStore.set(ephemeralKey(this.model, id), {
-          payload,
-          expiresAt: expiresAt ? expiresAt.getTime() / 1000 : undefined,
-        })
+        await this.upsertProviderRecord(id, payload, expiresAt)
     }
   }
 
@@ -114,15 +109,8 @@ class DrizzleAdapter implements Adapter {
         return this.findAccessToken(id)
       case "RefreshToken":
         return this.findRefreshToken(id)
-      default: {
-        const entry = ephemeralStore.get(ephemeralKey(this.model, id))
-        if (!entry) return undefined
-        if (entry.expiresAt && entry.expiresAt < Date.now() / 1000) {
-          ephemeralStore.delete(ephemeralKey(this.model, id))
-          return undefined
-        }
-        return entry.payload
-      }
+      default:
+        return this.findProviderRecord(id)
     }
   }
 
@@ -132,13 +120,31 @@ class DrizzleAdapter implements Adapter {
   }
 
   async findByUid(uid: string): Promise<AdapterPayload | undefined> {
-    // Search ephemeral store for matching uid
-    for (const entry of ephemeralStore.values()) {
-      if (entry.payload.uid === uid) {
-        return entry.payload
-      }
-    }
-    return undefined
+    const [record] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            payload: oauthProviderRecords.adapterPayload,
+            consumedAt: oauthProviderRecords.consumedAt,
+          })
+          .from(oauthProviderRecords)
+          .where(
+            and(
+              eq(oauthProviderRecords.model, this.model),
+              eq(oauthProviderRecords.uid, uid),
+              or(
+                isNull(oauthProviderRecords.expiresAt),
+                gt(oauthProviderRecords.expiresAt, new Date())
+              )
+            )
+          )
+          .limit(1),
+      "oidcAdapter.findByUid"
+    )
+
+    return record
+      ? withConsumed(record.payload, record.consumedAt)
+      : undefined
   }
 
   async consume(id: string): Promise<void> {
@@ -197,10 +203,20 @@ class DrizzleAdapter implements Adapter {
         break
       }
       default: {
-        const entry = ephemeralStore.get(ephemeralKey(this.model, id))
-        if (entry) {
-          entry.payload.consumed = Math.floor(Date.now() / 1000)
-        }
+        await executeQuery(
+          (db) =>
+            db
+              .update(oauthProviderRecords)
+              .set({ consumedAt: new Date() })
+              .where(
+                and(
+                  eq(oauthProviderRecords.model, this.model),
+                  eq(oauthProviderRecords.idHash, sha256(id)),
+                  isNull(oauthProviderRecords.consumedAt)
+                )
+              ),
+          "oidcAdapter.consumeProviderRecord"
+        )
       }
     }
   }
@@ -230,19 +246,119 @@ class DrizzleAdapter implements Adapter {
         break
       }
       default:
-        ephemeralStore.delete(ephemeralKey(this.model, id))
+        await executeQuery(
+          (db) =>
+            db
+              .delete(oauthProviderRecords)
+              .where(
+                and(
+                  eq(oauthProviderRecords.model, this.model),
+                  eq(oauthProviderRecords.idHash, sha256(id))
+                )
+              ),
+          "oidcAdapter.destroyProviderRecord"
+        )
     }
   }
 
   async revokeByGrantId(grantId: string): Promise<void> {
-    // Revoke all tokens associated with a grant
-    // For ephemeral models, just remove them
-    for (const [key, entry] of ephemeralStore) {
-      if (entry.payload.grantId === grantId) {
-        ephemeralStore.delete(key)
-      }
-    }
+    const revokedAt = new Date()
+    await Promise.all([
+      executeQuery(
+        (db) =>
+          db
+            .update(oauthAccessTokens)
+            .set({ revokedAt })
+            .where(eq(oauthAccessTokens.grantId, grantId)),
+        "oidcAdapter.revokeAccessTokensByGrant"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .update(oauthRefreshTokens)
+            .set({ revokedAt })
+            .where(eq(oauthRefreshTokens.grantId, grantId)),
+        "oidcAdapter.revokeRefreshTokensByGrant"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .delete(oauthProviderRecords)
+            .where(eq(oauthProviderRecords.grantId, grantId)),
+        "oidcAdapter.revokeProviderRecordsByGrant"
+      ),
+    ])
     this.log.info("Revoked tokens by grant", { grantId })
+  }
+
+  // ========================================
+  // Generic provider records
+  // ========================================
+
+  private async upsertProviderRecord(
+    id: string,
+    payload: AdapterPayload,
+    expiresAt?: Date
+  ): Promise<void> {
+    const mutable = {
+      uid: asOptionalString(payload.uid) ?? null,
+      grantId: asOptionalString(payload.grantId) ?? null,
+      adapterPayload: toAdapterJson(payload),
+      expiresAt: expiresAt ?? null,
+      consumedAt:
+        typeof payload.consumed === "number"
+          ? new Date(payload.consumed * 1000)
+          : null,
+    }
+
+    await executeQuery(
+      (db) =>
+        db
+          .insert(oauthProviderRecords)
+          .values({
+            model: this.model,
+            idHash: sha256(id),
+            ...mutable,
+          })
+          .onConflictDoUpdate({
+            target: [
+              oauthProviderRecords.model,
+              oauthProviderRecords.idHash,
+            ],
+            set: mutable,
+          }),
+      "oidcAdapter.upsertProviderRecord"
+    )
+  }
+
+  private async findProviderRecord(
+    id: string
+  ): Promise<AdapterPayload | undefined> {
+    const [record] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            payload: oauthProviderRecords.adapterPayload,
+            consumedAt: oauthProviderRecords.consumedAt,
+          })
+          .from(oauthProviderRecords)
+          .where(
+            and(
+              eq(oauthProviderRecords.model, this.model),
+              eq(oauthProviderRecords.idHash, sha256(id)),
+              or(
+                isNull(oauthProviderRecords.expiresAt),
+                gt(oauthProviderRecords.expiresAt, new Date())
+              )
+            )
+          )
+          .limit(1),
+      "oidcAdapter.findProviderRecord"
+    )
+
+    return record
+      ? withConsumed(record.payload, record.consumedAt)
+      : undefined
   }
 
   /**
@@ -326,6 +442,8 @@ class DrizzleAdapter implements Adapter {
       codeChallenge: payload.codeChallenge as string | undefined,
       codeChallengeMethod: (payload.codeChallengeMethod as string) ?? "S256",
       nonce: payload.nonce as string | undefined,
+      grantId: asOptionalString(payload.grantId),
+      adapterPayload: toAdapterJson(payload),
       expiresAt: expiresAt ?? new Date(Date.now() + 60_000),
     }
 
@@ -357,8 +475,8 @@ class DrizzleAdapter implements Adapter {
             codeChallenge: oauthAuthorizationCodes.codeChallenge,
             codeChallengeMethod: oauthAuthorizationCodes.codeChallengeMethod,
             nonce: oauthAuthorizationCodes.nonce,
+            adapterPayload: oauthAuthorizationCodes.adapterPayload,
             consumedAt: oauthAuthorizationCodes.consumedAt,
-            expiresAt: oauthAuthorizationCodes.expiresAt,
           })
           .from(oauthAuthorizationCodes)
           .where(eq(oauthAuthorizationCodes.codeHash, hash))
@@ -369,6 +487,7 @@ class DrizzleAdapter implements Adapter {
     if (!code) return undefined
 
     return {
+      ...code.adapterPayload,
       accountId: String(code.userId),
       clientId: code.clientId,
       redirectUri: code.redirectUri,
@@ -377,8 +496,7 @@ class DrizzleAdapter implements Adapter {
       codeChallengeMethod: code.codeChallengeMethod ?? undefined,
       nonce: code.nonce ?? undefined,
       consumed: code.consumedAt ? Math.floor(code.consumedAt.getTime() / 1000) : undefined,
-      expiresAt: code.expiresAt,
-    }
+    } as AdapterPayload
   }
 
   // ========================================
@@ -418,6 +536,8 @@ class DrizzleAdapter implements Adapter {
       clientId: payload.clientId as string,
       userId,
       scopes: (payload.scope as string)?.split(" ") ?? [],
+      grantId: asOptionalString(payload.grantId),
+      adapterPayload: toAdapterJson(payload),
       expiresAt: expiresAt ?? new Date(Date.now() + 900_000),
     }
     await executeQuery(
@@ -443,7 +563,7 @@ class DrizzleAdapter implements Adapter {
             userId: oauthAccessTokens.userId,
             clientId: oauthAccessTokens.clientId,
             scopes: oauthAccessTokens.scopes,
-            expiresAt: oauthAccessTokens.expiresAt,
+            adapterPayload: oauthAccessTokens.adapterPayload,
           })
           .from(oauthAccessTokens)
           .where(and(eq(oauthAccessTokens.jti, id), isNull(oauthAccessTokens.revokedAt)))
@@ -454,12 +574,12 @@ class DrizzleAdapter implements Adapter {
     if (!token) return undefined
 
     return {
+      ...token.adapterPayload,
       jti: token.jti,
       accountId: String(token.userId),
       clientId: token.clientId,
       scope: asStringArray(token.scopes).join(" "),
-      expiresAt: token.expiresAt,
-    }
+    } as AdapterPayload
   }
 
   // ========================================
@@ -481,6 +601,8 @@ class DrizzleAdapter implements Adapter {
       userId: this.accountUserId(payload),
       accessTokenJti: payload.jti as string | undefined,
       scopes: (payload.scope as string)?.split(" ") ?? [],
+      grantId: asOptionalString(payload.grantId),
+      adapterPayload: toAdapterJson(payload),
       expiresAt: expiresAt ?? new Date(Date.now() + 86_400_000),
     }
 
@@ -508,7 +630,7 @@ class DrizzleAdapter implements Adapter {
             userId: oauthRefreshTokens.userId,
             clientId: oauthRefreshTokens.clientId,
             scopes: oauthRefreshTokens.scopes,
-            expiresAt: oauthRefreshTokens.expiresAt,
+            adapterPayload: oauthRefreshTokens.adapterPayload,
             rotatedAt: oauthRefreshTokens.rotatedAt,
           })
           .from(oauthRefreshTokens)
@@ -525,12 +647,12 @@ class DrizzleAdapter implements Adapter {
     if (!token) return undefined
 
     return {
+      ...token.adapterPayload,
       accountId: String(token.userId),
       clientId: token.clientId,
       scope: asStringArray(token.scopes).join(" "),
-      expiresAt: token.expiresAt,
       consumed: token.rotatedAt ? Math.floor(token.rotatedAt.getTime() / 1000) : undefined,
-    }
+    } as AdapterPayload
   }
 }
 

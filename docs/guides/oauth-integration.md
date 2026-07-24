@@ -36,6 +36,28 @@ https://your-domain.com/.well-known/openid-configuration
 
 All clients must use PKCE (S256). Plain challenge method is disabled.
 
+### Chrome extension launch flow
+
+Register the client as public (`token_endpoint_auth_method: none`) with the
+exact redirect URI returned by `chrome.identity.getRedirectURL("atrium")`:
+
+```text
+https://<extension-id>.chromiumapp.org/atrium
+```
+
+Start the authorization page with `chrome.identity.launchWebAuthFlow`, using
+`response_type=code`, `code_challenge_method=S256`, and only registered scopes.
+The Atrium extension profile uses:
+
+```text
+openid profile content:read content:create content:update content:publish_internal
+```
+
+Exchange the returned code from the extension with `client_id`,
+`redirect_uri`, and `code_verifier`; do not send a client secret. Validate the
+OAuth `state` before exchanging the code. The redirect URI must match the
+registered extension id and `/atrium` path exactly.
+
 ### Step 1: Generate PKCE Parameters
 
 ```javascript
@@ -114,7 +136,9 @@ curl -X POST https://your-domain.com/api/oauth/token \
   -d "client_id=YOUR_CLIENT_ID"
 ```
 
-Refresh tokens are valid for 24 hours.
+Refresh tokens are valid for 24 hours. Public clients receive a new refresh
+token on every successful refresh and must atomically replace the old value.
+Reusing an old refresh token is treated as replay and revokes the grant family.
 
 ## Token Lifetimes
 

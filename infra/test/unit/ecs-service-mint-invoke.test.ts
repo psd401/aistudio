@@ -45,6 +45,7 @@ function synthTemplate(): Template {
     internalApiSecretArn: secretArn('internal-api'),
     collabJwtSecretArn: secretArn('collab-jwt'),
     guardrailHashSecretArn: secretArn('guardrail-hash'),
+    oidcSigningJwksSecretArn: secretArn('oidc-signing'),
   });
 
   return Template.fromStack(stack);

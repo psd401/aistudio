@@ -417,39 +417,59 @@ async function verifyJwtToken(
       audience: issuer,
     });
 
-    // Extract user ID from sub claim
-    const userId = Number.parseInt(payload.sub ?? "", 10);
-    if (Number.isNaN(userId)) {
+    // Numeric database ids are canonical decimal strings. parseInt alone accepts
+    // dangerous partial values such as "5garbage".
+    if (
+      typeof payload.sub !== "string" ||
+      !/^[1-9]\d*$/.test(payload.sub)
+    ) {
       log.warn("JWT missing or invalid sub claim");
       return null;
     }
-
-    // Look up cognitoSub for the user
-    const cognitoSub = await getCognitoSubByUserId(userId);
-    if (!cognitoSub) {
-      log.warn("JWT user not found in database", { userId });
+    const userId = Number(payload.sub);
+    if (!Number.isSafeInteger(userId)) {
+      log.warn("JWT sub claim is outside the safe integer range");
       return null;
     }
 
-    // Extract scopes from the token
-    const scopeStr = (payload.scope as string) ?? "";
-    const scopes = scopeStr ? scopeStr.split(" ") : [];
+    const scopeStr = typeof payload.scope === "string" ? payload.scope : "";
+    const scopes = scopeStr ? scopeStr.split(" ").filter(Boolean) : [];
+    const clientId =
+      typeof payload.client_id === "string"
+        ? payload.client_id
+        : typeof payload.azp === "string"
+          ? payload.azp
+          : undefined;
 
     // Atrium delegated-agent marker (§26.1) — see `parseDelegatedForClaim`.
     const delegatedForUserId = parseDelegatedForClaim(payload);
+
+    // OIDC access JWTs are stateful for revocation. Validate their persisted jti,
+    // client activation, subject, client, expiry, and scope snapshot after JOSE
+    // verification. Delegated KMS tokens are intentionally stateless and
+    // short-lived; their delegated_for marker selects that separate path.
+    const cognitoSub =
+      delegatedForUserId == null
+        ? await validatePersistedOidcAccessToken({
+            jti: typeof payload.jti === "string" ? payload.jti : undefined,
+            userId,
+            clientId,
+            scopes,
+          })
+        : await getCognitoSubByUserId(userId);
+    if (!cognitoSub) {
+      log.warn("JWT is revoked, expired, inactive, or references an unknown user", {
+        userId,
+        clientId,
+      });
+      return null;
+    }
 
     return {
       userId,
       cognitoSub,
       scopes,
-      clientId: (() => {
-        const cid = (payload.client_id as string) ?? (payload.azp as string)
-        if (!cid) {
-          log.warn("JWT missing client_id and azp claims")
-        }
-        // undefined (not a sentinel) when absent — see JwtAuthResult.clientId.
-        return cid || undefined
-      })(),
+      clientId,
       delegatedForUserId,
     };
   } catch (error) {
@@ -458,6 +478,75 @@ async function verifyJwtToken(
     });
     return null;
   }
+}
+
+interface PersistedOidcTokenIdentity {
+  jti?: string;
+  userId: number;
+  clientId?: string;
+  scopes: string[];
+}
+
+async function validatePersistedOidcAccessToken(
+  identity: PersistedOidcTokenIdentity
+): Promise<string | null> {
+  if (!identity.jti || !identity.clientId) return null;
+  const jti = identity.jti;
+  const clientId = identity.clientId;
+
+  const { executeQuery } = await import("@/lib/db/drizzle-client");
+  const { and, eq, gt, isNull } = await import("drizzle-orm");
+  const { oauthAccessTokens, oauthClients, users } = await import(
+    "@/lib/db/schema"
+  );
+
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({
+          cognitoSub: users.cognitoSub,
+          userId: oauthAccessTokens.userId,
+          clientId: oauthAccessTokens.clientId,
+          scopes: oauthAccessTokens.scopes,
+        })
+        .from(oauthAccessTokens)
+        .innerJoin(users, eq(users.id, oauthAccessTokens.userId))
+        .innerJoin(
+          oauthClients,
+          eq(oauthClients.clientId, oauthAccessTokens.clientId)
+        )
+        .where(
+          and(
+            eq(oauthAccessTokens.jti, jti),
+            eq(oauthAccessTokens.userId, identity.userId),
+            eq(oauthAccessTokens.clientId, clientId),
+            isNull(oauthAccessTokens.revokedAt),
+            gt(oauthAccessTokens.expiresAt, new Date()),
+            eq(oauthClients.isActive, true)
+          )
+        )
+        .limit(1),
+    "validatePersistedOidcAccessToken"
+  );
+
+  const token = rows[0];
+  if (!token) return null;
+
+  const persistedScopes = Array.isArray(token.scopes)
+    ? token.scopes.filter(
+        (scope): scope is string => typeof scope === "string"
+      )
+    : [];
+  const expected = [...new Set(identity.scopes)].sort();
+  const actual = [...new Set(persistedScopes)].sort();
+  if (
+    expected.length !== actual.length ||
+    expected.some((scope, index) => scope !== actual[index])
+  ) {
+    return null;
+  }
+
+  return token.cognitoSub;
 }
 
 /**

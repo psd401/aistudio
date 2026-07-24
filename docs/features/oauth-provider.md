@@ -37,8 +37,11 @@ Returns the standard OpenID Connect discovery document with all endpoint URLs.
 ## Security
 
 - **PKCE required** (S256 only) per OAuth 2.1 best practices
-- **JWT signing**: AWS KMS (RS256) in production, local RSA in dev
+- **OIDC JWT signing**: shared RSA-3072 JWK set in Secrets Manager; local RSA only in non-production development
+- **Delegated-token signing**: separate non-exportable AWS KMS key
 - **Token TTLs**: Access=15min, AuthCode=60s, Refresh=24hr
+- **Public-client refresh rotation**: every refresh is single-use; replay revokes the grant family
+- **Durability**: provider sessions, interactions, grants, codes, and tokens persist in PostgreSQL across ECS tasks/restarts
 - **Client types**: Public (PKCE only) and Confidential (with client_secret)
 - Client secrets hashed with Argon2id
 
@@ -108,7 +111,11 @@ authenticateRequest() → token starts with "sk-"?
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `KMS_SIGNING_KEY_ARN` | Prod only | — | AWS KMS key for JWT signing |
-| `KMS_SIGNING_KEY_KID` | Prod only | — | Key ID for JWKS |
+| `OIDC_SIGNING_JWKS_SECRET_ARN` | Production | — | Secrets Manager ARN for the shared OIDC-only RSA JWK set |
+| `KMS_SIGNING_KEY_ARN` | Prod only | — | Separate KMS key for delegated-agent JWT signing |
+| `KMS_SIGNING_KEY_KID` | Prod only | — | Delegated-token KMS key ID |
 | `OIDC_COOKIE_SECRET` | Recommended | NEXTAUTH_SECRET | Cookie encryption |
 | `NEXTAUTH_URL` | Yes | — | Issuer URL |
+
+See [OIDC signing-key operations](../operations/oauth-signing-keys.md) for the
+threat model, bootstrap, rotation, overlap, health check, and incident runbook.

@@ -138,6 +138,11 @@ export interface EcsServiceConstructProps {
    */
   guardrailHashSecretArn: string;
   /**
+   * Shared private OIDC JWK set in Secrets Manager (#1285). Read lazily by the
+   * application task role; never injected as an environment secret value.
+   */
+  oidcSigningJwksSecretArn: string;
+  /**
    * K-12 Content Safety: Bedrock Guardrail ARN (from GuardrailsStack)
    * If provided, enables precise IAM scoping instead of wildcard
    */
@@ -297,6 +302,7 @@ export class EcsServiceConstruct extends Construct {
         props.internalApiSecretArn,
         props.collabJwtSecretArn,
         props.guardrailHashSecretArn,
+        props.oidcSigningJwksSecretArn,
       ],
     }));
 
@@ -334,6 +340,7 @@ export class EcsServiceConstruct extends Construct {
                 props.internalApiSecretArn, // Include internal API secret
                 props.collabJwtSecretArn, // Include Atrium collab token signing secret (#1051)
                 props.guardrailHashSecretArn, // Include guardrail hash secret (#727)
+                props.oidcSigningJwksSecretArn, // Shared OIDC-only JWK set (#1285)
               ],
             }),
             // Agent Workspace OAuth secrets — read+update for refresh tokens (#912).
@@ -848,6 +855,9 @@ export class EcsServiceConstruct extends Construct {
         // Atrium content events SNS topic (#1055). The app publishes content
         // lifecycle events here; the publisher no-ops when this is empty.
         ATRIUM_EVENTS_TOPIC_ARN: props.atriumEventsTopicArn ?? '',
+        // Secret ARN only; the private key set is fetched through the task role
+        // and never serialized into the task definition.
+        OIDC_SIGNING_JWKS_SECRET_ARN: props.oidcSigningJwksSecretArn,
       },
       // Secrets injected from Secrets Manager at runtime
       secrets: {
