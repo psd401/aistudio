@@ -9,6 +9,22 @@ import { LambdaRoleProps, ECSTaskRoleProps } from "./types"
  */
 export class ServiceRoleFactory {
   /**
+   * Preserve complete resource ARNs, including unresolved CDK ARN tokens.
+   *
+   * Construct properties such as secretArn and queueArn are unresolved tokens
+   * until synthesis. Treating one as a bare name creates a malformed resource
+   * like arn:...:<resolved-full-arn>, which can never authorize the target.
+   */
+  private static resolveResourceArn(
+    resource: string,
+    fromName: (name: string) => string
+  ): string {
+    return resource.startsWith("arn:") || cdk.Token.isUnresolved(resource)
+      ? resource
+      : fromName(resource)
+  }
+
+  /**
    * Create a Lambda execution role with least privilege
    */
   static createLambdaRole(
@@ -299,13 +315,11 @@ export class ServiceRoleFactory {
           effect: iam.Effect.ALLOW,
           actions: ["secretsmanager:GetSecretValue"],
           resources: secretArns.map((secretName) =>
-            // CDK secretArn values are unresolved tokens at this point. Treat
-            // them as complete ARNs; prefixing one produces
-            // arn:...:secret:<resolved-full-arn>*, which never authorizes the
-            // target secret.
-            secretName.startsWith("arn:") || cdk.Token.isUnresolved(secretName)
-              ? secretName
-              : `arn:aws:secretsmanager:${props.region}:${props.account}:secret:${secretName}*`
+            this.resolveResourceArn(
+              secretName,
+              (name) =>
+                `arn:aws:secretsmanager:${props.region}:${props.account}:secret:${name}*`
+            )
           ),
           conditions: {
             StringEquals: {
@@ -332,7 +346,7 @@ export class ServiceRoleFactory {
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const bucketArns = bucketNames.map((bucket) =>
-      bucket.startsWith("arn:") ? bucket : `arn:aws:s3:::${bucket}`
+      this.resolveResourceArn(bucket, (name) => `arn:aws:s3:::${name}`)
     )
 
     return new iam.PolicyDocument({
@@ -385,9 +399,11 @@ export class ServiceRoleFactory {
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const tableArns = tableNames.map((table) =>
-      table.startsWith("arn:")
-        ? table
-        : `arn:aws:dynamodb:${props.region}:${props.account}:table/${table}`
+      this.resolveResourceArn(
+        table,
+        (name) =>
+          `arn:aws:dynamodb:${props.region}:${props.account}:table/${name}`
+      )
     )
 
     return new iam.PolicyDocument({
@@ -422,9 +438,10 @@ export class ServiceRoleFactory {
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const queueArns = queueNames.map((queue) =>
-      queue.startsWith("arn:")
-        ? queue
-        : `arn:aws:sqs:${props.region}:${props.account}:${queue}`
+      this.resolveResourceArn(
+        queue,
+        (name) => `arn:aws:sqs:${props.region}:${props.account}:${name}`
+      )
     )
 
     return new iam.PolicyDocument({
@@ -457,9 +474,10 @@ export class ServiceRoleFactory {
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const topicArns = topicNames.map((topic) =>
-      topic.startsWith("arn:")
-        ? topic
-        : `arn:aws:sns:${props.region}:${props.account}:${topic}`
+      this.resolveResourceArn(
+        topic,
+        (name) => `arn:aws:sns:${props.region}:${props.account}:${name}`
+      )
     )
 
     return new iam.PolicyDocument({
@@ -487,9 +505,11 @@ export class ServiceRoleFactory {
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const repositoryArns = repositoryNames.map((repo) =>
-      repo.startsWith("arn:")
-        ? repo
-        : `arn:aws:ecr:${props.region}:${props.account}:repository/${repo}`
+      this.resolveResourceArn(
+        repo,
+        (name) =>
+          `arn:aws:ecr:${props.region}:${props.account}:repository/${name}`
+      )
     )
 
     return new iam.PolicyDocument({
