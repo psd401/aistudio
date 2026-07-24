@@ -67,6 +67,9 @@ Returns the standard OpenID Connect discovery document with all endpoint URLs.
 OAuth clients are managed at `/admin/oauth-clients`:
 - Register web, browser-extension, and native clients
 - Configure redirect URIs and allowed scopes
+- Public clients automatically include `openid`, `profile`, and
+  `offline_access`; the admin form displays these as required, and the database
+  enforces the same invariant
 - Revoke clients (deactivates all issued tokens)
 
 Redirect URI validation is application-aware:

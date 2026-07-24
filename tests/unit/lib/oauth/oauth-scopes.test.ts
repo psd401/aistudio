@@ -6,7 +6,11 @@
  * returns the raw-string fallback rather than a Function or other inherited value.
  */
 
-import { getScopeLabel } from "@/lib/oauth/oauth-scopes"
+import {
+  getScopeLabel,
+  PUBLIC_CLIENT_REQUIRED_OIDC_SCOPES,
+  withPublicClientRequiredScopes,
+} from "@/lib/oauth/oauth-scopes"
 
 describe("getScopeLabel (REV-COR-637)", () => {
   it("returns the OIDC label for a known OIDC scope", () => {
@@ -35,5 +39,30 @@ describe("getScopeLabel (REV-COR-637)", () => {
     const label = getScopeLabel(scope)
     expect(typeof label).toBe("string")
     expect(label).toBe(scope)
+  })
+})
+
+describe("withPublicClientRequiredScopes", () => {
+  it("adds the OIDC baseline required by public authorization-code clients", () => {
+    expect(withPublicClientRequiredScopes(["content:read"])).toEqual([
+      "openid",
+      "profile",
+      "offline_access",
+      "content:read",
+    ])
+  })
+
+  it("preserves caller scopes without duplicating required scopes", () => {
+    const scopes = withPublicClientRequiredScopes([
+      "profile",
+      "content:create",
+      "openid",
+      "content:create",
+    ])
+
+    expect(scopes).toEqual([
+      ...PUBLIC_CLIENT_REQUIRED_OIDC_SCOPES,
+      "content:create",
+    ])
   })
 })

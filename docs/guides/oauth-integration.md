@@ -174,6 +174,10 @@ Reusing an old refresh token is treated as replay and revokes the grant family.
 - `email` — User's email address
 - `offline_access` — Enables refresh tokens
 
+Public clients (`token_endpoint_auth_method: none`) are registered with
+`openid`, `profile`, and `offline_access` automatically. Administrators may add
+`email` and supported API scopes, but cannot remove the public-client baseline.
+
 ### API Scopes
 - `chat:read`, `chat:write` — Chat operations
 - `assistants:read`, `assistants:write`, `assistants:list`, `assistants:execute` — Assistants
