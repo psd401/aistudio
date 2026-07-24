@@ -28,18 +28,47 @@ describe("Atrium local snapshot storage", () => {
     await s3Store.putText(key, "# Local body", "text/markdown");
 
     await expect(s3Store.getText(key)).resolves.toBe("# Local body");
+    await expect(s3Store.getTextBounded(key, 100)).resolves.toBe(
+      "# Local body"
+    );
+    await expect(s3Store.getTextBounded(key, 2)).rejects.toBeDefined();
+  });
+
+  it("enforces byte limits through the opened local file handle", async () => {
+    const key = s3Store.assetUploadKey(
+      "bounded-object",
+      "11111111-2222-4333-8444-555555555555"
+    );
+    await s3Store.putBytes(key, Buffer.from([1, 2, 3, 4]), "image/png");
+
+    await expect(s3Store.getBytesBounded(key, 4)).resolves.toEqual(
+      Buffer.from([1, 2, 3, 4])
+    );
+    await expect(s3Store.getBytesBounded(key, 3)).rejects.toBeDefined();
   });
 
   it("deletes only the requested object's local tree", async () => {
     const firstSource = s3Store.key("first-object", 1, "source.md");
     const firstRender = s3Store.key("first-object", 1, "render.html");
     const secondSource = s3Store.key("second-object", 1, "source.md");
+    const pendingAsset = s3Store.assetUploadKey(
+      "first-object",
+      "11111111-2222-4333-8444-555555555555"
+    );
     await s3Store.putText(firstSource, "first", "text/markdown");
     await s3Store.putText(firstRender, "<p>first</p>", "text/html");
     await s3Store.putText(secondSource, "second", "text/markdown");
+    await s3Store.putBytes(
+      pendingAsset,
+      Buffer.from([1, 2, 3]),
+      "image/png"
+    );
 
-    await expect(s3Store.deleteObjectTree("first-object")).resolves.toBe(2);
+    await expect(s3Store.deleteObjectTree("first-object")).resolves.toBe(3);
     await expect(s3Store.getText(firstSource)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      s3Store.getBytesBounded(pendingAsset, 3)
+    ).rejects.toMatchObject({ code: "ENOENT" });
     await expect(s3Store.getText(secondSource)).resolves.toBe("second");
   });
 });

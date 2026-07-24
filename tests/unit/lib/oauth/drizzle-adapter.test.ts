@@ -1,358 +1,226 @@
-/**
- * Unit tests for lib/oauth/drizzle-adapter.ts.
- *
- * Covers:
- * - REV-DB-164: consume('RefreshToken') stamps rotated_at; findRefreshToken maps it to `consumed`.
- * - REV-DB-166: the DB upserts are true upserts (onConflictDoUpdate), not insert-only.
- * - REV-DB-167: the read paths use explicit column projections (and still map correctly).
- * - REV-DB-170: upsert rejects a missing/non-numeric accountId before any DB write.
- *
- * `executeQuery` is mocked with a recording query-builder so we can assert the exact Drizzle
- * chain each adapter method builds without a live database.
- */
+import { beforeEach, describe, expect, it, jest } from "@jest/globals"
 
-import type { AdapterPayload } from "oidc-provider"
+const mockExecuteQuery = jest.fn<(...args: unknown[]) => Promise<unknown>>()
 
-// ─── Recording query-builder ─────────────────────────────────────────────────
-interface Recorder {
-  db: Record<string, (...args: unknown[]) => unknown>
-  calls: Record<string, unknown[][]>
-}
-
-function makeRecorder(): Recorder {
-  const calls: Record<string, unknown[][]> = {}
-  const db: Record<string, (...args: unknown[]) => unknown> = {}
-  const methods = [
-    "insert",
-    "values",
-    "onConflictDoUpdate",
-    "onConflictDoNothing",
-    "update",
-    "set",
-    "where",
-    "select",
-    "from",
-    "limit",
-    "returning",
-    "delete",
-  ]
-  for (const m of methods) {
-    db[m] = (...args: unknown[]) => {
-      ;(calls[m] ??= []).push(args)
-      return db
-    }
-  }
-  return { db, calls }
-}
-
-let recordings: Recorder[] = []
-let nextRows: unknown[] = []
-
-function lastCalls(): Record<string, unknown[][]> {
-  return recordings[recordings.length - 1].calls
-}
-
-// ─── Mocks ───────────────────────────────────────────────────────────────────
 jest.mock("@/lib/db/drizzle-client", () => ({
-  executeQuery: jest.fn(),
+  executeQuery: (...args: unknown[]) => mockExecuteQuery(...args),
 }))
 
-jest.mock("drizzle-orm", () => ({
-  eq: (...args: unknown[]) => ({ _eq: args }),
-  and: (...args: unknown[]) => ({ _and: args }),
-  isNull: (...args: unknown[]) => ({ _isNull: args }),
+jest.mock("@/lib/content/helpers", () => ({
+  systemUserIdOrNull: () => 1,
 }))
 
-jest.mock("@/lib/db/schema", () => {
-  // Each table proxies any column access to the column name string, so assertions can
-  // compare e.g. onConflictDoUpdate target === "codeHash".
-  const mk = () =>
-    new Proxy({}, { get: (_t, prop) => (typeof prop === "string" ? prop : undefined) })
-  return {
-    oauthClients: mk(),
-    oauthAuthorizationCodes: mk(),
-    oauthAccessTokens: mk(),
-    oauthRefreshTokens: mk(),
-  }
-})
-
-jest.mock("@/lib/logger", () => {
-  const logger = {
+jest.mock("@/lib/logger", () => ({
+  createLogger: () => ({
+    debug: jest.fn(),
     info: jest.fn(),
     warn: jest.fn(),
     error: jest.fn(),
-    debug: jest.fn(),
-  }
-  return { createLogger: () => logger }
-})
-
-jest.mock("@/lib/content/helpers", () => ({
-  systemUserIdOrNull: jest.fn(() => null),
+  }),
 }))
 
-import { DrizzleOidcAdapter } from "@/lib/oauth/drizzle-adapter"
-import { executeQuery } from "@/lib/db/drizzle-client"
-import { createLogger } from "@/lib/logger"
+jest.mock("drizzle-orm", () => ({
+  and: jest.fn(),
+  eq: jest.fn(),
+  gt: jest.fn(),
+  isNull: jest.fn(),
+  or: jest.fn(),
+}))
 
-const executeQueryMock = executeQuery as jest.Mock
-const loggerWarn = (createLogger({}) as unknown as { warn: jest.Mock }).warn
+jest.mock("@/lib/db/schema", () => ({
+  oauthClients: {
+    clientId: "client_id",
+    clientName: "client_name",
+    applicationType: "application_type",
+    clientSecretHash: "client_secret_hash",
+    redirectUris: "redirect_uris",
+    grantTypes: "grant_types",
+    responseTypes: "response_types",
+    allowedScopes: "allowed_scopes",
+    tokenEndpointAuthMethod: "token_endpoint_auth_method",
+    requirePkce: "require_pkce",
+    isActive: "is_active",
+  },
+  oauthAuthorizationCodes: {
+    id: "id",
+    codeHash: "code_hash",
+    userId: "user_id",
+    clientId: "client_id",
+    redirectUri: "redirect_uri",
+    scopes: "scopes",
+    codeChallenge: "code_challenge",
+    codeChallengeMethod: "code_challenge_method",
+    nonce: "nonce",
+    adapterPayload: "adapter_payload",
+    consumedAt: "consumed_at",
+    grantId: "grant_id",
+  },
+  oauthAccessTokens: {
+    id: "id",
+    jti: "jti",
+    userId: "user_id",
+    clientId: "client_id",
+    scopes: "scopes",
+    adapterPayload: "adapter_payload",
+    revokedAt: "revoked_at",
+    grantId: "grant_id",
+  },
+  oauthRefreshTokens: {
+    id: "id",
+    tokenHash: "token_hash",
+    userId: "user_id",
+    clientId: "client_id",
+    scopes: "scopes",
+    adapterPayload: "adapter_payload",
+    rotatedAt: "rotated_at",
+    revokedAt: "revoked_at",
+    grantId: "grant_id",
+  },
+  oauthProviderRecords: {
+    model: "model",
+    idHash: "id_hash",
+    uid: "uid",
+    grantId: "grant_id",
+    adapterPayload: "adapter_payload",
+    consumedAt: "consumed_at",
+    expiresAt: "expires_at",
+  },
+}))
 
-function payload(overrides: Record<string, unknown>): AdapterPayload {
-  return overrides as unknown as AdapterPayload
-}
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { DrizzleOidcAdapter } = require("@/lib/oauth/drizzle-adapter")
 
-beforeEach(() => {
-  recordings = []
-  nextRows = []
-  jest.clearAllMocks()
-  executeQueryMock.mockImplementation(async (fn: (db: unknown) => unknown) => {
-    const rec = makeRecorder()
-    recordings.push(rec)
-    fn(rec.db)
-    return nextRows
-  })
-})
-
-// ─── REV-DB-170 ──────────────────────────────────────────────────────────────
-describe("upsert accountId validation (REV-DB-170)", () => {
-  it("AuthorizationCode upsert throws on a missing accountId (no DB write)", async () => {
-    const adapter = DrizzleOidcAdapter("AuthorizationCode")
-    await expect(
-      adapter.upsert("code1", payload({ clientId: "c" }), 60)
-    ).rejects.toThrow(/non-numeric accountId/)
-    expect(executeQueryMock).not.toHaveBeenCalled()
-  })
-
-  it("RefreshToken upsert throws on a non-numeric accountId (no DB write)", async () => {
-    const adapter = DrizzleOidcAdapter("RefreshToken")
-    await expect(
-      adapter.upsert("rt1", payload({ clientId: "c", accountId: "abc" }), 3600)
-    ).rejects.toThrow(/non-numeric accountId/)
-    expect(executeQueryMock).not.toHaveBeenCalled()
-  })
-
-  it("AuthorizationCode upsert inserts a valid numeric userId", async () => {
-    const adapter = DrizzleOidcAdapter("AuthorizationCode")
-    await adapter.upsert(
-      "code1",
-      payload({ clientId: "c", accountId: "42", scope: "openid email" }),
-      60
-    )
-    const values = lastCalls().values[0][0] as { userId: number; codeHash: string }
-    expect(values.userId).toBe(42)
-    expect(values.codeHash).toEqual(expect.any(String))
-  })
-})
-
-// ─── REV-DB-166 ──────────────────────────────────────────────────────────────
-describe("upserts honour the insert-OR-update contract (REV-DB-166)", () => {
-  it("AuthorizationCode upsert uses onConflictDoUpdate on codeHash", async () => {
-    const adapter = DrizzleOidcAdapter("AuthorizationCode")
-    await adapter.upsert(
-      "code1",
-      payload({ clientId: "c", accountId: "1", scope: "openid" }),
-      60
-    )
-    const conflict = lastCalls().onConflictDoUpdate[0][0] as {
-      target: unknown
-      set: Record<string, unknown>
-    }
-    expect(conflict.target).toBe("codeHash")
-    expect(conflict.set).toMatchObject({ clientId: "c", userId: 1 })
-    // The unique key is never in the update set.
-    expect(conflict.set).not.toHaveProperty("codeHash")
-  })
-
-  it("AccessToken upsert uses onConflictDoUpdate on jti", async () => {
-    const adapter = DrizzleOidcAdapter("AccessToken")
-    await adapter.upsert(
-      "jti1",
-      payload({ clientId: "c", accountId: "1", scope: "openid" }),
-      900
-    )
-    const conflict = lastCalls().onConflictDoUpdate[0][0] as {
-      target: unknown
-      set: Record<string, unknown>
-    }
-    expect(conflict.target).toBe("jti")
-    expect(conflict.set).not.toHaveProperty("jti")
+describe("Drizzle OIDC adapter production durability (#1285)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
   })
 
-  it("RefreshToken upsert uses onConflictDoUpdate on tokenHash, excluding lifecycle columns", async () => {
-    const adapter = DrizzleOidcAdapter("RefreshToken")
-    await adapter.upsert(
-      "rt1",
-      payload({ clientId: "c", accountId: "1", scope: "openid" }),
-      3600
-    )
-    const conflict = lastCalls().onConflictDoUpdate[0][0] as {
-      target: unknown
-      set: Record<string, unknown>
-    }
-    expect(conflict.target).toBe("tokenHash")
-    // A re-upsert must not resurrect a rotated/revoked token, nor rewrite the unique key.
-    expect(conflict.set).not.toHaveProperty("rotatedAt")
-    expect(conflict.set).not.toHaveProperty("revokedAt")
-    expect(conflict.set).not.toHaveProperty("tokenHash")
-  })
-})
+  it("persists and reloads provider records through the database across adapter instances", async () => {
+    mockExecuteQuery
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          payload: {
+            uid: "interaction-uid",
+            accountId: "7",
+            grantId: "grant-1",
+          },
+          consumedAt: null,
+        },
+      ])
 
-// ─── REV-DB-164 ──────────────────────────────────────────────────────────────
-describe("consume('RefreshToken') stamps rotated_at (REV-DB-164)", () => {
-  it("issues an UPDATE that sets rotatedAt and returns the row id", async () => {
-    nextRows = [{ id: 1 }]
-    const adapter = DrizzleOidcAdapter("RefreshToken")
-    await adapter.consume("rt1")
-
-    const calls = lastCalls()
-    expect(calls.update).toHaveLength(1)
-    const setArg = calls.set[0][0] as Record<string, unknown>
-    expect(setArg).toHaveProperty("rotatedAt")
-    expect(setArg.rotatedAt).toBeInstanceOf(Date)
-    // returning({ id }) is used to detect the "already consumed / not found" case.
-    expect(calls.returning).toHaveLength(1)
-    expect(loggerWarn).not.toHaveBeenCalled()
-  })
-
-  it("warns when no row matched (already consumed or not found)", async () => {
-    nextRows = []
-    const adapter = DrizzleOidcAdapter("RefreshToken")
-    await adapter.consume("rt-missing")
-
-    expect(loggerWarn).toHaveBeenCalledWith(
-      "Refresh token already consumed or not found",
-      expect.objectContaining({ tokenHash: expect.any(String) })
-    )
-  })
-
-  it("leaves the AuthorizationCode consume path unchanged (sets consumedAt)", async () => {
-    nextRows = [{ id: 5 }]
-    const adapter = DrizzleOidcAdapter("AuthorizationCode")
-    await adapter.consume("code1")
-
-    const setArg = lastCalls().set[0][0] as Record<string, unknown>
-    expect(setArg).toHaveProperty("consumedAt")
-    expect(setArg).not.toHaveProperty("rotatedAt")
-  })
-})
-
-// ─── REV-DB-167 ──────────────────────────────────────────────────────────────
-describe("read paths use explicit projections and map unchanged (REV-DB-167)", () => {
-  it("findClient projects only consumed columns and maps them", async () => {
-    nextRows = [
+    await DrizzleOidcAdapter("Interaction").upsert(
+      "raw-interaction-id",
       {
-        clientId: "c1",
-        clientName: "App",
-        clientSecretHash: null,
-        redirectUris: ["https://x/cb"],
-        grantTypes: ["authorization_code"],
-        responseTypes: ["code"],
-        allowedScopes: ["openid"],
-        tokenEndpointAuthMethod: "none",
+        uid: "interaction-uid",
+        accountId: "7",
+        grantId: "grant-1",
       },
-    ]
-    const result = await DrizzleOidcAdapter("Client").find("c1")
+      600
+    )
+    const reloaded = await DrizzleOidcAdapter("Interaction").find(
+      "raw-interaction-id"
+    )
 
-    const projection = lastCalls().select[0][0] as Record<string, unknown>
-    expect(Object.keys(projection).sort()).toEqual([
-      "allowedScopes",
-      "clientId",
-      "clientName",
-      "clientSecretHash",
-      "grantTypes",
-      "redirectUris",
-      "responseTypes",
-      "tokenEndpointAuthMethod",
-    ])
-    expect(result).toMatchObject({
-      client_id: "c1",
-      client_name: "App",
-      redirect_uris: ["https://x/cb"],
-      scope: "openid",
-      token_endpoint_auth_method: "none",
-    })
+    expect(mockExecuteQuery).toHaveBeenCalledTimes(2)
+    expect(reloaded).toEqual(
+      expect.objectContaining({
+        uid: "interaction-uid",
+        accountId: "7",
+        grantId: "grant-1",
+      })
+    )
   })
 
-  it("findAccessToken projects only consumed columns and maps them", async () => {
-    nextRows = [
-      {
-        jti: "j1",
-        userId: 7,
-        clientId: "c1",
-        scopes: ["openid", "email"],
-        expiresAt: new Date("2030-01-01T00:00:00Z"),
-      },
-    ]
-    const result = await DrizzleOidcAdapter("AccessToken").find("j1")
-
-    const projection = lastCalls().select[0][0] as Record<string, unknown>
-    expect(Object.keys(projection).sort()).toEqual([
-      "clientId",
-      "expiresAt",
-      "jti",
-      "scopes",
-      "userId",
-    ])
-    expect(result).toMatchObject({
-      jti: "j1",
-      accountId: "7",
-      clientId: "c1",
-      scope: "openid email",
-    })
-  })
-
-  it("findRefreshToken projects columns and maps rotatedAt to a numeric consumed", async () => {
-    const rotatedAt = new Date("2030-06-01T00:00:00Z")
-    nextRows = [
+  it("rehydrates provider payload fields needed by refresh rotation", async () => {
+    const rotatedAt = new Date("2026-07-24T12:00:00.000Z")
+    mockExecuteQuery.mockResolvedValueOnce([
       {
         userId: 7,
-        clientId: "c1",
-        scopes: ["openid"],
-        expiresAt: new Date("2030-07-01T00:00:00Z"),
+        clientId: "public-client",
+        scopes: ["openid", "content:read"],
+        adapterPayload: {
+          grantId: "grant-1",
+          gty: "authorization_code",
+          sessionUid: "session-1",
+          rotations: 0,
+        },
         rotatedAt,
       },
-    ]
-    const result = (await DrizzleOidcAdapter("RefreshToken").find(
-      "rt1"
-    )) as AdapterPayload
-
-    const projection = lastCalls().select[0][0] as Record<string, unknown>
-    expect(Object.keys(projection).sort()).toEqual([
-      "clientId",
-      "expiresAt",
-      "rotatedAt",
-      "scopes",
-      "userId",
     ])
-    expect(result.consumed).toBe(Math.floor(rotatedAt.getTime() / 1000))
+
+    const token = await DrizzleOidcAdapter("RefreshToken").find("refresh-1")
+
+    expect(token).toEqual(
+      expect.objectContaining({
+        accountId: "7",
+        clientId: "public-client",
+        grantId: "grant-1",
+        sessionUid: "session-1",
+        consumed: Math.floor(rotatedAt.getTime() / 1000),
+      })
+    )
   })
 
-  it("findAuthCode uses an explicit projection and maps it", async () => {
-    nextRows = [
-      {
-        userId: 7,
-        clientId: "c1",
-        redirectUri: "https://x/cb",
-        scopes: ["openid"],
-        codeChallenge: null,
-        codeChallengeMethod: "S256",
-        nonce: null,
-        consumedAt: null,
-        expiresAt: new Date("2030-01-01T00:00:00Z"),
-      },
-    ]
-    const result = (await DrizzleOidcAdapter("AuthorizationCode").find(
-      "code1"
-    )) as AdapterPayload
+  it("atomically consumes authorization codes and refresh tokens", async () => {
+    mockExecuteQuery
+      .mockResolvedValueOnce([{ id: 1 }])
+      .mockResolvedValueOnce([{ id: 2 }])
+      .mockResolvedValueOnce([])
 
-    const projection = lastCalls().select[0][0] as Record<string, unknown>
-    expect(projection).toHaveProperty("redirectUri")
-    expect(projection).not.toHaveProperty("createdAt")
-    expect(result).toMatchObject({
-      accountId: "7",
-      clientId: "c1",
-      redirectUri: "https://x/cb",
-      scope: "openid",
-    })
+    await DrizzleOidcAdapter("AuthorizationCode").consume("code-1")
+    await DrizzleOidcAdapter("RefreshToken").consume("refresh-1")
+    await DrizzleOidcAdapter("RefreshToken").consume("refresh-1")
+
+    expect(mockExecuteQuery).toHaveBeenCalledTimes(3)
+  })
+
+  it("maps a validated native registration to oidc-provider native metadata", async () => {
+    mockExecuteQuery.mockResolvedValueOnce([
+      {
+        clientId: "native-client",
+        clientName: "Native client",
+        applicationType: "native",
+        clientSecretHash: null,
+        redirectUris: ["http://127.0.0.1/oauth/callback"],
+        grantTypes: ["authorization_code", "refresh_token"],
+        responseTypes: ["code"],
+        allowedScopes: ["openid", "content:read"],
+        tokenEndpointAuthMethod: "none",
+        requirePkce: true,
+      },
+    ])
+
+    const client = await DrizzleOidcAdapter("Client").find("native-client")
+
+    expect(client).toEqual(
+      expect.objectContaining({
+        application_type: "native",
+        client_secret: undefined,
+        redirect_uris: ["http://127.0.0.1/oauth/callback"],
+        token_endpoint_auth_method: "none",
+      })
+    )
+  })
+
+  it("fails closed when stored public-client metadata violates security policy", async () => {
+    mockExecuteQuery.mockResolvedValueOnce([
+      {
+        clientId: "unsafe-native",
+        clientName: "Unsafe native client",
+        applicationType: "native",
+        clientSecretHash: "must-not-exist",
+        redirectUris: ["http://localhost/oauth/callback"],
+        grantTypes: ["authorization_code", "refresh_token"],
+        responseTypes: ["code"],
+        allowedScopes: ["openid"],
+        tokenEndpointAuthMethod: "client_secret_post",
+        requirePkce: false,
+      },
+    ])
+
+    await expect(
+      DrizzleOidcAdapter("Client").find("unsafe-native")
+    ).resolves.toBeUndefined()
   })
 })

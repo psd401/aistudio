@@ -1,13 +1,13 @@
 /**
  * OIDC Provider Configuration
- * Configures node-oidc-provider with Drizzle adapter, KMS JWT signing,
- * and AI Studio-specific claims.
+ * Configures node-oidc-provider with the durable Drizzle adapter, shared OIDC
+ * signing keys, and AI Studio-specific claims.
  * Part of Issue #686 - MCP Server + OAuth2/OIDC Provider (Phase 3)
  */
 
 import Provider from "oidc-provider"
 import { DrizzleOidcAdapter } from "./drizzle-adapter"
-import { getJwtSigner } from "./jwt-signer"
+import { getOidcSigningKeySet } from "./oidc-signing-key-store"
 import { getIssuerUrl } from "./issuer-config"
 import { ALL_OAUTH_SCOPES } from "./oauth-scopes"
 import { createLogger } from "@/lib/logger"
@@ -25,6 +25,7 @@ interface OidcProviderOptions {
 // ============================================
 
 let providerInstance: InstanceType<typeof Provider> | null = null
+let providerKeyFingerprint: string | null = null
 
 /**
  * Security guard (#1055): a client-credentials token is stamped
@@ -75,34 +76,24 @@ async function warnIfSystemUserIsAdmin(
 export async function getOidcProvider(
   options?: OidcProviderOptions
 ): Promise<InstanceType<typeof Provider>> {
-  if (providerInstance) return providerInstance
-
   const log = createLogger({ action: "oidcProvider.init" })
-
   const issuer = getIssuerUrl(options?.issuer)
-
-  const signer = await getJwtSigner()
-  const jwk = await signer.getPublicKeyJwk()
-
-  // For node-oidc-provider to issue JWT access tokens (which the API middleware
-  // verifies via JWKS), it must SIGN with a private key whose public half is
-  // served at /api/oauth/jwks. The local signer can export its private JWK; KMS
-  // cannot (returns null), so JWT issuance is gated on having a signing key.
-  // Prod with KMS needs an exportable OIDC signing key — see the Phase 5 runbook.
-  const signingJwk = await signer.getSigningJwk()
-  const canIssueJwtTokens = signingJwk != null
-  if (!canIssueJwtTokens) {
-    log.warn(
-      "OIDC signing key is non-exportable (KMS); JWT access tokens disabled. " +
-        "Client-credentials tokens will be opaque and unverifiable by the API " +
-        "middleware until an exportable OIDC signing key is supplied."
-    )
+  const oidcKeys = await getOidcSigningKeySet()
+  const keyFingerprint = oidcKeys.publicKeys
+    .map((key) => key.kid)
+    .join(":")
+  if (
+    providerInstance &&
+    providerKeyFingerprint === keyFingerprint
+  ) {
+    return providerInstance
   }
 
   log.info("Initializing OIDC provider", {
     issuer,
-    kid: jwk.kid,
-    jwtTokens: canIssueJwtTokens,
+    kid: oidcKeys.activeKid,
+    verificationKeyCount: oidcKeys.publicKeys.length,
+    jwtTokens: true,
   })
 
   // One-time (cached provider) security check for the client-credentials sub.
@@ -123,10 +114,11 @@ export async function getOidcProvider(
     // ==========================================
     // JWKS — signing keys
     // ==========================================
-    // Prefer the PRIVATE signing JWK so oidc-provider can sign JWT access/id
-    // tokens; fall back to the public-only key (no signing) when unavailable.
+    // The active private JWK is first. Retiring private JWKs remain present only
+    // for the bounded overlap window so old tokens verify through the provider's
+    // JWKS endpoint while all new tokens use the active key.
     jwks: {
-      keys: [(signingJwk ?? { ...jwk }) as Record<string, unknown>],
+      keys: oidcKeys.signingKeys as Record<string, unknown>[],
     },
 
     // ==========================================
@@ -139,25 +131,19 @@ export async function getOidcProvider(
       // Atrium Phase 5 (#1055): machine-to-machine grant for autonomous agent
       // service identities (`agent_identities.oauthClientId`).
       clientCredentials: { enabled: true },
-      // JWT access tokens (so the API middleware can verify bearer tokens via
-      // JWKS). Only enabled when we have an exportable signing key; otherwise
-      // tokens stay opaque to avoid an init failure (oidc-provider needs the
-      // private key to sign).
-      ...(canIssueJwtTokens
-        ? {
-            resourceIndicators: {
-              enabled: true,
-              defaultResource: async () => issuer,
-              useGrantedResource: async () => true,
-              getResourceServerInfo: async () => ({
-                scope: ALL_OAUTH_SCOPES.join(" "),
-                audience: issuer,
-                accessTokenTTL: 900,
-                accessTokenFormat: "jwt" as const,
-              }),
-            },
-          }
-        : {}),
+      // OAuth access tokens are always RS256 JWTs for the API issuer/audience.
+      // Initialization fails closed if the shared key set is unavailable.
+      resourceIndicators: {
+        enabled: true,
+        defaultResource: async () => issuer,
+        useGrantedResource: async () => true,
+        getResourceServerInfo: async () => ({
+          scope: ALL_OAUTH_SCOPES.join(" "),
+          audience: issuer,
+          accessTokenTTL: 900,
+          accessTokenFormat: "jwt" as const,
+        }),
+      },
     },
 
     // Stamp a `sub` on client-credentials JWTs (which have no end-user) so the
@@ -191,18 +177,41 @@ export async function getOidcProvider(
       Grant: 86400,
     },
 
-    // Refresh-token rotation (REV-DB-164): node-oidc-provider's built-in default for
-    // `rotateRefreshToken` is NOT `false` — it's a function that rotates refresh tokens
-    // issued to public (`token_endpoint_auth_method: "none"`) clients and tokens nearing
-    // expiry. Since this app supports public/PKCE-only clients, that default would rotate
-    // their refresh tokens, and this adapter's `consume('RefreshToken')` now stamps
-    // `rotated_at` on every consume — so an un-pinned default would mark a public client's
-    // original refresh token as rotated/consumed on first use, breaking any client that
-    // expects to reuse the same refresh token for the full 24h TTL. Pin it to `false`
-    // explicitly so refresh tokens stay single-use-per-TTL, not rotated. The adapter is
-    // correct-by-construction either way: flipping this to a rotating policy later is safe
-    // without further adapter changes, and replay of a rotated token would be detected.
-    rotateRefreshToken: false,
+    // Public clients cannot protect a client secret, so every successful refresh
+    // rotates the token. Replaying a consumed token revokes its full grant family.
+    rotateRefreshToken: (ctx) =>
+      ctx.oidc.client?.clientAuthMethod === "none",
+
+    // Non-standard field documents the access-token profile alongside the
+    // standard grant, PKCE, endpoint, scope, and signing metadata.
+    discovery: {
+      access_token_format: "jwt",
+      access_token_signing_alg_values_supported: ["RS256"],
+    },
+
+    // oidc-provider's structured JWT formatter is intentionally stateless and
+    // otherwise skips Adapter.upsert entirely. Persist the token metadata inside
+    // this awaited formatting hook before signing/returning the JWT. API auth can
+    // then enforce token and client revocation on every request, and a DB failure
+    // fails issuance closed instead of creating an untracked bearer token.
+    formats: {
+      customizers: {
+        async jwt(_ctx, token, jwt) {
+          jwt.payload.token_use = "access"
+          const payload = {
+            ...Object.fromEntries(Object.entries(token)),
+            jti: token.jti,
+            kind: token.kind,
+          }
+          await DrizzleOidcAdapter("AccessToken").upsert(
+            token.jti,
+            payload,
+            token.remainingTTL
+          )
+          return jwt
+        },
+      },
+    },
 
     // ==========================================
     // Claims
@@ -299,6 +308,7 @@ export async function getOidcProvider(
   })
 
   providerInstance = provider
+  providerKeyFingerprint = keyFingerprint
   log.info("OIDC provider initialized")
   return provider
 }

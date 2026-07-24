@@ -14,6 +14,7 @@
  */
 
 const getTextCalls: string[] = [];
+const getTextBoundedCalls: Array<{ key: string; maxBytes: number }> = [];
 
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: jest.fn(async () => []),
@@ -44,6 +45,10 @@ jest.mock("@/lib/content/storage/s3-store", () => ({
     getText: jest.fn(async (key: string) => {
       getTextCalls.push(key);
       return `S3_CODE_FOR(${key})`;
+    }),
+    getTextBounded: jest.fn(async (key: string, maxBytes: number) => {
+      getTextBoundedCalls.push({ key, maxBytes });
+      return key.endsWith("source.md") ? "# Document source" : "LARGE_ARTIFACT";
     }),
   },
 }));
@@ -76,6 +81,57 @@ function makeVersion(overrides: Partial<ContentVersionDTO>): ContentVersionDTO {
 
 beforeEach(() => {
   getTextCalls.length = 0;
+  getTextBoundedCalls.length = 0;
+});
+
+describe("versionService.loadSource (#1288)", () => {
+  it("returns an inline artifact with a stable base64url SHA-256", async () => {
+    const source = await versionService.loadSource(
+      makeVersion({
+        id: "v-inline",
+        bodyInline: "<h1>inline</h1>",
+      })
+    );
+    expect(source).toEqual({
+      objectId: "obj-1",
+      versionId: "v-inline",
+      versionNumber: 1,
+      bodyFormat: "html",
+      body: "<h1>inline</h1>",
+      sha256: "zCqkvNuKD8g7gdf7skXMgGiYnK72rHAbEbLSb6F-h6w",
+    });
+    expect(getTextBoundedCalls).toHaveLength(0);
+  });
+
+  it("reads a document from its deterministic immutable source.md snapshot", async () => {
+    const source = await versionService.loadSource(
+      makeVersion({
+        id: "v-doc",
+        objectId: "doc-1",
+        versionNumber: 4,
+        bodyFormat: "markdown",
+        bodyLocation: "proof",
+      })
+    );
+    expect(source.body).toBe("# Document source");
+    expect(getTextBoundedCalls[0]?.key).toBe(
+      "atrium/objects/doc-1/v4/source.md"
+    );
+  });
+
+  it("reads a non-inline artifact through the bounded storage path", async () => {
+    const key = "atrium/objects/obj-1/v7/artifact.jsx";
+    const source = await versionService.loadSource(
+      makeVersion({
+        id: "v-large",
+        versionNumber: 7,
+        bodyFormat: "jsx",
+        bodyLocation: key,
+      })
+    );
+    expect(source.body).toBe("LARGE_ARTIFACT");
+    expect(getTextBoundedCalls[0]?.key).toBe(key);
+  });
 });
 
 describe("versionService.loadArtifactCode", () => {

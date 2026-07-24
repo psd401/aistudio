@@ -63,6 +63,11 @@ import {
   VIDEO_CLASS,
   isSafeMediaUrl,
 } from "../block-directives";
+import {
+  CONTENT_ASSET_DIRECTIVE_NAME,
+  contentAssetBytesPath,
+  parseContentAssetDirectiveAttrs,
+} from "../asset-directive";
 
 // NOTE: `sanitizeHtml` lives in ./html-sanitize (DOMPurify + jsdom). It is
 // intentionally NOT re-exported here: this module is imported by version-service
@@ -98,6 +103,22 @@ type DirectiveNode = {
  * stays a thin walker (keeps that closure's cyclomatic complexity low).
  */
 function applyAtriumDirective(node: DirectiveNode): void {
+  if (node.name === CONTENT_ASSET_DIRECTIVE_NAME) {
+    const attrs = Object.entries(node.attributes ?? {})
+      .map(([name, value]) => `${name}="${value ?? ""}"`)
+      .join(" ");
+    const asset = parseContentAssetDirectiveAttrs(attrs);
+    const src = asset ? contentAssetBytesPath(asset.assetId) : null;
+    if (!asset || !src) return;
+    const data = (node.data ??= {});
+    data.hName = "img";
+    data.hProperties = {
+      src,
+      alt: asset.alt,
+      "data-atrium-asset-id": asset.assetId,
+    };
+    return;
+  }
   if (node.name === "callout" || node.name === "warn") {
     const data = (node.data ??= {});
     data.hName = node.type === "textDirective" ? "span" : "div";
@@ -203,6 +224,10 @@ const sanitizeSchema: typeof defaultSchema = {
     span: [...(defaultSchema.attributes?.span ?? []), classAllow],
     div: [...(defaultSchema.attributes?.div ?? []), classAllow],
     video: [classAllow, "src", "controls", "preload", "playsinline", "poster", "width", "height"],
+    img: [
+      ...(defaultSchema.attributes?.img ?? []),
+      "data-atrium-asset-id",
+    ],
   },
 };
 

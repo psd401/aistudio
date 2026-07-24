@@ -18,12 +18,15 @@ import {
 import { z } from "zod";
 import {
   ApprovalRequiredError,
+  contentHeadEtag,
   hasPublishPublicScope,
+  parseContentIfMatch,
   publishService,
   recordContentAudit,
+  runIdempotentMutation,
 } from "@/lib/content";
 import {
-  contentErrorToResponse,
+  contentIdempotentMutationErrorToResponse,
   resolveRestRequester,
   respondApprovalRequired,
   restVisibilitySchema,
@@ -53,6 +56,15 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
   const parsedBody = await parseRequestBody(request, publishBodySchema, requestId);
   if (parsedBody instanceof Response) return parsedBody;
   const input = parsedBody.data;
+  const precondition = parseContentIfMatch(request.headers.get("if-match"));
+  if (!precondition.ok) {
+    return createErrorResponse(
+      requestId,
+      400,
+      "INVALID_IF_MATCH",
+      'If-Match must be a single strong ETag containing a version id or "none"'
+    );
+  }
 
   const resolved = await resolveRestRequester(auth, requestId);
   if ("response" in resolved) return resolved.response;
@@ -64,62 +76,89 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
   // gate) — admin humans still pass via req.isAdmin inside the service.
   const hasPublishPublicCapability = hasPublishPublicScope(auth.scopes);
 
-  try {
-    // Session humans must also hold the atrium-content capability (see helper).
-    await assertContentAuthoringCapability(auth);
-    const result = await publishService.publish(
-      req,
-      id,
-      { destination: input.destination, visibility: input.visibility },
-      { hasPublishPublicCapability }
-    );
-    void recordContentAudit({
-      req,
-      action: "publish",
-      surface: "rest",
-      objectId: id,
-      destination: input.destination,
-      outcome: "ok",
+  return runIdempotentMutation(
+    {
+      request,
+      auth,
       requestId,
-    });
-    log.info("Published via REST", { objectId: id, destination: input.destination });
-    return createApiResponse(
-      {
-        data: {
-          id,
-          destination: input.destination,
-          publishedVersionId: result.publishedVersionId,
-        },
-        meta: { requestId },
+      canonicalRoute: `/api/v1/content/${id}/publish`,
+      requestValue: {
+        body: input,
+        ifMatch:
+          precondition.expectedVersionId ??
+          (precondition.expectedVersionId === null ? "none" : undefined),
       },
-      requestId
-    );
-  } catch (err) {
-    // The §26.4 gate: an unauthorized public publish is not an error but a
-    // structured approval signal (202) that drives the review queue.
-    if (err instanceof ApprovalRequiredError) {
-      log.info("Public publish requires approval", {
-        objectId: id,
-        destination: input.destination,
-      });
-      return respondApprovalRequired(err, {
-        req,
-        action: "publish",
-        objectId: id,
-        destination: input.destination,
-        requestId,
-      });
+    },
+    async () => {
+      try {
+        // Session humans must also hold the atrium-content capability.
+        await assertContentAuthoringCapability(auth);
+        const result = await publishService.publish(
+          req,
+          id,
+          { destination: input.destination, visibility: input.visibility },
+          {
+            hasPublishPublicCapability,
+            expectedVersionId: precondition.expectedVersionId,
+          }
+        );
+        void recordContentAudit({
+          req,
+          action: "publish",
+          surface: "rest",
+          objectId: id,
+          destination: input.destination,
+          outcome: "ok",
+          requestId,
+        });
+        log.info("Published via REST", {
+          objectId: id,
+          destination: input.destination,
+        });
+        const response = createApiResponse(
+          {
+            data: {
+              id,
+              destination: input.destination,
+              publishedVersionId: result.publishedVersionId,
+            },
+            meta: { requestId },
+          },
+          requestId
+        );
+        response.headers.set(
+          "ETag",
+          contentHeadEtag(result.publishedVersionId)
+        );
+        return response;
+      } catch (err) {
+        // The §26.4 gate: an unauthorized public publish is not an error but a
+        // structured approval signal (202) that drives the review queue.
+        if (err instanceof ApprovalRequiredError) {
+          log.info("Public publish requires approval", {
+            objectId: id,
+            destination: input.destination,
+          });
+          return respondApprovalRequired(err, {
+            req,
+            action: "publish",
+            objectId: id,
+            destination: input.destination,
+            requestId,
+          });
+        }
+        void recordContentAudit({
+          req,
+          action: "publish",
+          surface: "rest",
+          objectId: id,
+          destination: input.destination,
+          outcome: "error",
+          error: err instanceof Error ? err.message : String(err),
+          requestId,
+        });
+        return contentIdempotentMutationErrorToResponse(err, requestId);
+      }
     }
-    void recordContentAudit({
-      req,
-      action: "publish",
-      surface: "rest",
-      objectId: id,
-      destination: input.destination,
-      outcome: "error",
-      error: err instanceof Error ? err.message : String(err),
-      requestId,
-    });
-    return contentErrorToResponse(err, requestId);
-  }
+  );
 });

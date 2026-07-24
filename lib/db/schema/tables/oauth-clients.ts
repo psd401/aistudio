@@ -15,11 +15,16 @@ import {
 } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 import { users } from "./users"
+import type { OAuthApplicationType } from "@/lib/oauth/redirect-uri-policy"
 
 export const oauthClients = pgTable("oauth_clients", {
   id: serial("id").primaryKey(),
   clientId: varchar("client_id", { length: 255 }).notNull().unique(),
   clientName: varchar("client_name", { length: 255 }).notNull(),
+  applicationType: varchar("application_type", { length: 32 })
+    .$type<OAuthApplicationType>()
+    .notNull()
+    .default("web"),
   clientSecretHash: varchar("client_secret_hash", { length: 255 }),
   redirectUris: jsonb("redirect_uris").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
   allowedScopes: jsonb("allowed_scopes").$type<string[]>().notNull().default(sql`'[]'::jsonb`),

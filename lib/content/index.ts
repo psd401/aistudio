@@ -11,9 +11,29 @@
 export { contentService } from "./content-service";
 export type { DeletedContentSummary } from "./content-service";
 export { versionService } from "./version-service";
+export {
+  contentSourceService,
+  contentSourceEtag,
+  ifNoneMatchIncludes,
+} from "./source-read";
 export { visibilityService } from "./visibility-service";
 export { collectionService } from "./collection-service";
 export type { CollectionTreeNode } from "./collection-service";
+export {
+  cleanupExpiredContentAssets,
+  contentAssetService,
+} from "./asset-service";
+export type {
+  ContentAssetDTO,
+  InitiateContentAssetInput,
+  InitiatedContentAsset,
+} from "./asset-service";
+export {
+  contentAssetBytesPath,
+  parseContentAssetDirectiveAttrs,
+  parseContentAssetIds,
+  serializeContentAssetDirective,
+} from "./asset-directive";
 export { navItemService } from "./nav-item-service";
 export type { NavObject } from "./nav-item-service";
 export { publishService } from "./publish-service";
@@ -62,9 +82,20 @@ export {
   NotFoundError,
   ValidationError,
   ConflictError,
+  VersionPreconditionFailedError,
+  StorageError,
   ApprovalRequiredError,
   isContentError,
 } from "./errors";
+
+export {
+  cleanupExpiredContentIdempotencyRecords,
+  contentHeadEtag,
+  hashIdempotencyRequest,
+  parseContentIfMatch,
+  runIdempotentMutation,
+  validateIdempotencyKey,
+} from "./idempotency";
 
 export {
   assertCanCreate,
@@ -94,4 +125,5 @@ export type {
   ContentObjectDTO,
   ContentVersionDTO,
   ContentObjectWithVersion,
+  ContentSourceDTO,
 } from "./types";

@@ -31,6 +31,11 @@ export const oauthAuthorizationCodes = pgTable("oauth_authorization_codes", {
   codeChallenge: varchar("code_challenge", { length: 128 }),
   codeChallengeMethod: varchar("code_challenge_method", { length: 10 }).default("S256"),
   nonce: varchar("nonce", { length: 255 }),
+  grantId: varchar("grant_id", { length: 255 }),
+  adapterPayload: jsonb("adapter_payload")
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
   consumedAt: timestamp("consumed_at", { withTimezone: true }),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

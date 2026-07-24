@@ -155,6 +155,9 @@ Comprehensive checklist for deploying to production.
 #### [operations/tool-management.md](./operations/tool-management.md)
 Managing Assistant Architect tools and permissions.
 
+#### [operations/oauth-signing-keys.md](./operations/oauth-signing-keys.md)
+OIDC signing-key architecture, provisioning, rotation, health checks, and incident response.
+
 ### API Documentation
 
 #### [API/AI_SDK_PATTERNS.md](./API/AI_SDK_PATTERNS.md)

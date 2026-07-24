@@ -18,6 +18,7 @@ import {
 import { z } from "zod";
 import {
   contentService,
+  contentHeadEtag,
   recordContentAudit,
   requesterFromApiAuth,
 } from "@/lib/content";
@@ -56,10 +57,12 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId, par
   try {
     const req = await requesterFromApiAuth(auth);
     const obj = await contentService.get(req, id);
-    return createApiResponse(
+    const response = createApiResponse(
       { data: { ...obj, url: contentDeepLink(obj.slug) }, meta: { requestId } },
       requestId
     );
+    response.headers.set("ETag", contentHeadEtag(obj.currentVersionId));
+    return response;
   } catch (err) {
     return contentErrorToResponse(err, requestId);
   }

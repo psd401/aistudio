@@ -87,30 +87,42 @@ const art = { id: "o2", kind: "artifact" as const };
 // snapshotInTx's 5th parameter — `assertScreened` returns before inspecting it for
 // a non-agent requester. (Agent-writer proof enforcement is covered separately in
 // the agent-screening tests.)
-const noProof = {} as unknown as Parameters<typeof snapshotInTx>[4];
+const noProof = {} as unknown as Parameters<typeof snapshotInTx>[4]["proof"];
 
 describe("snapshotInTx body-format validation", () => {
   it("rejects an empty body", async () => {
-    await expect(snapshotInTx(tx, req, doc, { body: "" }, noProof)).rejects.toThrow(
-      ValidationError
-    );
+    await expect(
+      snapshotInTx(tx, req, doc, { body: "" }, { proof: noProof })
+    ).rejects.toThrow(ValidationError);
   });
 
   it("rejects a whitespace-only body", async () => {
     await expect(
-      snapshotInTx(tx, req, doc, { body: "   \n\t " }, noProof)
+      snapshotInTx(tx, req, doc, { body: "   \n\t " }, { proof: noProof })
     ).rejects.toThrow(ValidationError);
   });
 
   it("rejects a document with a non-markdown bodyFormat", async () => {
     await expect(
-      snapshotInTx(tx, req, doc, { body: "<h1>hi</h1>", bodyFormat: "html" }, noProof)
+      snapshotInTx(
+        tx,
+        req,
+        doc,
+        { body: "<h1>hi</h1>", bodyFormat: "html" },
+        { proof: noProof }
+      )
     ).rejects.toThrow(/Documents must use bodyFormat 'markdown'/);
   });
 
   it("rejects an artifact with a markdown bodyFormat", async () => {
     await expect(
-      snapshotInTx(tx, req, art, { body: "# code", bodyFormat: "markdown" }, noProof)
+      snapshotInTx(
+        tx,
+        req,
+        art,
+        { body: "# code", bodyFormat: "markdown" },
+        { proof: noProof }
+      )
     ).rejects.toThrow(/Artifacts must use bodyFormat 'html' or 'jsx'/);
   });
 });
@@ -129,7 +141,7 @@ describe("snapshotInTx human author-id invariant", () => {
 
   it("rejects a guest (null userId) human author with a valid body", async () => {
     await expect(
-      snapshotInTx(tx, guest, doc, { body: "# hello" }, noProof)
+      snapshotInTx(tx, guest, doc, { body: "# hello" }, { proof: noProof })
     ).rejects.toThrow(ForbiddenError);
   });
 });

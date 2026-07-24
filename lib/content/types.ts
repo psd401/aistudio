@@ -237,3 +237,14 @@ export interface SnapshotInput {
   bodyFormat?: BodyFormat;
   summary?: string;
 }
+
+/** Exact canonical source for one committed immutable content version. */
+export interface ContentSourceDTO {
+  objectId: string;
+  versionId: string;
+  versionNumber: number;
+  bodyFormat: BodyFormat;
+  body: string;
+  /** SHA-256 of the UTF-8 body, encoded as base64url. */
+  sha256: string;
+}

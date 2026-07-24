@@ -104,6 +104,14 @@ export class StorageStack extends cdk.Stack {
           tagFilters: { 'aistudio-upload-state': 'temporary' },
           expiration: cdk.Duration.days(1),
         },
+        {
+          // Completion copies only normalized image bytes into the permanent
+          // object namespace. Reap abandoned raw Atrium uploads after one day.
+          id: 'AtriumPendingAssetCleanup',
+          enabled: true,
+          prefix: 'atrium/pending-assets/',
+          expiration: cdk.Duration.days(1),
+        },
       ],
     });
 

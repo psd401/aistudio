@@ -99,6 +99,27 @@ check("preserves https: img src", () => {
   assert.match(html, /src="https:\/\/example\.com\/x\.png"/);
 });
 
+check("renders an authored asset directive to its same-origin immutable reader", () => {
+  const id = "11111111-2222-4333-8444-555555555555";
+  const html = renderMarkdownToHtml(
+    `::atrium-asset{id="${id}" alt="Enrollment chart"}`
+  );
+  assert.match(
+    html,
+    new RegExp(`/api/v1/content/assets/${id}/bytes`)
+  );
+  assert.match(html, /alt="Enrollment chart"/);
+  assert.match(html, new RegExp(`data-atrium-asset-id="${id}"`));
+});
+
+check("malformed authored asset directives never emit an image", () => {
+  const html = renderMarkdownToHtml(
+    '::atrium-asset{id="../../private-key" alt="bad"}'
+  );
+  assert.doesNotMatch(html, /<img/i);
+  assert.doesNotMatch(html, /private-key/i);
+});
+
 check("empty input -> empty string", () => {
   assert.equal(renderMarkdownToHtml(""), "");
 });

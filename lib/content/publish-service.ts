@@ -45,7 +45,11 @@ import { visibilityService } from "./visibility-service";
 import { versionService } from "./version-service";
 import { retrievalService } from "./retrieval-service";
 import { contentEvents } from "./events";
-import { NotFoundError, ValidationError } from "./errors";
+import {
+  NotFoundError,
+  ValidationError,
+  VersionPreconditionFailedError,
+} from "./errors";
 import {
   isPublicDestination,
   type PublishAdapter,
@@ -113,6 +117,77 @@ interface PublishableObject {
   slug: string;
   title: string;
   collectionId: string | null;
+}
+
+function assertVersionPrecondition(
+  expectedVersionId: string | null | undefined,
+  currentVersionId: string | null
+): void {
+  if (
+    expectedVersionId !== undefined &&
+    currentVersionId !== expectedVersionId
+  ) {
+    throw new VersionPreconditionFailedError(
+      expectedVersionId,
+      currentVersionId
+    );
+  }
+}
+
+async function raiseDestinationPublishApproval(
+  txInput: {
+    req: Requester;
+    objectId: string;
+    slug: string;
+    destination: PublishDestination;
+    publishedVersionId: string;
+    wantsPublicWiden: boolean;
+  },
+  expectedVersionId: string | null | undefined
+): Promise<never> {
+  const raiseApproval = (): never =>
+    raisePublishApprovalRequired(
+      txInput.req,
+      "Publishing to a public destination requires approval",
+      {
+        objectId: txInput.objectId,
+        slug: txInput.slug,
+        destination: txInput.destination,
+      },
+      {
+        destination: txInput.destination,
+        objectId: txInput.objectId,
+        versionId: txInput.publishedVersionId,
+        wantsPublicWiden: txInput.wantsPublicWiden,
+      }
+    );
+
+  if (expectedVersionId === undefined) return raiseApproval();
+  await executeTransaction(
+    async (tx: DbTransaction) => {
+      const locked = await tx
+        .select({
+          id: contentObjects.id,
+          currentVersionId: contentObjects.currentVersionId,
+        })
+        .from(contentObjects)
+        .where(eq(contentObjects.id, txInput.objectId))
+        .for("update")
+        .limit(1);
+      if (!locked[0]) {
+        throw new NotFoundError("Content not found", {
+          objectId: txInput.objectId,
+        });
+      }
+      assertVersionPrecondition(
+        expectedVersionId,
+        locked[0].currentVersionId
+      );
+      return raiseApproval();
+    },
+    "publish.queueApprovalWithVersionPrecondition"
+  );
+  return raiseApproval();
 }
 
 /** Load the publish-relevant columns for an object, or null when absent. */
@@ -368,7 +443,10 @@ export const publishService = {
      * `content.publish_public` capability into the §26.4 gate; API/MCP surfaces
      * omit it (agents are scope-gated, admins pass via `req.isAdmin`).
      */
-    opts: { hasPublishPublicCapability?: boolean } = {}
+    opts: {
+      hasPublishPublicCapability?: boolean;
+      expectedVersionId?: string | null;
+    } = {}
   ): Promise<{ publicationId: string; publishedVersionId: string }> {
     const log = createLogger({ action: "publish.publish" });
 
@@ -393,6 +471,14 @@ export const publishService = {
       throw new NotFoundError("Content not found", { objectId });
     }
     assertCanEdit(req, obj.ownerUserId);
+
+    // Fast preflight for normal API callers. Approval replays omit this option
+    // because their explicit input.versionId intentionally pins an older,
+    // reviewed version.
+    assertVersionPrecondition(
+      opts.expectedVersionId,
+      obj.currentVersionId
+    );
 
     // Whether this caller holds the §26.4 public-publish authority (pure, no IO).
     const mayPublishPublic = canPublishPublic(
@@ -437,21 +523,19 @@ export const publishService = {
     // a concurrent narrow (public → internal) between a pre-read and the locked
     // write would skip the gate on a real widen-back.
     if (isPublicDestination(input.destination) && !mayPublishPublic) {
-      raisePublishApprovalRequired(
-        req,
-        "Publishing to a public destination requires approval",
-        { objectId, slug: obj.slug, destination: input.destination },
+      // If the caller supplied If-Match, make the approval decision against a
+      // locked head too. Otherwise a version could advance after preflight but
+      // before the durable request is raised.
+      await raiseDestinationPublishApproval(
         {
+          req,
           destination: input.destination,
           objectId,
-          // Pin the raise-time head so approve publishes the REVIEWED version
-          // even after later edits (#1118 item 1).
-          versionId: publishedVersionId,
-          // Record the caller's bundled widen so approve applies it too, and the
-          // approve message is accurate (#1118 item 5) — the pre-tx gate is the
-          // one site that would otherwise drop the widen intent.
+          slug: obj.slug,
+          publishedVersionId,
           wantsPublicWiden: input.visibility?.level === "public",
-        }
+        },
+        opts.expectedVersionId
       );
     }
 
@@ -473,6 +557,7 @@ export const publishService = {
           .select({
             id: contentObjects.id,
             visibilityLevel: contentObjects.visibilityLevel,
+            currentVersionId: contentObjects.currentVersionId,
           })
           .from(contentObjects)
           .where(eq(contentObjects.id, objectId))
@@ -481,6 +566,10 @@ export const publishService = {
         if (!locked[0]) {
           throw new NotFoundError("Content not found", { objectId });
         }
+        assertVersionPrecondition(
+          opts.expectedVersionId,
+          locked[0].currentVersionId
+        );
 
         // §26.4 gate — PART 2 (visibility widen), evaluated HERE against the locked
         // row's CURRENT visibility so it is race-free: a widen to `public` is gated

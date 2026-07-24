@@ -1378,6 +1378,8 @@ paths:
         `visibilityLevel` field for the same reason.
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKeyHeader"
       requestBody:
         required: true
         content:
@@ -1396,6 +1398,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ContentObjectResponse"
           headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/Idempotency-Replayed"
             X-Request-Id:
               $ref: "#/components/headers/X-Request-Id"
             X-RateLimit-Limit:
@@ -1412,6 +1416,58 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/ContentConflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /content/collections:
+    get:
+      operationId: discoverContentCollections
+      tags: [Content]
+      summary: Discover requester-visible Atrium collections
+      description: |
+        Returns exactly the permission-filtered collection hierarchy used by the
+        Atrium reader. Hidden/private collection names and global counts are never
+        loaded into the client. Requires `content:read`.
+
+        `shape=tree` (default) returns nested children. `shape=flat` returns the
+        same stable pre-order without `children`, retaining each node's display
+        `path`. When the caller also holds `content:create`,
+        `selectableForCreate` is included so an external picker can select a
+        destination without hard-coded slugs or ids.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: shape
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [tree, flat]
+            default: tree
+      responses:
+        "200":
+          description: Requester-visible collections in stable Atrium order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionDiscoveryResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -1440,6 +1496,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ContentObjectResponse"
           headers:
+            ETag:
+              $ref: "#/components/headers/ContentHeadETag"
             X-Request-Id:
               $ref: "#/components/headers/X-Request-Id"
             X-RateLimit-Limit:
@@ -1636,6 +1694,9 @@ paths:
         tool. Requires `content:update`.
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKeyHeader"
+        - $ref: "#/components/parameters/contentIfMatchHeader"
       requestBody:
         required: true
         content:
@@ -1650,6 +1711,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/ContentObjectResponse"
           headers:
+            ETag:
+              $ref: "#/components/headers/ContentHeadETag"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/Idempotency-Replayed"
             X-Request-Id:
               $ref: "#/components/headers/X-Request-Id"
             X-RateLimit-Limit:
@@ -1668,10 +1733,344 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/ContentConflict"
+        "412":
+          $ref: "#/components/responses/VersionPreconditionFailed"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /content/{id}/source:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+    get:
+      operationId: getCurrentContentSource
+      tags: [Content]
+      summary: Read the current committed source snapshot
+      description: |
+        Returns the exact canonical UTF-8 source of the current committed version.
+        This is an immutable snapshot alias, not unsnapshotted live collaborative
+        state. Requires `content:read`; object visibility is checked before storage.
+        Missing and unviewable objects both return `404`.
+
+        The strong `ETag` is the current version id. `If-None-Match` returns `304`
+        when the head has not changed. Because the alias can advance and permissions
+        can change, responses use `Cache-Control: private, no-store`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Current canonical source.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentSourceResponse"
+          headers:
+            ETag:
+              schema: { type: string }
+              description: Quoted current version id.
+            Cache-Control:
+              schema: { type: string, example: "private, no-store" }
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+        "304":
+          description: The current head matches `If-None-Match`; no body.
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ContentStorageUnavailable"
+
+  /content/{id}/assets:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+    get:
+      operationId: listContentAssets
+      tags: [Content]
+      summary: List authored asset metadata
+      description: |
+        Lists the object's authored raster assets after enforcing normal object
+        visibility. Storage keys are never returned. Requires `content:read`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      responses:
+        "200":
+          description: Permission-checked asset metadata in creation order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentAssetListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: initiateContentAsset
+      tags: [Content]
+      summary: Initiate an immutable authored raster upload
+      description: |
+        Reserves an asset and returns a 15-minute presigned S3 `PUT` URL.
+        The caller must send the exact returned `Content-Type` and
+        `x-amz-checksum-sha256` headers. The untrusted upload lands in a
+        temporary namespace and is never served. Requires `content:update` plus
+        object edit permission; session callers also require the Atrium content
+        capability.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InitiateContentAssetRequest"
+      responses:
+        "201":
+          description: Upload reservation and constrained direct-upload request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InitiatedContentAssetResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ContentStorageUnavailable"
+
+  /content/{id}/assets/{assetId}:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+      - $ref: "#/components/parameters/contentAssetIdPath"
+    get:
+      operationId: getContentAsset
+      tags: [Content]
+      summary: Get authored asset metadata
+      description: |
+        Returns masked, permission-checked metadata for an asset belonging to
+        the object. Storage keys and upload credentials are never returned.
+        Requires `content:read`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      responses:
+        "200":
+          description: Authored asset metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentAssetResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /content/{id}/assets/{assetId}/complete:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+      - $ref: "#/components/parameters/contentAssetIdPath"
+    post:
+      operationId: completeContentAsset
+      tags: [Content]
+      summary: Validate and complete an authored raster upload
+      description: |
+        Reads the temporary upload, verifies exact bytes and SHA-256, verifies
+        MIME signature and decodability, enforces dimension/pixel/frame limits,
+        strips metadata, and writes normalized bytes to the immutable asset
+        namespace. Completion is idempotent after the asset reaches `ready`.
+        Requires `content:update` plus object edit permission; session callers
+        also require the Atrium content capability.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompleteContentAssetRequest"
+      responses:
+        "200":
+          description: Ready, immutable asset metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentAssetResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ContentStorageUnavailable"
+
+  /content/assets/{assetId}/bytes:
+    parameters:
+      - $ref: "#/components/parameters/contentAssetIdPath"
+    get:
+      operationId: getContentAssetBytes
+      tags: [Content]
+      summary: Read normalized authored asset bytes
+      description: |
+        Same-origin raster reader. Authenticated callers must be in the
+        containing object's current audience. An anonymous caller receives bytes
+        only when the asset is pinned by the exact version in a live
+        `public_web` publication whose object is currently public. Every other
+        absent, private, unpublished, unready, or unreferenced case is masked as
+        `404`. Only normalized PNG/JPEG/WebP bytes are served; temporary uploads
+        and storage keys are never exposed.
+      security:
+        - {}
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Permission-checked normalized raster bytes.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema:
+                { type: string, example: "private, no-store" }
+            X-Content-Type-Options:
+              schema: { type: string, enum: [nosniff] }
+        "304":
+          description: The normalized byte digest matches `If-None-Match`.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ContentStorageUnavailable"
+
+  /content/{id}/versions/{versionId}/source:
+    parameters:
+      - $ref: "#/components/parameters/contentIdPath"
+      - name: versionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getContentVersionSource
+      tags: [Content]
+      summary: Read a specific immutable version source
+      description: |
+        Returns the exact canonical UTF-8 source for one retained version. The
+        version id is scoped to `{id}`; a version from another object returns the
+        same `404` as an absent version. Requires `content:read` and checks object
+        visibility before version/storage access.
+
+        The strong `ETag` is the immutable version id. Clients may revalidate with
+        `If-None-Match`; the response is private and must revalidate so a later
+        visibility revocation is enforced. Bodies are never redirected to S3.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Specific immutable canonical source.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentSourceResponse"
+          headers:
+            ETag:
+              schema: { type: string }
+              description: Quoted immutable version id.
+            Cache-Control:
+              schema:
+                {
+                  type: string,
+                  example: "private, no-cache, must-revalidate",
+                }
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+        "304":
+          description: The version matches `If-None-Match`; no body.
+          headers:
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ContentStorageUnavailable"
 
   /content/{id}/visibility:
     parameters:
@@ -1766,8 +2165,16 @@ paths:
         requested by a caller lacking `content:publish_public` is NOT an error —
         it returns **HTTP 202** with `data.status = "approval_required"` and the
         request enters the review queue instead of publishing.
+
+        Supply the strong ETag returned by `GET /content/{id}` as `If-Match`
+        to ensure the same current version is still being published. A stale
+        precondition returns `412 VERSION_PRECONDITION_FAILED` without
+        publishing or queuing approval.
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKeyHeader"
+        - $ref: "#/components/parameters/contentIfMatchHeader"
       requestBody:
         required: true
         content:
@@ -1782,6 +2189,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/ContentPublishResponse"
           headers:
+            ETag:
+              $ref: "#/components/headers/ContentHeadETag"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/Idempotency-Replayed"
             X-Request-Id:
               $ref: "#/components/headers/X-Request-Id"
             X-RateLimit-Limit:
@@ -1799,6 +2210,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ContentApprovalRequiredResponse"
           headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/Idempotency-Replayed"
             X-Request-Id:
               $ref: "#/components/headers/X-Request-Id"
             X-RateLimit-Limit:
@@ -1815,6 +2228,10 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
+        "412":
+          $ref: "#/components/responses/VersionPreconditionFailed"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -2261,6 +2678,15 @@ components:
         type: string
         format: uuid
 
+    contentAssetIdPath:
+      name: assetId
+      in: path
+      required: true
+      description: Immutable authored asset UUID
+      schema:
+        type: string
+        format: uuid
+
     publishDestinationPath:
       name: destination
       in: path
@@ -2272,6 +2698,37 @@ components:
       schema:
         type: string
         enum: [intranet, public_web, schoology, google]
+
+    idempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Opaque 1-255 character visible-ASCII key. The server scopes it to the
+        deployment environment, authenticated principal, OAuth/API client,
+        method, and canonical route for seven days. Repeating the same request
+        replays the original response; reusing it for different input returns
+        `409 IDEMPOTENCY_KEY_REUSED`. Terminal responses below HTTP 500 are
+        retained. A returned 5xx releases its reservation so the same key can
+        retry; an interrupted execution remains pending to prevent a duplicate
+        mutation.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+
+    contentIfMatchHeader:
+      name: If-Match
+      in: header
+      required: false
+      description: |
+        Optimistic concurrency precondition for version creation or publishing.
+        Supply the strong ETag returned by `GET /content/{id}` or `"none"` when
+        the object must not yet have a version. A stale value returns
+        `412 VERSION_PRECONDITION_FAILED` before content screening or mutation.
+      schema:
+        type: string
+        example: '"11111111-2222-4333-8444-555555555555"'
 
   # ---- Headers ----
   headers:
@@ -2295,6 +2752,16 @@ components:
       schema:
         type: integer
         example: 1706832060
+    ContentHeadETag:
+      description: Strong ETag containing the current content version id, or `"none"`.
+      schema:
+        type: string
+        example: '"11111111-2222-4333-8444-555555555555"'
+    Idempotency-Replayed:
+      description: Present and `true` when a stored mutation response was replayed.
+      schema:
+        type: string
+        enum: ["true"]
 
   # ---- Schemas ----
   schemas:
@@ -2983,6 +3450,71 @@ components:
         value:
           type: string
 
+    CollectionDiscoveryNode:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - slug
+        - parentId
+        - path
+        - defaultVisibilityLevel
+        - visibleObjectCount
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        path:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        defaultVisibilityLevel:
+          type: string
+          enum: [private, group, internal, public]
+        visibleObjectCount:
+          type: integer
+          minimum: 0
+          description: Objects in this collection visible to this requester.
+        selectableForCreate:
+          type: boolean
+          description: Present when the token also holds `content:create`.
+        children:
+          type: array
+          description: Present for `shape=tree`; omitted for `shape=flat`.
+          items:
+            $ref: "#/components/schemas/CollectionDiscoveryNode"
+
+    CollectionDiscoveryResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionDiscoveryNode"
+        meta:
+          type: object
+          required: [requestId, shape, count]
+          properties:
+            requestId:
+              type: string
+            shape:
+              type: string
+              enum: [tree, flat]
+            count:
+              type: integer
+              minimum: 0
+
     ContentObject:
       type: object
       description: A serialized Atrium content object (timestamps are ISO-8601 strings).
@@ -3029,10 +3561,10 @@ components:
           format: uuid
           nullable: true
         sourceRef:
-          type: object
-          nullable: true
-          additionalProperties: true
-          description: Provenance reference for content created from another source.
+          oneOf:
+            - $ref: "#/components/schemas/ContentSourceRef"
+            - type: "null"
+          description: Typed, create-only provenance reference.
         tags:
           type: array
           items:
@@ -3052,6 +3584,82 @@ components:
           type: string
           format: date-time
           nullable: true
+
+    ContentSourceRef:
+      oneOf:
+        - $ref: "#/components/schemas/CaptureSourceRef"
+        - type: object
+          additionalProperties: false
+          required: [type, uploadId, filename]
+          properties:
+            type: { type: string, enum: [upload] }
+            uploadId: { type: string, maxLength: 200 }
+            filename: { type: string, maxLength: 500 }
+        - type: object
+          additionalProperties: false
+          required: [type, objectId]
+          properties:
+            type: { type: string, enum: [object] }
+            objectId: { type: string, format: uuid }
+        - type: object
+          additionalProperties: false
+          required: [type, conversationId]
+          properties:
+            type: { type: string, enum: [chat] }
+            conversationId: { type: string, format: uuid }
+        - type: object
+          additionalProperties: false
+          required: [type, generator]
+          properties:
+            type: { type: string, enum: [okf] }
+            generator: { type: string, maxLength: 200 }
+        - type: object
+          additionalProperties: false
+          required: [type]
+          properties:
+            type: { type: string, enum: [none] }
+      discriminator:
+        propertyName: type
+
+    CaptureSourceRef:
+      type: object
+      additionalProperties: false
+      required:
+        [type, provider, externalId, clientSurface, clientVersion, capturedAt]
+      description: |
+        Safe content-level provenance supplied by Atrium Capture. `sourceOrigins`
+        is optional and policy-controlled; each entry is normalized to its
+        HTTP(S) origin, so paths, queries, fragments, and credentials are never
+        retained. The reference is immutable after create.
+      properties:
+        type: { type: string, enum: [capture] }
+        provider:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        externalId:
+          type: string
+          minLength: 1
+          maxLength: 200
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        clientSurface:
+          type: string
+          enum: [browser, mac]
+        clientVersion:
+          type: string
+          minLength: 1
+          maxLength: 64
+        capturedAt:
+          type: string
+          format: date-time
+        sourceOrigins:
+          type: array
+          maxItems: 20
+          uniqueItems: true
+          items:
+            type: string
+            format: uri
 
     ContentVersion:
       type: object
@@ -3167,6 +3775,8 @@ components:
           type: array
           items:
             type: string
+        sourceRef:
+          $ref: "#/components/schemas/ContentSourceRef"
 
     UpdateContentRequest:
       type: object
@@ -3285,6 +3895,199 @@ components:
               type: string
             count:
               type: integer
+
+    ContentSource:
+      type: object
+      additionalProperties: false
+      required:
+        [objectId, versionId, versionNumber, bodyFormat, body, sha256]
+      properties:
+        objectId:
+          type: string
+          format: uuid
+        versionId:
+          type: string
+          format: uuid
+        versionNumber:
+          type: integer
+          minimum: 1
+        bodyFormat:
+          type: string
+          enum: [markdown, html, jsx]
+        body:
+          type: string
+          description: |
+            Exact committed UTF-8 source. Storage is uncompressed; no
+            content-encoding transformation is applied. The decoded body is
+            bounded to 5,000,000 bytes.
+        sha256:
+          type: string
+          description: Base64url-encoded SHA-256 of the UTF-8 body.
+
+    ContentSourceResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ContentSource"
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    ContentAsset:
+      type: object
+      required:
+        - id
+        - objectId
+        - filename
+        - contentType
+        - byteLength
+        - sha256
+        - purpose
+        - state
+        - uploadExpiresAt
+        - createdAt
+        - embedRef
+      properties:
+        id: { type: string, format: uuid }
+        objectId: { type: string, format: uuid }
+        filename: { type: string, maxLength: 255 }
+        contentType:
+          type: string
+          enum: [image/png, image/jpeg, image/webp]
+        byteLength:
+          type: integer
+          minimum: 1
+          maximum: 20971520
+          description: Original upload byte length.
+        sha256:
+          type: string
+          description: Base64url SHA-256 of the original upload.
+        width: { type: integer, nullable: true }
+        height: { type: integer, nullable: true }
+        purpose:
+          type: string
+          enum: [capture_step, document_image]
+        state:
+          type: string
+          enum: [pending, quarantined, ready, rejected, deleted]
+        inspection:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Safe validator output; never raw metadata or storage keys.
+        uploadExpiresAt: { type: string, format: date-time }
+        readyAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        embedRef:
+          type: string
+          description: |
+            Canonical Markdown directive:
+            `::atrium-asset{id="<uuid>" alt="<text>"}`
+        bytesUrl:
+          type: string
+          nullable: true
+          description: Same-origin reader URL; present only when state is ready.
+
+    InitiateContentAssetRequest:
+      type: object
+      additionalProperties: false
+      required: [filename, contentType, byteLength, sha256, purpose]
+      properties:
+        filename: { type: string, minLength: 1, maxLength: 255 }
+        contentType:
+          type: string
+          enum: [image/png, image/jpeg, image/webp]
+        byteLength:
+          type: integer
+          minimum: 1
+          maximum: 20971520
+        sha256:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+          description: Base64url SHA-256 of the bytes that will be uploaded.
+        purpose:
+          type: string
+          enum: [capture_step, document_image]
+        width:
+          type: integer
+          minimum: 1
+          maximum: 12000
+        height:
+          type: integer
+          minimum: 1
+          maximum: 12000
+
+    CompleteContentAssetRequest:
+      type: object
+      additionalProperties: false
+      required: [sha256]
+      properties:
+        sha256:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+          description: Must exactly match the digest supplied at initiation.
+
+    ContentAssetResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ContentAsset"
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId: { type: string }
+
+    ContentAssetListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContentAsset"
+        meta:
+          type: object
+          required: [requestId, count]
+          properties:
+            requestId: { type: string }
+            count: { type: integer }
+
+    InitiatedContentAssetResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          allOf:
+            - $ref: "#/components/schemas/ContentAsset"
+            - type: object
+              required: [upload]
+              properties:
+                upload:
+                  type: object
+                  additionalProperties: false
+                  required: [method, url, headers, expiresAt]
+                  properties:
+                    method: { type: string, enum: [PUT] }
+                    url: { type: string, format: uri }
+                    headers:
+                      type: object
+                      additionalProperties: false
+                      required: [content-type, x-amz-checksum-sha256]
+                      properties:
+                        content-type: { type: string }
+                        x-amz-checksum-sha256: { type: string }
+                    expiresAt: { type: string, format: date-time }
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId: { type: string }
 
     ContentVisibilityResponse:
       type: object
@@ -3700,7 +4503,10 @@ components:
           $ref: "#/components/headers/X-Request-Id"
 
     ContentConflict:
-      description: A uniqueness or version race (slug collision, version-number conflict)
+      description: |
+        A uniqueness/version race, an in-flight idempotent operation
+        (`IDEMPOTENCY_IN_PROGRESS`, retryable), or reuse of an idempotency key
+        with different input (`IDEMPOTENCY_KEY_REUSED`).
       content:
         application/json:
           schema:
@@ -3709,6 +4515,29 @@ components:
             error:
               code: CONTENT_CONFLICT
               message: Conflict
+            requestId: req_abc123
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+        Retry-After:
+          description: Present for `IDEMPOTENCY_IN_PROGRESS`.
+          schema:
+            type: integer
+            example: 1
+
+    VersionPreconditionFailed:
+      description: The supplied If-Match value no longer matches the current version.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: VERSION_PRECONDITION_FAILED
+              message: The content version changed before this update was applied
+              details:
+                expectedVersionId: 11111111-2222-4333-8444-555555555555
+                currentVersionId: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
             requestId: req_abc123
       headers:
         X-Request-Id:
@@ -3742,6 +4571,16 @@ components:
 
     InternalError:
       description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+
+    ContentStorageUnavailable:
+      description: Canonical source storage is unavailable or invalid.
       content:
         application/json:
           schema:
