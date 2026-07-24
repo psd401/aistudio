@@ -21,6 +21,7 @@ import {
   contentService,
   hasPublishPublicScope,
   recordContentAudit,
+  runIdempotentMutation,
   requesterFromApiAuth,
 } from "@/lib/content";
 import {
@@ -133,61 +134,75 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   // scope, never a session's wildcard ["*"] (admin humans pass via req.isAdmin).
   const hasPublishPublicCapability = hasPublishPublicScope(auth.scopes);
 
-  try {
-    // Session humans must ALSO hold the atrium-content capability (scope alone is
-    // the wildcard ["*"] for a session); sk-/OIDC callers are gated by scope.
-    await assertContentAuthoringCapability(auth);
-    // Decode a base64 (WAF-opaque) body to its real content BEFORE the service's
-    // §28.3 screening + size caps run — screening always sees decoded content.
-    // Invalid base64 / over-cap throws a ValidationError (mapped to 400 below).
-    const body = decodeContentBody(input.body, input.codeEncoding);
-    const collectionId = await resolveCollectionId(input.collectionId);
-    const created = await contentService.create(
-      req,
-      {
-        kind: input.kind,
-        title: input.title,
-        collectionId,
-        body,
-        bodyFormat: input.bodyFormat,
-        visibility: input.visibility,
-        tags: input.tags,
-        sourceRef: input.sourceRef,
-      },
-      { hasPublishPublicCapability }
-    );
-    void recordContentAudit({
-      req,
-      action: "create",
-      surface: "rest",
-      objectId: created.id,
-      outcome: "ok",
-      details: captureAuditDetails(input.sourceRef),
+  return runIdempotentMutation(
+    {
+      request,
+      auth,
       requestId,
-    });
-    // §26.4 create-as-private (issue #1118 item 2): an unauthorized public create
-    // is NOT rejected — `contentService.create` returns the object created PRIVATE
-    // and queues a durable `visibility_widen` request. The response reflects
-    // `visibilityLevel: "private"`; a caller wanting public awaits admin approval.
-    log.info("Created content via REST", {
-      objectId: created.id,
-      kind: input.kind,
-      visibilityLevel: created.visibilityLevel,
-    });
-    return createApiResponse(
-      { data: { ...created, url: contentDeepLink(created.slug) }, meta: { requestId } },
-      requestId,
-      201
-    );
-  } catch (err) {
-    void recordContentAudit({
-      req,
-      action: "create",
-      surface: "rest",
-      outcome: "error",
-      error: err instanceof Error ? err.message : String(err),
-      requestId,
-    });
-    return contentErrorToResponse(err, requestId);
-  }
+      canonicalRoute: "/api/v1/content",
+      requestValue: input,
+    },
+    async () => {
+      try {
+        // Session humans must ALSO hold the atrium-content capability (scope alone is
+        // the wildcard ["*"] for a session); sk-/OIDC callers are gated by scope.
+        await assertContentAuthoringCapability(auth);
+        // Decode a base64 (WAF-opaque) body to its real content BEFORE the service's
+        // §28.3 screening + size caps run — screening always sees decoded content.
+        // Invalid base64 / over-cap throws a ValidationError (mapped to 400 below).
+        const body = decodeContentBody(input.body, input.codeEncoding);
+        const collectionId = await resolveCollectionId(input.collectionId);
+        const created = await contentService.create(
+          req,
+          {
+            kind: input.kind,
+            title: input.title,
+            collectionId,
+            body,
+            bodyFormat: input.bodyFormat,
+            visibility: input.visibility,
+            tags: input.tags,
+            sourceRef: input.sourceRef,
+          },
+          { hasPublishPublicCapability }
+        );
+        void recordContentAudit({
+          req,
+          action: "create",
+          surface: "rest",
+          objectId: created.id,
+          outcome: "ok",
+          details: captureAuditDetails(input.sourceRef),
+          requestId,
+        });
+        // §26.4 create-as-private (issue #1118 item 2): an unauthorized public create
+        // is NOT rejected — `contentService.create` returns the object created PRIVATE
+        // and queues a durable `visibility_widen` request. The response reflects
+        // `visibilityLevel: "private"`; a caller wanting public awaits admin approval.
+        log.info("Created content via REST", {
+          objectId: created.id,
+          kind: input.kind,
+          visibilityLevel: created.visibilityLevel,
+        });
+        return createApiResponse(
+          {
+            data: { ...created, url: contentDeepLink(created.slug) },
+            meta: { requestId },
+          },
+          requestId,
+          201
+        );
+      } catch (err) {
+        void recordContentAudit({
+          req,
+          action: "create",
+          surface: "rest",
+          outcome: "error",
+          error: err instanceof Error ? err.message : String(err),
+          requestId,
+        });
+        return contentErrorToResponse(err, requestId);
+      }
+    }
+  );
 });

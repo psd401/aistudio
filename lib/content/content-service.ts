@@ -54,6 +54,7 @@ import {
   ForbiddenError,
   NotFoundError,
   ValidationError,
+  VersionPreconditionFailedError,
 } from "./errors";
 import type {
   ContentKind,
@@ -494,7 +495,7 @@ export const contentService = {
             req,
             { id: dto.id, kind: input.kind },
             { body: input.body, bodyFormat: input.bodyFormat },
-            screeningProof
+            { proof: screeningProof }
           );
           // Reflect the new head id without a re-select.
           dto.currentVersionId = snap.version.id;
@@ -529,13 +530,27 @@ export const contentService = {
   async createVersion(
     req: Requester,
     id: string,
-    input: SnapshotInput
+    input: SnapshotInput,
+    options: { expectedVersionId?: string | null } = {}
   ): Promise<ContentObjectWithVersion> {
     const obj = await loadByIdOrSlug(id);
     if (!obj) throw new NotFoundError("Content not found", { id });
     // Mask existence from callers who cannot view it before revealing edit state.
     await assertViewable(req, obj, id);
     assertCanEdit(req, obj.ownerUserId);
+
+    // Reject an already-stale If-Match before guardrail/PII screening or any
+    // storage, audit, event, or mutation work. snapshotInTx repeats this check
+    // under a row lock to close the check-to-commit race.
+    if (
+      options.expectedVersionId !== undefined &&
+      obj.currentVersionId !== options.expectedVersionId
+    ) {
+      throw new VersionPreconditionFailedError(
+        options.expectedVersionId,
+        obj.currentVersionId
+      );
+    }
 
     // §28.3 — screen ONCE, OUTSIDE the conflict-retry (issue #1118 item 7).
     // Screening is unmemoized external IO (Bedrock Guardrails + Comprehend); a
@@ -558,7 +573,8 @@ export const contentService = {
         req,
         { id: obj.id, kind: obj.kind },
         input,
-        proof
+        proof,
+        options.expectedVersionId
       );
     } catch (err) {
       if (!(err instanceof ConflictError)) throw err;
@@ -566,7 +582,8 @@ export const contentService = {
         req,
         { id: obj.id, kind: obj.kind },
         input,
-        proof
+        proof,
+        options.expectedVersionId
       );
     }
     // Re-load so the returned object carries the post-snapshot updatedAt and

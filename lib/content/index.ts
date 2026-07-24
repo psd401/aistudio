@@ -67,10 +67,20 @@ export {
   NotFoundError,
   ValidationError,
   ConflictError,
+  VersionPreconditionFailedError,
   StorageError,
   ApprovalRequiredError,
   isContentError,
 } from "./errors";
+
+export {
+  cleanupExpiredContentIdempotencyRecords,
+  contentHeadEtag,
+  hashIdempotencyRequest,
+  parseContentIfMatch,
+  runIdempotentMutation,
+  validateIdempotencyKey,
+} from "./idempotency";
 
 export {
   assertCanCreate,

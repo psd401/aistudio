@@ -17,6 +17,9 @@ import {
 import { z } from "zod";
 import {
   contentService,
+  contentHeadEtag,
+  parseContentIfMatch,
+  runIdempotentMutation,
   versionService,
   recordContentAudit,
   requesterFromApiAuth,
@@ -67,57 +70,109 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId, par
 // POST — create a new version
 // ============================================
 
-export const POST = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
-  const scopeError = requireScope(auth, "content:update", requestId);
-  if (scopeError) return scopeError;
+export const POST = withApiAuth(
+  async (request: NextRequest, auth, requestId, params) => {
+    const scopeError = requireScope(auth, "content:update", requestId);
+    if (scopeError) return scopeError;
 
-  const log = createLogger({ requestId, route: "api.v1.content.createVersion" });
-
-  const id = params.id;
-  if (!id) {
-    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Missing content id");
-  }
-
-  const parsedBody = await parseRequestBody(request, createVersionBodySchema, requestId);
-  if (parsedBody instanceof Response) return parsedBody;
-  const input = parsedBody.data;
-
-  const resolved = await resolveRestRequester(auth, requestId);
-  if ("response" in resolved) return resolved.response;
-  const { req } = resolved;
-
-  try {
-    // Session humans must also hold the atrium-content capability (see helper).
-    await assertContentAuthoringCapability(auth);
-    // Decode a base64 (WAF-opaque) body BEFORE the service screens/size-caps it.
-    // `input.body` is a required non-empty string (zod), so a raw pass-through is
-    // always a string and the base64 branch either returns a string or throws.
-    const body = decodeContentBody(input.body, input.codeEncoding) ?? input.body;
-    const result = await contentService.createVersion(req, id, {
-      body,
-      bodyFormat: input.bodyFormat,
-      summary: input.summary,
-    });
-    void recordContentAudit({
-      req,
-      action: "create_version",
-      surface: "rest",
-      objectId: id,
-      outcome: "ok",
+    const log = createLogger({
       requestId,
+      route: "api.v1.content.createVersion",
     });
-    log.info("Created version via REST", { objectId: id, versionId: result.version?.id });
-    return createApiResponse({ data: result, meta: { requestId } }, requestId, 201);
-  } catch (err) {
-    void recordContentAudit({
-      req,
-      action: "create_version",
-      surface: "rest",
-      objectId: id,
-      outcome: "error",
-      error: err instanceof Error ? err.message : String(err),
-      requestId,
-    });
-    return contentErrorToResponse(err, requestId);
+
+    const id = params.id;
+    if (!id) {
+      return createErrorResponse(
+        requestId,
+        400,
+        "VALIDATION_ERROR",
+        "Missing content id"
+      );
+    }
+
+    const parsedBody = await parseRequestBody(
+      request,
+      createVersionBodySchema,
+      requestId
+    );
+    if (parsedBody instanceof Response) return parsedBody;
+    const input = parsedBody.data;
+    const precondition = parseContentIfMatch(request.headers.get("if-match"));
+    if (!precondition.ok) {
+      return createErrorResponse(
+        requestId,
+        400,
+        "INVALID_IF_MATCH",
+        'If-Match must be a single strong ETag containing a version id or "none"'
+      );
+    }
+
+    const resolved = await resolveRestRequester(auth, requestId);
+    if ("response" in resolved) return resolved.response;
+    const { req } = resolved;
+
+    return runIdempotentMutation(
+      {
+        request,
+        auth,
+        requestId,
+        canonicalRoute: `/api/v1/content/${id}/versions`,
+        requestValue: {
+          body: input,
+          ifMatch:
+            precondition.expectedVersionId ??
+            (precondition.expectedVersionId === null ? "none" : undefined),
+        },
+      },
+      async () => {
+        try {
+          // Session humans must also hold the atrium-content capability.
+          await assertContentAuthoringCapability(auth);
+          // Decode before the service screens and size-caps the body.
+          const body =
+            decodeContentBody(input.body, input.codeEncoding) ?? input.body;
+          const result = await contentService.createVersion(
+            req,
+            id,
+            {
+              body,
+              bodyFormat: input.bodyFormat,
+              summary: input.summary,
+            },
+            { expectedVersionId: precondition.expectedVersionId }
+          );
+          void recordContentAudit({
+            req,
+            action: "create_version",
+            surface: "rest",
+            objectId: id,
+            outcome: "ok",
+            requestId,
+          });
+          log.info("Created version via REST", {
+            objectId: id,
+            versionId: result.version?.id,
+          });
+          const response = createApiResponse(
+            { data: result, meta: { requestId } },
+            requestId,
+            201
+          );
+          response.headers.set("ETag", contentHeadEtag(result.currentVersionId));
+          return response;
+        } catch (err) {
+          void recordContentAudit({
+            req,
+            action: "create_version",
+            surface: "rest",
+            objectId: id,
+            outcome: "error",
+            error: err instanceof Error ? err.message : String(err),
+            requestId,
+          });
+          return contentErrorToResponse(err, requestId);
+        }
+      }
+    );
   }
-});
+);

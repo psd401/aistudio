@@ -22,6 +22,7 @@ const mockResolveRestRequester = jest.fn();
 const mockContentErrorToResponse = jest.fn();
 const mockCreateApiResponse = jest.fn();
 const mockResolveCollectionId = jest.fn();
+const mockParseContentIfMatch = jest.fn();
 
 jest.mock("@/lib/api", () => ({
   withApiAuth: (handler: unknown) => handler,
@@ -43,6 +44,12 @@ jest.mock("@/lib/content", () => {
     hasPublishPublicScope: jest.fn(() => false),
     recordContentAudit: jest.fn(),
     requesterFromApiAuth: jest.fn(),
+    runIdempotentMutation: (
+      _input: unknown,
+      execute: () => Promise<unknown>
+    ) => execute(),
+    parseContentIfMatch: (...args: unknown[]) => mockParseContentIfMatch(...args),
+    contentHeadEtag: (id: string | null) => `"${id ?? "none"}"`,
   };
 });
 
@@ -88,7 +95,10 @@ type VersionHandler = (
 const createHandler = CREATE as unknown as CreateHandler;
 const versionHandler = CREATE_VERSION as unknown as VersionHandler;
 
-const request = { url: "https://app.test/api/v1/content" } as unknown as NextRequest;
+const request = {
+  url: "https://app.test/api/v1/content",
+  headers: { get: jest.fn(() => null) },
+} as unknown as NextRequest;
 
 const ARTIFACT_CODE =
   '<html><style>b{color:red}</style><script>alert("x")</script></html>';
@@ -97,10 +107,17 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockResolveRestRequester.mockResolvedValue({ req: REQ });
   mockResolveCollectionId.mockResolvedValue(undefined);
+  mockParseContentIfMatch.mockReturnValue({
+    ok: true,
+    expectedVersionId: undefined,
+  });
   mockCreate.mockResolvedValue({ id: "obj-1", slug: "art", visibilityLevel: "private" });
   mockCreateVersion.mockResolvedValue({ id: "obj-1", slug: "art", version: { id: "v2" } });
   mockContentErrorToResponse.mockReturnValue({ __marker: "content-error" });
-  mockCreateApiResponse.mockReturnValue({ __marker: "ok" });
+  mockCreateApiResponse.mockReturnValue({
+    __marker: "ok",
+    headers: { set: jest.fn() },
+  });
 });
 
 describe("POST /api/v1/content — codeEncoding decode", () => {
@@ -205,7 +222,8 @@ describe("POST /api/v1/content/:id/versions — codeEncoding decode", () => {
     expect(mockCreateVersion).toHaveBeenCalledWith(
       REQ,
       "obj-1",
-      expect.objectContaining({ body: ARTIFACT_CODE })
+      expect.objectContaining({ body: ARTIFACT_CODE }),
+      { expectedVersionId: undefined }
     );
   });
 
@@ -221,5 +239,40 @@ describe("POST /api/v1/content/:id/versions — codeEncoding decode", () => {
       expect.any(ValidationError),
       expect.anything()
     );
+  });
+
+  it("passes If-Match to the service and returns the new head ETag", async () => {
+    mockParseRequestBody.mockResolvedValue({ data: { body: "# updated" } });
+    mockParseContentIfMatch.mockReturnValue({
+      ok: true,
+      expectedVersionId: "version-1",
+    });
+    mockCreateVersion.mockResolvedValue({
+      id: "obj-1",
+      currentVersionId: "version-2",
+      version: { id: "version-2" },
+    });
+    const setHeader = jest.fn();
+    mockCreateApiResponse.mockReturnValue({ headers: { set: setHeader } });
+
+    await versionHandler(request, AUTH, "req-6", { id: "obj-1" });
+
+    expect(mockCreateVersion).toHaveBeenCalledWith(
+      REQ,
+      "obj-1",
+      expect.objectContaining({ body: "# updated" }),
+      { expectedVersionId: "version-1" }
+    );
+    expect(setHeader).toHaveBeenCalledWith("ETag", '"version-2"');
+  });
+
+  it("rejects an invalid If-Match before the service", async () => {
+    mockParseRequestBody.mockResolvedValue({ data: { body: "# updated" } });
+    mockParseContentIfMatch.mockReturnValue({ ok: false });
+
+    const result = await versionHandler(request, AUTH, "req-7", { id: "obj-1" });
+
+    expect(mockCreateVersion).not.toHaveBeenCalled();
+    expect(result).toEqual({ __marker: "error" });
   });
 });

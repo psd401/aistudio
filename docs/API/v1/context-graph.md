@@ -864,6 +864,29 @@ than block, it uses **create-as-private** (issue #1118) — the object is create
 `data.visibilityLevel` in the `201` body to see whether the requested `public` was
 applied or downgraded.
 
+**Mutation idempotency and optimistic concurrency (#1287):**
+
+- `POST /content`, `POST /content/{id}/versions`, and
+  `POST /content/{id}/publish` accept `Idempotency-Key` (1-255 visible ASCII
+  characters). Asset initiate/complete endpoints use the same contract.
+- Keys are scoped by deployment environment, authenticated principal,
+  OAuth-client/API-key identity, method, and canonical route. Only SHA-256 key
+  and semantic-request digests are stored; raw keys and request bodies are not.
+- Repeating the same scoped key and request within seven days returns the original
+  status/body and safe response headers with `Idempotency-Replayed: true`.
+  Reusing it with different input returns `409 IDEMPOTENCY_KEY_REUSED`.
+- A concurrent or interrupted request keeps its durable reservation and returns
+  retryable `409 IDEMPOTENCY_IN_PROGRESS` (`Retry-After: 1`) rather than running a
+  second mutation. Completed response payloads are field-encrypted with the
+  existing Secrets Manager-backed application DEK. Expired records are removed
+  in bounded 500-row sweeps.
+- `GET /content/{id}` returns a strong ETag containing `currentVersionId` (or
+  `"none"`). Send that ETag as `If-Match` on version creation to prevent lost
+  updates. A stale value returns `412 VERSION_PRECONDITION_FAILED` before body
+  screening, S3 writes, audit/event emission, or DB mutation. The successful
+  `201` returns the new head ETag. Omitting `If-Match` preserves existing
+  last-writer behavior for older clients.
+
 **Content error codes** (in addition to the shared `INVALID_TOKEN`,
 `INSUFFICIENT_SCOPE`, `RATE_LIMIT_EXCEEDED`, and `INTERNAL_ERROR`):
 
@@ -875,6 +898,9 @@ applied or downgraded.
 | 403 | `CONTENT_FORBIDDEN` | The caller may not edit / act on this object. |
 | 404 | `CONTENT_NOT_FOUND` | The object does not exist — or is not visible to the caller (reads are 404-masked). |
 | 409 | `CONTENT_CONFLICT` | Slug collision or version-number race. |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | The scoped key was already used for different semantic input. |
+| 409 | `IDEMPOTENCY_IN_PROGRESS` | The scoped operation is pending/interrupted; retry later without changing the key. |
+| 412 | `VERSION_PRECONDITION_FAILED` | `If-Match` does not match the current version; details include expected/current ids. |
 | 503 | `CONTENT_STORAGE_ERROR` | Canonical source storage is unavailable, oversized, or invalid; storage coordinates are not exposed. |
 
 > The public-publish gate surfaces as a `202` **success** whose body is
@@ -1028,6 +1054,7 @@ sandboxed iframe (§28.1), never on the app origin.
 ```bash
 curl -X POST -H "Authorization: Bearer sk-your-key" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: create-policy-2026-07-23" \
   -d '{
     "kind": "document",
     "title": "AI Acceptable Use Policy",
@@ -1218,6 +1245,9 @@ before the list is exposed. Requires `content:read`.
 #### `POST /api/v1/content/{id}/versions`
 
 Snapshot a new version from `body` and make it the current version. Requires `content:update`.
+For lossless optimistic concurrency, first read `ETag` from
+`GET /api/v1/content/{id}` and send it as `If-Match`. Use `If-Match: "none"` only
+when the object must not yet have a head version.
 
 **Request body:**
 
@@ -1233,13 +1263,18 @@ Snapshot a new version from `body` and make it the current version. Requires `co
 ```bash
 curl -X POST -H "Authorization: Bearer sk-your-key" \
   -H "Content-Type: application/json" \
+  -H 'If-Match: "11111111-2222-4333-8444-555555555555"' \
+  -H "Idempotency-Key: update-policy-rev-2" \
   -d '{ "body": "# Acceptable Use (rev 2)...", "summary": "Tightened data retention" }' \
   "https://your-domain/api/v1/content/a1b2c3d4-e5f6-7890-abcd-ef1234567890/versions"
 ```
 
-**Response `201`** — the object joined with its new current `version` (no `url`).
+**Response `201`** — the object joined with its new current `version` (no `url`);
+the `ETag` header is the new `currentVersionId`.
 **Response `404`** — `CONTENT_NOT_FOUND`.
 **Response `409`** — `CONTENT_CONFLICT` (version-number race).
+**Response `412`** — `VERSION_PRECONDITION_FAILED`; no screening or side effects
+occurred.
 
 ---
 
@@ -1354,6 +1389,7 @@ returns `202` with `data.status = "approval_required"` and enters the review que
 ```bash
 curl -X POST -H "Authorization: Bearer sk-your-key" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: publish-policy-intranet" \
   -d '{ "destination": "intranet" }' \
   "https://your-domain/api/v1/content/a1b2c3d4-e5f6-7890-abcd-ef1234567890/publish"
 ```

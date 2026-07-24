@@ -75,7 +75,11 @@ jest.mock("@/lib/content/agent-screening", () => ({
 import { contentService } from "@/lib/content/content-service";
 import { versionService } from "@/lib/content/version-service";
 import { screenAgentBodyForWrite } from "@/lib/content/agent-screening";
-import { ConflictError, NotFoundError } from "@/lib/content/errors";
+import {
+  ConflictError,
+  NotFoundError,
+  VersionPreconditionFailedError,
+} from "@/lib/content/errors";
 import type { Requester } from "@/lib/content/types";
 
 const snapshot = versionService.snapshotScreened as jest.Mock;
@@ -148,5 +152,48 @@ describe("contentService.createVersion concurrency handling", () => {
       contentService.createVersion(req, baseObj.id, { body: "# hello" })
     ).rejects.toBeInstanceOf(NotFoundError);
     expect(snapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a stale expected head before screening or snapshot work", async () => {
+    loadRows.push([{ ...baseObj }]);
+
+    await expect(
+      contentService.createVersion(
+        req,
+        baseObj.id,
+        { body: "# stale" },
+        { expectedVersionId: "v-older" }
+      )
+    ).rejects.toMatchObject({
+      code: "VERSION_PRECONDITION_FAILED",
+      status: 412,
+      details: {
+        expectedVersionId: "v-older",
+        currentVersionId: "v0",
+      },
+    } satisfies Partial<VersionPreconditionFailedError>);
+
+    expect(screen).not.toHaveBeenCalled();
+    expect(snapshot).not.toHaveBeenCalled();
+  });
+
+  it("passes a matching expected head through to the locked snapshot", async () => {
+    loadRows.push([{ ...baseObj }], [{ ...baseObj, currentVersionId: "v1" }]);
+    snapshot.mockResolvedValueOnce(newVersion);
+
+    await contentService.createVersion(
+      req,
+      baseObj.id,
+      { body: "# current" },
+      { expectedVersionId: "v0" }
+    );
+
+    expect(snapshot).toHaveBeenCalledWith(
+      req,
+      { id: baseObj.id, kind: baseObj.kind },
+      { body: "# current" },
+      expect.anything(),
+      "v0"
+    );
   });
 });
