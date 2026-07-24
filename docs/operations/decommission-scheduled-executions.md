@@ -10,8 +10,19 @@ registrations from `infra/bin/infra.ts` only stops *future* synthesis from inclu
 them. The already-deployed CloudFormation stacks (`AIStudio-SchedulerStack-{Env}`,
 `AIStudio-EmailNotificationStack-{Env}`) — and their EventBridge schedules, Lambdas,
 SQS queue, and ongoing cost — are **not** touched by `cdk deploy --all`. They must be
-destroyed explicitly, in order, after this PR merges. Run these steps per environment
-(`Dev` shown; repeat for `Prod` with the `-Prod` suffix and a fresh pre-flight).
+deleted explicitly, in order, after this PR merges.
+
+> **Use `aws cloudformation delete-stack`, NOT `cdk destroy`.** Because the two stacks
+> are no longer registered in the CDK app, `cdk destroy AIStudio-SchedulerStack-{Env}`
+> matches **no** stack in the synthesized assembly and silently exits without deleting
+> the deployed CloudFormation stack — an operator would believe teardown happened while
+> the Lambdas, SQS queue, schedules, and cost remain. Delete them by name through the
+> CloudFormation API instead (step 3). (Alternatively, `cdk destroy` from a checkout of
+> the pre-removal commit would also work, but the AWS CLI path is simpler and has no
+> dependency on CDK app state.)
+
+Run these steps per environment (`Dev` shown; repeat for `Prod` with the `-Prod`
+suffix and a fresh pre-flight).
 
 ## Order matters
 
@@ -37,12 +48,26 @@ bunx cdk deploy AIStudio-FrontendStack-ECS-Dev --context baseDomain=<domain>
 # For a real release use the canonical full deploy command, not this single stack.
 ```
 
-### 3. Destroy the two retired stacks (explicit — `deploy --all` will NOT do this)
+### 3. Delete the two retired stacks (explicit — `deploy --all` will NOT do this)
 They are removed from `infra/bin/infra.ts`, so `cdk deploy --all` no longer targets
-them; an explicit destroy is required:
+them — and `cdk destroy <name>` no longer finds them either (see the warning above).
+Delete them by name via the CloudFormation API, then wait for completion. Resources
+with `DeletionPolicy: Retain` (the SES identity, the internal-api-secret) survive the
+delete and are handled in step 4:
 ```bash
-cd infra
-bunx cdk destroy AIStudio-SchedulerStack-Dev AIStudio-EmailNotificationStack-Dev
+REGION=us-east-1   # the deployment region
+
+aws cloudformation delete-stack --region "$REGION" \
+  --stack-name AIStudio-SchedulerStack-Dev
+aws cloudformation delete-stack --region "$REGION" \
+  --stack-name AIStudio-EmailNotificationStack-Dev
+
+# Block until each delete finishes (surfaces DELETE_FAILED if an export is still in use —
+# if so, confirm step 2 landed and re-run):
+aws cloudformation wait stack-delete-complete --region "$REGION" \
+  --stack-name AIStudio-SchedulerStack-Dev
+aws cloudformation wait stack-delete-complete --region "$REGION" \
+  --stack-name AIStudio-EmailNotificationStack-Dev
 ```
 
 ### 4. Manual cleanup (NOT CloudFormation-managed)

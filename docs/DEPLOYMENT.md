@@ -254,9 +254,11 @@ cdk deploy AIStudio-DatabaseStack-Dev
 Removing a stack's registration from `infra/bin/infra.ts` only stops future
 synthesis from including it — `cdk deploy --all` will **not** delete an
 already-deployed CloudFormation stack, so its resources and cost linger until an
-explicit `cdk destroy`. When retiring a stack, follow (and persist) an ordered
-teardown runbook. Example: the scheduled-assistant-executions decommission
-(#1322) is documented in
+explicit teardown. Note that once a stack is removed from the app, `cdk destroy
+<name>` no longer finds it either; delete it by name with `aws cloudformation
+delete-stack` (or `cdk destroy` from a checkout of the pre-removal commit). When
+retiring a stack, follow (and persist) an ordered teardown runbook. Example: the
+scheduled-assistant-executions decommission (#1322) is documented in
 [operations/decommission-scheduled-executions.md](operations/decommission-scheduled-executions.md).
 
 ---
