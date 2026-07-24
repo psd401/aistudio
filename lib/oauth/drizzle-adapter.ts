@@ -25,6 +25,12 @@ import {
 import { createLogger } from "@/lib/logger"
 import { systemUserIdOrNull } from "@/lib/content/helpers"
 import { createHash } from "node:crypto"
+import {
+  isOAuthApplicationType,
+  isPublicApplicationType,
+  oidcApplicationType,
+  validateOAuthRedirectUris,
+} from "./redirect-uri-policy"
 
 // ============================================
 // Hash Helper
@@ -393,12 +399,14 @@ class DrizzleAdapter implements Adapter {
             // couples this read to physical column order).
             clientId: oauthClients.clientId,
             clientName: oauthClients.clientName,
+            applicationType: oauthClients.applicationType,
             clientSecretHash: oauthClients.clientSecretHash,
             redirectUris: oauthClients.redirectUris,
             grantTypes: oauthClients.grantTypes,
             responseTypes: oauthClients.responseTypes,
             allowedScopes: oauthClients.allowedScopes,
             tokenEndpointAuthMethod: oauthClients.tokenEndpointAuthMethod,
+            requirePkce: oauthClients.requirePkce,
           })
           .from(oauthClients)
           .where(and(eq(oauthClients.clientId, clientId), eq(oauthClients.isActive, true)))
@@ -407,12 +415,54 @@ class DrizzleAdapter implements Adapter {
     )
 
     if (!client) return undefined
+    if (!isOAuthApplicationType(client.applicationType)) {
+      this.log.error("OAuth client has an invalid application type", {
+        clientId,
+      })
+      return undefined
+    }
+
+    const redirectUris = asStringArray(client.redirectUris)
+    const redirectValidation = validateOAuthRedirectUris(
+      client.applicationType,
+      redirectUris
+    )
+    const publicApplication = isPublicApplicationType(client.applicationType)
+    const authMethod = client.tokenEndpointAuthMethod
+    const authMethodValid =
+      authMethod === "none" ||
+      authMethod === "client_secret_post" ||
+      authMethod === "client_secret_basic"
+    const secretInvariantValid =
+      authMethod === "none"
+        ? client.clientSecretHash == null
+        : typeof client.clientSecretHash === "string" &&
+          client.clientSecretHash.length > 0
+
+    if (
+      !redirectValidation.valid ||
+      !authMethodValid ||
+      !secretInvariantValid ||
+      !client.requirePkce ||
+      (publicApplication && authMethod !== "none")
+    ) {
+      this.log.error("OAuth client registration failed security validation", {
+        clientId,
+        applicationType: client.applicationType,
+        redirectErrorCount: redirectValidation.errors.length,
+        authMethodValid,
+        secretInvariantValid,
+        requirePkce: client.requirePkce,
+      })
+      return undefined
+    }
 
     return {
       client_id: client.clientId,
       client_name: client.clientName,
       client_secret: client.clientSecretHash ?? undefined,
-      redirect_uris: asStringArray(client.redirectUris),
+      application_type: oidcApplicationType(client.applicationType),
+      redirect_uris: redirectValidation.normalizedUris,
       grant_types: asStringArray(client.grantTypes),
       response_types: asStringArray(client.responseTypes) as ("code" | "id_token" | "none")[],
       scope: asStringArray(client.allowedScopes).join(" "),

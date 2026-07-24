@@ -42,7 +42,8 @@ Returns the standard OpenID Connect discovery document with all endpoint URLs.
 - **Token TTLs**: Access=15min, AuthCode=60s, Refresh=24hr
 - **Public-client refresh rotation**: every refresh is single-use; replay revokes the grant family
 - **Durability**: provider sessions, interactions, grants, codes, and tokens persist in PostgreSQL across ECS tasks/restarts
-- **Client types**: Public (PKCE only) and Confidential (with client_secret)
+- **Application types**: web, browser extension, and native
+- **Public clients**: browser extensions and native apps have no secret and always use S256 PKCE
 - Client secrets hashed with Argon2id
 
 ## JWT Claims
@@ -64,9 +65,23 @@ Returns the standard OpenID Connect discovery document with all endpoint URLs.
 ## Admin UI
 
 OAuth clients are managed at `/admin/oauth-clients`:
-- Register new clients (public or confidential)
+- Register web, browser-extension, and native clients
 - Configure redirect URIs and allowed scopes
 - Revoke clients (deactivates all issued tokens)
+
+Redirect URI validation is application-aware:
+
+| Application type | Accepted redirects |
+|---|---|
+| Web | Hosted HTTPS URI; no localhost or loopback |
+| Browser extension | Exact `https://<32-character-extension-id>.chromiumapp.org/<fixed-path>` |
+| Native | Claimed HTTPS DNS URI, reverse-domain private scheme with a fixed path, or HTTP on literal `127.0.0.1`/`[::1]` |
+
+Native loopback redirects may choose an ephemeral port at runtime; scheme,
+literal host, path, and query must still match the registration. All profiles
+reject fragments, userinfo, wildcards, and dangerous schemes. Stored client
+metadata is revalidated when the OIDC provider loads it, so direct database
+writes cannot bypass the registration policy.
 
 ## Database Tables
 
@@ -98,6 +113,7 @@ authenticateRequest() → token starts with "sk-"?
 |------|---------|
 | `lib/oauth/oidc-provider-config.ts` | Provider initialization |
 | `lib/oauth/drizzle-adapter.ts` | Database adapter for oidc-provider |
+| `lib/oauth/redirect-uri-policy.ts` | Application-aware redirect security policy |
 | `lib/oauth/jwt-signer.ts` | JWT signing factory (KMS or local) |
 | `lib/oauth/kms-jwt-service.ts` | AWS KMS signing implementation |
 | `lib/oauth/jwks-cache.ts` | JWKS key caching for verification |

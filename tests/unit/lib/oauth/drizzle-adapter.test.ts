@@ -31,12 +31,14 @@ jest.mock("@/lib/db/schema", () => ({
   oauthClients: {
     clientId: "client_id",
     clientName: "client_name",
+    applicationType: "application_type",
     clientSecretHash: "client_secret_hash",
     redirectUris: "redirect_uris",
     grantTypes: "grant_types",
     responseTypes: "response_types",
     allowedScopes: "allowed_scopes",
     tokenEndpointAuthMethod: "token_endpoint_auth_method",
+    requirePkce: "require_pkce",
     isActive: "is_active",
   },
   oauthAuthorizationCodes: {
@@ -171,5 +173,54 @@ describe("Drizzle OIDC adapter production durability (#1285)", () => {
     await DrizzleOidcAdapter("RefreshToken").consume("refresh-1")
 
     expect(mockExecuteQuery).toHaveBeenCalledTimes(3)
+  })
+
+  it("maps a validated native registration to oidc-provider native metadata", async () => {
+    mockExecuteQuery.mockResolvedValueOnce([
+      {
+        clientId: "native-client",
+        clientName: "Native client",
+        applicationType: "native",
+        clientSecretHash: null,
+        redirectUris: ["http://127.0.0.1/oauth/callback"],
+        grantTypes: ["authorization_code", "refresh_token"],
+        responseTypes: ["code"],
+        allowedScopes: ["openid", "content:read"],
+        tokenEndpointAuthMethod: "none",
+        requirePkce: true,
+      },
+    ])
+
+    const client = await DrizzleOidcAdapter("Client").find("native-client")
+
+    expect(client).toEqual(
+      expect.objectContaining({
+        application_type: "native",
+        client_secret: undefined,
+        redirect_uris: ["http://127.0.0.1/oauth/callback"],
+        token_endpoint_auth_method: "none",
+      })
+    )
+  })
+
+  it("fails closed when stored public-client metadata violates security policy", async () => {
+    mockExecuteQuery.mockResolvedValueOnce([
+      {
+        clientId: "unsafe-native",
+        clientName: "Unsafe native client",
+        applicationType: "native",
+        clientSecretHash: "must-not-exist",
+        redirectUris: ["http://localhost/oauth/callback"],
+        grantTypes: ["authorization_code", "refresh_token"],
+        responseTypes: ["code"],
+        allowedScopes: ["openid"],
+        tokenEndpointAuthMethod: "client_secret_post",
+        requirePkce: false,
+      },
+    ])
+
+    await expect(
+      DrizzleOidcAdapter("Client").find("unsafe-native")
+    ).resolves.toBeUndefined()
   })
 })

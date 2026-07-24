@@ -4,7 +4,7 @@
  * It runs the repository's real oidc-provider version with a deterministic
  * in-memory adapter and exercises security behavior at HTTP boundaries: S256
  * PKCE, verifier/redirect mismatch, code replay, RS256 access JWTs, refresh
- * rotation/replay, expiry, and revocation.
+ * rotation/replay, expiry, revocation, and native loopback port matching.
  *
  * Run: bun run test:oauth-public-flow
  */
@@ -163,7 +163,10 @@ async function main(): Promise<void> {
     use: "sig",
   }
   const clientId = "atrium-chrome-extension"
-  const redirectUri = "https://abcdefghijklmnop.chromiumapp.org/atrium"
+  const redirectUri =
+    "https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/atrium"
+  const nativeClientId = "atrium-native"
+  const nativeRedirectUri = "http://127.0.0.1/oauth/callback"
   const verifier = "a".repeat(64)
 
   const holder = createServer()
@@ -176,8 +179,18 @@ async function main(): Promise<void> {
       {
         client_id: clientId,
         client_name: "Atrium Chrome extension",
+        application_type: "web",
         token_endpoint_auth_method: "none",
         redirect_uris: [redirectUri],
+        response_types: ["code"],
+        grant_types: ["authorization_code", "refresh_token"],
+      },
+      {
+        client_id: nativeClientId,
+        client_name: "Atrium native application",
+        application_type: "native",
+        token_endpoint_auth_method: "none",
+        redirect_uris: [nativeRedirectUri],
         response_types: ["code"],
         grant_types: ["authorization_code", "refresh_token"],
       },
@@ -247,6 +260,8 @@ async function main(): Promise<void> {
   const foundClient = await provider.Client.find(clientId)
   if (!foundClient) throw new Error("Smoke OAuth client not found")
   const client = foundClient
+  const nativeClient = await provider.Client.find(nativeClientId)
+  if (!nativeClient) throw new Error("Smoke native OAuth client not found")
 
   async function authorizationCode(
     expire = false
@@ -279,6 +294,21 @@ async function main(): Promise<void> {
   }
 
   try {
+    assert.equal(
+      nativeClient.redirectUriAllowed(
+        "http://127.0.0.1:49152/oauth/callback"
+      ),
+      true
+    )
+    assert.equal(
+      nativeClient.redirectUriAllowed("http://localhost:49152/oauth/callback"),
+      false
+    )
+    assert.equal(
+      nativeClient.redirectUriAllowed("http://127.0.0.1:49152/wrong"),
+      false
+    )
+
     const wrongVerifierCode = await authorizationCode()
     const wrongVerifier = await postForm<OAuthError>(origin, "/token", {
       grant_type: "authorization_code",
@@ -405,6 +435,7 @@ async function main(): Promise<void> {
         "refresh_rotation",
         "refresh_replay",
         "revocation",
+        "native_loopback_variable_port",
       ],
     })
   } finally {

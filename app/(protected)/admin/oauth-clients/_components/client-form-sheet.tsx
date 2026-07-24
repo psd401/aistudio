@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/select"
 import { createOAuthClient } from "@/actions/oauth/oauth-client.actions"
 import { API_SCOPES } from "@/lib/api-keys/scopes"
+import type { OAuthApplicationType } from "@/lib/oauth/redirect-uri-policy"
 
 // ============================================
 // Props
@@ -47,6 +48,8 @@ const OTHER_SCOPES = Object.entries(API_SCOPES).filter(
 
 export function ClientFormSheet({ onSuccess }: Props) {
   const [clientName, setClientName] = useState("")
+  const [applicationType, setApplicationType] =
+    useState<OAuthApplicationType>("web")
   const [redirectUri, setRedirectUri] = useState("")
   const [authMethod, setAuthMethod] = useState<"none" | "client_secret_post">("none")
   const [selectedScopes, setSelectedScopes] = useState<string[]>([])
@@ -74,6 +77,7 @@ export function ClientFormSheet({ onSuccess }: Props) {
 
       const result = await createOAuthClient({
         clientName,
+        applicationType,
         redirectUris,
         allowedScopes: selectedScopes,
         tokenEndpointAuthMethod: authMethod,
@@ -139,25 +143,64 @@ export function ClientFormSheet({ onSuccess }: Props) {
       </div>
 
       <div>
+        <Label htmlFor="applicationType">Application Type</Label>
+        <Select
+          value={applicationType}
+          onValueChange={(value) => {
+            const nextType = value as OAuthApplicationType
+            setApplicationType(nextType)
+            if (nextType !== "web") setAuthMethod("none")
+          }}
+        >
+          <SelectTrigger id="applicationType">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="web">Web application</SelectItem>
+            <SelectItem value="browser_extension">
+              Browser extension
+            </SelectItem>
+            <SelectItem value="native">Native application</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground mt-1">
+          {applicationType === "web"
+            ? "Hosted HTTPS application; may use a client secret."
+            : applicationType === "browser_extension"
+              ? "Public Chromium extension using its exact chromiumapp.org callback."
+              : "Public desktop or mobile app using claimed HTTPS, a reverse-domain scheme, or a literal loopback callback."}
+        </p>
+      </div>
+
+      <div>
         <Label htmlFor="redirectUri">Redirect URI(s)</Label>
         <Input
           id="redirectUri"
           value={redirectUri}
           onChange={(e) => setRedirectUri(e.target.value)}
-          placeholder="http://localhost:8080/callback"
+          placeholder={
+            applicationType === "web"
+              ? "https://app.example.org/oauth/callback"
+              : applicationType === "browser_extension"
+                ? "https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/atrium"
+                : "com.example.app:/oauth/callback, http://127.0.0.1/callback"
+          }
+          required
         />
         <p className="text-xs text-muted-foreground mt-1">
-          Comma-separated list of allowed redirect URIs
+          Comma-separated exact callbacks. Fragments, userinfo, wildcards, and
+          localhost are rejected.
         </p>
       </div>
 
       <div>
-        <Label>Auth Method</Label>
+        <Label htmlFor="authMethod">Auth Method</Label>
         <Select
           value={authMethod}
+          disabled={applicationType !== "web"}
           onValueChange={(v) => setAuthMethod(v as "none" | "client_secret_post")}
         >
-          <SelectTrigger>
+          <SelectTrigger id="authMethod">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -167,6 +210,12 @@ export function ClientFormSheet({ onSuccess }: Props) {
             </SelectItem>
           </SelectContent>
         </Select>
+        {applicationType !== "web" && (
+          <p className="text-xs text-muted-foreground mt-1">
+            Browser-extension and native apps cannot keep a secret; S256 PKCE
+            is mandatory.
+          </p>
+        )}
       </div>
 
       <div>

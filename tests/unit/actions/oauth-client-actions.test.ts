@@ -15,7 +15,22 @@ jest.mock('@/lib/auth/server-session', () => ({ getServerSession: jest.fn(() => 
 jest.mock('@/lib/db/drizzle/utils', () => ({ getUserIdByCognitoSubAsNumber: jest.fn(() => Promise.resolve(1)) }))
 jest.mock('@/lib/api-keys/argon2-loader', () => ({ hashArgon2: jest.fn() }))
 jest.mock('@/lib/db/schema', () => ({
-  oauthClients: { id: 'id', clientId: 'client_id', isActive: 'is_active', updatedAt: 'updated_at' },
+  oauthClients: {
+    id: 'id',
+    clientId: 'client_id',
+    clientName: 'client_name',
+    applicationType: 'application_type',
+    redirectUris: 'redirect_uris',
+    allowedScopes: 'allowed_scopes',
+    grantTypes: 'grant_types',
+    tokenEndpointAuthMethod: 'token_endpoint_auth_method',
+    requirePkce: 'require_pkce',
+    accessTokenTtl: 'access_token_ttl',
+    refreshTokenTtl: 'refresh_token_ttl',
+    isActive: 'is_active',
+    createdAt: 'created_at',
+    updatedAt: 'updated_at',
+  },
 }))
 jest.mock('@/lib/logger', () => ({
   createLogger: () => ({ info: jest.fn(), debug: jest.fn(), warn: jest.fn(), error: jest.fn() }),
@@ -25,7 +40,12 @@ jest.mock('@/lib/logger', () => ({
 
 describe('revokeOAuthClient (REV-COR-055)', () => {
   let revokeOAuthClient: typeof import('@/actions/oauth/oauth-client.actions').revokeOAuthClient
-  beforeAll(async () => { revokeOAuthClient = (await import('@/actions/oauth/oauth-client.actions')).revokeOAuthClient })
+  let createOAuthClient: typeof import('@/actions/oauth/oauth-client.actions').createOAuthClient
+  beforeAll(async () => {
+    const actions = await import('@/actions/oauth/oauth-client.actions')
+    revokeOAuthClient = actions.revokeOAuthClient
+    createOAuthClient = actions.createOAuthClient
+  })
   beforeEach(() => { jest.clearAllMocks(); mockRequireRole.mockResolvedValue(undefined) })
 
   it('returns a failure when no client matches the id (no false success)', async () => {
@@ -39,5 +59,76 @@ describe('revokeOAuthClient (REV-COR-055)', () => {
     const res = await revokeOAuthClient('client-abc')
     expect(res.isSuccess).toBe(true)
     expect(res.data).toEqual({ clientId: 'client-abc' })
+  })
+
+  it('creates a native client without a secret and records its application type', async () => {
+    const createdAt = new Date('2026-07-24T12:00:00.000Z')
+    mockExecuteQuery.mockResolvedValueOnce([{
+      id: 9,
+      clientId: 'native-client',
+      clientName: 'Atrium Desktop',
+      applicationType: 'native',
+      clientSecretHash: null,
+      redirectUris: ['com.example.atrium:/oauth/callback'],
+      allowedScopes: ['openid', 'content:read'],
+      grantTypes: ['authorization_code', 'refresh_token'],
+      responseTypes: ['code'],
+      tokenEndpointAuthMethod: 'none',
+      requirePkce: true,
+      accessTokenTtl: 900,
+      refreshTokenTtl: 86400,
+      isActive: true,
+      createdAt,
+      updatedAt: createdAt,
+    }])
+
+    const res = await createOAuthClient({
+      clientName: 'Atrium Desktop',
+      applicationType: 'native',
+      redirectUris: ['com.example.atrium:/oauth/callback'],
+      allowedScopes: ['openid', 'content:read'],
+      tokenEndpointAuthMethod: 'none',
+    })
+
+    expect(res.isSuccess).toBe(true)
+    expect(res.data?.client.applicationType).toBe('native')
+    expect(res.data?.clientSecret).toBeUndefined()
+  })
+
+  it('rejects native localhost callbacks before touching the database', async () => {
+    const res = await createOAuthClient({
+      clientName: 'Unsafe Desktop',
+      applicationType: 'native',
+      redirectUris: ['http://localhost/oauth/callback'],
+      allowedScopes: ['openid'],
+      tokenEndpointAuthMethod: 'none',
+    })
+
+    expect(res.isSuccess).toBe(false)
+    expect(mockExecuteQuery).not.toHaveBeenCalled()
+  })
+
+  it('rejects secrets and disabled PKCE for public application types', async () => {
+    const secretResult = await createOAuthClient({
+      clientName: 'Unsafe Extension',
+      applicationType: 'browser_extension',
+      redirectUris: [
+        'https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/atrium',
+      ],
+      allowedScopes: ['openid'],
+      tokenEndpointAuthMethod: 'client_secret_post',
+    })
+    const pkceResult = await createOAuthClient({
+      clientName: 'Unsafe Native',
+      applicationType: 'native',
+      redirectUris: ['com.example.atrium:/oauth/callback'],
+      allowedScopes: ['openid'],
+      tokenEndpointAuthMethod: 'none',
+      requirePkce: false,
+    })
+
+    expect(secretResult.isSuccess).toBe(false)
+    expect(pkceResult.isSuccess).toBe(false)
+    expect(mockExecuteQuery).not.toHaveBeenCalled()
   })
 })

@@ -16,6 +16,12 @@ import { oauthClients } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { randomBytes, randomUUID } from "node:crypto"
 import { hashArgon2 } from "@/lib/api-keys/argon2-loader"
+import {
+  isOAuthApplicationType,
+  isPublicApplicationType,
+  validateOAuthRedirectUris,
+  type OAuthApplicationType,
+} from "@/lib/oauth/redirect-uri-policy"
 import type { ActionState } from "@/types"
 
 // ============================================
@@ -26,6 +32,7 @@ export interface OAuthClientRow {
   id: number
   clientId: string
   clientName: string
+  applicationType: OAuthApplicationType
   redirectUris: string[]
   allowedScopes: string[]
   grantTypes: string[]
@@ -40,6 +47,7 @@ export interface OAuthClientRow {
 
 export interface CreateOAuthClientInput {
   clientName: string
+  applicationType: OAuthApplicationType
   redirectUris: string[]
   allowedScopes: string[]
   tokenEndpointAuthMethod?: "none" | "client_secret_post"
@@ -72,6 +80,7 @@ export async function listOAuthClients(): Promise<ActionState<OAuthClientRow[]>>
             id: oauthClients.id,
             clientId: oauthClients.clientId,
             clientName: oauthClients.clientName,
+            applicationType: oauthClients.applicationType,
             redirectUris: oauthClients.redirectUris,
             allowedScopes: oauthClients.allowedScopes,
             grantTypes: oauthClients.grantTypes,
@@ -114,53 +123,6 @@ export async function listOAuthClients(): Promise<ActionState<OAuthClientRow[]>>
 // Create OAuth Client
 // ============================================
 
-// ============================================
-// Redirect URI Validation
-// ============================================
-
-function validateRedirectUris(uris: string[]): { valid: boolean; errors: string[] } {
-  const errors: string[] = []
-  const isProduction = process.env.NODE_ENV === "production"
-
-  for (const uri of uris) {
-    let parsed: URL
-    try {
-      parsed = new URL(uri)
-    } catch {
-      errors.push(`Invalid URL format: ${uri}`)
-      continue
-    }
-
-    if (!["http:", "https:"].includes(parsed.protocol)) {
-      errors.push(`Invalid protocol (must be http/https): ${uri}`)
-      continue
-    }
-
-    // Production: enforce HTTPS except localhost
-    if (isProduction && parsed.protocol === "http:") {
-      if (!["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)) {
-        errors.push(`Production requires HTTPS: ${uri}`)
-      }
-    }
-
-    // No wildcards in hostname
-    if (parsed.hostname.includes("*")) {
-      errors.push(`Wildcards not allowed in hostname: ${uri}`)
-    }
-
-    // Fragment not allowed per OAuth spec
-    if (parsed.hash) {
-      errors.push(`Fragments not allowed in redirect URI: ${uri}`)
-    }
-  }
-
-  return { valid: errors.length === 0, errors }
-}
-
-// ============================================
-// Create OAuth Client
-// ============================================
-
 export async function createOAuthClient(
   input: CreateOAuthClientInput
 ): Promise<ActionState<CreateOAuthClientResult>> {
@@ -173,14 +135,82 @@ export async function createOAuthClient(
 
     const session = await getServerSession()
     const userId = session?.sub ? await getUserIdByCognitoSubAsNumber(session.sub) : null
+    const clientName =
+      typeof input.clientName === "string" ? input.clientName.trim() : ""
 
-    log.info("Creating OAuth client", { name: sanitizeForLogging(input.clientName) })
+    log.info("Creating OAuth client", {
+      name: sanitizeForLogging(clientName),
+      applicationType: input.applicationType,
+    })
 
-    // Validate redirect URIs
-    if (input.redirectUris.length === 0) {
-      throw ErrorFactories.invalidInput("redirectUris", input.redirectUris, "At least one redirect URI is required")
+    if (!isOAuthApplicationType(input.applicationType)) {
+      throw ErrorFactories.invalidInput(
+        "applicationType",
+        input.applicationType,
+        "Application type must be web, browser_extension, or native"
+      )
     }
-    const uriValidation = validateRedirectUris(input.redirectUris)
+    if (clientName.length === 0 || clientName.length > 255) {
+      throw ErrorFactories.invalidInput(
+        "clientName",
+        input.clientName,
+        "Client name must be between 1 and 255 characters"
+      )
+    }
+    if (input.requirePkce === false) {
+      throw ErrorFactories.invalidInput(
+        "requirePkce",
+        input.requirePkce,
+        "All authorization-code clients require S256 PKCE"
+      )
+    }
+    if (
+      input.tokenEndpointAuthMethod !== undefined &&
+      input.tokenEndpointAuthMethod !== "none" &&
+      input.tokenEndpointAuthMethod !== "client_secret_post"
+    ) {
+      throw ErrorFactories.invalidInput(
+        "tokenEndpointAuthMethod",
+        input.tokenEndpointAuthMethod,
+        "Token endpoint authentication must be none or client_secret_post"
+      )
+    }
+    if (
+      isPublicApplicationType(input.applicationType) &&
+      input.tokenEndpointAuthMethod !== undefined &&
+      input.tokenEndpointAuthMethod !== "none"
+    ) {
+      throw ErrorFactories.invalidInput(
+        "tokenEndpointAuthMethod",
+        input.tokenEndpointAuthMethod,
+        "Browser-extension and native clients are public, have no secret, and require S256 PKCE"
+      )
+    }
+    if (
+      !Array.isArray(input.redirectUris) ||
+      !input.redirectUris.every((uri) => typeof uri === "string")
+    ) {
+      throw ErrorFactories.invalidInput(
+        "redirectUris",
+        input.redirectUris,
+        "Redirect URIs must be a list of strings"
+      )
+    }
+    if (
+      !Array.isArray(input.allowedScopes) ||
+      !input.allowedScopes.every((scope) => typeof scope === "string")
+    ) {
+      throw ErrorFactories.invalidInput(
+        "allowedScopes",
+        input.allowedScopes,
+        "Allowed scopes must be a list of strings"
+      )
+    }
+
+    const uriValidation = validateOAuthRedirectUris(
+      input.applicationType,
+      input.redirectUris
+    )
     if (!uriValidation.valid) {
       log.warn("Invalid redirect URIs", { errors: uriValidation.errors })
       throw ErrorFactories.invalidInput(
@@ -191,7 +221,11 @@ export async function createOAuthClient(
     }
 
     const clientId = randomUUID()
-    const isConfidential = input.tokenEndpointAuthMethod === "client_secret_post"
+    const publicApplication = isPublicApplicationType(input.applicationType)
+    const authMethod = publicApplication
+      ? "none"
+      : (input.tokenEndpointAuthMethod ?? "none")
+    const isConfidential = authMethod === "client_secret_post"
 
     let clientSecret: string | undefined
     let clientSecretHash: string | null = null
@@ -207,14 +241,15 @@ export async function createOAuthClient(
           .insert(oauthClients)
           .values({
             clientId,
-            clientName: input.clientName.trim(),
+            clientName,
+            applicationType: input.applicationType,
             clientSecretHash,
-            redirectUris: input.redirectUris,
+            redirectUris: uriValidation.normalizedUris,
             allowedScopes: input.allowedScopes,
             grantTypes: ["authorization_code", "refresh_token"],
             responseTypes: ["code"],
-            tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
-            requirePkce: input.requirePkce ?? true,
+            tokenEndpointAuthMethod: authMethod,
+            requirePkce: true,
             accessTokenTtl: input.accessTokenTtl ?? 900,
             refreshTokenTtl: input.refreshTokenTtl ?? 86400,
             createdBy: userId,
@@ -232,6 +267,7 @@ export async function createOAuthClient(
           id: created.id,
           clientId: created.clientId,
           clientName: created.clientName,
+          applicationType: created.applicationType,
           redirectUris: created.redirectUris as string[],
           allowedScopes: created.allowedScopes as string[],
           grantTypes: created.grantTypes as string[],

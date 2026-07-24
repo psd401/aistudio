@@ -121,6 +121,7 @@ export function OAuthClientsPageClient({ initialClients }: Props) {
               <TableRow>
                 <TableHead>Name</TableHead>
                 <TableHead>Client ID</TableHead>
+                <TableHead>Type</TableHead>
                 <TableHead>Auth Method</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Scopes</TableHead>
@@ -137,6 +138,15 @@ export function OAuthClientsPageClient({ initialClients }: Props) {
                     <code className="text-xs bg-muted px-1 py-0.5 rounded">
                       {client.clientId.slice(0, 8)}...
                     </code>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="secondary">
+                      {client.applicationType === "browser_extension"
+                        ? "Browser extension"
+                        : client.applicationType === "native"
+                          ? "Native"
+                          : "Web"}
+                    </Badge>
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline">
