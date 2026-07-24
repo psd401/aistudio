@@ -64,6 +64,13 @@ class MemoryStore implements IdempotencyStore {
     record.response = response;
   }
 
+  async release(reservationId: string): Promise<void> {
+    const entry = [...this.records.entries()].find(
+      ([, candidate]) => candidate.id === reservationId
+    );
+    if (entry) this.records.delete(entry[0]);
+  }
+
   async cleanupExpired(limit: number): Promise<number> {
     this.cleanupLimits.push(limit);
     return 0;
@@ -243,6 +250,30 @@ describe("Atrium mutation idempotency", () => {
 
     expect(retry.status).toBe(409);
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases a returned 5xx so a same-key retry can execute again", async () => {
+    const store = new MemoryStore();
+    const testInput = input(store, "retry-transient-500");
+    const execute = jest
+      .fn<Promise<NextResponse>, []>()
+      .mockResolvedValueOnce(jsonResponse({ error: "temporary" }, 503))
+      .mockResolvedValueOnce(jsonResponse({ data: { id: "object-1" } }, 201));
+
+    const failed = await runIdempotentMutation(
+      testInput.args,
+      execute,
+      testInput.dependencies
+    );
+    const retried = await runIdempotentMutation(
+      testInput.args,
+      execute,
+      testInput.dependencies
+    );
+
+    expect(failed.status).toBe(503);
+    expect(retried.status).toBe(201);
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 
   it("retains reservations for seven days and bounds opportunistic cleanup", async () => {

@@ -66,15 +66,6 @@ export async function refreshJwksCache(): Promise<void> {
   await getJwksKeySet()
 }
 
-/**
- * Get the JWKS document as JSON (for the JWKS endpoint).
- */
-export async function getJwksDocument(): Promise<{ keys: object[] }> {
-  return {
-    keys: await getVerificationKeys(),
-  }
-}
-
 async function getVerificationKeys(): Promise<
   Array<Record<string, unknown>>
 > {
@@ -95,9 +86,4 @@ async function getVerificationKeys(): Promise<
   }
 
   return keys
-}
-
-export function resetJwksCache(): void {
-  cachedKeySet = null
-  cacheTimestamp = 0
 }

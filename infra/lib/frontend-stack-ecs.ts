@@ -248,9 +248,15 @@ export class FrontendStackEcs extends cdk.Stack {
         serviceToken: oidcKeyBootstrap.functionArn,
         properties: {
           SecretId: oidcSigningJwksSecret.secretArn,
+          // AWS::CloudFormation::CustomResource has no standard Tags property.
+          // Carry the same governance metadata in its provider properties.
+          Environment: environment,
+          ManagedBy: 'cdk',
         },
       }
     );
+    cdk.Tags.of(oidcKeyBootstrap).add('Environment', environment);
+    cdk.Tags.of(oidcKeyBootstrap).add('ManagedBy', 'cdk');
     oidcKeyBootstrapResource.node.addDependency(oidcSigningJwksSecret);
 
     // ============================================================================

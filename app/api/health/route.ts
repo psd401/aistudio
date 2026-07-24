@@ -134,10 +134,12 @@ export async function GET() {
       }
     }
   } catch (error) {
-    log.error("Environment check failed", error);
+    log.error("Environment check failed", {
+      errorType: error instanceof Error ? error.name : "UnknownError",
+    });
     healthCheck.checks.environment = {
       status: "error",
-      error: error instanceof Error ? error.message : "Unknown error"
+      error: "Environment validation failed"
     }
   }
 
@@ -153,10 +155,12 @@ export async function GET() {
         authConfigured: true
       }
     } catch (error) {
-      log.error("Authentication check failed", error);
+      log.error("Authentication check failed", {
+        errorType: error instanceof Error ? error.name : "UnknownError",
+      });
       healthCheck.checks.authentication = {
         status: "error",
-        error: error instanceof Error ? error.message : "Unknown error",
+        error: "Authentication validation failed",
         hint: "Authentication system may not be properly configured"
       }
     }
@@ -179,19 +183,24 @@ export async function GET() {
       log.debug("Database check completed", { success: dbValidation.success });
       healthCheck.checks.database = {
         status: dbValidation.success ? "healthy" : "unhealthy",
-        connectionType: hasDatabaseUrl ? 'DATABASE_URL (local)' : 'DB_HOST (AWS)',
-        ...dbValidation
+        success: dbValidation.success,
+        configured: true,
+        ...(dbValidation.success
+          ? {}
+          : {
+              error: "Database connectivity validation failed",
+              hint: "Check application logs for the internal failure details",
+            }),
       }
     } catch (error) {
-      log.error("Database check failed", error);
+      log.error("Database check failed", {
+        errorType: error instanceof Error ? error.name : "UnknownError",
+      });
       healthCheck.checks.database = {
         status: "error",
-        error: error instanceof Error ? {
-          name: error.name,
-          message: error.message,
-          stack: process.env.NODE_ENV !== 'production' ?
-            error.stack?.split('\n').slice(0, 5).join('\n') : undefined
-        } : "Unknown error"
+        configured: true,
+        error: "Database connectivity validation failed",
+        hint: "Check application logs for the internal failure details",
       }
     }
   } else {
@@ -218,15 +227,15 @@ export async function GET() {
       source: keySet.source,
     }
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unknown OIDC signing-key error"
-    log.error("OIDC signing key health check failed", { error: message })
+    log.error("OIDC signing key health check failed", {
+      errorType: error instanceof Error ? error.name : "UnknownError",
+    })
     healthCheck.checks.oauthSigning = {
       status: "unhealthy",
       configured: Boolean(process.env.OIDC_SIGNING_JWKS_SECRET_ARN),
-      error: message,
+      error: "OIDC signing keys are unavailable",
       hint:
-        "Verify OIDC_SIGNING_JWKS_SECRET_ARN, the secret JSON, and ECS task-role secretsmanager:GetSecretValue access.",
+        "Check application logs and the deployment's signing-key configuration.",
     }
   }
 
@@ -259,20 +268,7 @@ export async function GET() {
     }
     
     if (healthCheck.checks.database.status !== "healthy") {
-      const dbError = healthCheck.checks.database.error;
-      if (typeof dbError === 'object' && dbError !== null && 'message' in dbError && 
-          typeof (dbError as {message: string}).message === 'string' && 
-          (dbError as {message: string}).message.includes("credentials")) {
-        healthCheck.diagnostics.hints.push(
-          "AWS credentials issue. Verify Amplify service role has RDS Data API permissions."
-        )
-      } else if (typeof dbError === 'object' && dbError !== null && 'message' in dbError && 
-                 typeof (dbError as {message: string}).message === 'string' && 
-                 (dbError as {message: string}).message.includes("region")) {
-        healthCheck.diagnostics.hints.push(
-          "AWS region not configured. AWS Amplify should provide AWS_REGION automatically. Ensure NEXT_PUBLIC_AWS_REGION is set as fallback."
-        )
-      } else if (!healthCheck.checks.database.configured) {
+      if (!healthCheck.checks.database.configured) {
         healthCheck.diagnostics.hints.push(
           "Database not configured. Set DATABASE_URL (local dev) or DB_HOST (AWS ECS)."
         )
@@ -299,8 +295,22 @@ export async function GET() {
     ]
   }
 
+  // This route is intentionally unauthenticated for readiness probes. Expose
+  // only health states; configuration values, session identity, key ids,
+  // resource sources, SDK messages, and deployment hints remain internal.
+  const publicHealthCheck = {
+    timestamp: healthCheck.timestamp,
+    status: healthCheck.status,
+    checks: {
+      environment: { status: healthCheck.checks.environment.status },
+      authentication: { status: healthCheck.checks.authentication.status },
+      database: { status: healthCheck.checks.database.status },
+      oauthSigning: { status: healthCheck.checks.oauthSigning.status },
+    },
+  }
+
   return NextResponse.json(
-    healthCheck,
+    publicHealthCheck,
     { 
       status: allHealthy ? 200 : 503,
       headers: {

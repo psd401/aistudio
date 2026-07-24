@@ -17,7 +17,6 @@ import { createLogger } from "@/lib/logger";
 const completeAssetSchema = z
   .object({
     sha256: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-    etag: z.string().min(1).max(512).optional(),
   })
   .strict();
 

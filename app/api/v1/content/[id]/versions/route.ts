@@ -24,7 +24,11 @@ import {
   recordContentAudit,
   requesterFromApiAuth,
 } from "@/lib/content";
-import { contentErrorToResponse, resolveRestRequester } from "@/lib/content/rest";
+import {
+  contentErrorToResponse,
+  contentIdempotentMutationErrorToResponse,
+  resolveRestRequester,
+} from "@/lib/content/rest";
 import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
 import { decodeContentBody } from "@/lib/content/code-encoding";
 import { createLogger } from "@/lib/logger";
@@ -170,7 +174,7 @@ export const POST = withApiAuth(
             error: err instanceof Error ? err.message : String(err),
             requestId,
           });
-          return contentErrorToResponse(err, requestId);
+          return contentIdempotentMutationErrorToResponse(err, requestId);
         }
       }
     );

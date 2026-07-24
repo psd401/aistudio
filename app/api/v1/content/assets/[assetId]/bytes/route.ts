@@ -33,7 +33,16 @@ async function resolveRequester(
     const auth = await authenticateRequest(request);
     if (!("userId" in auth)) return auth;
     const scopeError = requireScope(auth, "content:read", requestId);
-    if (scopeError) return scopeError;
+    if (scopeError) {
+      // This reader masks every authorization denial so a scoped API caller
+      // cannot distinguish a real private asset from an absent id.
+      return createErrorResponse(
+        requestId,
+        404,
+        "CONTENT_NOT_FOUND",
+        "Content asset not found"
+      );
+    }
     try {
       return await requesterFromApiAuth(auth);
     } catch (error) {

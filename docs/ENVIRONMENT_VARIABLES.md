@@ -152,10 +152,15 @@ aws amplify update-app \
    - See `/docs/FIX_SSR_COMPUTE_ROLE.md` for detailed fix instructions
 
 ### Health Check
-Use the `/api/health` endpoint to verify:
+Use the unauthenticated `/api/health` endpoint to verify readiness status for:
 - Environment variable configuration
 - Database connectivity
-- AWS credentials chain
+- Authentication configuration
+- OAuth signing-key availability
+
+The response intentionally exposes only pass/fail status. Resource identifiers,
+account details, secret names, database configuration, and exception messages
+remain in sanitized server logs and are never returned by the public endpoint.
 
 ## Security Best Practices
 

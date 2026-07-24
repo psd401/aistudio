@@ -875,17 +875,25 @@ applied or downgraded.
 - Repeating the same scoped key and request within seven days returns the original
   status/body and safe response headers with `Idempotency-Replayed: true`.
   Reusing it with different input returns `409 IDEMPOTENCY_KEY_REUSED`.
+- Terminal responses below HTTP 500 are retained. A returned 5xx releases the
+  reservation so retrying with the same key can execute again; a thrown or
+  interrupted execution remains pending so an ambiguous mutation is not repeated.
 - A concurrent or interrupted request keeps its durable reservation and returns
   retryable `409 IDEMPOTENCY_IN_PROGRESS` (`Retry-After: 1`) rather than running a
   second mutation. Completed response payloads are field-encrypted with the
   existing Secrets Manager-backed application DEK. Expired records are removed
-  in bounded 500-row sweeps.
+  in bounded 500-row sweeps by hourly scheduled maintenance, with opportunistic
+  sweeps retained as a fallback.
 - `GET /content/{id}` returns a strong ETag containing `currentVersionId` (or
   `"none"`). Send that ETag as `If-Match` on version creation to prevent lost
   updates. A stale value returns `412 VERSION_PRECONDITION_FAILED` before body
   screening, S3 writes, audit/event emission, or DB mutation. The successful
   `201` returns the new head ETag. Omitting `If-Match` preserves existing
   last-writer behavior for older clients.
+- Publish accepts the same `If-Match` precondition. The service rechecks it while
+  holding the object lock, so a concurrent version advance returns `412` without
+  publishing or queuing approval. A successful `200` returns the pinned version
+  as the response ETag.
 
 **Content error codes** (in addition to the shared `INVALID_TOKEN`,
 `INSUFFICIENT_SCOPE`, `RATE_LIMIT_EXCEEDED`, and `INTERNAL_ERROR`):
@@ -1449,6 +1457,9 @@ Body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ..
 #### `POST /api/v1/content/{id}/publish`
 
 Publish the object's current version to a destination. Requires `content:publish_internal`.
+Supply the strong ETag from `GET /content/{id}` in `If-Match` to prevent a
+concurrent head change from publishing an unintended version. The service checks
+the precondition again under lock.
 
 **Request body:**
 
@@ -1467,6 +1478,7 @@ returns `202` with `data.status = "approval_required"` and enters the review que
 curl -X POST -H "Authorization: Bearer sk-your-key" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: publish-policy-intranet" \
+  -H 'If-Match: "11111111-2222-4333-8444-555555555555"' \
   -d '{ "destination": "intranet" }' \
   "https://your-domain/api/v1/content/a1b2c3d4-e5f6-7890-abcd-ef1234567890/publish"
 ```
@@ -1498,6 +1510,7 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 **Response `403`** — API key lacks `content:publish_internal`, or `CONTENT_FORBIDDEN`.
 **Response `404`** — `CONTENT_NOT_FOUND`.
+**Response `412`** — `VERSION_PRECONDITION_FAILED`; the object head changed.
 
 ---
 

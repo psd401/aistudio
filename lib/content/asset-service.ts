@@ -285,7 +285,7 @@ export const contentAssetService = {
     req: Requester,
     objectId: string,
     assetId: string,
-    input: { sha256: string; etag?: string }
+    input: { sha256: string }
   ): Promise<ContentAssetDTO> {
     await contentService.loadForEdit(req, objectId);
     const asset = await loadAsset(objectId, assetId);

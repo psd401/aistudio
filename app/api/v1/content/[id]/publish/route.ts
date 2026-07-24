@@ -18,13 +18,15 @@ import {
 import { z } from "zod";
 import {
   ApprovalRequiredError,
+  contentHeadEtag,
   hasPublishPublicScope,
+  parseContentIfMatch,
   publishService,
   recordContentAudit,
   runIdempotentMutation,
 } from "@/lib/content";
 import {
-  contentErrorToResponse,
+  contentIdempotentMutationErrorToResponse,
   resolveRestRequester,
   respondApprovalRequired,
   restVisibilitySchema,
@@ -54,6 +56,15 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
   const parsedBody = await parseRequestBody(request, publishBodySchema, requestId);
   if (parsedBody instanceof Response) return parsedBody;
   const input = parsedBody.data;
+  const precondition = parseContentIfMatch(request.headers.get("if-match"));
+  if (!precondition.ok) {
+    return createErrorResponse(
+      requestId,
+      400,
+      "INVALID_IF_MATCH",
+      'If-Match must be a single strong ETag containing a version id or "none"'
+    );
+  }
 
   const resolved = await resolveRestRequester(auth, requestId);
   if ("response" in resolved) return resolved.response;
@@ -71,7 +82,12 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
       auth,
       requestId,
       canonicalRoute: `/api/v1/content/${id}/publish`,
-      requestValue: input,
+      requestValue: {
+        body: input,
+        ifMatch:
+          precondition.expectedVersionId ??
+          (precondition.expectedVersionId === null ? "none" : undefined),
+      },
     },
     async () => {
       try {
@@ -81,7 +97,10 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
           req,
           id,
           { destination: input.destination, visibility: input.visibility },
-          { hasPublishPublicCapability }
+          {
+            hasPublishPublicCapability,
+            expectedVersionId: precondition.expectedVersionId,
+          }
         );
         void recordContentAudit({
           req,
@@ -96,7 +115,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
           objectId: id,
           destination: input.destination,
         });
-        return createApiResponse(
+        const response = createApiResponse(
           {
             data: {
               id,
@@ -107,6 +126,11 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
           },
           requestId
         );
+        response.headers.set(
+          "ETag",
+          contentHeadEtag(result.publishedVersionId)
+        );
+        return response;
       } catch (err) {
         // The §26.4 gate: an unauthorized public publish is not an error but a
         // structured approval signal (202) that drives the review queue.
@@ -133,7 +157,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
           error: err instanceof Error ? err.message : String(err),
           requestId,
         });
-        return contentErrorToResponse(err, requestId);
+        return contentIdempotentMutationErrorToResponse(err, requestId);
       }
     }
   );

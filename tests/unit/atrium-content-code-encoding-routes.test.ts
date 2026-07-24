@@ -58,6 +58,8 @@ jest.mock("@/lib/content/rest", () => {
   const { z } = require("zod") as typeof import("zod");
   return {
     contentErrorToResponse: (...a: unknown[]) => mockContentErrorToResponse(...a),
+    contentIdempotentMutationErrorToResponse: (...a: unknown[]) =>
+      mockContentErrorToResponse(...a),
     resolveRestRequester: (...a: unknown[]) => mockResolveRestRequester(...a),
     restVisibilitySchema: z.object({
       level: z.enum(["private", "group", "internal", "public"]),

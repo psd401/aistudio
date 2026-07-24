@@ -9,7 +9,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { and, eq, inArray, lt } from "drizzle-orm";
+import { and, eq, lt } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import type { ApiAuthContext } from "@/lib/api/auth-middleware";
 import { createErrorResponse } from "@/lib/api/auth-middleware";
@@ -23,11 +23,14 @@ import {
   type ContentIdempotencyHeaders,
 } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
+import {
+  cleanupExpiredContentIdempotencyRecords,
+  CONTENT_IDEMPOTENCY_CLEANUP_BATCH_SIZE,
+} from "./idempotency-cleanup";
 
 const IDEMPOTENCY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const IDEMPOTENCY_KEY_MAX_LENGTH = 255;
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
-const CLEANUP_BATCH_SIZE = 500;
 const SAFE_RESPONSE_HEADERS = [
   "cache-control",
   "content-type",
@@ -69,6 +72,7 @@ export interface IdempotencyStore {
     reservationId: string,
     response: StoredIdempotentResponse
   ): Promise<void>;
+  release(reservationId: string): Promise<void>;
   cleanupExpired(limit: number): Promise<number>;
 }
 
@@ -247,32 +251,23 @@ const postgresStore: IdempotencyStore = {
     );
   },
 
-  async cleanupExpired(limit) {
-    const ids = await executeQuery(
-      (db) =>
-        db
-          .select({ id: contentIdempotencyRecords.id })
-          .from(contentIdempotencyRecords)
-          .where(lt(contentIdempotencyRecords.expiresAt, new Date()))
-          .orderBy(contentIdempotencyRecords.expiresAt)
-          .limit(limit),
-      "content.idempotency.cleanup.select"
-    );
-    if (ids.length === 0) return 0;
-    const deleted = await executeQuery(
+  async release(reservationId) {
+    await executeQuery(
       (db) =>
         db
           .delete(contentIdempotencyRecords)
           .where(
-            inArray(
-              contentIdempotencyRecords.id,
-              ids.map((row) => row.id)
+            and(
+              eq(contentIdempotencyRecords.id, reservationId),
+              eq(contentIdempotencyRecords.state, "pending")
             )
-          )
-          .returning({ id: contentIdempotencyRecords.id }),
-      "content.idempotency.cleanup.delete"
+          ),
+      "content.idempotency.release"
     );
-    return deleted.length;
+  },
+
+  async cleanupExpired(limit) {
+    return cleanupExpiredContentIdempotencyRecords(limit);
   },
 };
 
@@ -295,7 +290,7 @@ function maybeCleanup(store: IdempotencyStore): void {
   if (now - lastCleanupStartedAt < CLEANUP_INTERVAL_MS) return;
   lastCleanupStartedAt = now;
   void store
-    .cleanupExpired(CLEANUP_BATCH_SIZE)
+    .cleanupExpired(CONTENT_IDEMPOTENCY_CLEANUP_BATCH_SIZE)
     .then((deleted) => {
       if (deleted > 0) log.info("Removed expired idempotency records", { deleted });
     })
@@ -397,6 +392,15 @@ export async function runIdempotentMutation(
   // committed immediately before an interruption; keeping it pending is the
   // only safe cross-process behavior that cannot duplicate side effects.
   const response = await execute();
+  if (response.status >= 500) {
+    // A returned 5xx is not a terminal result. Route handlers use returned 5xx
+    // responses for known failures, so retaining one for seven days would make
+    // the correct same-key retry replay a stale outage forever. Thrown/unknown
+    // interruptions still leave the reservation pending because commit state is
+    // ambiguous; only an explicit response takes this release path.
+    await dependencies.store.release(acquired.reservationId);
+    return response;
+  }
   const body = await response.clone().text();
   const ciphertext = await dependencies.codec.encrypt(body);
   await dependencies.store.complete(acquired.reservationId, {
@@ -407,10 +411,4 @@ export async function runIdempotentMutation(
   return response;
 }
 
-/** Explicit bounded cleanup entry point for a scheduled maintenance job. */
-export async function cleanupExpiredContentIdempotencyRecords(
-  limit = CLEANUP_BATCH_SIZE
-): Promise<number> {
-  const boundedLimit = Math.max(1, Math.min(limit, CLEANUP_BATCH_SIZE));
-  return postgresStore.cleanupExpired(boundedLimit);
-}
+export { cleanupExpiredContentIdempotencyRecords };

@@ -26,6 +26,7 @@ import {
 } from "@/lib/content";
 import {
   contentErrorToResponse,
+  contentIdempotentMutationErrorToResponse,
   resolveRestRequester,
   restVisibilitySchema,
 } from "@/lib/content/rest";
@@ -201,7 +202,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
           error: err instanceof Error ? err.message : String(err),
           requestId,
         });
-        return contentErrorToResponse(err, requestId);
+        return contentIdempotentMutationErrorToResponse(err, requestId);
       }
     }
   );

@@ -1793,6 +1793,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/ContentStorageUnavailable"
 
@@ -1824,6 +1826,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       operationId: initiateContentAsset
       tags: [Content]
@@ -1861,6 +1865,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/ContentStorageUnavailable"
 
@@ -1894,6 +1900,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /content/{id}/assets/{assetId}/complete:
     parameters:
@@ -1938,6 +1946,8 @@ paths:
           $ref: "#/components/responses/ContentConflict"
         "429":
           $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/ContentStorageUnavailable"
 
@@ -1989,6 +1999,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/ContentStorageUnavailable"
 
@@ -2055,6 +2067,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/ContentStorageUnavailable"
 
@@ -2151,10 +2165,16 @@ paths:
         requested by a caller lacking `content:publish_public` is NOT an error —
         it returns **HTTP 202** with `data.status = "approval_required"` and the
         request enters the review queue instead of publishing.
+
+        Supply the strong ETag returned by `GET /content/{id}` as `If-Match`
+        to ensure the same current version is still being published. A stale
+        precondition returns `412 VERSION_PRECONDITION_FAILED` without
+        publishing or queuing approval.
       security:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/idempotencyKeyHeader"
+        - $ref: "#/components/parameters/contentIfMatchHeader"
       requestBody:
         required: true
         content:
@@ -2169,6 +2189,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ContentPublishResponse"
           headers:
+            ETag:
+              $ref: "#/components/headers/ContentHeadETag"
             Idempotency-Replayed:
               $ref: "#/components/headers/Idempotency-Replayed"
             X-Request-Id:
@@ -2208,6 +2230,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/ContentConflict"
+        "412":
+          $ref: "#/components/responses/VersionPreconditionFailed"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -2684,7 +2708,10 @@ components:
         deployment environment, authenticated principal, OAuth/API client,
         method, and canonical route for seven days. Repeating the same request
         replays the original response; reusing it for different input returns
-        `409 IDEMPOTENCY_KEY_REUSED`.
+        `409 IDEMPOTENCY_KEY_REUSED`. Terminal responses below HTTP 500 are
+        retained. A returned 5xx releases its reservation so the same key can
+        retry; an interrupted execution remains pending to prevent a duplicate
+        mutation.
       schema:
         type: string
         minLength: 1
@@ -2695,9 +2722,9 @@ components:
       in: header
       required: false
       description: |
-        Optimistic concurrency precondition for version creation. Supply the
-        strong ETag returned by `GET /content/{id}` or `"none"` when the object
-        must not yet have a version. A stale value returns
+        Optimistic concurrency precondition for version creation or publishing.
+        Supply the strong ETag returned by `GET /content/{id}` or `"none"` when
+        the object must not yet have a version. A stale value returns
         `412 VERSION_PRECONDITION_FAILED` before content screening or mutation.
       schema:
         type: string
@@ -3912,7 +3939,6 @@ components:
 
     ContentAsset:
       type: object
-      additionalProperties: false
       required:
         - id
         - objectId
@@ -4004,10 +4030,6 @@ components:
           type: string
           pattern: "^[A-Za-z0-9_-]{43}$"
           description: Must exactly match the digest supplied at initiation.
-        etag:
-          type: string
-          maxLength: 512
-          description: Optional upload ETag retained for client correlation.
 
     ContentAssetResponse:
       type: object

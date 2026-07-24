@@ -80,9 +80,21 @@ const createOAuthClientInputSchema = z.discriminatedUnion("applicationType", [
   }),
 ])
 
-export type CreateOAuthClientInput = z.input<
-  typeof createOAuthClientInputSchema
->
+/**
+ * Untrusted server-action boundary. Keep this wider than the parsed profile
+ * union so callers can submit form state and the runtime schema—not TypeScript—
+ * remains the security authority for rejecting invalid combinations.
+ */
+export interface CreateOAuthClientInput {
+  clientName: string
+  applicationType: OAuthApplicationType
+  redirectUris: string[]
+  allowedScopes: string[]
+  tokenEndpointAuthMethod?: "none" | "client_secret_post"
+  requirePkce?: boolean
+  accessTokenTtl?: number
+  refreshTokenTtl?: number
+}
 
 export interface CreateOAuthClientResult {
   client: OAuthClientRow
