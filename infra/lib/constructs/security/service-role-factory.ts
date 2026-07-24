@@ -299,7 +299,11 @@ export class ServiceRoleFactory {
           effect: iam.Effect.ALLOW,
           actions: ["secretsmanager:GetSecretValue"],
           resources: secretArns.map((secretName) =>
-            secretName.startsWith("arn:")
+            // CDK secretArn values are unresolved tokens at this point. Treat
+            // them as complete ARNs; prefixing one produces
+            // arn:...:secret:<resolved-full-arn>*, which never authorizes the
+            // target secret.
+            secretName.startsWith("arn:") || cdk.Token.isUnresolved(secretName)
               ? secretName
               : `arn:aws:secretsmanager:${props.region}:${props.account}:secret:${secretName}*`
           ),
