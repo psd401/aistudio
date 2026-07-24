@@ -158,7 +158,7 @@
     "@types/uuid": "^11.0.0",
     "@uiw/react-markdown-preview": "^5.1.5",
     "@xyflow/react": "^12.9.2",
-    "ai": "~6.0.208",
+    "ai": "~7.0.37",
     "argon2": "^0.44.0",
     "aws-amplify": "^6.16.0",
     "aws-jwt-verify": "^5.1.1",
@@ -282,7 +282,7 @@
     "openai": {
       "zod": "^4.1.11"
     },
-    "ai": "~6.0.208",
+    "ai": "~7.0.37",
     "@ai-sdk/provider": "~3.0.10",
     "@ai-sdk/provider-utils": "~4.0.30",
     "@ai-sdk/react": "~3.0.210",
