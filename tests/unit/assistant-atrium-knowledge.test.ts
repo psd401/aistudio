@@ -88,20 +88,10 @@ jest.mock("@/lib/content/retrieval-service", () => ({
   },
 }));
 
-// requesterForUserId backs the scheduled-run owner fallback (Fix #2). The helper
-// under test statically imports it from this concrete module (not the barrel).
-const requesterForUserIdMock = jest.fn(
-  async (..._args: unknown[]): Promise<unknown> => null
-);
-jest.mock("@/lib/content/requester-from-auth", () => ({
-  requesterForUserId: (...args: unknown[]) => requesterForUserIdMock(...args),
-}));
-
 import {
   retrieveAtriumKnowledgeForPrompt,
   retrieveKnowledgeForPrompt,
   formatAtriumKnowledgeContext,
-  resolveScheduledAtriumRetrievalRequester,
 } from "@/lib/assistant-architect/knowledge-retrieval";
 import type { Requester } from "@/lib/content/types";
 import type { RetrievalHit } from "@/lib/content/retrieval-service";
@@ -313,54 +303,6 @@ describe("retrieveAtriumKnowledgeForPrompt — token budget", () => {
     });
     expect(hits).toHaveLength(1);
     expect(hits[0].chunkId).toBe(1);
-  });
-});
-
-describe("resolveScheduledAtriumRetrievalRequester — owner fallback (Fix #2)", () => {
-  const ownerUser: Requester = {
-    kind: "user",
-    userId: 42,
-    roles: ["staff"],
-    isAdmin: false,
-  };
-  const agentIdentity: Requester = {
-    kind: "agent-autonomous",
-    agentId: "agent-1",
-    roleId: null,
-    roles: [],
-    scopes: ["content:read"],
-    agentLabel: "Scheduler Bot",
-  };
-
-  beforeEach(() => {
-    requesterForUserIdMock.mockReset();
-    requesterForUserIdMock.mockResolvedValue(null);
-  });
-
-  it("uses the agent identity requester when one is set (owner fallback NOT consulted)", async () => {
-    const result = await resolveScheduledAtriumRetrievalRequester(
-      agentIdentity,
-      42
-    );
-    // Same reference passed straight through — the write/execution identity is the
-    // retrieval identity when present.
-    expect(result).toBe(agentIdentity);
-    expect(requesterForUserIdMock).not.toHaveBeenCalled();
-  });
-
-  it("falls back to the schedule owner's user requester when no identity is set", async () => {
-    requesterForUserIdMock.mockResolvedValue(ownerUser);
-    const result = await resolveScheduledAtriumRetrievalRequester(null, 42);
-    expect(result).toBe(ownerUser);
-    expect(requesterForUserIdMock).toHaveBeenCalledTimes(1);
-    expect(requesterForUserIdMock).toHaveBeenCalledWith(42);
-  });
-
-  it("returns null (fail closed, no retrieval) when neither identity nor owner resolves", async () => {
-    requesterForUserIdMock.mockResolvedValue(null);
-    const result = await resolveScheduledAtriumRetrievalRequester(null, 42);
-    expect(result).toBeNull();
-    expect(requesterForUserIdMock).toHaveBeenCalledWith(42);
   });
 });
 

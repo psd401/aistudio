@@ -66,7 +66,7 @@ export const CAPABILITY_MANIFEST: readonly CapabilityManifestEntry[] = [
   {
     identifier: "assistant-architect",
     name: "Assistant Architect",
-    description: "Build and schedule custom multi-step AI assistants.",
+    description: "Build custom multi-step AI assistants.",
     defaultRoles: ["administrator", "staff"],
   },
   {

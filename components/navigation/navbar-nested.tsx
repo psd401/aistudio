@@ -23,12 +23,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
-import { useNotifications } from '@/contexts/notification-context';
-import { useExecutionResults } from '@/hooks/use-execution-results';
 import { createFreshserviceTicketAction } from '@/actions/create-freshservice-ticket.actions';
 import { createLogger } from '@/lib/client-logger';
-import { NotificationBell } from '@/components/notifications/notification-bell';
-import { MessageCenter } from '@/components/notifications/message-center';
 import { useBranding } from '@/contexts/branding-context';
 import { iconMap, IconName } from './icon-map';
 import { LinksGroup } from './navbar-links-group';
@@ -201,92 +197,6 @@ function SidebarButton({ icon: Icon, label, isExpanded, badgeCount, onClick }: S
         </AnimatePresence>
       </div>
     </Button>
-  );
-}
-
-// Sidebar notifications wrapper
-interface SidebarNotificationsProps {
-  isExpanded: boolean;
-}
-
-function SidebarNotifications({ isExpanded }: SidebarNotificationsProps) {
-  const { notifications, unreadCount, isLoading, markAsRead, markAllAsRead } = useNotifications();
-
-  return (
-    <div className={cn(
-      'w-full mb-2',
-      isExpanded ? 'px-0' : 'flex justify-center'
-    )}>
-      <div className={cn(
-        'flex items-center gap-3 w-full',
-        isExpanded ? '' : 'justify-center'
-      )}>
-        <NotificationBell
-          unreadCount={unreadCount}
-          notifications={notifications}
-          onMarkRead={markAsRead}
-          onMarkAllRead={markAllAsRead}
-          loading={isLoading}
-        />
-        <AnimatePresence>
-          {isExpanded && (
-            <motion.span
-              variants={labelVariants}
-              initial="collapsed"
-              animate="expanded"
-              exit="collapsed"
-              className="text-sm font-medium overflow-hidden whitespace-nowrap"
-            >
-              Notifications {unreadCount > 0 && `(${unreadCount})`}
-            </motion.span>
-          )}
-        </AnimatePresence>
-      </div>
-    </div>
-  );
-}
-
-// Sidebar messages wrapper
-interface SidebarMessagesProps {
-  isExpanded: boolean;
-}
-
-function SidebarMessages({ isExpanded }: SidebarMessagesProps) {
-  const { results, isLoading } = useExecutionResults({ limit: 10 });
-
-  const handleViewResult = (resultId: number) => {
-    window.location.href = `/execution-results/${resultId}`;
-  };
-
-  return (
-    <div className={cn(
-      'w-full mb-2',
-      isExpanded ? 'px-0' : 'flex justify-center'
-    )}>
-      <div className={cn(
-        'flex items-center gap-3 w-full',
-        isExpanded ? '' : 'justify-center'
-      )}>
-        <MessageCenter
-          messages={results}
-          onViewResult={handleViewResult}
-          loading={isLoading}
-        />
-        <AnimatePresence>
-          {isExpanded && (
-            <motion.span
-              variants={labelVariants}
-              initial="collapsed"
-              animate="expanded"
-              exit="collapsed"
-              className="text-sm font-medium overflow-hidden whitespace-nowrap"
-            >
-              Execution Results
-            </motion.span>
-          )}
-        </AnimatePresence>
-      </div>
-    </div>
   );
 }
 
@@ -979,8 +889,6 @@ function NavigationContent({ isExpanded }: { isExpanded: boolean }) {
 
         {/* Bottom Section */}
         <div className={cn('border-t border-border/40 py-3', isExpanded ? 'px-3' : 'px-2')}>
-          <SidebarNotifications isExpanded={isExpanded} />
-          <SidebarMessages isExpanded={isExpanded} />
           <BugReportModal isExpanded={isExpanded} />
           <SidebarLink href="/settings" icon={Settings} label="Settings" isExpanded={isExpanded} />
           {session && (

@@ -62,10 +62,6 @@ test.describe('Capability functional flows (authenticated)', () => {
     ).toBeEnabled()
   })
 
-  test('/schedules grants access and renders', async ({ page }) => {
-    await assertCapabilityPageLoads(page, '/schedules')
-  })
-
   test('/repositories grants access and renders', async ({ page }) => {
     await assertCapabilityPageLoads(page, '/repositories')
   })
@@ -84,10 +80,9 @@ test.describe('Capability functional flows (authenticated)', () => {
  */
 async function assertCapabilityPageLoads(page: Page, route: string): Promise<void> {
   // `goto` resolves on the load event. Do NOT waitForLoadState('networkidle') —
-  // capability pages poll (e.g. /schedules execution status) and, under concurrent
-  // test load on the dev server, the network never goes idle, so the wait times out
-  // flakily. The element assertions below are the real readiness signal (Playwright
-  // auto-waits on them).
+  // some capability pages poll and, under concurrent test load on the dev server,
+  // the network never goes idle, so the wait times out flakily. The element
+  // assertions below are the real readiness signal (Playwright auto-waits on them).
   await page.goto(route)
   expect(new URL(page.url()).pathname).toBe(route)
   await expect(page.getByRole('navigation')).toBeVisible({ timeout: 15_000 })

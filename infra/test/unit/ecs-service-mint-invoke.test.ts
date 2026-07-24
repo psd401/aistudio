@@ -42,7 +42,6 @@ function synthTemplate(): Template {
     rdsResourceArn: 'arn:aws:rds:us-east-1:123456789012:cluster:aistudio-dev-cluster',
     rdsSecretArn: secretArn('db'),
     authSecretArn: secretArn('auth'),
-    internalApiSecretArn: secretArn('internal-api'),
     collabJwtSecretArn: secretArn('collab-jwt'),
     guardrailHashSecretArn: secretArn('guardrail-hash'),
     oidcCookieSecretArn: secretArn('oidc-cookie'),

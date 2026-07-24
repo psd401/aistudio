@@ -108,7 +108,7 @@ ON CONFLICT (user_id, role_id) DO NOTHING;
 -- identifiers from CAPABILITY_MANIFEST (lib/capabilities/manifest.ts) so local
 -- test users keep access immediately on a freshly seeded DB — before the
 -- boot-time manifest sync has run:
--- - assistant-architect: schedules, execute API
+-- - assistant-architect: execute API
 -- - model-compare: compare feature
 -- - knowledge-repositories: repositories, prompt library
 -- - decision-capture, voice-mode: Nexus features
@@ -119,7 +119,7 @@ ON CONFLICT (user_id, role_id) DO NOTHING;
 -- manifest-managed identifiers to source='code' when the dev server starts.
 
 INSERT INTO capabilities (identifier, name, description, is_active, source) VALUES
-('assistant-architect', 'Assistant Architect', 'Build and schedule custom AI assistants', true, 'manual'),
+('assistant-architect', 'Assistant Architect', 'Build custom AI assistants', true, 'manual'),
 ('model-compare', 'Model Compare', 'Compare AI model responses side-by-side', true, 'manual'),
 ('knowledge-repositories', 'Knowledge Repositories', 'Manage knowledge bases for AI assistants', true, 'manual'),
 ('decision-capture', 'Decision Capture', 'Extract and capture decisions from meeting transcripts into the context graph', true, 'manual'),
@@ -186,7 +186,6 @@ INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, r
 -- each capability by identifier (decoupled from id sequencing); the capabilities
 -- above are seeded before this INSERT so every subquery returns a row.
 INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, requires_role, position, is_active, description, type) VALUES
-(40, 'Assistant Scheduler', 'IconCalendar', '/schedules', 19, (SELECT id FROM capabilities WHERE identifier = 'assistant-architect'), NULL, 0, true, '', 'link'),
 (7, 'Assistant Architect', 'IconBraces', '/utilities/assistant-architect', 19, (SELECT id FROM capabilities WHERE identifier = 'assistant-architect'), NULL, 10, true, NULL, 'link'),
 (37, 'Model Compare', 'IconRobot', '/compare', 19, (SELECT id FROM capabilities WHERE identifier = 'model-compare'), NULL, 20, true, 'Compare AI model responses side-by-side', 'link'),
 (36, 'Repositories', 'IconBuildingBank', '/repositories', 19, (SELECT id FROM capabilities WHERE identifier = 'knowledge-repositories'), NULL, 30, true, '', 'link'),

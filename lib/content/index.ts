@@ -72,7 +72,6 @@ export type {
 export {
   requesterFromApiAuth,
   buildDelegatedRequester,
-  buildAutonomousRequesterForIdentity,
 } from "./requester-from-auth";
 export type { RequesterAuthInput } from "./requester-from-auth";
 

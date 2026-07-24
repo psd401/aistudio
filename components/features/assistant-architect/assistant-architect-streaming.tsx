@@ -25,7 +25,6 @@ import { ErrorBoundary } from "@/components/error-boundary"
 import type { AssistantArchitectWithRelations } from "@/types/assistant-architect-types"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { collectAndSanitizeEnabledTools, getToolDisplayName } from '@/lib/assistant-architect/tool-utils'
-import { ScheduleModal } from "./schedule-modal"
 import Image from "next/image"
 import DocumentUploadButton from "@/components/ui/document-upload-button"
 import { AssistantRuntimeProvider, useThreadRuntime, useLocalRuntime, type ChatModelRunOptions, type ChatModelRunResult } from '@assistant-ui/react'
@@ -1244,18 +1243,6 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
             </div>
           </form>
         </Form>
-
-        {/* Schedule Modal moved outside the form to prevent event bubbling */}
-        <ScheduleModal
-          tool={tool}
-          inputData={form.getValues()}
-          onScheduleCreated={() => {
-            toast({
-              title: "Schedule Created",
-              description: "Your assistant execution has been scheduled successfully."
-            })
-          }}
-        />
       </div>
 
       {/* Tool Usage Indicators */}
