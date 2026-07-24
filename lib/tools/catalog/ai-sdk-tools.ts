@@ -66,6 +66,11 @@ export interface ToolConfig {
 export interface AiSdkToolDef {
   /** Catalog `domain.action` identifier (e.g. `chat.web_search`). */
   identifier: string
+  /**
+   * Immutable catalog contract version. Bump whenever the projected schema
+   * changes after release.
+   */
+  version?: `v${number}`
   /** MCP/provider wire name — the catalog `name` (e.g. `web_search_preview`). */
   wireName: string
   /** Friendly key used by the UI registry + `enabledTools` (e.g. `webSearch`). */
@@ -91,6 +96,7 @@ export interface AiSdkToolDef {
 export const AI_SDK_TOOLS: readonly AiSdkToolDef[] = [
   {
     identifier: 'chat.show_chart',
+    version: 'v2',
     wireName: 'show_chart',
     friendlyName: 'showChart',
     description:
@@ -99,6 +105,7 @@ export const AI_SDK_TOOLS: readonly AiSdkToolDef[] = [
   },
   {
     identifier: 'chat.web_search',
+    version: 'v2',
     wireName: 'web_search_preview',
     friendlyName: 'webSearch',
     description: 'Search the web for current information and facts.',
@@ -111,6 +118,7 @@ export const AI_SDK_TOOLS: readonly AiSdkToolDef[] = [
   },
   {
     identifier: 'chat.code_interpreter',
+    version: 'v2',
     wireName: 'code_interpreter',
     friendlyName: 'codeInterpreter',
     description: 'Execute code and perform data analysis.',
@@ -123,6 +131,7 @@ export const AI_SDK_TOOLS: readonly AiSdkToolDef[] = [
   },
   {
     identifier: 'chat.generate_image',
+    version: 'v2',
     wireName: 'generateImage',
     friendlyName: 'generateImage',
     description:
