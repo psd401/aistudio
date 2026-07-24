@@ -25,7 +25,10 @@ export class ServiceRoleFactory {
     fromName: (name: string) => string
   ): string {
     if (typeof resource !== "string") {
-      return "arn" in resource ? resource.arn : fromName(resource.name)
+      if (typeof resource.arn === "string") {
+        return resource.arn
+      }
+      return fromName(resource.name)
     }
     if (resource.startsWith("arn:")) {
       return resource
