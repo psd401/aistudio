@@ -249,6 +249,16 @@ cdk deploy AIStudio-DatabaseStack-Dev
 
 **Deployment time:** ~3-5 minutes per stack (vs 15-20 minutes for all stacks)
 
+### Decommissioning a stack
+
+Removing a stack's registration from `infra/bin/infra.ts` only stops future
+synthesis from including it — `cdk deploy --all` will **not** delete an
+already-deployed CloudFormation stack, so its resources and cost linger until an
+explicit `cdk destroy`. When retiring a stack, follow (and persist) an ordered
+teardown runbook. Example: the scheduled-assistant-executions decommission
+(#1322) is documented in
+[operations/decommission-scheduled-executions.md](operations/decommission-scheduled-executions.md).
+
 ---
 
 ## DNS and Certificate Configuration
