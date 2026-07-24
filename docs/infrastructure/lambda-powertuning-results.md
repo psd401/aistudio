@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-Completed PowerTuning analysis on all Lambda functions in the dev environment. Results show potential for **significant cost savings** (65-85% reduction on 3 of 4 functions) by right-sizing memory allocations.
+Completed PowerTuning analysis on all Lambda functions in the dev environment. Results show potential for **significant cost savings** (65-85% reduction on 2 of 3 functions) by right-sizing memory allocations.
 
 **Total Potential Monthly Savings**: ~$40-60/month in dev, estimated $80-100/month in production
 
@@ -53,20 +53,6 @@ Completed PowerTuning analysis on all Lambda functions in the dev environment. R
 **Analysis**: Function is over-provisioned. Reducing memory will cut costs significantly while maintaining performance.
 
 **Action Required**: Update memory to 1024 MB
-
----
-
-### 4. schedule-executor-dev 💰 **HIGH IMPACT**
-
-| Metric | Current | Recommended | Change |
-|--------|---------|-------------|--------|
-| **Memory** | 2048 MB | **512 MB** | **-75%** |
-| **Avg Duration** | ~600ms | 556ms | Faster |
-| **Cost per Invocation** | $0.000021 | $0.0000053 | **-75%** |
-
-**Analysis**: Function uses minimal resources and can run efficiently at much lower memory allocation.
-
-**Action Required**: Update memory to 512 MB
 
 ---
 
@@ -132,18 +118,17 @@ You **don't need to re-run** for:
 | HighMemory Processor | 10,000 | $6.20 | $0.63 | **$5.57** |
 | Standard Processor | 50,000 | $5.90 | $5.90 | $0.00 |
 | File Processor | 5,000 | $0.19 | $0.07 | **$0.12** |
-| Schedule Executor | 100,000 | $2.10 | $0.53 | **$1.57** |
-| **TOTAL** | | **$14.39** | **$7.13** | **$7.26/month** |
+| **TOTAL** | | **$12.29** | **$6.60** | **$5.69/month** |
 
 ### Production Environment (Estimated 3x Dev Traffic)
 
 | Environment | Current Cost | Optimized Cost | Monthly Savings |
 |------------|--------------|----------------|-----------------|
-| Dev | $14.39 | $7.13 | $7.26 |
-| Prod (3x) | $43.17 | $21.39 | **$21.78** |
-| **TOTAL** | **$57.56** | **$28.52** | **$29.04/month** |
+| Dev | $12.29 | $6.60 | $5.69 |
+| Prod (3x) | $36.87 | $19.80 | **$17.07** |
+| **TOTAL** | **$49.16** | **$26.40** | **$22.76/month** |
 
-**Annual Savings**: ~$348/year
+**Annual Savings**: ~$273/year
 
 **Note**: These are conservative estimates. Actual savings may be higher with production traffic patterns.
 

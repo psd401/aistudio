@@ -4,7 +4,7 @@
 #
 # WHY LOCAL INSTEAD OF GITHUB CI:
 #   The suite drives real logged-in flows (Atrium collab, nexus, admin pages,
-#   scheduling, assistant-architect). Most specs need seeded data AND configured
+#   assistant-architect). Most specs need seeded data AND configured
 #   AI providers. A clean GitHub runner has neither, so the job could only ever go
 #   red or force-fit a committed AUTH_SECRET (which GitHub's secret scanner flags).
 #   Your machine already has .env.local (real AUTH_SECRET + Cognito + provider keys)

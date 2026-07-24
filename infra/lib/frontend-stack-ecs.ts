@@ -106,29 +106,6 @@ export class FrontendStackEcs extends cdk.Stack {
       : (environment === 'dev' ? `dev.${baseDomain}` : baseDomain);
 
     // ============================================================================
-    // Internal API Secret for Scheduled Execution Authentication
-    // ============================================================================
-    // Create secret for Lambda → ECS JWT authentication
-    const internalApiSecret = new secretsmanager.Secret(this, 'InternalApiSecret', {
-      secretName: `aistudio-${environment}-internal-api-secret`,
-      description: 'Internal API authentication secret for scheduled execution',
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({}),
-        generateStringKey: 'INTERNAL_API_SECRET',
-        excludePunctuation: true,
-        passwordLength: 32,
-      },
-      removalPolicy: environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
-    });
-
-    // Export secret ARN to SSM for SchedulerStack to read
-    new ssm.StringParameter(this, 'InternalApiSecretArnParam', {
-      parameterName: `/aistudio/${environment}/internal-api-secret-arn`,
-      stringValue: internalApiSecret.secretArn,
-      description: 'Internal API secret ARN for Lambda JWT authentication',
-    });
-
-    // ============================================================================
     // Atrium Collab Token Signing Secret (#1051)
     // ============================================================================
     // Dedicated HS256 signing key for Atrium collab session tokens. These tokens
@@ -331,8 +308,6 @@ export class FrontendStackEcs extends cdk.Stack {
       rdsSecretArn: ssm.StringParameter.valueForStringParameter(this, `/aistudio/${environment}/db-secret-arn`),
       // Auth secret from Secrets Manager
       authSecretArn: cdk.Fn.importValue(`${environment}-AuthSecretArn`),
-      // Internal API secret (created above)
-      internalApiSecretArn: internalApiSecret.secretArn,
       // Atrium collab token signing secret (#1051, created above)
       collabJwtSecretArn: collabJwtSecret.secretArn,
       // Guardrail violation-log hash secret (#727, created above)
@@ -514,18 +489,6 @@ export class FrontendStackEcs extends cdk.Stack {
       webAclArn: webAcl.attrArn,
     });
 
-
-    // ============================================================================
-    // SSM Parameters for Cross-Stack References
-    // ============================================================================
-    // Store ECS internal endpoint URL for schedule executor Lambda
-    // Lambda must use the domain name (not ALB DNS) to match SSL certificate
-    // Note: Uses SSM instead of CloudFormation export to avoid circular dependency with SchedulerStack
-    new ssm.StringParameter(this, 'EcsInternalEndpointParam', {
-      parameterName: `/aistudio/${environment}/ecs-internal-endpoint`,
-      stringValue: `https://${subdomain}`,
-      description: 'ECS endpoint URL for schedule executor Lambda (HTTPS via domain name)',
-    });
 
     // ============================================================================
     // Outputs (ECS-related outputs are in the construct, only add stack-specific ones here)

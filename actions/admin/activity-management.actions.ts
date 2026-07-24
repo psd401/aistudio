@@ -18,9 +18,6 @@ import { eq, sql, desc, count, gte, and, ilike, or, asc, notInArray } from "driz
 import { users } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { nexusMessages } from "@/lib/db/schema/tables/nexus-messages"
-import { executionResults } from "@/lib/db/schema/tables/execution-results"
-import { scheduledExecutions } from "@/lib/db/schema/tables/scheduled-executions"
-import { assistantArchitects } from "@/lib/db/schema/tables/assistant-architects"
 import { modelComparisons } from "@/lib/db/schema/tables/model-comparisons"
 import { aiModels } from "@/lib/db/schema/tables/ai-models"
 import { getDateThreshold } from "@/lib/date-utils"
@@ -92,24 +89,6 @@ export interface NexusMessageItem {
     totalTokens?: number
   } | null
   createdAt: Date | null
-}
-
-export interface ExecutionActivityItem {
-  id: number
-  status: string
-  executedAt: Date | null
-  executionDurationMs: number | null
-  assistantName: string
-  scheduleName: string
-  userName: string
-  userEmail: string | null
-  errorMessage: string | null
-}
-
-export interface ExecutionDetailItem extends ExecutionActivityItem {
-  resultData: Record<string, unknown>
-  assistantDescription: string | null
-  inputData: Record<string, string>
 }
 
 export interface ComparisonActivityItem {
@@ -194,9 +173,6 @@ export async function getActivityStats(
       nexusTotalResult,
       nexus24hResult,
       nexus7dResult,
-      scheduledExecTotalResult,
-      scheduledExec24hResult,
-      scheduledExec7dResult,
       assistantConvTotalResult,
       assistantConv24hResult,
       assistantConv7dResult,
@@ -237,30 +213,6 @@ export async function getActivityStats(
             .from(nexusConversations)
             .where(and(chatOnlyFilter, gte(nexusConversations.createdAt, sevenDaysAgo))),
         "getActivityStats-nexus7d"
-      ),
-      // Scheduled execution results
-      executeQuery(
-        (db) =>
-          db.select({ count: count() }).from(executionResults).where(
-            rangeStart ? gte(executionResults.executedAt, rangeStart) : undefined
-          ),
-        "getActivityStats-scheduledExecTotal"
-      ),
-      executeQuery(
-        (db) =>
-          db
-            .select({ count: count() })
-            .from(executionResults)
-            .where(gte(executionResults.executedAt, oneDayAgo)),
-        "getActivityStats-scheduledExec24h"
-      ),
-      executeQuery(
-        (db) =>
-          db
-            .select({ count: count() })
-            .from(executionResults)
-            .where(gte(executionResults.executedAt, sevenDaysAgo)),
-        "getActivityStats-scheduledExec7d"
       ),
       // Manual assistant-architect conversations
       executeQuery(
@@ -488,23 +440,21 @@ export async function getActivityStats(
       ),
     ])
 
-    // Combine scheduled executions + manual assistant conversations for total execution counts
-    const scheduledTotal = scheduledExecTotalResult[0]?.count ?? 0
+    // Manual assistant-architect conversations are the only architect execution
+    // activity now that scheduled executions have been decommissioned (#1322).
     const assistantConvTotal = assistantConvTotalResult[0]?.count ?? 0
-    const scheduled24h = scheduledExec24hResult[0]?.count ?? 0
     const assistantConv24h = assistantConv24hResult[0]?.count ?? 0
-    const scheduled7d = scheduledExec7dResult[0]?.count ?? 0
     const assistantConv7d = assistantConv7dResult[0]?.count ?? 0
 
     const stats: ActivityStats = {
       totalNexusConversations: nexusTotalResult[0]?.count ?? 0,
-      totalArchitectExecutions: scheduledTotal + assistantConvTotal,
+      totalArchitectExecutions: assistantConvTotal,
       totalComparisons: comparisonsTotalResult[0]?.count ?? 0,
       nexus24h: nexus24hResult[0]?.count ?? 0,
-      executions24h: scheduled24h + assistantConv24h,
+      executions24h: assistantConv24h,
       comparisons24h: comparisons24hResult[0]?.count ?? 0,
       nexus7d: nexus7dResult[0]?.count ?? 0,
-      executions7d: scheduled7d + assistantConv7d,
+      executions7d: assistantConv7d,
       comparisons7d: comparisons7dResult[0]?.count ?? 0,
       activeUsers7d: activeUsersResult[0]?.count ?? 0,
       totalCostUsd: Number.parseFloat(String(costTotalResult[0]?.total ?? "0"))
@@ -748,206 +698,7 @@ export async function getConversationMessages(
 }
 
 /**
- * Get paginated execution results with assistant info
- */
-export async function getExecutionActivity(
-  filters?: ActivityFilters & { status?: string }
-): Promise<ActionState<{ items: ExecutionActivityItem[]; total: number }>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("getExecutionActivity")
-  const log = createLogger({ requestId, action: "getExecutionActivity" })
-
-  try {
-    log.info("Fetching execution activity", { filters: sanitizeForLogging(filters) })
-
-    await requireRole("administrator")
-
-    const page = filters?.page ?? 1
-    const pageSize = Math.min(filters?.pageSize ?? 25, 100)
-    const offset = (page - 1) * pageSize
-
-    if (page < 1) {
-      throw ErrorFactories.invalidInput("page", page, "Must be >= 1")
-    }
-
-    // Build conditions
-    const conditions = []
-
-    if (filters?.status) {
-      conditions.push(eq(executionResults.status, filters.status))
-    }
-
-    if (filters?.dateFrom) {
-      conditions.push(gte(executionResults.executedAt, new Date(filters.dateFrom)))
-    }
-
-    if (filters?.dateTo) {
-      const endDate = new Date(filters.dateTo)
-      endDate.setHours(23, 59, 59, 999)
-      conditions.push(sql`${executionResults.executedAt} <= ${endDate}`)
-    }
-
-    if (filters?.search) {
-      const searchInput = filters.search.trim()
-      if (searchInput.length > 100) {
-        throw ErrorFactories.invalidInput("search", searchInput, "Must be 100 characters or less")
-      }
-      if (searchInput.length > 0) {
-        const escapedInput = searchInput
-          .replace(/\\/g, "\\\\")
-          .replace(/%/g, "\\%")
-          .replace(/_/g, "\\_")
-        const searchTerm = `%${escapedInput}%`
-        conditions.push(
-          or(
-            ilike(assistantArchitects.name, searchTerm),
-            ilike(scheduledExecutions.name, searchTerm),
-            ilike(users.email, searchTerm)
-          )!
-        )
-      }
-    }
-
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined
-
-    const [items, countResult] = await Promise.all([
-      executeQuery(
-        (db) =>
-          db
-            .select({
-              id: executionResults.id,
-              status: executionResults.status,
-              executedAt: executionResults.executedAt,
-              executionDurationMs: executionResults.executionDurationMs,
-              assistantName: assistantArchitects.name,
-              scheduleName: scheduledExecutions.name,
-              userName: sql<string>`COALESCE(CONCAT(${users.firstName}, ' ', ${users.lastName}), 'Unknown')`,
-              userEmail: users.email,
-              errorMessage: executionResults.errorMessage,
-            })
-            .from(executionResults)
-            .innerJoin(
-              scheduledExecutions,
-              eq(executionResults.scheduledExecutionId, scheduledExecutions.id)
-            )
-            .innerJoin(
-              assistantArchitects,
-              eq(scheduledExecutions.assistantArchitectId, assistantArchitects.id)
-            )
-            .innerJoin(users, eq(scheduledExecutions.userId, users.id))
-            .where(whereClause)
-            .orderBy(desc(executionResults.executedAt))
-            .limit(pageSize)
-            .offset(offset),
-        "getExecutionActivity-list"
-      ),
-      executeQuery(
-        (db) =>
-          db
-            .select({ count: count() })
-            .from(executionResults)
-            .innerJoin(
-              scheduledExecutions,
-              eq(executionResults.scheduledExecutionId, scheduledExecutions.id)
-            )
-            .innerJoin(
-              assistantArchitects,
-              eq(scheduledExecutions.assistantArchitectId, assistantArchitects.id)
-            )
-            .innerJoin(users, eq(scheduledExecutions.userId, users.id))
-            .where(whereClause),
-        "getExecutionActivity-count"
-      ),
-    ])
-
-    timer({ status: "success" })
-    log.info("Execution activity fetched", { count: items.length, total: countResult[0]?.count ?? 0 })
-
-    return createSuccess(
-      { items: items as ExecutionActivityItem[], total: countResult[0]?.count ?? 0 },
-      "Activity fetched successfully"
-    )
-  } catch (error) {
-    timer({ status: "error" })
-    return handleError(error, "Failed to fetch execution activity", {
-      context: "getExecutionActivity",
-      requestId,
-      operation: "getExecutionActivity",
-    })
-  }
-}
-
-/**
- * Get detailed execution result
- */
-export async function getExecutionDetail(
-  executionId: number
-): Promise<ActionState<ExecutionDetailItem | null>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("getExecutionDetail")
-  const log = createLogger({ requestId, action: "getExecutionDetail" })
-
-  try {
-    log.info("Fetching execution detail", { executionId })
-
-    await requireRole("administrator")
-
-    if (!executionId || executionId < 1) {
-      throw ErrorFactories.invalidInput("executionId", executionId, "Must be a positive integer")
-    }
-
-    const result = await executeQuery(
-      (db) =>
-        db
-          .select({
-            id: executionResults.id,
-            status: executionResults.status,
-            executedAt: executionResults.executedAt,
-            executionDurationMs: executionResults.executionDurationMs,
-            resultData: executionResults.resultData,
-            errorMessage: executionResults.errorMessage,
-            assistantName: assistantArchitects.name,
-            assistantDescription: assistantArchitects.description,
-            scheduleName: scheduledExecutions.name,
-            inputData: scheduledExecutions.inputData,
-            userName: sql<string>`COALESCE(CONCAT(${users.firstName}, ' ', ${users.lastName}), 'Unknown')`,
-            userEmail: users.email,
-          })
-          .from(executionResults)
-          .innerJoin(
-            scheduledExecutions,
-            eq(executionResults.scheduledExecutionId, scheduledExecutions.id)
-          )
-          .innerJoin(
-            assistantArchitects,
-            eq(scheduledExecutions.assistantArchitectId, assistantArchitects.id)
-          )
-          .innerJoin(users, eq(scheduledExecutions.userId, users.id))
-          .where(eq(executionResults.id, executionId))
-          .limit(1),
-      "getExecutionDetail"
-    )
-
-    if (result.length === 0) {
-      throw ErrorFactories.dbRecordNotFound("execution_results", executionId)
-    }
-
-    timer({ status: "success" })
-    log.info("Execution detail fetched", { executionId })
-
-    return createSuccess(result[0] as ExecutionDetailItem, "Detail fetched successfully")
-  } catch (error) {
-    timer({ status: "error" })
-    return handleError(error, "Failed to fetch execution detail", {
-      context: "getExecutionDetail",
-      requestId,
-      operation: "getExecutionDetail",
-    })
-  }
-}
-
-/**
- * Get paginated assistant architect conversations (manual runs that don't have execution_results records).
+ * Get paginated assistant architect conversations (manual runs).
  * These are nexus_conversations with provider='assistant-architect'.
  */
 export async function getAssistantConversationActivity(

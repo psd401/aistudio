@@ -6,7 +6,7 @@ import { authenticateContext } from "./helpers/session-auth";
  * Local E2E global setup: (1) generate authenticated storageState files, and
  * (2) browser-warm dev routes.
  *
- * (1) AUTH STATE — many specs (nexus/*, scheduling, assistant-architect, admin)
+ * (1) AUTH STATE — many specs (nexus/*, assistant-architect, admin)
  * were written against a global authenticated session saved to tests/e2e/.auth/*.json
  * (the standard Playwright storageState pattern) that was never wired up, so they
  * ran unauthenticated and timed out. We mint two seeded sessions here and persist
@@ -47,7 +47,6 @@ const WARM_ROUTES = [
   "/admin/tools",
   "/repositories",
   "/prompt-library",
-  "/schedules",
   "/compare",
   "/settings",
   "/skills",

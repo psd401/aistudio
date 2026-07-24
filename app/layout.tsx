@@ -1,7 +1,6 @@
 import '@/app/globals.css';
 import { Toaster } from 'sonner';
 import AuthSessionProvider from "@/components/utilities/session-provider"
-import { NotificationProvider } from "@/contexts/notification-context";
 import { BrandingProvider } from "@/contexts/branding-context";
 import { ErrorCaptureInit } from "@/components/utilities/error-capture-init";
 import { fontSans } from "@/lib/fonts"
@@ -49,11 +48,9 @@ export default async function RootLayout({
             logoSrc: branding.logoSrc,
             logoIsExternal: !branding.logoSrc.startsWith('/'),
           }}>
-            <NotificationProvider>
-              <ErrorCaptureInit />
-              {children}
-              <Toaster />
-            </NotificationProvider>
+            <ErrorCaptureInit />
+            {children}
+            <Toaster />
           </BrandingProvider>
         </AuthSessionProvider>
       </body>
