@@ -1,3 +1,4 @@
+import type { Metadata } from "next"
 import type { LucideIcon } from "lucide-react"
 import {
   Activity,
@@ -197,3 +198,23 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     ],
   },
 ]
+
+/** Flat list of every registered admin page. */
+export const ALL_ADMIN_PAGES: AdminPageEntry[] = ADMIN_SECTIONS.flatMap(
+  section => section.pages
+)
+
+/**
+ * Registry-driven <title>/<meta description> for an admin page. Every admin
+ * page exports `metadata = adminPageMetadata("<its href>")` so browser tabs
+ * stay consistent with the hub cards. Falls back to plain "Admin" rather than
+ * throwing so a registry gap can never break a page render (the drift unit
+ * test is the enforcement layer).
+ */
+export function adminPageMetadata(href: string): Metadata {
+  const entry = ALL_ADMIN_PAGES.find(page => page.href === href)
+  return {
+    title: entry ? `${entry.title} | Admin` : "Admin",
+    description: entry?.description,
+  }
+}

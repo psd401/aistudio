@@ -13,6 +13,8 @@
 import { requireRole } from "@/lib/auth/role-helpers"
 import { TriageDetailClient } from "./_components/triage-detail-client"
 
+export const metadata = { title: "Email Triage | Admin" }
+
 interface PageProps {
   params: Promise<{ userEmail: string }>
 }

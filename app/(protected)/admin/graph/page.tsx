@@ -1,7 +1,10 @@
+import { adminPageMetadata } from "../_lib/admin-pages"
 import { Suspense } from "react"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { GraphPageClient } from "./_components"
 import { PageBranding } from "@/components/ui/page-branding"
+
+export const metadata = adminPageMetadata("/admin/graph")
 
 export default async function AdminGraphPage() {
   await requireRole("administrator")

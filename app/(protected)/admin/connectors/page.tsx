@@ -1,7 +1,10 @@
+import { adminPageMetadata } from "../_lib/admin-pages"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { listMcpServers } from "@/actions/admin/connector.actions"
 import { ConnectorsPageClient } from "./_components/connectors-page-client"
 import { PageBranding } from "@/components/ui/page-branding"
+
+export const metadata = adminPageMetadata("/admin/connectors")
 
 export default async function ConnectorsPage() {
   await requireRole("administrator")

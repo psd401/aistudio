@@ -1,3 +1,4 @@
+import { adminPageMetadata } from "../_lib/admin-pages"
 import { Suspense } from "react"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { getAIModels } from "@/lib/db/drizzle"
@@ -5,6 +6,8 @@ import { ModelsPageClient } from "./_components"
 import { StatsCardsSkeleton } from "./_components/stats-cards"
 import { PageBranding } from "@/components/ui/page-branding"
 import type { SelectAiModel } from "@/types/db-types"
+
+export const metadata = adminPageMetadata("/admin/models")
 
 export default async function ModelsPage() {
   await requireRole("administrator")

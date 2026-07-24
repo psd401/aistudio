@@ -33,6 +33,10 @@ test.describe('Admin hub page', () => {
     const heading = page.locator('h1').filter({ hasText: /^Admin$/ })
     await expect(heading).toBeVisible({ timeout: 15000 })
     await expect(page.getByTestId('admin-hub')).toBeVisible()
+    await expect(page).toHaveTitle(/Admin/)
+
+    // The hub itself has no back-link; sub-pages do (asserted below).
+    await expect(page.getByTestId('admin-breadcrumb')).toHaveCount(0)
 
     // A card from each section of the registry is present.
     await expect(page.getByTestId('admin-card-users')).toBeVisible()
@@ -48,11 +52,19 @@ test.describe('Admin hub page', () => {
         .or(page.getByTestId('triage-quick-jump-empty')),
     ).toBeVisible()
 
-    // A card navigates to its admin page.
+    // A card navigates to its admin page, which carries the registry-driven
+    // title and the "← Admin" breadcrumb back to the hub.
     await page.getByTestId('admin-card-users').click()
     await page.waitForURL('**/admin/users')
     await expect(
       page.locator('h1').filter({ hasText: 'User Management' }),
     ).toBeVisible({ timeout: 15000 })
+    await expect(page).toHaveTitle(/User Management \| Admin/)
+    await expect(page.getByTestId('admin-breadcrumb')).toBeVisible()
+
+    // Breadcrumb round-trips back to the hub.
+    await page.getByTestId('admin-breadcrumb').click()
+    await page.waitForURL('**/admin')
+    await expect(page.getByTestId('admin-hub')).toBeVisible()
   })
 })

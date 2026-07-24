@@ -1,3 +1,4 @@
+import { adminPageMetadata } from "../_lib/admin-pages"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { listToolCatalogIdentifiers } from "@/lib/db/drizzle"
 import { PageBranding } from "@/components/ui/page-branding"
@@ -10,6 +11,8 @@ import { ToolVersionsClient } from "./_components/tool-versions-client"
  * tool loads its full version history (published date, deprecation state,
  * replaced_by, usage counts) and exposes deprecate / restore / remove actions.
  */
+export const metadata = adminPageMetadata("/admin/tools")
+
 export default async function AdminToolsPage() {
   await requireRole("administrator")
 
