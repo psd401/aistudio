@@ -122,6 +122,8 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     identifier: "assistants.execute",
     requiredScope: "mcp:execute_assistant",
     internalScopes: ["mcp:execute_assistant"],
+    // v2: the published v1 schema predates the current execution inputs.
+    version: "v2",
     rest: {
       // REST callers use `assistants:execute` (see app/api/v1/assistants/[id]/execute);
       // distinct from the MCP scope, hence surfaceScopes rather than a shared array.
@@ -144,6 +146,8 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     identifier: "assistants.list",
     requiredScope: "mcp:list_assistants",
     internalScopes: ["mcp:list_assistants"],
+    // v2: the published v1 schema predates the current list filters.
+    version: "v2",
     rest: {
       // REST list route uses `assistants:list` (see app/api/v1/assistants GET).
       scopes: ["assistants:list"],
@@ -313,7 +317,7 @@ const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
  */
 const AI_SDK_MANIFEST_ENTRIES: ToolManifestEntry[] = AI_SDK_TOOLS.map((tool) => ({
   identifier: tool.identifier,
-  version: "v1",
+  version: tool.version ?? "v1",
   name: tool.wireName,
   description: tool.description,
   inputSchema: { type: "object", properties: {} },

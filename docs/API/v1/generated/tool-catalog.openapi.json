@@ -19,7 +19,7 @@
         "operationId": "listAssistants",
         "summary": "List assistants available for API execution",
         "x-tool-identifier": "assistants.list",
-        "x-tool-version": "v1",
+        "x-tool-version": "v2",
         "security": [
           {
             "ApiKeyAuth": [
@@ -49,7 +49,7 @@
         "summary": "Execute an assistant",
         "description": "Execute an assistant architect by id. Returns an SSE stream (default) or a 202 job (Accept: application/json).",
         "x-tool-identifier": "assistants.execute",
-        "x-tool-version": "v1",
+        "x-tool-version": "v2",
         "parameters": [
           {
             "name": "id",
