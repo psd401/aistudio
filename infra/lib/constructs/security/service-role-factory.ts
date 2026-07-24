@@ -2,26 +2,40 @@ import * as iam from "aws-cdk-lib/aws-iam"
 import * as cdk from "aws-cdk-lib"
 import { Construct } from "constructs"
 import { BaseIAMRole } from "./base-iam-role"
-import { LambdaRoleProps, ECSTaskRoleProps } from "./types"
+import {
+  LambdaRoleProps,
+  ECSTaskRoleProps,
+  IAMResourceReference,
+} from "./types"
 
 /**
  * Factory for creating service-specific IAM roles with least privilege
  */
 export class ServiceRoleFactory {
   /**
-   * Preserve complete resource ARNs, including unresolved CDK ARN tokens.
+   * Resolve an explicit ARN/name reference to an IAM resource ARN.
    *
-   * Construct properties such as secretArn and queueArn are unresolved tokens
-   * until synthesis. Treating one as a bare name creates a malformed resource
-   * like arn:...:<resolved-full-arn>, which can never authorize the target.
+   * Literal strings retain the legacy convenience behavior: complete ARNs are
+   * preserved and literal names are formatted. Unresolved strings are rejected
+   * because CDK cannot tell whether they represent an ARN or a bare name;
+   * callers must wrap those as { arn } or { name }.
    */
   private static resolveResourceArn(
-    resource: string,
+    resource: IAMResourceReference,
     fromName: (name: string) => string
   ): string {
-    return resource.startsWith("arn:") || cdk.Token.isUnresolved(resource)
-      ? resource
-      : fromName(resource)
+    if (typeof resource !== "string") {
+      return "arn" in resource ? resource.arn : fromName(resource.name)
+    }
+    if (resource.startsWith("arn:")) {
+      return resource
+    }
+    if (cdk.Token.isUnresolved(resource)) {
+      throw new Error(
+        "Ambiguous unresolved IAM resource reference; wrap token values as { arn } or { name }"
+      )
+    }
+    return fromName(resource)
   }
 
   /**
@@ -306,7 +320,7 @@ export class ServiceRoleFactory {
    * Build Secrets Manager access policy with tag-based conditions for enhanced security
    */
   private static buildSecretsAccessPolicy(
-    secretArns: string[],
+    secretArns: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     return new iam.PolicyDocument({
@@ -342,7 +356,7 @@ export class ServiceRoleFactory {
    * - Avoids requiring object tagging in application code
    */
   private static buildS3AccessPolicy(
-    bucketNames: string[],
+    bucketNames: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const bucketArns = bucketNames.map((bucket) =>
@@ -395,7 +409,7 @@ export class ServiceRoleFactory {
    * Build DynamoDB access policy with tag-based conditions for enhanced security
    */
   private static buildDynamoDBAccessPolicy(
-    tableNames: string[],
+    tableNames: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const tableArns = tableNames.map((table) =>
@@ -434,7 +448,7 @@ export class ServiceRoleFactory {
    * Build SQS access policy with tag-based conditions for enhanced security
    */
   private static buildSQSAccessPolicy(
-    queueNames: string[],
+    queueNames: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const queueArns = queueNames.map((queue) =>
@@ -470,7 +484,7 @@ export class ServiceRoleFactory {
    * Build SNS access policy with tag-based conditions for enhanced security
    */
   private static buildSNSAccessPolicy(
-    topicNames: string[],
+    topicNames: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const topicArns = topicNames.map((topic) =>
@@ -501,7 +515,7 @@ export class ServiceRoleFactory {
    * Build ECR access policy with tag-based conditions for enhanced security
    */
   private static buildECRAccessPolicy(
-    repositoryNames: string[],
+    repositoryNames: IAMResourceReference[],
     props: { region: string; account: string; environment: string }
   ): iam.PolicyDocument {
     const repositoryArns = repositoryNames.map((repo) =>

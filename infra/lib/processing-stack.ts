@@ -153,10 +153,10 @@ export class ProcessingStack extends cdk.Stack {
       region: this.region,
       account: this.account,
       vpcEnabled: false,
-      s3Buckets: [documentsBucketName],
-      dynamodbTables: [this.jobStatusTable.tableName],
-      sqsQueues: [this.embeddingQueue.queueArn],
-      secrets: [databaseSecretArn],
+      s3Buckets: [{ name: documentsBucketName }],
+      dynamodbTables: [{ name: this.jobStatusTable.tableName }],
+      sqsQueues: [{ arn: this.embeddingQueue.queueArn }],
+      secrets: [{ arn: databaseSecretArn }],
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [
@@ -231,8 +231,8 @@ export class ProcessingStack extends cdk.Stack {
       region: this.region,
       account: this.account,
       vpcEnabled: false,
-      dynamodbTables: [this.jobStatusTable.tableName],
-      secrets: [databaseSecretArn],
+      dynamodbTables: [{ name: this.jobStatusTable.tableName }],
+      secrets: [{ arn: databaseSecretArn }],
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [
@@ -286,7 +286,7 @@ export class ProcessingStack extends cdk.Stack {
       // vpcEnabled: false — VPC access added manually via managed policy below
       // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
       vpcEnabled: false,
-      sqsQueues: [this.embeddingQueue.queueArn],
+      sqsQueues: [{ arn: this.embeddingQueue.queueArn }],
       // secrets[] uses tag-conditional access which won't match the DatabaseStack secret.
       // Add an explicit statement without tag conditions instead (same as AgentHealthDailyRole).
       additionalPolicies: [
@@ -471,8 +471,8 @@ export class ProcessingStack extends cdk.Stack {
       region: this.region,
       account: this.account,
       vpcEnabled: false,
-      sqsQueues: [this.embeddingQueue.queueArn],
-      secrets: [databaseSecretArn],
+      sqsQueues: [{ arn: this.embeddingQueue.queueArn }],
+      secrets: [{ arn: databaseSecretArn }],
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [

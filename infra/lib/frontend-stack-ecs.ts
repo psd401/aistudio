@@ -212,7 +212,7 @@ export class FrontendStackEcs extends cdk.Stack {
         environment,
         region: this.region,
         account: this.account,
-        secrets: [oidcSigningJwksSecret.secretArn],
+        secrets: [{ arn: oidcSigningJwksSecret.secretArn }],
         additionalPolicies: [
           new iam.PolicyDocument({
             statements: [

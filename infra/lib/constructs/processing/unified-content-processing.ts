@@ -272,7 +272,7 @@ export class UnifiedContentProcessing extends Construct {
         // resource-tag conditions are guaranteed to match. Embedding dispatch
         // uses an explicit queue-ARN grant below because shared queues may have
         // stack-level tags whose values do not match those conditions.
-        sqsQueues: [this.queue.queueName],
+        sqsQueues: [{ name: this.queue.queueName }],
         additionalPolicies: [
           new iam.PolicyDocument({
             statements: [

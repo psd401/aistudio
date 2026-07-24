@@ -232,7 +232,7 @@ export class IntelligentAlerting extends Construct {
           ],
         }),
       ],
-      snsTopics: [alarmTopic.topicArn], // Grant publish permission to SNS topic
+      snsTopics: [{ arn: alarmTopic.topicArn }], // Grant publish permission to SNS topic
     });
 
     const router = new lambda.Function(this, 'AlertRouter', {

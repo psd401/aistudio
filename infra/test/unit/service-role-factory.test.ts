@@ -8,13 +8,14 @@ import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager"
 import * as sns from "aws-cdk-lib/aws-sns"
 import * as sqs from "aws-cdk-lib/aws-sqs"
 import { ServiceRoleFactory } from "../../lib/constructs/security/service-role-factory"
+import type { IAMResourceReference } from "../../lib/constructs/security/types"
 
 interface AccessProps {
-  secrets?: string[]
-  s3Buckets?: string[]
-  dynamodbTables?: string[]
-  sqsQueues?: string[]
-  snsTopics?: string[]
+  secrets?: IAMResourceReference[]
+  s3Buckets?: IAMResourceReference[]
+  dynamodbTables?: IAMResourceReference[]
+  sqsQueues?: IAMResourceReference[]
+  snsTopics?: IAMResourceReference[]
 }
 
 interface PolicyStatement {
@@ -74,7 +75,7 @@ function statementFor(
   return statement
 }
 
-function synthesizeSecretRole(secretReference: string): string {
+function synthesizeSecretRole(secretReference: IAMResourceReference): string {
   const app = new cdk.App()
   const stack = new cdk.Stack(app, "ServiceRoleFactoryTest", {
     env: { account: "123456789012", region: "us-east-1" },
@@ -94,7 +95,7 @@ describe("ServiceRoleFactory resource ARN normalization", () => {
     })
     const secret = new secretsmanager.Secret(stack, "SigningSecret")
 
-    createRole(stack, { secrets: [secret.secretArn] })
+    createRole(stack, { secrets: [{ arn: secret.secretArn }] })
 
     expect(
       statementFor(stack, "secretsmanager:GetSecretValue").Resource
@@ -108,7 +109,7 @@ describe("ServiceRoleFactory resource ARN normalization", () => {
     })
     const bucket = new s3.Bucket(stack, "DocumentsBucket")
 
-    createRole(stack, { s3Buckets: [bucket.bucketArn] })
+    createRole(stack, { s3Buckets: [{ arn: bucket.bucketArn }] })
 
     expect(statementFor(stack, "s3:ListBucket").Resource).toEqual(
       stack.resolve(bucket.bucketArn)
@@ -124,7 +125,7 @@ describe("ServiceRoleFactory resource ARN normalization", () => {
       partitionKey: { name: "id", type: dynamodb.AttributeType.STRING },
     })
 
-    createRole(stack, { dynamodbTables: [table.tableArn] })
+    createRole(stack, { dynamodbTables: [{ arn: table.tableArn }] })
 
     expect(statementFor(stack, "dynamodb:GetItem").Resource).toEqual(
       expect.arrayContaining([stack.resolve(table.tableArn)])
@@ -138,7 +139,7 @@ describe("ServiceRoleFactory resource ARN normalization", () => {
     })
     const queue = new sqs.Queue(stack, "WorkQueue")
 
-    createRole(stack, { sqsQueues: [queue.queueArn] })
+    createRole(stack, { sqsQueues: [{ arn: queue.queueArn }] })
 
     expect(statementFor(stack, "sqs:SendMessage").Resource).toEqual(
       stack.resolve(queue.queueArn)
@@ -152,7 +153,7 @@ describe("ServiceRoleFactory resource ARN normalization", () => {
     })
     const topic = new sns.Topic(stack, "AlertsTopic")
 
-    createRole(stack, { snsTopics: [topic.topicArn] })
+    createRole(stack, { snsTopics: [{ arn: topic.topicArn }] })
 
     expect(statementFor(stack, "sns:Publish").Resource).toEqual(
       stack.resolve(topic.topicArn)
@@ -167,12 +168,12 @@ describe("ServiceRoleFactory resource ARN normalization", () => {
     const repository = new ecr.Repository(stack, "ImageRepository")
     const ecrPolicyFactory = ServiceRoleFactory as unknown as {
       buildECRAccessPolicy(
-        repositoryNames: string[],
+        repositoryNames: IAMResourceReference[],
         props: { region: string; account: string; environment: string }
       ): iam.PolicyDocument
     }
     const ecrPolicy = ecrPolicyFactory.buildECRAccessPolicy(
-      [repository.repositoryArn],
+      [{ arn: repository.repositoryArn }],
       {
         region: "us-east-1",
         account: "123456789012",
@@ -186,6 +187,68 @@ describe("ServiceRoleFactory resource ARN normalization", () => {
 
     expect(statementFor(stack, "ecr:BatchGetImage").Resource).toEqual(
       stack.resolve(repository.repositoryArn)
+    )
+  })
+
+  it("expands an unresolved S3 bucket name token", () => {
+    const app = new cdk.App()
+    const stack = new cdk.Stack(app, "TokenBucketNameRoleTest", {
+      env: { account: "123456789012", region: "us-east-1" },
+    })
+    const bucket = new s3.Bucket(stack, "DocumentsBucket")
+
+    createRole(stack, { s3Buckets: [{ name: bucket.bucketName }] })
+
+    expect(statementFor(stack, "s3:ListBucket").Resource).toEqual(
+      stack.resolve(`arn:aws:s3:::${bucket.bucketName}`)
+    )
+  })
+
+  it("expands an unresolved DynamoDB table name token", () => {
+    const app = new cdk.App()
+    const stack = new cdk.Stack(app, "TokenTableNameRoleTest", {
+      env: { account: "123456789012", region: "us-east-1" },
+    })
+    const table = new dynamodb.Table(stack, "DataTable", {
+      partitionKey: { name: "id", type: dynamodb.AttributeType.STRING },
+    })
+
+    createRole(stack, { dynamodbTables: [{ name: table.tableName }] })
+
+    expect(statementFor(stack, "dynamodb:GetItem").Resource).toEqual(
+      expect.arrayContaining([
+        stack.resolve(
+          `arn:aws:dynamodb:us-east-1:123456789012:table/${table.tableName}`
+        ),
+      ])
+    )
+  })
+
+  it("expands an unresolved SQS queue name token", () => {
+    const app = new cdk.App()
+    const stack = new cdk.Stack(app, "TokenQueueNameRoleTest", {
+      env: { account: "123456789012", region: "us-east-1" },
+    })
+    const queue = new sqs.Queue(stack, "WorkQueue")
+
+    createRole(stack, { sqsQueues: [{ name: queue.queueName }] })
+
+    expect(statementFor(stack, "sqs:SendMessage").Resource).toEqual(
+      stack.resolve(
+        `arn:aws:sqs:us-east-1:123456789012:${queue.queueName}`
+      )
+    )
+  })
+
+  it("rejects ambiguous unresolved string references", () => {
+    const app = new cdk.App()
+    const stack = new cdk.Stack(app, "AmbiguousTokenRoleTest", {
+      env: { account: "123456789012", region: "us-east-1" },
+    })
+    const secret = new secretsmanager.Secret(stack, "SigningSecret")
+
+    expect(() => createRole(stack, { secrets: [secret.secretArn] })).toThrow(
+      "Ambiguous unresolved IAM resource reference; wrap token values as { arn } or { name }"
     )
   })
 
