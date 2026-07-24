@@ -76,7 +76,7 @@
     "dev:voice": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false IS_LOCAL_DEV=true bun run server.ts"
   },
   "dependencies": {
-    "@ai-sdk/amazon-bedrock": "~4.0.120",
+    "@ai-sdk/amazon-bedrock": "~5.0.17",
     "@ai-sdk/azure": "~3.0.77",
     "@ai-sdk/google": "~3.0.83",
     "@ai-sdk/mcp": "1.0.52",
