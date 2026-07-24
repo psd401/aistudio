@@ -124,6 +124,7 @@
     "127-atrium-idempotency.sql",
     "128-atrium-content-assets.sql",
     "129-oauth-production-hardening.sql",
-    "130-oauth-application-types.sql"
+    "130-oauth-application-types.sql",
+    "131-admin-hub-nav-cleanup.sql"
   ]
 }

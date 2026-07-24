@@ -171,21 +171,11 @@ INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, r
 (8, 'Experiments', 'IconFlask', NULL, NULL, NULL, NULL, 50, true, NULL, 'section'),
 (19, 'Utilities', 'IconTools', NULL, NULL, NULL, NULL, 60, true, NULL, 'section'),
 (12, 'Ideas', 'IconBulb', '/ideas', NULL, NULL, NULL, 70, true, NULL, 'link'),
-(11, 'Admin', 'IconShield', '', NULL, NULL, 'administrator', 80, true, '', 'section');
+(11, 'Admin', 'IconShield', '/admin', NULL, NULL, 'administrator', 80, true, 'All administration pages in one place', 'link');
 
--- Admin sub-items (alphabetical order)
-INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, requires_role, position, is_active, description, type) VALUES
-(46, 'Activity Dashboard', 'IconActivity', '/admin/activity', 11, NULL, 'administrator', 0, true, 'View activity across Nexus, Assistant Architect, and Model Compare', 'link'),
-(16, 'AI Models', 'IconRobot', '/admin/models', 11, NULL, 'administrator', 10, true, '', 'link'),
-(18, 'Assistant Administration', 'IconBraces', '/admin/assistants', 11, NULL, 'administrator', 20, true, '', 'link'),
-(48, 'Context Graph', 'IconGitBranch', '/admin/graph', 11, NULL, 'administrator', 30, true, 'Manage context graph nodes and edges', 'link'),
-(14, 'Navigation Manager', 'IconHome', '/admin/navigation', 11, NULL, 'administrator', 40, true, '', 'link'),
-(49, 'OAuth Clients', 'IconKey', '/admin/oauth-clients', 11, NULL, 'administrator', 50, true, 'Manage OAuth client applications', 'link'),
-(45, 'Prompt Management', 'IconBriefcase', '/admin/prompts', 11, NULL, 'administrator', 60, true, '', 'link'),
-(38, 'Repository Manager', 'IconBuildingBank', '/admin/repositories', 11, NULL, 'administrator', 70, true, '', 'link'),
-(17, 'Role Management', 'IconUsersGroup', '/admin/roles', 11, NULL, 'administrator', 80, true, '', 'link'),
-(13, 'System Settings', 'IconTools', '/admin/settings', 11, NULL, 'administrator', 90, true, '', 'link'),
-(15, 'User Management', 'IconUser', '/admin/users', 11, NULL, 'administrator', 100, true, '', 'link');
+-- Admin sub-pages are NOT seeded as nav rows: /admin is a hub page whose cards
+-- come from the ADMIN_SECTIONS registry (app/(protected)/admin/_lib/admin-pages.ts).
+-- Mirrors migration 131-admin-hub-nav-cleanup.sql.
 
 -- Utilities sub-items.
 -- capability_id gates each item by the capability the route enforces. A NULL
