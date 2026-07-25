@@ -152,6 +152,16 @@ describe('Security Headers Tests', () => {
         expect(response.headers.get(name)).toBe(value)
       })
     })
+
+    it('does not public-exempt descendants of the Google webhook route', async () => {
+      const request = new NextRequest(
+        'http://localhost:3000/api/repositories/connectors/google/webhook/unexpected',
+      )
+
+      const response = await middleware(request, {} as any) as NextResponse
+
+      expect(response.status).toBe(401)
+    })
   })
 
   describe('Static Assets', () => {

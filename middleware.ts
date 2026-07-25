@@ -14,11 +14,6 @@ const PUBLIC_PATHS = [
   "/api/healthz", // Lightweight health check for ECS/Docker
   "/api/ping",
   "/api/auth/federated-signout",
-  // Google Drive push notifications authenticate with a high-entropy channel
-  // token plus channel/resource identifiers inside the route. Google cannot
-  // hold an AI Studio browser session, so middleware must let the route perform
-  // its own fail-closed notification validation.
-  "/api/repositories/connectors/google/webhook",
   // SECURITY: All routes under /api/v1/* MUST use withApiAuth() wrapper.
   // This bypass only skips NextAuth session checks — API routes handle their own auth.
   "/api/v1", // External API routes handle their own auth via Bearer token (#677)
@@ -60,6 +55,14 @@ const PUBLIC_PATHS = [
   "/sitemap.xml",
   "/robots.txt",
 ];
+
+// Unlike PUBLIC_PATHS, entries here do not expose descendant routes. Google
+// Drive push notifications authenticate with a high-entropy channel token plus
+// channel/resource identifiers inside the route, but future sibling handlers
+// must not silently inherit that browser-session exemption.
+const EXACT_PUBLIC_PATHS = new Set([
+  "/api/repositories/connectors/google/webhook",
+]);
 
 // Atrium artifact sandbox (#1052): the app embeds an <iframe> pointing at a
 // SEPARATE origin that runs untrusted artifact code (spec §19.2/§28.1). The app's
@@ -104,9 +107,13 @@ export default authMiddleware((req) => {
   const isLoggedIn = !!auth;
 
   // Check if path is public
-  const isPublicPath = PUBLIC_PATHS.some(path => 
-    nextUrl.pathname === path || nextUrl.pathname.startsWith(path + "/")
-  ) || isOidcProviderResumePath(nextUrl.pathname);
+  const isPublicPath =
+    EXACT_PUBLIC_PATHS.has(nextUrl.pathname) ||
+    PUBLIC_PATHS.some(
+      (path) =>
+        nextUrl.pathname === path || nextUrl.pathname.startsWith(path + "/"),
+    ) ||
+    isOidcProviderResumePath(nextUrl.pathname);
 
   // Create response with security headers
   let response: NextResponse;
