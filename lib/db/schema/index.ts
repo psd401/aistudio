@@ -177,6 +177,7 @@ export * from "./tables/api-key-usage";
 // OAuth2/OIDC Provider (#686)
 // ============================================
 export * from "./tables/oauth-clients";
+export * from "./tables/oauth-client-trust-audit";
 export * from "./tables/oauth-authorization-codes";
 export * from "./tables/oauth-access-tokens";
 export * from "./tables/oauth-refresh-tokens";

@@ -13,10 +13,9 @@ import { approveConsent, denyConsent } from "@/actions/oauth/consent.actions"
 
 interface ConsentFormProps {
   uid: string
-  scopes: string[]
 }
 
-export function ConsentForm({ uid, scopes }: ConsentFormProps) {
+export function ConsentForm({ uid }: ConsentFormProps) {
   const router = useRouter()
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -25,7 +24,7 @@ export function ConsentForm({ uid, scopes }: ConsentFormProps) {
     setIsLoading(true)
     setError(null)
     try {
-      const result = await approveConsent(uid, scopes)
+      const result = await approveConsent(uid)
       if (result.isSuccess && result.data?.redirectTo) {
         router.push(result.data.redirectTo)
       } else {

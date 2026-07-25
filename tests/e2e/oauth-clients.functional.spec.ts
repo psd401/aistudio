@@ -16,6 +16,17 @@ test.describe("OAuth client application profiles (#1289)", () => {
     expect(response.headers().location).toContain("/api/auth/signin")
   })
 
+  test("OAuth interaction completion requires a district session", async ({
+    request,
+  }) => {
+    const response = await request.get(
+      "/oauth/authorize/interaction/not-a-real-interaction/login",
+      { maxRedirects: 0 }
+    )
+    expect(response.status()).toBe(307)
+    expect(response.headers().location).toContain("/api/auth/signin")
+  })
+
   test.describe("authenticated administration", () => {
     test.skip(
       process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
@@ -64,6 +75,23 @@ test.describe("OAuth client application profiles (#1289)", () => {
       await expect(
         page.getByText("email", { exact: true }).locator("..").getByRole("checkbox")
       ).toBeEnabled()
+    })
+
+    test("invalid provider interactions show the safe expired state", async ({
+      page,
+    }) => {
+      await authenticateContext(
+        page.context(),
+        SEEDED_ADMIN_EMAIL,
+        SEEDED_ADMIN_SUB
+      )
+      await page.goto("/oauth/authorize?uid=not-a-real-interaction")
+      await expect(
+        page.getByRole("heading", { name: "Authorization Expired" })
+      ).toBeVisible()
+      await expect(page).toHaveURL(
+        /\/oauth\/authorize\?uid=not-a-real-interaction/
+      )
     })
   })
 })

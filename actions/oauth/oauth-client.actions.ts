@@ -43,6 +43,7 @@ export interface OAuthClientRow {
   accessTokenTtl: number
   refreshTokenTtl: number
   isActive: boolean
+  isFirstParty: boolean
   createdAt: Date
   updatedAt: Date
 }
@@ -130,6 +131,7 @@ export async function listOAuthClients(): Promise<ActionState<OAuthClientRow[]>>
             accessTokenTtl: oauthClients.accessTokenTtl,
             refreshTokenTtl: oauthClients.refreshTokenTtl,
             isActive: oauthClients.isActive,
+            isFirstParty: oauthClients.isFirstParty,
             createdAt: oauthClients.createdAt,
             updatedAt: oauthClients.updatedAt,
           })
@@ -257,6 +259,7 @@ export async function createOAuthClient(
           accessTokenTtl: created.accessTokenTtl,
           refreshTokenTtl: created.refreshTokenTtl,
           isActive: created.isActive,
+          isFirstParty: created.isFirstParty,
           createdAt: created.createdAt,
           updatedAt: created.updatedAt,
         },

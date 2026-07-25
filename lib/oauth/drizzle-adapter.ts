@@ -407,6 +407,7 @@ class DrizzleAdapter implements Adapter {
             allowedScopes: oauthClients.allowedScopes,
             tokenEndpointAuthMethod: oauthClients.tokenEndpointAuthMethod,
             requirePkce: oauthClients.requirePkce,
+            isFirstParty: oauthClients.isFirstParty,
           })
           .from(oauthClients)
           .where(and(eq(oauthClients.clientId, clientId), eq(oauthClients.isActive, true)))
@@ -467,6 +468,7 @@ class DrizzleAdapter implements Adapter {
       response_types: asStringArray(client.responseTypes) as ("code" | "id_token" | "none")[],
       scope: asStringArray(client.allowedScopes).join(" "),
       token_endpoint_auth_method: client.tokenEndpointAuthMethod as "none" | "client_secret_post" | "client_secret_basic",
+      is_first_party: client.isFirstParty,
     }
   }
 
