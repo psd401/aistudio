@@ -15,6 +15,14 @@ import {
  * server's own image/attachment save paths. Strip them from client-supplied parts so
  * a caller cannot plant a key/URL that a later presign step would trust. Returns new
  * objects (never mutates the input parts).
+ *
+ * #1330 — this is now also a DELETION boundary, not only a presign one. The
+ * nexus-conversation-retention Lambda reads `parts[].s3Key` off persisted rows
+ * and permanently deletes the objects those keys name (every version, in a
+ * versioned bucket). A new message-write path that forgets to strip client
+ * input would let a caller plant an arbitrary key in their own conversation and
+ * have it destroyed once that conversation ages out. Any new writer to
+ * nexus_messages.parts MUST sanitise here first.
  */
 function stripClientStorageRefs(parts: MessagePart[] | undefined): MessagePart[] | undefined {
   if (!Array.isArray(parts)) return parts
@@ -28,6 +36,39 @@ function stripClientStorageRefs(parts: MessagePart[] | undefined): MessagePart[]
     }
     return part
   })
+}
+
+/**
+ * Normalize optional client fields for the upsert: falsy values become undefined
+ * so the upsert leaves the corresponding columns untouched.
+ */
+function buildUpsertData(input: {
+  role: 'user' | 'assistant' | 'system'
+  content?: string
+  parts?: MessagePart[]
+  modelId?: number
+  reasoningContent?: string
+  tokenUsage?: TokenUsage
+  finishReason?: string
+  metadata: Record<string, unknown>
+}) {
+  return {
+    role: input.role,
+    content: input.content || undefined,
+    parts: input.parts || undefined,
+    modelId: input.modelId || undefined,
+    reasoningContent: input.reasoningContent || undefined,
+    tokenUsage: input.tokenUsage || undefined,
+    finishReason: input.finishReason || undefined,
+    metadata: input.metadata,
+  }
+}
+
+function bodySizeLogFields(content?: string, parts?: MessagePart[]) {
+  return {
+    contentLength: content?.length || 0,
+    partsCount: Array.isArray(parts) ? parts.length : 0,
+  }
 }
 
 /**
@@ -92,8 +133,7 @@ export async function POST(req: NextRequest) {
       conversationId,
       messageId,
       role,
-      contentLength: content?.length || 0,
-      partsCount: Array.isArray(parts) ? parts.length : 0
+      ...bodySizeLogFields(content, parts)
     }))
 
     // Validate required fields
@@ -135,16 +175,16 @@ export async function POST(req: NextRequest) {
     const sanitizedParts = stripClientStorageRefs(parts)
 
     // Upsert message and update conversation stats using Drizzle
-    await upsertMessageWithStats(messageId, conversationId, {
+    await upsertMessageWithStats(messageId, conversationId, buildUpsertData({
       role,
-      content: content || undefined,
-      parts: sanitizedParts || undefined,
-      modelId: modelId || undefined,
-      reasoningContent: reasoningContent || undefined,
-      tokenUsage: tokenUsage || undefined,
-      finishReason: finishReason || undefined,
-      metadata: metadata,
-    })
+      content,
+      parts: sanitizedParts,
+      modelId,
+      reasoningContent,
+      tokenUsage,
+      finishReason,
+      metadata,
+    }))
 
     log.debug('Message saved', { messageId, conversationId })
 

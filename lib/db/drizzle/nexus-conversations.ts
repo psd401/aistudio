@@ -61,6 +61,8 @@ export interface ConversationListItem {
   updatedAt: Date | null;
   isArchived: boolean | null;
   isPinned: boolean | null;
+  /** "Keep" flag — excludes the conversation from the retention sweep (#1330) */
+  isSaved: boolean;
   externalId: string | null;
   cacheKey: string | null;
   metadata: NexusConversationMetadata | null;
@@ -78,6 +80,8 @@ export interface UpdateConversationData {
   title?: string;
   isArchived?: boolean;
   isPinned?: boolean;
+  /** "Keep" flag — excludes the conversation from the retention sweep (#1330) */
+  isSaved?: boolean;
   folderId?: string | null;
   metadata?: NexusConversationMetadata;
 }
@@ -176,6 +180,7 @@ export async function getConversations(
           updatedAt: nexusConversations.updatedAt,
           isArchived: nexusConversations.isArchived,
           isPinned: nexusConversations.isPinned,
+          isSaved: nexusConversations.isSaved,
           externalId: nexusConversations.externalId,
           cacheKey: nexusConversations.cacheKey,
           metadata: nexusConversations.metadata,
@@ -396,6 +401,7 @@ export async function updateConversation(
           title: nexusConversations.title,
           isArchived: nexusConversations.isArchived,
           isPinned: nexusConversations.isPinned,
+          isSaved: nexusConversations.isSaved,
           updatedAt: nexusConversations.updatedAt,
         }),
     "updateConversation"

@@ -130,6 +130,7 @@
     "133-decommission-scheduled-executions.sql",
     "134-oauth-first-party-clients.sql",
     "135-atrium-asset-initiation-idempotency.sql",
-    "136-google-content-connectors.sql"
+    "136-google-content-connectors.sql",
+    "137-nexus-conversation-retention.sql"
   ]
 }

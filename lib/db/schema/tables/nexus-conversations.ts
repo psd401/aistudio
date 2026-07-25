@@ -35,6 +35,12 @@ export const nexusConversations = pgTable(
     lastMessageAt: timestamp("last_message_at").defaultNow(),
     isArchived: boolean("is_archived").default(false),
     isPinned: boolean("is_pinned").default(false),
+    /**
+     * "Keep" flag (#1330). When true the retention sweep never deletes the
+     * conversation, regardless of age or archive state. NOT NULL in the
+     * database (migration 137) so the sweep predicate has only two states.
+     */
+    isSaved: boolean("is_saved").notNull().default(false),
     metadata: jsonb("metadata").$type<NexusConversationMetadata>().default({}),
     createdAt: timestamp("created_at").defaultNow(),
     updatedAt: timestamp("updated_at").defaultNow(),

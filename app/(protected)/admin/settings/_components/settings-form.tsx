@@ -84,6 +84,7 @@ const commonSettings = [
   { key: "CONTENT_DUAL_WRITE_ENABLED", category: "Content Platform", description: "Write canonical content records alongside legacy repository processing", isSecret: false },
   { key: "CONTENT_READ_V2_ENABLED", category: "Content Platform", description: "Read repository search results from active canonical index generations", isSecret: false },
   { key: "NEXUS_ATTACHMENT_RETENTION_DAYS", category: "Content Platform", description: "Days to retain private one-off Nexus attachment repositories", isSecret: false },
+  { key: "NEXUS_CONVERSATION_RETENTION_DAYS", category: "Content Platform", description: "Days since the last message before a Nexus conversation is permanently deleted. Empty or 0 disables auto-deletion; conversations marked Keep (or pinned) are never deleted", isSecret: false },
   { key: "CONTENT_DELETION_GRACE_DAYS", category: "Content Platform", description: "Recovery window before expired content is physically deleted", isSecret: false },
   { key: "CONTENT_MAX_FILE_SIZE_GB", category: "Content Platform", description: "Maximum source upload size in GiB", isSecret: false },
   { key: "CONTENT_MAX_PDF_SIZE_MB", category: "Content Platform", description: "Maximum PDF size for the canonical PDF processor", isSecret: false },

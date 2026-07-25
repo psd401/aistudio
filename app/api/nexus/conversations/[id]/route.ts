@@ -7,6 +7,22 @@ import {
 } from '@/lib/db/drizzle/nexus-conversations'
 
 /**
+ * isSaved and isPinned BOTH gate irreversible retention deletion — the sweep's
+ * eligibility predicate is `is_saved = false AND is_pinned IS NOT TRUE` — so
+ * both are validated strictly rather than coerced. A truthy string must not
+ * silently become "kept"/"pinned", and a non-boolean must not silently become
+ * "not kept"/"not pinned".
+ *
+ * Returns the name of the first offending field, or null when both are fine.
+ */
+function findInvalidBooleanFlag(flags: Record<string, unknown>): string | null {
+  for (const [field, value] of Object.entries(flags)) {
+    if (value !== undefined && typeof value !== 'boolean') return field
+  }
+  return null
+}
+
+/**
  * PATCH /api/nexus/conversations/[id] - Update a conversation
  *
  * Migrated to Drizzle ORM as part of Epic #526, Issue #533
@@ -45,38 +61,43 @@ export async function PATCH(
 
     // Parse request body
     const body = await req.json()
-    const { title, isArchived, isPinned, metadata } = body
+    const { title, isArchived, isPinned, isSaved, metadata } = body
 
     log.debug('Update conversation request', sanitizeForLogging({
       conversationId,
       title: title ? `${String(title).substring(0, 20)}...` : undefined,
       isArchived,
-      isPinned
+      isPinned,
+      isSaved
     }))
+
+    const invalidFlag = findInvalidBooleanFlag({ isSaved, isPinned })
+    if (invalidFlag) {
+      log.warn('Invalid boolean flag value', { conversationId, field: invalidFlag })
+      timer({ status: 'error', reason: `invalid_${invalidFlag}` })
+      return new Response(`${invalidFlag} must be a boolean`, { status: 400 })
+    }
+
+    // metadata was previously written through unvalidated. It lands in a JSONB
+    // column that readers treat as an object, so an array or scalar produces a
+    // row shape they do not expect. Closed here while the route is being
+    // touched; the only in-app caller of this endpoint is the Keep toggle,
+    // which never sends metadata.
+    if (
+      metadata !== undefined &&
+      (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata))
+    ) {
+      log.warn('Invalid metadata value', { conversationId, type: typeof metadata })
+      timer({ status: 'error', reason: 'invalid_metadata' })
+      return new Response('metadata must be an object', { status: 400 })
+    }
 
     // Build update object with provided fields only
     const updates: Record<string, unknown> = {}
-    let fieldCount = 0
-
-    if (title !== undefined) {
-      updates.title = title
-      fieldCount++
+    for (const [field, value] of Object.entries({ title, isArchived, isPinned, isSaved, metadata })) {
+      if (value !== undefined) updates[field] = value
     }
-
-    if (isArchived !== undefined) {
-      updates.isArchived = isArchived
-      fieldCount++
-    }
-
-    if (isPinned !== undefined) {
-      updates.isPinned = isPinned
-      fieldCount++
-    }
-
-    if (metadata !== undefined) {
-      updates.metadata = metadata
-      fieldCount++
-    }
+    const fieldCount = Object.keys(updates).length
 
     if (fieldCount === 0) {
       log.warn('No fields to update')
