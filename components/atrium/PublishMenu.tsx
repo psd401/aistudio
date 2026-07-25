@@ -173,6 +173,8 @@ function WidenDialog({
   destinationLabel,
   current,
   target,
+  confirming,
+  error,
   onConfirm,
 }: {
   open: boolean;
@@ -180,6 +182,10 @@ function WidenDialog({
   destinationLabel: string;
   current: VisibilityLevel;
   target: VisibilityLevel;
+  /** A confirmation is in flight (re-reading visibility before publishing). */
+  confirming: boolean;
+  /** Revalidation failed — shown inline; the dialog stays open to retry. */
+  error: string | null;
   onConfirm: () => void;
 }): React.JSX.Element {
   return (
@@ -201,16 +207,33 @@ function WidenDialog({
             ? " — anyone on the internet will be able to read it, no sign-in required."
             : " — anyone signed in to AI Studio will be able to read it."}
         </p>
+        {error && (
+          <p
+            className="text-sm text-destructive"
+            role="alert"
+            data-testid="widen-error"
+          >
+            {error}
+          </p>
+        )}
         <DialogFooter>
           <Button
             type="button"
             variant="ghost"
+            disabled={confirming}
             onClick={() => onOpenChange(false)}
           >
             Cancel
           </Button>
-          <Button type="button" onClick={onConfirm} data-testid="confirm-widen">
-            Publish and set to {VISIBILITY_LABELS[target]}
+          <Button
+            type="button"
+            disabled={confirming}
+            onClick={onConfirm}
+            data-testid="confirm-widen"
+          >
+            {confirming
+              ? "Checking…"
+              : `Publish and set to ${VISIBILITY_LABELS[target]}`}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -259,6 +282,8 @@ export function PublishMenu({
   const [destination, setDestination] =
     useState<EditorPublishDestination>("intranet");
   const [pendingWiden, setPendingWiden] = useState<VisibilityLevel | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
   const current =
     DESTINATION_OPTIONS.find((o) => o.value === destination) ??
     DESTINATION_OPTIONS[0];
@@ -286,6 +311,59 @@ export function PublishMenu({
     }
     onPublish(destination);
   }, [destination, visibility, onPublish]);
+
+  /**
+   * Confirming the widen re-reads visibility and recomputes the widen against
+   * that fresh value instead of submitting the snapshot the dialog was opened
+   * with.
+   *
+   * The snapshot can be stale by the time it is confirmed — another tab, or the
+   * Share control beside this menu, may have changed the level while the dialog
+   * sat open. `runPublishTx` applies whatever visibility it is handed,
+   * unconditionally, under its row lock; so confirming what is PRESENTED as a
+   * widen ("set to Internal") would silently NARROW an object that had
+   * concurrently become Public. Recomputing closes that: a level that now
+   * already reaches the destination yields no widen at all, and the publish
+   * rides without a `visibility` parameter.
+   *
+   * Recomputing can never contradict what the user confirmed, so there is no
+   * second prompt: the request was "make this readable at <destination>", and
+   * the recomputed widen is the minimum that still satisfies it — either the
+   * same level, or none because the object already reaches further.
+   *
+   * A failed re-read does NOT fall back to the snapshot. It leaves the dialog
+   * open with an inline error, because publishing on an unverifiable audience is
+   * the defect this whole path exists to prevent.
+   */
+  const handleConfirmWiden = useCallback(() => {
+    setConfirming(true);
+    setConfirmError(null);
+    void (async () => {
+      try {
+        const vis = await getVisibilityAction(idOrSlug);
+        if (!vis.isSuccess) {
+          log.warn("widen revalidation failed", { message: vis.message });
+          setConfirmError(
+            "Could not confirm who can currently see this. Please try again."
+          );
+          setConfirming(false);
+          return;
+        }
+        const widen = widenNeededFor(destination, vis.data.visibilityLevel);
+        setConfirming(false);
+        setPendingWiden(null);
+        onPublish(destination, widen ?? undefined);
+      } catch (e) {
+        log.error("widen revalidation threw", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+        setConfirmError(
+          "Could not confirm who can currently see this. Please try again."
+        );
+        setConfirming(false);
+      }
+    })();
+  }, [destination, idOrSlug, onPublish]);
 
   return (
     <>
@@ -372,15 +450,19 @@ export function PublishMenu({
       {pendingWiden && visibility && (
         <WidenDialog
           open
-          onOpenChange={(next) => !next && setPendingWiden(null)}
+          onOpenChange={(next) => {
+            // Ignore dismissal while a confirmation is in flight, so an
+            // outside-click cannot orphan the request mid-revalidation.
+            if (next || confirming) return;
+            setPendingWiden(null);
+            setConfirmError(null);
+          }}
           destinationLabel={current.short}
           current={visibility}
           target={pendingWiden}
-          onConfirm={() => {
-            const widen = pendingWiden;
-            setPendingWiden(null);
-            onPublish(destination, widen);
-          }}
+          confirming={confirming}
+          error={confirmError}
+          onConfirm={handleConfirmWiden}
         />
       )}
     </>
