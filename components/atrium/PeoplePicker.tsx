@@ -40,6 +40,11 @@ export function PeoplePicker({
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<PersonOption[]>([]);
   const [searching, setSearching] = useState(false);
+  // A FAILED search must not render as "No matching people" — that reads as a
+  // confident answer ("this person isn't in the directory") when the truth is
+  // that we never got one, and it sends the author looking for a different
+  // spelling instead of retrying.
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     const term = query.trim();
@@ -50,19 +55,23 @@ export function PeoplePicker({
     }
     let cancelled = false;
     setSearching(true);
+    setFailed(false);
     const t = setTimeout(() => {
       void (async () => {
         try {
           const res = await searchPeopleAction(term);
           if (cancelled) return;
-          if (res.isSuccess) setResults(res.data);
-          else {
+          if (res.isSuccess) {
+            setResults(res.data);
+          } else {
             setResults([]);
+            setFailed(true);
             log.warn("searchPeopleAction failed", { message: res.message });
           }
         } catch (e) {
           if (cancelled) return;
           setResults([]);
+          setFailed(true);
           log.error("searchPeopleAction threw", {
             error: e instanceof Error ? e.message : String(e),
           });
@@ -105,7 +114,13 @@ export function PeoplePicker({
         </p>
       )}
 
-      {!searching && query.trim().length >= 2 && results.length === 0 && (
+      {!searching && failed && (
+        <p className="text-xs text-destructive" role="alert">
+          Could not search people — check your connection and try again.
+        </p>
+      )}
+
+      {!searching && !failed && query.trim().length >= 2 && results.length === 0 && (
         <p className="text-xs text-muted-foreground">No matching people.</p>
       )}
 

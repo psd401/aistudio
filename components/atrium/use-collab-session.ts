@@ -63,6 +63,15 @@ export function useCollabSession(idOrSlug: string): UseCollabSessionResult {
   const ydocRef = useRef<Y.Doc | null>(null);
   if (!ydocRef.current) ydocRef.current = new Y.Doc();
   const ydoc = ydocRef.current;
+  // The document this instance's Y.Doc belongs to. The Y.Doc is created ONCE
+  // per mount and TipTap binds it once at editor creation, so a component that
+  // survives an `idOrSlug` change is a call-site bug (a missing `key`) — and a
+  // dangerous one: binding a provider for document B to a Y.Doc still holding
+  // document A merges A's content into B, because Yjs sync is a CRDT merge, not
+  // an overwrite. The effect below refuses to connect in that case rather than
+  // corrupting data, so the invariant defends itself instead of relying on every
+  // call site remembering the `key`.
+  const ydocForRef = useRef(idOrSlug);
 
   const providerRef = useRef<WebsocketProvider | null>(null);
   const [provider, setProvider] = useState<WebsocketProvider | null>(null);
@@ -77,6 +86,13 @@ export function useCollabSession(idOrSlug: string): UseCollabSessionResult {
     let cancelled = false;
     const ydoc = ydocRef.current;
     if (!ydoc) return;
+
+    // Fail CLOSED on a mount that outlived its document (see `ydocForRef`).
+    if (ydocForRef.current !== idOrSlug) {
+      setStatus("error");
+      setCanEdit(false);
+      return;
+    }
 
     // Fetch a fresh collab token — used both for the initial connect and to
     // re-mint before each reconnect (the token TTL is short — see collab-token.ts).

@@ -118,7 +118,17 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
         )}
         {state.status === "ready" &&
           (state.data.kind === "document" ? (
+            // `key` is LOAD-BEARING, not cosmetic. `DocumentEditor` binds its
+            // Y.Doc to TipTap exactly once at creation, so a document switch
+            // must fully remount it. This panel resets its own state during
+            // render rather than remounting, so without the key the same
+            // editor instance would survive an id change and a new provider
+            // would bind the PREVIOUS document's Y.Doc to the new doc name —
+            // and Yjs sync is a CRDT merge, not an overwrite, so document A's
+            // content would be merged into document B on the server. The full
+            // page mount (`/atrium/[id]/edit`) already keys the same way.
             <DocumentEditor
+              key={state.data.id}
               idOrSlug={state.data.id}
               userId={state.data.userId}
               layout="panel"

@@ -36,6 +36,10 @@ import {
   NO_COLLECTION,
   type CollectionOption,
 } from "@/lib/atrium/collection-options";
+import {
+  summarize,
+  type BulkOutcome,
+} from "@/lib/atrium/bulk-summary";
 import { createLogger } from "@/lib/client-logger";
 
 const log = createLogger({ component: "LibraryBulkBar" });
@@ -46,13 +50,6 @@ const log = createLogger({ component: "LibraryBulkBar" });
  * connection from the pool).
  */
 const BULK_CONCURRENCY = 4;
-
-/** The outcome of one bulk fan-out. */
-interface BulkOutcome {
-  succeeded: number;
-  /** One message per failed id, deduped by message with a count. */
-  failures: Map<string, number>;
-}
 
 /**
  * Run `task` over `ids` with bounded concurrency, collecting per-id outcomes.
@@ -91,24 +88,6 @@ async function runBounded(
     Array.from({ length: Math.min(BULK_CONCURRENCY, ids.length) }, worker)
   );
   return outcome;
-}
-
-/** Render one aggregated sentence from a fan-out outcome. */
-function summarize(outcome: BulkOutcome, verb: string, total: number): string {
-  const { succeeded, failures } = outcome;
-  if (failures.size === 0) {
-    return `${verb} ${succeeded} ${succeeded === 1 ? "item" : "items"}.`;
-  }
-  const failed = total - succeeded;
-  const reasons = [...failures.entries()]
-    .map(([message, count]) => (count > 1 ? `${message} (×${count})` : message))
-    .join("; ");
-  if (succeeded === 0) {
-    return `Could not ${verb.toLowerCase()} ${failed} ${
-      failed === 1 ? "item" : "items"
-    }: ${reasons}`;
-  }
-  return `${verb} ${succeeded} of ${total}. ${failed} failed: ${reasons}`;
 }
 
 /**
