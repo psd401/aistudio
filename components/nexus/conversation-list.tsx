@@ -388,7 +388,12 @@ function useConversationListState({
 }: ConversationListProps) {
   const [activeTab, setActiveTab] = useState<ConversationFilterTab>('chat')
   const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
-  const [togglingKeepId, setTogglingKeepId] = useState<string | null>(null)
+  // A SET, not a single id: Keep requests on different rows overlap. With one
+  // id, starting B re-enabled A's button, and whichever request settled first
+  // cleared the id while the other was still in flight — letting a second
+  // toggle start whose PATCH and optimistic rollback could then resolve out of
+  // order, leaving the UI disagreeing with the persisted protection state.
+  const [togglingKeepIds, setTogglingKeepIds] = useState<ReadonlySet<string>>(new Set())
   /** Transient, non-blocking error for row-level actions (does not hide the list) */
   const [actionError, setActionError] = useState<string | null>(null)
   const router = useRouter()
@@ -414,7 +419,7 @@ function useConversationListState({
   // on any failure — the UI must never claim a conversation is protected when
   // the server did not record it.
   const handleToggleKeep = useCallback(async (conversationId: string, nextIsSaved: boolean) => {
-    setTogglingKeepId(conversationId)
+    setTogglingKeepIds((prev) => new Set(prev).add(conversationId))
     setConversations(prev => prev.map(conv =>
       conv.id === conversationId ? { ...conv, isSaved: nextIsSaved } : conv
     ))
@@ -446,7 +451,11 @@ function useConversationListState({
       setActionError(`Keep failed: ${errorMessage}`)
       setTimeout(() => setActionError(null), 5000)
     } finally {
-      setTogglingKeepId(null)
+      setTogglingKeepIds((prev) => {
+        const next = new Set(prev)
+        next.delete(conversationId)
+        return next
+      })
     }
     // setConversations is a useState setter (stable identity); listed to satisfy
     // exhaustive-deps now that it arrives via the loader hook's return value.
@@ -514,7 +523,7 @@ function useConversationListState({
     actionError,
     activeTab,
     deletingConversationId,
-    togglingKeepId,
+    togglingKeepIds,
     handleTabChat,
     handleTabAssistants,
     loadConversations,
@@ -533,7 +542,7 @@ export function ConversationList(props: ConversationListProps) {
     actionError,
     activeTab,
     deletingConversationId,
-    togglingKeepId,
+    togglingKeepIds,
     handleTabChat,
     handleTabAssistants,
     loadConversations,
@@ -623,7 +632,7 @@ export function ConversationList(props: ConversationListProps) {
               conversation={conversation}
               isSelected={selectedConversationId === conversation.id}
               isDeleting={deletingConversationId === conversation.id}
-              isTogglingKeep={togglingKeepId === conversation.id}
+              isTogglingKeep={togglingKeepIds.has(conversation.id)}
               onSelect={handleConversationSelect}
               onDelete={handleDeleteConversation}
               onToggleKeep={handleToggleKeep}

@@ -127,22 +127,29 @@ export interface SweepPorts {
    */
   claimRepositoryRows(repositoryIds: number[]): Promise<number[]>;
 
-  /** Delete `documents` rows by id. */
-  deleteDocumentRows(documentIds: number[]): Promise<number>;
-
   /**
-   * Delete the conversation row; cascades the nexus_* children.
+   * Atomically claim the conversation for destruction, in ONE transaction:
+   * delete its linked `documents` rows (guarded on `conversation_id`) and then
+   * the conversation row itself (guarded on the full eligibility predicate).
+   * Rolls back entirely if the conversation delete matches nothing.
    *
-   * MUST re-assert the FULL eligibility predicate — Keep, pin AND the age
-   * cutoff (CANDIDATE_WHERE_CLAUSE with `retentionDays`) — in the DELETE's own
-   * WHERE clause, and return the number of rows actually deleted. Flags alone
-   * are not enough: a user who sends a new message after the late re-check
-   * bumps last_message_at, and only re-testing the age inside the DELETE
-   * itself makes that save the conversation atomically. This is the claim for
-   * the whole operation: a return of 0 means the user won the race and nothing
-   * may be destroyed.
+   * Both guards are required and the order is forced:
+   *  - The conversation DELETE cascades `documents.conversation_id` to NULL, so
+   *    the documents must be claimed FIRST or the link is gone.
+   *  - `linkDocumentToConversation` (lib/db/queries/documents.ts) moves a
+   *    document by id alone, with no old-conversation check, so a document
+   *    resolved earlier in this sweep may since have been relinked to a
+   *    different, live conversation. Guarding the delete on `conversation_id`
+   *    excludes it; without that, the sweep would destroy another
+   *    conversation's document and its S3 object.
+   *
+   * Returns the documents actually deleted — those and only those are safe to
+   * delete storage for.
    */
-  deleteConversationRow(conversationId: string, retentionDays: number): Promise<number>;
+  claimConversation(
+    conversationId: string,
+    retentionDays: number
+  ): Promise<{ claimed: boolean; documents: LegacyDocument[] }>;
 }
 
 export interface SweepOptions {
@@ -274,7 +281,13 @@ async function sweepConversation(
   //    the window since step 1 makes it match nothing. 0 rows back means the
   //    user won, and at this point nothing whatsoever has been deleted: not
   //    the row, not S3 storage, not a repository. Winning the race is free.
-  if ((await ports.deleteConversationRow(conversationId, retentionDays)) === 0) {
+  //    The same transaction claims the conversation's linked `documents` rows,
+  //    guarded on conversation_id, and rolls both back together if the
+  //    conversation delete matches nothing. Only the documents it returns are
+  //    safe to delete storage for — a document relinked to a live conversation
+  //    since resolution is excluded by that guard.
+  const claim = await ports.claimConversation(conversationId, retentionDays);
+  if (!claim.claimed) {
     log.info("keep_race_detected", {
       conversationId,
       message:
@@ -282,6 +295,21 @@ async function sweepConversation(
     });
     report.skippedReason = "keep_race_detected";
     return report;
+  }
+
+  const claimedDocuments = claim.documents;
+  report.documentIds = claimedDocuments.map((doc) => doc.id);
+  report.documentRowsDeleted = claimedDocuments.length;
+
+  const relinkedDocumentIds = documents
+    .map((doc) => doc.id)
+    .filter((id) => !report.documentIds.includes(id));
+  if (relinkedDocumentIds.length > 0) {
+    log.info("document_relinked_mid_sweep", {
+      conversationId,
+      documentIds: relinkedDocumentIds,
+      message: "Document was relinked to another conversation mid-sweep; left intact.",
+    });
   }
 
   // 3. Conversation-scoped prefixes — best effort. The row is gone, these
@@ -299,7 +327,7 @@ async function sweepConversation(
 
   // 4. Legacy document objects + out-of-prefix message-part objects — best effort.
   const legacyKeys = [
-    ...documents.map((doc) => doc.objectKey).filter((key): key is string => key !== null),
+    ...claimedDocuments.map((doc) => doc.objectKey).filter((key): key is string => key !== null),
     ...messageObjectKeys,
   ];
   for (const key of legacyKeys) {
@@ -350,18 +378,14 @@ async function sweepConversation(
     }
   }
 
-  // 7. Legacy documents rows, which would otherwise be left as SET NULL
-  //    stragglers pointing at a conversation that no longer exists. The
-  //    conversation row itself went first — it was step 2, the claim.
+  // Legacy `documents` rows were already removed inside the step-2 claim
+  // transaction, guarded on conversation_id — they cannot be deleted after the
+  // conversation row, because that cascade SET NULLs the link the guard needs.
   //
-  //    Counts come from what the database actually deleted rather than from the
-  //    number of IDs we planned to delete: a partially-completed previous run
-  //    can leave rows already gone, and reporting the planned count would
-  //    overstate the sweep's effect in exactly the situation an operator is
-  //    investigating.
-  if (report.documentIds.length > 0) {
-    report.documentRowsDeleted = await ports.deleteDocumentRows(report.documentIds);
-  }
+  // Counts throughout come from what the database actually deleted rather than
+  // from the number of IDs resolved: a partially-completed previous run can
+  // leave rows already gone, and reporting the planned count would overstate
+  // the sweep's effect in exactly the situation an operator is investigating.
 
   report.deleted = true;
   return report;

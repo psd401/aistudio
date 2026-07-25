@@ -17,7 +17,21 @@ export type DisabledReason =
   | "empty"
   | "zero"
   | "negative"
-  | "not_a_number";
+  | "not_a_number"
+  | "too_large";
+
+/**
+ * Upper bound on the retention window: 100 years.
+ *
+ * Not arbitrary politeness — values above this are not executable. The window
+ * is bound as `$1::int`, so anything past 2147483647 fails the cast outright,
+ * and `retentionCutoff()` on a large value produces an Invalid Date whose
+ * .toISOString() throws, turning the nightly sweep into a hard error instead of
+ * the no-op an operator would expect from a bad setting. Anything at or beyond
+ * this bound is functionally "retention off" anyway, so it fails closed like
+ * every other unusable value.
+ */
+export const MAX_RETENTION_DAYS = 36_500;
 
 /**
  * Interpret the admin-configured retention window.
@@ -52,6 +66,9 @@ export function parseRetentionDays(raw: string | null | undefined): RetentionCon
   }
   if (days < 0) {
     return { enabled: false, reason: "negative" };
+  }
+  if (days > MAX_RETENTION_DAYS) {
+    return { enabled: false, reason: "too_large" };
   }
 
   return { enabled: true, retentionDays: days };

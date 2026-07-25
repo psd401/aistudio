@@ -315,6 +315,17 @@ export function extractOutOfPrefixKeys(
   return [...keys];
 }
 
+/**
+ * Sentinel used to roll the claim transaction back when the conversation
+ * DELETE matches nothing. Not an error condition — the user won the race.
+ */
+class ClaimLostError extends Error {
+  constructor() {
+    super("conversation no longer eligible at claim time");
+    this.name = "ClaimLostError";
+  }
+}
+
 function buildPorts(sql: postgres.Sql): SweepPorts {
   return {
     getRetentionSetting: async () => {
@@ -461,36 +472,59 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       return rows.map((row) => row.id);
     },
 
-    deleteDocumentRows: async (documentIds) => {
-      const rows = await sql<{ id: number }[]>`
-        DELETE FROM documents
-        WHERE id = ANY(${documentIds}::int[])
-        RETURNING id
-      `;
-      return rows.length;
-    },
+    claimConversation: async (conversationId, retentionDays) => {
+      // ONE transaction, and the order inside it is forced.
+      //
+      // The documents delete must come FIRST: the conversation delete cascades
+      // documents.conversation_id to NULL, which would erase the very link the
+      // guard depends on. And it must be GUARDED on conversation_id, because
+      // linkDocumentToConversation (lib/db/queries/documents.ts) relinks a
+      // document by id alone with no old-conversation check — a document
+      // resolved earlier in this sweep may since have been moved to a
+      // different, live conversation, and deleting it would destroy that
+      // conversation's document and its S3 object.
+      //
+      // If the conversation delete then matches nothing (Keep, pin, or a new
+      // message landed), throwing rolls the document deletes back with it, so
+      // losing the race still costs the user nothing.
+      try {
+        const documents = await sql.begin(async (tx) => {
+          const docRows = await tx<{ id: number; url: string | null }[]>`
+            DELETE FROM documents
+            WHERE conversation_id = ${conversationId}::uuid
+            RETURNING id, url
+          `;
 
-    deleteConversationRow: async (conversationId, retentionDays) => {
-      // Cascades nexus_messages, nexus_conversation_events,
-      // nexus_conversation_folders, nexus_cache_entries, nexus_shares and
-      // nexus_provider_metrics.
-      // The FULL eligibility predicate — Keep, pin AND the age cutoff — is
-      // re-asserted HERE, in the delete itself, so the check and the deletion
-      // are one atomic statement. A user who clicks Keep, pins, or sends a
-      // new message (bumping last_message_at) after the sweep's pre-check but
-      // before this line still wins: the WHERE matches nothing, 0 rows come
-      // back, and the caller aborts having destroyed nothing. Same
-      // CANDIDATE_WHERE_CLAUSE constant as the batch scan; $1 is the
-      // retention window, $2 the conversation id.
-      const rows = await sql.unsafe<{ id: string }[]>(
-        `DELETE FROM nexus_conversations
-         WHERE ${CANDIDATE_WHERE_CLAUSE}
-           AND ${NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL}
-           AND id = $2::uuid
-         RETURNING id`,
-        [retentionDays, conversationId]
-      );
-      return rows.length;
+          // Cascades nexus_messages, nexus_conversation_events,
+          // nexus_conversation_folders, nexus_cache_entries, nexus_shares and
+          // nexus_provider_metrics. The FULL eligibility predicate — Keep, pin,
+          // the age cutoff AND the committed-message check — is re-asserted
+          // here so the check and the deletion are one atomic statement.
+          const convRows = await tx.unsafe<{ id: string }[]>(
+            `DELETE FROM nexus_conversations
+             WHERE ${CANDIDATE_WHERE_CLAUSE}
+               AND ${NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL}
+               AND id = $2::uuid
+             RETURNING id`,
+            [retentionDays, conversationId]
+          );
+
+          if (convRows.length === 0) throw new ClaimLostError();
+
+          return docRows.map<LegacyDocument>((row) => {
+            const objectKey = documentUrlToObjectKey(row.url);
+            if (objectKey === null && row.url) {
+              log.warn("document_url_unresolvable", { conversationId, documentId: row.id });
+            }
+            return { id: row.id, objectKey };
+          });
+        });
+
+        return { claimed: true, documents };
+      } catch (error) {
+        if (error instanceof ClaimLostError) return { claimed: false, documents: [] };
+        throw error;
+      }
     },
   };
 }

@@ -24,6 +24,7 @@ import {
   retentionCutoff,
   CANDIDATE_WHERE_CLAUSE,
   NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL,
+  MAX_RETENTION_DAYS,
   type ConversationEligibilityRow,
 } from "./retention-policy";
 import {
@@ -283,6 +284,8 @@ interface FakeState {
   racedAtDelete?: string[];
   /** Repository ids promoted to 'durable' between resolution and the claim. */
   promotedMidSweep?: number[];
+  /** Document ids relinked to another conversation between resolution and the claim. */
+  relinkedDocumentIds?: number[];
 }
 
 interface FakeRecorder {
@@ -359,18 +362,22 @@ function makeFakePorts(state: FakeState): { ports: SweepPorts; rec: FakeRecorder
       rec.deletedRepositoryRows.push(...claimed);
       return claimed;
     },
-    deleteDocumentRows: async (ids) => {
-      rec.deletedDocumentRows.push(...ids);
-      return ids.length;
-    },
-    deleteConversationRow: async (id, retentionDays) => {
-      rec.calls.push(`deleteConversationRow:${id}`);
+    claimConversation: async (id, retentionDays) => {
+      rec.calls.push(`claimConversation:${id}`);
       rec.gateRetentionDays.push(retentionDays);
-      // Models the guarded DELETE: its WHERE re-asserts the FULL predicate
-      // (Keep, pin, age), so a raced row matches nothing and reports 0 deleted.
-      if ((state.racedAtDelete ?? []).includes(id)) return 0;
+      // Models the transaction: the guarded conversation DELETE matching
+      // nothing rolls the document deletes back with it.
+      if ((state.racedAtDelete ?? []).includes(id)) {
+        return { claimed: false, documents: [] };
+      }
       rec.deletedConversations.push(id);
-      return 1;
+      // Documents relinked to another conversation are excluded by the
+      // conversation_id guard inside the same transaction.
+      const claimed = (state.documentsByConversation[id] ?? []).filter(
+        (doc) => !(state.relinkedDocumentIds ?? []).includes(doc.id)
+      );
+      rec.deletedDocumentRows.push(...claimed.map((doc) => doc.id));
+      return { claimed: true, documents: claimed };
     },
   };
 
@@ -420,7 +427,7 @@ describe("runRetentionSweep — deletion ordering and completeness", () => {
     await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
 
     const resolveIdx = rec.calls.indexOf("getBoundRepositoryIds:conv-1");
-    const deleteIdx = rec.calls.indexOf("deleteConversationRow:conv-1");
+    const deleteIdx = rec.calls.indexOf("claimConversation:conv-1");
     expect(resolveIdx).toBeGreaterThanOrEqual(0);
     expect(deleteIdx).toBeGreaterThanOrEqual(0);
     // nexus_repository_bindings cascades from the conversation; resolving after
@@ -536,7 +543,7 @@ describe("runRetentionSweep — Keep wins races against the sweep", () => {
     await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
 
     const recheckIdx = rec.calls.indexOf("isStillEligible:conv-1");
-    const deleteIdx = rec.calls.indexOf("deleteConversationRow:conv-1");
+    const deleteIdx = rec.calls.indexOf("claimConversation:conv-1");
     expect(recheckIdx).toBeGreaterThanOrEqual(0);
     expect(recheckIdx).toBeLessThan(deleteIdx);
   });
@@ -564,7 +571,7 @@ describe("runRetentionSweep — Keep wins races against the sweep", () => {
     const { ports, rec } = makeFakePorts(baseState());
     await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
 
-    const claimIdx = rec.calls.indexOf("deleteConversationRow:conv-1");
+    const claimIdx = rec.calls.indexOf("claimConversation:conv-1");
     const repoStorageIdx = rec.calls.indexOf("deleteRepositoryStorage:101");
     const convStorageIdx = rec.calls.indexOf("deleteConversationStorage:conv-1");
     expect(claimIdx).toBeGreaterThanOrEqual(0);
@@ -727,10 +734,10 @@ describe("runRetentionSweep — unexpected error isolation", () => {
     // findCandidates is ordered oldest-first, so without isolation this
     // conversation would be selected first every single night and stall the
     // entire retention feature indefinitely.
-    const originalDelete = ports.deleteConversationRow;
-    ports.deleteConversationRow = async (id, retentionDays) => {
+    const originalClaim = ports.claimConversation;
+    ports.claimConversation = async (id, retentionDays) => {
       if (id === "conv-1") throw new Error("deadlock detected");
-      return originalDelete(id, retentionDays);
+      return originalClaim(id, retentionDays);
     };
 
     const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
@@ -746,7 +753,11 @@ describe("runRetentionSweep — unexpected error isolation", () => {
     // Simulates a partially-completed previous run: the IDs still resolve, but
     // the rows are already gone, so the delete affects fewer rows than planned.
     ports.claimRepositoryRows = async () => [101]; // 2 ids resolved, 1 row actually claimed
-    ports.deleteDocumentRows = async () => 0; // 1 id resolved, 0 rows actually deleted
+    const originalClaimConv = ports.claimConversation;
+    ports.claimConversation = async (id, retentionDays) => {
+      const res = await originalClaimConv(id, retentionDays);
+      return { ...res, documents: [] }; // 1 doc resolved, 0 rows actually deleted
+    };
 
     const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
 
@@ -833,5 +844,60 @@ describe("NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL", () => {
   test("is NOT part of the bulk candidate scan — that stays a cheap indexed range read", () => {
     expect(CANDIDATE_WHERE_CLAUSE).not.toContain("NOT EXISTS");
     expect(CANDIDATE_WHERE_CLAUSE).not.toContain("nexus_messages");
+  });
+});
+
+describe("parseRetentionDays — unexecutable ranges fail closed", () => {
+  test("values beyond MAX_RETENTION_DAYS are disabled, not enabled", () => {
+    // 2147483648 overflows the $1::int bind, and a large enough window makes
+    // retentionCutoff() produce an Invalid Date whose toISOString() throws —
+    // turning the sweep into a hard error rather than the no-op an operator
+    // would expect from a bad setting.
+    expect(parseRetentionDays("2147483648")).toEqual({ enabled: false, reason: "too_large" });
+    expect(parseRetentionDays("999999999999")).toEqual({ enabled: false, reason: "too_large" });
+    expect(parseRetentionDays(String(MAX_RETENTION_DAYS + 1))).toEqual({
+      enabled: false,
+      reason: "too_large",
+    });
+  });
+
+  test("the boundary itself is still enabled and produces a valid cutoff", () => {
+    expect(parseRetentionDays(String(MAX_RETENTION_DAYS))).toEqual({
+      enabled: true,
+      retentionDays: MAX_RETENTION_DAYS,
+    });
+    const cutoff = retentionCutoff(new Date("2026-07-01T00:00:00.000Z"), MAX_RETENTION_DAYS);
+    expect(Number.isNaN(cutoff.getTime())).toBe(false);
+    expect(() => cutoff.toISOString()).not.toThrow();
+  });
+});
+
+describe("runRetentionSweep — a document relinked mid-sweep is left intact", () => {
+  test("a relinked document keeps its row and its storage", async () => {
+    // linkDocumentToConversation moves a document by id alone, with no
+    // old-conversation check, so a document resolved earlier in the sweep may
+    // now belong to a different, LIVE conversation. The conversation_id guard
+    // inside the claim transaction excludes it.
+    const { ports, rec } = makeFakePorts(
+      baseState({
+        documentsByConversation: {
+          "conv-1": [
+            { id: 5001, objectKey: "7/1700000000-a.pdf" },
+            { id: 5002, objectKey: "7/1700000000-b.pdf" },
+          ],
+        },
+        relinkedDocumentIds: [5002],
+      })
+    );
+
+    const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+
+    expect(result.conversationsDeleted).toBe(1);
+    expect(rec.deletedDocumentRows).toEqual([5001]);
+    expect(result.documentRowsDeleted).toBe(1);
+    // Critically, the relinked document's OBJECT is never deleted — storage
+    // deletion is driven off what the claim actually returned.
+    expect(rec.deletedObjectKeys).toContain("7/1700000000-a.pdf");
+    expect(rec.deletedObjectKeys).not.toContain("7/1700000000-b.pdf");
   });
 });
