@@ -129,6 +129,32 @@ describe("in-app publish grants public-publish authority (#1336)", () => {
     expect(input.visibility?.level).toBe("public");
   });
 
+  it("forwards `widenOnly` — dropping it silently restores assignment semantics", async () => {
+    // Regression: the action rebuilds `visibility` field-by-field to run the
+    // runtime validators, and an earlier revision omitted this one. The type
+    // still declared it, the UI still sent it, and the whole server-side
+    // narrowing guard was dead with nothing failing.
+    await publishDocumentAction("obj-1", {
+      destination: "intranet",
+      visibility: { level: "internal", widenOnly: true },
+    });
+    const input = publishMock.mock.calls[0][2] as {
+      visibility?: { widenOnly?: boolean };
+    };
+    expect(input.visibility?.widenOnly).toBe(true);
+  });
+
+  it("defaults `widenOnly` to false for a caller that omits it (REST/MCP semantics)", async () => {
+    await publishDocumentAction("obj-1", {
+      destination: "intranet",
+      visibility: { level: "internal" },
+    });
+    const input = publishMock.mock.calls[0][2] as {
+      visibility?: { widenOnly?: boolean };
+    };
+    expect(input.visibility?.widenOnly).toBe(false);
+  });
+
   it("passes the same authority to unpublish, so an author can retract", async () => {
     await unpublishDocumentAction("obj-1", { destination: "public_web" });
     expect(unpublishMock).toHaveBeenCalledTimes(1);

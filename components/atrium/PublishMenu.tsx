@@ -136,13 +136,19 @@ function usePublishState(idOrSlug: string, refreshKey: number) {
         if (cancelled) return;
         if (pubs.isSuccess) setLive(new Set(pubs.data.map((p) => p.destination)));
         else log.warn("listPublicationsAction failed", { message: pubs.message });
-        if (vis.isSuccess) {
+        // BOTH reads must succeed to mark the key loaded. A handled failure of
+        // the publications read leaves `live` empty or stale, which would show
+        // an actually-live destination as unpublished and DISABLE its Unpublish
+        // action — worse than showing nothing, because the menu looks
+        // authoritative. Note `isSuccess === false` is the normal error channel
+        // here (`handleError` returns it); only an exception reaches the catch.
+        if (vis.isSuccess && pubs.isSuccess) {
           setVisibility(vis.data.visibilityLevel);
-          // Only a SUCCESSFUL visibility read marks this key loaded. A failed
-          // read leaves the menu un-ready (Publish stays disabled) rather than
-          // letting it act on a value it never obtained.
+          // Only a fully SUCCESSFUL load marks this key loaded. A failed read
+          // leaves the menu un-ready (Publish stays disabled) rather than
+          // letting it act on state it never obtained.
           setLoadedKey(requestKey);
-        } else {
+        } else if (!vis.isSuccess) {
           log.warn("getVisibilityAction failed", { message: vis.message });
         }
       } catch (e) {

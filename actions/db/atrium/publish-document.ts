@@ -148,6 +148,13 @@ export async function publishDocumentAction(
                 kind: assertGrantKind(g.kind),
                 value: g.value,
               })),
+              // MUST be forwarded: dropping it silently restores assignment
+              // semantics, so a doc another tab widened between the dialog's
+              // re-read and the transaction gets NARROWED back — the exact
+              // defect `widenOnly` exists to prevent. A plain boolean intent
+              // flag needing no runtime narrowing beyond coercion, and it can
+              // only ever make the change LESS impactful.
+              widenOnly: input.visibility.widenOnly === true,
             }
           : undefined,
       },

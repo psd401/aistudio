@@ -381,9 +381,17 @@ function usePublicPublication(idOrSlug: string, active: boolean) {
       try {
         const res = await listPublicationsAction(idOrSlug);
         if (cancelled) return;
-        const pub = res.isSuccess
-          ? res.data.find((p) => p.destination === "public_web")
-          : undefined;
+        if (!res.isSuccess) {
+          // `isSuccess === false` is the NORMAL error channel (`handleError`
+          // returns it; only an exception reaches the catch below). Treating it
+          // as "no publication found" would confidently tell the owner their
+          // live public page "has not been published yet" — a false warning
+          // about the exact thing this notice exists to get right. Stay
+          // UNKNOWN: `loaded` false renders no notice at all.
+          setState({ loaded: false, url: null, live: false });
+          return;
+        }
+        const pub = res.data.find((p) => p.destination === "public_web");
         setState({
           loaded: true,
           url: pub?.readerUrl ?? null,
