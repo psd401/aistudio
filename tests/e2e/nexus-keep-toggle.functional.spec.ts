@@ -116,6 +116,43 @@ test.describe('Nexus Keep toggle (authenticated)', () => {
       .toBe(false)
   })
 
+  test('keyboard: Enter on the Keep button toggles without navigating into the conversation', async ({
+    page,
+  }) => {
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+
+    const created = await page.request.post('/api/nexus/conversations', {
+      data: { title: `e2e keep keyboard ${Date.now()}`, provider: 'openai' },
+    })
+    expect(created.ok()).toBeTruthy()
+    const conversationId: string = (await created.json())?.id
+    expect(conversationId).toBeTruthy()
+
+    await page.goto('/nexus')
+    const row = page.getByTestId(`conversation-item-${conversationId}`)
+    await expect(row).toBeVisible({ timeout: 15000 })
+
+    const keepToggle = row.getByTestId('conversation-keep-toggle')
+    const urlBefore = page.url()
+
+    const responsePromise = page.waitForResponse(
+      (res) =>
+        res.request().method() === 'PATCH' &&
+        res.url().includes(`/api/nexus/conversations/${conversationId}`),
+      { timeout: 20000 }
+    )
+    await keepToggle.focus()
+    await page.keyboard.press('Enter')
+    const res = await responsePromise
+    expect(res.status()).toBe(200)
+
+    await expect(keepToggle).toHaveAttribute('aria-pressed', 'true', { timeout: 10000 })
+    // The row's own keydown handler must NOT have fired: Enter aimed at a
+    // nested control used to bubble up and navigate into the conversation
+    // while the toggle was firing.
+    expect(page.url()).toBe(urlBefore)
+  })
+
   test('PATCH rejects a non-boolean isSaved with 400', async ({ page }) => {
     await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
 

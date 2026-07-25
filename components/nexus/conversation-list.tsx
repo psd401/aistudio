@@ -131,6 +131,12 @@ const ConversationItemRow = memo(function ConversationItemRow({
   }, [conversation.id, onSelect])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // Only act on keys aimed at the row ITSELF. Enter/Space on a nested
+    // control (Keep, Delete) bubbles up here, and without this guard the row
+    // would navigate into the conversation at the same time as the button
+    // fired — so a keyboard user toggling Keep also got yanked into the chat,
+    // and Enter on Delete opened the confirm dialog on top of a navigation.
+    if (e.target !== e.currentTarget) return
     if (e.key === 'Enter' || e.key === ' ') {
       onSelect(conversation.id)
     }
