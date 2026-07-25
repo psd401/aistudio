@@ -78,6 +78,16 @@ test.describe("Unified content platform guards", () => {
       { data: { name: "Unauthorized promotion" } },
     );
     expect(promotion.status()).toBe(401);
+
+    const googleConnectors = await request.get(
+      "/api/repositories/1/connectors/google",
+    );
+    expect(googleConnectors.status()).toBe(401);
+
+    const googleAuthorize = await request.get(
+      "/api/repositories/1/connectors/google/authorize",
+    );
+    expect(googleAuthorize.status()).toBe(401);
   });
 });
 
@@ -140,6 +150,16 @@ test.describe("Unified content product migration (authenticated)", () => {
     page,
   }) => {
     await authenticateContext(page.context(), ADMIN_EMAIL, ADMIN_SUB);
+    await page.route(
+      /\/api\/repositories\/\d+\/connectors\/google$/,
+      async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ connectors: [] }),
+        });
+      },
+    );
     await openRepository(page);
 
     await expect(page.getByText("durable", { exact: true })).toBeVisible();
@@ -157,6 +177,22 @@ test.describe("Unified content product migration (authenticated)", () => {
     await expect(sourceDialog.getByRole("tab", { name: "Text" })).toBeVisible();
     await expect(
       sourceDialog.getByRole("tab", { name: "Google Drive" }),
+    ).toBeVisible();
+    await sourceDialog.getByRole("tab", { name: "Google Drive" }).click();
+    await expect(
+      sourceDialog.getByRole("heading", { name: "Personal Google Drive" }),
+    ).toBeVisible();
+    await expect(
+      sourceDialog.getByRole("button", { name: "Connect Google Drive" }),
+    ).toBeVisible();
+    await expect(
+      sourceDialog.getByRole("heading", { name: "Shared Drive" }),
+    ).toBeVisible();
+    await expect(
+      sourceDialog.getByText(
+        "unified-content-sync@psd-aistudio-broker.iam.gserviceaccount.com",
+        { exact: true },
+      ),
     ).toBeVisible();
   });
 

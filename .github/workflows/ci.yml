@@ -135,6 +135,11 @@ jobs:
       env:
         CI: true
 
+    - name: Run Google content connector lifecycle smoke
+      run: bun run test:smoke:google-content
+      env:
+        CI: true
+
   # CDK validation job - checks infrastructure code
   cdk-validate:
     name: Validate CDK Infrastructure

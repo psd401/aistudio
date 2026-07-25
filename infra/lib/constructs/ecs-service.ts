@@ -812,6 +812,7 @@ export class EcsServiceConstruct extends Construct {
         EMBEDDING_QUEUE_URL: cdk.Fn.importValue(`${environment}-EmbeddingQueueUrl`),
         FILE_PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-FileProcessingQueueUrl`),
         CONTENT_PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-ContentProcessingQueueUrl`),
+        GOOGLE_CONTENT_SYNC_QUEUE_URL: cdk.Fn.importValue(`${environment}-GoogleContentSyncQueueUrl`),
         // Queue URLs from Document Processing Stack exports
         PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-ProcessingQueueUrl`),
         HIGH_MEMORY_QUEUE_URL: cdk.Fn.importValue(`${environment}-HighMemoryQueueUrl`),
