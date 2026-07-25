@@ -211,11 +211,24 @@ export const s3Store = {
     return `${ATRIUM_PREFIX}/objects/${objectId}/assets/${assetId}`;
   },
 
-  /** Temporary, lifecycle-reaped key used only before image normalization. */
-  assetUploadKey(objectId: string, assetId: string): string {
+  /**
+   * Temporary, lifecycle-reaped key used only before image normalization.
+   * A recovery attempt gets a new suffix after cleanup has retired the prior
+   * reservation, so cleanup can never delete bytes uploaded through the
+   * replacement request.
+   */
+  assetUploadKey(
+    objectId: string,
+    assetId: string,
+    recoveryAttemptId?: string
+  ): string {
     assertSafeSegment(objectId, "objectId");
     assertSafeSegment(assetId, "assetId");
-    return `${ATRIUM_PREFIX}/pending-assets/${objectId}/${assetId}`;
+    if (recoveryAttemptId) {
+      assertSafeSegment(recoveryAttemptId, "recoveryAttemptId");
+    }
+    const suffix = recoveryAttemptId ? `/${recoveryAttemptId}` : "";
+    return `${ATRIUM_PREFIX}/pending-assets/${objectId}/${assetId}${suffix}`;
   },
 
   /**

@@ -33,7 +33,11 @@ async function handleOidcRequest(request: NextRequest): Promise<Response> {
 
     const url = new URL(request.url)
     // Strip /api/oauth prefix to get the path oidc-provider expects
-    const oidcPath = url.pathname.replace(/^\/api\/oauth/, "") || "/"
+    const requestedPath = url.pathname.replace(/^\/api\/oauth/, "") || "/"
+    // Preserve compatibility for clients that cached oidc-provider's previous
+    // default while discovery now advertises the documented /revocation route.
+    const oidcPath =
+      requestedPath === "/token/revocation" ? "/revocation" : requestedPath
     return invokeNodeHttpHandler(
       request,
       oidcPath + url.search,

@@ -16,8 +16,11 @@ import {
 } from "@/lib/api";
 import {
   contentAssetService,
+  hashIdempotencyRequest,
+  idempotencyScope,
   recordContentAudit,
   requesterFromApiAuth,
+  validateIdempotencyKey,
 } from "@/lib/content";
 import { contentErrorToResponse, resolveRestRequester } from "@/lib/content/rest";
 import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
@@ -80,6 +83,33 @@ export const POST = withApiAuth(
       requestId
     );
     if (parsed instanceof Response) return parsed;
+    const rawIdempotencyKey = request.headers.get("idempotency-key");
+    if (
+      rawIdempotencyKey !== null &&
+      !validateIdempotencyKey(rawIdempotencyKey)
+    ) {
+      return createErrorResponse(
+        requestId,
+        400,
+        "INVALID_IDEMPOTENCY_KEY",
+        "Idempotency-Key must contain 1-255 visible ASCII characters"
+      );
+    }
+    const canonicalRoute = `/api/v1/content/${objectId}/assets`;
+    const initiationIdempotency =
+      rawIdempotencyKey === null
+        ? undefined
+        : {
+            keyHash: hashIdempotencyRequest(
+              idempotencyScope(
+                auth,
+                request,
+                canonicalRoute,
+                rawIdempotencyKey
+              )
+            ),
+            requestHash: hashIdempotencyRequest(parsed.data),
+          };
     const resolved = await resolveRestRequester(auth, requestId);
     if ("response" in resolved) return resolved.response;
     const { req } = resolved;
@@ -89,11 +119,13 @@ export const POST = withApiAuth(
     });
     try {
       await assertContentAuthoringCapability(auth);
-      const asset = await contentAssetService.initiate(
+      const result = await contentAssetService.initiate(
         req,
         objectId,
-        parsed.data
+        parsed.data,
+        initiationIdempotency
       );
+      const { asset } = result;
       void recordContentAudit({
         req,
         action: "initiate_asset",
@@ -107,11 +139,15 @@ export const POST = withApiAuth(
         objectId,
         assetId: asset.id,
       });
-      return createApiResponse(
+      const response = createApiResponse(
         { data: asset, meta: { requestId } },
         requestId,
         201
       );
+      if (result.replayed) {
+        response.headers.set("Idempotency-Replayed", "true");
+      }
+      return response;
     } catch (error) {
       void recordContentAudit({
         req,

@@ -258,25 +258,44 @@ test.describe('Atrium content v1 — session capability gate (authenticated)', (
     const objectId = created.data.id as string
     const sha256 = createHash('sha256').update(authoredAssetPng).digest('base64url')
 
+    const initiationBody = {
+      filename: 'red-pixel.png',
+      contentType: 'image/png',
+      byteLength: authoredAssetPng.byteLength,
+      sha256,
+      purpose: 'capture_step',
+      width: 4,
+      height: 3,
+    }
+    const initiationHeaders = {
+      'Idempotency-Key': `e2e-asset-${objectId}`,
+    }
     const initiate = await page.request.post(
       `/api/v1/content/${objectId}/assets`,
       {
-        data: {
-          filename: 'red-pixel.png',
-          contentType: 'image/png',
-          byteLength: authoredAssetPng.byteLength,
-          sha256,
-          purpose: 'capture_step',
-          width: 4,
-          height: 3,
-        },
+        headers: initiationHeaders,
+        data: initiationBody,
       }
     )
     expect(initiate.status()).toBe(201)
     const initiated = (await initiate.json()).data
     expect(JSON.stringify(initiated)).not.toContain('objectKey')
-    const uploaded = await page.request.put(initiated.upload.url, {
-      headers: initiated.upload.headers,
+
+    // Simulate losing the first initiation response: the same client key must
+    // recover the reservation and return a currently usable upload request.
+    const retry = await page.request.post(
+      `/api/v1/content/${objectId}/assets`,
+      {
+        headers: initiationHeaders,
+        data: initiationBody,
+      }
+    )
+    expect(retry.status()).toBe(201)
+    expect(retry.headers()['idempotency-replayed']).toBe('true')
+    const retried = (await retry.json()).data
+    expect(retried.id).toBe(initiated.id)
+    const uploaded = await page.request.put(retried.upload.url, {
+      headers: retried.upload.headers,
       data: authoredAssetPng,
     })
     expect(uploaded.ok()).toBeTruthy()

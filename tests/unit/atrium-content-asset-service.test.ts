@@ -25,6 +25,8 @@ jest.mock("@/lib/db/schema", () => ({
     uploadExpiresAt: "contentAssets.uploadExpiresAt",
     createdAt: "contentAssets.createdAt",
     uploadKey: "contentAssets.uploadKey",
+    initiationKeyHash: "contentAssets.initiationKeyHash",
+    initiationRequestHash: "contentAssets.initiationRequestHash",
   },
   contentObjects: {
     id: "contentObjects.id",
@@ -58,8 +60,14 @@ jest.mock("@/lib/content/storage/s3-store", () => ({
   s3Store: {
     assetKey: (objectId: string, assetId: string) =>
       `atrium/objects/${objectId}/assets/${assetId}`,
-    assetUploadKey: (objectId: string, assetId: string) =>
-      `atrium/pending-assets/${objectId}/${assetId}`,
+    assetUploadKey: (
+      objectId: string,
+      assetId: string,
+      recoveryAttemptId?: string
+    ) =>
+      `atrium/pending-assets/${objectId}/${assetId}${
+        recoveryAttemptId ? `/${recoveryAttemptId}` : ""
+      }`,
     signedAssetUploadUrl: (...args: unknown[]) =>
       mockSignedAssetUploadUrl(...args),
     getBytesBounded: (...args: unknown[]) => mockGetBytesBounded(...args),
@@ -72,7 +80,12 @@ import {
   cleanupExpiredContentAssets,
   contentAssetService,
 } from "@/lib/content/asset-service";
-import { ConflictError, NotFoundError } from "@/lib/content/errors";
+import {
+  ConflictError,
+  IdempotencyKeyReusedError,
+  NotFoundError,
+  StorageError,
+} from "@/lib/content/errors";
 import type { Requester } from "@/lib/content/types";
 
 const OBJECT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -93,6 +106,8 @@ const readyRow = {
   width: 4,
   height: 3,
   purpose: "document_image" as const,
+  initiationKeyHash: null,
+  initiationRequestHash: null,
   state: "ready" as const,
   inspection: {
     processorVersion: "atrium-image-normalize-v1",
@@ -175,15 +190,195 @@ describe("contentAssetService (#1284)", () => {
         ttlSeconds: 900,
       })
     );
-    expect(result.upload).toMatchObject({
+    expect(result.replayed).toBe(false);
+    expect(result.asset.upload).toMatchObject({
       method: "PUT",
       url: "https://s3.test/presigned",
       headers: {
         "content-type": "image/png",
       },
     });
-    expect(result).not.toHaveProperty("objectKey");
-    expect(result).not.toHaveProperty("uploadKey");
+    expect(result.asset).not.toHaveProperty("objectKey");
+    expect(result.asset).not.toHaveProperty("uploadKey");
+  });
+
+  it("recovers a keyed pending reservation with the same asset and a fresh URL", async () => {
+    const keyHash = "1".repeat(64);
+    const requestHash = "2".repeat(64);
+    const pending = {
+      ...readyRow,
+      state: "pending" as const,
+      readyAt: null,
+      inspection: null,
+      initiationKeyHash: keyHash,
+      initiationRequestHash: requestHash,
+    };
+    mockExecuteQuery.mockImplementation(
+      async (_query: unknown, operation: string) => {
+        if (operation === "content.assets.initiate.reserve") return [];
+        if (operation === "content.assets.initiate.loadReservation") {
+          return [pending];
+        }
+        if (operation === "content.assets.initiate.renewReservation") {
+          return [
+            {
+              ...pending,
+              uploadExpiresAt: new Date(Date.now() + 900_000),
+            },
+          ];
+        }
+        throw new Error(`unexpected query ${operation}`);
+      }
+    );
+
+    const result = await contentAssetService.initiate(
+      human,
+      OBJECT_ID,
+      {
+        filename: "diagram.png",
+        contentType: "image/png",
+        byteLength: 3,
+        sha256: "A".repeat(43),
+        purpose: "document_image",
+        width: 4,
+        height: 3,
+      },
+      { keyHash, requestHash }
+    );
+
+    expect(result.replayed).toBe(true);
+    expect(result.asset.id).toBe(ASSET_ID);
+    expect(mockSignedAssetUploadUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ key: pending.uploadKey })
+    );
+  });
+
+  it("rejects a keyed reservation reused with different input", async () => {
+    const keyHash = "1".repeat(64);
+    mockExecuteQuery.mockImplementation(
+      async (_query: unknown, operation: string) => {
+        if (operation === "content.assets.initiate.reserve") return [];
+        if (operation === "content.assets.initiate.loadReservation") {
+          return [
+            {
+              ...readyRow,
+              state: "pending",
+              initiationKeyHash: keyHash,
+              initiationRequestHash: "2".repeat(64),
+            },
+          ];
+        }
+        throw new Error(`unexpected query ${operation}`);
+      }
+    );
+
+    await expect(
+      contentAssetService.initiate(
+        human,
+        OBJECT_ID,
+        {
+          filename: "diagram.png",
+          contentType: "image/png",
+          byteLength: 3,
+          sha256: "A".repeat(43),
+          purpose: "document_image",
+        },
+        { keyHash, requestHash: "3".repeat(64) }
+      )
+    ).rejects.toBeInstanceOf(IdempotencyKeyReusedError);
+    expect(mockSignedAssetUploadUrl).not.toHaveBeenCalled();
+  });
+
+  it("replaces the upload key when cleanup retired a keyed reservation", async () => {
+    const keyHash = "1".repeat(64);
+    const requestHash = "2".repeat(64);
+    const deleted = {
+      ...readyRow,
+      state: "deleted" as const,
+      readyAt: null,
+      inspection: null,
+      initiationKeyHash: keyHash,
+      initiationRequestHash: requestHash,
+    };
+    mockExecuteQuery.mockImplementation(
+      async (_query: unknown, operation: string) => {
+        if (operation === "content.assets.initiate.reserve") return [];
+        if (operation === "content.assets.initiate.loadReservation") {
+          return [deleted];
+        }
+        if (
+          operation === "content.assets.initiate.recoverDeletedReservation"
+        ) {
+          return [
+            {
+              ...deleted,
+              state: "pending",
+              uploadKey: `${deleted.uploadKey}/replacement`,
+              uploadExpiresAt: new Date(Date.now() + 900_000),
+            },
+          ];
+        }
+        throw new Error(`unexpected query ${operation}`);
+      }
+    );
+
+    const result = await contentAssetService.initiate(
+      human,
+      OBJECT_ID,
+      {
+        filename: "diagram.png",
+        contentType: "image/png",
+        byteLength: 3,
+        sha256: "A".repeat(43),
+        purpose: "document_image",
+      },
+      { keyHash, requestHash }
+    );
+
+    expect(result.replayed).toBe(true);
+    expect(mockSignedAssetUploadUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ key: `${deleted.uploadKey}/replacement` })
+    );
+  });
+
+  it("keeps a keyed reservation recoverable when URL signing fails", async () => {
+    const keyHash = "1".repeat(64);
+    const requestHash = "2".repeat(64);
+    mockExecuteQuery.mockImplementation(
+      async (_query: unknown, operation: string) => {
+        if (operation === "content.assets.initiate.reserve") {
+          return [
+            {
+              ...readyRow,
+              state: "pending",
+              initiationKeyHash: keyHash,
+              initiationRequestHash: requestHash,
+            },
+          ];
+        }
+        throw new Error(`unexpected query ${operation}`);
+      }
+    );
+    mockSignedAssetUploadUrl.mockRejectedValueOnce(new Error("signing outage"));
+
+    await expect(
+      contentAssetService.initiate(
+        human,
+        OBJECT_ID,
+        {
+          filename: "diagram.png",
+          contentType: "image/png",
+          byteLength: 3,
+          sha256: "A".repeat(43),
+          purpose: "document_image",
+        },
+        { keyHash, requestHash }
+      )
+    ).rejects.toBeInstanceOf(StorageError);
+    expect(mockExecuteQuery).toHaveBeenCalledWith(
+      expect.any(Function),
+      "content.assets.initiate.reserve"
+    );
   });
 
   it("treats completion of an already-ready immutable asset as idempotent", async () => {
@@ -322,7 +517,9 @@ describe("contentAssetService (#1284)", () => {
         throw new Error(`unexpected query ${operation}`);
       }
     );
-    const returning = jest.fn(async () => [{ id: ASSET_ID }]);
+    const returning = jest.fn(async () => [
+      { id: ASSET_ID, uploadKey: readyRow.uploadKey },
+    ]);
     const where = jest.fn(() => ({ returning }));
     const set = jest.fn(() => ({ where }));
     const update = jest.fn(() => ({ set }));
@@ -335,5 +532,8 @@ describe("contentAssetService (#1284)", () => {
     expect(mockDeleteKey).toHaveBeenCalledWith(readyRow.uploadKey);
     expect(set).toHaveBeenCalledWith({ state: "deleted" });
     expect(where).toHaveBeenCalled();
+    expect(returning.mock.invocationCallOrder[0]).toBeLessThan(
+      mockDeleteKey.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
+    );
   });
 });
