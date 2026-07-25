@@ -140,6 +140,7 @@ describe('Security Headers Tests', () => {
       '/api/public/health',
       '/api/health',
       '/api/ping',
+      '/api/repositories/connectors/google/webhook',
       '/auth/error'
     ])('should apply security headers to public route %s', async (path) => {
       const request = new NextRequest(`http://localhost:3000${path}`)
@@ -201,6 +202,26 @@ describe('Security Headers Tests', () => {
   })
 
   describe('Security Attack Prevention', () => {
+    it('permits only the exact Google Picker origins required by the UI', async () => {
+      const request = new NextRequest('http://localhost:3000/repositories', {
+        headers: {
+          authorization: 'Bearer test-token'
+        }
+      })
+
+      const response = await middleware(
+        request,
+        {} as Parameters<typeof middleware>[1],
+      ) as NextResponse
+      const csp = response.headers.get('Content-Security-Policy')
+
+      expect(csp).toContain('script-src')
+      expect(csp).toContain('https://apis.google.com')
+      expect(csp).toContain('frame-src')
+      expect(csp).toContain('https://docs.google.com')
+      expect(csp).not.toContain('https://*.google.com')
+    })
+
     it('should prevent clickjacking with X-Frame-Options', async () => {
       const request = new NextRequest('http://localhost:3000/dashboard', {
         headers: {

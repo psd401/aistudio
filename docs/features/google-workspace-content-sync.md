@@ -36,13 +36,17 @@ Shared Drives use the fixed keyless identity delivered by
 The worker uses ambient Lambda credentials for AWS-to-GCP federation and service
 account impersonation. It has no service-account key and no domain-wide
 delegation. A Shared Drive administrator must add the service account as a
-Viewer before configuring the Drive ID in Repository Manager.
+Viewer before an AI Studio administrator configures the Drive ID in Repository
+Manager. Because WIF uses a shared application identity, Shared Drive creation
+is restricted to the AI Studio `administrator` role; this prevents a repository
+owner from using that identity to read a Drive they cannot access directly.
 
-Only a repository owner or administrator with the
-`knowledge-repositories` UI capability may configure a connector. The same
-repository management check is repeated on list, Picker, selection, manual
-retry, and disconnect routes. This is a human UI capability boundary, not an API
-key scope.
+A repository owner or administrator with the `knowledge-repositories` UI
+capability may configure personal OAuth, choose personal sources, retry, and
+disconnect. Shared Drive setup additionally requires the `administrator` role
+and is hidden from other managers. The repository management check is repeated
+on list, Picker, selection, retry, and disconnect routes. This is a human UI
+capability boundary, not an API key scope.
 
 ## Synchronization model
 
@@ -71,8 +75,25 @@ acquired start token. Folder changes also complete a selection snapshot before
 advancing the page cursor because Drive may not emit a separate change for every
 descendant moved with the folder.
 
+The five-minute EventBridge dispatcher only identifies due connectors and puts
+one message per connector on the isolated SQS queue. Synchronization therefore
+inherits the queue event source's bounded concurrency instead of starting up to
+25 Drive crawls inside one scheduler invocation. A snapshot is limited to
+10,000 unique files and 10,000 folder visits. Crossing either bound fails the
+run with `GOOGLE_DRIVE_SNAPSHOT_LIMIT_EXCEEDED` before a partial snapshot can
+advance the cursor or mark unseen sources missing; durable page-level traversal
+is required before raising these limits.
+
 A failed download or export degrades only that source; the remainder of the
 cursor page still commits and the failed source is retried on the next run.
+The worker rejects advertised source sizes and response lengths above
+`CONTENT_MAX_FILE_SIZE_GB`, and an authoritative byte-counting transform aborts
+multipart upload if an export exceeds that limit in flight. Oversized sources
+remain visible with `GOOGLE_DRIVE_SOURCE_SIZE_LIMIT_EXCEEDED` and never receive
+a repository version. Completed source uploads are initially tagged
+`aistudio-upload-state=temporary`; canonical inspection promotes registered
+versions to `permanent`, while the documents-bucket lifecycle removes an object
+left unregistered by a selection race or database failure.
 Files moved outside a selected folder, deleted files, and lost access enter a
 recoverable missing state. Their last immutable versions remain stored, but
 active retrieval is disabled after
@@ -142,6 +163,11 @@ versions. Do not remove migration 136 or delete connector records as a rollback.
   operations.
 - `tests/unit/lib/repositories/google-drive-oauth.test.ts` covers PKCE and
   fail-closed scope validation.
+- `tests/unit/lib/repositories/google-drive-route-access.test.ts` proves the
+  common WIF identity can only be configured by an AI Studio administrator.
+- `tests/unit/lib/repositories/google-drive-selections-route.test.ts` and
+  `google-drive-bounded-concurrency.test.ts` prove per-user throttling, bounded
+  provider fanout, and stable selection ordering.
 - `tests/unit/lib/repositories/google-drive-callback.test.ts` proves forged or
   mismatched callback state cannot select or consume another in-progress state
   cookie while valid denial and PKCE success behavior remains intact.
@@ -149,11 +175,15 @@ versions. Do not remove migration 136 or delete connector records as a rollback.
   and verifies selection-generation fencing, isolated source failure/recovery,
   cursor, immutable-version, sync-run, deletion-grace state, and fail-closed
   creator-deletion cleanup.
+- `infra/lambdas/google-content-sync/__tests__/safety.test.ts` proves metadata,
+  response, and in-flight byte limits plus finite snapshot budgets.
 - `infra/test/unit/google-content-sync.test.ts` synthesizes the exact WIF role,
-  least-privilege object/queue policies, schedule, queue/DLQ, and alarms.
+  least-privilege object/queue policies, scheduled queue dispatch, queue/DLQ,
+  and alarms.
 - `tests/e2e/unified-content-product-migration.functional.spec.ts` covers
-  unauthenticated route guards and the authenticated personal/Shared Drive
-  Repository Manager UI without requiring live Google credentials.
+  unauthenticated route guards, public token-authenticated webhook reachability,
+  and the authenticated personal/Shared Drive Repository Manager UI without
+  requiring live Google credentials.
 
 After deployment, complete a labeled live matrix for create, edit, move into and
 out of a selected folder, delete/restore, Shared Drive permission loss/restore,

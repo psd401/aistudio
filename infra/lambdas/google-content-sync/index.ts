@@ -7,12 +7,17 @@ import type {
   SQSRecord,
 } from "aws-lambda";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { Readable, Transform } from "node:stream";
+import { Readable } from "node:stream";
 import {
   GetSecretValueCommand,
   SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
 import { S3Client } from "@aws-sdk/client-s3";
+import {
+  SendMessageBatchCommand,
+  SQSClient,
+  type SendMessageBatchRequestEntry,
+} from "@aws-sdk/client-sqs";
 import { Upload } from "@aws-sdk/lib-storage";
 import {
   and,
@@ -56,6 +61,7 @@ import {
   CONTENT_PROCESSOR_CONTRACT_VERSION,
 } from "../../../lib/repositories/content-platform/job-state";
 import { buildRepositorySourceObjectKey } from "../../../lib/repositories/content-platform/object-key";
+import { REPOSITORY_UPLOAD_TEMPORARY_TAGGING } from "../../../lib/repositories/content-platform/upload-state";
 import {
   GoogleDriveApiError,
   GoogleDriveClient,
@@ -70,6 +76,13 @@ import {
 } from "../../../lib/repositories/google-drive/formats";
 import { refreshGoogleAccessToken } from "../../../lib/repositories/google-drive/oauth";
 import { getGoogleContentWifAccessToken } from "../../../lib/repositories/google-drive/wif";
+import {
+  assertGoogleSourceMetadataSize,
+  assertGoogleSourceResponseSize,
+  createBoundedHashingStream,
+  GoogleDriveSnapshotBudget,
+  maximumGoogleSourceBytes,
+} from "./safety";
 
 const syncMessageSchema = z.object({
   connectorId: z.string().uuid(),
@@ -94,6 +107,7 @@ interface ConnectorContext {
   selections: RepositoryConnectorSelectionRow[];
   sources: RepositoryConnectorSourceRow[];
   encryptedRefreshToken: string | null;
+  maximumSourceBytes: number;
 }
 
 interface SyncCounters {
@@ -122,11 +136,13 @@ const log = {
 };
 
 const s3 = new S3Client({});
+const sqs = new SQSClient({});
 const secrets = new SecretsManagerClient({});
 const documentsBucket = requiredEnvironment("DOCUMENTS_BUCKET_NAME");
 const databaseHost = requiredEnvironment("DATABASE_HOST");
 const databaseSecretArn = requiredEnvironment("DATABASE_SECRET_ARN");
 const appBaseUrl = process.env.APP_BASE_URL?.replace(/\/+$/, "") ?? "";
+const syncQueueUrl = requiredEnvironment("GOOGLE_CONTENT_SYNC_QUEUE_URL");
 const MAX_SCHEDULED_CONNECTORS = 25;
 const WATCH_RENEWAL_WINDOW_MS = 24 * 60 * 60 * 1000;
 const WATCH_LIFETIME_MS = 6 * 24 * 60 * 60 * 1000;
@@ -216,6 +232,7 @@ function sourceMetadata(
 
 async function loadConnectorContext(
   connectorId: string,
+  maximumSourceBytes: number,
 ): Promise<ConnectorContext | null> {
   const [connector] = await executeQuery(
     (db) =>
@@ -282,6 +299,7 @@ async function loadConnectorContext(
     selections,
     sources,
     encryptedRefreshToken: credential?.encryptedRefreshToken ?? null,
+    maximumSourceBytes,
   };
 }
 
@@ -537,6 +555,7 @@ async function importFile(
   const format = resolveGoogleDriveExportFormat(file.mimeType);
   const identity = await ensureSourceIdentity({ context, file, selectedVia });
   if (!format) return identity.created ? "created" : "unchanged";
+  assertGoogleSourceMetadataSize(file.size, context.maximumSourceBytes);
 
   const revision = sourceRevision(file);
   if (
@@ -572,24 +591,20 @@ async function importFile(
   if (!downloaded.response.body) {
     throw new Error("Google Drive download returned no body");
   }
+  assertGoogleSourceResponseSize(
+    downloaded.response,
+    context.maximumSourceBytes,
+  );
   const fileName = exportedGoogleDriveFileName(file.name, format);
   const objectKey = buildRepositorySourceObjectKey(
     context.connector.repositoryId,
     fileName,
     randomUUID(),
   );
-  const hash = createHash("sha256");
-  let byteSize = 0;
-  const meter = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      byteSize += chunk.length;
-      hash.update(chunk);
-      callback(null, chunk);
-    },
-  });
+  const meter = createBoundedHashingStream(context.maximumSourceBytes);
   const body = Readable.from(
     downloaded.response.body as AsyncIterable<Uint8Array>,
-  ).pipe(meter);
+  ).pipe(meter.stream);
   await new Upload({
     client: s3,
     params: {
@@ -597,6 +612,7 @@ async function importFile(
       Key: objectKey,
       Body: body,
       ContentType: format.contentType,
+      Tagging: REPOSITORY_UPLOAD_TEMPORARY_TAGGING,
       Metadata: {
         "source-provider": "google-drive",
         "source-external-id": file.id,
@@ -606,7 +622,8 @@ async function importFile(
     partSize: 8 * 1024 * 1024,
     leavePartsOnError: false,
   }).done();
-  const sha256 = hash.digest("hex");
+  const byteSize = meter.getByteSize();
+  const sha256 = meter.digestSha256();
   if (byteSize <= 0) throw new Error("Google Drive download was empty");
 
   const registered = await executeTransaction(async (tx) => {
@@ -742,6 +759,7 @@ async function enumerateInitialFiles(
     string,
     { file: GoogleDriveFile; selectedVia: Set<string> }
   >();
+  const budget = new GoogleDriveSnapshotBudget();
   let inaccessibleSelectionCount = 0;
   const add = async (candidate: GoogleDriveFile, selectedVia: string) => {
     const file = await resolveShortcut(client, candidate);
@@ -750,6 +768,7 @@ async function enumerateInitialFiles(
     if (existing) {
       existing.selectedVia.add(selectedVia);
     } else {
+      budget.recordFile(file.id);
       discovered.set(file.id, {
         file,
         selectedVia: new Set([selectedVia]),
@@ -788,6 +807,7 @@ async function enumerateInitialFiles(
         const folderId = pendingFolders.shift();
         if (!folderId || visitedFolders.has(folderId)) continue;
         visitedFolders.add(folderId);
+        budget.recordFolderVisit();
         let pageToken: string | null = null;
         do {
           const page = await client.listChildren(folderId, pageToken);
@@ -1508,7 +1528,10 @@ async function synchronize(
     if (!config.enabled || !config.googleSyncEnabled) {
       throw new Error("Google Workspace synchronization is disabled");
     }
-    const context = await loadConnectorContext(message.connectorId);
+    const context = await loadConnectorContext(
+      message.connectorId,
+      maximumGoogleSourceBytes(config.maxFileSizeGb),
+    );
     if (!context) {
       await abandonClaimedSync(
         runId,
@@ -1640,6 +1663,36 @@ async function dueConnectors(): Promise<string[]> {
   return rows.map(({ id }) => id);
 }
 
+async function enqueueScheduledConnectors(
+  connectorIds: readonly string[],
+  requestId: string,
+): Promise<void> {
+  for (let offset = 0; offset < connectorIds.length; offset += 10) {
+    const connectorChunk = connectorIds.slice(offset, offset + 10);
+    const entries: SendMessageBatchRequestEntry[] = connectorChunk.map(
+      (connectorId, index) => ({
+        Id: String(index),
+        MessageBody: JSON.stringify({
+          connectorId,
+          trigger: "schedule",
+          requestId,
+        } satisfies SyncMessage),
+      }),
+    );
+    const result = await sqs.send(
+      new SendMessageBatchCommand({
+        QueueUrl: syncQueueUrl,
+        Entries: entries,
+      }),
+    );
+    if ((result.Failed?.length ?? 0) > 0) {
+      throw new Error(
+        `Failed to enqueue ${result.Failed?.length ?? 0} scheduled Google Drive synchronization(s)`,
+      );
+    }
+  }
+}
+
 function isSqsEvent(
   event: SQSEvent | EventBridgeEvent<string, unknown>,
 ): event is SQSEvent {
@@ -1653,14 +1706,7 @@ export async function handler(
   await ensureDatabaseCredentials();
   if (!isSqsEvent(event)) {
     const connectorIds = await dueConnectors();
-    await Promise.allSettled(
-      connectorIds.map((connectorId) =>
-        synchronize(
-          { connectorId, trigger: "schedule" },
-          `${context.awsRequestId}:${connectorId}`,
-        ),
-      ),
-    );
+    await enqueueScheduledConnectors(connectorIds, context.awsRequestId);
     return;
   }
 

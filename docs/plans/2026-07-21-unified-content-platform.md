@@ -1105,19 +1105,30 @@ Implemented on `codex/unified-content-google-sync`, ready for dev review:
   disconnect. Queue/DLQ, schedule, least-privilege source-prefix/dispatch IAM,
   worker/DLQ/staleness alarms, and correlated credential-free logs complete the
   operational boundary.
+- Delivery-boundary security review tightened the common-identity and resource
+  ceilings: Shared Drive WIF setup is application-administrator-only; personal
+  selection verification has a per-user five-per-minute budget and five-call
+  provider concurrency; source metadata, HTTP length, and streamed bytes all
+  enforce `CONTENT_MAX_FILE_SIZE_GB`; uploads remain temporary until canonical
+  inspection promotes them; snapshot traversal fails closed above 10,000 files
+  or folder visits; and the scheduler fans due connectors into the existing SQS
+  queue rather than executing 25 synchronizations in one invocation. Google
+  notification delivery is explicitly public only to its route-local
+  channel/resource/token validation, and CSP permits the exact Picker script
+  and frame origins.
 
 Verification at this checkpoint includes exact Drive/OAuth unit contracts, a
 real PostgreSQL migration/lifecycle smoke, CDK synthesis assertions for the WIF
 role and least-privilege policies, unauthenticated connector guards, and an
 authenticated Repository Manager Playwright workflow with deterministic Google
 API substitution. The final local gate passed whole-repository typecheck and
-lint (zero errors; 411 existing warnings), all 350 Jest suites with 3,484 tests
-passing (3 suites/26 tests skipped), 16 focused Drive/OAuth unit tests, 4 CDK
-contract tests, the real-PostgreSQL connector smoke, and all 11 affected
-authenticated/guard Playwright cases. The production Next.js build,
-infrastructure build, full CDK synthesis, clean isolated
-migration application, and final diff checks also passed. The deployment
-runbook records migration-first ordering, OAuth secret shape/callback
-registration, flags, rollback, alarms, and the labeled live
+lint (zero errors; 411 existing warnings), all 353 Jest suites with 3,491 tests
+passing (3 suites/26 tests skipped), 7 focused Drive/OAuth/security suites with
+56 tests, 2 focused Lambda/CDK suites with 8 tests, the real-PostgreSQL
+connector smoke, and all 11 affected authenticated/guard Playwright cases. The
+production Next.js build, infrastructure build, full CDK synthesis, clean
+isolated migration application, and final diff checks also passed. The
+deployment runbook records migration-first ordering, OAuth secret
+shape/callback registration, flags, rollback, alarms, and the labeled live
 create/edit/move/delete/access-loss/notification-resume matrix required after
 dev deployment.

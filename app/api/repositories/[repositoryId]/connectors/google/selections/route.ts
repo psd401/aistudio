@@ -11,18 +11,22 @@ import {
   GOOGLE_SHORTCUT_MIME_TYPE,
 } from "@/lib/repositories/google-drive";
 import { refreshGoogleAccessToken } from "@/lib/repositories/google-drive/oauth";
+import { mapWithConcurrency } from "@/lib/repositories/google-drive/bounded-concurrency";
 import {
   repositoryConnectorErrorResponse,
   requireRepositoryConnectorManager,
 } from "@/lib/repositories/google-drive/route-access";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+import { apiRateLimit } from "@/lib/rate-limit";
 
 const requestSchema = z.object({
   connectorId: z.string().uuid(),
   fileIds: z.array(z.string().trim().min(1).max(512)).min(1).max(100),
 });
 
-export async function POST(
+const GOOGLE_METADATA_CONCURRENCY = 5;
+
+async function replaceSelections(
   request: Request,
   context: { params: Promise<{ repositoryId: string }> },
 ): Promise<Response> {
@@ -49,8 +53,10 @@ export async function POST(
       encryptedRefreshToken: credential.encryptedRefreshToken,
     });
     const drive = new GoogleDriveClient(token.accessToken);
-    const selections = await Promise.all(
-      Array.from(new Set(input.fileIds)).map(async (fileId) => {
+    const selections = await mapWithConcurrency(
+      Array.from(new Set(input.fileIds)),
+      GOOGLE_METADATA_CONCURRENCY,
+      async (fileId) => {
         let file = await drive.getFile(fileId);
         if (file.mimeType === GOOGLE_SHORTCUT_MIME_TYPE) {
           if (!file.shortcutDetails?.targetId) {
@@ -67,7 +73,7 @@ export async function POST(
           displayName: file.name,
           includeDescendants: true,
         };
-      }),
+      },
     );
     await replaceGoogleDriveSelections({
       connectorId: input.connectorId,
@@ -91,3 +97,10 @@ export async function POST(
     return repositoryConnectorErrorResponse(error);
   }
 }
+
+/**
+ * Selection verification performs provider metadata calls, so it receives the
+ * same per-user request budget as uploads in addition to bounded call
+ * concurrency inside each request.
+ */
+export const POST = apiRateLimit.upload(replaceSelections);

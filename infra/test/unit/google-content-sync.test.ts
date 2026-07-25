@@ -69,6 +69,13 @@ describe("GoogleContentSync", () => {
       ScheduleExpression: "rate(5 minutes)",
       State: "ENABLED",
     });
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: {
+        Variables: Match.objectLike({
+          GOOGLE_CONTENT_SYNC_QUEUE_URL: Match.anyValue(),
+        }),
+      },
+    });
   });
 
   test("keeps source storage and downstream dispatch least-privileged", () => {
@@ -76,6 +83,8 @@ describe("GoogleContentSync", () => {
     expect(policies).toContain("GoogleContentSourceObjects");
     expect(policies).toContain(":s3:::aistudio-dev-documents/repositories/*");
     expect(policies).toContain("CanonicalProcessingDispatch");
+    expect(policies).toContain("sqs:SendMessage");
+    expect(policies).toContain("GoogleContentSyncQueue");
     expect(policies).toContain("aistudio/dev/mcp/token-encryption-key-");
     expect(policies).not.toContain("iam:CreateAccessKey");
   });

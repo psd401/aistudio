@@ -8,8 +8,10 @@ import {
 import {
   repositoryConnectorErrorResponse,
   requireRepositoryConnectorManager,
+  requireSharedDriveConnectorAdministrator,
 } from "@/lib/repositories/google-drive/route-access";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+import { checkUserRole } from "@/lib/db/drizzle";
 
 const sharedDriveSchema = z.object({
   sharedDriveId: z.string().trim().min(1).max(256),
@@ -24,12 +26,12 @@ export async function GET(
   try {
     const repositoryId = Number((await context.params).repositoryId);
     const manager = await requireRepositoryConnectorManager(repositoryId);
-    const connectors = await listGoogleDriveConnectors(
-      repositoryId,
-      manager.userId,
-    );
+    const [connectors, canConfigureSharedDrives] = await Promise.all([
+      listGoogleDriveConnectors(repositoryId, manager.userId),
+      checkUserRole(manager.userId, "administrator"),
+    ]);
     timer({ status: "success", connectorCount: connectors.length });
-    return Response.json({ connectors });
+    return Response.json({ connectors, canConfigureSharedDrives });
   } catch (error) {
     timer({ status: "error" });
     return repositoryConnectorErrorResponse(error);
@@ -49,6 +51,7 @@ export async function POST(
   try {
     const repositoryId = Number((await context.params).repositoryId);
     const manager = await requireRepositoryConnectorManager(repositoryId);
+    await requireSharedDriveConnectorAdministrator(manager);
     await assertGoogleContentSyncEnabled();
     const input = sharedDriveSchema.parse(await request.json());
     const connectorId = await upsertSharedDriveConnector({

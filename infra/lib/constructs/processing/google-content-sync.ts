@@ -152,6 +152,7 @@ export class GoogleContentSync extends Construct {
         NODE_OPTIONS: "--enable-source-maps",
         DOCUMENTS_BUCKET_NAME: props.documentsBucket.bucketName,
         CONTENT_PROCESSING_QUEUE_URL: props.contentProcessingQueue.queueUrl,
+        GOOGLE_CONTENT_SYNC_QUEUE_URL: this.queue.queueUrl,
         DATABASE_HOST: props.databaseHost,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
         DATABASE_NAME: "aistudio",

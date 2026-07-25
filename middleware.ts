@@ -14,6 +14,11 @@ const PUBLIC_PATHS = [
   "/api/healthz", // Lightweight health check for ECS/Docker
   "/api/ping",
   "/api/auth/federated-signout",
+  // Google Drive push notifications authenticate with a high-entropy channel
+  // token plus channel/resource identifiers inside the route. Google cannot
+  // hold an AI Studio browser session, so middleware must let the route perform
+  // its own fail-closed notification validation.
+  "/api/repositories/connectors/google/webhook",
   // SECURITY: All routes under /api/v1/* MUST use withApiAuth() wrapper.
   // This bypass only skips NextAuth session checks — API routes handle their own auth.
   "/api/v1", // External API routes handle their own auth via Bearer token (#677)
@@ -78,14 +83,19 @@ const PUBLIC_PATHS = [
 // only when configured (otherwise the artifact preview frame is simply blocked,
 // matching the component's fail-closed behavior).
 const SANDBOX_FRAME_ORIGIN = getArtifactSandboxOrigin();
-const FRAME_SRC = ["'self'", "https://www.canva.com", ...(SANDBOX_FRAME_ORIGIN ? [SANDBOX_FRAME_ORIGIN] : [])].join(" ");
+const FRAME_SRC = [
+  "'self'",
+  "https://www.canva.com",
+  "https://docs.google.com",
+  ...(SANDBOX_FRAME_ORIGIN ? [SANDBOX_FRAME_ORIGIN] : []),
+].join(" ");
 const CONTENT_SECURITY_POLICY =
   "default-src 'self'; " +
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com; " +
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com https://apis.google.com; " +
   "style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data: https: blob:; " +
   "font-src 'self' data:; " +
-  "connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com; " +
+  "connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com https://apis.google.com; " +
   `frame-src ${FRAME_SRC}; ` +
   "frame-ancestors 'none';";
 

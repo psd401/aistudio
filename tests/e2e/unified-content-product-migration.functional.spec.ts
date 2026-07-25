@@ -88,6 +88,14 @@ test.describe("Unified content platform guards", () => {
       "/api/repositories/1/connectors/google/authorize",
     );
     expect(googleAuthorize.status()).toBe(401);
+
+    const malformedGoogleNotification = await request.post(
+      "/api/repositories/connectors/google/webhook",
+    );
+    expect(malformedGoogleNotification.status()).toBe(400);
+    await expect(malformedGoogleNotification.json()).resolves.toEqual({
+      error: "Invalid notification",
+    });
   });
 });
 
@@ -156,7 +164,10 @@ test.describe("Unified content product migration (authenticated)", () => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify({ connectors: [] }),
+          body: JSON.stringify({
+            connectors: [],
+            canConfigureSharedDrives: true,
+          }),
         });
       },
     );

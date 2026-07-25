@@ -132,6 +132,8 @@ export function GoogleDriveConnectorPanel({
   const { toast } = useToast();
   const [connectors, setConnectors] = useState<GoogleDriveConnectorView[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [canConfigureSharedDrives, setCanConfigureSharedDrives] =
+    useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sharedDriveId, setSharedDriveId] = useState("");
@@ -147,12 +149,14 @@ export function GoogleDriveConnectorPanel({
       );
       const payload = (await response.json()) as {
         connectors?: GoogleDriveConnectorView[];
+        canConfigureSharedDrives?: boolean;
         error?: string;
       };
       if (!response.ok) {
         throw new Error(payload.error || "Failed to load Drive connections");
       }
       setConnectors(payload.connectors ?? []);
+      setCanConfigureSharedDrives(payload.canConfigureSharedDrives === true);
     } catch (loadError) {
       setError(
         loadError instanceof Error
@@ -422,53 +426,55 @@ export function GoogleDriveConnectorPanel({
         </div>
       </div>
 
-      <div className="rounded-md border p-4">
-        <h3 className="font-medium">Shared Drive</h3>
-        <p className="mb-3 text-sm text-muted-foreground">
-          Add{" "}
-          <code className="break-all text-xs">
-            unified-content-sync@psd-aistudio-broker.iam.gserviceaccount.com
-          </code>{" "}
-          as a Viewer, then enter the Shared Drive ID below. No service-account
-          key or domain-wide delegation is used.
-        </p>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="space-y-1">
-            <Label htmlFor="shared-drive-name">Display name</Label>
-            <Input
-              id="shared-drive-name"
-              value={sharedDriveName}
-              onChange={(event) => setSharedDriveName(event.target.value)}
-              placeholder="Curriculum Shared Drive"
-            />
+      {canConfigureSharedDrives && (
+        <div className="rounded-md border p-4">
+          <h3 className="font-medium">Shared Drive</h3>
+          <p className="mb-3 text-sm text-muted-foreground">
+            Add{" "}
+            <code className="break-all text-xs">
+              unified-content-sync@psd-aistudio-broker.iam.gserviceaccount.com
+            </code>{" "}
+            as a Viewer, then enter the Shared Drive ID below. No
+            service-account key or domain-wide delegation is used.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <Label htmlFor="shared-drive-name">Display name</Label>
+              <Input
+                id="shared-drive-name"
+                value={sharedDriveName}
+                onChange={(event) => setSharedDriveName(event.target.value)}
+                placeholder="Curriculum Shared Drive"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="shared-drive-id">Shared Drive ID</Label>
+              <Input
+                id="shared-drive-id"
+                value={sharedDriveId}
+                onChange={(event) => setSharedDriveId(event.target.value)}
+                placeholder="0AExampleDriveId"
+              />
+            </div>
           </div>
-          <div className="space-y-1">
-            <Label htmlFor="shared-drive-id">Shared Drive ID</Label>
-            <Input
-              id="shared-drive-id"
-              value={sharedDriveId}
-              onChange={(event) => setSharedDriveId(event.target.value)}
-              placeholder="0AExampleDriveId"
-            />
-          </div>
+          <Button
+            type="button"
+            variant="outline"
+            className="mt-3"
+            disabled={
+              pendingAction !== null ||
+              !sharedDriveId.trim() ||
+              !sharedDriveName.trim()
+            }
+            onClick={() => void addSharedDrive()}
+          >
+            {pendingAction === "shared-drive" && (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            )}
+            Connect Shared Drive
+          </Button>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          className="mt-3"
-          disabled={
-            pendingAction !== null ||
-            !sharedDriveId.trim() ||
-            !sharedDriveName.trim()
-          }
-          onClick={() => void addSharedDrive()}
-        >
-          {pendingAction === "shared-drive" && (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          )}
-          Connect Shared Drive
-        </Button>
-      </div>
+      )}
 
       {connectors.length > 0 && (
         <div className="space-y-2">
