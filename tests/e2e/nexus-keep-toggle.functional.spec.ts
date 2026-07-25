@@ -74,8 +74,24 @@ test.describe('Nexus Keep toggle (authenticated)', () => {
     await expect(keepToggle).toHaveAttribute('aria-pressed', 'false')
     await expect(keptIndicator).toHaveCount(0)
 
+    // Waits for the PATCH the click triggers, so the assertions below race
+    // against a settled request rather than against React's render timing —
+    // and a wrong request body shows up here instead of as a mystery UI state.
+    const expectPatch = async (expectedIsSaved: boolean) => {
+      const responsePromise = page.waitForResponse(
+        (res) =>
+          res.request().method() === 'PATCH' &&
+          res.url().includes(`/api/nexus/conversations/${conversationId}`),
+        { timeout: 20000 }
+      )
+      await keepToggle.click()
+      const res = await responsePromise
+      expect(res.request().postDataJSON()).toEqual({ isSaved: expectedIsSaved })
+      expect(res.status()).toBe(200)
+    }
+
     // Toggle ON.
-    await keepToggle.click()
+    await expectPatch(true)
     await expect(keepToggle).toHaveAttribute('aria-pressed', 'true', { timeout: 10000 })
     await expect(keptIndicator).toBeVisible({ timeout: 10000 })
 
@@ -91,7 +107,7 @@ test.describe('Nexus Keep toggle (authenticated)', () => {
     })
 
     // Toggle OFF.
-    await keepToggle.click()
+    await expectPatch(false)
     await expect(keepToggle).toHaveAttribute('aria-pressed', 'false', { timeout: 10000 })
     await expect(keptIndicator).toHaveCount(0, { timeout: 10000 })
 
