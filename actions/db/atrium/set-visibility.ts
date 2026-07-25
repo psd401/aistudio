@@ -135,7 +135,7 @@ export async function setVisibilityAction(
     // an admin. Before that change a non-admin's "make public" silently entered
     // the approval queue: the chip flipped, no publication was created, and
     // nobody was notified in either direction. See public-publish-policy.ts.
-    const result = await visibilityService.setLevel(
+    const { visibilityLevel, becamePublic } = await visibilityService.setLevel(
       requester,
       obj.id,
       { level, grants },
@@ -145,7 +145,15 @@ export async function setVisibilityAction(
     // Allow-then-NOTIFY: a non-admin making content publicly visible records an
     // admin-visible notification instead of blocking on approval. Best-effort
     // and post-commit — it can never fail the author's change.
-    if (level === "public") {
+    //
+    // Gated on the TRANSITION the service observed under its row lock, not on
+    // the requested `level`. The Share dialog permits unchanged saves, so an
+    // already-public object re-saved at Public keyed a fresh `publicExposure`
+    // audit row off `level === "public"` alone — routine edits flooding the
+    // admin feed with exposures that never occurred, while the service itself
+    // treats that same save as a no-op for the §26.4 gate. One judgement, made
+    // in the one place that holds the lock.
+    if (becamePublic) {
       await notifyPublicExposure({
         req: requester,
         action: "set_visibility",
@@ -158,9 +166,12 @@ export async function setVisibilityAction(
     timer({ status: "success" });
     log.info("Visibility updated", {
       objectId: obj.id,
-      visibilityLevel: result.visibilityLevel,
+      visibilityLevel,
+      becamePublic,
     });
-    return createSuccess(result, "Visibility updated");
+    // Re-wrap rather than returning the service result verbatim: `becamePublic`
+    // is an internal policy signal, not part of this action's response contract.
+    return createSuccess({ visibilityLevel }, "Visibility updated");
   } catch (error) {
     timer({ status: "error" });
     // The §26.4 public-publish gate is not a failure — it's a pending-approval

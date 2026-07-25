@@ -575,7 +575,18 @@ export const visibilityService = {
    *
    * The object must exist (404 otherwise) and the caller is expected to have
    * already passed `assertCanEdit`. Does NOT change `status`. Returns the new
-   * level so the surface can reflect it without a re-read.
+   * level so the surface can reflect it without a re-read, plus `becamePublic`
+   * — whether this call actually TRANSITIONED the object from non-public to
+   * public, decided against the FOR-UPDATE-locked previous level.
+   *
+   * `becamePublic` exists because "the caller asked for public" and "this call
+   * created a new public exposure" are different questions, and the
+   * allow-then-notify policy (#1336) cares only about the second. The visibility
+   * dialog permits unchanged saves, so a surface keying its public-exposure
+   * notification off the requested level alone floods the admin audit feed with
+   * exposures that never happened — this service already treats an
+   * already-public save as a no-op for the §26.4 gate directly below, and
+   * reporting it is what lets the surfaces agree with that judgement.
    *
    * §26.4 — widening to `public` through this standalone path is the SAME
    * privilege boundary as `publishService.publish`'s visibility widen, so it
@@ -588,7 +599,7 @@ export const visibilityService = {
     objectId: string,
     visibility: VisibilityInput,
     opts: { hasPublishPublicCapability?: boolean } = {}
-  ): Promise<{ visibilityLevel: VisibilityLevel }> {
+  ): Promise<{ visibilityLevel: VisibilityLevel; becamePublic: boolean }> {
     // Whether this caller holds the §26.4 public-publish authority (pure, no IO).
     // The ACTUAL gate decision (is this a NEW public exposure?) is made INSIDE the
     // transaction against the FOR-UPDATE-locked level — never against a pre-lock
@@ -600,6 +611,10 @@ export const visibilityService = {
       req,
       opts.hasPublishPublicCapability ?? false
     );
+    // Set from INSIDE the transaction against the locked previous level (see the
+    // docblock). Declared here so the decision survives the closure; reassigned
+    // on every attempt, so a retried transaction cannot leave a stale verdict.
+    let becamePublic = false;
     await executeTransaction(async (tx) => {
       // Guard against a missing object inside the tx so the level write does not
       // silently no-op (UPDATE ... WHERE id = <absent> affects zero rows). Lock
@@ -640,9 +655,14 @@ export const visibilityService = {
         );
       }
 
+      // Decided under the SAME lock as the §26.4 gate above, and only once the
+      // write is committed-bound: a genuine non-public → public transition.
+      becamePublic =
+        visibility.level === "public" && rows[0].visibilityLevel !== "public";
+
       await setLevelInTx(tx, objectId, visibility);
     }, "content.setLevel");
-    return { visibilityLevel: visibility.level };
+    return { visibilityLevel: visibility.level, becamePublic };
   },
 
   /**

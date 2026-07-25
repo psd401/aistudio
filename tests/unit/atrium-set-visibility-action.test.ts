@@ -53,6 +53,14 @@ jest.mock("@/lib/content/helpers", () => ({
   },
 }));
 
+// `notifyPublicExposure` (the #1336 allow-then-notify hook) writes through
+// `recordContentAudit`. Mocked so the notification is OBSERVABLE here without
+// reaching the database — `public-publish-policy` is the module's only importer.
+const recordContentAuditMock = jest.fn(async (..._a: unknown[]) => undefined);
+jest.mock("@/lib/content/audit", () => ({
+  recordContentAudit: (...a: unknown[]) => recordContentAuditMock(...a),
+}));
+
 jest.mock("@/utils/roles", () => ({
   hasCapabilityAccess: jest.fn(async () => true),
 }));
@@ -77,8 +85,11 @@ const OBJ = { id: "uuid-1", ownerUserId: 7, visibilityLevel: "private" };
 beforeEach(() => {
   loadByIdOrSlugMock.mockReset().mockResolvedValue(OBJ);
   canViewMock.mockReset().mockResolvedValue(true);
-  setLevelMock.mockReset().mockResolvedValue({ visibilityLevel: "group" });
+  setLevelMock
+    .mockReset()
+    .mockResolvedValue({ visibilityLevel: "group", becamePublic: false });
   canEditMock.mockReset().mockReturnValue(true);
+  recordContentAuditMock.mockReset().mockResolvedValue(undefined);
 });
 
 describe("setVisibilityAction — input validation", () => {
@@ -204,5 +215,58 @@ describe("setVisibilityAction — write", () => {
       (result as { approvalRequired?: boolean }).approvalRequired
     ).toBe(true);
     expect(result.message).toMatch(/approval/i);
+  });
+});
+
+describe("setVisibilityAction — allow-then-notify is keyed on the TRANSITION", () => {
+  // The service decides "did this actually create a new public exposure?" under
+  // its FOR UPDATE lock and reports it as `becamePublic`. The action must key
+  // the admin notification off THAT, not off the requested level: the Share
+  // dialog permits unchanged saves, so keying off `level === "public"` alone
+  // recorded a fresh exposure every time an already-public object was re-saved.
+  it("notifies when the object actually transitioned to public", async () => {
+    setLevelMock.mockResolvedValueOnce({
+      visibilityLevel: "public",
+      becamePublic: true,
+    });
+    const result = await setVisibilityAction("o1", { level: "public" });
+    expect(result.isSuccess).toBe(true);
+    expect(recordContentAuditMock).toHaveBeenCalledTimes(1);
+    const entry = recordContentAuditMock.mock.calls[0][0] as {
+      action: string;
+      objectId: string;
+      details: { publicExposure?: boolean };
+    };
+    expect(entry.action).toBe("set_visibility");
+    expect(entry.objectId).toBe("uuid-1");
+    expect(entry.details.publicExposure).toBe(true);
+  });
+
+  it("does NOT notify when an already-public object is re-saved at public", async () => {
+    setLevelMock.mockResolvedValueOnce({
+      visibilityLevel: "public",
+      becamePublic: false,
+    });
+    const result = await setVisibilityAction("o1", { level: "public" });
+    expect(result.isSuccess).toBe(true);
+    expect(recordContentAuditMock).not.toHaveBeenCalled();
+  });
+
+  it("does NOT notify for a non-public level change", async () => {
+    const result = await setVisibilityAction("o1", { level: "internal" });
+    expect(result.isSuccess).toBe(true);
+    expect(recordContentAuditMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps `becamePublic` out of the action's response payload", async () => {
+    setLevelMock.mockResolvedValueOnce({
+      visibilityLevel: "public",
+      becamePublic: true,
+    });
+    const result = await setVisibilityAction("o1", { level: "public" });
+    expect(result.isSuccess).toBe(true);
+    expect(result.isSuccess && result.data).toEqual({
+      visibilityLevel: "public",
+    });
   });
 });
