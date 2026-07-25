@@ -1164,3 +1164,13 @@ lint (zero errors; 411 existing warnings), all 353 application Jest suites with
 with 406 tests, both production builds, full CDK synthesis, deploy-script
 preflight, the authenticated Repository Manager Playwright case, final diff
 checks, and a complete diff-scoped security review with no reportable findings.
+
+Live Dev verification then completed the real Google authorization flow and
+opened Picker against both personal and Shared Drive content. Selecting a source
+exposed an invalid Drive metadata field projection:
+`shortcutDetails.resourceKey` is not a Drive API v3 field; the provider contract
+uses `shortcutDetails.targetResourceKey`. The post-deployment hotfix corrects
+that field across metadata, change, and traversal requests and forwards the
+target resource key through `X-Goog-Drive-Resource-Keys` when resolving a
+link-shared shortcut. Focused client and selection-route tests now assert the
+exact provider field projection and resource-key propagation.

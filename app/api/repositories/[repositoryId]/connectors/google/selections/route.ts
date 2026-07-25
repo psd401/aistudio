@@ -62,7 +62,10 @@ async function replaceSelections(
           if (!file.shortcutDetails?.targetId) {
             throw new Error("Selected shortcut has no accessible target");
           }
-          file = await drive.getFile(file.shortcutDetails.targetId);
+          file = await drive.getFile(
+            file.shortcutDetails.targetId,
+            file.shortcutDetails.targetResourceKey,
+          );
         }
         return {
           externalId: file.id,
