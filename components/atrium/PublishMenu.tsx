@@ -104,6 +104,11 @@ const DESTINATION_OPTIONS: ReadonlyArray<{
 function usePublishState(idOrSlug: string, refreshKey: number) {
   const [live, setLive] = useState<Set<string>>(() => new Set());
   const [visibility, setVisibility] = useState<VisibilityLevel | null>(null);
+  // Whether the audience state has been resolved at least once. Publishing is
+  // blocked until it has: without the current visibility the audience check
+  // cannot run, and publishing anyway would silently reintroduce the exact
+  // #1336 C2 defect (a live publication its readers cannot open).
+  const [ready, setReady] = useState(false);
 
   // Bumped to force a re-read. Kept as state (rather than calling a `reload()`
   // function straight out of an effect) so the fetch and its setStates always
@@ -123,8 +128,12 @@ function usePublishState(idOrSlug: string, refreshKey: number) {
         if (cancelled) return;
         if (pubs.isSuccess) setLive(new Set(pubs.data.map((p) => p.destination)));
         else log.warn("listPublicationsAction failed", { message: pubs.message });
-        if (vis.isSuccess) setVisibility(vis.data.visibilityLevel);
-        else log.warn("getVisibilityAction failed", { message: vis.message });
+        if (vis.isSuccess) {
+          setVisibility(vis.data.visibilityLevel);
+          setReady(true);
+        } else {
+          log.warn("getVisibilityAction failed", { message: vis.message });
+        }
       } catch (e) {
         if (cancelled) return;
         log.error("publish state load threw", {
@@ -138,7 +147,7 @@ function usePublishState(idOrSlug: string, refreshKey: number) {
     // `seq` is the explicit re-read trigger (menu opened, or an action landed).
   }, [idOrSlug, seq, refreshKey]);
 
-  return { live, visibility, reload };
+  return { live, visibility, ready, reload };
 }
 
 /**
@@ -246,16 +255,23 @@ export function PublishMenu({
 
   // `refreshKey` (bumped by the parent after every publish/unpublish) and the
   // menu opening are the two re-read triggers.
-  const { live, visibility, reload } = usePublishState(idOrSlug, refreshKey);
+  const { live, visibility, ready, reload } = usePublishState(idOrSlug, refreshKey);
 
   const isLive = live.has(destination);
 
   const handlePublishClick = useCallback(() => {
-    // Visibility unknown (the read failed) → publish without a widen rather than
-    // guessing; the server remains the authority either way.
-    const widen = visibility ? widenNeededFor(destination, visibility) : null;
+    // Never reached with an unresolved visibility — the item is disabled until
+    // `ready` (see below). Guarded anyway so a future caller cannot skip the
+    // audience check by accident.
+    if (!visibility) return;
+    const widen = widenNeededFor(destination, visibility);
     if (widen) {
-      setPendingWiden(widen);
+      // Deferred by a macrotask on purpose. Radix closes the dropdown on select
+      // and runs its dismissable-layer teardown in the SAME tick, so a Dialog
+      // opened synchronously here is caught by that dismissal and closes again
+      // immediately — the confirm never appears. Letting the dropdown fully
+      // unmount first is the documented way to open a dialog from a menu item.
+      setTimeout(() => setPendingWiden(widen), 0);
       return;
     }
     onPublish(destination);
@@ -310,8 +326,17 @@ export function PublishMenu({
             ))}
           </DropdownMenuRadioGroup>
           <DropdownMenuSeparator />
-          <DropdownMenuItem disabled={busy} onSelect={handlePublishClick}>
-            {isLive ? "Republish to" : "Publish to"} {current.short}
+          <DropdownMenuItem
+            // Disabled until the audience state is known: publishing without it
+            // cannot evaluate the widen check, and doing so anyway is exactly
+            // the #1336 C2 defect (a live page its readers cannot open).
+            disabled={busy || !ready}
+            onSelect={handlePublishClick}
+            data-testid="publish-item"
+          >
+            {ready
+              ? `${isLive ? "Republish to" : "Publish to"} ${current.short}`
+              : "Checking visibility…"}
           </DropdownMenuItem>
           <DropdownMenuItem
             // #1336 B8: unpublishing a destination with nothing live is a no-op

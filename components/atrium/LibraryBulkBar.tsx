@@ -324,21 +324,28 @@ export function LibraryBulkBar({
     void run("Deleted", (id) => deleteContentAction(id));
   }, [count, run]);
 
-  if (count === 0) return null;
+  // Render while anything is selected OR while an outcome message is still
+  // pending. The bar used to unmount the instant the selection cleared, which
+  // is exactly when a successful bulk action finishes — so the aggregated
+  // "Deleted 1 of 2. 1 failed: …" sentence was destroyed at the moment it
+  // became useful.
+  if (count === 0 && !message && !busy) return null;
 
   return (
     <div className="mer-bulk-bar" role="region" aria-label="Bulk actions">
-      <BulkControls
-        count={count}
-        busy={busy}
-        archivedView={archivedView}
-        options={options}
-        onArchive={() => void setStatus("archived", "Archived")}
-        onRestore={() => void setStatus("draft", "Restored")}
-        onMove={(v) => void move(v)}
-        onDelete={remove}
-        onClear={onClear}
-      />
+      {count > 0 && (
+        <BulkControls
+          count={count}
+          busy={busy}
+          archivedView={archivedView}
+          options={options}
+          onArchive={() => void setStatus("archived", "Archived")}
+          onRestore={() => void setStatus("draft", "Restored")}
+          onMove={(v) => void move(v)}
+          onDelete={remove}
+          onClear={onClear}
+        />
+      )}
 
       {(busy || message) && (
         <p className="mer-bulk-message" role="status" data-testid="bulk-message">

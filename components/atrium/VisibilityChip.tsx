@@ -526,6 +526,18 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   const [pendingApproval, setPendingApproval] = useState<string | null>(null);
   const [savedLevel, setSavedLevel] = useState<Level>("private");
   const [savedGrants, setSavedGrants] = useState<Grant[]>([]);
+  // Bumped every time the dialog opens, so the panel re-reads the PERSISTED
+  // state instead of showing what it loaded on mount. Without this the chip goes
+  // stale after anything else changes visibility out of band — most obviously
+  // #1336's publish-with-widen, which sets the level to Internal/Public from the
+  // Publish menu right beside it, leaving the chip insisting "Private".
+  const [reloadSeq, setReloadSeq] = useState(0);
+  // Whether the user has touched the draft since the dialog opened. A re-read
+  // must never clobber an in-progress edit: without this, picking a level
+  // immediately after opening is silently reverted the moment the (async)
+  // re-read lands. Pristine → the fetch seeds the draft; dirty → it updates only
+  // the "last persisted" baseline that Cancel restores.
+  const draftDirtyRef = useRef(false);
 
   // Load the current visibility once per object so the badge shows the real
   // level even before the dialog is opened. The fetch + its setStates run inside
@@ -548,8 +560,10 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
         if (result.isSuccess) {
           const loadedLevel = result.data.visibilityLevel as Level;
           const loadedGrants = result.data.grants as Grant[];
-          setLevel(loadedLevel);
-          setGrants(loadedGrants);
+          if (!draftDirtyRef.current) {
+            setLevel(loadedLevel);
+            setGrants(loadedGrants);
+          }
           setSavedLevel(loadedLevel);
           setSavedGrants(loadedGrants);
           setCanEdit(result.data.canEdit);
@@ -570,7 +584,7 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
     return () => {
       cancelled = true;
     };
-  }, [idOrSlug]);
+  }, [idOrSlug, reloadSeq]);
 
   // Role + group options for the group-grant builder, loaded lazily when the GROUP
   // editor is open. Passing `level === "group"` lets a failed load retry when the
@@ -589,16 +603,19 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   // linger with nothing the user can do about it. `handleOpenChange` only clears
   // on close, not on level change.
   const changeLevel = useCallback((next: Level) => {
+    draftDirtyRef.current = true;
     setLevel(next);
     setError(null);
     setPendingApproval(null);
   }, []);
 
   const removeGrant = useCallback((index: number) => {
+    draftDirtyRef.current = true;
     setGrants((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
   const addGrant = useCallback((grant: Grant) => {
+    draftDirtyRef.current = true;
     // Skip an exact duplicate (kind+value) — the DB enforces uniqueness anyway.
     setGrants((prev) =>
       prev.some((g) => g.kind === grant.kind && g.value === grant.value)
@@ -608,8 +625,8 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   }, []);
 
   const save = useCallback(
-    () =>
-      performVisibilitySave(idOrSlug, level, grants, {
+    async () => {
+      await performVisibilitySave(idOrSlug, level, grants, {
         setSaving,
         setError,
         setPendingApproval,
@@ -617,7 +634,12 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
         setSavedGrants,
         setOpen,
         onChange,
-      }),
+      });
+      // The draft IS the persisted state now (or the save failed and the dialog
+      // stayed open with the same values) — either way there is nothing a
+      // re-read could clobber.
+      draftDirtyRef.current = false;
+    },
     [idOrSlug, level, grants, onChange]
   );
 
@@ -625,7 +647,13 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   // (Esc, outside-click, Dialog X button, or Cancel). Resets draft level/grants
   // to the last-persisted values so the chip never shows unsaved state as saved.
   const handleOpenChange = useCallback((next: boolean) => {
-    if (!next) {
+    if (next) {
+      // A freshly-opened dialog has no unsaved edits, and re-reads the persisted
+      // state (see `reloadSeq`).
+      draftDirtyRef.current = false;
+      setReloadSeq((n) => n + 1);
+    } else {
+      draftDirtyRef.current = false;
       setLevel(savedLevel);
       setGrants(savedGrants);
       setError(null);
