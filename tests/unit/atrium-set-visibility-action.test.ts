@@ -23,9 +23,20 @@ const loadByIdOrSlugMock = jest.fn(
   async (..._a: unknown[]): Promise<LoadedObj> => null
 );
 const canViewMock = jest.fn(async (..._a: unknown[]) => true);
-const setLevelMock = jest.fn(async (..._a: unknown[]) => ({
-  visibilityLevel: "group",
-}));
+/**
+ * Mirrors `visibilityService.setLevel`'s real return type. Annotated rather than
+ * inferred: inference off the default value pins the type to whatever THAT
+ * literal happens to contain, so a per-test `mockResolvedValueOnce` carrying
+ * `becamePublic` is rejected as an unknown property even though production
+ * returns it.
+ */
+type SetLevelResult = { visibilityLevel: string; becamePublic: boolean };
+const setLevelMock = jest.fn(
+  async (..._a: unknown[]): Promise<SetLevelResult> => ({
+    visibilityLevel: "group",
+    becamePublic: false,
+  })
+);
 const canEditMock = jest.fn((..._a: unknown[]) => true);
 
 jest.mock("@/lib/content/content-service", () => ({
