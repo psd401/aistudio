@@ -433,10 +433,34 @@ export class DatabaseStack extends cdk.Stack {
                 // factory's s3Buckets option: that path attaches an
                 // aws:ResourceTag condition which never resolves for object
                 // ARNs and denies every object operation at runtime.
+                //
+                // Scope note: this is bucket-wide because it genuinely has to
+                // be. Conversation-owned objects live under three deterministic
+                // prefixes (conversations/, v2/generated-images/,
+                // repositories/), but legacy `documents.url` rows — which the
+                // sweep must also clean up — use `<userId>/<timestamp>-<file>`,
+                // a shape no IAM resource pattern can express. The explicit
+                // Deny below is the backstop instead.
                 sid: 'DocumentsBucketDeleteVersions',
                 effect: iam.Effect.ALLOW,
                 actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
                 resources: [`arn:${this.partition}:s3:::${documentsBucketName}/*`],
+              }),
+              new iam.PolicyStatement({
+                // Hard backstop against a future key-derivation bug in the
+                // Lambda: namespaces this sweep has no business touching are
+                // denied outright, and an explicit Deny cannot be overridden.
+                // Without this, a regression in documentUrlToObjectKey or the
+                // eligibility predicate would have full-bucket blast radius.
+                sid: 'DenyForeignNamespaces',
+                effect: iam.Effect.DENY,
+                actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+                resources: [
+                  `arn:${this.partition}:s3:::${documentsBucketName}/atrium/*`,
+                  `arn:${this.partition}:s3:::${documentsBucketName}/public-images/*`,
+                  `arn:${this.partition}:s3:::${documentsBucketName}/v2/uploads/*`,
+                  `arn:${this.partition}:s3:::${documentsBucketName}/v2/generated-documents/*`,
+                ],
               }),
             ],
           }),

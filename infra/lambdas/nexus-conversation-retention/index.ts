@@ -297,25 +297,45 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       // clause in a template: a nested unsafe fragment carries its own $1 and
       // would collide with the outer query's parameter numbering. Both values
       // are still bound parameters ($1/$2), never interpolated.
-      const rows = (await sql.unsafe(
+      const rows = await sql.unsafe<
+        {
+          id: string;
+          user_id: number;
+          last_message_at: Date | null;
+          is_archived: boolean | null;
+        }[]
+      >(
         `SELECT id, user_id, last_message_at, is_archived
          FROM nexus_conversations
          WHERE ${CANDIDATE_WHERE_CLAUSE}
          ORDER BY last_message_at ASC
          LIMIT $2`,
         [retentionDays, limit]
-      )) as unknown as {
-        id: string;
-        user_id: number;
-        last_message_at: Date | null;
-        is_archived: boolean | null;
-      }[];
+      );
       return rows.map<CandidateConversation>((row) => ({
         id: row.id,
         userId: row.user_id,
         lastMessageAt: row.last_message_at,
         isArchived: row.is_archived,
       }));
+    },
+
+    isStillEligible: async (conversationId, retentionDays) => {
+      // The FULL predicate, not just the flags: re-testing last_message_at is
+      // what catches a user who resumed the conversation mid-sweep, which
+      // should protect it exactly as much as clicking Keep would.
+      // Same CANDIDATE_WHERE_CLAUSE constant as the batch scan, so the late
+      // re-check and the initial selection can never disagree. $1 is the
+      // retention window, $2 the conversation id.
+      const rows = await sql.unsafe<{ id: string }[]>(
+        `SELECT id
+         FROM nexus_conversations
+         WHERE ${CANDIDATE_WHERE_CLAUSE}
+           AND id = $2::uuid
+         LIMIT 1`,
+        [retentionDays, conversationId]
+      );
+      return rows.length > 0;
     },
 
     getBoundRepositoryIds: async (conversationId) => {
@@ -405,9 +425,15 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       // Cascades nexus_messages, nexus_conversation_events,
       // nexus_conversation_folders, nexus_cache_entries, nexus_shares and
       // nexus_provider_metrics.
+      // The Keep/pin predicate is re-asserted HERE, in the delete itself, so
+      // the check and the deletion are one atomic statement. A user who clicks
+      // Keep after the sweep's pre-check but before this line still wins: the
+      // WHERE matches nothing, 0 rows come back, and the caller aborts.
       const rows = await sql<{ id: string }[]>`
         DELETE FROM nexus_conversations
         WHERE id = ${conversationId}::uuid
+          AND is_saved = false
+          AND is_pinned IS NOT TRUE
         RETURNING id
       `;
       return rows.length;

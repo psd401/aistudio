@@ -56,6 +56,21 @@ export interface SweepPorts {
    */
   findCandidates(retentionDays: number, limit: number): Promise<CandidateConversation[]>;
 
+  /**
+   * Re-evaluate the FULL eligibility predicate for ONE conversation against
+   * live state, as late as possible before destructive work begins.
+   *
+   * findCandidates snapshots up to `batchLimit` rows at the top of a run and
+   * the loop then works through them sequentially, each doing several S3
+   * round-trips — so minutes can pass between a conversation being selected and
+   * being deleted. Without this re-read, a user who clicks Keep, pins, or
+   * simply sends a new message inside that window would still lose the
+   * conversation irreversibly, from a stale snapshot, defeating the exact flag
+   * this feature is built around. Re-testing the age (not just the flags) is
+   * what covers the "sent a new message" case.
+   */
+  isStillEligible(conversationId: string, retentionDays: number): Promise<boolean>;
+
   /** Ephemeral repository IDs bound to a conversation. Resolve BEFORE deleting it. */
   getBoundRepositoryIds(conversationId: string): Promise<number[]>;
 
@@ -92,7 +107,14 @@ export interface SweepPorts {
   /** Delete `documents` rows by id. */
   deleteDocumentRows(documentIds: number[]): Promise<number>;
 
-  /** Delete the conversation row; cascades the nexus_* children. */
+  /**
+   * Delete the conversation row; cascades the nexus_* children.
+   *
+   * MUST re-assert `is_saved = false AND is_pinned IS NOT TRUE` in its WHERE
+   * clause and return the number of rows actually deleted. This is the atomic
+   * gate for the whole operation: a return of 0 means the user won the race and
+   * the conversation must survive.
+   */
   deleteConversationRow(conversationId: string): Promise<number>;
 }
 
@@ -112,6 +134,10 @@ export interface SweepConversationReport {
   messageObjectKeys: number;
   storageObjectsDeleted: number;
   storageFailures: number;
+  /** Rows the database actually deleted, not the number of IDs resolved. */
+  repositoryRowsDeleted: number;
+  /** Rows the database actually deleted, not the number of IDs resolved. */
+  documentRowsDeleted: number;
   deleted: boolean;
   skippedReason?: string;
 }
@@ -128,6 +154,8 @@ export interface SweepResult {
   documentRowsDeleted: number;
   storageObjectsDeleted: number;
   conversationsSkipped: number;
+  /** Conversations abandoned by an unexpected error; isolated so the batch continues. */
+  conversationsFailed: number;
   conversations: SweepConversationReport[];
 }
 
@@ -144,6 +172,7 @@ function disabledResult(config: Extract<RetentionConfig, { enabled: false }>, dr
     documentRowsDeleted: 0,
     storageObjectsDeleted: 0,
     conversationsSkipped: 0,
+    conversationsFailed: 0,
     conversations: [],
   };
 }
@@ -162,11 +191,16 @@ function disabledResult(config: Extract<RetentionConfig, { enabled: false }>, dr
  *     (log-and-continue). Those are single keys, an already-missing object is
  *     the common case, and blocking a whole conversation on one of them would
  *     make the sweep trivially stallable.
+ *
+ * The conversation row DELETE is deliberately positioned as the gate: it
+ * re-asserts the Keep/pin predicate, and every other destructive step against
+ * the conversation's own records runs only after it has succeeded.
  */
 async function sweepConversation(
   ports: SweepPorts,
   log: SweepLogger,
   conversation: CandidateConversation,
+  retentionDays: number,
   dryRun: boolean
 ): Promise<SweepConversationReport> {
   const conversationId = conversation.id;
@@ -183,6 +217,8 @@ async function sweepConversation(
     messageObjectKeys: messageObjectKeys.length,
     storageObjectsDeleted: 0,
     storageFailures: 0,
+    repositoryRowsDeleted: 0,
+    documentRowsDeleted: 0,
     deleted: false,
   };
 
@@ -190,7 +226,17 @@ async function sweepConversation(
     return report;
   }
 
-  // 1. Repository storage — fail-closed.
+  // 1. Re-confirm eligibility against LIVE state. The candidate list is a
+  //    snapshot taken at the top of the run; by the time this conversation's
+  //    turn comes around the user may have clicked Keep or pinned it. Checked
+  //    before a single byte is deleted.
+  if (!(await ports.isStillEligible(conversationId, retentionDays))) {
+    log.info("skipped_no_longer_eligible", { conversationId });
+    report.skippedReason = "no_longer_eligible";
+    return report;
+  }
+
+  // 2. Repository storage — fail-closed.
   for (const repositoryId of repositoryIds) {
     try {
       report.storageObjectsDeleted += await ports.deleteRepositoryStorage(repositoryId);
@@ -206,7 +252,24 @@ async function sweepConversation(
     }
   }
 
-  // 2. Conversation-scoped prefixes — best effort. Unlike repository storage
+  // 3. The atomic gate. deleteConversationRow re-asserts the Keep/pin predicate
+  //    in its WHERE clause, so if the user won the race in the window since
+  //    step 1 this deletes nothing and returns 0. Everything genuinely
+  //    destructive to the conversation's own records happens AFTER this point,
+  //    which means losing the race costs the user nothing except the repository
+  //    objects removed in step 2 — and their rows are deliberately left intact
+  //    so the next run resolves them again from the still-present binding.
+  if ((await ports.deleteConversationRow(conversationId)) === 0) {
+    log.error("keep_race_detected", {
+      conversationId,
+      message:
+        "Conversation became Keep/pinned mid-sweep; deletion aborted. Repository storage for this conversation may have been removed already.",
+    });
+    report.skippedReason = "keep_race_detected";
+    return report;
+  }
+
+  // 4. Conversation-scoped prefixes — best effort. Unlike repository storage
   //    these have no database row that would be orphaned by a failure, so a
   //    transient S3 error must not block the conversation's deletion forever.
   try {
@@ -219,7 +282,7 @@ async function sweepConversation(
     report.storageFailures++;
   }
 
-  // 3. Legacy document objects + out-of-prefix message-part objects — best effort.
+  // 5. Legacy document objects + out-of-prefix message-part objects — best effort.
   const legacyKeys = [
     ...documents.map((doc) => doc.objectKey).filter((key): key is string => key !== null),
     ...messageObjectKeys,
@@ -236,15 +299,21 @@ async function sweepConversation(
     }
   }
 
-  // 4. Rows that would otherwise be orphaned (repositories) or left as
-  //    SET NULL stragglers (documents), then the conversation itself.
+  // 6. Rows that would otherwise be orphaned (repositories) or left as
+  //    SET NULL stragglers (documents). The conversation row itself is already
+  //    gone — it was step 3, the gate.
+  //
+  //    Counts come from what the database actually deleted rather than from the
+  //    number of IDs we planned to delete: a partially-completed previous run
+  //    can leave rows already gone, and reporting the planned count would
+  //    overstate the sweep's effect in exactly the situation an operator is
+  //    investigating.
   if (repositoryIds.length > 0) {
-    await ports.deleteRepositoryRows(repositoryIds);
+    report.repositoryRowsDeleted = await ports.deleteRepositoryRows(repositoryIds);
   }
   if (report.documentIds.length > 0) {
-    await ports.deleteDocumentRows(report.documentIds);
+    report.documentRowsDeleted = await ports.deleteDocumentRows(report.documentIds);
   }
-  await ports.deleteConversationRow(conversationId);
 
   report.deleted = true;
   return report;
@@ -294,18 +363,37 @@ export async function runRetentionSweep(
     documentRowsDeleted: 0,
     storageObjectsDeleted: 0,
     conversationsSkipped: 0,
+    conversationsFailed: 0,
     conversations: [],
   };
 
   for (const conversation of candidates) {
-    const report = await sweepConversation(ports, log, conversation, dryRun);
+    // Per-conversation isolation. Without this, a single unexpected database
+    // error (connection drop, deadlock, an FK we did not anticipate) propagates
+    // out of the loop and abandons every remaining candidate in the batch.
+    // Because findCandidates is ordered oldest-first, the same conversation
+    // would be selected first again on the next run, so one permanently-failing
+    // row would stall the entire retention feature indefinitely.
+    let report: SweepConversationReport;
+    try {
+      report = await sweepConversation(ports, log, conversation, config.retentionDays, dryRun);
+    } catch (error) {
+      log.error("conversation_sweep_failed", {
+        conversationId: conversation.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      result.conversationsSkipped++;
+      result.conversationsFailed++;
+      continue;
+    }
+
     result.conversations.push(report);
     result.storageObjectsDeleted += report.storageObjectsDeleted;
 
     if (report.deleted) {
       result.conversationsDeleted++;
-      result.repositoryRowsDeleted += report.repositoryIds.length;
-      result.documentRowsDeleted += report.documentIds.length;
+      result.repositoryRowsDeleted += report.repositoryRowsDeleted;
+      result.documentRowsDeleted += report.documentRowsDeleted;
     } else if (!dryRun) {
       result.conversationsSkipped++;
     }

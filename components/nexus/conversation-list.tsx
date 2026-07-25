@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, memo } from 'react'
+import { useState, useEffect, useCallback, useRef, memo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
@@ -196,55 +196,78 @@ const ConversationItemRow = memo(function ConversationItemRow({
         </div>
       </div>
 
-      {/* Keep toggle — kept conversations are exempt from retention auto-deletion (#1330) */}
-      <TooltipIconButton
-        className={`ml-auto size-4 p-4 ${isSaved ? 'text-primary hover:text-primary/80' : 'text-muted-foreground hover:text-foreground'}`}
-        variant="ghost"
-        tooltip={isSaved ? 'Stop keeping conversation' : 'Keep conversation'}
-        aria-pressed={isSaved}
-        data-testid="conversation-keep-toggle"
-        disabled={isTogglingKeep}
-        onClick={handleToggleKeepClick}
-      >
-        {isSaved
-          ? <BookmarkCheckIcon className="h-4 w-4" />
-          : <BookmarkIcon className="h-4 w-4" />}
-      </TooltipIconButton>
+      {/* Row actions. Gapped and sized deliberately: `size-4 p-4` (the previous
+          Delete styling) renders a 16px hit target — size-* and p-* are
+          different twMerge groups, so the padding does not enlarge the box it
+          is clamped inside. That is below the 24px WCAG 2.5.8 minimum, and it
+          puts a protective control flush against a destructive one. */}
+      <div className="ml-auto mr-1 flex items-center gap-1">
+        {/* Keep toggle — kept conversations are exempt from retention auto-deletion (#1330) */}
+        <TooltipIconButton
+          className={`size-8 ${isSaved ? 'text-primary hover:text-primary/80' : 'text-muted-foreground hover:text-foreground'}`}
+          variant="ghost"
+          tooltip={isSaved ? 'Stop keeping — no longer protected from automatic cleanup' : 'Keep — protect from automatic cleanup'}
+          aria-pressed={isSaved}
+          data-testid="conversation-keep-toggle"
+          disabled={isTogglingKeep}
+          onClick={handleToggleKeepClick}
+        >
+          {isSaved
+            ? <BookmarkCheckIcon className="h-4 w-4" />
+            : <BookmarkIcon className="h-4 w-4" />}
+        </TooltipIconButton>
 
-      {/* Delete Button */}
-      <AlertDialog>
-        <AlertDialogTrigger asChild>
-          <TooltipIconButton
-            className="text-destructive hover:text-destructive/80 mr-1 size-4 p-4"
-            variant="ghost"
-            tooltip="Delete conversation"
-            onClick={handleStopPropagation}
-          >
-            <Trash2Icon className="h-4 w-4" />
-          </TooltipIconButton>
-        </AlertDialogTrigger>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete conversation?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This action cannot be undone. This will permanently delete this conversation and all its messages.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={handleDeleteClick}
-              disabled={isDeleting}
+        {/* Delete Button */}
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <TooltipIconButton
+              className="text-destructive hover:text-destructive/80 size-8"
+              variant="ghost"
+              tooltip="Delete conversation"
+              onClick={handleStopPropagation}
             >
-              {isDeleting ? 'Deleting...' : 'Delete'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+              <Trash2Icon className="h-4 w-4" />
+            </TooltipIconButton>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete conversation?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This action cannot be undone. This will permanently delete this conversation and all its messages.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                onClick={handleDeleteClick}
+                disabled={isDeleting}
+              >
+                {isDeleting ? 'Deleting...' : 'Delete'}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
     </div>
   )
 })
+
+/** Maps a non-ok conversation-list response to a user-facing message. */
+function describeResponseError(status: number): string {
+  if (status === 401) return 'Authentication required. Please sign in again.'
+  if (status === 403) return 'Access denied. You do not have permission to view conversations.'
+  if (status >= 500) return 'Server error. Please try again later.'
+  return `Failed to load conversations: ${status}`
+}
+
+/** Maps a thrown load failure to a user-facing message. */
+function describeLoadError(err: unknown): string {
+  if (!(err instanceof Error)) return 'Failed to load conversations'
+  if (err.name === 'AbortError') return 'Request timed out. Please check your connection and try again.'
+  if (err instanceof TypeError) return 'Network error. Please check your internet connection.'
+  return err.message
+}
 
 /**
  * Fetches and validates the conversation list for the active tab / provider.
@@ -260,9 +283,18 @@ function useConversationLoader(
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  // Monotonic request id. `conversations` is shared across tabs, so if a slow
+  // request for one tab resolves AFTER a newer request for another, committing
+  // it would leave the list showing the wrong tab's conversations until the
+  // next reload. Only the most recent request is allowed to commit state.
+  const requestIdRef = useRef(0)
+
   // Load conversations from database with comprehensive error handling
   // Server-side filtering based on active tab to avoid missing items with >500 conversations
   const loadConversations = useCallback(async () => {
+    const requestId = ++requestIdRef.current
+    const isStale = () => requestIdRef.current !== requestId
+
     try {
       setLoading(true)
       setError(null)
@@ -295,15 +327,7 @@ function useConversationLoader(
       clearTimeout(timeoutId)
       
       if (!response.ok) {
-        if (response.status === 401) {
-          throw new Error('Authentication required. Please sign in again.')
-        } else if (response.status === 403) {
-          throw new Error('Access denied. You do not have permission to view conversations.')
-        } else if (response.status >= 500) {
-          throw new Error('Server error. Please try again later.')
-        } else {
-          throw new Error(`Failed to load conversations: ${response.status}`)
-        }
+        throw new Error(describeResponseError(response.status))
       }
       
       const data = await response.json()
@@ -327,26 +351,18 @@ function useConversationLoader(
         })
       }
       
+      if (isStale()) return
       setConversations(validConversations)
       log.debug('Conversations loaded', { count: validConversations.length })
       
     } catch (err) {
-      let errorMessage = 'Failed to load conversations'
-
-      if (err instanceof Error) {
-        if (err.name === 'AbortError') {
-          errorMessage = 'Request timed out. Please check your connection and try again.'
-        } else if (err instanceof TypeError) {
-          errorMessage = 'Network error. Please check your internet connection.'
-        } else {
-          errorMessage = err.message
-        }
-      }
+      const errorMessage = describeLoadError(err)
 
       log.error('Failed to load conversations', { error: errorMessage, activeTab })
+      if (isStale()) return
       setError(errorMessage)
     } finally {
-      setLoading(false)
+      if (!isStale()) setLoading(false)
     }
   }, [activeTab, provider])
 

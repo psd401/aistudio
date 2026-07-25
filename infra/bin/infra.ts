@@ -243,6 +243,14 @@ const devProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-De
   appBaseUrl: baseDomain ? `https://dev.${baseDomain}` : undefined,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
+// #1330: DatabaseStack's nexus-conversation-retention Lambda reads the
+// documents bucket name from the SSM parameter StorageStack writes. That is a
+// CloudFormation dynamic reference, NOT an Fn::ImportValue, so CDK cannot infer
+// the ordering on its own — on a fresh environment DatabaseStack would fail to
+// resolve it. Declared explicitly here (StorageStack has no reverse reference,
+// so this cannot cycle) rather than by reordering construction.
+devDbStack.addDependency(devStorageStack);
+
 devProcessingStack.addDependency(devDbStack); // Reads database SSM parameters and uses the shared VPC
 devProcessingStack.addDependency(devStorageStack); // Reads the documents bucket SSM parameter
 cdk.Tags.of(devProcessingStack).add('Environment', 'Dev');
@@ -365,6 +373,10 @@ const prodProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-P
   appBaseUrl: baseDomain ? `https://${baseDomain}` : undefined,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
+// #1330: see the dev-side comment — DatabaseStack now reads StorageStack's
+// documents-bucket-name SSM parameter, which CDK cannot infer as a dependency.
+prodDbStack.addDependency(prodStorageStack);
+
 prodProcessingStack.addDependency(prodDbStack); // Reads database SSM parameters and uses the shared VPC
 prodProcessingStack.addDependency(prodStorageStack); // Reads the documents bucket SSM parameter
 cdk.Tags.of(prodProcessingStack).add('Environment', 'Prod');

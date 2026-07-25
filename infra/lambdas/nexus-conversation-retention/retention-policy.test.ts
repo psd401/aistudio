@@ -264,6 +264,13 @@ interface FakeState {
   failRepositoryStorage?: number;
   failObjectKey?: string;
   failConversationStorage?: string;
+  /** Conversation ids that the late re-check reports as no longer eligible. */
+  becameIneligible?: string[];
+  /**
+   * Conversation ids that pass the late re-check but are protected by the
+   * guarded DELETE — i.e. the user won the race in the window between the two.
+   */
+  racedAtDelete?: string[];
 }
 
 interface FakeRecorder {
@@ -295,6 +302,10 @@ function makeFakePorts(state: FakeState): { ports: SweepPorts; rec: FakeRecorder
       rec.findCandidatesCalls++;
       rec.calls.push("findCandidates");
       return state.candidates.slice(0, limit);
+    },
+    isStillEligible: async (id) => {
+      rec.calls.push(`isStillEligible:${id}`);
+      return !(state.becameIneligible ?? []).includes(id);
     },
     getBoundRepositoryIds: async (id) => {
       rec.calls.push(`getBoundRepositoryIds:${id}`);
@@ -334,6 +345,9 @@ function makeFakePorts(state: FakeState): { ports: SweepPorts; rec: FakeRecorder
     },
     deleteConversationRow: async (id) => {
       rec.calls.push(`deleteConversationRow:${id}`);
+      // Models the guarded DELETE: its WHERE re-asserts the Keep/pin
+      // predicate, so a raced row matches nothing and reports 0 deleted.
+      if ((state.racedAtDelete ?? []).includes(id)) return 0;
       rec.deletedConversations.push(id);
       return 1;
     },
@@ -474,6 +488,75 @@ describe("runRetentionSweep — deletion ordering and completeness", () => {
   });
 });
 
+describe("runRetentionSweep — Keep wins races against the sweep", () => {
+  // findCandidates snapshots the batch at the top of the run, then the loop
+  // works through it sequentially over what can be minutes. A user clicking
+  // Keep inside that window must not lose the conversation.
+
+  test("a conversation that becomes ineligible after selection is not touched at all", async () => {
+    const { ports, rec } = makeFakePorts(baseState({ becameIneligible: ["conv-1"] }));
+    const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+
+    expect(result.conversationsDeleted).toBe(0);
+    expect(result.conversationsSkipped).toBe(1);
+    expect(result.conversations[0]!.skippedReason).toBe("no_longer_eligible");
+    // Nothing destroyed — not even S3, which is why the re-check runs before
+    // any storage deletion rather than just before the row delete.
+    expect(rec.deletedConversations).toEqual([]);
+    expect(rec.deletedStoragePrefixes).toEqual([]);
+    expect(rec.deletedConversationPrefixes).toEqual([]);
+    expect(rec.deletedObjectKeys).toEqual([]);
+    expect(rec.deletedRepositoryRows).toEqual([]);
+    expect(rec.deletedDocumentRows).toEqual([]);
+  });
+
+  test("the re-check happens BEFORE any storage deletion", async () => {
+    const { ports, rec } = makeFakePorts(baseState());
+    await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+
+    const recheckIdx = rec.calls.indexOf("isStillEligible:conv-1");
+    const deleteIdx = rec.calls.indexOf("deleteConversationRow:conv-1");
+    expect(recheckIdx).toBeGreaterThanOrEqual(0);
+    expect(recheckIdx).toBeLessThan(deleteIdx);
+  });
+
+  test("the guarded DELETE is the atomic gate: 0 rows means the user won and nothing else is removed", async () => {
+    // Models Keep landing in the window between the re-check and the DELETE.
+    const { ports, rec } = makeFakePorts(baseState({ racedAtDelete: ["conv-1"] }));
+    const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+
+    expect(result.conversationsDeleted).toBe(0);
+    expect(result.conversationsSkipped).toBe(1);
+    expect(result.conversations[0]!.skippedReason).toBe("keep_race_detected");
+    expect(rec.deletedConversations).toEqual([]);
+    // Crucially the conversation's OWN records survive: the row delete gates
+    // everything after it.
+    expect(rec.deletedRepositoryRows).toEqual([]);
+    expect(rec.deletedDocumentRows).toEqual([]);
+    expect(rec.deletedConversationPrefixes).toEqual([]);
+    expect(rec.deletedObjectKeys).toEqual([]);
+  });
+
+  test("a raced conversation does not stop the rest of the batch", async () => {
+    const { ports, rec } = makeFakePorts(
+      baseState({
+        candidates: [
+          { id: "conv-1", userId: 1, lastMessageAt: new Date("2026-01-01"), isArchived: false },
+          { id: "conv-2", userId: 1, lastMessageAt: new Date("2026-01-02"), isArchived: false },
+        ],
+        repositoriesByConversation: {},
+        documentsByConversation: {},
+        messageKeysByConversation: {},
+        becameIneligible: ["conv-1"],
+      })
+    );
+
+    const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+    expect(result.conversationsDeleted).toBe(1);
+    expect(rec.deletedConversations).toEqual(["conv-2"]);
+  });
+});
+
 describe("runRetentionSweep — dry run", () => {
   test("reports candidates without deleting anything", async () => {
     const { ports, rec } = makeFakePorts(baseState());
@@ -534,5 +617,56 @@ describe("runRetentionSweep — storage failure policy", () => {
     expect(result.conversationsDeleted).toBe(1);
     expect(result.conversationsSkipped).toBe(1);
     expect(rec.deletedConversations).toEqual(["conv-2"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-conversation error isolation
+// ---------------------------------------------------------------------------
+
+describe("runRetentionSweep — unexpected error isolation", () => {
+  test("a database error on one conversation does not abandon the rest of the batch", async () => {
+    const { ports, rec } = makeFakePorts(
+      baseState({
+        candidates: [
+          { id: "conv-1", userId: 1, lastMessageAt: new Date("2026-01-01"), isArchived: false },
+          { id: "conv-2", userId: 1, lastMessageAt: new Date("2026-01-02"), isArchived: false },
+          { id: "conv-3", userId: 1, lastMessageAt: new Date("2026-01-03"), isArchived: false },
+        ],
+        repositoriesByConversation: {},
+        documentsByConversation: {},
+        messageKeysByConversation: {},
+      })
+    );
+
+    // findCandidates is ordered oldest-first, so without isolation this
+    // conversation would be selected first every single night and stall the
+    // entire retention feature indefinitely.
+    const originalDelete = ports.deleteConversationRow;
+    ports.deleteConversationRow = async (id) => {
+      if (id === "conv-1") throw new Error("deadlock detected");
+      return originalDelete(id);
+    };
+
+    const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+
+    expect(result.conversationsFailed).toBe(1);
+    expect(result.conversationsDeleted).toBe(2);
+    expect(rec.deletedConversations).toEqual(["conv-2", "conv-3"]);
+  });
+
+  test("row counters report what the database actually deleted, not what was planned", async () => {
+    const { ports } = makeFakePorts(baseState());
+
+    // Simulates a partially-completed previous run: the IDs still resolve, but
+    // the rows are already gone, so the delete affects fewer rows than planned.
+    ports.deleteRepositoryRows = async () => 1; // 2 ids resolved, 1 row actually deleted
+    ports.deleteDocumentRows = async () => 0; // 1 id resolved, 0 rows actually deleted
+
+    const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+
+    expect(result.conversationsDeleted).toBe(1);
+    expect(result.repositoryRowsDeleted).toBe(1);
+    expect(result.documentRowsDeleted).toBe(0);
   });
 });
