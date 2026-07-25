@@ -144,7 +144,7 @@ export async function publishDocumentAction(
       },
       {
         // #1336: any author may publish publicly — no admin approval gate. See
-        // actions/db/atrium/public-publish-policy.ts for why this is supplied
+        // lib/atrium/public-publish-policy.ts for why this is supplied
         // here rather than by weakening the service's §26.4 gate.
         hasPublishPublicCapability: IN_APP_PUBLISH_PUBLIC_CAPABILITY,
       },
