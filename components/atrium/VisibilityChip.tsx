@@ -44,12 +44,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Globe, Lock, Users, Building2, X } from "lucide-react";
+import { Globe, Lock, Users, Building2, Share2, X } from "lucide-react";
 import { getVisibilityAction } from "@/actions/db/atrium/get-visibility";
 import { setVisibilityAction } from "@/actions/db/atrium/set-visibility";
 import { listGrantOptionsAction } from "@/actions/db/atrium/list-grant-options";
 import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
-import { POSITIVE_INT_RE } from "@/lib/content/validators";
+import { listPublicationsAction } from "@/actions/db/atrium/list-publications";
+import { PeoplePicker } from "./PeoplePicker";
+import { CopyableLink } from "./CopyableLink";
 
 /** The visibility levels, in widening order, with their picker labels. */
 const LEVELS = [
@@ -65,7 +67,7 @@ const GRANT_KINDS = [
   { value: "building", label: "Building" },
   { value: "department", label: "Department" },
   { value: "grade", label: "Grade" },
-  { value: "user", label: "User ID" },
+  { value: "user", label: "Person" },
   { value: "group", label: "Google group" },
 ] as const;
 type GrantKind = (typeof GRANT_KINDS)[number]["value"];
@@ -320,6 +322,192 @@ async function performVisibilitySave(
   }
 }
 
+/**
+ * The consequence of Public visibility (#1336 C1).
+ *
+ * Setting visibility to Public flips ONE of the two switches the anonymous
+ * reader requires: `/p/[slug]` needs BOTH `visibility_level = 'public'` AND a
+ * live `public_web` publication row. Before #1336 the chip flipped and said
+ * nothing, so the owner had no way to learn the link they were about to share
+ * still 404s. This surfaces the link when it works and an explicit warning when
+ * it does not.
+ */
+function PublicLinkNotice({
+  publicUrl,
+  hasLivePublication,
+}: {
+  publicUrl: string | null;
+  hasLivePublication: boolean;
+}): React.JSX.Element {
+  if (!hasLivePublication) {
+    return (
+      <p
+        className="text-sm text-amber-600"
+        role="status"
+        data-testid="public-not-published"
+      >
+        This is set to Public, but it has not been published to the public web
+        yet — the public link will not open for anyone. Use Publish ▾ → Public
+        web to put it live.
+      </p>
+    );
+  }
+  if (!publicUrl) return <></>;
+  return (
+    <p className="text-sm text-muted-foreground" data-testid="public-link-notice">
+      Anyone with this link can read it, no sign-in required:{" "}
+      <CopyableLink url={publicUrl} testId="visibility-public-url" />
+    </p>
+  );
+}
+
+/**
+ * Live `public_web` publication state for the Public consequence notice.
+ * Loaded only while the dialog is open AND the SAVED level is public — there is
+ * no consequence to explain otherwise, and this keeps the chip's mount cost at
+ * exactly one request.
+ */
+function usePublicPublication(idOrSlug: string, active: boolean) {
+  const [state, setState] = useState<{
+    loaded: boolean;
+    url: string | null;
+    live: boolean;
+  }>({ loaded: false, url: null, live: false });
+
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await listPublicationsAction(idOrSlug);
+        if (cancelled) return;
+        const pub = res.isSuccess
+          ? res.data.find((p) => p.destination === "public_web")
+          : undefined;
+        setState({
+          loaded: true,
+          url: pub?.readerUrl ?? null,
+          live: Boolean(pub),
+        });
+      } catch {
+        // Leave `loaded` false: an unknown state must not render a confident
+        // "not published yet" warning that might be wrong.
+        if (!cancelled) setState({ loaded: false, url: null, live: false });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [idOrSlug, active]);
+
+  return state;
+}
+
+/** State of the live `public_web` publication, as loaded for the notice. */
+interface PublicNoticeState {
+  loaded: boolean;
+  url: string | null;
+  live: boolean;
+}
+
+/**
+ * The Share dialog's body: level picker, grant builder, the Public consequence
+ * notice, feedback, and the footer. Presentational — every mutation is a
+ * callback into `VisibilityChip`, which owns all state. Extracted so both
+ * bodies stay under the max-lines-per-function lint.
+ */
+function ShareDialogBody({
+  level,
+  savedLevel,
+  canEdit,
+  saving,
+  grants,
+  roleOptions,
+  groupOptions,
+  publicNotice,
+  error,
+  pendingApproval,
+  onChangeLevel,
+  onAddGrant,
+  onRemoveGrant,
+  onCancel,
+  onSave,
+}: {
+  level: Level;
+  savedLevel: Level;
+  canEdit: boolean;
+  saving: boolean;
+  grants: Grant[];
+  roleOptions: string[];
+  groupOptions: GroupOption[];
+  publicNotice: PublicNoticeState;
+  error: string | null;
+  pendingApproval: string | null;
+  onChangeLevel: (level: Level) => void;
+  onAddGrant: (grant: Grant) => void;
+  onRemoveGrant: (index: number) => void;
+  onCancel: () => void;
+  onSave: () => void;
+}): React.JSX.Element {
+  return (
+    <DialogContent className={meridianPortalClassName}>
+      <DialogHeader>
+        <DialogTitle>Share</DialogTitle>
+        <DialogDescription>
+          Controls who may view this content — roles, buildings, departments,
+          grades, individual people, or Google groups. Separate from where it is
+          published.
+        </DialogDescription>
+      </DialogHeader>
+
+      <div className="space-y-4">
+        <LevelPicker
+          level={level}
+          disabled={!canEdit || saving}
+          onChange={onChangeLevel}
+        />
+
+        {level === "group" && (
+          <GroupGrantEditor
+            grants={grants}
+            canEdit={canEdit}
+            saving={saving}
+            roleOptions={roleOptions}
+            groupOptions={groupOptions}
+            onAdd={onAddGrant}
+            onRemove={onRemoveGrant}
+          />
+        )}
+
+        {savedLevel === "public" && publicNotice.loaded && (
+          <PublicLinkNotice
+            publicUrl={publicNotice.url}
+            hasLivePublication={publicNotice.live}
+          />
+        )}
+
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        {pendingApproval && (
+          <p className="text-sm text-amber-600" role="status">
+            {pendingApproval}
+          </p>
+        )}
+      </div>
+
+      {canEdit && (
+        <DialogFooter>
+          <Button type="button" variant="ghost" onClick={onCancel} disabled={saving}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={onSave} disabled={saving}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </DialogFooter>
+      )}
+    </DialogContent>
+  );
+}
+
 export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -448,74 +636,56 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
 
   const chrome = levelChrome(level);
 
+  // The Public consequence notice reads the SAVED level, not the draft: an
+  // unsaved pick of "Public" has changed nothing yet, so promising a live link
+  // (or warning about a missing publication) would be premature.
+  const publicNotice = usePublicPublication(
+    idOrSlug,
+    open && savedLevel === "public"
+  );
+
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
+        {/* #1336 C5: a labeled SHARE verb, not a bare status badge. The chip was
+            the only entry point to the whole grant machinery and read as a
+            read-only indicator, so nobody found it. The level badge stays
+            beside the label so the current state is still visible at a glance. */}
         <button
           type="button"
-          className="inline-flex"
+          className="mer-ectl"
+          data-testid="share-control"
           aria-label={
             levelKnown
-              ? `Visibility: ${chrome.label}${canEdit ? " (click to edit)" : ""}`
+              ? `Share — visibility: ${chrome.label}${canEdit ? " (click to edit)" : ""}`
               : loaded
                 ? "Visibility unavailable"
                 : "Loading visibility…"
           }
           disabled={!loaded}
         >
+          <Share2 className="h-3.5 w-3.5" aria-hidden="true" />
+          Share
           <ChipBadge levelKnown={levelKnown} chrome={chrome} />
         </button>
       </DialogTrigger>
-      <DialogContent className={meridianPortalClassName}>
-        <DialogHeader>
-          <DialogTitle>Visibility</DialogTitle>
-          <DialogDescription>
-            Controls who may view this content. Separate from where it is
-            published.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-4">
-          <LevelPicker
-            level={level}
-            disabled={!canEdit || saving}
-            onChange={changeLevel}
-          />
-
-          {level === "group" && (
-            <GroupGrantEditor
-              grants={grants}
-              canEdit={canEdit}
-              saving={saving}
-              roleOptions={roleOptions}
-              groupOptions={groupOptions}
-              onAdd={addGrant}
-              onRemove={removeGrant}
-            />
-          )}
-
-          {error && <p className="text-sm text-destructive">{error}</p>}
-          {pendingApproval && (
-            <p className="text-sm text-amber-600" role="status">{pendingApproval}</p>
-          )}
-        </div>
-
-        {canEdit && (
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => handleOpenChange(false)}
-              disabled={saving}
-            >
-              Cancel
-            </Button>
-            <Button type="button" onClick={save} disabled={saving}>
-              {saving ? "Saving…" : "Save"}
-            </Button>
-          </DialogFooter>
-        )}
-      </DialogContent>
+      <ShareDialogBody
+        level={level}
+        savedLevel={savedLevel}
+        canEdit={canEdit}
+        saving={saving}
+        grants={grants}
+        roleOptions={roleOptions}
+        groupOptions={groupOptions}
+        publicNotice={publicNotice}
+        error={error}
+        pendingApproval={pendingApproval}
+        onChangeLevel={changeLevel}
+        onAddGrant={addGrant}
+        onRemoveGrant={removeGrant}
+        onCancel={() => handleOpenChange(false)}
+        onSave={save}
+      />
     </Dialog>
   );
 }
@@ -569,6 +739,95 @@ interface GroupGrantEditorProps {
  * add a new grant. Owns its own draft kind/value so the parent's render and
  * save logic stay independent of the in-progress draft.
  */
+/**
+ * The grant-value control for the currently-picked grant kind: a role select, a
+ * synced-group select, the #1336 people picker, or free text. Extracted so
+ * `GroupGrantEditor` stays under the max-lines-per-function lint.
+ */
+function GrantValueField({
+  draftKind,
+  draftValue,
+  onDraftValue,
+  saving,
+  roleOptions,
+  groupOptions,
+  onAdd,
+  onSubmit,
+}: {
+  draftKind: GrantKind;
+  draftValue: string;
+  onDraftValue: (v: string) => void;
+  saving: boolean;
+  roleOptions: string[];
+  groupOptions: GroupOption[];
+  onAdd: (grant: Grant) => void;
+  onSubmit: () => void;
+}): React.JSX.Element {
+  if (draftKind === "role") {
+    return (
+      <Select value={draftValue} onValueChange={onDraftValue} disabled={saving}>
+        <SelectTrigger id="grant-value">
+          <SelectValue placeholder="Select a role" />
+        </SelectTrigger>
+        <SelectContent className={meridianPortalClassName}>
+          {roleOptions.map((r) => (
+            <SelectItem key={r} value={r}>
+              {r}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    );
+  }
+  if (draftKind === "group") {
+    return (
+      <Select value={draftValue} onValueChange={onDraftValue} disabled={saving}>
+        <SelectTrigger id="grant-value">
+          <SelectValue
+            placeholder={
+              groupOptions.length === 0 ? "No synced groups" : "Select a group"
+            }
+          />
+        </SelectTrigger>
+        <SelectContent className={meridianPortalClassName}>
+          {groupOptions.map((g) => (
+            <SelectItem key={g.email} value={g.email}>
+              {g.name ? `${g.name} (${g.email})` : g.email}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    );
+  }
+  if (draftKind === "user") {
+    // #1336 C5: search by name/email instead of demanding a raw numeric
+    // `users.id`. Selecting a person adds the grant immediately — there is
+    // nothing further to type, so routing it through the shared "Add" button
+    // would only add a second click.
+    return (
+      <PeoplePicker
+        disabled={saving}
+        onSelect={(person) => onAdd({ kind: "user", value: String(person.id) })}
+      />
+    );
+  }
+  return (
+    <Input
+      id="grant-value"
+      value={draftValue}
+      onChange={(e) => onDraftValue(e.target.value)}
+      placeholder={`${draftKind} name`}
+      disabled={saving}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onSubmit();
+        }
+      }}
+    />
+  );
+}
+
 function GroupGrantEditor({
   grants,
   canEdit,
@@ -652,78 +911,29 @@ function GroupGrantEditor({
             <Label htmlFor="grant-value" className="text-xs">
               Value
             </Label>
-            {draftKind === "role" ? (
-              <Select
-                value={draftValue}
-                onValueChange={setDraftValue}
-                disabled={saving}
-              >
-                <SelectTrigger id="grant-value">
-                  <SelectValue placeholder="Select a role" />
-                </SelectTrigger>
-                <SelectContent className={meridianPortalClassName}>
-                  {roleOptions.map((r) => (
-                    <SelectItem key={r} value={r}>
-                      {r}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : draftKind === "group" ? (
-              <Select
-                value={draftValue}
-                onValueChange={setDraftValue}
-                disabled={saving}
-              >
-                <SelectTrigger id="grant-value">
-                  <SelectValue
-                    placeholder={
-                      groupOptions.length === 0
-                        ? "No synced groups"
-                        : "Select a group"
-                    }
-                  />
-                </SelectTrigger>
-                <SelectContent className={meridianPortalClassName}>
-                  {groupOptions.map((g) => (
-                    <SelectItem key={g.email} value={g.email}>
-                      {g.name ? `${g.name} (${g.email})` : g.email}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <Input
-                id="grant-value"
-                value={draftValue}
-                onChange={(e) => setDraftValue(e.target.value)}
-                placeholder={
-                  draftKind === "user" ? "Numeric user ID" : `${draftKind} name`
-                }
-                inputMode={draftKind === "user" ? "numeric" : "text"}
-                disabled={saving}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    submit();
-                  }
-                }}
-              />
-            )}
+            <GrantValueField
+              draftKind={draftKind}
+              draftValue={draftValue}
+              onDraftValue={setDraftValue}
+              saving={saving}
+              roleOptions={roleOptions}
+              groupOptions={groupOptions}
+              onAdd={onAdd}
+              onSubmit={submit}
+            />
           </div>
 
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={submit}
-            disabled={
-              saving ||
-              !draftValue.trim() ||
-              (draftKind === "user" && !POSITIVE_INT_RE.test(draftValue.trim()))
-            }
-          >
-            Add
-          </Button>
+          {/* The people picker adds on selection, so it needs no Add button. */}
+          {draftKind !== "user" && (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={submit}
+              disabled={saving || !draftValue.trim()}
+            >
+              Add
+            </Button>
+          )}
         </div>
       )}
     </div>

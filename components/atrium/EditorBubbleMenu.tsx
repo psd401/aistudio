@@ -445,16 +445,13 @@ export interface EditorBubbleMenuProps {
   askAgentHref: string;
 }
 
-export function EditorBubbleMenu({
-  editor,
-  askAgentHref,
-}: EditorBubbleMenuProps): React.JSX.Element {
-  const router = useRouter();
-  const [pop, setPop] = useState<BubblePop>("none");
-
-  // Re-render the toolbar when the active-mark state changes so B/I/U/S and the
-  // Text ▾ label reflect the current selection.
-  const marks = useEditorState({
+/**
+ * Re-render the toolbar when the active-mark state changes so B/I/U/S and the
+ * Text ▾ label reflect the current selection. Extracted so `EditorBubbleMenu`
+ * stays under the max-lines-per-function lint.
+ */
+function useActiveMarks(editor: EditorBubbleMenuProps["editor"]) {
+  return useEditorState({
     editor,
     selector: ({ editor: e }) => ({
       bold: e.isActive("bold"),
@@ -462,10 +459,19 @@ export function EditorBubbleMenu({
       underline: e.isActive("underline"),
       strike: e.isActive("strike"),
       bulletList: e.isActive("bulletList"),
-      blockLabel:
-        BLOCK_STYLES.find((b) => b.isActive(e))?.label ?? "Text",
+      blockLabel: BLOCK_STYLES.find((b) => b.isActive(e))?.label ?? "Text",
     }),
   });
+}
+
+export function EditorBubbleMenu({
+  editor,
+  askAgentHref,
+}: EditorBubbleMenuProps): React.JSX.Element {
+  const router = useRouter();
+  const [pop, setPop] = useState<BubblePop>("none");
+
+  const marks = useActiveMarks(editor);
 
   const closePops = () => setPop("none");
 

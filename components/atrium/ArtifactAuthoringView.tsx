@@ -23,6 +23,8 @@ import { ArtifactTopbarActions } from "./ArtifactTopbarActions";
 import { ArtifactMetaRail } from "./ArtifactMetaRail";
 import { ContentSettings } from "./ContentSettings";
 import { VisibilityChip } from "./VisibilityChip";
+import { ArtifactPublishControl } from "./ArtifactPublishControl";
+import { publishService } from "@/lib/content/publish-service";
 
 export interface ArtifactAuthoringViewProps {
   obj: ContentObjectDTO;
@@ -40,10 +42,22 @@ export async function ArtifactAuthoringView({
   userCanEdit,
   collectionName,
 }: ArtifactAuthoringViewProps): Promise<React.JSX.Element> {
-  // Reader URL for the current visibility: a public artifact's full-screen / share
-  // target is the anonymous /p/ reader; everything else the internal /c/.
+  // Share target resolved from ACTUAL publication state (#1336 C4), not from
+  // visibility alone. `/p/[slug]` requires BOTH `visibility_level = 'public'`
+  // AND a live `public_web` publication, and `/c/[slug]` requires a live
+  // `intranet` one — so the old `visibility === "public" ? /p/ : /c/` rule
+  // handed users a 404 for the exact case they were most likely to share.
+  // Falls back to the chrome-free viewer route, which works for an unpublished
+  // artifact and any viewer who canView.
+  const publications = await publishService.listLive(req, obj.id);
+  const publicPub = publications.find((p) => p.destination === "public_web");
+  const intranetPub = publications.find((p) => p.destination === "intranet");
   const readerHref =
-    obj.visibilityLevel === "public" ? `/p/${obj.slug}` : `/c/${obj.slug}`;
+    publicPub && obj.visibilityLevel === "public"
+      ? `/p/${obj.slug}`
+      : intranetPub
+        ? `/c/${obj.slug}`
+        : `/atrium/${obj.id}/view`;
 
   // Rail data (manage-rights only): the current head backs the version number; the
   // backlinks are viewer-filtered documents that embed this artifact.
@@ -99,6 +113,8 @@ export async function ArtifactAuthoringView({
             />
           )}
           <VisibilityChip key={obj.id} idOrSlug={obj.id} />
+          {/* #1336 C4: artifacts previously had NO publish control at all. */}
+          {userCanEdit && <ArtifactPublishControl artifactId={obj.id} />}
           <Link
             // Full screen opens the chrome-free viewer route (#1052) — it works
             // for UNPUBLISHED artifacts and any viewer who canView, unlike the

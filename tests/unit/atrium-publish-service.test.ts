@@ -421,7 +421,14 @@ describe("publishService.publish", () => {
         destination: "intranet",
         visibility: { level: "public" },
       })
-    ).resolves.toEqual({ publicationId: "pub1", publishedVersionId: "v1" });
+    ).resolves.toEqual({
+      publicationId: "pub1",
+      publishedVersionId: "v1",
+      // #1336 C3: the intranet reader link is DERIVED from the slug (that
+      // adapter records a null external_ref by design) and returned so surfaces
+      // can show the author where the content went.
+      readerUrl: "/c/s1",
+    });
   });
 
   it("admin past the gate to an unimplemented (stub) public destination fails BEFORE any write (no visibility leak)", async () => {
@@ -488,7 +495,13 @@ describe("publishService.publish", () => {
     const result = await publishService.publish(admin, "o1", {
       destination: "public_web",
     });
-    expect(result).toEqual({ publicationId: "pub1", publishedVersionId: "v1" });
+    expect(result).toEqual({
+      publicationId: "pub1",
+      publishedVersionId: "v1",
+      // #1336 C3: the adapter's external_ref is now also RETURNED, not merely
+      // persisted — previously the public URL was computed and then dropped.
+      readerUrl: PUBLIC_WEB_REF,
+    });
     // The public_web adapter ran with the object's slug and returned the URL.
     expect(publicWebPublishCalls).toBe(1);
     expect(lastPublicWebSlug).toBe("s1");
@@ -527,7 +540,11 @@ describe("publishService.publish", () => {
     const result = await publishService.publish(owner, "o1", {
       destination: "intranet",
     });
-    expect(result).toEqual({ publicationId: "pub1", publishedVersionId: "v1" });
+    expect(result).toEqual({
+      publicationId: "pub1",
+      publishedVersionId: "v1",
+      readerUrl: "/c/s1",
+    });
     expect(adapterPublishCalls).toBe(1);
     // No visibility provided -> setLevelInTx must NOT run (publish doesn't widen).
     expect(setLevelInTxCalls).toBe(0);
@@ -568,6 +585,7 @@ describe("publishService.publish", () => {
     expect(result).toEqual({
       publicationId: "pub1",
       publishedVersionId: "v-reviewed",
+      readerUrl: "/c/s1",
     });
     expect(getVersionByIdMock).toHaveBeenCalled();
     // Retrieval must index the PUBLISHED (pinned) version, not the head — else it

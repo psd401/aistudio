@@ -44,6 +44,7 @@ import { makeAuthorTag } from "@/lib/content/collab/provenance";
 import { useUser } from "@/components/auth/user-provider";
 import { EditorToolbar } from "./EditorToolbar";
 import { PublishMenu } from "./PublishMenu";
+import { CopyableLink } from "./CopyableLink";
 import { EditableSheetTitle } from "./EditableSheetTitle";
 import { EditorBubbleMenu } from "./EditorBubbleMenu";
 import { DocumentCover } from "./DocumentCover";
@@ -201,10 +202,13 @@ function buildLocalUser(
 /** The snapshot/publish feedback caption below the desk (amber for pending). */
 function StatusCaption({
   message,
+  messageUrl,
   actionError,
   pendingApproval,
 }: {
   message: string | null;
+  /** Reader URL for a successful publish (#1336 C3), shown as a copyable link. */
+  messageUrl: string | null;
   actionError: boolean;
   pendingApproval: boolean;
 }): React.JSX.Element | null {
@@ -221,6 +225,12 @@ function StatusCaption({
       data-tone={tone}
     >
       {message}
+      {messageUrl && (
+        <>
+          {" — "}
+          <CopyableLink url={messageUrl} testId="publish-reader-url" />
+        </>
+      )}
     </p>
   );
 }
@@ -690,6 +700,8 @@ export function DocumentEditor({
   // Snapshot / publish / unpublish, with shared busy + success/error feedback.
   const {
     message,
+    messageUrl,
+    actionSeq,
     actionError,
     pendingApproval,
     busy,
@@ -726,34 +738,22 @@ export function DocumentEditor({
   const [docTitle, setDocTitle] = useSyncedTitle(title);
   const crumbs = breadcrumb ?? [];
 
-  const toolbar = (
-    <EditorToolbar
-      status={status}
-      canEdit={canEdit}
-      busy={busy}
-      suggesting={suggesting}
-      suggestionCount={suggestionCount}
-      onToggleSuggesting={() => editor?.commands.toggleSuggesting()}
-      onAcceptAll={() => {
-        if (editor) acceptAllSuggestions(editor);
-      }}
-    />
-  );
-
-  // The primary "Publish ▾" split control (destination + publish + unpublish +
-  // snapshot). Editors only; rendered LAST in the control row per the spec topbar.
-  const publishControl = canEdit ? (
-    <PublishMenu
-      busy={busy}
-      onSnapshot={handleSnapshot}
-      onPublish={handlePublish}
-      onUnpublish={handleUnpublish}
-    />
-  ) : null;
-
-  // The two #1336 view toggles, always adjacent in the control row.
-  const viewToggles = (
+  // The topbar control cluster common to both layouts: the Suggesting toolbar,
+  // the two #1336 view toggles, and — for editors only — the primary "Publish ▾"
+  // split control, rendered LAST per the spec topbar.
+  const coreControls = (
     <>
+      <EditorToolbar
+        status={status}
+        canEdit={canEdit}
+        busy={busy}
+        suggesting={suggesting}
+        suggestionCount={suggestionCount}
+        onToggleSuggesting={() => editor?.commands.toggleSuggesting()}
+        onAcceptAll={() => {
+          if (editor) acceptAllSuggestions(editor);
+        }}
+      />
       <ProvenanceToggle on={provenanceOn} onToggle={toggleProvenance} />
       <CommentsToggle
         open={commentsOpen}
@@ -762,9 +762,19 @@ export function DocumentEditor({
       />
     </>
   );
+  const publishControl = canEdit ? (
+    <PublishMenu
+      idOrSlug={idOrSlug}
+      busy={busy}
+      refreshKey={actionSeq}
+      onSnapshot={handleSnapshot}
+      onPublish={handlePublish}
+      onUnpublish={handleUnpublish}
+    />
+  ) : null;
 
   const statusCaption = (
-    <StatusCaption {...{ message, actionError, pendingApproval }} />
+    <StatusCaption {...{ message, messageUrl, actionError, pendingApproval }} />
   );
 
   const editorBody = (
@@ -791,7 +801,7 @@ export function DocumentEditor({
     return (
       <PanelLayout
         presence={presence}
-        controls={<>{toolbar}{viewToggles}{publishControl}</>}
+        controls={<>{coreControls}{publishControl}</>}
         editorBody={editorBody}
         comments={comments}
         commentsOpen={commentsOpen}
@@ -810,8 +820,7 @@ export function DocumentEditor({
       localUserId={userId}
       controls={
         <>
-          {toolbar}
-          {viewToggles}
+          {coreControls}
           {historyControl}
           {settingsControl}
           {publishControl}

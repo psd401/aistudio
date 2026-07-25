@@ -2474,3 +2474,34 @@
 .mer-reader-comment-chip:hover {
   background: var(--mer-brand-tint);
 }
+
+/* Copyable reader link (#1336 C1/C3) — the publish success caption and the
+ * VisibilityChip public notice. Inline so it sits inside a sentence. */
+.mer-copy-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+.mer-copy-link-url {
+  color: var(--mer-brand);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mer-copy-link-btn {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 2px;
+  border-radius: var(--mer-r-chip);
+  color: var(--mer-ink-muted);
+  cursor: pointer;
+}
+.mer-copy-link-btn:hover {
+  color: var(--mer-ink);
+  background: var(--mer-canvas-sunken);
+}

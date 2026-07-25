@@ -1,4 +1,4 @@
-"use server"
+"use server";
 
 /**
  * Atrium publish-document server action
@@ -32,6 +32,11 @@ import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
+import {
+  IN_APP_PUBLISH_PUBLIC_CAPABILITY,
+  notifyPublicExposure,
+} from "@/lib/atrium/public-publish-policy";
+import { isPublicDestination } from "@/lib/content/publish-adapters/types";
 
 /**
  * The editor destination union (excludes `okf` — API/MCP-only by design),
@@ -62,8 +67,19 @@ export async function publishDocumentAction(
      * accepted by the service) for `level: "group"`.
      */
     visibility?: { level: string; grants?: { kind: string; value: string }[] };
-  }
-): Promise<ActionState<{ publicationId: string; publishedVersionId: string }>> {
+  },
+): Promise<
+  ActionState<{
+    publicationId: string;
+    publishedVersionId: string;
+    /**
+     * The reader URL the content is now served at (#1336 C3) — `/p/{slug}` for
+     * public web, `/c/{slug}` for the intranet. Surfaced so the success caption
+     * can offer a copyable link instead of a bare "Published to …".
+     */
+    readerUrl: string | null;
+  }>
+> {
   const requestId = generateRequestId();
   const timer = startTimer("publishDocumentAction");
   const log = createLogger({ requestId, action: "publishDocumentAction" });
@@ -107,22 +123,49 @@ export async function publishDocumentAction(
     // `string`). `assertLevel` / `assertGrantKind` narrow each via a RUNTIME
     // check (throwing ValidationError on an unexpected value) before they reach
     // the service — the DB enum is the last line of defense, not the first.
-    const result = await publishService.publish(requester, objectId, {
-      destination,
-      visibility: input.visibility
-        ? {
-            level: assertLevel(input.visibility.level),
-            // `?? []` guard: `grants` is optional on the input contract (a REST/MCP
-            // caller, or a future action passing `{ visibility: { level: "internal" } }`,
-            // can omit it). Without the guard `undefined.map()` throws a TypeError —
-            // mirrors the `(input.grants ?? []).map(...)` guard in set-visibility.ts.
-            grants: (input.visibility.grants ?? []).map((g) => ({
-              kind: assertGrantKind(g.kind),
-              value: g.value,
-            })),
-          }
-        : undefined,
-    });
+    const result = await publishService.publish(
+      requester,
+      objectId,
+      {
+        destination,
+        visibility: input.visibility
+          ? {
+              level: assertLevel(input.visibility.level),
+              // `?? []` guard: `grants` is optional on the input contract (a REST/MCP
+              // caller, or a future action passing `{ visibility: { level: "internal" } }`,
+              // can omit it). Without the guard `undefined.map()` throws a TypeError —
+              // mirrors the `(input.grants ?? []).map(...)` guard in set-visibility.ts.
+              grants: (input.visibility.grants ?? []).map((g) => ({
+                kind: assertGrantKind(g.kind),
+                value: g.value,
+              })),
+            }
+          : undefined,
+      },
+      {
+        // #1336: any author may publish publicly — no admin approval gate. See
+        // actions/db/atrium/public-publish-policy.ts for why this is supplied
+        // here rather than by weakening the service's §26.4 gate.
+        hasPublishPublicCapability: IN_APP_PUBLISH_PUBLIC_CAPABILITY,
+      },
+    );
+
+    // Allow-then-NOTIFY: record the admin-visible notification for a non-admin
+    // public exposure. Best-effort and post-commit, so it can never fail or roll
+    // back the publish the author just completed.
+    if (
+      isPublicDestination(destination) ||
+      input.visibility?.level === "public"
+    ) {
+      await notifyPublicExposure({
+        req: requester,
+        action: "publish",
+        objectId,
+        destination,
+        note: `Published to ${destination} without administrator approval (allow-then-notify policy)`,
+        requestId,
+      });
+    }
 
     timer({ status: "success" });
     log.info("Document published", {
