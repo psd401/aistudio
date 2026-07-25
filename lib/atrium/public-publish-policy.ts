@@ -65,7 +65,10 @@ export const IN_APP_PUBLISH_PUBLIC_CAPABILITY = true;
  */
 export async function notifyPublicExposure(args: {
   req: Requester;
-  action: Extract<ContentAuditAction, "publish" | "unpublish" | "set_visibility">;
+  action: Extract<
+    ContentAuditAction,
+    "publish" | "unpublish" | "set_visibility" | "create"
+  >;
   objectId: string;
   destination?: PublishDestination | null;
   /** Short human-readable note stored in the audit row's details. */

@@ -104,11 +104,6 @@ const DESTINATION_OPTIONS: ReadonlyArray<{
 function usePublishState(idOrSlug: string, refreshKey: number) {
   const [live, setLive] = useState<Set<string>>(() => new Set());
   const [visibility, setVisibility] = useState<VisibilityLevel | null>(null);
-  // Whether the audience state has been resolved at least once. Publishing is
-  // blocked until it has: without the current visibility the audience check
-  // cannot run, and publishing anyway would silently reintroduce the exact
-  // #1336 C2 defect (a live publication its readers cannot open).
-  const [ready, setReady] = useState(false);
 
   // Bumped to force a re-read. Kept as state (rather than calling a `reload()`
   // function straight out of an effect) so the fetch and its setStates always
@@ -116,6 +111,19 @@ function usePublishState(idOrSlug: string, refreshKey: number) {
   // uses, and the one that satisfies `react-hooks/set-state-in-effect`.
   const [seq, setSeq] = useState(0);
   const reload = useCallback(() => setSeq((n) => n + 1), []);
+
+  // Readiness is tied to the COMPLETED request, not to "a read succeeded once".
+  // A boolean latch would leave the menu enabled with STALE data while a re-read
+  // is still in flight: reopening it after the adjacent Share control narrowed
+  // Public → Private would keep serving the old Public value, so a fast click
+  // would skip the required widen and create a `public_web` publication whose
+  // reader still 404s — the exact #1336 C2 defect. Comparing the key that
+  // produced the current data against the key being requested disables the
+  // Publish item for the whole in-flight window, with no synchronous setState
+  // in the effect body.
+  const requestKey = `${idOrSlug}:${seq}:${refreshKey}`;
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const ready = loadedKey === requestKey;
 
   useEffect(() => {
     let cancelled = false;
@@ -130,7 +138,10 @@ function usePublishState(idOrSlug: string, refreshKey: number) {
         else log.warn("listPublicationsAction failed", { message: pubs.message });
         if (vis.isSuccess) {
           setVisibility(vis.data.visibilityLevel);
-          setReady(true);
+          // Only a SUCCESSFUL visibility read marks this key loaded. A failed
+          // read leaves the menu un-ready (Publish stays disabled) rather than
+          // letting it act on a value it never obtained.
+          setLoadedKey(requestKey);
         } else {
           log.warn("getVisibilityAction failed", { message: vis.message });
         }
@@ -144,8 +155,7 @@ function usePublishState(idOrSlug: string, refreshKey: number) {
     return () => {
       cancelled = true;
     };
-    // `seq` is the explicit re-read trigger (menu opened, or an action landed).
-  }, [idOrSlug, seq, refreshKey]);
+  }, [idOrSlug, requestKey]);
 
   return { live, visibility, ready, reload };
 }

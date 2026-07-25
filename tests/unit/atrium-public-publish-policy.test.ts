@@ -59,6 +59,17 @@ jest.mock("@/lib/content/audit", () => ({
   recordContentAudit: (...a: unknown[]) => recordContentAuditMock(...a),
 }));
 
+const createMock = jest.fn(async (..._a: unknown[]) => ({
+  id: "obj-new",
+  kind: "document",
+  visibilityLevel: "public",
+  version: null,
+}));
+jest.mock("@/lib/content", () => ({
+  contentService: { create: (...a: unknown[]) => createMock(...a) },
+}));
+
+import { createContentAction } from "@/actions/db/atrium/create-content";
 import { publishDocumentAction } from "@/actions/db/atrium/publish-document";
 import { unpublishDocumentAction } from "@/actions/db/atrium/unpublish-document";
 import { notifyPublicExposure } from "@/lib/atrium/public-publish-policy";
@@ -125,6 +136,57 @@ describe("in-app publish grants public-publish authority (#1336)", () => {
       hasPublishPublicCapability?: boolean;
     };
     expect(opts.hasPublishPublicCapability).toBe(true);
+  });
+});
+
+describe("in-app CREATE honours the same policy (#1336, Codex P2)", () => {
+  it("passes hasPublishPublicCapability:true to contentService.create", async () => {
+    await createContentAction({
+      kind: "document",
+      title: "t",
+      visibility: { level: "public" },
+    } as Parameters<typeof createContentAction>[0]);
+
+    expect(createMock).toHaveBeenCalledTimes(1);
+    // Without this, `resolveCreateVisibility`'s §26.4 "create-as-private"
+    // downgrade fires and a non-admin creating explicitly-Public content
+    // silently gets a PRIVATE object plus a queued widen request.
+    const opts = createMock.mock.calls[0][2] as {
+      hasPublishPublicCapability?: boolean;
+    };
+    expect(opts.hasPublishPublicCapability).toBe(true);
+  });
+
+  it("notifies when the created object actually RESOLVED to public", async () => {
+    await createContentAction({
+      kind: "document",
+      title: "t",
+      visibility: { level: "public" },
+    } as Parameters<typeof createContentAction>[0]);
+
+    expect(recordContentAuditMock).toHaveBeenCalledTimes(1);
+    const entry = recordContentAuditMock.mock.calls[0][0] as {
+      action: string;
+      surface: string;
+      objectId: string;
+    };
+    expect(entry.action).toBe("create");
+    expect(entry.surface).toBe("ui");
+    expect(entry.objectId).toBe("obj-new");
+  });
+
+  it("does NOT notify when the created object did not resolve to public", async () => {
+    createMock.mockResolvedValueOnce({
+      id: "obj-new",
+      kind: "document",
+      visibilityLevel: "private",
+      version: null,
+    });
+    await createContentAction({
+      kind: "document",
+      title: "t",
+    } as Parameters<typeof createContentAction>[0]);
+    expect(recordContentAuditMock).not.toHaveBeenCalled();
   });
 });
 
