@@ -39,6 +39,39 @@ function stripClientStorageRefs(parts: MessagePart[] | undefined): MessagePart[]
 }
 
 /**
+ * Normalize optional client fields for the upsert: falsy values become undefined
+ * so the upsert leaves the corresponding columns untouched.
+ */
+function buildUpsertData(input: {
+  role: 'user' | 'assistant' | 'system'
+  content?: string
+  parts?: MessagePart[]
+  modelId?: number
+  reasoningContent?: string
+  tokenUsage?: TokenUsage
+  finishReason?: string
+  metadata: Record<string, unknown>
+}) {
+  return {
+    role: input.role,
+    content: input.content || undefined,
+    parts: input.parts || undefined,
+    modelId: input.modelId || undefined,
+    reasoningContent: input.reasoningContent || undefined,
+    tokenUsage: input.tokenUsage || undefined,
+    finishReason: input.finishReason || undefined,
+    metadata: input.metadata,
+  }
+}
+
+function bodySizeLogFields(content?: string, parts?: MessagePart[]) {
+  return {
+    contentLength: content?.length || 0,
+    partsCount: Array.isArray(parts) ? parts.length : 0,
+  }
+}
+
+/**
  * POST /api/nexus/messages - Save a message to a conversation
  *
  * Migrated to Drizzle ORM as part of Epic #526
@@ -100,8 +133,7 @@ export async function POST(req: NextRequest) {
       conversationId,
       messageId,
       role,
-      contentLength: content?.length || 0,
-      partsCount: Array.isArray(parts) ? parts.length : 0
+      ...bodySizeLogFields(content, parts)
     }))
 
     // Validate required fields
@@ -143,16 +175,16 @@ export async function POST(req: NextRequest) {
     const sanitizedParts = stripClientStorageRefs(parts)
 
     // Upsert message and update conversation stats using Drizzle
-    await upsertMessageWithStats(messageId, conversationId, {
+    await upsertMessageWithStats(messageId, conversationId, buildUpsertData({
       role,
-      content: content || undefined,
-      parts: sanitizedParts || undefined,
-      modelId: modelId || undefined,
-      reasoningContent: reasoningContent || undefined,
-      tokenUsage: tokenUsage || undefined,
-      finishReason: finishReason || undefined,
-      metadata: metadata,
-    })
+      content,
+      parts: sanitizedParts,
+      modelId,
+      reasoningContent,
+      tokenUsage,
+      finishReason,
+      metadata,
+    }))
 
     log.debug('Message saved', { messageId, conversationId })
 
