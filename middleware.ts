@@ -56,6 +56,14 @@ const PUBLIC_PATHS = [
   "/robots.txt",
 ];
 
+// Unlike PUBLIC_PATHS, entries here do not expose descendant routes. Google
+// Drive push notifications authenticate with a high-entropy channel token plus
+// channel/resource identifiers inside the route, but future sibling handlers
+// must not silently inherit that browser-session exemption.
+const EXACT_PUBLIC_PATHS = new Set([
+  "/api/repositories/connectors/google/webhook",
+]);
+
 // Atrium artifact sandbox (#1052): the app embeds an <iframe> pointing at a
 // SEPARATE origin that runs untrusted artifact code (spec §19.2/§28.1). The app's
 // own CSP `frame-src` must explicitly allow that origin, or the browser blocks
@@ -78,14 +86,19 @@ const PUBLIC_PATHS = [
 // only when configured (otherwise the artifact preview frame is simply blocked,
 // matching the component's fail-closed behavior).
 const SANDBOX_FRAME_ORIGIN = getArtifactSandboxOrigin();
-const FRAME_SRC = ["'self'", "https://www.canva.com", ...(SANDBOX_FRAME_ORIGIN ? [SANDBOX_FRAME_ORIGIN] : [])].join(" ");
+const FRAME_SRC = [
+  "'self'",
+  "https://www.canva.com",
+  "https://docs.google.com",
+  ...(SANDBOX_FRAME_ORIGIN ? [SANDBOX_FRAME_ORIGIN] : []),
+].join(" ");
 const CONTENT_SECURITY_POLICY =
   "default-src 'self'; " +
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com; " +
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com https://apis.google.com; " +
   "style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data: https: blob:; " +
   "font-src 'self' data:; " +
-  "connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com; " +
+  "connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com https://apis.google.com; " +
   `frame-src ${FRAME_SRC}; ` +
   "frame-ancestors 'none';";
 
@@ -94,9 +107,13 @@ export default authMiddleware((req) => {
   const isLoggedIn = !!auth;
 
   // Check if path is public
-  const isPublicPath = PUBLIC_PATHS.some(path => 
-    nextUrl.pathname === path || nextUrl.pathname.startsWith(path + "/")
-  ) || isOidcProviderResumePath(nextUrl.pathname);
+  const isPublicPath =
+    EXACT_PUBLIC_PATHS.has(nextUrl.pathname) ||
+    PUBLIC_PATHS.some(
+      (path) =>
+        nextUrl.pathname === path || nextUrl.pathname.startsWith(path + "/"),
+    ) ||
+    isOidcProviderResumePath(nextUrl.pathname);
 
   // Create response with security headers
   let response: NextResponse;

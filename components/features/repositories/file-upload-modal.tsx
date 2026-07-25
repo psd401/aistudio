@@ -23,7 +23,6 @@ import {
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAction } from "@/lib/hooks/use-action"
 import {
@@ -45,6 +44,7 @@ import {
   uploadFileToRepositoryStorage,
   type BrowserRepositoryUpload,
 } from "@/lib/repositories/content-platform/browser-upload"
+import { GoogleDriveConnectorPanel } from "./google-drive-connector-panel"
 
 // File size limits - will be loaded from environment
 const ACCEPTED_FILE_TYPES = [
@@ -669,21 +669,10 @@ export function FileUploadModal({
           </TabsContent>
 
           <TabsContent value="google-drive">
-            <Alert>
-              <Cloud className="h-4 w-4" />
-              <AlertTitle>Google Drive is not available yet</AlertTitle>
-              <AlertDescription className="space-y-2">
-                <p>
-                  Drive import and synchronization remain disabled until the
-                  connector boundary tracked in issue #1262 is implemented.
-                </p>
-                <p>
-                  Download the file from Drive and use the File tab in the
-                  meantime. No Drive permissions or credentials are requested
-                  by this screen.
-                </p>
-              </AlertDescription>
-            </Alert>
+            <GoogleDriveConnectorPanel
+              repositoryId={repositoryId}
+              onSourcesChanged={onSuccess}
+            />
             <div className="mt-4 flex justify-end">
               <Button
                 type="button"

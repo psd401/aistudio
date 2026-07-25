@@ -240,6 +240,7 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAgentPlatf
 
 const devProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Dev', {
   environment: 'dev',
+  appBaseUrl: baseDomain ? `https://dev.${baseDomain}` : undefined,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 devProcessingStack.addDependency(devDbStack); // Reads database SSM parameters and uses the shared VPC
@@ -361,6 +362,7 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAgentPlat
 
 const prodProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Prod', {
   environment: 'prod',
+  appBaseUrl: baseDomain ? `https://${baseDomain}` : undefined,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 prodProcessingStack.addDependency(prodDbStack); // Reads database SSM parameters and uses the shared VPC

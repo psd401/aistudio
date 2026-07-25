@@ -19,6 +19,7 @@ import { execSync } from 'child_process';
 import { ServiceRoleFactory } from './constructs/security';
 import { VPCProvider, EnvironmentConfig } from './constructs';
 import { UnifiedContentProcessing } from './constructs/processing/unified-content-processing';
+import { GoogleContentSync } from './constructs/processing/google-content-sync';
 
 export interface ProcessingStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
@@ -26,11 +27,13 @@ export interface ProcessingStackProps extends cdk.StackProps {
   documentsBucketName?: string; // Optional for backward compatibility
   databaseResourceArn?: string; // Optional for backward compatibility
   databaseSecretArn?: string; // Optional for backward compatibility
+  appBaseUrl?: string;
 }
 export class ProcessingStack extends cdk.Stack {
   public readonly fileProcessingQueue: sqs.Queue;
   public readonly embeddingQueue: sqs.Queue;
   public readonly contentProcessingQueue: sqs.Queue;
+  public readonly googleContentSyncQueue: sqs.Queue;
   public readonly jobStatusTable: dynamodb.Table;
   public readonly textractCompletionTopic: sns.Topic;
 
@@ -120,6 +123,16 @@ export class ProcessingStack extends cdk.Stack {
       vpc,
     });
     this.contentProcessingQueue = unifiedContent.queue;
+    const googleContentSync = new GoogleContentSync(this, 'GoogleContentSync', {
+      environment: props.environment,
+      documentsBucket,
+      databaseHost,
+      databaseSecretArn,
+      contentProcessingQueue: this.contentProcessingQueue,
+      vpc,
+      appBaseUrl: props.appBaseUrl,
+    });
+    this.googleContentSyncQueue = googleContentSync.queue;
 
     // SNS Topic for Textract completion notifications
     this.textractCompletionTopic = new sns.Topic(this, 'TextractCompletionTopic', {
@@ -825,6 +838,18 @@ export class ProcessingStack extends cdk.Stack {
       value: this.contentProcessingQueue.queueArn,
       description: 'ARN of the unified repository content processing queue',
       exportName: `${props.environment}-ContentProcessingQueueArn`,
+    });
+
+    new cdk.CfnOutput(this, 'GoogleContentSyncQueueUrl', {
+      value: this.googleContentSyncQueue.queueUrl,
+      description: 'URL of the Google Workspace synchronization queue',
+      exportName: `${props.environment}-GoogleContentSyncQueueUrl`,
+    });
+
+    new cdk.CfnOutput(this, 'GoogleContentSyncQueueArn', {
+      value: this.googleContentSyncQueue.queueArn,
+      description: 'ARN of the Google Workspace synchronization queue',
+      exportName: `${props.environment}-GoogleContentSyncQueueArn`,
     });
 
     new cdk.CfnOutput(this, 'EmbeddingGeneratorFunctionName', {

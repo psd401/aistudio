@@ -19,8 +19,9 @@ preselected destination. The source modal currently supports:
 - canonical direct-to-S3 single or multipart file upload;
 - URL sources through the repository URL processor;
 - inline text with a canonical immutable-version shadow write; and
-- an explicit unavailable state for Google Drive while #1262 remains blocked on
-  `psd401/psd-gcp-infra#1`.
+- personal Google Drive file/folder selection and keyless Shared Drive
+  synchronization through the connector boundary in
+  [#1262](google-workspace-content-sync.md).
 
 The canonical browser helper uploads bytes directly to a signed object-storage
 URL. Only bounded metadata, multipart ETags, and completion identifiers cross a

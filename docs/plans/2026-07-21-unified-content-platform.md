@@ -366,11 +366,11 @@ scheduled dev-environment suite validates the real services.
 
 ## Worktree and branch model
 
-The active Retrieval v2 branch is `codex/unified-content-retrieval-v2` in the
-isolated worktree:
+The active Google synchronization branch is
+`codex/unified-content-google-sync` in the main checkout:
 
 ```text
-/private/tmp/aistudio-unified-content-retrieval-v2
+/Users/hagelk/non-ic-code/aistudio
 ```
 
 The main checkout stays on `dev`, so other agents or projects can use separate
@@ -391,7 +391,7 @@ two worktrees should edit the same migration or contract file concurrently.
 - [x] Multimodal processing (Office, image, audio, and video deployed; real dev
       managed-service validation passed)
 - [x] Retrieval v2 and visual search
-- [ ] Google Workspace sync
+- [x] Google Workspace sync
 - [x] Universal product UI migration
 - [ ] OpenClaw and Projects integration
 - [ ] Backfill, cutover, and legacy retirement
@@ -1055,3 +1055,80 @@ fail closed to the documented legacy response while canonical cutover is off;
 already-issued canonical uploads may still complete safely. The remaining live
 environment check is deployment observability and cleanup behavior under real
 GuardDuty/S3 events, not an unresolved product or architecture decision.
+
+### Google Workspace synchronization checkpoint (2026-07-24)
+
+Issue #1262 was selected because the foundation, multimodal, Retrieval v2, and
+product-consolidation workstreams were delivered; the issue's Google-side
+coordination comment records the fixed WIF identity and explicitly says no
+remaining Google dependency blocks implementation. It was therefore the
+earliest incomplete, unblocked item in this plan. The open pull-request set was
+inspected before selection and contained no overlapping connector work.
+
+Implemented on `codex/unified-content-google-sync`, ready for dev review:
+
+- Additive migration 136 introduces encrypted credential references, personal
+  and Shared Drive connectors, verified file/folder/drive selections, stable
+  external-source identity, cursor/watch health, and per-run reconciliation
+  evidence. Stable repository items receive immutable `google_drive` versions;
+  each new source revision atomically creates the canonical inspection job.
+- Personal Drive uses authorization code plus S256 PKCE, an encrypted
+  short-lived state cookie, exactly `drive.readonly`, owner-only Picker tokens,
+  encrypted refresh-token persistence, Google revocation on disconnect, and
+  no-store token responses. Every route reuses the Repository Manager
+  capability plus exact owner/admin repository boundary.
+- Shared Drives use the fixed
+  `unified-content-sync@psd-aistudio-broker.iam.gserviceaccount.com` service
+  account through the exact `aws-agent-broker/content-sync` WIF provider. The
+  isolated Lambda role is named
+  `unified-content-sync-execution-role-{dev|prod}` to match the external trust;
+  no key or domain-wide delegation path exists.
+- Initial file/folder/Shared Drive discovery records the change token first.
+  Scheduled `changes.list` polling is authoritative; validated watch
+  notifications accelerate it. Page cursors advance only after durable work,
+  duplicate revisions are idempotent, overlapping triggers are lease-coalesced,
+  selection generations prevent an older in-flight run from overwriting a new
+  selection/reset cursor, the configured global interval controls scheduling,
+  expired cursors rebuild from a new snapshot, and folder moves reconcile the
+  complete selection before the cursor advances. Downloads stream through
+  bounded multipart S3 upload, per-source failures do not discard a successful
+  page, and long-running Google Vids operations resume from persisted state.
+- Docs, Sheets, Slides, Drawings, supported blobs, images, audio, video, and
+  Google Vids enter the existing canonical processing pipeline. Unsupported
+  native types remain visible. Move/delete/unshare state uses a configurable
+  grace window, preserves immutable history, and reactivates the stable item if
+  access returns before expiry. Connector-creator deletion marks retained items
+  unavailable before connector/source cascades remove their reconciliation
+  rows.
+- Repository Manager now provides personal connection/selection, Shared Drive
+  setup, connector health, last error/success, source counts, retry, and
+  disconnect. Queue/DLQ, schedule, least-privilege source-prefix/dispatch IAM,
+  worker/DLQ/staleness alarms, and correlated credential-free logs complete the
+  operational boundary.
+- Delivery-boundary security review tightened the common-identity and resource
+  ceilings: Shared Drive WIF setup is application-administrator-only; personal
+  selection verification has a per-user five-per-minute budget and five-call
+  provider concurrency; source metadata, HTTP length, and streamed bytes all
+  enforce `CONTENT_MAX_FILE_SIZE_GB`; uploads remain temporary until canonical
+  inspection promotes them; snapshot traversal fails closed above 10,000 files
+  or folder visits; and the scheduler fans due connectors into the existing SQS
+  queue rather than executing 25 synchronizations in one invocation. Google
+  notification delivery is explicitly public only to its route-local
+  channel/resource/token validation, and CSP permits the exact Picker script
+  and frame origins.
+
+Verification at this checkpoint includes exact Drive/OAuth unit contracts, a
+real PostgreSQL migration/lifecycle smoke, CDK synthesis assertions for the WIF
+role and least-privilege policies, unauthenticated connector guards, and an
+authenticated Repository Manager Playwright workflow with deterministic Google
+API substitution. The final local gate passed whole-repository typecheck and
+lint (zero errors; 411 existing warnings), all 353 Jest suites with 3,492 tests
+passing (3 suites/26 tests skipped), 7 focused Drive/OAuth/security suites with
+57 tests, 2 focused Lambda/CDK suites with 8 tests, the real-PostgreSQL
+connector smoke, and all 11 affected authenticated/guard Playwright cases. The
+production Next.js build, infrastructure build, full CDK synthesis, clean
+isolated migration application, and final diff checks also passed. The
+deployment runbook records migration-first ordering, OAuth secret
+shape/callback registration, flags, rollback, alarms, and the labeled live
+create/edit/move/delete/access-loss/notification-resume matrix required after
+dev deployment.

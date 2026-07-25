@@ -174,6 +174,8 @@ AI integration patterns using Vercel AI SDK v6, provider factory implementation,
 
 **[Unified repository product integration](./features/unified-repository-product-integration.md)** — Authoritative Repository Manager source/ACL/version UI, Assistant Architect repository-only knowledge, Nexus private ephemeral attachments, promotion, retention, and rollback boundaries.
 
+**[Google Workspace content synchronization](./features/google-workspace-content-sync.md)** — Personal PKCE OAuth, Picker selection, keyless Shared Drive WIF, durable cursor/version reconciliation, deletion grace, deployment, and operations.
+
 #### [features/navigation.md](./features/navigation.md)
 Dynamic navigation system with role-based menu items.
 
