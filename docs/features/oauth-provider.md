@@ -25,14 +25,41 @@ Returns the standard OpenID Connect discovery document with all endpoint URLs.
 | Introspection | `/api/oauth/introspection` | Validate tokens |
 | Revocation | `/api/oauth/revocation` | Revoke tokens |
 
+oidc-provider's signed, single-use interaction continuation uses the internal
+`/auth/:uid` route. Middleware exposes only the provider's exact
+43-character URL-safe UID shape, not the surrounding `/auth/*` tree.
+
 ## Auth Code Flow with PKCE
 
 1. Client generates `code_verifier` and `code_challenge` (S256)
 2. Client redirects user to `/api/oauth/auth?client_id=...&code_challenge=...&redirect_uri=...`
-3. User sees consent screen at `/oauth/authorize`
-4. User approves → redirect back with `code`
-5. Client exchanges code + `code_verifier` at `/api/oauth/token`
-6. Receives JWT access token + refresh token
+3. AI Studio completes the provider's login prompt with the authenticated
+   district user
+4. Explicitly trusted first-party clients return immediately; standard clients
+   see the consent screen at `/oauth/authorize`
+5. When required, the user approves → redirect back with `code`
+6. Client exchanges code + `code_verifier` at `/api/oauth/token`
+7. Client receives a JWT access token + rotating refresh token
+
+The App Router bridge preserves oidc-provider's status, exact `Location`,
+response body, and individual `Set-Cookie` headers. Custom login and consent
+completion use oidc-provider's public interaction APIs; no resume URL is
+constructed by application code.
+
+## First-party clients
+
+`oauth_clients.is_first_party` is an explicit, default-false trust decision.
+It is never inferred from a client name, application type, redirect URI, or
+requested scopes. Migration 134 marks only the existing Atrium Capture browser
+extension and Mac client IDs as first-party, and only when their exact redirect
+and public S256 PKCE registration still match the expected production profile.
+
+First-party authorization still requires a valid district user session. Once
+an account is known, `loadExistingGrant` reuses or creates a provider grant
+containing only requested scopes present in that client's registered
+allowlist. OIDC scopes are stored in the OIDC grant portion; `content:*` scopes
+are stored under the AI Studio resource server. Standard clients continue
+through explicit consent.
 
 ## Security
 
@@ -44,6 +71,10 @@ Returns the standard OpenID Connect discovery document with all endpoint URLs.
 - **Durability**: provider sessions, interactions, grants, codes, and tokens persist in PostgreSQL across ECS tasks/restarts
 - **Application types**: web, browser extension, and native
 - **Public clients**: browser extensions and native apps have no secret and always use S256 PKCE
+- **First-party trust**: explicit default-deny client metadata; does not bypass
+  login, redirect validation, scope allowlists, active-client checks, or PKCE
+- **Consent integrity**: grant scopes come from signed provider interaction
+  state, never browser-submitted scope lists
 - Client secrets hashed with Argon2id
 
 ## JWT Claims
@@ -71,6 +102,11 @@ OAuth clients are managed at `/admin/oauth-clients`:
   `offline_access`; the admin form displays these as required, and the database
   enforces the same invariant
 - Revoke clients (deactivates all issued tokens)
+- View whether a client has the privileged `First-party` trust designation
+
+First-party trust changes are written to `oauth_client_trust_audit`. Migration
+backfills have an explicit source, and later database changes are captured by
+the trust audit rule.
 
 Redirect URI validation is application-aware:
 
@@ -91,6 +127,7 @@ writes cannot bypass the registration policy.
 | Table | Purpose |
 |-------|---------|
 | `oauth_clients` | Registered applications |
+| `oauth_client_trust_audit` | Append-only first-party trust changes |
 | `oauth_authorization_codes` | Short-lived auth codes |
 | `oauth_access_tokens` | Issued JWT metadata |
 | `oauth_refresh_tokens` | Refresh token rotation |
@@ -116,13 +153,18 @@ authenticateRequest() → token starts with "sk-"?
 |------|---------|
 | `lib/oauth/oidc-provider-config.ts` | Provider initialization |
 | `lib/oauth/drizzle-adapter.ts` | Database adapter for oidc-provider |
+| `lib/oauth/first-party-grants.ts` | Explicit first-party grant and interaction policy |
+| `lib/oauth/node-http-adapter.ts` | Node/Web request-response bridge |
+| `lib/oauth/interaction-service.ts` | Read-only public interaction API adapter |
 | `lib/oauth/redirect-uri-policy.ts` | Application-aware redirect security policy |
 | `lib/oauth/jwt-signer.ts` | JWT signing factory (KMS or local) |
 | `lib/oauth/kms-jwt-service.ts` | AWS KMS signing implementation |
 | `lib/oauth/jwks-cache.ts` | JWKS key caching for verification |
 | `app/api/oauth/[...oidc]/route.ts` | OIDC endpoint routing |
+| `app/auth/[uid]/route.ts` | Provider-generated authorization resume routing |
 | `app/.well-known/openid-configuration/route.ts` | Discovery document |
 | `app/(protected)/oauth/authorize/page.tsx` | Consent UI |
+| `app/(protected)/oauth/authorize/interaction/[uid]/[action]/route.ts` | Login/consent completion |
 | `actions/oauth/consent.actions.ts` | Consent server actions |
 | `actions/oauth/oauth-client.actions.ts` | Client CRUD actions |
 

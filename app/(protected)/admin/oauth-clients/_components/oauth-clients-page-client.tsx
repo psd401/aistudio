@@ -123,6 +123,7 @@ export function OAuthClientsPageClient({ initialClients }: Props) {
                 <TableHead>Client ID</TableHead>
                 <TableHead>Type</TableHead>
                 <TableHead>Auth Method</TableHead>
+                <TableHead>Trust</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Scopes</TableHead>
                 <TableHead className="w-24">Actions</TableHead>
@@ -153,6 +154,13 @@ export function OAuthClientsPageClient({ initialClients }: Props) {
                       {client.tokenEndpointAuthMethod === "none"
                         ? "Public (PKCE)"
                         : "Confidential"}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={client.isFirstParty ? "default" : "outline"}
+                    >
+                      {client.isFirstParty ? "First-party" : "Standard"}
                     </Badge>
                   </TableCell>
                   <TableCell>

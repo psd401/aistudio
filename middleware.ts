@@ -1,6 +1,8 @@
 import { authMiddleware } from "@/auth";
 import { NextResponse } from "next/server";
 import { getArtifactSandboxOrigin } from "@/lib/content/artifact-sandbox-config";
+import { inAppSignInCallbackUrl } from "@/lib/auth/sign-in-callback";
+import { isOidcProviderResumePath } from "@/lib/oauth/resume-path";
 
 // Public paths that don't require authentication
 const PUBLIC_PATHS = [
@@ -94,7 +96,7 @@ export default authMiddleware((req) => {
   // Check if path is public
   const isPublicPath = PUBLIC_PATHS.some(path => 
     nextUrl.pathname === path || nextUrl.pathname.startsWith(path + "/")
-  );
+  ) || isOidcProviderResumePath(nextUrl.pathname);
 
   // Create response with security headers
   let response: NextResponse;
@@ -128,7 +130,8 @@ export default authMiddleware((req) => {
   }
   // Redirect unauthenticated users to sign-in for non-API routes
   else if (!isLoggedIn) {
-    response = NextResponse.redirect(new URL(`/api/auth/signin?callbackUrl=${encodeURIComponent(nextUrl.pathname)}`, nextUrl));
+    const callbackUrl = inAppSignInCallbackUrl(nextUrl);
+    response = NextResponse.redirect(new URL(`/api/auth/signin?callbackUrl=${encodeURIComponent(callbackUrl)}`, nextUrl));
   }
   else {
     response = NextResponse.next();

@@ -35,6 +35,7 @@ export const oauthClients = pgTable("oauth_clients", {
   accessTokenTtl: integer("access_token_ttl").notNull().default(900),
   refreshTokenTtl: integer("refresh_token_ttl").notNull().default(86400),
   isActive: boolean("is_active").notNull().default(true),
+  isFirstParty: boolean("is_first_party").notNull().default(false),
   createdBy: integer("created_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

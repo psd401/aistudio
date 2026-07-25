@@ -12,8 +12,15 @@ import {
   type OidcSigningKeySet,
 } from "./oidc-signing-key-store"
 import { getIssuerUrl } from "./issuer-config"
-import { ALL_OAUTH_SCOPES } from "./oauth-scopes"
+import {
+  ALL_OAUTH_SCOPES,
+  RESOURCE_SERVER_SCOPES,
+} from "./oauth-scopes"
 import { getOidcCookieSecret } from "./oidc-cookie-secret"
+import {
+  createFirstPartyLoadExistingGrant,
+  createOAuthInteractionPolicy,
+} from "./first-party-grants"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -130,6 +137,13 @@ export async function getOidcProvider(
     // ==========================================
     // Dynamic client registration is not enabled;
     // clients are managed via admin UI and adapter.
+    extraClientMetadata: {
+      properties: ["is_first_party"],
+    },
+
+    // First-party clients receive only their explicitly registered, requested
+    // scopes and only after the provider has an authenticated account.
+    loadExistingGrant: createFirstPartyLoadExistingGrant(issuer),
 
     // ==========================================
     // JWKS — signing keys
@@ -158,7 +172,7 @@ export async function getOidcProvider(
         defaultResource: async () => issuer,
         useGrantedResource: async () => true,
         getResourceServerInfo: async () => ({
-          scope: ALL_OAUTH_SCOPES.join(" "),
+          scope: RESOURCE_SERVER_SCOPES.join(" "),
           audience: issuer,
           accessTokenTTL: 900,
           accessTokenFormat: "jwt" as const,
@@ -251,6 +265,7 @@ export async function getOidcProvider(
     // Interactions — custom consent UI
     // ==========================================
     interactions: {
+      policy: createOAuthInteractionPolicy(),
       url: (_ctx, interaction) => {
         return `/oauth/authorize?uid=${interaction.uid}`
       },

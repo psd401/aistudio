@@ -2,23 +2,35 @@
  * Protocol smoke test for the public OAuth/OIDC contract (Issue #1285).
  *
  * It runs the repository's real oidc-provider version with a deterministic
- * in-memory adapter and exercises security behavior at HTTP boundaries: S256
- * PKCE, verifier/redirect mismatch, code replay, RS256 access JWTs, refresh
- * rotation/replay, expiry, revocation, and native loopback port matching.
+ * in-memory adapter and exercises the browser-visible authorization
+ * interaction lifecycle plus token security at HTTP boundaries: first-party
+ * login without consent, third-party consent, S256 PKCE, redirect mismatch,
+ * code replay, RS256 access JWTs, refresh rotation/replay, expiry, revocation,
+ * and native redirect matching.
  *
  * Run: bun run test:oauth-public-flow
  */
 
 import assert from "node:assert/strict"
 import { createHash, generateKeyPairSync } from "node:crypto"
-import { createServer, type Server } from "node:http"
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http"
 import type { AddressInfo } from "node:net"
 import Provider, {
   type Adapter,
   type AdapterPayload,
+  type Interaction,
 } from "oidc-provider"
 import { decodeJwt, decodeProtectedHeader } from "jose"
 import { scriptLogger as log } from "../db/script-logger"
+import {
+  createFirstPartyLoadExistingGrant,
+  createOAuthInteractionPolicy,
+} from "../../lib/oauth/first-party-grants"
 
 interface Stored {
   payload: AdapterPayload
@@ -116,8 +128,85 @@ interface OAuthError {
   error_description?: string
 }
 
+interface AuthorizationResult {
+  callback: URL
+  prompts: string[]
+}
+
+class CookieJar {
+  private readonly values = new Map<
+    string,
+    { value: string; path: string }
+  >()
+
+  capture(response: Response, requestUrl: string): void {
+    const requestPath = new URL(requestUrl).pathname
+    const lastSlash = requestPath.lastIndexOf("/")
+    const defaultPath =
+      lastSlash <= 0 ? "/" : requestPath.slice(0, lastSlash)
+
+    for (const cookie of response.headers.getSetCookie()) {
+      const pair = cookie.split(";", 1)[0]
+      const separator = pair.indexOf("=")
+      if (separator <= 0) continue
+      const name = pair.slice(0, separator)
+      const value = pair.slice(separator + 1)
+      const path =
+        cookie.match(/(?:^|;)\s*path=([^;]+)/i)?.[1] ?? defaultPath
+      if (
+        value.length === 0 ||
+        /(?:^|;)\s*max-age=0(?:;|$)/i.test(cookie)
+      ) {
+        this.values.delete(name)
+      } else {
+        this.values.set(name, { value, path })
+      }
+    }
+  }
+
+  header(requestUrl: string): string | undefined {
+    const requestPath = new URL(requestUrl).pathname
+    const cookies = [...this.values].filter(([, cookie]) => {
+      return (
+        requestPath === cookie.path ||
+        requestPath.startsWith(
+          cookie.path.endsWith("/") ? cookie.path : `${cookie.path}/`
+        )
+      )
+    })
+    if (cookies.length === 0) return undefined
+    return cookies
+      .map(([name, cookie]) => `${name}=${cookie.value}`)
+      .join("; ")
+  }
+}
+
 function pkce(verifier: string): string {
   return createHash("sha256").update(verifier).digest("base64url")
+}
+
+function isRedirect(status: number): boolean {
+  return status >= 300 && status < 400
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) &&
+    value.every((item) => typeof item === "string")
+    ? value
+    : []
+}
+
+async function fetchWithCookies(
+  url: string,
+  jar: CookieJar
+): Promise<Response> {
+  const cookie = jar.header(url)
+  const response = await fetch(url, {
+    redirect: "manual",
+    headers: cookie ? { cookie } : undefined,
+  })
+  jar.capture(response, url)
+  return response
 }
 
 async function postForm<T>(
@@ -162,11 +251,19 @@ async function main(): Promise<void> {
     alg: "RS256",
     use: "sig",
   }
-  const clientId = "atrium-chrome-extension"
+  const clientId = "ae781263-20c0-4b0c-8a34-8be01ab72fb1"
   const redirectUri =
-    "https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/atrium"
-  const nativeClientId = "atrium-native"
-  const nativeRedirectUri = "http://127.0.0.1/oauth/callback"
+    "https://jldnpmcpimhabiphcglkbgmbffpoocpo.chromiumapp.org/atrium"
+  const nativeClientId = "fbdaa815-1b0f-435b-805f-1732805720c1"
+  const nativeRedirectUri =
+    "org.psd401.atrium-capture:/oauth/callback"
+  const thirdPartyClientId = "third-party-browser"
+  const thirdPartyRedirectUri =
+    "https://third-party.example/oauth/callback"
+  const loopbackClientId = "native-loopback-smoke"
+  const loopbackRedirectUri = "http://127.0.0.1/oauth/callback"
+  const registeredScopes =
+    "openid profile offline_access content:read content:create content:update content:publish_internal"
   const verifier = "a".repeat(64)
 
   const holder = createServer()
@@ -184,6 +281,8 @@ async function main(): Promise<void> {
         redirect_uris: [redirectUri],
         response_types: ["code"],
         grant_types: ["authorization_code", "refresh_token"],
+        scope: registeredScopes,
+        is_first_party: true,
       },
       {
         client_id: nativeClientId,
@@ -193,8 +292,36 @@ async function main(): Promise<void> {
         redirect_uris: [nativeRedirectUri],
         response_types: ["code"],
         grant_types: ["authorization_code", "refresh_token"],
+        scope: registeredScopes,
+        is_first_party: true,
+      },
+      {
+        client_id: thirdPartyClientId,
+        client_name: "Third-party browser",
+        application_type: "web",
+        token_endpoint_auth_method: "none",
+        redirect_uris: [thirdPartyRedirectUri],
+        response_types: ["code"],
+        grant_types: ["authorization_code", "refresh_token"],
+        scope: registeredScopes,
+        is_first_party: false,
+      },
+      {
+        client_id: loopbackClientId,
+        client_name: "Native loopback smoke client",
+        application_type: "native",
+        token_endpoint_auth_method: "none",
+        redirect_uris: [loopbackRedirectUri],
+        response_types: ["code"],
+        grant_types: ["authorization_code", "refresh_token"],
+        scope: registeredScopes,
+        is_first_party: false,
       },
     ],
+    extraClientMetadata: {
+      properties: ["is_first_party"],
+    },
+    loadExistingGrant: createFirstPartyLoadExistingGrant(origin),
     jwks: { keys: [signingJwk] },
     pkce: { required: () => true },
     responseTypes: ["code"],
@@ -206,6 +333,7 @@ async function main(): Promise<void> {
       "content:create",
       "content:update",
       "content:publish_internal",
+      "content:not_registered",
     ],
     issueRefreshToken: () => true,
     rotateRefreshToken: true,
@@ -248,9 +376,130 @@ async function main(): Promise<void> {
         name: "Smoke User",
       }),
     }),
+    interactions: {
+      policy: createOAuthInteractionPolicy(),
+      url: (_ctx, interaction) =>
+        `/oauth/authorize?uid=${interaction.uid}`,
+    },
     cookies: { keys: ["smoke-cookie-key"] },
   })
-  const server = createServer(provider.callback())
+  const observedPrompts: Array<{
+    clientId: string
+    name: string
+    details: Record<string, unknown>
+  }> = []
+  const providerCallback = provider.callback()
+
+  async function finishInteraction(
+    request: IncomingMessage,
+    response: ServerResponse,
+    interaction: Interaction
+  ): Promise<void> {
+    const rawClientId = interaction.params.client_id
+    if (typeof rawClientId !== "string") {
+      throw new TypeError("interaction client_id must be a string")
+    }
+    const clientIdParam = rawClientId
+
+    if (interaction.prompt.name === "login") {
+      await provider.interactionFinished(
+        request,
+        response,
+        { login: { accountId: "1" } },
+        { mergeWithLastSubmission: false }
+      )
+      return
+    }
+
+    assert.equal(interaction.prompt.name, "consent")
+    const accountId = interaction.session?.accountId
+    assert(accountId)
+    let grant = interaction.grantId
+      ? await provider.Grant.find(interaction.grantId)
+      : undefined
+    grant ??= new provider.Grant({
+      accountId,
+      clientId: clientIdParam,
+    })
+
+    const details = interaction.prompt.details
+    const oidcScopes = stringArray(details.missingOIDCScope)
+    if (oidcScopes.length > 0) {
+      grant.addOIDCScope(oidcScopes.join(" "))
+    }
+    const oidcClaims = stringArray(details.missingOIDCClaims)
+    if (oidcClaims.length > 0) {
+      grant.addOIDCClaims(oidcClaims)
+    }
+    const resources = details.missingResourceScopes
+    if (
+      resources &&
+      typeof resources === "object" &&
+      !Array.isArray(resources)
+    ) {
+      for (const [resource, value] of Object.entries(resources)) {
+        const scopes = stringArray(value)
+        if (scopes.length > 0) {
+          grant.addResourceScope(resource, scopes.join(" "))
+        }
+      }
+    }
+
+    await provider.interactionFinished(
+      request,
+      response,
+      { consent: { grantId: await grant.save() } },
+      { mergeWithLastSubmission: true }
+    )
+  }
+
+  async function handleRequest(
+    request: IncomingMessage,
+    response: ServerResponse
+  ): Promise<void> {
+    const path = new URL(request.url ?? "/", origin).pathname
+    if (path === "/oauth/authorize") {
+      const interaction = await provider.interactionDetails(
+        request,
+        response
+      )
+      const rawClientId = interaction.params.client_id
+      if (typeof rawClientId !== "string") {
+        throw new TypeError("interaction client_id must be a string")
+      }
+      observedPrompts.push({
+        clientId: rawClientId,
+        name: interaction.prompt.name,
+        details: interaction.prompt.details,
+      })
+      response.statusCode = 303
+      response.setHeader(
+        "Location",
+        `/oauth/authorize/interaction/${interaction.uid}/${interaction.prompt.name}`
+      )
+      response.end()
+      return
+    }
+    if (path.startsWith("/oauth/authorize/interaction/")) {
+      const interaction = await provider.interactionDetails(
+        request,
+        response
+      )
+      await finishInteraction(request, response, interaction)
+      return
+    }
+    providerCallback(request, response)
+  }
+
+  const server = createServer((request, response) => {
+    void handleRequest(request, response).catch((error) => {
+      log.error("OAuth smoke HTTP handler failed", {
+        error: error instanceof Error ? error.message : String(error),
+      })
+      if (!response.headersSent) response.statusCode = 500
+      if (!response.writableEnded) response.end()
+    })
+  })
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject)
     const port = Number(new URL(origin).port)
@@ -262,6 +511,10 @@ async function main(): Promise<void> {
   const client = foundClient
   const nativeClient = await provider.Client.find(nativeClientId)
   if (!nativeClient) throw new Error("Smoke native OAuth client not found")
+  const loopbackClient = await provider.Client.find(loopbackClientId)
+  if (!loopbackClient) {
+    throw new Error("Smoke loopback OAuth client not found")
+  }
 
   async function authorizationCode(
     expire = false
@@ -293,19 +546,222 @@ async function main(): Promise<void> {
     return value
   }
 
+  function authorizationUrl(options: {
+    clientId: string
+    redirectUri: string
+    state: string
+    scope?: string
+    includeChallenge?: boolean
+    challengeMethod?: string
+  }): string {
+    const params = new URLSearchParams({
+      client_id: options.clientId,
+      redirect_uri: options.redirectUri,
+      response_type: "code",
+      scope: options.scope ?? registeredScopes,
+      state: options.state,
+      resource: origin,
+    })
+    if (options.includeChallenge !== false) {
+      params.set("code_challenge", pkce(verifier))
+      params.set(
+        "code_challenge_method",
+        options.challengeMethod ?? "S256"
+      )
+    }
+    return `${origin}/auth?${params.toString()}`
+  }
+
+  async function authorize(options: {
+    clientId: string
+    redirectUri: string
+    state: string
+    jar: CookieJar
+  }): Promise<AuthorizationResult> {
+    let current = authorizationUrl(options)
+    const promptStart = observedPrompts.length
+
+    for (let redirectCount = 0; redirectCount < 10; redirectCount += 1) {
+      const response = await fetchWithCookies(current, options.jar)
+      assert(
+        isRedirect(response.status),
+        `authorization expected redirect, got ${response.status}: ${await response.text()}`
+      )
+      const location = response.headers.get("location")
+      assert(location, "authorization redirect missing Location")
+      const next = new URL(location, current)
+      if (next.href.startsWith(options.redirectUri)) {
+        return {
+          callback: next,
+          prompts: observedPrompts
+            .slice(promptStart)
+            .map((prompt) => prompt.name),
+        }
+      }
+      assert.equal(
+        next.origin,
+        origin,
+        `unexpected authorization redirect: ${next.href}`
+      )
+      current = next.href
+    }
+
+    throw new Error("authorization redirect limit exceeded")
+  }
+
+  async function assertAuthorizationRejected(
+    url: string,
+    expectedError: string
+  ): Promise<void> {
+    const response = await fetchWithCookies(url, new CookieJar())
+    if (isRedirect(response.status)) {
+      const location = response.headers.get("location")
+      assert(location, "OAuth error redirect missing Location")
+      const error = new URL(location, url).searchParams.get("error")
+      assert.equal(error, expectedError)
+      return
+    }
+
+    assert(
+      response.status >= 400,
+      `OAuth rejection returned unexpected HTTP ${response.status}`
+    )
+    const body = await response.text()
+    assert(
+      body.includes(expectedError),
+      `OAuth rejection did not include ${expectedError}: ${body}`
+    )
+  }
+
   try {
+    const browserSession = new CookieJar()
+    const signedOutBrowser = await authorize({
+      clientId,
+      redirectUri,
+      state: "browser-signed-out",
+      jar: browserSession,
+    })
+    assert.equal(
+      signedOutBrowser.callback.searchParams.get("state"),
+      "browser-signed-out"
+    )
+    assert(signedOutBrowser.callback.searchParams.get("code"))
+    assert.deepEqual(
+      signedOutBrowser.prompts,
+      ["login"],
+      JSON.stringify(observedPrompts, null, 2)
+    )
+
+    const signedInBrowser = await authorize({
+      clientId,
+      redirectUri,
+      state: "browser-signed-in",
+      jar: browserSession,
+    })
+    assert.equal(
+      signedInBrowser.callback.searchParams.get("state"),
+      "browser-signed-in"
+    )
+    assert(signedInBrowser.callback.searchParams.get("code"))
+    assert.deepEqual(signedInBrowser.prompts, [])
+
+    const nativeFirstParty = await authorize({
+      clientId: nativeClientId,
+      redirectUri: nativeRedirectUri,
+      state: "native-first-party",
+      jar: new CookieJar(),
+    })
+    assert.equal(
+      nativeFirstParty.callback.searchParams.get("state"),
+      "native-first-party"
+    )
+    assert(nativeFirstParty.callback.searchParams.get("code"))
+    assert.deepEqual(nativeFirstParty.prompts, ["login"])
+
+    const thirdParty = await authorize({
+      clientId: thirdPartyClientId,
+      redirectUri: thirdPartyRedirectUri,
+      state: "third-party",
+      jar: new CookieJar(),
+    })
+    assert.equal(
+      thirdParty.callback.searchParams.get("state"),
+      "third-party"
+    )
+    assert(thirdParty.callback.searchParams.get("code"))
+    assert.deepEqual(thirdParty.prompts, ["login", "consent"])
+
+    await assertAuthorizationRejected(
+      authorizationUrl({
+        clientId,
+        redirectUri,
+        state: "unregistered-scope",
+        scope: "openid content:not_registered",
+      }),
+      "invalid_scope"
+    )
+    await assertAuthorizationRejected(
+      authorizationUrl({
+        clientId,
+        redirectUri:
+          "https://jldnpmcpimhabiphcglkbgmbffpoocpo.chromiumapp.org/wrong",
+        state: "callback-mismatch",
+      }),
+      "invalid_redirect_uri"
+    )
+    await assertAuthorizationRejected(
+      authorizationUrl({
+        clientId,
+        redirectUri,
+        state: "missing-pkce",
+        includeChallenge: false,
+      }),
+      "invalid_request"
+    )
+    await assertAuthorizationRejected(
+      authorizationUrl({
+        clientId,
+        redirectUri,
+        state: "plain-pkce",
+        challengeMethod: "plain",
+      }),
+      "invalid_request"
+    )
+    await assertAuthorizationRejected(
+      authorizationUrl({
+        clientId: "inactive-or-unknown-client",
+        redirectUri,
+        state: "inactive-client",
+      }),
+      "invalid_client"
+    )
+
+    assert.equal(
+      nativeClient.redirectUriAllowed(nativeRedirectUri),
+      true
+    )
     assert.equal(
       nativeClient.redirectUriAllowed(
+        "org.psd401.atrium-capture:/oauth/wrong"
+      ),
+      false
+    )
+    assert.equal(
+      loopbackClient.redirectUriAllowed(
         "http://127.0.0.1:49152/oauth/callback"
       ),
       true
     )
     assert.equal(
-      nativeClient.redirectUriAllowed("http://localhost:49152/oauth/callback"),
+      loopbackClient.redirectUriAllowed(
+        "http://localhost:49152/oauth/callback"
+      ),
       false
     )
     assert.equal(
-      nativeClient.redirectUriAllowed("http://127.0.0.1:49152/wrong"),
+      loopbackClient.redirectUriAllowed(
+        "http://127.0.0.1:49152/wrong"
+      ),
       false
     )
 
@@ -427,6 +883,15 @@ async function main(): Promise<void> {
 
     log.info("OAuth public-client protocol smoke passed", {
       checks: [
+        "first_party_signed_out_login_only",
+        "first_party_signed_in_no_prompt",
+        "first_party_native_login_only",
+        "third_party_consent",
+        "unregistered_scope_rejected",
+        "authorization_redirect_mismatch",
+        "missing_pkce_rejected",
+        "non_s256_pkce_rejected",
+        "inactive_client_rejected",
         "wrong_verifier",
         "redirect_mismatch",
         "expired_code",
@@ -435,6 +900,7 @@ async function main(): Promise<void> {
         "refresh_rotation",
         "refresh_replay",
         "revocation",
+        "native_custom_scheme_exact_match",
         "native_loopback_variable_port",
       ],
     })

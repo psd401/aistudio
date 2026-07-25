@@ -9,6 +9,7 @@
 import {
   getScopeLabel,
   PUBLIC_CLIENT_REQUIRED_OIDC_SCOPES,
+  RESOURCE_SERVER_SCOPES,
   withPublicClientRequiredScopes,
 } from "@/lib/oauth/oauth-scopes"
 
@@ -64,5 +65,25 @@ describe("withPublicClientRequiredScopes", () => {
       ...PUBLIC_CLIENT_REQUIRED_OIDC_SCOPES,
       "content:create",
     ])
+  })
+})
+
+describe("RESOURCE_SERVER_SCOPES", () => {
+  it("contains API scopes without duplicating OIDC scopes into the resource grant", () => {
+    expect(RESOURCE_SERVER_SCOPES).toEqual(
+      expect.arrayContaining([
+        "mcp:search_decisions",
+        "content:read",
+        "content:publish_internal",
+        "platform:read",
+      ])
+    )
+    expect(RESOURCE_SERVER_SCOPES).not.toEqual(
+      expect.arrayContaining([
+        "openid",
+        "profile",
+        "offline_access",
+      ])
+    )
   })
 })

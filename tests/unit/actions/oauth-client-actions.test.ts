@@ -28,6 +28,7 @@ jest.mock('@/lib/db/schema', () => ({
     accessTokenTtl: 'access_token_ttl',
     refreshTokenTtl: 'refresh_token_ttl',
     isActive: 'is_active',
+    isFirstParty: 'is_first_party',
     createdAt: 'created_at',
     updatedAt: 'updated_at',
   },
@@ -78,6 +79,7 @@ describe('revokeOAuthClient (REV-COR-055)', () => {
       accessTokenTtl: 900,
       refreshTokenTtl: 86400,
       isActive: true,
+      isFirstParty: false,
       createdAt,
       updatedAt: createdAt,
     }])
@@ -112,6 +114,7 @@ describe('revokeOAuthClient (REV-COR-055)', () => {
       accessTokenTtl: 900,
       refreshTokenTtl: 86400,
       isActive: true,
+      isFirstParty: false,
       createdAt,
       updatedAt: createdAt,
     }
