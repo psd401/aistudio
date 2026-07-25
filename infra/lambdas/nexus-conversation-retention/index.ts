@@ -35,7 +35,10 @@ import {
 } from "@aws-sdk/client-s3";
 import postgres from "postgres";
 
-import { CANDIDATE_WHERE_CLAUSE } from "./retention-policy";
+import {
+  CANDIDATE_WHERE_CLAUSE,
+  NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL,
+} from "./retention-policy";
 import {
   runRetentionSweep,
   type CandidateConversation,
@@ -363,6 +366,7 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
         `SELECT id
          FROM nexus_conversations
          WHERE ${CANDIDATE_WHERE_CLAUSE}
+           AND ${NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL}
            AND id = $2::uuid
          LIMIT 1`,
         [retentionDays, conversationId]
@@ -481,6 +485,7 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       const rows = await sql.unsafe<{ id: string }[]>(
         `DELETE FROM nexus_conversations
          WHERE ${CANDIDATE_WHERE_CLAUSE}
+           AND ${NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL}
            AND id = $2::uuid
          RETURNING id`,
         [retentionDays, conversationId]

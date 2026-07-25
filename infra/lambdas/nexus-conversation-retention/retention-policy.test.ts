@@ -23,6 +23,7 @@ import {
   isEligibleForDeletion,
   retentionCutoff,
   CANDIDATE_WHERE_CLAUSE,
+  NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL,
   type ConversationEligibilityRow,
 } from "./retention-policy";
 import {
@@ -802,5 +803,35 @@ describe("extractOutOfPrefixKeys — ownership, not just syntax", () => {
   test("ignores malformed parts without throwing", () => {
     expect(extractOutOfPrefixKeys([{ parts: null }, { parts: "nope" }], CONV, OWNER)).toEqual([]);
     expect(extractOutOfPrefixKeys([{ parts: [null, 3, { type: "text" }] }], CONV, OWNER)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Committed-message gate
+// ---------------------------------------------------------------------------
+
+describe("NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL", () => {
+  test("derives age from committed nexus_messages rows, not the denormalized clock", () => {
+    // upsertMessageWithStats inserts the message and updates the conversation
+    // stats as two separate statements ("Not atomic" per its own docstring), so
+    // last_message_at can read stale while a message is already committed —
+    // transiently, or permanently if the stats update failed.
+    expect(NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL).toContain("NOT EXISTS");
+    expect(NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL).toContain("FROM nexus_messages m");
+    expect(NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL).toContain("m.created_at >=");
+    expect(NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL).toContain(
+      "m.conversation_id = nexus_conversations.id"
+    );
+  });
+
+  test("compares against UTC and reuses $1 so it composes with the candidate clause", () => {
+    expect(NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL).toContain("now() AT TIME ZONE 'UTC'");
+    const placeholders = NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL.match(/\$\d+/g) ?? [];
+    expect(placeholders).toEqual(["$1"]);
+  });
+
+  test("is NOT part of the bulk candidate scan — that stays a cheap indexed range read", () => {
+    expect(CANDIDATE_WHERE_CLAUSE).not.toContain("NOT EXISTS");
+    expect(CANDIDATE_WHERE_CLAUSE).not.toContain("nexus_messages");
   });
 });
