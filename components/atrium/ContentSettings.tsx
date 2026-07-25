@@ -59,6 +59,13 @@ import { createLogger } from "@/lib/client-logger";
 const log = createLogger({ component: "ContentSettings" });
 
 /**
+ * Upper bound on tags in the settings dialog. Presentation-only — the service
+ * imposes no count limit, so this is purely to stop the pill field growing
+ * without end. Deliberately generous.
+ */
+const MAX_CONTENT_TAGS = 30;
+
+/**
  * Persist a settings patch and apply the resulting local/navigation state.
  * Module-level with the component's setters threaded in (mirrors
  * VisibilityChip's performVisibilitySave) so the component body stays under the
@@ -255,6 +262,11 @@ function SettingsFields({
           onChange={onTags}
           placeholder="Add a tag and press Enter"
           disabled={saving}
+          // Explicit, and higher than TagInput's default of 10: the previous
+          // comma-separated field imposed no cap at all, so an existing object
+          // may already carry more than the default would allow — silently
+          // refusing to re-add them on the next save would drop metadata.
+          maxTags={MAX_CONTENT_TAGS}
         />
       </div>
 
