@@ -11,10 +11,11 @@
  * the provider is returned (as state) so the presence layer can read its
  * awareness once it is ready.
  *
- * The Y.Doc is created ONCE per mount and destroyed on unmount — DocumentEditor
- * mounts with `key={obj.id}`, so switching documents fully remounts (fresh doc +
- * fresh provider), and this hook's cleanup tears down the doc the unmounting
- * instance owned (also freeing Yjs structs eagerly instead of waiting on GC).
+ * The Y.Doc is created ONCE per mount and lives as long as the component does —
+ * DocumentEditor mounts with `key={obj.id}`, so switching documents fully
+ * remounts (fresh doc + fresh provider) and the previous doc becomes garbage.
+ * The effect cleanup tears down only the PROVIDER; see the cleanup comment for
+ * why destroying the Y.Doc there is a StrictMode footgun (#1336 B5).
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -37,7 +38,20 @@ export interface UseCollabSessionResult {
   /** The provider once connected (null while the token is being fetched). */
   provider: WebsocketProvider | null;
   status: CollabStatus;
+  /**
+   * Whether the SESSION grants edit permission. This is an authorization answer
+   * only — it says nothing about whether the document body has arrived yet, so
+   * callers must not hand it straight to `editor.setEditable`: until the first
+   * Yjs sync the doc is empty, and an editable empty sheet invites typing into
+   * what looks like a blank document that is about to be replaced (#1336 B5).
+   * Gate on `canEdit && synced`.
+   */
   canEdit: boolean;
+  /**
+   * True once the provider has completed its FIRST sync, i.e. the persisted
+   * document state has actually arrived. Never returns to false.
+   */
+  synced: boolean;
   /** The resolved object UUID (`docName`) for the snapshot/publish actions. */
   docNameRef: RefObject<string | null>;
 }
@@ -54,6 +68,9 @@ export function useCollabSession(idOrSlug: string): UseCollabSessionResult {
   const [provider, setProvider] = useState<WebsocketProvider | null>(null);
   const [status, setStatus] = useState<CollabStatus>("connecting");
   const [canEdit, setCanEdit] = useState(false);
+  // Latches true on the first successful sync and never goes back — a later
+  // reconnect must not re-lock an editor the user is already typing in.
+  const [synced, setSynced] = useState(false);
   const docNameRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -113,8 +130,10 @@ export function useCollabSession(idOrSlug: string): UseCollabSessionResult {
             reminting = remintToken();
           }
         });
-        wsProvider.on("sync", (synced: boolean) => {
-          if (!cancelled && synced) setStatus("ready");
+        wsProvider.on("sync", (isSynced: boolean) => {
+          if (cancelled || !isSynced) return;
+          setStatus("ready");
+          setSynced(true);
         });
         providerRef.current = wsProvider;
         setProvider(wsProvider);
@@ -130,9 +149,20 @@ export function useCollabSession(idOrSlug: string): UseCollabSessionResult {
       providerRef.current = null;
       setProvider(null);
       docNameRef.current = null;
-      ydoc.destroy();
+      // The Y.Doc is DELIBERATELY not destroyed here (#1336 B5). This cleanup
+      // also runs during React StrictMode's dev-only effect double-invoke, where
+      // the component — and the TipTap editor already bound to this exact doc
+      // via `Collaboration.configure({ document: ydoc })` — stays mounted. The
+      // old `ydoc.destroy()` therefore killed the live doc and the re-run effect
+      // bound a fresh provider to a dead one: first sync never completed, the
+      // sheet stayed empty, and the byline sat on "connecting…" forever. The doc
+      // cannot be re-created either, because the editor binds it exactly once at
+      // creation. Its lifetime is the component's: `DocumentEditor` mounts with
+      // `key={obj.id}`, so switching documents fully remounts and the previous
+      // doc becomes garbage. Freeing the structs eagerly was only an
+      // optimization — correctness wins.
     };
   }, [idOrSlug]);
 
-  return { ydoc, provider, status, canEdit, docNameRef };
+  return { ydoc, provider, status, canEdit, synced, docNameRef };
 }

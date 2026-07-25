@@ -475,6 +475,9 @@ export function EditorBubbleMenu({
       // Only over a real, non-empty text selection, and only for editors (a
       // read-only viewer never gets the formatting UI).
       shouldShow={({ editor: e, from, to }) => e.isEditable && to > from}
+      // The default 250ms debounce made every selection feel laggy — the
+      // toolbar appeared a beat after the user finished dragging (#1336 B4).
+      updateDelay={0}
       options={{ placement: "top", offset: 8 }}
     >
       <div

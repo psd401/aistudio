@@ -1310,17 +1310,43 @@
   z-index: 2;
 }
 
+/* Cover BLOCK (#1336) — wraps the band (and its picker) plus the emoji tile as
+ * one unit. Two jobs:
+ *  1. It carries the negative bleed margins that used to sit on `.mer-cover`, so
+ *     the picker (a child of `.mer-cover-frame`, NOT of the overflow-hidden band)
+ *     can escape the band without the band losing its edge-to-edge bleed.
+ *  2. It owns the gap to the kicker/title below. Putting the bottom margin on the
+ *     BLOCK rather than on `.mer-cover` is load-bearing: the emoji tile overlaps
+ *     the band by -28px, so a bottom margin on the band itself would simply be
+ *     cancelled by that overlap and the "DOCUMENT" kicker would stay glued to the
+ *     tile (the #1336 B2 symptom).
+ * `.mer-cover-frame` is a plain positioning context — the band keeps its own
+ * `overflow: hidden` (load-bearing for the two radial glow pseudo-elements). */
+.mer-cover-block {
+  margin-bottom: 26px;
+}
+.mer-cover-frame {
+  position: relative;
+}
+
 /* Editor sheet: bleed the cover to the sheet edges (cancel the 48px/60px padding). */
-.mer-sheet .mer-cover {
-  margin: -48px -60px 0;
+.mer-sheet .mer-cover-block {
+  margin-left: -60px;
+  margin-right: -60px;
+  margin-top: -48px;
 }
 @media (max-width: 720px) {
-  .mer-sheet .mer-cover {
-    margin: -32px -26px 0;
+  .mer-sheet .mer-cover-block {
+    margin-left: -26px;
+    margin-right: -26px;
+    margin-top: -32px;
   }
 }
 
-/* Cover-gradient picker popover (Change-cover pill → swatches + emoji field). */
+/* Cover-gradient picker popover (Change-cover pill → swatches + emoji field).
+ * Anchored to `.mer-cover-frame`, which does NOT clip — before #1336 this was a
+ * child of the 170px `overflow: hidden` band, so roughly a third of the popover
+ * (the ICON label, the emoji field, and "Remove cover") was invisible. */
 .mer-cover-picker {
   position: absolute;
   right: 14px;
@@ -1751,6 +1777,13 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+/* Collapsed rail (#1336 B3). `display: none` rather than unmounting, so
+ * CommentSidebar stays the single owner of the thread data and keeps feeding the
+ * topbar chip its open-comment count. The desk is `justify-content: center`, so
+ * removing the column from layout re-centers the sheet for free. */
+.mer-comments[data-open="false"] {
+  display: none;
 }
 @media (max-width: 1040px) {
   .mer-comments {
@@ -2339,14 +2372,20 @@
 }
 /* Reader cover band (slice F): a slightly shorter 150px band + 52px tile, bled to
  * the reader sheet's 16px corners. No "Change cover" pill — the reader is read-only. */
+.mer-reader-sheet .mer-cover-block {
+  margin-left: -56px;
+  margin-right: -56px;
+  margin-top: -44px;
+}
 .mer-reader-sheet .mer-cover {
-  margin: -44px -56px 0;
   height: 150px;
   border-radius: 16px 16px 0 0;
 }
 @media (max-width: 720px) {
-  .mer-reader-sheet .mer-cover {
-    margin: -30px -24px 0;
+  .mer-reader-sheet .mer-cover-block {
+    margin-left: -24px;
+    margin-right: -24px;
+    margin-top: -30px;
   }
 }
 .mer-reader-sheet .mer-cover-icon {

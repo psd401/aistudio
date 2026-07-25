@@ -28,10 +28,12 @@
  * stable conversation id.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useEditor, EditorContent, ReactNodeViewRenderer } from "@tiptap/react";
+import type { Editor } from "@tiptap/react";
 import { Collaboration } from "@tiptap/extension-collaboration";
+import type * as Y from "yjs";
 import { Markdown } from "tiptap-markdown";
 import type { Node as TiptapNode, Extensions } from "@tiptap/core";
 import { getSchemaExtensions } from "@/lib/content/collab/editor-extensions";
@@ -52,6 +54,7 @@ import { SuggestionMode, useSuggestionState } from "./suggestion-mode";
 import { CommentSidebar } from "./CommentSidebar";
 import { usePresence, type MarginAvatar, type LocalPresenceUser } from "./use-presence";
 import { useCollabSession, type CollabStatus } from "./use-collab-session";
+import { useProvenancePref } from "./use-provenance-pref";
 import { renderColorFor, initialsFromName, type PresenceUser } from "@/lib/atrium/presence";
 import { acceptAllSuggestions } from "@/lib/content/collab/suggestions";
 import "@/styles/atrium-content.css";
@@ -292,6 +295,7 @@ function MeridianDesk({
   byline,
   body,
   comments,
+  commentsOpen,
 }: {
   sheetRef: React.RefObject<HTMLDivElement | null>;
   margins: MarginAvatar[];
@@ -302,6 +306,13 @@ function MeridianDesk({
   byline: string;
   body: React.ReactNode;
   comments: React.ReactNode;
+  /**
+   * Whether the 296px comment rail is expanded (#1336 B3). When collapsed the
+   * column is `display: none` — NOT unmounted — so `CommentSidebar` keeps
+   * feeding the topbar its open-comment count, and the desk's
+   * `justify-content` re-centers the sheet for free.
+   */
+  commentsOpen: boolean;
 }): React.JSX.Element {
   return (
     <div className="mer-editor-desk">
@@ -327,7 +338,13 @@ function MeridianDesk({
           {body}
         </div>
       </div>
-      <div className="mer-comments">{comments}</div>
+      <div
+        className="mer-comments"
+        data-open={commentsOpen ? "true" : "false"}
+        data-testid="comment-rail"
+      >
+        {comments}
+      </div>
     </div>
   );
 }
@@ -343,12 +360,15 @@ function PanelLayout({
   controls,
   editorBody,
   comments,
+  commentsOpen,
   statusCaption,
 }: {
   presence: React.ReactNode;
   controls: React.ReactNode;
   editorBody: React.ReactNode;
   comments: React.ReactNode;
+  /** Whether the comment block is expanded (#1336 B3). */
+  commentsOpen: boolean;
   statusCaption: React.ReactNode;
 }): React.JSX.Element {
   return (
@@ -358,7 +378,11 @@ function PanelLayout({
         <div className="mer-ectl-group">{controls}</div>
       </div>
       {editorBody}
-      <div className="w-full border-t pt-3">{comments}</div>
+      {/* Collapsed with `hidden`, NOT unmounted: CommentSidebar owns the thread
+          data and keeps feeding the toggle its open-comment count. */}
+      <div className="w-full border-t pt-3" hidden={!commentsOpen}>
+        {comments}
+      </div>
       {statusCaption}
     </div>
   );
@@ -384,6 +408,7 @@ function FullPageLayout({
   byline,
   editorBody,
   comments,
+  commentsOpen,
   statusCaption,
 }: {
   docTitle: string;
@@ -400,6 +425,8 @@ function FullPageLayout({
   byline: string;
   editorBody: React.ReactNode;
   comments: React.ReactNode;
+  /** Whether the comment rail is expanded (#1336 B3). */
+  commentsOpen: boolean;
   statusCaption: React.ReactNode;
 }): React.JSX.Element {
   return (
@@ -421,10 +448,99 @@ function FullPageLayout({
         byline={byline}
         body={editorBody}
         comments={comments}
+        commentsOpen={commentsOpen}
       />
       {statusCaption}
     </div>
   );
+}
+
+/**
+ * Topbar chip toggling the comment rail, badged with the open-comment count
+ * (#1336 B3). Mirrors the `mer-ectl` + `data-active` pattern the Suggesting
+ * control uses.
+ */
+function CommentsToggle({
+  open,
+  openCount,
+  onToggle,
+}: {
+  open: boolean;
+  openCount: number;
+  onToggle: () => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      className="mer-ectl"
+      data-active={open ? "true" : "false"}
+      aria-pressed={open}
+      onClick={onToggle}
+      data-testid="comments-toggle"
+      title={open ? "Hide comments" : "Show comments"}
+    >
+      <span aria-hidden="true">💬</span>
+      <span data-testid="comments-open-count">{openCount}</span>
+      <span className="sr-only">
+        {openCount === 1 ? "1 open comment" : `${openCount} open comments`}
+      </span>
+    </button>
+  );
+}
+
+/**
+ * Topbar chip toggling the provenance rail (#1336 B7). Sits next to Suggesting
+ * and mirrors its `mer-ectl` + `data-active` pattern.
+ */
+function ProvenanceToggle({
+  on,
+  onToggle,
+}: {
+  on: boolean;
+  onToggle: () => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      className="mer-ectl"
+      data-active={on ? "true" : "false"}
+      aria-pressed={on}
+      onClick={onToggle}
+      data-testid="provenance-toggle"
+      title={on ? "Hide who wrote what" : "Show who wrote what"}
+    >
+      <span aria-hidden="true">🎨</span> Authorship
+    </button>
+  );
+}
+
+/**
+ * Comment-rail visibility (#1336 B3). The rail used to occupy its full 296px
+ * unconditionally, even on a document with no comments at all. It now defaults
+ * to open ONLY when the document actually has open threads, and the topbar chip
+ * overrides that either way. `CommentSidebar` owns the thread data and reports
+ * the count up, so this never triggers a second fetch.
+ */
+function useCommentsRail() {
+  const [openCount, setOpenCount] = useState(0);
+  // `null` = the first count has not arrived yet, so no default has been picked.
+  const [userChoice, setUserChoice] = useState<boolean | null>(null);
+  const [autoOpen, setAutoOpen] = useState(false);
+
+  const handleOpenCountChange = useCallback((next: number) => {
+    setOpenCount(next);
+    // Only the FIRST settled count seeds the default; later counts must not
+    // reopen a rail the user deliberately closed.
+    setAutoOpen((prev) => prev || next > 0);
+  }, []);
+
+  const commentsOpen = userChoice ?? autoOpen;
+  const toggleComments = useCallback(
+    () => setUserChoice(!commentsOpen),
+    [commentsOpen]
+  );
+
+  return { openCount, commentsOpen, toggleComments, handleOpenCountChange };
 }
 
 /**
@@ -445,32 +561,60 @@ function useSyncedTitle(title?: string): [string, (next: string) => void] {
   return [docTitle, setDocTitle];
 }
 
-export function DocumentEditor({
-  idOrSlug,
-  userId,
-  layout = "page",
-  title,
-  eyebrow,
-  breadcrumb,
-  historyControl,
-  settingsControl,
+/**
+ * The editor surface: the ProseMirror content plus the floating bubble toolbar,
+ * wrapped in the `.atrium-editor` element that carries the two CSS-only display
+ * flags.
+ */
+function EditorSurface({
+  editor,
   askAgentHref,
-  coverGradient,
-  icon,
-}: DocumentEditorProps) {
-  // The collab session (Y.Doc + provider + status + canEdit) lives in a dedicated
-  // hook so this component stays focused on layout + presence composition.
-  const { ydoc, provider, status, canEdit, docNameRef } =
-    useCollabSession(idOrSlug);
-  // The sheet wrap — positioning context for the margin presence avatars.
-  const sheetRef = useRef<HTMLDivElement | null>(null);
+  provenanceOn,
+  suggesting,
+}: {
+  editor: Editor | null;
+  /** Where the bubble-menu "✦ Ask agent" navigates. */
+  askAgentHref?: string;
+  /** Provenance rail shown (#1336 B7). */
+  provenanceOn: boolean;
+  /** Suggesting mode active (#1336 B6) — drives the document-level mode cue. */
+  suggesting: boolean;
+}): React.JSX.Element {
+  return (
+    <div
+      className="atrium-editor min-w-0"
+      // CSS-only gating (#1336 B7 / B6): both attributes drive presentation
+      // rules in atrium-content.css. No plugin, schema, decoration or Yjs write
+      // is involved — the authorship marks and rail decorations stay in the
+      // document either way.
+      data-provenance={provenanceOn ? "on" : "off"}
+      data-suggesting={suggesting ? "true" : "false"}
+    >
+      <EditorContent editor={editor} className="atrium-content" />
+      {/* Mounted as soon as the editor exists — NOT gated on `canEdit` (#1336
+          B4). Gating the mount meant the plugin was registered only after the
+          collab token round-trip resolved, a window long enough that users
+          reliably selected text into a dead toolbar. `EditorBubbleMenu`'s own
+          `shouldShow` already returns false unless `e.isEditable`, so a
+          read-only viewer still never sees it — the permission gate is
+          unchanged, only its location. */}
+      {editor && (
+        <EditorBubbleMenu editor={editor} askAgentHref={askAgentHref ?? "#"} />
+      )}
+    </div>
+  );
+}
 
-  const { user } = useUser();
-
-  // The editor binds to the Y.Doc directly; the provider syncs that same doc, so
-  // the editor is created once (deps: []) and is unaffected by provider timing.
-  // The collaboration cursor is wired later against the ready provider via
-  // usePresence (editor.registerPlugin) so this single-creation invariant holds.
+/**
+ * Create the Atrium TipTap editor and keep its editability in sync.
+ *
+ * The editor binds to the Y.Doc directly; the provider syncs that same doc, so
+ * the editor is created ONCE (deps: []) and is unaffected by provider timing.
+ * The collaboration cursor is wired later against the ready provider via
+ * `usePresence` (`editor.registerPlugin`), so that single-creation invariant
+ * holds.
+ */
+function useAtriumEditor(ydoc: Y.Doc, userId: number, editable: boolean) {
   const editor = useEditor(
     {
       immediatelyRender: false,
@@ -498,10 +642,50 @@ export function DocumentEditor({
     []
   );
 
-  // Apply edit permission to the editor once the session resolves.
-  useEffect(() => {
-    editor?.setEditable(canEdit);
-  }, [editor, canEdit]);
+  // `useLayoutEffect`, not `useEffect` (#1336 B4): child passive effects run
+  // BEFORE the parent's, so when `editable` flipped true the BubbleMenu child
+  // registered its ProseMirror plugin first and its constructor-time
+  // `shouldShow` sampled `editor.isEditable === false`. `setEditable` does not
+  // re-evaluate `shouldShow` on its own (`updatePluginViews` early-returns when
+  // neither the selection nor the doc changed), so the toolbar stayed dead until
+  // some unrelated doc-changing transaction — e.g. adding a comment — forced a
+  // re-evaluation. Running this layout effect first means the plugin constructor
+  // observes the correct editability.
+  useLayoutEffect(() => {
+    editor?.setEditable(editable);
+  }, [editor, editable]);
+
+  return editor;
+}
+
+export function DocumentEditor({
+  idOrSlug,
+  userId,
+  layout = "page",
+  title,
+  eyebrow,
+  breadcrumb,
+  historyControl,
+  settingsControl,
+  askAgentHref,
+  coverGradient,
+  icon,
+}: DocumentEditorProps) {
+  // The collab session (Y.Doc + provider + status + canEdit) lives in a dedicated
+  // hook so this component stays focused on layout + presence composition.
+  const { ydoc, provider, status, canEdit, synced, docNameRef } =
+    useCollabSession(idOrSlug);
+  // Typing is enabled only once the persisted document state has actually
+  // arrived (#1336 B5). Before the first sync the Y.Doc is empty, so an editable
+  // sheet showed a blank body that accepted keystrokes which were then merged
+  // against the real content the moment it landed.
+  const editable = canEdit && synced;
+  // The sheet wrap — positioning context for the margin presence avatars.
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+
+  const { user } = useUser();
+
+  const editor = useAtriumEditor(ydoc, userId, editable);
 
   // Snapshot / publish / unpublish, with shared busy + success/error feedback.
   const {
@@ -516,6 +700,13 @@ export function DocumentEditor({
 
   // Live track-changes toggle state + pending-suggestion count for the toolbar.
   const { suggesting, count: suggestionCount } = useSuggestionState(editor);
+
+  // Comment-rail visibility + the topbar chip's open-comment badge (#1336 B3).
+  const { openCount, commentsOpen, toggleComments, handleOpenCountChange } =
+    useCommentsRail();
+
+  // Provenance-rail visibility, per viewer (#1336 B7).
+  const [provenanceOn, toggleProvenance] = useProvenancePref();
 
   // Real presence — the awareness roster (topbar + margin avatars), inline remote
   // carets, and the live "agent is writing" signal. Memoized so the awareness /
@@ -560,27 +751,35 @@ export function DocumentEditor({
     />
   ) : null;
 
-  const bubble =
-    editor && canEdit ? (
-      <EditorBubbleMenu editor={editor} askAgentHref={askAgentHref ?? "#"} />
-    ) : null;
+  // The two #1336 view toggles, always adjacent in the control row.
+  const viewToggles = (
+    <>
+      <ProvenanceToggle on={provenanceOn} onToggle={toggleProvenance} />
+      <CommentsToggle
+        open={commentsOpen}
+        openCount={openCount}
+        onToggle={toggleComments}
+      />
+    </>
+  );
 
   const statusCaption = (
-    <StatusCaption
-      message={message}
-      actionError={actionError}
-      pendingApproval={pendingApproval}
-    />
+    <StatusCaption {...{ message, actionError, pendingApproval }} />
   );
 
   const editorBody = (
-    <div className="atrium-editor min-w-0">
-      <EditorContent editor={editor} className="atrium-content" />
-      {bubble}
-    </div>
+    <EditorSurface
+      editor={editor}
+      askAgentHref={askAgentHref}
+      provenanceOn={provenanceOn}
+      suggesting={suggesting}
+    />
   );
   const comments = (
-    <CommentSidebar idOrSlug={idOrSlug} editor={editor} canEdit={canEdit} />
+    <CommentSidebar
+      {...{ idOrSlug, editor, canEdit }}
+      onOpenCountChange={handleOpenCountChange}
+    />
   );
 
   const presence = (
@@ -592,9 +791,10 @@ export function DocumentEditor({
     return (
       <PanelLayout
         presence={presence}
-        controls={<>{toolbar}{publishControl}</>}
+        controls={<>{toolbar}{viewToggles}{publishControl}</>}
         editorBody={editorBody}
         comments={comments}
+        commentsOpen={commentsOpen}
         statusCaption={statusCaption}
       />
     );
@@ -608,7 +808,15 @@ export function DocumentEditor({
       agentWriting={agentWriting}
       roster={roster}
       localUserId={userId}
-      controls={<>{toolbar}{historyControl}{settingsControl}{publishControl}</>}
+      controls={
+        <>
+          {toolbar}
+          {viewToggles}
+          {historyControl}
+          {settingsControl}
+          {publishControl}
+        </>
+      }
       sheetRef={sheetRef}
       margins={margins}
       cover={
@@ -631,6 +839,7 @@ export function DocumentEditor({
       byline={bylineText(roster, userId, agentWriting, status)}
       editorBody={editorBody}
       comments={comments}
+      commentsOpen={commentsOpen}
       statusCaption={statusCaption}
     />
   );
