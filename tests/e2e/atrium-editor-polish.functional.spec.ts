@@ -31,6 +31,33 @@ import { mkdirSync } from 'node:fs'
 
 const SHOT_DIR = '.verification'
 
+
+/**
+ * Best-effort teardown for objects a spec created. Leaving rows behind grows the
+ * shared local library on every run, which makes UNRELATED library specs slower
+ * and flakier (they page through the same list). Published objects are refused
+ * by delete, so they are unpublished first. Failures are ignored — teardown must
+ * never mask the real assertion failure.
+ */
+async function cleanup(
+  page: import('@playwright/test').Page,
+  ids: string[]
+): Promise<void> {
+  for (const id of ids) {
+    try {
+      await page.request.post(`/api/v1/content/${id}/unpublish`, {
+        data: { destination: 'intranet' },
+      })
+      await page.request.post(`/api/v1/content/${id}/unpublish`, {
+        data: { destination: 'public_web' },
+      })
+      await page.request.delete(`/api/v1/content/${id}`)
+    } catch {
+      // Ignored on purpose — see the docblock.
+    }
+  }
+}
+
 function runToken(): string {
   return `${Date.now()}${Math.floor(Math.random() * 1000)}`
 }
@@ -115,6 +142,8 @@ test.describe('Atrium editor polish (authenticated)', () => {
       await expect(picker).toBeVisible()
       await page.mouse.click(20, 500)
       await expect(picker).toBeHidden()
+
+      await cleanup(page, [id])
     } finally {
       await context.close()
     }
@@ -170,6 +199,8 @@ test.describe('Atrium editor polish (authenticated)', () => {
       await page.keyboard.press('Shift+ArrowLeft')
       await page.keyboard.press('Shift+ArrowLeft')
       await expect(bubble).toBeVisible({ timeout: 10000 })
+
+      await cleanup(page, [id])
     } finally {
       await context.close()
     }
@@ -223,6 +254,8 @@ test.describe('Atrium editor polish (authenticated)', () => {
       await toggle.click()
       await expect(rail).toHaveAttribute('data-open', 'false')
       await expect(rail).toBeHidden()
+
+      await cleanup(page, [id])
     } finally {
       await context.close()
     }
