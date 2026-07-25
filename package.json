@@ -5,7 +5,7 @@
   "packageManager": "bun@1.2.23",
   "scripts": {
     "test:oauth-public-flow": "tsx scripts/test/oauth-public-client-flow.smoke.ts",
-    "test:smoke:oauth-client-trust-audit": "tsx tests/smoke/oauth-client-trust-audit.smoke.ts",
+    "test:smoke:oauth-client-trust-audit": "bun run tests/smoke/oauth-client-trust-audit.smoke.ts",
     "prepare": "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git config core.hooksPath .githooks || true",
     "test:e2e:local": "bash scripts/test/e2e-local.sh",
     "dev": "next dev",
