@@ -40,7 +40,9 @@ test.describe("Atrium visibility editor — VisibilityChip (authenticated owner)
       await page.goto(`/atrium/${OBJ_ID}/edit`);
 
       // The chip loads the current visibility and is editable for the owner.
-      const chip = page.getByRole("button", { name: /^Visibility:/ });
+      // #1336 relabelled the trigger from a bare status badge to a "Share"
+      // control; its aria-label is now "Share — visibility: <Level>".
+      const chip = page.getByRole("button", { name: /^Share — visibility:/ });
       await expect(chip).toBeEnabled();
 
       // Open the editor and switch the level to Internal.
@@ -54,13 +56,13 @@ test.describe("Atrium visibility editor — VisibilityChip (authenticated owner)
       // The dialog closes and the chip reflects the new level immediately.
       await expect(dialog).toBeHidden();
       await expect(
-        page.getByRole("button", { name: /Visibility: Internal/ })
+        page.getByRole("button", { name: /visibility: Internal/ })
       ).toBeVisible();
 
       // Persisted: a reload re-fetches via getVisibilityAction and still shows it.
       await page.reload();
       await expect(
-        page.getByRole("button", { name: /Visibility: Internal/ })
+        page.getByRole("button", { name: /visibility: Internal/ })
       ).toBeVisible();
     } finally {
       await context.close();
