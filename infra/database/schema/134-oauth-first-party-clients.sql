@@ -11,6 +11,11 @@
 -- redirect. Existing IDs, callbacks, grants, and secrets are not recreated.
 --
 -- Rollback:
+-- DROP TRIGGER IF EXISTS trg_oauth_client_trust_audit_insert ON oauth_clients;
+-- DROP TRIGGER IF EXISTS trg_oauth_client_trust_audit_update ON oauth_clients;
+-- DROP FUNCTION IF EXISTS audit_oauth_client_first_party_insert();
+-- DROP FUNCTION IF EXISTS audit_oauth_client_first_party_update();
+-- DROP FUNCTION IF EXISTS audit_oauth_client_first_party_trust();
 -- DROP RULE IF EXISTS oauth_client_trust_audit_insert ON oauth_clients;
 -- DROP RULE IF EXISTS oauth_client_trust_audit_update ON oauth_clients;
 -- DROP TABLE IF EXISTS oauth_client_trust_audit;
@@ -49,11 +54,18 @@ CREATE TABLE IF NOT EXISTS oauth_client_trust_audit (
 CREATE INDEX IF NOT EXISTS idx_oauth_client_trust_audit_client
   ON oauth_client_trust_audit (client_id, changed_at DESC);
 
--- Remove prior audit rules before the idempotent backfill. PostgreSQL does not
--- permit an UPDATE inside a data-modifying CTE when that table already has a
--- DO ALSO rule; both rules are recreated after the backfill below.
+-- Remove audit hooks before the idempotent backfill so the migration writes one
+-- explicit audit row per exact-ID promotion. The rule drops clean up an earlier
+-- migration-134 implementation: PostgreSQL rewrite rules make every
+-- INSERT ... ON CONFLICT against oauth_clients fail, even when their predicate
+-- is false. Row-level triggers preserve existing OAuth client upsert paths.
 DROP RULE IF EXISTS oauth_client_trust_audit_insert ON oauth_clients;
 DROP RULE IF EXISTS oauth_client_trust_audit_update ON oauth_clients;
+DROP TRIGGER IF EXISTS trg_oauth_client_trust_audit_insert ON oauth_clients;
+DROP TRIGGER IF EXISTS trg_oauth_client_trust_audit_update ON oauth_clients;
+DROP FUNCTION IF EXISTS audit_oauth_client_first_party_insert();
+DROP FUNCTION IF EXISTS audit_oauth_client_first_party_update();
+DROP FUNCTION IF EXISTS audit_oauth_client_first_party_trust();
 
 WITH trusted_clients AS (
   UPDATE oauth_clients
@@ -95,40 +107,22 @@ SELECT
   'migration-134-exact-atrium-capture-backfill'
 FROM trusted_clients;
 
-CREATE OR REPLACE RULE oauth_client_trust_audit_update AS
-  ON UPDATE TO oauth_clients
-  WHERE NEW.is_first_party IS DISTINCT FROM OLD.is_first_party
-  DO ALSO
-    INSERT INTO oauth_client_trust_audit (
-      client_id,
-      previous_is_first_party,
-      new_is_first_party,
-      changed_by,
-      change_source
-    )
-    VALUES (
-      NEW.client_id,
-      OLD.is_first_party,
-      NEW.is_first_party,
-      NULL,
-      'database-rule'
-    );
+-- Keep each trigger function on one line. The production RDS Data API
+-- migration splitter ends PL/pgSQL blocks on a line ending in
+-- "' LANGUAGE plpgsql;" and otherwise mistakes inner semicolons for statement
+-- boundaries.
+CREATE OR REPLACE FUNCTION audit_oauth_client_first_party_insert() RETURNS TRIGGER AS 'BEGIN INSERT INTO oauth_client_trust_audit (client_id, previous_is_first_party, new_is_first_party, changed_by, change_source) VALUES (NEW.client_id, false, true, NEW.created_by, ''database-trigger-insert''); RETURN NEW; END;' LANGUAGE plpgsql;
 
-CREATE OR REPLACE RULE oauth_client_trust_audit_insert AS
-  ON INSERT TO oauth_clients
-  WHERE NEW.is_first_party = true
-  DO ALSO
-    INSERT INTO oauth_client_trust_audit (
-      client_id,
-      previous_is_first_party,
-      new_is_first_party,
-      changed_by,
-      change_source
-    )
-    VALUES (
-      NEW.client_id,
-      false,
-      true,
-      NEW.created_by,
-      'database-rule-insert'
-    );
+CREATE OR REPLACE FUNCTION audit_oauth_client_first_party_update() RETURNS TRIGGER AS 'BEGIN INSERT INTO oauth_client_trust_audit (client_id, previous_is_first_party, new_is_first_party, changed_by, change_source) VALUES (NEW.client_id, OLD.is_first_party, NEW.is_first_party, NULL, ''database-trigger-update''); RETURN NEW; END;' LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_oauth_client_trust_audit_insert
+  AFTER INSERT ON oauth_clients
+  FOR EACH ROW
+  WHEN (NEW.is_first_party = true)
+  EXECUTE FUNCTION audit_oauth_client_first_party_insert();
+
+CREATE TRIGGER trg_oauth_client_trust_audit_update
+  AFTER UPDATE OF is_first_party ON oauth_clients
+  FOR EACH ROW
+  WHEN (NEW.is_first_party IS DISTINCT FROM OLD.is_first_party)
+  EXECUTE FUNCTION audit_oauth_client_first_party_update();

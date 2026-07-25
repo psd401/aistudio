@@ -120,6 +120,11 @@ jobs:
       env:
         CI: true
 
+    - name: Run OAuth client trust audit smoke
+      run: bun run test:smoke:oauth-client-trust-audit
+      env:
+        CI: true
+
     - name: Run Nexus ephemeral-repository lifecycle smoke
       run: bun run test:smoke:nexus-ephemeral
       env:

@@ -36,23 +36,31 @@ describe("first-party OAuth client migration", () => {
     expect(migration).not.toContain("client_name =")
   })
 
-  it("writes the backfill audit and installs a future-change audit rule", () => {
+  it("writes the backfill audit and installs upsert-safe audit triggers", () => {
     expect(migration).toContain("oauth_client_trust_audit")
     expect(migration).toContain(
       "migration-134-exact-atrium-capture-backfill"
     )
     expect(migration).toContain(
-      "CREATE OR REPLACE RULE oauth_client_trust_audit_update"
+      "CREATE OR REPLACE FUNCTION audit_oauth_client_first_party_insert()"
     )
     expect(migration).toContain(
-      "CREATE OR REPLACE RULE oauth_client_trust_audit_insert"
+      "CREATE OR REPLACE FUNCTION audit_oauth_client_first_party_update()"
+    )
+    expect(migration).toContain(
+      "CREATE TRIGGER trg_oauth_client_trust_audit_insert"
+    )
+    expect(migration).toContain(
+      "CREATE TRIGGER trg_oauth_client_trust_audit_update"
+    )
+    expect(migration).toContain(
+      "WHEN (NEW.is_first_party IS DISTINCT FROM OLD.is_first_party)"
     )
     expect(migration).toContain(
       "DROP RULE IF EXISTS oauth_client_trust_audit_update"
     )
-    expect(migration).toContain(
-      "NEW.is_first_party IS DISTINCT FROM OLD.is_first_party"
+    expect(migration).not.toContain(
+      "CREATE OR REPLACE RULE oauth_client_trust_audit"
     )
-    expect(migration).not.toContain("CREATE FUNCTION")
   })
 })
