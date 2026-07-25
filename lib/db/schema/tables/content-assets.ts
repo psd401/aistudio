@@ -13,9 +13,11 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { actorKindEnum } from "../enums";
 import { agentIdentities } from "./agent-identities";
 import { contentObjects } from "./content-objects";
@@ -67,6 +69,10 @@ export const contentAssets = pgTable(
     purpose: varchar("purpose", { length: 32 })
       .$type<ContentAssetPurpose>()
       .notNull(),
+    // REST initiation idempotency. Both values are SHA-256 digests; the raw
+    // client key and request body are never persisted.
+    initiationKeyHash: varchar("initiation_key_hash", { length: 64 }),
+    initiationRequestHash: varchar("initiation_request_hash", { length: 64 }),
     state: varchar("state", { length: 24 })
       .$type<ContentAssetState>()
       .default("pending")
@@ -80,6 +86,9 @@ export const contentAssets = pgTable(
   (t) => [
     index("idx_content_assets_object_created").on(t.objectId, t.createdAt),
     index("idx_content_assets_pending_expiry").on(t.state, t.uploadExpiresAt),
+    uniqueIndex("uq_content_assets_initiation_key")
+      .on(t.objectId, t.initiationKeyHash)
+      .where(sql`${t.initiationKeyHash} IS NOT NULL`),
   ]
 );
 

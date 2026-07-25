@@ -23,6 +23,7 @@ import {
   recordContentAudit,
   runIdempotentMutation,
   requesterFromApiAuth,
+  type ContentObjectWithVersion,
 } from "@/lib/content";
 import {
   contentErrorToResponse,
@@ -66,6 +67,20 @@ const createBodySchema = z.object({
   tags: z.array(z.string()).optional(),
   sourceRef: contentSourceRefSchema.optional(),
 });
+
+function createContentResponse(
+  created: ContentObjectWithVersion,
+  requestId: string
+) {
+  return createApiResponse(
+    {
+      data: { ...created, url: contentDeepLink(created.slug) },
+      meta: { requestId },
+    },
+    requestId,
+    201
+  );
+}
 
 // ============================================
 // GET — list visible content
@@ -135,6 +150,24 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   // scope, never a session's wildcard ["*"] (admin humans pass via req.isAdmin).
   const hasPublishPublicCapability = hasPublishPublicScope(auth.scopes);
 
+  const prepareServiceInput = async () => {
+    // Session humans must ALSO hold the atrium-content capability (scope alone is
+    // role-derived); sk-/OIDC callers are gated by their explicit scope.
+    await assertContentAuthoringCapability(auth);
+    return {
+      kind: input.kind,
+      title: input.title,
+      collectionId: await resolveCollectionId(input.collectionId),
+      // Decode before both the create path and recovery metadata comparison so
+      // the two paths use the identical semantic service input.
+      body: decodeContentBody(input.body, input.codeEncoding),
+      bodyFormat: input.bodyFormat,
+      visibility: input.visibility,
+      tags: input.tags,
+      sourceRef: input.sourceRef,
+    };
+  };
+
   return runIdempotentMutation(
     {
       request,
@@ -142,29 +175,36 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       requestId,
       canonicalRoute: "/api/v1/content",
       requestValue: input,
+      recoverPending: async ({ createdAt }) => {
+        try {
+          const serviceInput = await prepareServiceInput();
+          const recovered = await contentService.recoverCaptureCreate(
+            req,
+            serviceInput,
+            createdAt
+          );
+          if (!recovered) return null;
+          log.warn("Recovered committed content create from pending idempotency", {
+            objectId: recovered.id,
+            visibilityLevel: recovered.visibilityLevel,
+          });
+          return createContentResponse(recovered, requestId);
+        } catch (err) {
+          // A transient reconciliation read must never re-run the create. Keep
+          // the reservation pending so the same scoped key can retry safely.
+          log.warn("Pending content-create reconciliation was not available", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return null;
+        }
+      },
     },
     async () => {
       try {
-        // Session humans must ALSO hold the atrium-content capability (scope alone is
-        // the wildcard ["*"] for a session); sk-/OIDC callers are gated by scope.
-        await assertContentAuthoringCapability(auth);
-        // Decode a base64 (WAF-opaque) body to its real content BEFORE the service's
-        // §28.3 screening + size caps run — screening always sees decoded content.
-        // Invalid base64 / over-cap throws a ValidationError (mapped to 400 below).
-        const body = decodeContentBody(input.body, input.codeEncoding);
-        const collectionId = await resolveCollectionId(input.collectionId);
+        const serviceInput = await prepareServiceInput();
         const created = await contentService.create(
           req,
-          {
-            kind: input.kind,
-            title: input.title,
-            collectionId,
-            body,
-            bodyFormat: input.bodyFormat,
-            visibility: input.visibility,
-            tags: input.tags,
-            sourceRef: input.sourceRef,
-          },
+          serviceInput,
           { hasPublishPublicCapability }
         );
         void recordContentAudit({
@@ -185,14 +225,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
           kind: input.kind,
           visibilityLevel: created.visibilityLevel,
         });
-        return createApiResponse(
-          {
-            data: { ...created, url: contentDeepLink(created.slug) },
-            meta: { requestId },
-          },
-          requestId,
-          201
-        );
+        return createContentResponse(created, requestId);
       } catch (err) {
         void recordContentAudit({
           req,

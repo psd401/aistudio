@@ -75,6 +75,14 @@ Exchange the returned code from the extension with `client_id`,
 OAuth `state` before exchanging the code. The redirect URI must match the
 registered extension id and `/atrium` path exactly.
 
+Browser CORS trust is registered separately from redirect trust. The production
+Atrium Capture client `ae781263-20c0-4b0c-8a34-8be01ab72fb1` allows only the
+exact caller origin
+`chrome-extension://jldnpmcpimhabiphcglkbgmbffpoocpo` on token requests for
+`authorization_code` and `refresh_token`, and on revocation. Successful CORS
+handling echoes that exact origin; it never uses `*`. No origin is inferred from
+the Chromium HTTPS redirect URI.
+
 ### Step 1: Generate PKCE Parameters
 
 ```javascript

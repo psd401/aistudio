@@ -21,6 +21,7 @@ import {
   createFirstPartyLoadExistingGrant,
   createOAuthInteractionPolicy,
 } from "./first-party-grants"
+import { isAllowedOAuthClientOrigin } from "./client-origin-policy"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -144,6 +145,17 @@ export async function getOidcProvider(
     // First-party clients receive only their explicitly registered, requested
     // scopes and only after the provider has an authenticated account.
     loadExistingGrant: createFirstPartyLoadExistingGrant(issuer),
+
+    // Browser access is an explicit client + origin + endpoint registration.
+    // Never infer origin trust from redirect_uris: Chrome extensions use a
+    // chrome-extension:// caller origin and an HTTPS chromiumapp callback.
+    clientBasedCORS: (ctx, origin, client) =>
+      isAllowedOAuthClientOrigin({
+        clientId: client.clientId,
+        origin,
+        route: ctx.oidc.route,
+        grantType: ctx.oidc.params?.grant_type,
+      }),
 
     // ==========================================
     // JWKS — signing keys
@@ -313,6 +325,13 @@ export async function getOidcProvider(
     // Response types & grant types
     // ==========================================
     responseTypes: ["code"],
+
+    // Keep the public route documented by AI Studio and used by browser clients.
+    // The catch-all route retains a compatibility alias for the provider's
+    // historical default at /token/revocation.
+    routes: {
+      revocation: "/revocation",
+    },
 
     // ==========================================
     // Cookies

@@ -11,7 +11,7 @@
  * driver); JSONB columns insert via `sql\`${safeJsonbStringify(v)}::jsonb\``.
  */
 
-import { and, count, eq, like, sql } from "drizzle-orm";
+import { and, count, eq, gte, isNull, like, sql } from "drizzle-orm";
 import { createLogger } from "@/lib/logger";
 import {
   executeQuery,
@@ -375,6 +375,73 @@ async function resolveCreateVisibility(
 
 export const contentService = {
   loadByIdOrSlug,
+
+  /**
+   * Reconcile a create whose object transaction committed but whose
+   * idempotency response did not finalize.
+   *
+   * This is deliberately limited to Capture provenance because its
+   * owner/provider/externalId tuple has a permanent unique index. The pending
+   * reservation timestamp prevents an older, pre-existing source collision
+   * from being converted into a false 201. Request metadata and body/version
+   * presence must also agree.
+   */
+  async recoverCaptureCreate(
+    req: Requester,
+    input: CreateObjectInput,
+    reservationCreatedAt: Date
+  ): Promise<ContentObjectWithVersion | null> {
+    const sourceRef = input.sourceRef;
+    if (sourceRef?.type !== "capture") return null;
+
+    const ownerUserId = ownerFor(req);
+    const createdByActor = actorKindOf(req);
+    const createdByAgentId = agentIdOf(req);
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select(objectSelectFields)
+          .from(contentObjects)
+          .where(
+            and(
+              eq(contentObjects.ownerUserId, ownerUserId),
+              eq(contentObjects.kind, input.kind),
+              eq(contentObjects.title, input.title),
+              input.collectionId
+                ? eq(contentObjects.collectionId, input.collectionId)
+                : isNull(contentObjects.collectionId),
+              eq(contentObjects.createdByActor, createdByActor),
+              createdByAgentId
+                ? eq(contentObjects.createdByAgentId, createdByAgentId)
+                : isNull(contentObjects.createdByAgentId),
+              gte(contentObjects.createdAt, reservationCreatedAt),
+              sql`${contentObjects.sourceRef}->>'type' = 'capture'`,
+              sql`${contentObjects.sourceRef}->>'provider' = ${sourceRef.provider}`,
+              sql`${contentObjects.sourceRef}->>'externalId' = ${sourceRef.externalId}`
+            )
+          )
+          .limit(1),
+      "content.recoverCaptureCreate"
+    );
+    const row = rows[0];
+    if (!row) return null;
+
+    const object = rowToObjectDTO(row as ObjectRowAsText);
+    const expectedTags = input.tags ?? [];
+    if (
+      object.tags.length !== expectedTags.length ||
+      object.tags.some((tag, index) => tag !== expectedTags[index]) ||
+      (input.body === undefined) !== (object.currentVersionId === null)
+    ) {
+      return null;
+    }
+
+    const version = object.currentVersionId
+      ? await versionService.current(object.id)
+      : null;
+    if (object.currentVersionId && !version) return null;
+    return { ...object, version };
+  },
 
   /**
    * Create a content object. When `input.body` is supplied, an initial version

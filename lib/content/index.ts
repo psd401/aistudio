@@ -25,8 +25,10 @@ export {
 } from "./asset-service";
 export type {
   ContentAssetDTO,
+  ContentAssetInitiationIdempotency,
   InitiateContentAssetInput,
   InitiatedContentAsset,
+  InitiatedContentAssetResult,
 } from "./asset-service";
 export {
   contentAssetBytesPath,
@@ -81,6 +83,7 @@ export {
   NotFoundError,
   ValidationError,
   ConflictError,
+  IdempotencyKeyReusedError,
   VersionPreconditionFailedError,
   StorageError,
   ApprovalRequiredError,
@@ -91,6 +94,7 @@ export {
   cleanupExpiredContentIdempotencyRecords,
   contentHeadEtag,
   hashIdempotencyRequest,
+  idempotencyScope,
   parseContentIfMatch,
   runIdempotentMutation,
   validateIdempotencyKey,

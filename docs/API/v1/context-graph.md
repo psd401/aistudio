@@ -866,9 +866,9 @@ applied or downgraded.
 
 **Mutation idempotency and optimistic concurrency (#1287):**
 
-- `POST /content`, `POST /content/{id}/versions`, and
-  `POST /content/{id}/publish` accept `Idempotency-Key` (1-255 visible ASCII
-  characters).
+- `POST /content`, `POST /content/{id}/versions`,
+  `POST /content/{id}/publish`, and `POST /content/{id}/assets` accept
+  `Idempotency-Key` (1-255 visible ASCII characters).
 - Keys are scoped by deployment environment, authenticated principal,
   OAuth-client/API-key identity, method, and canonical route. Only SHA-256 key
   and semantic-request digests are stored; raw keys and request bodies are not.
@@ -880,10 +880,23 @@ applied or downgraded.
   interrupted execution remains pending so an ambiguous mutation is not repeated.
 - A concurrent or interrupted request keeps its durable reservation and returns
   retryable `409 IDEMPOTENCY_IN_PROGRESS` (`Retry-After: 1`) rather than running a
-  second mutation. Completed response payloads are field-encrypted with the
-  existing Secrets Manager-backed application DEK. Expired records are removed
-  in bounded 500-row sweeps by hourly scheduled maintenance, with opportunistic
-  sweeps retained as a fallback.
+  second mutation. For `POST /content` with typed Capture provenance, a same-key
+  retry can instead reconcile a proven committed object through the permanent
+  owner/provider/externalId unique source reference. The object must have been
+  created after that exact pending reservation and match its request metadata
+  and body/version shape. The server then finalizes and returns the original
+  successful `201` with `Idempotency-Replayed: true`; it never reruns create or
+  converts an older source collision into success. Completed response payloads
+  are field-encrypted with the existing Secrets Manager-backed application DEK.
+  Expired records are removed in bounded 500-row sweeps by hourly scheduled
+  maintenance, with opportunistic sweeps retained as a fallback.
+- Asset initiation is the deliberate expiring-credential exception: the keyed
+  reservation lives with the asset instead of replaying a stored response.
+  Repeating the same scoped key and request returns the same asset id with a new
+  15-minute presigned upload request. If cleanup retired an expired reservation,
+  recovery assigns a new temporary upload key before signing, so cleanup cannot
+  delete bytes uploaded through the replacement request. Reusing the key for
+  different asset metadata returns `409 IDEMPOTENCY_KEY_REUSED`.
 - `GET /content/{id}` returns a strong ETag containing `currentVersionId` (or
   `"none"`). Send that ETag as `If-Match` on version creation to prevent lost
   updates. A stale value returns `412 VERSION_PRECONDITION_FAILED` before body
@@ -1040,9 +1053,12 @@ discarded, credentials and invalid/non-network URLs are rejected, duplicates are
 removed, and district policy can disable origin retention entirely with
 `ATRIUM_CAPTURE_SOURCE_ORIGINS_ENABLED=false`. The reference is immutable through
 metadata updates. `(owner, provider, externalId)` is unique for capture references,
-so a permanently repeated recorder session returns `409 CONTENT_CONFLICT` without
-creating a second object. Audit/support records include only the provider,
-external id, and client surface—never captured steps, typed values, or page text.
+so a fresh or differently keyed repeated recorder session returns
+`409 CONTENT_CONFLICT` without creating a second object. A retry using the exact
+same scoped idempotency key and request can recover the committed object if the
+original `201` failed during response finalization. Audit/support records include
+only the provider, external id, and client surface—never captured steps, typed
+values, or page text.
 
 **Artifact code with JS/CSS — `codeEncoding: "base64"`:** artifacts are self-contained
 HTML/JS/CSS, so their code legitimately contains `<script>`, `<style>`, and inline
@@ -1345,7 +1361,8 @@ Upload flow:
 
 1. `POST /api/v1/content/{id}/assets` with `content:update`, object edit
    permission, filename, MIME, byte length, base64url SHA-256, purpose, and
-   optional pixel dimensions.
+   optional pixel dimensions. Send a stable `Idempotency-Key` for retry
+   durability.
 2. `PUT` the exact bytes to the 15-minute presigned URL using the exact
    `Content-Type` and `x-amz-checksum-sha256` headers returned by step 1.
 3. `POST /api/v1/content/{id}/assets/{assetId}/complete` with the same SHA-256.
@@ -1382,6 +1399,13 @@ Initiation returns safe asset metadata plus:
   }
 }
 ```
+
+A same-key retry with the same semantic input returns `201`, the same asset id,
+`Idempotency-Replayed: true`, and a newly signed 15-minute upload request. The
+raw client key and body are never stored—only scoped SHA-256 digests. This
+recovers a reservation when the first response is lost, even after its original
+presigned URL expires or bounded cleanup retires its temporary key. Reusing the
+same scoped key with different input returns `409 IDEMPOTENCY_KEY_REUSED`.
 
 Completion verifies the exact declared byte length and digest, byte-signature MIME,
 decodability, single-frame constraint, 12,000-pixel dimension cap, and 40-million

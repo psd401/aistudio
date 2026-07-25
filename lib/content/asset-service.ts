@@ -39,6 +39,7 @@ import {
 } from "./helpers";
 import {
   ConflictError,
+  IdempotencyKeyReusedError,
   NotFoundError,
   StorageError,
   ValidationError,
@@ -89,6 +90,19 @@ export interface InitiatedContentAsset extends ContentAssetDTO {
     };
     expiresAt: string;
   };
+}
+
+export interface ContentAssetInitiationIdempotency {
+  /** SHA-256 of the environment/principal/client/route-scoped client key. */
+  keyHash: string;
+  /** SHA-256 of the stable semantic initiation request. */
+  requestHash: string;
+}
+
+export interface InitiatedContentAssetResult {
+  asset: InitiatedContentAsset;
+  /** True when an existing reservation received a replacement upload request. */
+  replayed: boolean;
 }
 
 function checksumBase64(base64url: string): string {
@@ -216,68 +230,227 @@ function rejectionCode(error: unknown): string {
   return "IMAGE_VALIDATION_FAILED";
 }
 
+async function loadInitiationReservation(
+  objectId: string,
+  keyHash: string
+): Promise<ContentAssetRow | null> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(contentAssets)
+        .where(
+          and(
+            eq(contentAssets.objectId, objectId),
+            eq(contentAssets.initiationKeyHash, keyHash)
+          )
+        )
+        .limit(1),
+    "content.assets.initiate.loadReservation"
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Renew an existing reservation without allowing cleanup to invalidate the
+ * replacement request. A cleanup-retired row gets a fresh temporary S3 key;
+ * pending rows keep their deterministic key so concurrent retries are safe.
+ */
+async function recoverInitiationReservation(
+  objectId: string,
+  idempotency: ContentAssetInitiationIdempotency,
+  expiresAt: Date
+): Promise<ContentAssetRow> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const existing = await loadInitiationReservation(
+      objectId,
+      idempotency.keyHash
+    );
+    if (!existing) {
+      throw new StorageError("Failed to recover the asset upload reservation");
+    }
+    if (existing.initiationRequestHash !== idempotency.requestHash) {
+      throw new IdempotencyKeyReusedError();
+    }
+
+    if (existing.state === "pending" || existing.state === "quarantined") {
+      const renewed = await executeQuery(
+        (db) =>
+          db
+            .update(contentAssets)
+            .set({ uploadExpiresAt: expiresAt })
+            .where(
+              and(
+                eq(contentAssets.id, existing.id),
+                eq(contentAssets.initiationKeyHash, idempotency.keyHash),
+                inArray(contentAssets.state, ["pending", "quarantined"])
+              )
+            )
+            .returning(),
+        "content.assets.initiate.renewReservation"
+      );
+      if (renewed[0]) return renewed[0];
+      continue;
+    }
+
+    if (existing.state === "deleted") {
+      const replacementUploadKey = s3Store.assetUploadKey(
+        objectId,
+        existing.id,
+        randomUUID()
+      );
+      const recovered = await executeQuery(
+        (db) =>
+          db
+            .update(contentAssets)
+            .set({
+              state: "pending",
+              uploadKey: replacementUploadKey,
+              uploadExpiresAt: expiresAt,
+              inspection: null,
+              rejectedAt: null,
+            })
+            .where(
+              and(
+                eq(contentAssets.id, existing.id),
+                eq(contentAssets.initiationKeyHash, idempotency.keyHash),
+                eq(contentAssets.state, "deleted")
+              )
+            )
+            .returning(),
+        "content.assets.initiate.recoverDeletedReservation"
+      );
+      if (recovered[0]) return recovered[0];
+      continue;
+    }
+
+    throw new ConflictError(
+      "Content asset initiation cannot be replayed from this state",
+      { state: existing.state }
+    );
+  }
+  throw new ConflictError("Content asset initiation lost a reservation state race");
+}
+
 export const contentAssetService = {
   async initiate(
     req: Requester,
     objectId: string,
-    input: InitiateContentAssetInput
-  ): Promise<InitiatedContentAsset> {
+    input: InitiateContentAssetInput,
+    idempotency?: ContentAssetInitiationIdempotency
+  ): Promise<InitiatedContentAssetResult> {
     validateInitiate(input);
+    if (
+      idempotency &&
+      (!/^[0-9a-f]{64}$/.test(idempotency.keyHash) ||
+        !/^[0-9a-f]{64}$/.test(idempotency.requestHash))
+    ) {
+      throw new ValidationError("Invalid asset initiation idempotency digest");
+    }
     const object = await contentService.loadForEdit(req, objectId);
     const id = randomUUID();
     const objectKey = s3Store.assetKey(object.id, id);
     const uploadKey = s3Store.assetUploadKey(object.id, id);
     const expiresAt = new Date(Date.now() + UPLOAD_TTL_SECONDS * 1000);
     const checksum = checksumBase64(input.sha256);
-    let uploadUrl: string;
-    try {
-      uploadUrl = await s3Store.signedAssetUploadUrl({
-        key: uploadKey,
-        contentType: input.contentType,
-        contentLength: input.byteLength,
-        checksumSha256: checksum,
-        ttlSeconds: UPLOAD_TTL_SECONDS,
-      });
-    } catch {
-      throw new StorageError("Asset upload storage is temporarily unavailable");
+    const values = {
+      id,
+      objectId: object.id,
+      uploaderActor: actorKindOf(req),
+      uploaderUserId: authorUserIdOf(req),
+      uploaderAgentId: agentIdOf(req),
+      filename: input.filename.trim(),
+      objectKey,
+      uploadKey,
+      contentType: input.contentType,
+      byteLength: input.byteLength,
+      sha256: input.sha256,
+      width: input.width ?? null,
+      height: input.height ?? null,
+      purpose: input.purpose,
+      initiationKeyHash: idempotency?.keyHash ?? null,
+      initiationRequestHash: idempotency?.requestHash ?? null,
+      uploadExpiresAt: expiresAt,
+    };
+
+    let row: ContentAssetRow;
+    let replayed = false;
+    let uploadUrl: string | undefined;
+
+    if (idempotency) {
+      const inserted = await executeQuery(
+        (db) =>
+          db
+            .insert(contentAssets)
+            .values(values)
+            .onConflictDoNothing()
+            .returning(),
+        "content.assets.initiate.reserve"
+      );
+      if (inserted[0]) {
+        row = inserted[0];
+      } else {
+        row = await recoverInitiationReservation(
+          object.id,
+          idempotency,
+          expiresAt
+        );
+        replayed = true;
+      }
+    } else {
+      // Preserve the unkeyed path's no-orphan behavior on a signing outage.
+      try {
+        uploadUrl = await s3Store.signedAssetUploadUrl({
+          key: uploadKey,
+          contentType: input.contentType,
+          contentLength: input.byteLength,
+          checksumSha256: checksum,
+          ttlSeconds: UPLOAD_TTL_SECONDS,
+        });
+      } catch {
+        throw new StorageError("Asset upload storage is temporarily unavailable");
+      }
+      const inserted = await executeQuery(
+        (db) => db.insert(contentAssets).values(values).returning(),
+        "content.assets.initiate"
+      );
+      const insertedRow = inserted[0];
+      if (!insertedRow) {
+        throw new StorageError("Failed to reserve the asset upload");
+      }
+      row = insertedRow;
     }
-    const rows = await executeQuery(
-      (db) =>
-        db
-          .insert(contentAssets)
-          .values({
-            id,
-            objectId: object.id,
-            uploaderActor: actorKindOf(req),
-            uploaderUserId: authorUserIdOf(req),
-            uploaderAgentId: agentIdOf(req),
-            filename: input.filename.trim(),
-            objectKey,
-            uploadKey,
-            contentType: input.contentType,
-            byteLength: input.byteLength,
-            sha256: input.sha256,
-            width: input.width ?? null,
-            height: input.height ?? null,
-            purpose: input.purpose,
-            uploadExpiresAt: expiresAt,
-          })
-          .returning(),
-      "content.assets.initiate"
-    );
-    const row = rows[0];
-    if (!row) throw new StorageError("Failed to reserve the asset upload");
+
+    if (!uploadUrl) {
+      try {
+        uploadUrl = await s3Store.signedAssetUploadUrl({
+          key: row.uploadKey,
+          contentType: row.contentType,
+          contentLength: row.byteLength,
+          checksumSha256: checksum,
+          ttlSeconds: UPLOAD_TTL_SECONDS,
+        });
+      } catch {
+        // The durable reservation intentionally remains retryable. The same
+        // client key will find it and ask storage for a replacement request.
+        throw new StorageError("Asset upload storage is temporarily unavailable");
+      }
+    }
+
     return {
-      ...dto(row),
-      upload: {
-        method: "PUT",
-        url: uploadUrl,
-        headers: {
-          "content-type": input.contentType,
-          "x-amz-checksum-sha256": checksum,
+      asset: {
+        ...dto(row),
+        upload: {
+          method: "PUT",
+          url: uploadUrl,
+          headers: {
+            "content-type": input.contentType,
+            "x-amz-checksum-sha256": checksum,
+          },
+          expiresAt: row.uploadExpiresAt.toISOString(),
         },
-        expiresAt: expiresAt.toISOString(),
       },
+      replayed,
     };
   },
 
@@ -514,9 +687,9 @@ export async function cleanupExpiredContentAssets(
     "content.assets.cleanup.select"
   );
   if (expired.length === 0) return 0;
-  await Promise.allSettled(
-    expired.map((asset) => s3Store.deleteKey(asset.uploadKey))
-  );
+  // Retire in PostgreSQL before deleting storage. A concurrent recovery either
+  // renews the row first (so this update skips it) or observes `deleted` and
+  // switches to a fresh upload key before returning a replacement URL.
   const deleted = await executeTransaction(
     (tx) =>
       tx
@@ -529,8 +702,14 @@ export async function cleanupExpiredContentAssets(
             lt(contentAssets.uploadExpiresAt, new Date())
           )
         )
-        .returning({ id: contentAssets.id }),
+        .returning({
+          id: contentAssets.id,
+          uploadKey: contentAssets.uploadKey,
+        }),
     "content.assets.cleanup.mark"
+  );
+  await Promise.allSettled(
+    deleted.map((asset) => s3Store.deleteKey(asset.uploadKey))
   );
   return deleted.length;
 }

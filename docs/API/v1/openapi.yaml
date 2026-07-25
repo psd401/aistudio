@@ -1376,6 +1376,13 @@ paths:
         **HTTP 202** `approval_required` because there is an existing object to gate.)
         The MCP `create_document` / `create_artifact` tool results include the same
         `visibilityLevel` field for the same reason.
+
+        If a typed Capture create commits but its durable idempotency response
+        cannot be finalized, retrying the exact same scoped `Idempotency-Key` and
+        request reconciles the one owner/provider/externalId-correlated object and
+        returns its successful `201` with `Idempotency-Replayed: true`. The create
+        mutation is never run twice; an older pre-existing source collision is
+        not eligible for recovery.
       security:
         - BearerAuth: []
       parameters:
@@ -1839,9 +1846,18 @@ paths:
         temporary namespace and is never served. Requires `content:update` plus
         object edit permission; session callers also require the Atrium content
         capability.
+
+        Send an `Idempotency-Key` to make the reservation durable. Repeating the
+        same scoped key and semantic request returns the same asset id with a
+        newly signed 15-minute upload request. This remains recoverable after a
+        prior upload request expires or cleanup retires its temporary key. Using
+        the same scoped key for different input returns
+        `409 IDEMPOTENCY_KEY_REUSED`.
       security:
         - BearerAuth: []
         - SessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKeyHeader"
       requestBody:
         required: true
         content:
@@ -1851,6 +1867,9 @@ paths:
       responses:
         "201":
           description: Upload reservation and constrained direct-upload request.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/Idempotency-Replayed"
           content:
             application/json:
               schema:
@@ -1863,6 +1882,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/ContentConflict"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -2711,7 +2732,12 @@ components:
         `409 IDEMPOTENCY_KEY_REUSED`. Terminal responses below HTTP 500 are
         retained. A returned 5xx releases its reservation so the same key can
         retry; an interrupted execution remains pending to prevent a duplicate
-        mutation.
+        mutation. A pending typed Capture create may reconcile its uniquely
+        correlated committed object and finalize the original successful `201`
+        without rerunning create. Asset initiation uses the same scoped-key
+        contract but keeps the reservation on `content_assets` and returns a
+        replacement presigned upload request instead of replaying an expiring
+        URL.
       schema:
         type: string
         minLength: 1

@@ -10,6 +10,9 @@ const mockInitiate = jest.fn();
 const mockComplete = jest.fn();
 const mockList = jest.fn();
 const mockGet = jest.fn();
+const mockHashIdempotencyRequest = jest.fn();
+const mockIdempotencyScope = jest.fn();
+const mockValidateIdempotencyKey = jest.fn();
 
 jest.mock("@/lib/api", () => ({
   withApiAuth: (handler: unknown) => handler,
@@ -26,6 +29,11 @@ jest.mock("@/lib/content", () => ({
     get: (...args: unknown[]) => mockGet(...args),
   },
   recordContentAudit: jest.fn(),
+  hashIdempotencyRequest: (...args: unknown[]) =>
+    mockHashIdempotencyRequest(...args),
+  idempotencyScope: (...args: unknown[]) => mockIdempotencyScope(...args),
+  validateIdempotencyKey: (...args: unknown[]) =>
+    mockValidateIdempotencyKey(...args),
   requesterFromApiAuth: (...args: unknown[]) =>
     mockRequesterFromApiAuth(...args),
 }));
@@ -62,7 +70,9 @@ const requester = {
   roles: ["staff"],
   isAdmin: false,
 };
-const request = {} as NextRequest;
+const request = {
+  headers: { get: () => null },
+} as unknown as NextRequest;
 const objectId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const assetId = "11111111-2222-4333-8444-555555555555";
 
@@ -85,6 +95,9 @@ beforeEach(() => {
   mockCreateApiResponse.mockReturnValue({ status: 200 });
   mockCreateErrorResponse.mockReturnValue({ status: 400 });
   mockContentErrorToResponse.mockReturnValue({ status: 404 });
+  mockHashIdempotencyRequest.mockReturnValue("a".repeat(64));
+  mockIdempotencyScope.mockReturnValue({ keyHash: "scope-key" });
+  mockValidateIdempotencyKey.mockReturnValue(true);
 });
 
 describe("Atrium authored asset routes (#1284)", () => {
@@ -115,7 +128,10 @@ describe("Atrium authored asset routes (#1284)", () => {
       purpose: "capture_step",
     };
     mockParseRequestBody.mockResolvedValue({ data: input });
-    mockInitiate.mockResolvedValue({ id: assetId });
+    mockInitiate.mockResolvedValue({
+      asset: { id: assetId },
+      replayed: false,
+    });
     await initiateHandler(request, auth, "req-init", { id: objectId });
 
     expect(mockRequireScope).toHaveBeenCalledWith(
@@ -124,7 +140,96 @@ describe("Atrium authored asset routes (#1284)", () => {
       "req-init"
     );
     expect(mockAssertCapability).toHaveBeenCalledWith(auth);
-    expect(mockInitiate).toHaveBeenCalledWith(requester, objectId, input);
+    expect(mockInitiate).toHaveBeenCalledWith(
+      requester,
+      objectId,
+      input,
+      undefined
+    );
+  });
+
+  it("scopes a client idempotency key and marks a recovered reservation", async () => {
+    const keyedRequest = {
+      headers: {
+        get: (name: string) =>
+          name.toLowerCase() === "idempotency-key"
+            ? "capture-upload-42"
+            : null,
+      },
+    } as unknown as NextRequest;
+    const setResponseHeader = jest.fn();
+    mockCreateApiResponse.mockReturnValue({
+      status: 201,
+      headers: { set: setResponseHeader },
+    });
+    const input = {
+      filename: "step.png",
+      contentType: "image/png",
+      byteLength: 100,
+      sha256: "A".repeat(43),
+      purpose: "capture_step",
+    };
+    mockParseRequestBody.mockResolvedValue({ data: input });
+    mockInitiate.mockResolvedValue({
+      asset: { id: assetId },
+      replayed: true,
+    });
+
+    await initiateHandler(keyedRequest, auth, "req-retry", { id: objectId });
+
+    expect(mockValidateIdempotencyKey).toHaveBeenCalledWith(
+      "capture-upload-42"
+    );
+    expect(mockIdempotencyScope).toHaveBeenCalledWith(
+      auth,
+      keyedRequest,
+      `/api/v1/content/${objectId}/assets`,
+      "capture-upload-42"
+    );
+    expect(mockInitiate).toHaveBeenCalledWith(
+      requester,
+      objectId,
+      input,
+      {
+        keyHash: "a".repeat(64),
+        requestHash: "a".repeat(64),
+      }
+    );
+    expect(setResponseHeader).toHaveBeenCalledWith(
+      "Idempotency-Replayed",
+      "true"
+    );
+  });
+
+  it("rejects an invalid asset initiation idempotency key", async () => {
+    const invalidRequest = {
+      headers: {
+        get: (name: string) =>
+          name.toLowerCase() === "idempotency-key" ? "contains space" : null,
+      },
+    } as unknown as NextRequest;
+    mockParseRequestBody.mockResolvedValue({
+      data: {
+        filename: "step.png",
+        contentType: "image/png",
+        byteLength: 100,
+        sha256: "A".repeat(43),
+        purpose: "capture_step",
+      },
+    });
+    mockValidateIdempotencyKey.mockReturnValue(false);
+
+    await initiateHandler(invalidRequest, auth, "req-invalid-key", {
+      id: objectId,
+    });
+
+    expect(mockCreateErrorResponse).toHaveBeenCalledWith(
+      "req-invalid-key",
+      400,
+      "INVALID_IDEMPOTENCY_KEY",
+      expect.any(String)
+    );
+    expect(mockInitiate).not.toHaveBeenCalled();
   });
 
   it("completes through the same authoring gates and passes the immutable id", async () => {
