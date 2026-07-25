@@ -338,11 +338,17 @@ export async function replaceGoogleDriveSelections(input: {
           },
         });
     }
+    // Bumping the selection version invalidates any sync run already in flight:
+    // that run captured the previous version and its completion handler will
+    // refuse to write back the stale cursor, so files that already existed
+    // under newly selected folders are picked up by a fresh full snapshot
+    // instead of being skipped by the superseded changes feed.
     await tx
       .update(repositoryConnectors)
       .set({
         status: "pending",
         cursor: null,
+        selectionVersion: sql`${repositoryConnectors.selectionVersion} + 1`,
         nextSyncAt: new Date(),
         updatedAt: new Date(),
       })

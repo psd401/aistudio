@@ -105,9 +105,14 @@ export const repositoryConnectors = pgTable(
     authMode: varchar("auth_mode", { length: 32 })
       .$type<RepositoryConnectorAuthMode>()
       .notNull(),
-    createdBy: integer("created_by")
-      .references(() => users.id, { onDelete: "cascade" })
-      .notNull(),
+    /**
+     * Nullable on purpose: deleting the creating user must not delete the
+     * connector, or its imported `repository_items` are left indexed with no
+     * connector record to reconcile or disconnect them.
+     */
+    createdBy: integer("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
     credentialId: uuid("credential_id").references(
       () => repositoryConnectorCredentials.id,
       { onDelete: "set null" },
@@ -126,7 +131,17 @@ export const repositoryConnectors = pgTable(
     lastNotificationNumber: bigint("last_notification_number", {
       mode: "bigint",
     }),
-    syncIntervalMinutes: integer("sync_interval_minutes").default(15).notNull(),
+    /**
+     * Bumped whenever the active selection set is replaced. Sync runs capture
+     * it at load time and refuse to persist their cursor if it moved, so a
+     * concurrent selection reset is never overwritten.
+     */
+    selectionVersion: integer("selection_version").default(0).notNull(),
+    /**
+     * `null` inherits `GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES`; a value is a
+     * per-connector override.
+     */
+    syncIntervalMinutes: integer("sync_interval_minutes"),
     nextSyncAt: timestamp("next_sync_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
@@ -173,14 +188,18 @@ export const repositoryConnectors = pgTable(
     check(
       "chk_repository_connectors_auth_shape",
       sql`(
-        (${table.authMode} = 'personal_oauth' AND ${table.credentialId} IS NOT NULL AND ${table.sharedDriveId} IS NULL)
+        (${table.authMode} = 'personal_oauth' AND ${table.sharedDriveId} IS NULL)
         OR
         (${table.authMode} = 'shared_drive_wif' AND ${table.credentialId} IS NULL AND ${table.sharedDriveId} IS NOT NULL)
       )`,
     ),
     check(
       "chk_repository_connectors_sync_interval",
-      sql`${table.syncIntervalMinutes} BETWEEN 5 AND 1440`,
+      sql`${table.syncIntervalMinutes} IS NULL OR ${table.syncIntervalMinutes} BETWEEN 5 AND 1440`,
+    ),
+    check(
+      "chk_repository_connectors_selection_version",
+      sql`${table.selectionVersion} >= 0`,
     ),
     check(
       "chk_repository_connectors_failure_count",

@@ -357,9 +357,12 @@ async function claimSync(
         .where(eq(repositoryConnectorSyncRuns.id, running.id));
     }
 
+    // Crash-recovery lease only — completeSync/failSync overwrite nextSyncAt
+    // with the real schedule. A connector inheriting the global interval
+    // (null override) simply gets the SYNC_LEASE_MS floor.
     const claimedUntil = new Date(
       now.getTime() +
-        Math.max(SYNC_LEASE_MS, connector.syncIntervalMinutes * 60_000),
+        Math.max(SYNC_LEASE_MS, (connector.syncIntervalMinutes ?? 0) * 60_000),
     );
     await tx
       .update(repositoryConnectors)
@@ -1284,7 +1287,7 @@ async function completeSync(input: {
       ? 1
       : Math.max(
           5,
-          input.connector.syncIntervalMinutes ||
+          input.connector.syncIntervalMinutes ??
             input.config.googleSyncIntervalMinutes,
         );
   await executeTransaction(async (tx) => {
@@ -1302,7 +1305,13 @@ async function completeSync(input: {
         finishedAt: now,
       })
       .where(eq(repositoryConnectorSyncRuns.id, input.runId));
-    await tx
+    // Only publish this run's cursor if the connector's selection set has not
+    // been replaced since the run loaded it. A concurrent
+    // `replaceGoogleDriveSelections` clears the cursor and bumps
+    // selectionVersion precisely so this write is skipped — otherwise files
+    // that predate the old cursor never enter the changes feed and stay
+    // unsynchronized indefinitely.
+    const reclaimed = await tx
       .update(repositoryConnectors)
       .set({
         status: input.counters.failed > 0 ? "degraded" : "active",
@@ -1321,8 +1330,23 @@ async function completeSync(input: {
         and(
           eq(repositoryConnectors.id, input.connector.id),
           ne(repositoryConnectors.status, "revoked"),
+          eq(
+            repositoryConnectors.selectionVersion,
+            input.connector.selectionVersion,
+          ),
         ),
+      )
+      .returning({ id: repositoryConnectors.id });
+    if (reclaimed.length === 0) {
+      log.info(
+        "Google Drive sync cursor discarded; connector changed during the run",
+        {
+          connectorId: input.connector.id,
+          runId: input.runId,
+          selectionVersion: input.connector.selectionVersion,
+        },
       );
+    }
   }, "googleContent.completeSync");
 }
 

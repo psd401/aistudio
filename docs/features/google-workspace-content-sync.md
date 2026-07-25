@@ -68,6 +68,26 @@ from a newly acquired start token. Folder changes also complete a selection
 snapshot before advancing the page cursor because Drive may not emit a separate
 change for every descendant moved with the folder.
 
+Replacing the selection set while a run is in flight clears the cursor and
+increments the connector's `selection_version`. The in-flight run captured the
+previous version when it loaded the connector, so its completion refuses to
+write the superseded cursor back and the connector stays pending for a full
+snapshot. Without that guard, files that already existed under a newly selected
+folder predate the old cursor, never appear in the changes feed, and stay
+unsynchronized indefinitely.
+
+`sync_interval_minutes` is nullable. `NULL` means the connector inherits the
+`GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES` setting, which is how an administrator
+changes the interval for every connector; a non-null value is a per-connector
+override.
+
+Deleting the user who created a connector nulls `created_by` instead of deleting
+the connector. The record is deliberately owner-neutral afterwards so the
+repository items it imported still have a connector to reconcile, retry, or
+disconnect against. For a personal OAuth connector the credential is deleted
+with the user, so the connector reports an authorization error until an
+administrator disconnects or a user reconnects it.
+
 A failed download or export degrades only that source; the remainder of the
 cursor page still commits and the failed source is retried on the next run.
 Files moved outside a selected folder, deleted files, and lost access enter a

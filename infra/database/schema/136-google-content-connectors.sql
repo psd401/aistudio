@@ -25,7 +25,10 @@ CREATE TABLE IF NOT EXISTS repository_connectors (
     REFERENCES knowledge_repositories(id) ON DELETE CASCADE,
   provider VARCHAR(32) NOT NULL,
   auth_mode VARCHAR(32) NOT NULL,
-  created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  -- Owner-neutral on user deletion: the connector record must outlive its
+  -- creator so imported repository_items keep a connector to reconcile and
+  -- disconnect against. Cascading here would orphan indexed items.
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   credential_id UUID
     REFERENCES repository_connector_credentials(id) ON DELETE SET NULL,
   display_name TEXT NOT NULL,
@@ -37,7 +40,15 @@ CREATE TABLE IF NOT EXISTS repository_connectors (
   watch_token_hash VARCHAR(64),
   watch_expires_at TIMESTAMPTZ,
   last_notification_number BIGINT,
-  sync_interval_minutes INTEGER NOT NULL DEFAULT 15,
+  -- Monotonic counter bumped whenever the active selection set changes. A sync
+  -- run captures it when it loads the connector and refuses to persist its
+  -- cursor at completion if the value moved, so a concurrent selection reset is
+  -- never overwritten by the run it superseded.
+  selection_version INTEGER NOT NULL DEFAULT 0,
+  -- NULL means "inherit GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES"; a value is a
+  -- per-connector override. A NOT NULL default would pin every connector to the
+  -- column default and make the global setting unreachable.
+  sync_interval_minutes INTEGER,
   next_sync_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_sync_at TIMESTAMPTZ,
   last_success_at TIMESTAMPTZ,
@@ -53,11 +64,13 @@ CREATE TABLE IF NOT EXISTS repository_connectors (
     CHECK (auth_mode IN ('personal_oauth', 'shared_drive_wif')),
   CONSTRAINT chk_repository_connectors_status
     CHECK (status IN ('pending', 'active', 'degraded', 'paused', 'revoked')),
+  -- personal_oauth tolerates a NULL credential_id: deleting the owning user
+  -- cascades the credential away and SET NULLs this column, and the surviving
+  -- connector is then reported as unauthorized rather than blocking the delete.
   CONSTRAINT chk_repository_connectors_auth_shape
     CHECK (
       (
         auth_mode = 'personal_oauth'
-        AND credential_id IS NOT NULL
         AND shared_drive_id IS NULL
       )
       OR
@@ -68,7 +81,9 @@ CREATE TABLE IF NOT EXISTS repository_connectors (
       )
     ),
   CONSTRAINT chk_repository_connectors_sync_interval
-    CHECK (sync_interval_minutes BETWEEN 5 AND 1440),
+    CHECK (sync_interval_minutes IS NULL OR sync_interval_minutes BETWEEN 5 AND 1440),
+  CONSTRAINT chk_repository_connectors_selection_version
+    CHECK (selection_version >= 0),
   CONSTRAINT chk_repository_connectors_failure_count
     CHECK (consecutive_failures >= 0)
 );
