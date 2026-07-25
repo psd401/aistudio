@@ -510,6 +510,35 @@
   gap: 10px;
   margin-bottom: 18px;
 }
+
+/* Bulk-action bar (#1336) — appears above the grid whenever the library
+ * selection is non-empty. */
+.mer-bulk-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: var(--mer-brand-tint);
+  border: 1px solid var(--mer-border);
+  border-radius: var(--mer-r-button);
+}
+.mer-bulk-bar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.mer-bulk-count {
+  margin-right: auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mer-brand);
+}
+.mer-bulk-message {
+  font-size: 12.5px;
+  color: var(--mer-ink-secondary);
+}
 .mer-chips {
   display: flex;
   flex-wrap: wrap;
@@ -558,6 +587,58 @@
   .mer-card-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+}
+
+/* Multi-select wrapper (#1336). Becomes the grid cell so the card keeps its own
+ * layout; `position: relative` anchors the checkbox overlay. `display: flex`
+ * (not block) lets the card stretch to the row height as it did when it was the
+ * direct grid child. */
+.mer-lib-card-wrap {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+.mer-lib-card-wrap > .mer-lib-card {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* The checkbox sits ABOVE the card (a sibling, not a child — see
+ * SelectableCard) so clicking it never triggers the card's navigation. */
+.mer-lib-card-check {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--mer-brand);
+  /* Stay out of the way until the card is hovered/focused or actually selected,
+   * so the default grid is not a sea of checkboxes. */
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.mer-lib-card-wrap:hover .mer-lib-card-check,
+.mer-lib-card-wrap[data-selected="true"] .mer-lib-card-check,
+.mer-lib-card-check:focus-visible {
+  opacity: 1;
+}
+/* Keyboard users must be able to reach the checkbox without a pointer hover. */
+@media (hover: none) {
+  .mer-lib-card-check {
+    opacity: 1;
+  }
+}
+.mer-lib-card-wrap[data-selected="true"] > .mer-lib-card {
+  border-color: var(--mer-brand);
+  box-shadow: 0 0 0 2px var(--mer-brand-tint);
+}
+/* A selected card shifts its head row right so the checkbox does not sit on top
+ * of the icon chip. Artifact cards have no head row and are unaffected. */
+.mer-lib-card-wrap:hover .mer-lib-card-head,
+.mer-lib-card-wrap[data-selected="true"] .mer-lib-card-head {
+  padding-left: 22px;
 }
 
 .mer-lib-card {
@@ -615,12 +696,37 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mer-lib-card-tags {
-  font-size: 11.5px;
-  color: var(--mer-ink-muted);
+/* Tag pills on library cards (#1336). Clones `.mer-badge` geometry minus the
+ * uppercase/letter-spacing — tags are user text and must render verbatim. The
+ * row wraps to at most one extra line; the component itself caps the pill count
+ * and collapses the rest into a "+N" pill. */
+.mer-tag-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mer-tag-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 9px;
+  border-radius: var(--mer-r-pill);
+  background: #f1f2f0;
+  color: var(--mer-ink-secondary);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.6;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.mer-tag-pill-more {
+  background: transparent;
+  color: var(--mer-ink-muted);
+  box-shadow: inset 0 0 0 1px var(--mer-border);
 }
 .mer-lib-card-foot {
   display: flex;

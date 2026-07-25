@@ -5,10 +5,12 @@
  * restyled to the Meridian card grid (Epic #1059 redesign, slice B).
  *
  * The library lists exactly the content the requester may view (the list action
- * is permission-pushed via `canView`), with client-side title search, filter
- * chips (All / Docs / Artifacts / Shared with me — the last driven by the new
- * server-side `owner: "shared"` filter), a debounced tag filter, and
- * "New doc" / "New artifact" creation.
+ * is permission-pushed via `canView`), with a debounced SERVER-side search over
+ * titles and tags (#1336 — previously a client-side title-only filter over the
+ * already-loaded page, which silently missed everything on page 2+), filter
+ * chips (All / Docs / Artifacts / Shared with me — the last driven by the
+ * server-side `owner: "shared"` filter), a debounced exact tag filter,
+ * multi-select bulk actions (#1336), and "New doc" / "New artifact" creation.
  *
  * The section tree lives in the Meridian shell's workspace nav column
  * (`atrium/layout.tsx`); this view reads the shell's `?collection=` selection
@@ -20,16 +22,17 @@
  * any server-side filter change resets to page one.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Search, Plus, Sparkles, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { listContentAction } from "@/actions/db/atrium/list-content";
 import { createContentAction } from "@/actions/db/atrium/create-content";
-import type { ContentObjectDTO, ContentKind } from "@/lib/content";
+import type { ContentObjectDTO, ContentKind, ListFilter } from "@/lib/content";
 import { createLogger } from "@/lib/client-logger";
 import { LibraryList } from "./LibraryList";
+import { LibraryBulkBar } from "./LibraryBulkBar";
 import { CreateContentDialog } from "./CreateContentDialog";
 
 const log = createLogger({ component: "LibraryView" });
@@ -170,8 +173,8 @@ function LibraryHeader({
         <input
           ref={searchRef}
           type="text"
-          aria-label="Search content by title"
-          placeholder="Search or ask the agent to find it…"
+          aria-label="Search content by title or tag"
+          placeholder="Search titles and tags…"
           value={search}
           onChange={(e) => onSearch(e.target.value)}
           className="mer-search-input"
@@ -246,56 +249,54 @@ function LibraryChips({
   );
 }
 
-export interface LibraryViewProps {
-  /**
-   * The cross-origin sandbox render URL, resolved SERVER-SIDE
-   * (`getArtifactSandboxRenderUrl()`) and passed from the Atrium page. Threaded to
-   * each artifact card's live thumbnail (slice F). `null` (unconfigured sandbox
-   * origin) → cards keep the gradient placeholder.
-   */
-  sandboxSrc?: string | null;
+/**
+ * Map the active filter chip onto the server-side `ListFilter` fields. The
+ * "Archived" chip is the ONLY view that requests archived content; every other
+ * view leaves `status` undefined and the service then excludes archived rows
+ * (default list behavior preserved). Pure — extracted so `LibraryView` stays
+ * under the cyclomatic-complexity lint.
+ */
+function viewToFilter(view: LibraryFilterView): {
+  kind?: ContentKind;
+  owner?: "shared";
+  status?: "archived";
+} {
+  switch (view) {
+    case "document":
+      return { kind: "document" };
+    case "artifact":
+      return { kind: "artifact" };
+    case "shared":
+      return { owner: "shared" };
+    case "archived":
+      return { status: "archived" };
+    default:
+      return {};
+  }
 }
 
-export function LibraryView({
-  sandboxSrc = null,
-}: LibraryViewProps = {}): React.JSX.Element {
-  const searchParams = useSearchParams();
-
-  // Section selection is URL-driven (`?collection=<id>`): the Meridian shell's
-  // workspace nav column owns the tree and pushes the selection into the URL, and
-  // the reader's collection sidebar deep-links here the same way. `useSearchParams`
-  // already re-renders on any URL change, so reading the param directly (no local
-  // state + sync effect) is all that's needed for the shell tree to drive the grid.
-  const collectionId = searchParams.get("collection");
-
-  const [view, setView] = useState<LibraryFilterView>("all");
-  const [tag, setTag] = useState("");
-  // Debounced copy of `tag`: the tag filter is a SERVER round-trip (unlike the
-  // client-side title search), so feeding every keystroke into `load` fires a
-  // request storm and flickers the list. Debounce 300ms before it reaches `load`.
-  const [debouncedTag, setDebouncedTag] = useState("");
-  const [search, setSearch] = useState("");
-  const searchRef = useRef<HTMLInputElement>(null);
-
+/**
+ * Debounce one free-text filter value. Both library free-text filters (search
+ * and tag) are SERVER round-trips, so every keystroke must not reach
+ * `listContentAction`.
+ */
+function useDebounced(value: string, delayMs = 300): string {
+  const [debounced, setDebounced] = useState(value);
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedTag(tag), 300);
+    const t = setTimeout(() => setDebounced(value), delayMs);
     return () => clearTimeout(t);
-  }, [tag]);
+  }, [value, delayMs]);
+  return debounced;
+}
 
-  // ⌘K / Ctrl+K focuses the library search (design "⌘K" hint). Global listener,
-  // cleaned up on unmount; ignores the combo when a modifier-less field already
-  // has focus is unnecessary — ⌘/Ctrl+K is not a text-entry combo.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        searchRef.current?.focus();
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
+/**
+ * The library's paged fetch (extracted from `LibraryView` so its body stays
+ * under the max-lines lint). `fetchPage(0)` REPLACES the list for the current
+ * filters; a non-zero offset APPENDS (the "Load more" path). A monotonic
+ * sequence ref drops stale responses so a slow earlier request cannot overwrite
+ * a newer one.
+ */
+function useLibraryPage(filter: ListFilter) {
   const [items, setItems] = useState<ContentObjectDTO[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -303,53 +304,25 @@ export function LibraryView({
   // means the end was reached, so "Load more" hides.
   const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // The Meridian creation flow (New doc → blank sheet; New artifact / create card
-  // → agent-prompt dialog). Extracted to a hook to keep this body under the lint.
-  const {
-    agentPromptOpen,
-    setAgentPromptOpen,
-    creatingDoc,
-    createError,
-    handleNewDoc,
-    handleAgentCreate,
-  } = useLibraryCreate(collectionId);
-
-  // Monotonic sequence so a slow earlier response cannot overwrite a newer one.
   const reqSeqRef = useRef(0);
 
-  // Derive the server filter from the active chip.
-  const kind: ContentKind | undefined =
-    view === "document" ? "document" : view === "artifact" ? "artifact" : undefined;
-  const owner: "shared" | undefined = view === "shared" ? "shared" : undefined;
-  // The "Archived" chip is the ONLY view that requests archived content; every
-  // other view leaves `status` undefined, and the service then excludes archived
-  // rows (default list behavior is preserved — no regression).
-  const status: "archived" | undefined =
-    view === "archived" ? "archived" : undefined;
-  const archivedView = view === "archived";
+  const { collectionId, kind, owner, status, tag, query } = filter;
 
-  /**
-   * Fetch one page. `offset === 0` replaces the list (a fresh load for the
-   * current filters); a non-zero offset APPENDS (the "Load more" path).
-   */
   const fetchPage = useCallback(
     async (offset: number) => {
       const reqSeq = ++reqSeqRef.current;
       const append = offset > 0;
-      if (append) {
-        setLoadingMore(true);
-      } else {
-        setLoading(true);
-      }
+      if (append) setLoadingMore(true);
+      else setLoading(true);
       setError(null);
       try {
         const res = await listContentAction({
-          collectionId: collectionId ?? undefined,
+          collectionId,
           kind,
           owner,
           status,
-          tag: debouncedTag.trim() || undefined,
+          tag,
+          query,
           limit: PAGE_SIZE,
           offset,
         });
@@ -374,13 +347,113 @@ export function LibraryView({
         }
       }
     },
-    [collectionId, kind, owner, status, debouncedTag]
+    [collectionId, kind, owner, status, tag, query]
   );
 
-  // Filters changed (or first mount): reload page one.
+  return { items, loading, loadingMore, hasMore, error, fetchPage };
+}
+
+/**
+ * Multi-select state for the bulk-action bar (#1336). The caller clears it
+ * whenever the underlying set changes (filter/search/section change or a
+ * post-mutation refetch) so a bulk action can never operate on ids the user can
+ * no longer see.
+ */
+function useLibrarySelection() {
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const clearSelection = useCallback(() => setSelected(new Set()), []);
+  const toggleSelect = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  return { selected, clearSelection, toggleSelect };
+}
+
+export interface LibraryViewProps {
+  /**
+   * The cross-origin sandbox render URL, resolved SERVER-SIDE
+   * (`getArtifactSandboxRenderUrl()`) and passed from the Atrium page. Threaded to
+   * each artifact card's live thumbnail (slice F). `null` (unconfigured sandbox
+   * origin) → cards keep the gradient placeholder.
+   */
+  sandboxSrc?: string | null;
+}
+
+export function LibraryView({
+  sandboxSrc = null,
+}: LibraryViewProps = {}): React.JSX.Element {
+  const searchParams = useSearchParams();
+
+  // Section selection is URL-driven (`?collection=<id>`): the Meridian shell's
+  // workspace nav column owns the tree and pushes the selection into the URL, and
+  // the reader's collection sidebar deep-links here the same way. `useSearchParams`
+  // already re-renders on any URL change, so reading the param directly (no local
+  // state + sync effect) is all that's needed for the shell tree to drive the grid.
+  const collectionId = searchParams.get("collection");
+
+  const [view, setView] = useState<LibraryFilterView>("all");
+  const [tag, setTag] = useState("");
+  const [search, setSearch] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // BOTH free-text filters are SERVER round-trips (#1336 moved the title search
+  // server-side and widened it to match tags, so it now finds rows on page 2+
+  // that a client-side filter over the already-loaded page could never see).
+  const debouncedTag = useDebounced(tag);
+  const debouncedSearch = useDebounced(search);
+
+  // ⌘K / Ctrl+K focuses the library search (design "⌘K" hint). Global listener,
+  // cleaned up on unmount; ignores the combo when a modifier-less field already
+  // has focus is unnecessary — ⌘/Ctrl+K is not a text-entry combo.
   useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // The Meridian creation flow (New doc → blank sheet; New artifact / create card
+  // → agent-prompt dialog). Extracted to a hook to keep this body under the lint.
+  const {
+    agentPromptOpen,
+    setAgentPromptOpen,
+    creatingDoc,
+    createError,
+    handleNewDoc,
+    handleAgentCreate,
+  } = useLibraryCreate(collectionId);
+
+  // Derive the server filter from the active chip.
+  const { kind, owner, status } = viewToFilter(view);
+  const archivedView = view === "archived";
+
+  const { items, loading, loadingMore, hasMore, error, fetchPage } =
+    useLibraryPage({
+      collectionId: collectionId ?? undefined,
+      kind,
+      owner,
+      status,
+      tag: debouncedTag.trim() || undefined,
+      query: debouncedSearch.trim() || undefined,
+    });
+
+  const { selected, clearSelection, toggleSelect } = useLibrarySelection();
+
+  // Filters changed (or first mount): reload page one and drop the selection.
+  // `fetchPage`'s identity changes exactly when a server filter changes, so it
+  // is the correct trigger for both.
+  useEffect(() => {
+    clearSelection();
     void fetchPage(0);
-  }, [fetchPage]);
+  }, [fetchPage, clearSelection]);
 
   // Append the next offset page. `items.length` (not a page counter) is the
   // offset so a short final page can never skip rows.
@@ -388,13 +461,11 @@ export function LibraryView({
     void fetchPage(items.length);
   }, [fetchPage, items.length]);
 
-  // Client-side title search over the server-filtered set (kept local so typing
-  // doesn't round-trip; the server already scoped to visible + filtered rows).
-  const visibleItems = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter((it) => it.title.toLowerCase().includes(q));
-  }, [items, search]);
+  // Re-fetch page one after a bulk mutation so the grid reflects the new state
+  // (archived rows leave the default views, moved rows leave a section view).
+  const refresh = useCallback(() => {
+    void fetchPage(0);
+  }, [fetchPage]);
 
   return (
     <div className="w-full px-5 py-6 md:px-8 md:py-8">
@@ -416,18 +487,29 @@ export function LibraryView({
 
         <LibraryChips view={view} onView={setView} tag={tag} onTag={setTag} />
 
+        <LibraryBulkBar
+          selectedIds={[...selected]}
+          onClear={clearSelection}
+          onRefresh={refresh}
+          archivedView={archivedView}
+        />
+
         <LibraryList
-          items={visibleItems}
+          items={items}
           loading={loading}
           error={error}
           onCreate={() => setAgentPromptOpen(true)}
           sandboxSrc={sandboxSrc}
           archivedView={archivedView}
+          selected={selected}
+          onToggleSelect={toggleSelect}
+          searchTerm={debouncedSearch}
         />
 
         {/* Pagination: hidden once a short page signals the end, while the first
-            page loads, or on error. */}
-        {hasMore && !loading && !error && (
+            page loads, on error, or when the current filter matched nothing (a
+            zero-result search must not render a dangling "Load more" — #1336). */}
+        {hasMore && !loading && !error && items.length > 0 && (
           <div className="mt-5 flex justify-center">
             <button
               type="button"

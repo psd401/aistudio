@@ -742,12 +742,28 @@ export const visibilityService = {
       filters.push(sql`${o.tags} && ARRAY[${tag}]::text[]`);
     }
     if (filter.query) {
-      // Case-insensitive title substring search. Bounded + LIKE-escaped so an
-      // oversized or wildcard-bearing query can neither bloat the bound
+      // Case-insensitive substring search over the TITLE **or any TAG** (#1336:
+      // the library search box searches both, so "phoenix" finds a doc tagged
+      // `phoenix` as well as one titled "Phoenix plan"). Bounded + LIKE-escaped
+      // so an oversized or wildcard-bearing query can neither bloat the bound
       // parameter nor act as a pattern; the pattern is a bound parameter
       // (injection-safe).
+      //
+      // The tag arm is an `EXISTS (SELECT 1 FROM unnest(tags) ...)` rather than
+      // the `&&` array-overlap used by the exact-match `filter.tag` arm above:
+      // overlap can only test equality (and so cannot do substring/`ILIKE`
+      // matching), and `unnest` is the only way to apply a per-element pattern.
+      // This arm cannot use the `idx_content_tags` GIN index, but it runs only
+      // on explicit user search text and is already bounded by the visibility
+      // predicate + LIMIT.
       const q = escapeLikePattern(filter.query.slice(0, MAX_QUERY_LENGTH));
-      filters.push(ilike(o.title, `%${q}%`));
+      const pattern = `%${q}%`;
+      filters.push(
+        sql`(${ilike(o.title, pattern)} OR EXISTS (
+          SELECT 1 FROM unnest(${o.tags}) AS search_tag
+          WHERE search_tag ILIKE ${pattern}
+        ))`
+      );
     }
 
     // List-only projection: the shared `objectSelectFields` (single-object loads)
