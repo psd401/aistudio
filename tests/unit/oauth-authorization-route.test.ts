@@ -41,9 +41,13 @@ jest.mock("@/lib/logger", () => ({
   }),
 }))
 
-import { GET } from "@/app/api/oauth/[...oidc]/route"
+import { GET, POST } from "@/app/api/oauth/[...oidc]/route"
 
 describe("OAuth authorization route", () => {
+  beforeEach(() => {
+    providerCallback.mockClear()
+  })
+
   it("returns the provider's real redirect and separate cookies", async () => {
     const response = await GET(
       new UndiciRequest(
@@ -60,5 +64,19 @@ describe("OAuth authorization route", () => {
       "_session=two; Path=/api/oauth; HttpOnly",
     ])
     expect(await response.text()).toBe("Redirecting…")
+  })
+
+  it.each([
+    ["/api/oauth/revocation", "/revocation"],
+    ["/api/oauth/token/revocation", "/revocation"],
+  ])("routes %s to the provider revocation endpoint", async (path, expected) => {
+    await POST(
+      new UndiciRequest(`https://aistudio.example${path}`, {
+        method: "POST",
+      }) as unknown as NextRequest
+    )
+
+    expect(providerCallback).toHaveBeenCalledTimes(1)
+    expect(providerCallback.mock.calls[0]?.[0].url).toBe(expected)
   })
 })

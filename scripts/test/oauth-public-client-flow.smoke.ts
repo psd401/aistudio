@@ -31,6 +31,10 @@ import {
   createFirstPartyLoadExistingGrant,
   createOAuthInteractionPolicy,
 } from "../../lib/oauth/first-party-grants"
+import {
+  ATRIUM_CAPTURE_EXTENSION_ORIGIN,
+  isAllowedOAuthClientOrigin,
+} from "../../lib/oauth/client-origin-policy"
 
 interface Stored {
   payload: AdapterPayload
@@ -212,17 +216,23 @@ async function fetchWithCookies(
 async function postForm<T>(
   origin: string,
   path: string,
-  form: Record<string, string>
-): Promise<{ status: number; body: T }> {
+  form: Record<string, string>,
+  requestOrigin?: string
+): Promise<{ status: number; body: T; allowOrigin: string | null }> {
+  const headers: Record<string, string> = {
+    "content-type": "application/x-www-form-urlencoded",
+  }
+  if (requestOrigin) headers.origin = requestOrigin
   const response = await fetch(`${origin}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers,
     body: new URLSearchParams(form),
   })
   const text = await response.text()
   return {
     status: response.status,
     body: (text ? JSON.parse(text) : {}) as T,
+    allowOrigin: response.headers.get("access-control-allow-origin"),
   }
 }
 
@@ -322,6 +332,13 @@ async function main(): Promise<void> {
       properties: ["is_first_party"],
     },
     loadExistingGrant: createFirstPartyLoadExistingGrant(origin),
+    clientBasedCORS: (ctx, requestOrigin, client) =>
+      isAllowedOAuthClientOrigin({
+        clientId: client.clientId,
+        origin: requestOrigin,
+        route: ctx.oidc.route,
+        grantType: ctx.oidc.params?.grant_type,
+      }),
     jwks: { keys: [signingJwk] },
     pkce: { required: () => true },
     responseTypes: ["code"],
@@ -368,6 +385,9 @@ async function main(): Promise<void> {
           accessTokenTTL: 900,
         }),
       },
+    },
+    routes: {
+      revocation: "/revocation",
     },
     findAccount: async (_ctx, id) => ({
       accountId: id,
@@ -798,6 +818,58 @@ async function main(): Promise<void> {
     assert.equal(expired.status, 400)
     assert.equal(expired.body.error, "invalid_grant")
 
+    const browserFakeCode = await postForm<OAuthError>(
+      origin,
+      "/token",
+      {
+        grant_type: "authorization_code",
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        code: "deliberately-fake-code",
+        code_verifier: "a".repeat(43),
+      },
+      ATRIUM_CAPTURE_EXTENSION_ORIGIN
+    )
+    assert.equal(browserFakeCode.status, 400)
+    assert.equal(browserFakeCode.body.error, "invalid_grant")
+    assert.equal(
+      browserFakeCode.allowOrigin,
+      ATRIUM_CAPTURE_EXTENSION_ORIGIN
+    )
+
+    const browserFakeRefresh = await postForm<OAuthError>(
+      origin,
+      "/token",
+      {
+        grant_type: "refresh_token",
+        client_id: clientId,
+        refresh_token: "deliberately-fake-refresh-token",
+      },
+      ATRIUM_CAPTURE_EXTENSION_ORIGIN
+    )
+    assert.equal(browserFakeRefresh.status, 400)
+    assert.equal(browserFakeRefresh.body.error, "invalid_grant")
+    assert.equal(
+      browserFakeRefresh.allowOrigin,
+      ATRIUM_CAPTURE_EXTENSION_ORIGIN
+    )
+
+    const wrongBrowserOrigin = await postForm<OAuthError>(
+      origin,
+      "/token",
+      {
+        grant_type: "authorization_code",
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        code: "deliberately-fake-code",
+        code_verifier: "a".repeat(43),
+      },
+      "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    )
+    assert.equal(wrongBrowserOrigin.status, 400)
+    assert.equal(wrongBrowserOrigin.body.error, "invalid_request")
+    assert.equal(wrongBrowserOrigin.allowOrigin, null)
+
     const code = await authorizationCode()
     const token = await postForm<TokenSuccess>(origin, "/token", {
       grant_type: "authorization_code",
@@ -881,6 +953,21 @@ async function main(): Promise<void> {
       undefined
     )
 
+    const browserRevocation = await postForm<OAuthError>(
+      origin,
+      "/revocation",
+      {
+        client_id: clientId,
+        token: "deliberately-fake-token",
+      },
+      ATRIUM_CAPTURE_EXTENSION_ORIGIN
+    )
+    assert.equal(browserRevocation.status, 200)
+    assert.equal(
+      browserRevocation.allowOrigin,
+      ATRIUM_CAPTURE_EXTENSION_ORIGIN
+    )
+
     log.info("OAuth public-client protocol smoke passed", {
       checks: [
         "first_party_signed_out_login_only",
@@ -895,11 +982,15 @@ async function main(): Promise<void> {
         "wrong_verifier",
         "redirect_mismatch",
         "expired_code",
+        "extension_origin_authorization_code",
+        "extension_origin_refresh_token",
+        "extension_origin_exact_match",
         "jwt_access_token",
         "code_replay",
         "refresh_rotation",
         "refresh_replay",
         "revocation",
+        "extension_origin_revocation",
         "native_custom_scheme_exact_match",
         "native_loopback_variable_port",
       ],

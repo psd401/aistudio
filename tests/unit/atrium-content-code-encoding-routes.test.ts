@@ -16,6 +16,7 @@
  */
 
 const mockCreate = jest.fn();
+const mockRecoverCaptureCreate = jest.fn();
 const mockCreateVersion = jest.fn();
 const mockParseRequestBody = jest.fn();
 const mockResolveRestRequester = jest.fn();
@@ -23,6 +24,7 @@ const mockContentErrorToResponse = jest.fn();
 const mockCreateApiResponse = jest.fn();
 const mockResolveCollectionId = jest.fn();
 const mockParseContentIfMatch = jest.fn();
+const mockRunIdempotentMutation = jest.fn();
 
 jest.mock("@/lib/api", () => ({
   withApiAuth: (handler: unknown) => handler,
@@ -38,16 +40,14 @@ jest.mock("@/lib/content", () => {
     ApprovalRequiredError: MockApprovalRequiredError,
     contentService: {
       create: (...a: unknown[]) => mockCreate(...a),
+      recoverCaptureCreate: (...a: unknown[]) => mockRecoverCaptureCreate(...a),
       createVersion: (...a: unknown[]) => mockCreateVersion(...a),
     },
     versionService: { list: jest.fn() },
     hasPublishPublicScope: jest.fn(() => false),
     recordContentAudit: jest.fn(),
     requesterFromApiAuth: jest.fn(),
-    runIdempotentMutation: (
-      _input: unknown,
-      execute: () => Promise<unknown>
-    ) => execute(),
+    runIdempotentMutation: (...a: unknown[]) => mockRunIdempotentMutation(...a),
     parseContentIfMatch: (...args: unknown[]) => mockParseContentIfMatch(...args),
     contentHeadEtag: (id: string | null) => `"${id ?? "none"}"`,
   };
@@ -107,6 +107,9 @@ const ARTIFACT_CODE =
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockRunIdempotentMutation.mockImplementation(
+    (_input: unknown, execute: () => Promise<unknown>) => execute()
+  );
   mockResolveRestRequester.mockResolvedValue({ req: REQ });
   mockResolveCollectionId.mockResolvedValue(undefined);
   mockParseContentIfMatch.mockReturnValue({
@@ -185,6 +188,76 @@ describe("POST /api/v1/content — codeEncoding decode", () => {
       REQ,
       expect.objectContaining({ sourceRef }),
       expect.anything()
+    );
+  });
+
+  it("reconciles a committed bodyless Capture object without creating a duplicate", async () => {
+    const sourceRef = {
+      type: "capture",
+      provider: "atrium-capture",
+      externalId: "capture-session-recovery",
+      clientSurface: "mac",
+      clientVersion: "1.0.0",
+      capturedAt: "2026-07-25T04:25:13.281Z",
+    };
+    const reservationCreatedAt = new Date("2026-07-25T04:44:20.479Z");
+    const recovered = {
+      id: "object-committed-once",
+      slug: "region-capture",
+      visibilityLevel: "private",
+      currentVersionId: null,
+      version: null,
+    };
+    mockParseRequestBody.mockResolvedValue({
+      data: {
+        kind: "document",
+        title: "Region capture",
+        tags: ["atrium-capture"],
+        sourceRef,
+      },
+    });
+    mockRecoverCaptureCreate.mockResolvedValue(recovered);
+    mockRunIdempotentMutation.mockImplementation(
+      async (
+        input: {
+          recoverPending?: (reservation: {
+            reservationId: string;
+            createdAt: Date;
+          }) => Promise<unknown>;
+        },
+        _execute: () => Promise<unknown>
+      ) =>
+        input.recoverPending?.({
+          reservationId: "pending-reservation",
+          createdAt: reservationCreatedAt,
+        })
+    );
+
+    await createHandler(request, AUTH, "req-recovery");
+
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockRecoverCaptureCreate).toHaveBeenCalledWith(
+      REQ,
+      expect.objectContaining({
+        kind: "document",
+        title: "Region capture",
+        body: undefined,
+        collectionId: undefined,
+        tags: ["atrium-capture"],
+        sourceRef,
+      }),
+      reservationCreatedAt
+    );
+    expect(mockCreateApiResponse).toHaveBeenCalledWith(
+      {
+        data: {
+          ...recovered,
+          url: "/c/region-capture",
+        },
+        meta: { requestId: "req-recovery" },
+      },
+      "req-recovery",
+      201
     );
   });
 

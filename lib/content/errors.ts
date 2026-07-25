@@ -73,6 +73,17 @@ export class ConflictError extends ContentError {
   }
 }
 
+/** 409 — a scoped Idempotency-Key was reused with different semantic input. */
+export class IdempotencyKeyReusedError extends ContentError {
+  constructor() {
+    super(
+      "Idempotency-Key was already used with a different request",
+      "IDEMPOTENCY_KEY_REUSED",
+      409
+    );
+  }
+}
+
 /** 412 — If-Match did not match the object's current version head. */
 export class VersionPreconditionFailedError extends ContentError {
   constructor(

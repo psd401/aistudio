@@ -73,6 +73,8 @@ through explicit consent.
 - **Public clients**: browser extensions and native apps have no secret and always use S256 PKCE
 - **First-party trust**: explicit default-deny client metadata; does not bypass
   login, redirect validation, scope allowlists, active-client checks, or PKCE
+- **Browser CORS trust**: exact client + extension-origin + endpoint/grant
+  allowlist; never wildcarded or inferred from a redirect URI
 - **Consent integrity**: grant scopes come from signed provider interaction
   state, never browser-submitted scope lists
 - Client secrets hashed with Argon2id
