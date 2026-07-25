@@ -4,13 +4,13 @@
 
 ### Parameters Required by Each Stack:
 
-| Stack | GoogleClientId | baseDomain | Notes |
-|-------|---------------|------------|-------|
-| DatabaseStack | ❌ | ❌ | No parameters needed |
-| AuthStack | ✅ | ✅ (indirect) | Needs GoogleClientId parameter, baseDomain used for callback URLs |
-| StorageStack | ❌ | ❌ | No parameters needed |
-| ProcessingStack | ❌ | ❌ | No parameters needed |
-| FrontendStack | ❌ | ✅ | Only created when baseDomain is provided |
+| Stack | GoogleClientId | GooglePickerApiKey | baseDomain | Notes |
+|-------|---------------|--------------------|------------|-------|
+| DatabaseStack | ❌ | ❌ | ❌ | No parameters needed |
+| AuthStack | ✅ | ✅ | ✅ (indirect) | Creates the application OAuth/Picker secret; baseDomain is used for callback URLs |
+| StorageStack | ❌ | ❌ | ❌ | No parameters needed |
+| ProcessingStack | ❌ | ❌ | ❌ | Depends on the AuthStack content OAuth secret |
+| FrontendStack | ❌ | ❌ | ✅ | Only created when baseDomain is provided |
 
 ## Full Deployment Commands
 
@@ -19,10 +19,12 @@
 # With all required parameters
 bunx cdk deploy --all \
   --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_GOOGLE_CLIENT_ID \
+  --parameters AIStudio-AuthStack-Dev:GooglePickerApiKey=YOUR_RESTRICTED_PICKER_KEY \
   --context baseDomain=aistudio.psd401.ai
 
 # Or use the helper script
-./deploy-dev.sh YOUR_GOOGLE_CLIENT_ID aistudio.psd401.ai
+GOOGLE_PICKER_API_KEY=YOUR_RESTRICTED_PICKER_KEY \
+  ./deploy-dev.sh YOUR_GOOGLE_CLIENT_ID aistudio.psd401.ai
 ```
 
 ### Deploy All Stacks (Prod Environment)
@@ -32,8 +34,9 @@ bunx cdk deploy \
   AIStudio-AuthStack-Prod \
   AIStudio-StorageStack-Prod \
   AIStudio-ProcessingStack-Prod \
-  AIStudio-FrontendStack-Prod \
+  AIStudio-FrontendStack-ECS-Prod \
   --parameters AIStudio-AuthStack-Prod:GoogleClientId=YOUR_PROD_GOOGLE_CLIENT_ID \
+  --parameters AIStudio-AuthStack-Prod:GooglePickerApiKey=YOUR_PROD_RESTRICTED_PICKER_KEY \
   --context baseDomain=aistudio.psd401.ai
 ```
 
@@ -48,17 +51,19 @@ bunx cdk deploy AIStudio-DatabaseStack-Dev --exclusively
 bunx cdk deploy AIStudio-DatabaseStack-Prod --exclusively
 ```
 
-### AuthStack (Requires GoogleClientId)
+### AuthStack (Requires GoogleClientId and GooglePickerApiKey)
 ```bash
 # Dev
 bunx cdk deploy AIStudio-AuthStack-Dev \
   --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_GOOGLE_CLIENT_ID \
+  --parameters AIStudio-AuthStack-Dev:GooglePickerApiKey=YOUR_RESTRICTED_PICKER_KEY \
   --context baseDomain=aistudio.psd401.ai \
   --exclusively
 
 # Prod
 bunx cdk deploy AIStudio-AuthStack-Prod \
   --parameters AIStudio-AuthStack-Prod:GoogleClientId=YOUR_PROD_GOOGLE_CLIENT_ID \
+  --parameters AIStudio-AuthStack-Prod:GooglePickerApiKey=YOUR_PROD_RESTRICTED_PICKER_KEY \
   --context baseDomain=aistudio.psd401.ai \
   --exclusively
 ```
@@ -91,12 +96,12 @@ focused ProcessingStack deployment never creates or removes subscriptions.
 ### FrontendStack (Requires baseDomain)
 ```bash
 # Dev
-bunx cdk deploy AIStudio-FrontendStack-Dev \
+bunx cdk deploy AIStudio-FrontendStack-ECS-Dev \
   --context baseDomain=aistudio.psd401.ai \
   --exclusively
 
 # Prod
-bunx cdk deploy AIStudio-FrontendStack-Prod \
+bunx cdk deploy AIStudio-FrontendStack-ECS-Prod \
   --context baseDomain=aistudio.psd401.ai \
   --exclusively
 ```
@@ -109,23 +114,30 @@ bunx cdk deploy AIStudio-FrontendStack-Prod \
 - Different IDs for dev/prod environments
 - Stored in Secrets Manager as `aistudio-dev-google-oauth` and `aistudio-prod-google-oauth`
 
-### 2. Base Domain
+### 2. Google Picker API Key
+- Required for AuthStack only
+- Use a browser key restricted to the environment's exact HTTPS origin and the Google Picker/Drive APIs
+- Passed as a NoEcho CloudFormation parameter; never commit it or place it in a shell script
+- AuthStack combines it with the existing client ID/client secret in the retained `aistudio/{environment}/google-content-oauth` secret
+
+### 3. Base Domain
 - Required when deploying FrontendStack
 - Used by AuthStack for callback URLs (passed via context)
 - If not provided, FrontendStack won't be created
 
-### 3. First Deployment After SSM Changes
+### 4. First Deployment After OAuth Deployment Changes
 ```bash
 # Deploy all at once to ensure SSM parameters are created
 bunx cdk deploy --all \
   --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_GOOGLE_CLIENT_ID \
+  --parameters AIStudio-AuthStack-Dev:GooglePickerApiKey=YOUR_RESTRICTED_PICKER_KEY \
   --context baseDomain=aistudio.psd401.ai
 ```
 
-### 4. Deployment Order (if deploying individually)
+### 5. Deployment Order (if deploying individually)
 1. DatabaseStack & StorageStack (can be parallel, no dependencies)
-2. AuthStack (no dependencies, but needs GoogleClientId)
-3. ProcessingStack (depends on SSM from Database & Storage)
+2. AuthStack (needs GoogleClientId and GooglePickerApiKey)
+3. ProcessingStack (depends on Database, Storage, and the AuthStack content OAuth secret)
 4. FrontendStack (depends on SSM from Storage, needs baseDomain)
 
 ## Quick Reference
@@ -134,17 +146,19 @@ bunx cdk deploy --all \
 
 ```bash
 # Deploy everything (dev)
-./deploy-dev.sh YOUR_GOOGLE_CLIENT_ID aistudio.psd401.ai
+GOOGLE_PICKER_API_KEY=YOUR_RESTRICTED_PICKER_KEY \
+  ./deploy-dev.sh YOUR_GOOGLE_CLIENT_ID aistudio.psd401.ai
 
 # Update just the database
 bunx cdk deploy AIStudio-DatabaseStack-Dev --exclusively
 
 # Update just the frontend
-bunx cdk deploy AIStudio-FrontendStack-Dev --context baseDomain=aistudio.psd401.ai --exclusively
+bunx cdk deploy AIStudio-FrontendStack-ECS-Dev --context baseDomain=aistudio.psd401.ai --exclusively
 
 # Update auth (if Google OAuth changes)
 bunx cdk deploy AIStudio-AuthStack-Dev \
   --parameters AIStudio-AuthStack-Dev:GoogleClientId=NEW_GOOGLE_CLIENT_ID \
+  --parameters AIStudio-AuthStack-Dev:GooglePickerApiKey=YOUR_RESTRICTED_PICKER_KEY \
   --context baseDomain=aistudio.psd401.ai \
   --exclusively
 ```

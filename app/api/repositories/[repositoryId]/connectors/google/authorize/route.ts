@@ -75,14 +75,14 @@ export async function GET(
       },
     );
     timer({ status: "success" });
-    log.info("Personal Google Drive authorization started", {
+    log.info("Google Drive authorization started", {
       repositoryId,
       userId: manager.userId,
     });
     return NextResponse.redirect(authorizationUrl);
   } catch (error) {
     timer({ status: "error" });
-    log.warn("Personal Google Drive authorization rejected");
+    log.warn("Google Drive authorization rejected");
     return repositoryConnectorErrorResponse(error);
   }
 }

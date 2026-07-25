@@ -22,31 +22,19 @@ existing AES-256-GCM token DEK and stored separately from connector/source
 metadata. Picker access tokens are short lived, returned only to the connector
 owner, sent with `Cache-Control: no-store`, and never logged.
 
-Shared Drives use the fixed keyless identity delivered by
-`psd401/psd-gcp-infra#1`:
-
-| Contract               | Value                                                                                    |
-| ---------------------- | ---------------------------------------------------------------------------------------- |
-| Service account        | `unified-content-sync@psd-aistudio-broker.iam.gserviceaccount.com`                       |
-| GCP project number     | `1022506104054`                                                                          |
-| Workload Identity Pool | `aws-agent-broker`                                                                       |
-| Provider               | `content-sync`                                                                           |
-| Trusted AWS roles      | `unified-content-sync-execution-role-dev` and `unified-content-sync-execution-role-prod` |
-
-The worker uses ambient Lambda credentials for AWS-to-GCP federation and service
-account impersonation. It has no service-account key and no domain-wide
-delegation. A Shared Drive administrator must add the service account as a
-Viewer before an AI Studio administrator configures the Drive ID in Repository
-Manager. Because WIF uses a shared application identity, Shared Drive creation
-is restricted to the AI Studio `administrator` role; this prevents a repository
-owner from using that identity to read a Drive they cannot access directly.
+The same user OAuth and Picker flow covers both My Drive and Shared Drives. A
+user may select only files, folders, and drives that Google reports as
+accessible to that user. AI Studio never asks a customer to grant access to an
+AI Studio service account or paste a Shared Drive ID. `supportsAllDrives` and
+`includeItemsFromAllDrives` are set on the Drive API calls used after selection.
 
 A repository owner or administrator with the `knowledge-repositories` UI
-capability may configure personal OAuth, choose personal sources, retry, and
-disconnect. Shared Drive setup additionally requires the `administrator` role
-and is hidden from other managers. The repository management check is repeated
-on list, Picker, selection, retry, and disconnect routes. This is a human UI
-capability boundary, not an API key scope.
+capability may connect Google Drive, select accessible sources, retry, and
+disconnect. The repository management check is repeated on list, Picker,
+selection, retry, and disconnect routes. This is a human UI capability
+boundary, not an API key scope. The worker retains read support for legacy WIF
+connector records during migration, but Repository Manager no longer creates
+that connector type.
 
 ## Synchronization model
 
@@ -113,27 +101,37 @@ an `unsupported` source status instead of silently disappearing.
 Deploy in this order:
 
 1. apply additive migration `136-google-content-connectors.sql`;
-2. deploy the Processing stack (queue, DLQ, isolated worker/WIF role, schedule,
+2. deploy the Auth stack so it creates the complete
+   `aistudio/{environment}/google-content-oauth` secret;
+3. deploy the Processing stack (queue, DLQ, isolated worker role, schedule,
    alarms, and queue exports);
-3. deploy the Frontend stack so ECS receives
+4. deploy the Frontend stack so ECS receives
    `GOOGLE_CONTENT_SYNC_QUEUE_URL`; and
-4. enable `CONTENT_PLATFORM_ENABLED` and
+5. enable `CONTENT_PLATFORM_ENABLED` and
    `GOOGLE_CONTENT_SYNC_ENABLED` for the intended environment.
 
 The scheduled next-run delay is controlled by
 `GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES`; deferred long-running downloads retry
 after one minute.
 
-Create `aistudio/{environment}/google-content-oauth` in Secrets Manager with:
+`AuthStack` creates and retains
+`aistudio/{environment}/google-content-oauth` with this runtime contract:
 
 ```json
 {
   "clientId": "google-oauth-client-id",
   "clientSecret": "google-oauth-client-secret",
   "pickerApiKey": "browser-key-restricted-to-the-ai-studio-origin",
-  "appId": "1022506104054"
+  "appId": "google-cloud-project-number-derived-from-client-id"
 }
 ```
+
+Deployment supplies the existing `GoogleClientId` and the browser-restricted
+`GooglePickerApiKey` CloudFormation parameters. The existing
+`aistudio-{environment}-google-oauth` secret remains the source of the client
+secret. CloudFormation assembles the content secret; operators must not create
+or edit it manually. `infra/deploy-dev.sh` requires `GOOGLE_PICKER_API_KEY` and
+passes both parameters to the Auth stack.
 
 Register this exact callback for each environment:
 
@@ -143,8 +141,8 @@ https://<ai-studio-origin>/api/repositories/connectors/google/callback
 
 Restrict the Picker browser key to the corresponding HTTPS origin and Google
 Picker/Drive APIs. The OAuth client, consent screen, domain verification, and
-callback registration are administrator-controlled console steps; no secret
-value belongs in CDK, source control, a connector row, or a worker message.
+callback registration remain Google Cloud configuration; no credential value
+belongs in source control, a connector row, or a worker message.
 
 The worker alarms on Lambda errors, messages older than 30 minutes, and any DLQ
 record. Repository Manager shows connector status, last success, last error,
@@ -162,9 +160,10 @@ versions. Do not remove migration 136 or delete connector records as a rollback.
   Drive metadata/cursor contracts, export mappings, and resumable Vids
   operations.
 - `tests/unit/lib/repositories/google-drive-oauth.test.ts` covers PKCE and
-  fail-closed scope validation.
-- `tests/unit/lib/repositories/google-drive-route-access.test.ts` proves the
-  common WIF identity can only be configured by an AI Studio administrator.
+  fail-closed scope validation plus sanitized missing/malformed deployment
+  configuration errors.
+- `tests/unit/lib/repositories/google-drive-route-access.test.ts` covers the
+  capability/repository authorization boundary and sanitized 503 response.
 - `tests/unit/lib/repositories/google-drive-selections-route.test.ts` and
   `google-drive-bounded-concurrency.test.ts` prove per-user throttling, bounded
   provider fanout, and stable selection ordering.
@@ -177,9 +176,12 @@ versions. Do not remove migration 136 or delete connector records as a rollback.
   creator-deletion cleanup.
 - `infra/lambdas/google-content-sync/__tests__/safety.test.ts` proves metadata,
   response, and in-flight byte limits plus finite snapshot budgets.
-- `infra/test/unit/google-content-sync.test.ts` synthesizes the exact WIF role,
-  least-privilege object/queue policies, scheduled queue dispatch, queue/DLQ,
-  and alarms.
+- `infra/test/unit/google-content-oauth-secret.test.ts` proves the Auth stack
+  requires the Picker key and creates the retained, complete runtime secret
+  from deployment-owned inputs.
+- `infra/test/unit/google-content-sync.test.ts` synthesizes the isolated worker
+  role, exact OAuth secret grant, least-privilege object/queue policies,
+  scheduled queue dispatch, queue/DLQ, and alarms.
 - `tests/e2e/unified-content-product-migration.functional.spec.ts` covers
   unauthenticated route guards, public token-authenticated webhook reachability,
   and the authenticated personal/Shared Drive Repository Manager UI without

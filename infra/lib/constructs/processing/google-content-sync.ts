@@ -20,6 +20,7 @@ export interface GoogleContentSyncProps {
   documentsBucket: s3.IBucket;
   databaseHost: string;
   databaseSecretArn: string;
+  googleContentOAuthSecretArn: string;
   contentProcessingQueue: sqs.IQueue;
   vpc: ec2.IVpc;
   appBaseUrl?: string;
@@ -95,8 +96,7 @@ export class GoogleContentSync extends Construct {
                 props.databaseSecretArn,
                 `arn:${stack.partition}:secretsmanager:${stack.region}:` +
                   `${stack.account}:secret:aistudio/${props.environment}/mcp/token-encryption-key-*`,
-                `arn:${stack.partition}:secretsmanager:${stack.region}:` +
-                  `${stack.account}:secret:aistudio/${props.environment}/google-content-oauth-*`,
+                props.googleContentOAuthSecretArn,
               ],
             }),
             new iam.PolicyStatement({
@@ -159,7 +159,7 @@ export class GoogleContentSync extends Construct {
         DATABASE_PORT: "5432",
         ENVIRONMENT: props.environment,
         APP_BASE_URL: props.appBaseUrl ?? "",
-        GOOGLE_CONTENT_OAUTH_SECRET_ID: `aistudio/${props.environment}/google-content-oauth`,
+        GOOGLE_CONTENT_OAUTH_SECRET_ID: props.googleContentOAuthSecretArn,
       },
       bundling: {
         format: lambdaNodejs.OutputFormat.ESM,

@@ -26,6 +26,8 @@ function synthesize(): Template {
     databaseHost: "database.example.test",
     databaseSecretArn:
       "arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio-dev-db-AbCdEf",
+    googleContentOAuthSecretArn:
+      "arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio/dev/google-content-oauth-AbCdEf",
     contentProcessingQueue: processingQueue,
     vpc,
     appBaseUrl: "https://dev.aistudio.example.test",
@@ -86,6 +88,7 @@ describe("GoogleContentSync", () => {
     expect(policies).toContain("sqs:SendMessage");
     expect(policies).toContain("GoogleContentSyncQueue");
     expect(policies).toContain("aistudio/dev/mcp/token-encryption-key-");
+    expect(policies).toContain("aistudio/dev/google-content-oauth-AbCdEf");
     expect(policies).not.toContain("iam:CreateAccessKey");
   });
 

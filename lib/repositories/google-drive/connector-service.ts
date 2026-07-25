@@ -157,7 +157,7 @@ export async function upsertPersonalGoogleDriveConnector(input: {
       await tx
         .update(repositoryConnectors)
         .set({
-          displayName: input.displayName?.trim() || "Personal Google Drive",
+          displayName: input.displayName?.trim() || "Google Drive",
           status: selection ? "pending" : "paused",
           nextSyncAt: new Date(),
           lastErrorCode: null,
@@ -189,89 +189,13 @@ export async function upsertPersonalGoogleDriveConnector(input: {
         authMode: "personal_oauth",
         createdBy: input.userId,
         credentialId: credential.id,
-        displayName: input.displayName?.trim() || "Personal Google Drive",
+        displayName: input.displayName?.trim() || "Google Drive",
         status: "paused",
       })
       .returning({ id: repositoryConnectors.id });
     if (!connector) throw new Error("Failed to create Google Drive connector");
     return connector.id;
   }, "googleDrive.upsertPersonalConnector");
-}
-
-export async function upsertSharedDriveConnector(input: {
-  repositoryId: number;
-  userId: number;
-  sharedDriveId: string;
-  displayName: string;
-}): Promise<string> {
-  validateRepositoryId(input.repositoryId);
-  const sharedDriveId = input.sharedDriveId.trim();
-  const displayName = input.displayName.trim();
-  if (!sharedDriveId || sharedDriveId.length > 256) {
-    throw new Error("A valid Shared Drive id is required");
-  }
-  if (!displayName || displayName.length > 255) {
-    throw new Error("A Shared Drive name is required");
-  }
-
-  return executeTransaction(async (tx) => {
-    const [repository] = await tx
-      .select({ id: knowledgeRepositories.id })
-      .from(knowledgeRepositories)
-      .where(eq(knowledgeRepositories.id, input.repositoryId))
-      .limit(1)
-      .for("update");
-    if (!repository) throw new Error("Repository not found");
-
-    const [existing] = await tx
-      .select({ id: repositoryConnectors.id })
-      .from(repositoryConnectors)
-      .where(
-        and(
-          eq(repositoryConnectors.repositoryId, input.repositoryId),
-          eq(repositoryConnectors.provider, "google_drive"),
-          eq(repositoryConnectors.authMode, "shared_drive_wif"),
-          eq(repositoryConnectors.sharedDriveId, sharedDriveId),
-        ),
-      )
-      .limit(1);
-    if (existing) {
-      await tx
-        .update(repositoryConnectors)
-        .set({
-          displayName,
-          status: "pending",
-          nextSyncAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(repositoryConnectors.id, existing.id));
-      return existing.id;
-    }
-
-    const [connector] = await tx
-      .insert(repositoryConnectors)
-      .values({
-        repositoryId: input.repositoryId,
-        provider: "google_drive",
-        authMode: "shared_drive_wif",
-        createdBy: input.userId,
-        credentialId: null,
-        displayName,
-        sharedDriveId,
-        status: "pending",
-      })
-      .returning({ id: repositoryConnectors.id });
-    if (!connector) throw new Error("Failed to create Shared Drive connector");
-
-    await tx.insert(repositoryConnectorSelections).values({
-      connectorId: connector.id,
-      externalId: sharedDriveId,
-      selectionKind: "drive",
-      displayName,
-      includeDescendants: true,
-    });
-    return connector.id;
-  }, "googleDrive.upsertSharedDriveConnector");
 }
 
 export async function replaceGoogleDriveSelections(input: {

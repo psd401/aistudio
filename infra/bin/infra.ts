@@ -240,11 +240,13 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAgentPlatf
 
 const devProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Dev', {
   environment: 'dev',
+  googleContentOAuthSecretArn: devAuthStack.googleContentOAuthSecret.secretArn,
   appBaseUrl: baseDomain ? `https://dev.${baseDomain}` : undefined,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 devProcessingStack.addDependency(devDbStack); // Reads database SSM parameters and uses the shared VPC
 devProcessingStack.addDependency(devStorageStack); // Reads the documents bucket SSM parameter
+devProcessingStack.addDependency(devAuthStack); // Owns Google content OAuth configuration
 cdk.Tags.of(devProcessingStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devProcessingStack).add(key, value));
 
@@ -362,11 +364,13 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAgentPlat
 
 const prodProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Prod', {
   environment: 'prod',
+  googleContentOAuthSecretArn: prodAuthStack.googleContentOAuthSecret.secretArn,
   appBaseUrl: baseDomain ? `https://${baseDomain}` : undefined,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 prodProcessingStack.addDependency(prodDbStack); // Reads database SSM parameters and uses the shared VPC
 prodProcessingStack.addDependency(prodStorageStack); // Reads the documents bucket SSM parameter
+prodProcessingStack.addDependency(prodAuthStack); // Owns Google content OAuth configuration
 cdk.Tags.of(prodProcessingStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodProcessingStack).add(key, value));
 

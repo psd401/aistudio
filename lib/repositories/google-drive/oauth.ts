@@ -9,6 +9,8 @@ import { GOOGLE_DRIVE_SCOPE } from "./formats";
 
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const GOOGLE_REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
+const GOOGLE_CONTENT_CONFIGURATION_ERROR =
+  "Google Drive is not configured for this environment";
 
 const googleContentSecretSchema = z.object({
   clientId: z.string().min(1),
@@ -88,17 +90,23 @@ export async function loadGoogleContentOAuthConfig(): Promise<GoogleContentOAuth
     return cachedConfig.value;
   }
 
-  const result = await getSecretsClient().send(
-    new GetSecretValueCommand({ SecretId: secretId() }),
-  );
-  if (!result.SecretString) {
-    throw new Error("Google content OAuth is not configured");
+  try {
+    const result = await getSecretsClient().send(
+      new GetSecretValueCommand({ SecretId: secretId() }),
+    );
+    if (!result.SecretString) {
+      throw new Error(GOOGLE_CONTENT_CONFIGURATION_ERROR);
+    }
+    const config = googleContentSecretSchema.parse(
+      JSON.parse(result.SecretString) as unknown,
+    );
+    cachedConfig = { value: config, expiresAt: Date.now() + 5 * 60_000 };
+    return config;
+  } catch {
+    // AWS SDK errors include provider and resource details that are useful only
+    // to operators. Keep the public route response stable and non-disclosing.
+    throw new Error(GOOGLE_CONTENT_CONFIGURATION_ERROR);
   }
-  const config = googleContentSecretSchema.parse(
-    JSON.parse(result.SecretString) as unknown,
-  );
-  cachedConfig = { value: config, expiresAt: Date.now() + 5 * 60_000 };
-  return config;
 }
 
 export function generateGooglePkce(): {

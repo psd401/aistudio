@@ -27,6 +27,7 @@ export interface ProcessingStackProps extends cdk.StackProps {
   documentsBucketName?: string; // Optional for backward compatibility
   databaseResourceArn?: string; // Optional for backward compatibility
   databaseSecretArn?: string; // Optional for backward compatibility
+  googleContentOAuthSecretArn: string;
   appBaseUrl?: string;
 }
 export class ProcessingStack extends cdk.Stack {
@@ -128,6 +129,7 @@ export class ProcessingStack extends cdk.Stack {
       documentsBucket,
       databaseHost,
       databaseSecretArn,
+      googleContentOAuthSecretArn: props.googleContentOAuthSecretArn,
       contentProcessingQueue: this.contentProcessingQueue,
       vpc,
       appBaseUrl: props.appBaseUrl,

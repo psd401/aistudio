@@ -6,7 +6,6 @@ import {
   canModifyRepository,
   getUserIdFromSession,
 } from "@/actions/repositories/repository-permissions";
-import { checkUserRole } from "@/lib/db/drizzle";
 import { hasCapabilityAccess } from "@/utils/roles";
 
 export interface RepositoryConnectorManager {
@@ -31,20 +30,6 @@ export async function requireRepositoryConnectorManager(
     throw new Error("Forbidden");
   }
   return { userId, cognitoSub: session.sub };
-}
-
-/**
- * The shared WIF service account can read every Drive explicitly granted to
- * that common identity. Restrict choosing a Shared Drive id to application
- * administrators so repository ownership cannot be used as a confused-deputy
- * bridge into another team's Drive.
- */
-export async function requireSharedDriveConnectorAdministrator(
-  manager: RepositoryConnectorManager,
-): Promise<void> {
-  if (!(await checkUserRole(manager.userId, "administrator"))) {
-    throw new Error("Forbidden");
-  }
 }
 
 export function repositoryConnectorErrorResponse(error: unknown): Response {

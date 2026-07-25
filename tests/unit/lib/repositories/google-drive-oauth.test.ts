@@ -1,9 +1,17 @@
 /** @jest-environment node */
 
+const mockSecretsSend = jest.fn();
+
+jest.mock("@aws-sdk/client-secrets-manager", () => ({
+  GetSecretValueCommand: jest.fn((input: unknown) => input),
+  SecretsManagerClient: jest.fn(() => ({ send: mockSecretsSend })),
+}));
+
 import {
   __resetGoogleOAuthConfigForTests,
   exchangeGoogleAuthorizationCode,
   generateGooglePkce,
+  loadGoogleContentOAuthConfig,
 } from "@/lib/repositories/google-drive/oauth";
 import { GOOGLE_DRIVE_SCOPE } from "@/lib/repositories/google-drive/formats";
 import { GOOGLE_CONTENT_WIF_CONFIG } from "@/lib/repositories/google-drive/wif";
@@ -18,6 +26,7 @@ function tokenResponse(body: unknown): Response {
 
 describe("Google content OAuth", () => {
   beforeEach(() => {
+    mockSecretsSend.mockReset();
     process.env.GOOGLE_CONTENT_OAUTH_CLIENT_ID = "client-id";
     process.env.GOOGLE_CONTENT_OAUTH_CLIENT_SECRET = "client-secret";
     process.env.GOOGLE_CONTENT_PICKER_API_KEY = "picker-key";
@@ -88,6 +97,36 @@ describe("Google content OAuth", () => {
         fetch: fetchMock,
       }),
     ).rejects.toThrow("unexpected scope");
+  });
+
+  test("sanitizes a missing deployment-managed secret", async () => {
+    delete process.env.GOOGLE_CONTENT_OAUTH_CLIENT_ID;
+    delete process.env.GOOGLE_CONTENT_OAUTH_CLIENT_SECRET;
+    delete process.env.GOOGLE_CONTENT_PICKER_API_KEY;
+    delete process.env.GOOGLE_CONTENT_PICKER_APP_ID;
+    __resetGoogleOAuthConfigForTests();
+    mockSecretsSend.mockRejectedValue(
+      new Error("Secrets Manager can't find the specified secret"),
+    );
+
+    await expect(loadGoogleContentOAuthConfig()).rejects.toThrow(
+      "Google Drive is not configured for this environment",
+    );
+  });
+
+  test("sanitizes malformed deployment configuration", async () => {
+    delete process.env.GOOGLE_CONTENT_OAUTH_CLIENT_ID;
+    delete process.env.GOOGLE_CONTENT_OAUTH_CLIENT_SECRET;
+    delete process.env.GOOGLE_CONTENT_PICKER_API_KEY;
+    delete process.env.GOOGLE_CONTENT_PICKER_APP_ID;
+    __resetGoogleOAuthConfigForTests();
+    mockSecretsSend.mockResolvedValue({
+      SecretString: JSON.stringify({ clientId: "incomplete" }),
+    });
+
+    await expect(loadGoogleContentOAuthConfig()).rejects.toThrow(
+      "Google Drive is not configured for this environment",
+    );
   });
 });
 
