@@ -11,6 +11,8 @@ export interface AuthStackProps extends cdk.StackProps {
 }
 
 export class AuthStack extends cdk.Stack {
+  public readonly googleContentOAuthSecret: secretsmanager.Secret;
+
   constructor(scope: Construct, id: string, props: AuthStackProps) {
     super(scope, id, props);
 
@@ -19,6 +21,33 @@ export class AuthStack extends cdk.Stack {
       description: `Google OAuth Client ID for ${props.environment}`,
     });
     const googleClientId = googleClientIdParam.valueAsString;
+    const googlePickerApiKeyParam = new cdk.CfnParameter(this, 'GooglePickerApiKey', {
+      type: 'String',
+      noEcho: true,
+      minLength: 1,
+      description: `Browser-restricted Google Picker API key for ${props.environment}`,
+    });
+
+    // Reuse the Google OAuth web client already required by this stack and
+    // assemble the content connector's complete runtime contract in
+    // CloudFormation. The application must never depend on an operator-created
+    // Secrets Manager object. A web client id encodes its owning Google Cloud
+    // project number before the first "-"; Picker requires that value as appId.
+    this.googleContentOAuthSecret = new secretsmanager.Secret(this, 'GoogleContentOAuthSecret', {
+      secretName: `aistudio/${props.environment}/google-content-oauth`,
+      description: 'Deployment-managed Google OAuth and Picker configuration for repository synchronization',
+      secretObjectValue: {
+        clientId: cdk.SecretValue.unsafePlainText(googleClientId),
+        clientSecret: props.googleClientSecret,
+        pickerApiKey: cdk.SecretValue.unsafePlainText(googlePickerApiKeyParam.valueAsString),
+        appId: cdk.SecretValue.unsafePlainText(
+          cdk.Fn.select(0, cdk.Fn.split('-', googleClientId))
+        ),
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    cdk.Tags.of(this.googleContentOAuthSecret).add('Environment', props.environment);
+    cdk.Tags.of(this.googleContentOAuthSecret).add('ManagedBy', 'cdk');
 
     // Cognito User Pool
     const userPool = new cognito.UserPool(this, 'UserPool', {
@@ -126,6 +155,11 @@ export class AuthStack extends cdk.Stack {
       value: authSecret.secretArn,
       description: 'NextAuth secret ARN',
       exportName: `${props.environment}-AuthSecretArn`,
+    });
+    new cdk.CfnOutput(this, 'GoogleContentOAuthSecretArn', {
+      value: this.googleContentOAuthSecret.secretArn,
+      description: 'Deployment-managed Google content OAuth configuration secret ARN',
+      exportName: `${props.environment}-GoogleContentOAuthSecretArn`,
     });
   }
 }

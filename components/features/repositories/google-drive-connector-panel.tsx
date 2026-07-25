@@ -12,8 +12,6 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 import type { GoogleDriveConnectorView } from "@/lib/repositories/google-drive/connector-service";
 
@@ -132,12 +130,8 @@ export function GoogleDriveConnectorPanel({
   const { toast } = useToast();
   const [connectors, setConnectors] = useState<GoogleDriveConnectorView[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [canConfigureSharedDrives, setCanConfigureSharedDrives] =
-    useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [sharedDriveId, setSharedDriveId] = useState("");
-  const [sharedDriveName, setSharedDriveName] = useState("");
 
   const loadConnectors = useCallback(async () => {
     setIsLoading(true);
@@ -149,14 +143,12 @@ export function GoogleDriveConnectorPanel({
       );
       const payload = (await response.json()) as {
         connectors?: GoogleDriveConnectorView[];
-        canConfigureSharedDrives?: boolean;
         error?: string;
       };
       if (!response.ok) {
         throw new Error(payload.error || "Failed to load Drive connections");
       }
       setConnectors(payload.connectors ?? []);
-      setCanConfigureSharedDrives(payload.canConfigureSharedDrives === true);
     } catch (loadError) {
       setError(
         loadError instanceof Error
@@ -270,42 +262,6 @@ export function GoogleDriveConnectorPanel({
     }
   }
 
-  async function addSharedDrive() {
-    setPendingAction("shared-drive");
-    try {
-      const response = await postJson(
-        `/api/repositories/${repositoryId}/connectors/google`,
-        {
-          sharedDriveId,
-          displayName: sharedDriveName,
-        },
-      );
-      const result = (await response.json()) as { error?: string };
-      if (!response.ok) {
-        throw new Error(result.error || "Failed to connect Shared Drive");
-      }
-      setSharedDriveId("");
-      setSharedDriveName("");
-      toast({
-        title: "Shared Drive queued",
-        description:
-          "The fixed sync identity will verify access and begin reconciliation.",
-      });
-      await loadConnectors();
-    } catch (sharedDriveError) {
-      toast({
-        title: "Shared Drive connection failed",
-        description:
-          sharedDriveError instanceof Error
-            ? sharedDriveError.message
-            : "Failed to connect Shared Drive",
-        variant: "destructive",
-      });
-    } finally {
-      setPendingAction(null);
-    }
-  }
-
   async function syncConnector(connectorId: string) {
     setPendingAction(`sync:${connectorId}`);
     try {
@@ -393,10 +349,10 @@ export function GoogleDriveConnectorPanel({
       <div className="rounded-md border p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h3 className="font-medium">Personal Google Drive</h3>
+            <h3 className="font-medium">Google Drive</h3>
             <p className="text-sm text-muted-foreground">
-              Connect with read-only access, then explicitly choose files or
-              folders to keep synchronized.
+              Connect with read-only access, then choose files or folders from
+              My Drive or Shared Drives that you can already access.
             </p>
           </div>
           {personalConnector ? (
@@ -425,56 +381,6 @@ export function GoogleDriveConnectorPanel({
           )}
         </div>
       </div>
-
-      {canConfigureSharedDrives && (
-        <div className="rounded-md border p-4">
-          <h3 className="font-medium">Shared Drive</h3>
-          <p className="mb-3 text-sm text-muted-foreground">
-            Add{" "}
-            <code className="break-all text-xs">
-              unified-content-sync@psd-aistudio-broker.iam.gserviceaccount.com
-            </code>{" "}
-            as a Viewer, then enter the Shared Drive ID below. No
-            service-account key or domain-wide delegation is used.
-          </p>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1">
-              <Label htmlFor="shared-drive-name">Display name</Label>
-              <Input
-                id="shared-drive-name"
-                value={sharedDriveName}
-                onChange={(event) => setSharedDriveName(event.target.value)}
-                placeholder="Curriculum Shared Drive"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="shared-drive-id">Shared Drive ID</Label>
-              <Input
-                id="shared-drive-id"
-                value={sharedDriveId}
-                onChange={(event) => setSharedDriveId(event.target.value)}
-                placeholder="0AExampleDriveId"
-              />
-            </div>
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            className="mt-3"
-            disabled={
-              pendingAction !== null ||
-              !sharedDriveId.trim() ||
-              !sharedDriveName.trim()
-            }
-            onClick={() => void addSharedDrive()}
-          >
-            {pendingAction === "shared-drive" && (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            )}
-            Connect Shared Drive
-          </Button>
-        </div>
-      )}
 
       {connectors.length > 0 && (
         <div className="space-y-2">

@@ -92,33 +92,47 @@ Deploy stacks in dependency order:
 
 ```bash
 cd infra
+export GOOGLE_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID
+export GOOGLE_PICKER_API_KEY=YOUR_BROWSER_RESTRICTED_PICKER_KEY
 
 # 1. Database (creates VPC + Aurora)
 bunx cdk deploy AIStudio-DatabaseStack-Dev
 
-# 2. Auth (creates Cognito)
-bunx cdk deploy AIStudio-AuthStack-Dev
+# 2. Auth (creates Cognito and the Google content OAuth/Picker secret)
+bunx cdk deploy AIStudio-AuthStack-Dev \
+  --parameters AIStudio-AuthStack-Dev:GoogleClientId=$GOOGLE_CLIENT_ID \
+  --parameters AIStudio-AuthStack-Dev:GooglePickerApiKey=$GOOGLE_PICKER_API_KEY
 
 # 3. Storage (creates S3 buckets)
 bunx cdk deploy AIStudio-StorageStack-Dev
 
-# 4. Document Processing (creates Lambdas)
+# 4. Processing (creates Google content sync and other processing workers)
+bunx cdk deploy AIStudio-ProcessingStack-Dev
+
+# 5. Document Processing (creates Lambdas)
 bunx cdk deploy AIStudio-DocumentProcessingStack-Dev
 
-# 5. Frontend (creates ECS + ALB)
-bunx cdk deploy AIStudio-FrontendStack-Dev
+# 6. Frontend (creates ECS + ALB)
+bunx cdk deploy AIStudio-FrontendStack-ECS-Dev
 
-# 6. Scheduling (creates EventBridge)
+# 7. Scheduling (creates EventBridge)
 bunx cdk deploy AIStudio-SchedulingStack-Dev
 
-# 7. Monitoring (creates CloudWatch dashboards)
+# 8. Monitoring (creates CloudWatch dashboards)
 bunx cdk deploy AIStudio-MonitoringStack-Dev
 ```
 
 **Or deploy all at once:**
 ```bash
-bunx cdk deploy --all --require-approval never
+bunx cdk deploy --all \
+  --parameters AIStudio-AuthStack-Dev:GoogleClientId=$GOOGLE_CLIENT_ID \
+  --parameters AIStudio-AuthStack-Dev:GooglePickerApiKey=$GOOGLE_PICKER_API_KEY \
+  --require-approval never
 ```
+
+The Picker key must be restricted to the environment's exact browser origin
+and the Google Picker/Drive APIs. AuthStack assembles the retained
+`aistudio/dev/google-content-oauth` secret; do not create it manually.
 
 ### Subsequent Deployments
 
@@ -126,13 +140,13 @@ Deploy only changed stacks:
 
 ```bash
 # Check what changed
-bunx cdk diff AIStudio-FrontendStack-Dev
+bunx cdk diff AIStudio-FrontendStack-ECS-Dev
 
 # Deploy single stack
-bunx cdk deploy AIStudio-FrontendStack-Dev
+bunx cdk deploy AIStudio-FrontendStack-ECS-Dev
 
 # Deploy multiple specific stacks
-bunx cdk deploy AIStudio-FrontendStack-Dev AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-FrontendStack-ECS-Dev AIStudio-DatabaseStack-Dev
 ```
 
 ## CDK Commands

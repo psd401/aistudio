@@ -166,7 +166,6 @@ test.describe("Unified content product migration (authenticated)", () => {
           contentType: "application/json",
           body: JSON.stringify({
             connectors: [],
-            canConfigureSharedDrives: true,
           }),
         });
       },
@@ -191,20 +190,19 @@ test.describe("Unified content product migration (authenticated)", () => {
     ).toBeVisible();
     await sourceDialog.getByRole("tab", { name: "Google Drive" }).click();
     await expect(
-      sourceDialog.getByRole("heading", { name: "Personal Google Drive" }),
+      sourceDialog.getByRole("heading", { name: "Google Drive" }),
     ).toBeVisible();
     await expect(
       sourceDialog.getByRole("button", { name: "Connect Google Drive" }),
     ).toBeVisible();
     await expect(
-      sourceDialog.getByRole("heading", { name: "Shared Drive" }),
-    ).toBeVisible();
-    await expect(
       sourceDialog.getByText(
-        "unified-content-sync@psd-aistudio-broker.iam.gserviceaccount.com",
-        { exact: true },
+        "Connect with read-only access, then choose files or folders from My Drive or Shared Drives that you can already access.",
       ),
     ).toBeVisible();
+    await expect(sourceDialog.getByText(/unified-content-sync@/)).toHaveCount(
+      0,
+    );
   });
 
   test("staff can manage repositories and bind an explicitly shared repository in Assistant Architect", async ({

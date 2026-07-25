@@ -41,6 +41,8 @@ function synthesizeProcessingStack(): Template {
       'arn:aws:rds:us-east-1:123456789012:cluster:aistudio-dev',
     databaseSecretArn:
       'arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio-dev',
+    googleContentOAuthSecretArn:
+      'arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio/dev/google-content-oauth-AbCdEf',
   });
   return Template.fromStack(stack);
 }

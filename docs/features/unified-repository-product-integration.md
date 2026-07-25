@@ -19,8 +19,8 @@ preselected destination. The source modal currently supports:
 - canonical direct-to-S3 single or multipart file upload;
 - URL sources through the repository URL processor;
 - inline text with a canonical immutable-version shadow write; and
-- personal Google Drive file/folder selection and keyless Shared Drive
-  synchronization through the connector boundary in
+- Google Drive file/folder selection from My Drive or user-accessible Shared
+  Drives through the same OAuth Picker connector boundary in
   [#1262](google-workspace-content-sync.md).
 
 The canonical browser helper uploads bytes directly to a signed object-storage

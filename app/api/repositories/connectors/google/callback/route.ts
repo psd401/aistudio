@@ -137,7 +137,7 @@ export async function GET(request: Request): Promise<Response> {
       // worker will recover a transient SQS dispatch failure.
     });
     timer({ status: "success" });
-    log.info("Personal Google Drive connector authorized", {
+    log.info("Google Drive connector authorized", {
       repositoryId,
       connectorId,
       userId: manager.userId,
@@ -145,7 +145,7 @@ export async function GET(request: Request): Promise<Response> {
     return NextResponse.redirect(completionUrl(repositoryId, "connected"));
   } catch {
     timer({ status: "error" });
-    log.warn("Personal Google Drive callback rejected", { repositoryId });
+    log.warn("Google Drive callback rejected", { repositoryId });
     return NextResponse.redirect(completionUrl(repositoryId, "failed"));
   }
 }

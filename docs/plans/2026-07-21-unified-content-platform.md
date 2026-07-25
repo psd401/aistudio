@@ -1132,3 +1132,35 @@ deployment runbook records migration-first ordering, OAuth secret
 shape/callback registration, flags, rollback, alarms, and the labeled live
 create/edit/move/delete/access-loss/notification-resume matrix required after
 dev deployment.
+
+#### Deployment remediation checkpoint (2026-07-25)
+
+Dev verification exposed two delivery defects after the original #1262 merge:
+the application depended on an operator-created
+`aistudio/dev/google-content-oauth` secret that the CDK deployment did not
+create, and Repository Manager presented Shared Drive WIF as a separate setup
+that required customers to grant an AI Studio service account access. Both
+contradicted the intended deployable, user-authorized connector boundary.
+
+The remediation moves the complete Google content OAuth secret into AuthStack.
+Deployment now requires the browser-restricted Picker key alongside the
+existing Google client ID, reads the client secret from the existing
+environment OAuth secret, derives Picker's app ID from the client ID's owning
+Google Cloud project, and creates the exact retained secret consumed by the web
+app and worker. ProcessingStack depends on AuthStack and grants the worker only
+that exact secret ARN. Missing or malformed runtime configuration returns a
+sanitized service-unavailable response without leaking AWS provider details.
+
+Repository Manager now exposes one Google Drive OAuth/Picker flow for My Drive
+and Shared Drives already accessible to the connecting user. The service-account
+email/Drive-ID form and its POST route were removed. Legacy WIF connector rows
+remain readable by the worker for backward compatibility, but no new WIF
+connector can be created through the product. Focused OAuth and CDK regression
+tests cover sanitized failure handling, required deployment inputs, secret
+shape, retention, app-ID derivation, exact IAM scope, and the updated
+authenticated UI. The remediation gate passed whole-repository typecheck and
+lint (zero errors; 411 existing warnings), all 353 application Jest suites with
+3,494 tests passing (3 suites/26 tests skipped), all 43 infrastructure suites
+with 406 tests, both production builds, full CDK synthesis, deploy-script
+preflight, the authenticated Repository Manager Playwright case, final diff
+checks, and a complete diff-scoped security review with no reportable findings.
