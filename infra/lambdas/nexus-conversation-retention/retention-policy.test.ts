@@ -28,6 +28,7 @@ import {
   type SweepPorts,
   type SweepLogger,
 } from "./sweep";
+import { documentUrlToObjectKey, toObjectKey } from "./index";
 
 const silentLog: SweepLogger = {
   info: () => {},
@@ -157,6 +158,97 @@ describe("CANDIDATE_WHERE_CLAUSE", () => {
   test("does not filter on is_archived — archived conversations are eligible", () => {
     expect(CANDIDATE_WHERE_CLAUSE).not.toContain("is_archived");
   });
+
+  test("uses exactly one bound parameter, $1, and never interpolates the window", () => {
+    // index.ts composes this into a single sql.unsafe statement where the
+    // retention window is $1 and the batch limit is $2. A second $1-numbered
+    // placeholder here, or a literal window, would break that contract.
+    const placeholders = CANDIDATE_WHERE_CLAUSE.match(/\$\d+/g) ?? [];
+    expect(placeholders).toEqual(["$1"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// documents.url → S3 object key
+// ---------------------------------------------------------------------------
+
+describe("documentUrlToObjectKey", () => {
+  const BUCKET = "aistudio-documents-dev";
+
+  test("passes a bare object key through (the current storage format)", () => {
+    expect(documentUrlToObjectKey("7/1700000000-report.pdf", BUCKET)).toBe("7/1700000000-report.pdf");
+    expect(documentUrlToObjectKey("repositories/42/abc/file.docx", BUCKET)).toBe(
+      "repositories/42/abc/file.docx"
+    );
+  });
+
+  test("extracts the key from a legacy virtual-hosted presigned URL", () => {
+    // Rows written before the mid-2025 change stored the presigned URL. If we
+    // rejected these, the oldest conversations — precisely the ones retention
+    // targets — would leave their objects behind forever.
+    expect(
+      documentUrlToObjectKey(
+        `https://${BUCKET}.s3.us-east-1.amazonaws.com/7/1700000000-report.pdf?X-Amz-Signature=abc`,
+        BUCKET
+      )
+    ).toBe("7/1700000000-report.pdf");
+  });
+
+  test("extracts the key from a legacy path-style URL", () => {
+    expect(
+      documentUrlToObjectKey(`https://s3.us-east-1.amazonaws.com/${BUCKET}/7/a.pdf`, BUCKET)
+    ).toBe("7/a.pdf");
+  });
+
+  test("url-decodes the key", () => {
+    expect(
+      documentUrlToObjectKey(`https://${BUCKET}.s3.amazonaws.com/7/my%20file.pdf`, BUCKET)
+    ).toBe("7/my file.pdf");
+  });
+
+  test("refuses a URL for a DIFFERENT bucket", () => {
+    expect(
+      documentUrlToObjectKey("https://some-other-bucket.s3.amazonaws.com/7/a.pdf", BUCKET)
+    ).toBeNull();
+    expect(
+      documentUrlToObjectKey(`https://s3.amazonaws.com/some-other-bucket/7/a.pdf`, BUCKET)
+    ).toBeNull();
+  });
+
+  test("refuses non-S3 hosts (Supabase-era rows, CDNs) rather than guessing", () => {
+    expect(documentUrlToObjectKey("https://xyz.supabase.co/storage/v1/a.pdf", BUCKET)).toBeNull();
+    expect(documentUrlToObjectKey("https://cdn.example.com/7/a.pdf", BUCKET)).toBeNull();
+  });
+
+  test("refuses traversal, absolute and empty values", () => {
+    expect(documentUrlToObjectKey("../../etc/passwd", BUCKET)).toBeNull();
+    expect(documentUrlToObjectKey("/7/a.pdf", BUCKET)).toBeNull();
+    expect(documentUrlToObjectKey("", BUCKET)).toBeNull();
+    expect(documentUrlToObjectKey(null, BUCKET)).toBeNull();
+    expect(documentUrlToObjectKey(`https://${BUCKET}.s3.amazonaws.com/`, BUCKET)).toBeNull();
+    expect(
+      documentUrlToObjectKey(`https://${BUCKET}.s3.amazonaws.com/a/../../b`, BUCKET)
+    ).toBeNull();
+  });
+
+  test("refuses non-http schemes outright", () => {
+    expect(documentUrlToObjectKey("s3://bucket/key", BUCKET)).toBeNull();
+    expect(documentUrlToObjectKey("file:///etc/passwd", BUCKET)).toBeNull();
+  });
+});
+
+describe("toObjectKey (message-part s3Key)", () => {
+  test("accepts a bare key and rejects anything URL-shaped or traversing", () => {
+    expect(toObjectKey("conversations/abc/attachments/1-0-x.png")).toBe(
+      "conversations/abc/attachments/1-0-x.png"
+    );
+    expect(toObjectKey("s3://bucket/key")).toBeNull();
+    expect(toObjectKey("https://example.com/key")).toBeNull();
+    expect(toObjectKey("/leading")).toBeNull();
+    expect(toObjectKey("a/../../b")).toBeNull();
+    expect(toObjectKey("  ")).toBeNull();
+    expect(toObjectKey(undefined)).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -171,6 +263,7 @@ interface FakeState {
   messageKeysByConversation: Record<string, string[]>;
   failRepositoryStorage?: number;
   failObjectKey?: string;
+  failConversationStorage?: string;
 }
 
 interface FakeRecorder {
@@ -179,6 +272,7 @@ interface FakeRecorder {
   deletedRepositoryRows: number[];
   deletedDocumentRows: number[];
   deletedStoragePrefixes: number[];
+  deletedConversationPrefixes: string[];
   deletedObjectKeys: string[];
   findCandidatesCalls: number;
 }
@@ -190,6 +284,7 @@ function makeFakePorts(state: FakeState): { ports: SweepPorts; rec: FakeRecorder
     deletedRepositoryRows: [],
     deletedDocumentRows: [],
     deletedStoragePrefixes: [],
+    deletedConversationPrefixes: [],
     deletedObjectKeys: [],
     findCandidatesCalls: 0,
   };
@@ -207,6 +302,13 @@ function makeFakePorts(state: FakeState): { ports: SweepPorts; rec: FakeRecorder
     },
     getLegacyDocuments: async (id) => state.documentsByConversation[id] ?? [],
     getMessageObjectKeys: async (id) => state.messageKeysByConversation[id] ?? [],
+    deleteConversationStorage: async (id) => {
+      if (state.failConversationStorage === id) {
+        throw new Error("Throttled");
+      }
+      rec.deletedConversationPrefixes.push(id);
+      return 2;
+    },
     deleteRepositoryStorage: async (repositoryId) => {
       if (state.failRepositoryStorage === repositoryId) {
         throw new Error("AccessDenied");
@@ -247,7 +349,7 @@ function baseState(overrides: Partial<FakeState> = {}): FakeState {
       { id: "conv-1", userId: 7, lastMessageAt: new Date("2026-01-01T00:00:00.000Z"), isArchived: false },
     ],
     repositoriesByConversation: { "conv-1": [101, 102] },
-    documentsByConversation: { "conv-1": [{ id: 5001, url: "uploads/a.pdf" }] },
+    documentsByConversation: { "conv-1": [{ id: 5001, objectKey: "7/1700000000-a.pdf" }] },
     messageKeysByConversation: { "conv-1": ["nexus/att-1.png"] },
     ...overrides,
   };
@@ -308,14 +410,48 @@ describe("runRetentionSweep — deletion ordering and completeness", () => {
     const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
 
     expect(rec.deletedDocumentRows).toEqual([5001]);
-    expect(rec.deletedObjectKeys).toContain("uploads/a.pdf");
+    expect(rec.deletedObjectKeys).toContain("7/1700000000-a.pdf");
     expect(result.documentRowsDeleted).toBe(1);
   });
 
-  test("deletes message-part object keys", async () => {
+  test("deletes out-of-prefix message-part object keys", async () => {
     const { ports, rec } = makeFakePorts(baseState());
     await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
     expect(rec.deletedObjectKeys).toContain("nexus/att-1.png");
+  });
+
+  test("sweeps the conversation-scoped storage prefixes", async () => {
+    // The persist path downgrades user image parts to { hasImage: true }, so
+    // those objects have no s3Key left in the row — only a prefix sweep
+    // reclaims them.
+    const { ports, rec } = makeFakePorts(baseState());
+    await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+    expect(rec.deletedConversationPrefixes).toEqual(["conv-1"]);
+  });
+
+  test("a document whose url could not be resolved to a key still loses its row", async () => {
+    const { ports, rec } = makeFakePorts(
+      baseState({
+        documentsByConversation: { "conv-1": [{ id: 5001, objectKey: null }] },
+      })
+    );
+    const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+
+    // A dangling documents row pointing at a conversation that no longer
+    // exists is worse than one unreferenced object.
+    expect(rec.deletedDocumentRows).toEqual([5001]);
+    expect(result.conversationsDeleted).toBe(1);
+  });
+
+  test("a failed conversation-prefix sweep is best-effort — the conversation still goes", async () => {
+    // Unlike repository storage, these prefixes have no database row that a
+    // failure would orphan, so they must not block deletion forever.
+    const { ports, rec } = makeFakePorts(baseState({ failConversationStorage: "conv-1" }));
+    const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+
+    expect(result.conversationsDeleted).toBe(1);
+    expect(rec.deletedConversations).toEqual(["conv-1"]);
+    expect(result.conversations[0]!.storageFailures).toBe(1);
   });
 
   test("honours the per-run batch cap", async () => {
@@ -372,7 +508,7 @@ describe("runRetentionSweep — storage failure policy", () => {
   });
 
   test("a failed single-object delete is best-effort — the conversation still goes", async () => {
-    const { ports, rec } = makeFakePorts(baseState({ failObjectKey: "uploads/a.pdf" }));
+    const { ports, rec } = makeFakePorts(baseState({ failObjectKey: "7/1700000000-a.pdf" }));
     const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
 
     expect(result.conversationsDeleted).toBe(1);

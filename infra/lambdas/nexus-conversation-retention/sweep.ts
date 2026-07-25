@@ -35,8 +35,15 @@ export interface CandidateConversation {
 /** A legacy `documents` row owned by a conversation. */
 export interface LegacyDocument {
   id: number;
-  /** Raw `documents.url` value; the adapter converts it to an object key. */
-  url: string;
+  /**
+   * S3 object key derived from `documents.url`, or null when it could not be
+   * derived. Current rows store a bare key, but rows written before the
+   * mid-2025 change store a full presigned https URL (and older ones a
+   * Supabase URL), so the adapter normalises and may fail to. A null key still
+   * gets its database row deleted — leaving a dangling row pointing at a
+   * conversation that no longer exists is worse than one unreferenced object.
+   */
+  objectKey: string | null;
 }
 
 export interface SweepPorts {
@@ -55,8 +62,23 @@ export interface SweepPorts {
   /** Legacy `documents` rows whose conversation_id is this conversation. */
   getLegacyDocuments(conversationId: string): Promise<LegacyDocument[]>;
 
-  /** S3 object keys referenced by this conversation's message parts. */
+  /**
+   * S3 object keys referenced by this conversation's message parts that fall
+   * OUTSIDE the conversation-scoped prefixes (which are swept wholesale by
+   * deleteConversationStorage). Legacy rows only.
+   */
   getMessageObjectKeys(conversationId: string): Promise<string[]>;
+
+  /**
+   * Delete every version + delete marker under the conversation-scoped
+   * prefixes (`conversations/<id>/`, `v2/generated-images/<id>/`).
+   *
+   * Prefix-based rather than driven off message parts because the persist path
+   * downgrades user image parts to `{ hasImage: true }` — the object exists in
+   * S3 with no s3Key left in the row to find it by. A prefix sweep is the only
+   * way those are ever reclaimed.
+   */
+  deleteConversationStorage(conversationId: string): Promise<number>;
 
   /** Delete every version + delete marker under `repositories/<id>/`. */
   deleteRepositoryStorage(repositoryId: number): Promise<number>;
@@ -184,8 +206,25 @@ async function sweepConversation(
     }
   }
 
-  // 2. Legacy document objects + message-part objects — best effort.
-  for (const key of [...documents.map((doc) => doc.url), ...messageObjectKeys]) {
+  // 2. Conversation-scoped prefixes — best effort. Unlike repository storage
+  //    these have no database row that would be orphaned by a failure, so a
+  //    transient S3 error must not block the conversation's deletion forever.
+  try {
+    report.storageObjectsDeleted += await ports.deleteConversationStorage(conversationId);
+  } catch (error) {
+    log.warn("conversation_storage_failed", {
+      conversationId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    report.storageFailures++;
+  }
+
+  // 3. Legacy document objects + out-of-prefix message-part objects — best effort.
+  const legacyKeys = [
+    ...documents.map((doc) => doc.objectKey).filter((key): key is string => key !== null),
+    ...messageObjectKeys,
+  ];
+  for (const key of legacyKeys) {
     try {
       report.storageObjectsDeleted += await ports.deleteObjectStorage(key);
     } catch (error) {
@@ -197,7 +236,7 @@ async function sweepConversation(
     }
   }
 
-  // 3. Rows that would otherwise be orphaned (repositories) or left as
+  // 4. Rows that would otherwise be orphaned (repositories) or left as
   //    SET NULL stragglers (documents), then the conversation itself.
   if (repositoryIds.length > 0) {
     await ports.deleteRepositoryRows(repositoryIds);
