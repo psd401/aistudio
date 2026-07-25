@@ -880,10 +880,16 @@ applied or downgraded.
   interrupted execution remains pending so an ambiguous mutation is not repeated.
 - A concurrent or interrupted request keeps its durable reservation and returns
   retryable `409 IDEMPOTENCY_IN_PROGRESS` (`Retry-After: 1`) rather than running a
-  second mutation. Completed response payloads are field-encrypted with the
-  existing Secrets Manager-backed application DEK. Expired records are removed
-  in bounded 500-row sweeps by hourly scheduled maintenance, with opportunistic
-  sweeps retained as a fallback.
+  second mutation. For `POST /content` with typed Capture provenance, a same-key
+  retry can instead reconcile a proven committed object through the permanent
+  owner/provider/externalId unique source reference. The object must have been
+  created after that exact pending reservation and match its request metadata
+  and body/version shape. The server then finalizes and returns the original
+  successful `201` with `Idempotency-Replayed: true`; it never reruns create or
+  converts an older source collision into success. Completed response payloads
+  are field-encrypted with the existing Secrets Manager-backed application DEK.
+  Expired records are removed in bounded 500-row sweeps by hourly scheduled
+  maintenance, with opportunistic sweeps retained as a fallback.
 - Asset initiation is the deliberate expiring-credential exception: the keyed
   reservation lives with the asset instead of replaying a stored response.
   Repeating the same scoped key and request returns the same asset id with a new
@@ -1047,9 +1053,12 @@ discarded, credentials and invalid/non-network URLs are rejected, duplicates are
 removed, and district policy can disable origin retention entirely with
 `ATRIUM_CAPTURE_SOURCE_ORIGINS_ENABLED=false`. The reference is immutable through
 metadata updates. `(owner, provider, externalId)` is unique for capture references,
-so a permanently repeated recorder session returns `409 CONTENT_CONFLICT` without
-creating a second object. Audit/support records include only the provider,
-external id, and client surface—never captured steps, typed values, or page text.
+so a fresh or differently keyed repeated recorder session returns
+`409 CONTENT_CONFLICT` without creating a second object. A retry using the exact
+same scoped idempotency key and request can recover the committed object if the
+original `201` failed during response finalization. Audit/support records include
+only the provider, external id, and client surface—never captured steps, typed
+values, or page text.
 
 **Artifact code with JS/CSS — `codeEncoding: "base64"`:** artifacts are self-contained
 HTML/JS/CSS, so their code legitimately contains `<script>`, `<style>`, and inline

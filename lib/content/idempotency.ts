@@ -3,17 +3,18 @@
  *
  * The coordinator is intentionally separated from the PostgreSQL store so the
  * concurrency and interruption behavior can be tested deterministically. A
- * pending record is never taken over: if a worker disappears after a mutation
- * commits but before the response is persisted, retries receive a typed,
- * retryable response instead of risking a duplicate write/event/audit.
+ * pending record is never re-executed. Routes with a permanent, unique mutation
+ * correlation may reconcile a proven commit and finalize its original
+ * reservation; every other retry receives a typed, retryable response.
  */
 
 import { createHash } from "node:crypto";
-import { and, eq, lt } from "drizzle-orm";
+import { and, eq, lt, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import type { ApiAuthContext } from "@/lib/api/auth-middleware";
 import { createErrorResponse } from "@/lib/api/auth-middleware";
 import { decryptToken, encryptToken } from "@/lib/crypto/token-encryption";
+import { safeJsonbStringify } from "@/lib/db/json-utils";
 import {
   executeQuery,
   executeTransaction,
@@ -56,11 +57,16 @@ export interface StoredIdempotentResponse {
   ciphertext: string;
 }
 
+export interface PendingIdempotencyReservation {
+  reservationId: string;
+  createdAt: Date;
+}
+
 export type IdempotencyAcquireResult =
   | { kind: "execute"; reservationId: string }
   | { kind: "replay"; response: StoredIdempotentResponse }
   | { kind: "mismatch" }
-  | { kind: "pending" };
+  | { kind: "pending"; reservation?: PendingIdempotencyReservation };
 
 export interface IdempotencyStore {
   acquire(
@@ -195,11 +201,13 @@ const postgresStore: IdempotencyStore = {
 
       const rows = await tx
         .select({
+          id: contentIdempotencyRecords.id,
           requestHash: contentIdempotencyRecords.requestHash,
           state: contentIdempotencyRecords.state,
           responseStatus: contentIdempotencyRecords.responseStatus,
           responseHeaders: contentIdempotencyRecords.responseHeaders,
           responseCiphertext: contentIdempotencyRecords.responseCiphertext,
+          createdAt: contentIdempotencyRecords.createdAt,
         })
         .from(contentIdempotencyRecords)
         .where(scopeWhere)
@@ -226,7 +234,13 @@ const postgresStore: IdempotencyStore = {
           },
         } as const;
       }
-      return { kind: "pending" } as const;
+      return {
+        kind: "pending",
+        reservation: {
+          reservationId: row.id,
+          createdAt: row.createdAt,
+        },
+      } as const;
     }, "content.idempotency.acquire");
   },
 
@@ -238,7 +252,12 @@ const postgresStore: IdempotencyStore = {
           .set({
             state: "completed",
             responseStatus: response.status,
-            responseHeaders: response.headers,
+            // Required postgres.js JSONB pattern. Directly passing the
+            // null-prototype header map caused production finalization to throw
+            // after content creation had already committed.
+            responseHeaders: sql`${safeJsonbStringify(
+              response.headers
+            )}::jsonb`,
             responseCiphertext: response.ciphertext,
           })
           .where(
@@ -277,12 +296,28 @@ const productionCodec: IdempotencyCodec = {
 };
 
 function responseHeaders(response: Response): ContentIdempotencyHeaders {
-  const result: ContentIdempotencyHeaders = Object.create(null) as ContentIdempotencyHeaders;
+  // These keys come only from SAFE_RESPONSE_HEADERS, not caller-controlled
+  // input, so a normal object is both safe and postgres.js-compatible.
+  const result: ContentIdempotencyHeaders = {};
   for (const name of SAFE_RESPONSE_HEADERS) {
     const value = response.headers.get(name);
     if (value !== null) result[name] = value;
   }
   return result;
+}
+
+async function completeIdempotentResponse(
+  reservationId: string,
+  response: NextResponse,
+  dependencies: IdempotencyDependencies
+): Promise<void> {
+  const body = await response.clone().text();
+  const ciphertext = await dependencies.codec.encrypt(body);
+  await dependencies.store.complete(reservationId, {
+    status: response.status,
+    headers: responseHeaders(response),
+    ciphertext,
+  });
 }
 
 function maybeCleanup(store: IdempotencyStore): void {
@@ -307,6 +342,14 @@ export interface IdempotentMutationInput {
   requestId: string;
   canonicalRoute: string;
   requestValue: unknown;
+  /**
+   * Route-specific reconciliation for the narrow commit-before-finalization
+   * window. Called only for the same scoped key and request hash while its
+   * durable record remains pending.
+   */
+  recoverPending?: (
+    reservation: PendingIdempotencyReservation
+  ) => Promise<NextResponse | null>;
 }
 
 export interface IdempotencyDependencies {
@@ -319,7 +362,8 @@ export interface IdempotencyDependencies {
  * Execute a mutation once and replay its exact status/body/safe headers.
  *
  * An unhandled interruption leaves the reservation pending. Subsequent requests
- * receive IDEMPOTENCY_IN_PROGRESS rather than risking a duplicate mutation.
+ * either reconcile a route-proven committed result or receive
+ * IDEMPOTENCY_IN_PROGRESS rather than risking a duplicate mutation.
  */
 export async function runIdempotentMutation(
   input: IdempotentMutationInput,
@@ -364,6 +408,18 @@ export async function runIdempotentMutation(
     );
   }
   if (acquired.kind === "pending") {
+    if (acquired.reservation && input.recoverPending) {
+      const recovered = await input.recoverPending(acquired.reservation);
+      if (recovered) {
+        await completeIdempotentResponse(
+          acquired.reservation.reservationId,
+          recovered,
+          dependencies
+        );
+        recovered.headers.set("Idempotency-Replayed", "true");
+        return recovered;
+      }
+    }
     const response = createErrorResponse(
       input.requestId,
       409,
@@ -401,13 +457,11 @@ export async function runIdempotentMutation(
     await dependencies.store.release(acquired.reservationId);
     return response;
   }
-  const body = await response.clone().text();
-  const ciphertext = await dependencies.codec.encrypt(body);
-  await dependencies.store.complete(acquired.reservationId, {
-    status: response.status,
-    headers: responseHeaders(response),
-    ciphertext,
-  });
+  await completeIdempotentResponse(
+    acquired.reservationId,
+    response,
+    dependencies
+  );
   return response;
 }
 

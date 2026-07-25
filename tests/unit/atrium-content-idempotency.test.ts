@@ -17,12 +17,14 @@ interface MemoryRecord {
   scope: IdempotencyScope;
   requestHash: string;
   expiresAt: Date;
+  createdAt: Date;
   response?: StoredIdempotentResponse;
 }
 
 class MemoryStore implements IdempotencyStore {
   readonly records = new Map<string, MemoryRecord>();
   cleanupLimits: number[] = [];
+  failNextCompletion = false;
   private nextId = 1;
 
   private scopeKey(scope: IdempotencyScope): string {
@@ -41,13 +43,20 @@ class MemoryStore implements IdempotencyStore {
       if (existing.response) {
         return { kind: "replay", response: existing.response };
       }
-      return { kind: "pending" };
+      return {
+        kind: "pending",
+        reservation: {
+          reservationId: existing.id,
+          createdAt: existing.createdAt,
+        },
+      };
     }
     const record = {
       id: `reservation-${this.nextId++}`,
       scope,
       requestHash,
       expiresAt,
+      createdAt: now,
     };
     this.records.set(key, record);
     return { kind: "execute", reservationId: record.id };
@@ -57,6 +66,10 @@ class MemoryStore implements IdempotencyStore {
     reservationId: string,
     response: StoredIdempotentResponse
   ): Promise<void> {
+    if (this.failNextCompletion) {
+      this.failNextCompletion = false;
+      throw new Error("simulated response finalization failure");
+    }
     const record = [...this.records.values()].find(
       (candidate) => candidate.id === reservationId
     );
@@ -105,7 +118,10 @@ function jsonResponse(
     status,
     headers: {
       get: (name: string) => normalized.get(name.toLowerCase()) ?? null,
+      set: (name: string, value: string) =>
+        normalized.set(name.toLowerCase(), value),
     },
+    json: async () => body,
     clone: () => ({ text: async () => text }),
   } as unknown as NextResponse;
 }
@@ -250,6 +266,75 @@ describe("Atrium mutation idempotency", () => {
 
     expect(retry.status).toBe(409);
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers one committed object when response finalization fails", async () => {
+    const store = new MemoryStore();
+    store.failNextCompletion = true;
+    const committedObjects: Array<{
+      id: string;
+      visibilityLevel: "private";
+      currentVersionId: null;
+    }> = [];
+    const recoverPending = jest.fn(async () => {
+      const committed = committedObjects[0];
+      return committed
+        ? jsonResponse({ data: committed, meta: { requestId: "retry-2" } }, 201)
+        : null;
+    });
+    const testInput = input(store, "capture-finalization-failure", {
+      kind: "document",
+      title: "Region capture",
+      sourceRef: {
+        type: "capture",
+        provider: "atrium-capture",
+        externalId: "capture-session-1",
+      },
+    });
+    const recoveryArgs = { ...testInput.args, recoverPending };
+    const execute = jest.fn(async () => {
+      const committed = {
+        id: "object-committed-once",
+        visibilityLevel: "private" as const,
+        currentVersionId: null,
+      };
+      committedObjects.push(committed);
+      return jsonResponse(
+        { data: committed, meta: { requestId: "original-1" } },
+        201
+      );
+    });
+
+    await expect(
+      runIdempotentMutation(recoveryArgs, execute, testInput.dependencies)
+    ).rejects.toThrow("simulated response finalization failure");
+
+    const recovered = await runIdempotentMutation(
+      recoveryArgs,
+      execute,
+      testInput.dependencies
+    );
+    const replayed = await runIdempotentMutation(
+      recoveryArgs,
+      execute,
+      testInput.dependencies
+    );
+
+    expect(recovered.status).toBe(201);
+    expect(recovered.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(await recovered.json()).toEqual({
+      data: {
+        id: "object-committed-once",
+        visibilityLevel: "private",
+        currentVersionId: null,
+      },
+      meta: { requestId: "retry-2" },
+    });
+    expect(replayed.status).toBe(201);
+    expect(replayed.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(recoverPending).toHaveBeenCalledTimes(1);
+    expect(committedObjects).toHaveLength(1);
   });
 
   it("releases a returned 5xx so a same-key retry can execute again", async () => {
