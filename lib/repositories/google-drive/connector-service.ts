@@ -342,6 +342,7 @@ export async function replaceGoogleDriveSelections(input: {
       .update(repositoryConnectors)
       .set({
         status: "pending",
+        selectionRevision: sql`${repositoryConnectors.selectionRevision} + 1`,
         cursor: null,
         nextSyncAt: new Date(),
         updatedAt: new Date(),

@@ -22,6 +22,7 @@ import {
   repositoryItemVersions,
   users,
 } from "@/lib/db/schema";
+import { replaceGoogleDriveSelections } from "@/lib/repositories/google-drive/connector-service";
 import { GOOGLE_DRIVE_SCOPE } from "@/lib/repositories/google-drive/formats";
 
 const [owner] = await executeQuery(
@@ -50,7 +51,24 @@ const [repository] = await executeQuery(
 assert.ok(repository);
 
 let credentialId: string | null = null;
+let connectorCreatorId: number | null = null;
 try {
+  const [connectorCreator] = await executeQuery(
+    (db) =>
+      db
+        .insert(users)
+        .values({
+          cognitoSub: `google-content-creator-${Date.now()}`,
+          email: `google-content-creator-${Date.now()}@example.test`,
+          firstName: "Disposable",
+          lastName: "Connector Creator",
+        })
+        .returning({ id: users.id }),
+    "smoke.googleContent.connectorCreator",
+  );
+  assert.ok(connectorCreator);
+  connectorCreatorId = connectorCreator.id;
+
   const [credential] = await executeQuery(
     (db) =>
       db
@@ -97,6 +115,67 @@ try {
       }),
     "smoke.googleContent.selection",
   );
+  await replaceGoogleDriveSelections({
+    connectorId: connector.id,
+    selections: [
+      {
+        externalId: "folder-smoke",
+        selectionKind: "folder",
+        displayName: "Smoke folder",
+        includeDescendants: true,
+      },
+    ],
+  });
+  const [selectionFence] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          cursor: repositoryConnectors.cursor,
+          selectionRevision: repositoryConnectors.selectionRevision,
+        })
+        .from(repositoryConnectors)
+        .where(eq(repositoryConnectors.id, connector.id))
+        .limit(1),
+    "smoke.googleContent.selectionFence",
+  );
+  assert.deepEqual(selectionFence, {
+    cursor: null,
+    selectionRevision: 1,
+  });
+  const staleCompletion = await executeQuery(
+    (db) =>
+      db
+        .update(repositoryConnectors)
+        .set({
+          status: "active",
+          cursor: "stale-cursor-must-not-persist",
+        })
+        .where(
+          and(
+            eq(repositoryConnectors.id, connector.id),
+            eq(repositoryConnectors.selectionRevision, 0),
+          ),
+        )
+        .returning({ id: repositoryConnectors.id }),
+    "smoke.googleContent.staleSelectionCompletion",
+  );
+  assert.equal(staleCompletion.length, 0);
+  const [connectorAfterStaleCompletion] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          status: repositoryConnectors.status,
+          cursor: repositoryConnectors.cursor,
+        })
+        .from(repositoryConnectors)
+        .where(eq(repositoryConnectors.id, connector.id))
+        .limit(1),
+    "smoke.googleContent.connectorAfterStaleSelectionCompletion",
+  );
+  assert.deepEqual(connectorAfterStaleCompletion, {
+    status: "pending",
+    cursor: null,
+  });
 
   const [item] = await executeQuery(
     (db) =>
@@ -300,8 +379,95 @@ try {
     itemStatus: "unavailable",
   });
 
+  const [creatorOwnedCredential] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryConnectorCredentials)
+        .values({
+          repositoryId: repository.id,
+          userId: connectorCreator.id,
+          provider: "google_drive",
+          encryptedRefreshToken: "creator-owned-smoke-placeholder",
+          grantedScopes: [GOOGLE_DRIVE_SCOPE],
+        })
+        .returning({ id: repositoryConnectorCredentials.id }),
+    "smoke.googleContent.creatorOwnedCredential",
+  );
+  assert.ok(creatorOwnedCredential);
+  const [creatorOwnedConnector] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryConnectors)
+        .values({
+          repositoryId: repository.id,
+          provider: "google_drive",
+          authMode: "personal_oauth",
+          createdBy: connectorCreator.id,
+          credentialId: creatorOwnedCredential.id,
+          displayName: "Creator deletion smoke",
+          status: "active",
+        })
+        .returning({ id: repositoryConnectors.id }),
+    "smoke.googleContent.creatorOwnedConnector",
+  );
+  assert.ok(creatorOwnedConnector);
+  const [creatorOwnedItem] = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryItems)
+        .values({
+          repositoryId: repository.id,
+          type: "document",
+          name: "Creator deletion retained item",
+          source: "google_drive",
+          sourceExternalId: "creator-deletion-file",
+          lifecycleStatus: "active",
+          processingStatus: "completed",
+        })
+        .returning({ id: repositoryItems.id }),
+    "smoke.googleContent.creatorOwnedItem",
+  );
+  assert.ok(creatorOwnedItem);
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryConnectorSources).values({
+        connectorId: creatorOwnedConnector.id,
+        repositoryItemId: creatorOwnedItem.id,
+        externalId: "creator-deletion-file",
+        name: "Creator deletion retained item",
+        mimeType: "application/pdf",
+        status: "active",
+      }),
+    "smoke.googleContent.creatorOwnedSource",
+  );
+  await executeQuery(
+    (db) => db.delete(users).where(eq(users.id, connectorCreator.id)),
+    "smoke.googleContent.deleteConnectorCreator",
+  );
+  connectorCreatorId = null;
+  const [deletedConnector] = await executeQuery(
+    (db) =>
+      db
+        .select({ id: repositoryConnectors.id })
+        .from(repositoryConnectors)
+        .where(eq(repositoryConnectors.id, creatorOwnedConnector.id))
+        .limit(1),
+    "smoke.googleContent.deletedCreatorConnector",
+  );
+  const [retainedItem] = await executeQuery(
+    (db) =>
+      db
+        .select({ lifecycleStatus: repositoryItems.lifecycleStatus })
+        .from(repositoryItems)
+        .where(eq(repositoryItems.id, creatorOwnedItem.id))
+        .limit(1),
+    "smoke.googleContent.retainedCreatorItem",
+  );
+  assert.equal(deletedConnector, undefined);
+  assert.equal(retainedItem?.lifecycleStatus, "unavailable");
+
   process.stdout.write(
-    "Google content connector PostgreSQL smoke passed: isolated source failure, cursor, immutable version, sync run, and deletion grace.\n",
+    "Google content connector PostgreSQL smoke passed: selection fencing, isolated source failure, cursor, immutable version, sync run, deletion grace, and creator deletion cleanup.\n",
   );
 } finally {
   await executeQuery(
@@ -319,6 +485,13 @@ try {
           .delete(repositoryConnectorCredentials)
           .where(eq(repositoryConnectorCredentials.id, credentialIdToDelete)),
       "smoke.googleContent.cleanupCredential",
+    );
+  }
+  const connectorCreatorIdToDelete = connectorCreatorId;
+  if (connectorCreatorIdToDelete) {
+    await executeQuery(
+      (db) => db.delete(users).where(eq(users.id, connectorCreatorIdToDelete)),
+      "smoke.googleContent.cleanupConnectorCreator",
     );
   }
   await closeDatabase();

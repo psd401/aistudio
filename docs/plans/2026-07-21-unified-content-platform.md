@@ -1087,6 +1087,8 @@ Implemented on `codex/unified-content-google-sync`, ready for dev review:
   Scheduled `changes.list` polling is authoritative; validated watch
   notifications accelerate it. Page cursors advance only after durable work,
   duplicate revisions are idempotent, overlapping triggers are lease-coalesced,
+  selection generations prevent an older in-flight run from overwriting a new
+  selection/reset cursor, the configured global interval controls scheduling,
   expired cursors rebuild from a new snapshot, and folder moves reconcile the
   complete selection before the cursor advances. Downloads stream through
   bounded multipart S3 upload, per-source failures do not discard a successful
@@ -1095,7 +1097,9 @@ Implemented on `codex/unified-content-google-sync`, ready for dev review:
   Google Vids enter the existing canonical processing pipeline. Unsupported
   native types remain visible. Move/delete/unshare state uses a configurable
   grace window, preserves immutable history, and reactivates the stable item if
-  access returns before expiry.
+  access returns before expiry. Connector-creator deletion marks retained items
+  unavailable before connector/source cascades remove their reconciliation
+  rows.
 - Repository Manager now provides personal connection/selection, Shared Drive
   setup, connector health, last error/success, source counts, retry, and
   disconnect. Queue/DLQ, schedule, least-privilege source-prefix/dispatch IAM,
@@ -1107,11 +1111,11 @@ real PostgreSQL migration/lifecycle smoke, CDK synthesis assertions for the WIF
 role and least-privilege policies, unauthenticated connector guards, and an
 authenticated Repository Manager Playwright workflow with deterministic Google
 API substitution. The final local gate passed whole-repository typecheck and
-lint (zero errors; 413 existing warnings), all 349 Jest suites with 3,481 tests
-passing (3 suites/26 tests skipped), 13 focused Drive/OAuth unit tests, 4 CDK
+lint (zero errors; 411 existing warnings), all 350 Jest suites with 3,484 tests
+passing (3 suites/26 tests skipped), 16 focused Drive/OAuth unit tests, 4 CDK
 contract tests, the real-PostgreSQL connector smoke, and all 11 affected
 authenticated/guard Playwright cases. The production Next.js build,
-infrastructure build, development ProcessingStack synthesis, clean isolated
+infrastructure build, full CDK synthesis, clean isolated
 migration application, and final diff checks also passed. The deployment
 runbook records migration-first ordering, OAuth secret shape/callback
 registration, flags, rollback, alarms, and the labeled live

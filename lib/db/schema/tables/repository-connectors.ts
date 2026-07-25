@@ -118,6 +118,7 @@ export const repositoryConnectors = pgTable(
       .$type<RepositoryConnectorStatus>()
       .default("pending")
       .notNull(),
+    selectionRevision: integer("selection_revision").default(0).notNull(),
     cursor: text("cursor"),
     watchChannelId: uuid("watch_channel_id"),
     watchResourceId: text("watch_resource_id"),
@@ -185,6 +186,10 @@ export const repositoryConnectors = pgTable(
     check(
       "chk_repository_connectors_failure_count",
       sql`${table.consecutiveFailures} >= 0`,
+    ),
+    check(
+      "chk_repository_connectors_selection_revision",
+      sql`${table.selectionRevision} >= 0`,
     ),
   ],
 );

@@ -140,6 +140,13 @@ class ConnectorRevokedError extends Error {
   }
 }
 
+class ConnectorSelectionChangedError extends Error {
+  constructor() {
+    super("Google Drive selections changed during synchronization");
+    this.name = "ConnectorSelectionChangedError";
+  }
+}
+
 let databaseReady: Promise<void> | null = null;
 
 function requiredEnvironment(name: string): string {
@@ -397,13 +404,21 @@ async function ensureSourceIdentity(input: {
   const format = resolveGoogleDriveExportFormat(input.file.mimeType);
   return executeTransaction(async (tx) => {
     const [connector] = await tx
-      .select({ status: repositoryConnectors.status })
+      .select({
+        status: repositoryConnectors.status,
+        selectionRevision: repositoryConnectors.selectionRevision,
+      })
       .from(repositoryConnectors)
       .where(eq(repositoryConnectors.id, input.context.connector.id))
       .limit(1)
       .for("update");
     if (!connector || connector.status === "revoked") {
       throw new ConnectorRevokedError();
+    }
+    if (
+      connector.selectionRevision !== input.context.connector.selectionRevision
+    ) {
+      throw new ConnectorSelectionChangedError();
     }
     const [existing] = await tx
       .select({
@@ -596,13 +611,19 @@ async function importFile(
 
   const registered = await executeTransaction(async (tx) => {
     const [connector] = await tx
-      .select({ status: repositoryConnectors.status })
+      .select({
+        status: repositoryConnectors.status,
+        selectionRevision: repositoryConnectors.selectionRevision,
+      })
       .from(repositoryConnectors)
       .where(eq(repositoryConnectors.id, context.connector.id))
       .limit(1)
       .for("update");
     if (!connector || connector.status === "revoked") {
       throw new ConnectorRevokedError();
+    }
+    if (connector.selectionRevision !== context.connector.selectionRevision) {
+      throw new ConnectorSelectionChangedError();
     }
     const [source] = await tx
       .select({
@@ -1041,7 +1062,12 @@ async function importFileIsolated(
       await importFile(context, client, file, selectedVia),
     );
   } catch (error) {
-    if (error instanceof ConnectorRevokedError) throw error;
+    if (
+      error instanceof ConnectorRevokedError ||
+      error instanceof ConnectorSelectionChangedError
+    ) {
+      throw error;
+    }
     if (
       error instanceof GoogleDriveApiError &&
       (error.status === 403 || error.status === 404)
@@ -1109,7 +1135,12 @@ async function retryDeferredDownloads(
         counters,
       );
     } catch (error) {
-      if (error instanceof ConnectorRevokedError) throw error;
+      if (
+        error instanceof ConnectorRevokedError ||
+        error instanceof ConnectorSelectionChangedError
+      ) {
+        throw error;
+      }
       if (
         error instanceof GoogleDriveApiError &&
         (error.status === 403 || error.status === 404)
@@ -1166,7 +1197,12 @@ async function reconcileChanges(
         }
         await importFileIsolated(context, client, file, selectedVia, counters);
       } catch (error) {
-        if (error instanceof ConnectorRevokedError) throw error;
+        if (
+          error instanceof ConnectorRevokedError ||
+          error instanceof ConnectorSelectionChangedError
+        ) {
+          throw error;
+        }
         if (
           error instanceof GoogleDriveApiError &&
           (error.status === 403 || error.status === 404)
@@ -1183,27 +1219,53 @@ async function reconcileChanges(
     }
     cursor = page.nextPageToken ?? page.newStartPageToken ?? cursor;
     if (!requiresSelectionSnapshot) {
-      await executeQuery(
+      const persisted = await executeQuery(
         (db) =>
           db
             .update(repositoryConnectors)
             .set({ cursor, updatedAt: new Date() })
-            .where(eq(repositoryConnectors.id, context.connector.id)),
+            .where(
+              and(
+                eq(repositoryConnectors.id, context.connector.id),
+                eq(
+                  repositoryConnectors.selectionRevision,
+                  context.connector.selectionRevision,
+                ),
+                ne(repositoryConnectors.status, "revoked"),
+              ),
+            )
+            .returning({ id: repositoryConnectors.id }),
         "googleContent.persistCursor",
       );
+      if (persisted.length === 0) {
+        throw new ConnectorSelectionChangedError();
+      }
     }
     if (!page.nextPageToken) break;
   }
   if (requiresSelectionSnapshot) {
     await reconcileSelectionSnapshot(context, client, counters);
-    await executeQuery(
+    const persisted = await executeQuery(
       (db) =>
         db
           .update(repositoryConnectors)
           .set({ cursor, updatedAt: new Date() })
-          .where(eq(repositoryConnectors.id, context.connector.id)),
+          .where(
+            and(
+              eq(repositoryConnectors.id, context.connector.id),
+              eq(
+                repositoryConnectors.selectionRevision,
+                context.connector.selectionRevision,
+              ),
+              ne(repositoryConnectors.status, "revoked"),
+            ),
+          )
+          .returning({ id: repositoryConnectors.id }),
       "googleContent.persistSnapshotCursor",
     );
+    if (persisted.length === 0) {
+      throw new ConnectorSelectionChangedError();
+    }
   }
   return cursor;
 }
@@ -1249,7 +1311,7 @@ async function renewWatch(
   });
   const oldChannelId = context.connector.watchChannelId;
   const oldResourceId = context.connector.watchResourceId;
-  await executeQuery(
+  const persisted = await executeQuery(
     (db) =>
       db
         .update(repositoryConnectors)
@@ -1261,9 +1323,28 @@ async function renewWatch(
           lastNotificationNumber: null,
           updatedAt: new Date(),
         })
-        .where(eq(repositoryConnectors.id, context.connector.id)),
+        .where(
+          and(
+            eq(repositoryConnectors.id, context.connector.id),
+            eq(
+              repositoryConnectors.selectionRevision,
+              context.connector.selectionRevision,
+            ),
+            ne(repositoryConnectors.status, "revoked"),
+          ),
+        )
+        .returning({ id: repositoryConnectors.id }),
     "googleContent.renewWatch",
   );
+  if (persisted.length === 0) {
+    await client
+      .stopWatch({
+        channelId: watch.channelId,
+        resourceId: watch.resourceId,
+      })
+      .catch(() => {});
+    throw new ConnectorSelectionChangedError();
+  }
   if (oldChannelId && oldResourceId) {
     await client
       .stopWatch({ channelId: oldChannelId, resourceId: oldResourceId })
@@ -1277,32 +1358,14 @@ async function completeSync(input: {
   cursor: string;
   counters: SyncCounters;
   config: ContentPlatformConfig;
-}): Promise<void> {
+}): Promise<boolean> {
   const now = new Date();
   const nextMinutes =
     input.counters.deferred > 0
       ? 1
-      : Math.max(
-          5,
-          input.connector.syncIntervalMinutes ||
-            input.config.googleSyncIntervalMinutes,
-        );
-  await executeTransaction(async (tx) => {
-    await tx
-      .update(repositoryConnectorSyncRuns)
-      .set({
-        status: "succeeded",
-        cursorAfter: input.cursor,
-        discoveredCount: input.counters.discovered,
-        createdCount: input.counters.created,
-        updatedCount: input.counters.updated,
-        unchangedCount: input.counters.unchanged,
-        missingCount: input.counters.missing,
-        failedCount: input.counters.failed,
-        finishedAt: now,
-      })
-      .where(eq(repositoryConnectorSyncRuns.id, input.runId));
-    await tx
+      : Math.max(5, input.config.googleSyncIntervalMinutes);
+  return executeTransaction(async (tx) => {
+    const [completed] = await tx
       .update(repositoryConnectors)
       .set({
         status: input.counters.failed > 0 ? "degraded" : "active",
@@ -1320,9 +1383,42 @@ async function completeSync(input: {
       .where(
         and(
           eq(repositoryConnectors.id, input.connector.id),
+          eq(
+            repositoryConnectors.selectionRevision,
+            input.connector.selectionRevision,
+          ),
           ne(repositoryConnectors.status, "revoked"),
         ),
-      );
+      )
+      .returning({ id: repositoryConnectors.id });
+    if (!completed) {
+      await tx
+        .update(repositoryConnectorSyncRuns)
+        .set({
+          status: "failed",
+          errorCode: "SELECTIONS_CHANGED",
+          errorMessage:
+            "Connector selections changed before synchronization completed",
+          finishedAt: now,
+        })
+        .where(eq(repositoryConnectorSyncRuns.id, input.runId));
+      return false;
+    }
+    await tx
+      .update(repositoryConnectorSyncRuns)
+      .set({
+        status: "succeeded",
+        cursorAfter: input.cursor,
+        discoveredCount: input.counters.discovered,
+        createdCount: input.counters.created,
+        updatedCount: input.counters.updated,
+        unchangedCount: input.counters.unchanged,
+        missingCount: input.counters.missing,
+        failedCount: input.counters.failed,
+        finishedAt: now,
+      })
+      .where(eq(repositoryConnectorSyncRuns.id, input.runId));
+    return true;
   }, "googleContent.completeSync");
 }
 
@@ -1459,13 +1555,24 @@ async function synchronize(
     }
     await applyDeletionGrace(context.connector.id, config.deletionGraceDays);
     await renewWatch(context, client, cursor);
-    await completeSync({
+    const completed = await completeSync({
       connector: context.connector,
       runId,
       cursor,
       counters,
       config,
     });
+    if (!completed) {
+      log.info(
+        "Google Drive synchronization was superseded before completion",
+        {
+          connectorId: context.connector.id,
+          runId,
+          traceId,
+        },
+      );
+      return;
+    }
     log.info("Google Drive synchronization completed", {
       connectorId: context.connector.id,
       runId,
@@ -1476,6 +1583,15 @@ async function synchronize(
     if (error instanceof ConnectorRevokedError) {
       await abandonClaimedSync(runId, "CONNECTOR_REVOKED", error.message);
       log.info("Google Drive synchronization stopped after revocation", {
+        connectorId: message.connectorId,
+        runId,
+        traceId,
+      });
+      return;
+    }
+    if (error instanceof ConnectorSelectionChangedError) {
+      await abandonClaimedSync(runId, "SELECTIONS_CHANGED", error.message);
+      log.info("Google Drive synchronization stopped after selection change", {
         connectorId: message.connectorId,
         runId,
         traceId,

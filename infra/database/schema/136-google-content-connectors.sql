@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS repository_connectors (
   display_name TEXT NOT NULL,
   shared_drive_id TEXT,
   status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  selection_revision INTEGER NOT NULL DEFAULT 0,
   cursor TEXT,
   watch_channel_id UUID,
   watch_resource_id TEXT,
@@ -70,7 +71,9 @@ CREATE TABLE IF NOT EXISTS repository_connectors (
   CONSTRAINT chk_repository_connectors_sync_interval
     CHECK (sync_interval_minutes BETWEEN 5 AND 1440),
   CONSTRAINT chk_repository_connectors_failure_count
-    CHECK (consecutive_failures >= 0)
+    CHECK (consecutive_failures >= 0),
+  CONSTRAINT chk_repository_connectors_selection_revision
+    CHECK (selection_revision >= 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_repository_connectors_due
@@ -201,3 +204,26 @@ DROP TRIGGER IF EXISTS trg_repository_connector_sources_updated_at
 CREATE TRIGGER trg_repository_connector_sources_updated_at
 BEFORE UPDATE ON repository_connector_sources
 FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- A connector can be deleted indirectly when the administrator who configured
+-- it is removed. Preserve the repository item/version audit trail, but fail the
+-- item closed before connector/source cascades erase the reconciliation link.
+CREATE OR REPLACE FUNCTION mark_repository_connector_items_unavailable()
+RETURNS TRIGGER AS $$
+BEGIN
+  UPDATE repository_items
+  SET lifecycle_status = 'unavailable', updated_at = NOW()
+  WHERE id IN (
+    SELECT repository_item_id
+    FROM repository_connector_sources
+    WHERE connector_id = OLD.id
+  );
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_repository_connector_items_unavailable
+  ON repository_connectors;
+CREATE TRIGGER trg_repository_connector_items_unavailable
+BEFORE DELETE ON repository_connectors
+FOR EACH ROW EXECUTE FUNCTION mark_repository_connector_items_unavailable();

@@ -63,10 +63,13 @@ precision message number.
 Workers persist a page cursor only after every change in that page is durable.
 Duplicate delivery is safe because the source revision and processing job keys
 are idempotent, and a durable lease coalesces overlapping schedule, webhook, and
-manual requests. An expired Drive cursor triggers a complete selection snapshot
-from a newly acquired start token. Folder changes also complete a selection
-snapshot before advancing the page cursor because Drive may not emit a separate
-change for every descendant moved with the folder.
+manual requests. Replacing a selection increments a durable generation; source,
+version, cursor, watch, and completion writes that can publish stale work from an
+older in-flight generation fail closed without overwriting the reset cursor. An
+expired Drive cursor triggers a complete selection snapshot from a newly
+acquired start token. Folder changes also complete a selection snapshot before
+advancing the page cursor because Drive may not emit a separate change for every
+descendant moved with the folder.
 
 A failed download or export degrades only that source; the remainder of the
 cursor page still commits and the failed source is retried on the next run.
@@ -74,7 +77,9 @@ Files moved outside a selected folder, deleted files, and lost access enter a
 recoverable missing state. Their last immutable versions remain stored, but
 active retrieval is disabled after
 `CONTENT_DELETION_GRACE_DAYS`. Reappearance during the grace window reactivates
-the same stable item.
+the same stable item. If the administrator who configured a connector is
+deleted, a database cleanup trigger marks its retained repository items
+unavailable before connector/source cascades remove the reconciliation link.
 
 Google Docs, Sheets, Slides, and Drawings export to DOCX, XLSX, PPTX, and PDF.
 Drive blobs retain their supported MIME type. Google Vids and other Drive
@@ -93,6 +98,10 @@ Deploy in this order:
    `GOOGLE_CONTENT_SYNC_QUEUE_URL`; and
 4. enable `CONTENT_PLATFORM_ENABLED` and
    `GOOGLE_CONTENT_SYNC_ENABLED` for the intended environment.
+
+The scheduled next-run delay is controlled by
+`GOOGLE_CONTENT_SYNC_INTERVAL_MINUTES`; deferred long-running downloads retry
+after one minute.
 
 Create `aistudio/{environment}/google-content-oauth` in Secrets Manager with:
 
@@ -133,9 +142,13 @@ versions. Do not remove migration 136 or delete connector records as a rollback.
   operations.
 - `tests/unit/lib/repositories/google-drive-oauth.test.ts` covers PKCE and
   fail-closed scope validation.
+- `tests/unit/lib/repositories/google-drive-callback.test.ts` proves forged or
+  mismatched callback state cannot select or consume another in-progress state
+  cookie while valid denial and PKCE success behavior remains intact.
 - `tests/smoke/google-content-connectors.smoke.ts` runs against real PostgreSQL
-  and verifies isolated source failure/recovery, cursor, immutable-version,
-  sync-run, and deletion-grace state.
+  and verifies selection-generation fencing, isolated source failure/recovery,
+  cursor, immutable-version, sync-run, deletion-grace state, and fail-closed
+  creator-deletion cleanup.
 - `infra/test/unit/google-content-sync.test.ts` synthesizes the exact WIF role,
   least-privilege object/queue policies, schedule, queue/DLQ, and alarms.
 - `tests/e2e/unified-content-product-migration.functional.spec.ts` covers
