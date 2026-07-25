@@ -5,11 +5,16 @@
  * ordering invariants that make an irreversible hard delete safe can be tested
  * with fakes. index.ts supplies the real adapters.
  *
- * The one ordering rule that matters most: `nexus_repository_bindings` cascades
- * from `nexus_conversations`, so the conversation's ephemeral repository IDs
- * MUST be resolved before the conversation row is deleted. After the cascade
- * those rows are unreachable and the `knowledge_repositories` rows they point
- * at would be orphaned forever.
+ * Two ordering rules matter most:
+ *   1. `nexus_repository_bindings` cascades from `nexus_conversations`, so the
+ *      conversation's ephemeral repository IDs MUST be resolved before the
+ *      conversation row is deleted. After the cascade those rows are
+ *      unreachable and the `knowledge_repositories` rows they point at would
+ *      be orphaned forever.
+ *   2. The guarded conversation-row DELETE is the FIRST destructive act. It is
+ *      the atomic claim: until it succeeds, a user who clicks Keep, pins, or
+ *      sends a new message loses nothing — not the row, not S3 storage, not a
+ *      bound repository. Storage cleanup runs only after the claim.
  */
 
 import {
@@ -71,7 +76,14 @@ export interface SweepPorts {
    */
   isStillEligible(conversationId: string, retentionDays: number): Promise<boolean>;
 
-  /** Ephemeral repository IDs bound to a conversation. Resolve BEFORE deleting it. */
+  /**
+   * Repository IDs bound to a conversation whose repository_kind is
+   * 'ephemeral' — and ONLY those. Promoted (durable) and system repositories
+   * stay bound to the conversation but are explicitly user-preserved data; the
+   * sweep must never touch their storage or rows, so the adapter filters them
+   * out at the SQL level. Resolve BEFORE deleting the conversation (the
+   * binding rows cascade away).
+   */
   getBoundRepositoryIds(conversationId: string): Promise<number[]>;
 
   /** Legacy `documents` rows whose conversation_id is this conversation. */
@@ -110,12 +122,16 @@ export interface SweepPorts {
   /**
    * Delete the conversation row; cascades the nexus_* children.
    *
-   * MUST re-assert `is_saved = false AND is_pinned IS NOT TRUE` in its WHERE
-   * clause and return the number of rows actually deleted. This is the atomic
-   * gate for the whole operation: a return of 0 means the user won the race and
-   * the conversation must survive.
+   * MUST re-assert the FULL eligibility predicate — Keep, pin AND the age
+   * cutoff (CANDIDATE_WHERE_CLAUSE with `retentionDays`) — in the DELETE's own
+   * WHERE clause, and return the number of rows actually deleted. Flags alone
+   * are not enough: a user who sends a new message after the late re-check
+   * bumps last_message_at, and only re-testing the age inside the DELETE
+   * itself makes that save the conversation atomically. This is the claim for
+   * the whole operation: a return of 0 means the user won the race and nothing
+   * may be destroyed.
    */
-  deleteConversationRow(conversationId: string): Promise<number>;
+  deleteConversationRow(conversationId: string, retentionDays: number): Promise<number>;
 }
 
 export interface SweepOptions {
@@ -178,23 +194,28 @@ function disabledResult(config: Extract<RetentionConfig, { enabled: false }>, dr
 }
 
 /**
- * Delete one conversation's S3 storage, then its out-of-cascade rows, then the
- * conversation itself.
+ * Claim the conversation with the guarded row DELETE, then clean up its S3
+ * storage and out-of-cascade rows.
  *
- * Failure policy is asymmetric on purpose:
- *   - Repository *prefix* deletion failing aborts this conversation entirely.
- *     Deleting the knowledge_repositories row anyway would strand its objects
- *     with nothing left in the database pointing at them. Nothing is deleted,
- *     the run continues with other conversations, and the next nightly run
- *     retries — visible in logs as a storage_failed event.
- *   - Individual document / message-part object deletions are best-effort
- *     (log-and-continue). Those are single keys, an already-missing object is
- *     the common case, and blocking a whole conversation on one of them would
- *     make the sweep trivially stallable.
+ * The row DELETE comes FIRST among the destructive steps, and its WHERE
+ * re-asserts the full eligibility predicate (Keep, pin, age). Until it
+ * succeeds, nothing has been destroyed — so a user who clicks Keep, pins, or
+ * sends a new message at ANY point before the claim keeps the conversation
+ * and every byte of its data. The alternative (storage first, gate second)
+ * honoured the flag on the row but had already destroyed bound repository
+ * objects when the user won the race.
  *
- * The conversation row DELETE is deliberately positioned as the gate: it
- * re-asserts the Keep/pin predicate, and every other destructive step against
- * the conversation's own records runs only after it has succeeded.
+ * After the claim, cleanup failure policy is asymmetric on purpose:
+ *   - Individual document / message-part / conversation-prefix deletions are
+ *     best-effort (log-and-continue). The row is already gone; those objects
+ *     have no surviving database reference and a transient S3 error must not
+ *     resurrect half a conversation or stall the sweep.
+ *   - A repository *prefix* deletion failing keeps that repository's
+ *     knowledge_repositories row: row and objects stay consistent as a pair,
+ *     ERROR-logged for the operator, and the ephemeral-repository lifecycle
+ *     (expires_at / lifecycle_status) remains the eventual reclaim path.
+ *     Repository rows are only deleted for repositories whose storage sweep
+ *     succeeded.
  */
 async function sweepConversation(
   ports: SweepPorts,
@@ -236,42 +257,25 @@ async function sweepConversation(
     return report;
   }
 
-  // 2. Repository storage — fail-closed.
-  for (const repositoryId of repositoryIds) {
-    try {
-      report.storageObjectsDeleted += await ports.deleteRepositoryStorage(repositoryId);
-    } catch (error) {
-      log.error("repository_storage_failed", {
-        conversationId,
-        repositoryId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      report.storageFailures++;
-      report.skippedReason = "repository_storage_failed";
-      return report;
-    }
-  }
-
-  // 3. The atomic gate. deleteConversationRow re-asserts the Keep/pin predicate
-  //    in its WHERE clause, so if the user won the race in the window since
-  //    step 1 this deletes nothing and returns 0. Everything genuinely
-  //    destructive to the conversation's own records happens AFTER this point,
-  //    which means losing the race costs the user nothing except the repository
-  //    objects removed in step 2 — and their rows are deliberately left intact
-  //    so the next run resolves them again from the still-present binding.
-  if ((await ports.deleteConversationRow(conversationId)) === 0) {
-    log.error("keep_race_detected", {
+  // 2. The atomic claim, and the FIRST destructive act. The DELETE's own WHERE
+  //    re-asserts the full eligibility predicate — Keep, pin AND the age
+  //    cutoff — so a user who clicked Keep, pinned, or sent a new message in
+  //    the window since step 1 makes it match nothing. 0 rows back means the
+  //    user won, and at this point nothing whatsoever has been deleted: not
+  //    the row, not S3 storage, not a repository. Winning the race is free.
+  if ((await ports.deleteConversationRow(conversationId, retentionDays)) === 0) {
+    log.info("keep_race_detected", {
       conversationId,
       message:
-        "Conversation became Keep/pinned mid-sweep; deletion aborted. Repository storage for this conversation may have been removed already.",
+        "Conversation became Keep/pinned or received a new message mid-sweep; nothing was deleted.",
     });
     report.skippedReason = "keep_race_detected";
     return report;
   }
 
-  // 4. Conversation-scoped prefixes — best effort. Unlike repository storage
-  //    these have no database row that would be orphaned by a failure, so a
-  //    transient S3 error must not block the conversation's deletion forever.
+  // 3. Conversation-scoped prefixes — best effort. The row is gone, these
+  //    objects have no database reference left, and a transient S3 error must
+  //    not stall the sweep.
   try {
     report.storageObjectsDeleted += await ports.deleteConversationStorage(conversationId);
   } catch (error) {
@@ -282,7 +286,7 @@ async function sweepConversation(
     report.storageFailures++;
   }
 
-  // 5. Legacy document objects + out-of-prefix message-part objects — best effort.
+  // 4. Legacy document objects + out-of-prefix message-part objects — best effort.
   const legacyKeys = [
     ...documents.map((doc) => doc.objectKey).filter((key): key is string => key !== null),
     ...messageObjectKeys,
@@ -299,17 +303,38 @@ async function sweepConversation(
     }
   }
 
-  // 6. Rows that would otherwise be orphaned (repositories) or left as
-  //    SET NULL stragglers (documents). The conversation row itself is already
-  //    gone — it was step 3, the gate.
+  // 5. Ephemeral repository storage. A failure keeps that repository's row so
+  //    row and objects stay consistent as a pair — ERROR-logged because unlike
+  //    the single-key deletes above there is real bulk data behind it, and the
+  //    binding row that used to reach it from the conversation is gone. The
+  //    ephemeral-repository lifecycle (expires_at / lifecycle_status) is the
+  //    eventual reclaim path for such a repository.
+  const cleanedRepositoryIds: number[] = [];
+  for (const repositoryId of repositoryIds) {
+    try {
+      report.storageObjectsDeleted += await ports.deleteRepositoryStorage(repositoryId);
+      cleanedRepositoryIds.push(repositoryId);
+    } catch (error) {
+      log.error("repository_storage_failed", {
+        conversationId,
+        repositoryId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      report.storageFailures++;
+    }
+  }
+
+  // 6. Rows that would otherwise be orphaned (repositories whose storage is
+  //    verifiably gone) or left as SET NULL stragglers (documents). The
+  //    conversation row itself went first — it was step 2, the claim.
   //
   //    Counts come from what the database actually deleted rather than from the
   //    number of IDs we planned to delete: a partially-completed previous run
   //    can leave rows already gone, and reporting the planned count would
   //    overstate the sweep's effect in exactly the situation an operator is
   //    investigating.
-  if (repositoryIds.length > 0) {
-    report.repositoryRowsDeleted = await ports.deleteRepositoryRows(repositoryIds);
+  if (cleanedRepositoryIds.length > 0) {
+    report.repositoryRowsDeleted = await ports.deleteRepositoryRows(cleanedRepositoryIds);
   }
   if (report.documentIds.length > 0) {
     report.documentRowsDeleted = await ports.deleteDocumentRows(report.documentIds);

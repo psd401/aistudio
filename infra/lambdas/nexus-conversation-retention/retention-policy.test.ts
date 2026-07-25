@@ -11,6 +11,10 @@
  *     AND last_message_at < cutoff (archived rows included)
  *   - ephemeral repository IDs are resolved BEFORE the conversation row is
  *     deleted, and no knowledge_repositories row is left orphaned
+ *   - the guarded row DELETE is the FIRST destructive act and re-asserts the
+ *     full predicate including age, so a user who Keeps, pins, or sends a new
+ *     message mid-sweep loses nothing — including bound repository storage
+ *   - only repository_kind='ephemeral' repositories are ever swept
  */
 
 import { test, expect, describe } from "bun:test";
@@ -28,7 +32,11 @@ import {
   type SweepPorts,
   type SweepLogger,
 } from "./sweep";
-import { documentUrlToObjectKey, toObjectKey } from "./index";
+import {
+  documentUrlToObjectKey,
+  toObjectKey,
+  BOUND_EPHEMERAL_REPOSITORIES_SQL,
+} from "./index";
 
 const silentLog: SweepLogger = {
   info: () => {},
@@ -282,6 +290,8 @@ interface FakeRecorder {
   deletedConversationPrefixes: string[];
   deletedObjectKeys: string[];
   findCandidatesCalls: number;
+  /** retentionDays value the guarded row DELETE was invoked with. */
+  gateRetentionDays: number[];
 }
 
 function makeFakePorts(state: FakeState): { ports: SweepPorts; rec: FakeRecorder } {
@@ -294,6 +304,7 @@ function makeFakePorts(state: FakeState): { ports: SweepPorts; rec: FakeRecorder
     deletedConversationPrefixes: [],
     deletedObjectKeys: [],
     findCandidatesCalls: 0,
+    gateRetentionDays: [],
   };
 
   const ports: SweepPorts = {
@@ -314,6 +325,7 @@ function makeFakePorts(state: FakeState): { ports: SweepPorts; rec: FakeRecorder
     getLegacyDocuments: async (id) => state.documentsByConversation[id] ?? [],
     getMessageObjectKeys: async (id) => state.messageKeysByConversation[id] ?? [],
     deleteConversationStorage: async (id) => {
+      rec.calls.push(`deleteConversationStorage:${id}`);
       if (state.failConversationStorage === id) {
         throw new Error("Throttled");
       }
@@ -321,6 +333,7 @@ function makeFakePorts(state: FakeState): { ports: SweepPorts; rec: FakeRecorder
       return 2;
     },
     deleteRepositoryStorage: async (repositoryId) => {
+      rec.calls.push(`deleteRepositoryStorage:${repositoryId}`);
       if (state.failRepositoryStorage === repositoryId) {
         throw new Error("AccessDenied");
       }
@@ -343,10 +356,11 @@ function makeFakePorts(state: FakeState): { ports: SweepPorts; rec: FakeRecorder
       rec.deletedDocumentRows.push(...ids);
       return ids.length;
     },
-    deleteConversationRow: async (id) => {
+    deleteConversationRow: async (id, retentionDays) => {
       rec.calls.push(`deleteConversationRow:${id}`);
-      // Models the guarded DELETE: its WHERE re-asserts the Keep/pin
-      // predicate, so a raced row matches nothing and reports 0 deleted.
+      rec.gateRetentionDays.push(retentionDays);
+      // Models the guarded DELETE: its WHERE re-asserts the FULL predicate
+      // (Keep, pin, age), so a raced row matches nothing and reports 0 deleted.
       if ((state.racedAtDelete ?? []).includes(id)) return 0;
       rec.deletedConversations.push(id);
       return 1;
@@ -520,8 +534,9 @@ describe("runRetentionSweep — Keep wins races against the sweep", () => {
     expect(recheckIdx).toBeLessThan(deleteIdx);
   });
 
-  test("the guarded DELETE is the atomic gate: 0 rows means the user won and nothing else is removed", async () => {
-    // Models Keep landing in the window between the re-check and the DELETE.
+  test("the guarded DELETE is the atomic claim: 0 rows means the user won and NOTHING was removed", async () => {
+    // Models Keep (or a new message — the gate re-asserts age too) landing in
+    // the window between the re-check and the DELETE.
     const { ports, rec } = makeFakePorts(baseState({ racedAtDelete: ["conv-1"] }));
     const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
 
@@ -529,12 +544,34 @@ describe("runRetentionSweep — Keep wins races against the sweep", () => {
     expect(result.conversationsSkipped).toBe(1);
     expect(result.conversations[0]!.skippedReason).toBe("keep_race_detected");
     expect(rec.deletedConversations).toEqual([]);
-    // Crucially the conversation's OWN records survive: the row delete gates
-    // everything after it.
+    // EVERYTHING survives — including bound repository storage. The claim is
+    // the first destructive act, so winning the race costs the user nothing.
     expect(rec.deletedRepositoryRows).toEqual([]);
     expect(rec.deletedDocumentRows).toEqual([]);
     expect(rec.deletedConversationPrefixes).toEqual([]);
     expect(rec.deletedObjectKeys).toEqual([]);
+    expect(rec.deletedStoragePrefixes).toEqual([]);
+  });
+
+  test("the claim precedes ALL storage deletion, repository storage included", async () => {
+    const { ports, rec } = makeFakePorts(baseState());
+    await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+
+    const claimIdx = rec.calls.indexOf("deleteConversationRow:conv-1");
+    const repoStorageIdx = rec.calls.indexOf("deleteRepositoryStorage:101");
+    const convStorageIdx = rec.calls.indexOf("deleteConversationStorage:conv-1");
+    expect(claimIdx).toBeGreaterThanOrEqual(0);
+    expect(repoStorageIdx).toBeGreaterThan(claimIdx);
+    expect(convStorageIdx).toBeGreaterThan(claimIdx);
+  });
+
+  test("the claim re-asserts the age cutoff: retentionDays reaches the DELETE itself", async () => {
+    // A user who sends a new message after the late re-check bumps
+    // last_message_at; only the age predicate inside the DELETE's own WHERE
+    // makes that save the conversation atomically.
+    const { ports, rec } = makeFakePorts(baseState());
+    await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+    expect(rec.gateRetentionDays).toEqual([30]);
   });
 
   test("a raced conversation does not stop the rest of the batch", async () => {
@@ -576,18 +613,20 @@ describe("runRetentionSweep — dry run", () => {
 });
 
 describe("runRetentionSweep — storage failure policy", () => {
-  test("a failed repository prefix delete aborts that conversation, deleting nothing", async () => {
+  test("a failed repository prefix delete keeps that repository's row; the rest is cleaned", async () => {
+    // The claim already succeeded, so the conversation is gone regardless.
+    // Repository 101's storage delete failed: its row survives so row and
+    // objects stay consistent as a pair (ERROR-logged; the ephemeral lifecycle
+    // is the eventual reclaim path). Repository 102 swept fine and loses its
+    // row normally.
     const { ports, rec } = makeFakePorts(baseState({ failRepositoryStorage: 101 }));
     const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
 
-    expect(result.conversationsDeleted).toBe(0);
-    expect(result.conversationsSkipped).toBe(1);
-    expect(result.conversations[0]!.skippedReason).toBe("repository_storage_failed");
-    // Critically: the row is still there to retry, and no repository row was
-    // deleted out from under its surviving objects.
-    expect(rec.deletedConversations).toEqual([]);
-    expect(rec.deletedRepositoryRows).toEqual([]);
-    expect(rec.deletedDocumentRows).toEqual([]);
+    expect(result.conversationsDeleted).toBe(1);
+    expect(rec.deletedConversations).toEqual(["conv-1"]);
+    expect(result.conversations[0]!.storageFailures).toBe(1);
+    expect(rec.deletedStoragePrefixes).toEqual([102]);
+    expect(rec.deletedRepositoryRows).toEqual([102]);
   });
 
   test("a failed single-object delete is best-effort — the conversation still goes", async () => {
@@ -599,7 +638,7 @@ describe("runRetentionSweep — storage failure policy", () => {
     expect(result.conversations[0]!.storageFailures).toBe(1);
   });
 
-  test("one failing conversation does not stop the rest of the batch", async () => {
+  test("a storage failure in one conversation does not stop the rest of the batch", async () => {
     const { ports, rec } = makeFakePorts(
       baseState({
         candidates: [
@@ -614,9 +653,30 @@ describe("runRetentionSweep — storage failure policy", () => {
     );
 
     const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
-    expect(result.conversationsDeleted).toBe(1);
-    expect(result.conversationsSkipped).toBe(1);
-    expect(rec.deletedConversations).toEqual(["conv-2"]);
+    expect(result.conversationsDeleted).toBe(2);
+    expect(rec.deletedConversations).toEqual(["conv-1", "conv-2"]);
+    // Only the repository whose storage was verifiably removed loses its row.
+    expect(rec.deletedRepositoryRows).toEqual([201]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ephemeral-only repository scope
+// ---------------------------------------------------------------------------
+
+describe("BOUND_EPHEMERAL_REPOSITORIES_SQL", () => {
+  test("filters to repository_kind = 'ephemeral' via the knowledge_repositories join", () => {
+    // promoteNexusRepository flips a repository to 'durable' but keeps its
+    // conversation binding. Without this filter the sweep would permanently
+    // destroy a repository the user explicitly saved — and 'system'
+    // repositories bound for retrieval context along with it.
+    expect(BOUND_EPHEMERAL_REPOSITORIES_SQL).toContain("JOIN knowledge_repositories");
+    expect(BOUND_EPHEMERAL_REPOSITORIES_SQL).toContain("repository_kind = 'ephemeral'");
+  });
+
+  test("uses exactly one bound parameter, $1 (the conversation id)", () => {
+    const placeholders = BOUND_EPHEMERAL_REPOSITORIES_SQL.match(/\$\d+/g) ?? [];
+    expect(placeholders).toEqual(["$1"]);
   });
 });
 
@@ -643,9 +703,9 @@ describe("runRetentionSweep — unexpected error isolation", () => {
     // conversation would be selected first every single night and stall the
     // entire retention feature indefinitely.
     const originalDelete = ports.deleteConversationRow;
-    ports.deleteConversationRow = async (id) => {
+    ports.deleteConversationRow = async (id, retentionDays) => {
       if (id === "conv-1") throw new Error("deadlock detected");
-      return originalDelete(id);
+      return originalDelete(id, retentionDays);
     };
 
     const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });

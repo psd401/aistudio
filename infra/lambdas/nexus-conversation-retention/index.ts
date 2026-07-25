@@ -242,6 +242,23 @@ export function documentUrlToObjectKey(
 }
 
 /**
+ * Bound repositories eligible for sweep-owned destruction: ONLY
+ * repository_kind = 'ephemeral'. Promoted repositories keep their conversation
+ * binding but become 'durable' (see promoteNexusRepository in
+ * lib/nexus/ephemeral-repository-service.ts) — they are explicitly
+ * user-preserved and must survive the conversation, as must 'system'
+ * repositories. Exported as a constant, like CANDIDATE_WHERE_CLAUSE, so the
+ * unit tests can pin the filter and it cannot silently regress.
+ */
+export const BOUND_EPHEMERAL_REPOSITORIES_SQL = `
+  SELECT b.repository_id
+  FROM nexus_repository_bindings b
+  JOIN knowledge_repositories r ON r.id = b.repository_id
+  WHERE b.conversation_id = $1::uuid
+    AND r.repository_kind = 'ephemeral'
+`.trim();
+
+/**
  * Prefixes that hold everything a conversation owns in S3.
  * See app/api/nexus/conversations/[id]/messages/route.ts, which authorises reads
  * against exactly these two.
@@ -339,11 +356,17 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
     },
 
     getBoundRepositoryIds: async (conversationId) => {
-      const rows = await sql<{ repository_id: number }[]>`
-        SELECT repository_id
-        FROM nexus_repository_bindings
-        WHERE conversation_id = ${conversationId}::uuid
-      `;
+      // BOUND_EPHEMERAL_REPOSITORIES_SQL joins knowledge_repositories and
+      // keeps ONLY repository_kind = 'ephemeral'. A promoted repository
+      // (promoteNexusRepository flips it to 'durable' but intentionally keeps
+      // the conversation binding) is user-preserved data the sweep must never
+      // destroy; 'system' repositories likewise. Their binding rows still
+      // cascade away with the conversation — the repositories themselves
+      // survive.
+      const rows = await sql.unsafe<{ repository_id: number }[]>(
+        BOUND_EPHEMERAL_REPOSITORIES_SQL,
+        [conversationId]
+      );
       return rows.map((row) => row.repository_id);
     },
 
@@ -421,21 +444,25 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       return rows.length;
     },
 
-    deleteConversationRow: async (conversationId) => {
+    deleteConversationRow: async (conversationId, retentionDays) => {
       // Cascades nexus_messages, nexus_conversation_events,
       // nexus_conversation_folders, nexus_cache_entries, nexus_shares and
       // nexus_provider_metrics.
-      // The Keep/pin predicate is re-asserted HERE, in the delete itself, so
-      // the check and the deletion are one atomic statement. A user who clicks
-      // Keep after the sweep's pre-check but before this line still wins: the
-      // WHERE matches nothing, 0 rows come back, and the caller aborts.
-      const rows = await sql<{ id: string }[]>`
-        DELETE FROM nexus_conversations
-        WHERE id = ${conversationId}::uuid
-          AND is_saved = false
-          AND is_pinned IS NOT TRUE
-        RETURNING id
-      `;
+      // The FULL eligibility predicate — Keep, pin AND the age cutoff — is
+      // re-asserted HERE, in the delete itself, so the check and the deletion
+      // are one atomic statement. A user who clicks Keep, pins, or sends a
+      // new message (bumping last_message_at) after the sweep's pre-check but
+      // before this line still wins: the WHERE matches nothing, 0 rows come
+      // back, and the caller aborts having destroyed nothing. Same
+      // CANDIDATE_WHERE_CLAUSE constant as the batch scan; $1 is the
+      // retention window, $2 the conversation id.
+      const rows = await sql.unsafe<{ id: string }[]>(
+        `DELETE FROM nexus_conversations
+         WHERE ${CANDIDATE_WHERE_CLAUSE}
+           AND id = $2::uuid
+         RETURNING id`,
+        [retentionDays, conversationId]
+      );
       return rows.length;
     },
   };
