@@ -31,6 +31,21 @@ import { mkdirSync } from 'node:fs'
 
 const SHOT_DIR = 'docs/verification/atrium-meridian'
 
+/**
+ * Pin the grid to a single seeded probe via the library search box. The search
+ * is SERVER-side (#1336), so this scopes the query itself rather than filtering
+ * an already-loaded page — which is what makes the assertion independent of how
+ * much content the shared local database has accumulated.
+ */
+async function pinToProbe(
+  page: import('@playwright/test').Page,
+  title: string
+) {
+  await page
+    .getByRole('textbox', { name: 'Search content by title or tag' })
+    .fill(title)
+}
+
 /** The chips group's "Archived" filter button. */
 function archivedChip(page: import('@playwright/test').Page) {
   return page
@@ -95,7 +110,10 @@ test.describe('Atrium archived-content view (authenticated)', () => {
       // Archive + delete both raise a window.confirm — auto-accept every dialog.
       page.on('dialog', (dialog) => void dialog.accept())
 
-      // A doc with a unique title so its card link is unambiguous across views.
+      // A doc with a unique title so its card link is unambiguous across views —
+      // and so the (server-side, #1336) search box can pin the list to exactly
+      // this row. Without that the archived view is an unbounded shared list and
+      // the probe can fall off page one as local runs accumulate.
       const title = `e2e archived probe ${Date.now()}`
       const created = await page.request.post('/api/v1/content', {
         data: { kind: 'document', title, body: '# hi', bodyFormat: 'markdown' },
@@ -107,8 +125,10 @@ test.describe('Atrium archived-content view (authenticated)', () => {
 
       // It starts as a draft: visible in the default library, absent from Archived.
       await page.goto('/atrium')
+      await pinToProbe(page, title)
       await expect(cardLink).toBeVisible({ timeout: 15000 })
       await archivedChip(page).click()
+      await pinToProbe(page, title)
       await expect(cardLink).toHaveCount(0)
 
       // Archive it from the editor's content-settings dialog.
@@ -121,8 +141,10 @@ test.describe('Atrium archived-content view (authenticated)', () => {
       await page.waitForURL('**/atrium', { timeout: 15000 })
 
       // Now it is GONE from the default view and present ONLY under Archived.
+      await pinToProbe(page, title)
       await expect(cardLink).toHaveCount(0)
       await archivedChip(page).click()
+      await pinToProbe(page, title)
       await expect(cardLink).toBeVisible({ timeout: 15000 })
       // Muted treatment + ARCHIVED pill on the card.
       await expect(cardLink).toHaveClass(/mer-card-archived/)
@@ -148,8 +170,10 @@ test.describe('Atrium archived-content view (authenticated)', () => {
 
       // Back in the library it is visible in the default view again, absent from Archived.
       await page.goto('/atrium')
+      await pinToProbe(page, title)
       await expect(cardLink).toBeVisible({ timeout: 15000 })
       await archivedChip(page).click()
+      await pinToProbe(page, title)
       await expect(cardLink).toHaveCount(0)
 
       // Archive it a second time, then Delete permanently from the editor.
@@ -159,6 +183,7 @@ test.describe('Atrium archived-content view (authenticated)', () => {
       await page.waitForURL('**/atrium', { timeout: 15000 })
 
       await archivedChip(page).click()
+      await pinToProbe(page, title)
       await expect(cardLink).toBeVisible({ timeout: 15000 })
       await cardLink.click()
       await page.waitForURL(`**/atrium/${id}/edit`, { timeout: 15000 })
@@ -175,8 +200,10 @@ test.describe('Atrium archived-content view (authenticated)', () => {
       expect(editorResp?.status()).toBe(404)
 
       await page.goto('/atrium')
+      await pinToProbe(page, title)
       await expect(cardLink).toHaveCount(0)
       await archivedChip(page).click()
+      await pinToProbe(page, title)
       await expect(cardLink).toHaveCount(0)
     } finally {
       await context.close()
