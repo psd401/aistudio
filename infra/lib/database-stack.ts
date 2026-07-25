@@ -383,7 +383,7 @@ export class DatabaseStack extends cdk.Stack {
     // is older than the admin-configured NEXUS_CONVERSATION_RETENTION_DAYS
     // setting, unless the user flagged them Keep (is_saved) or pinned them.
     //
-    // Ships INERT: migration 136 seeds that setting empty, and the handler
+    // Ships INERT: migration 137 seeds that setting empty, and the handler
     // exits as a no-op for a missing/empty/zero/negative/non-numeric value.
     // Enabling it is a settings change in /admin/settings — no deploy — and
     // clearing the value disables it again just as immediately.

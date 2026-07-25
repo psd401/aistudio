@@ -112,7 +112,7 @@ export function retentionCutoff(now: Date, retentionDays: number): Date {
  * `is_pinned IS NOT TRUE` rather than `is_pinned = false`: is_pinned is
  * nullable, and `NULL = false` is NULL, which would silently exempt every
  * NULL-pinned conversation from the sweep. It matches the partial index
- * predicate created by migration 136.
+ * predicate created by migration 137.
  *
  * The cutoff is compared against `now() AT TIME ZONE 'UTC'` because
  * last_message_at is `timestamp without time zone` holding UTC wall time;

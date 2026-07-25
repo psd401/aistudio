@@ -146,7 +146,7 @@ describe("isEligibleForDeletion", () => {
 describe("CANDIDATE_WHERE_CLAUSE", () => {
   test("uses IS NOT TRUE for the nullable is_pinned column", () => {
     // `is_pinned = false` is NULL for NULL rows, which would silently exempt
-    // them from the sweep AND from the partial index in migration 136.
+    // them from the sweep AND from the partial index in migration 137.
     expect(CANDIDATE_WHERE_CLAUSE).toContain("is_pinned IS NOT TRUE");
     expect(CANDIDATE_WHERE_CLAUSE).not.toContain("is_pinned = false");
   });
