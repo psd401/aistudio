@@ -45,14 +45,24 @@ export async function PATCH(
 
     // Parse request body
     const body = await req.json()
-    const { title, isArchived, isPinned, metadata } = body
+    const { title, isArchived, isPinned, isSaved, metadata } = body
 
     log.debug('Update conversation request', sanitizeForLogging({
       conversationId,
       title: title ? `${String(title).substring(0, 20)}...` : undefined,
       isArchived,
-      isPinned
+      isPinned,
+      isSaved
     }))
+
+    // isSaved gates irreversible retention deletion, so it is validated
+    // strictly rather than coerced — a truthy string must not silently
+    // become "kept", and a non-boolean must not silently become "not kept".
+    if (isSaved !== undefined && typeof isSaved !== 'boolean') {
+      log.warn('Invalid isSaved value', { conversationId, type: typeof isSaved })
+      timer({ status: 'error', reason: 'invalid_is_saved' })
+      return new Response('isSaved must be a boolean', { status: 400 })
+    }
 
     // Build update object with provided fields only
     const updates: Record<string, unknown> = {}
@@ -70,6 +80,11 @@ export async function PATCH(
 
     if (isPinned !== undefined) {
       updates.isPinned = isPinned
+      fieldCount++
+    }
+
+    if (isSaved !== undefined) {
+      updates.isSaved = isSaved
       fieldCount++
     }
 

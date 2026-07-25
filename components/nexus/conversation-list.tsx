@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, memo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
-import { Trash2Icon, MessageSquareIcon, BotIcon } from 'lucide-react'
+import { Trash2Icon, MessageSquareIcon, BotIcon, BookmarkIcon, BookmarkCheckIcon } from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -34,6 +34,8 @@ interface ConversationItem {
   createdAt: string
   isArchived: boolean
   isPinned: boolean
+  /** "Keep" flag — kept conversations are never auto-deleted by retention (#1330) */
+  isSaved: boolean
   metadata?: NexusConversationMetadata | AssistantArchitectConversationMetadata | null
 }
 
@@ -109,16 +111,20 @@ interface ConversationItemRowProps {
   conversation: ConversationItem
   isSelected: boolean
   isDeleting: boolean
+  isTogglingKeep: boolean
   onSelect: (id: string) => void
   onDelete: (id: string) => void
+  onToggleKeep: (id: string, nextIsSaved: boolean) => void
 }
 
 const ConversationItemRow = memo(function ConversationItemRow({
   conversation,
   isSelected,
   isDeleting,
+  isTogglingKeep,
   onSelect,
   onDelete,
+  onToggleKeep,
 }: ConversationItemRowProps) {
   const handleClick = useCallback(() => {
     onSelect(conversation.id)
@@ -138,6 +144,13 @@ const ConversationItemRow = memo(function ConversationItemRow({
     e.stopPropagation()
     onDelete(conversation.id)
   }, [conversation.id, onDelete])
+
+  const isSaved = conversation.isSaved === true
+
+  const handleToggleKeepClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+    onToggleKeep(conversation.id, !isSaved)
+  }, [conversation.id, isSaved, onToggleKeep])
 
   return (
     <div
@@ -172,16 +185,36 @@ const ConversationItemRow = memo(function ConversationItemRow({
               {conversation.provider === 'assistant-architect' && isAssistantArchitectMetadata(conversation.metadata) && isValidExecutionStatus(conversation.metadata.executionStatus) && (
                 <ExecutionStatusBadge status={conversation.metadata.executionStatus} />
               )}
+              {isSaved && (
+                <Badge variant="secondary" size="sm" data-testid="conversation-kept-indicator">
+                  Kept
+                </Badge>
+              )}
             </div>
           </div>
         </div>
       </div>
 
+      {/* Keep toggle — kept conversations are exempt from retention auto-deletion (#1330) */}
+      <TooltipIconButton
+        className={`ml-auto size-4 p-4 ${isSaved ? 'text-primary hover:text-primary/80' : 'text-muted-foreground hover:text-foreground'}`}
+        variant="ghost"
+        tooltip={isSaved ? 'Stop keeping conversation' : 'Keep conversation'}
+        aria-pressed={isSaved}
+        data-testid="conversation-keep-toggle"
+        disabled={isTogglingKeep}
+        onClick={handleToggleKeepClick}
+      >
+        {isSaved
+          ? <BookmarkCheckIcon className="h-4 w-4" />
+          : <BookmarkIcon className="h-4 w-4" />}
+      </TooltipIconButton>
+
       {/* Delete Button */}
       <AlertDialog>
         <AlertDialogTrigger asChild>
           <TooltipIconButton
-            className="text-destructive hover:text-destructive/80 ml-auto mr-1 size-4 p-4"
+            className="text-destructive hover:text-destructive/80 mr-1 size-4 p-4"
             variant="ghost"
             tooltip="Delete conversation"
             onClick={handleStopPropagation}
@@ -217,6 +250,9 @@ export function ConversationList({ selectedConversationId, provider, onConversat
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
+  const [togglingKeepId, setTogglingKeepId] = useState<string | null>(null)
+  /** Transient, non-blocking error for row-level actions (does not hide the list) */
+  const [actionError, setActionError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<ConversationFilterTab>('chat')
   const router = useRouter()
 
@@ -329,6 +365,47 @@ export function ConversationList({ selectedConversationId, provider, onConversat
     }
   }, [onConversationSelectProp])
 
+  // Toggle the "Keep" flag (#1330). Kept conversations are permanently exempt
+  // from the nightly retention sweep, so the optimistic update is rolled back
+  // on any failure — the UI must never claim a conversation is protected when
+  // the server did not record it.
+  const handleToggleKeep = useCallback(async (conversationId: string, nextIsSaved: boolean) => {
+    setTogglingKeepId(conversationId)
+    setConversations(prev => prev.map(conv =>
+      conv.id === conversationId ? { ...conv, isSaved: nextIsSaved } : conv
+    ))
+
+    try {
+      const response = await fetch(`/api/nexus/conversations/${encodeURIComponent(conversationId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isSaved: nextIsSaved })
+      })
+
+      if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`)
+      }
+
+      log.debug('Conversation keep flag updated', { conversationId, isSaved: nextIsSaved })
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to update Keep'
+      log.error('Failed to update conversation keep flag', { conversationId, error: errorMessage })
+
+      // Roll the optimistic flip back to its previous value
+      setConversations(prev => prev.map(conv =>
+        conv.id === conversationId ? { ...conv, isSaved: !nextIsSaved } : conv
+      ))
+
+      // Deliberately NOT the `error` state: that state replaces the entire
+      // list with a retry panel, which would be a disproportionate response to
+      // a failed toggle. This renders a non-blocking inline notice instead.
+      setActionError(`Keep failed: ${errorMessage}`)
+      setTimeout(() => setActionError(null), 5000)
+    } finally {
+      setTogglingKeepId(null)
+    }
+  }, [])
+
   // Handle deleting a conversation using server action with comprehensive error handling
   const handleDeleteConversation = useCallback(async (conversationId: string) => {
     try {
@@ -404,6 +481,12 @@ export function ConversationList({ selectedConversationId, provider, onConversat
 
   return (
     <div className="flex flex-col items-stretch gap-1.5 text-foreground">
+      {actionError && (
+        <p className="px-3 py-1 text-xs text-destructive" role="status">
+          {actionError}
+        </p>
+      )}
+
       {/* Filter Tabs - hidden when provider is explicitly set */}
       {!provider && (
         <div className="flex gap-1 px-1 pb-1" role="tablist" aria-label="Conversation type filter">
@@ -458,8 +541,10 @@ export function ConversationList({ selectedConversationId, provider, onConversat
               conversation={conversation}
               isSelected={selectedConversationId === conversation.id}
               isDeleting={deletingConversationId === conversation.id}
+              isTogglingKeep={togglingKeepId === conversation.id}
               onSelect={handleConversationSelect}
               onDelete={handleDeleteConversation}
+              onToggleKeep={handleToggleKeep}
             />
           ))}
         </>
