@@ -1134,9 +1134,8 @@ async function reconcileChanges(
   counters: SyncCounters,
 ): Promise<string> {
   let cursor = initialCursor;
-  let hasMore = true;
   let requiresSelectionSnapshot = false;
-  do {
+  for (;;) {
     const page = await client.listChanges(
       cursor,
       context.connector.sharedDriveId,
@@ -1182,7 +1181,6 @@ async function reconcileChanges(
         throw error;
       }
     }
-    hasMore = page.nextPageToken !== null;
     cursor = page.nextPageToken ?? page.newStartPageToken ?? cursor;
     if (!requiresSelectionSnapshot) {
       await executeQuery(
@@ -1194,7 +1192,8 @@ async function reconcileChanges(
         "googleContent.persistCursor",
       );
     }
-  } while (hasMore);
+    if (!page.nextPageToken) break;
+  }
   if (requiresSelectionSnapshot) {
     await reconcileSelectionSnapshot(context, client, counters);
     await executeQuery(

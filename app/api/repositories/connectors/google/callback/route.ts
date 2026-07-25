@@ -10,6 +10,7 @@ import {
 } from "@/lib/repositories/google-drive/connector-service";
 import { exchangeGoogleAuthorizationCode } from "@/lib/repositories/google-drive/oauth";
 import {
+  GOOGLE_CONTENT_OAUTH_STATE_COOKIE_PREFIX,
   googleContentOAuthStateCookieName,
   type GoogleContentOAuthState,
 } from "@/lib/repositories/google-drive/oauth-state";
@@ -34,14 +35,36 @@ function safeEqual(left: string, right: string): boolean {
   );
 }
 
-function repositoryIdFromState(state: string | null): number | null {
-  if (!state) return null;
-  const separator = state.indexOf(":");
-  if (separator <= 0) return null;
-  const repositoryId = Number(state.slice(0, separator));
-  return Number.isSafeInteger(repositoryId) && repositoryId > 0
-    ? repositoryId
-    : null;
+interface OAuthStateCookieStore {
+  getAll(): Array<{ name: string; value: string }>;
+}
+
+async function findMatchingOAuthState(
+  cookieStore: OAuthStateCookieStore,
+  returnedState: string,
+): Promise<{
+  cookieName: string;
+  state: GoogleContentOAuthState;
+} | null> {
+  const candidates = cookieStore
+    .getAll()
+    .filter(({ name }) =>
+      name.startsWith(GOOGLE_CONTENT_OAUTH_STATE_COOKIE_PREFIX),
+    );
+  for (const candidate of candidates) {
+    try {
+      const state = oauthStateSchema.parse(
+        JSON.parse(await decryptToken(candidate.value)) as unknown,
+      ) satisfies GoogleContentOAuthState;
+      if (safeEqual(state.state, returnedState)) {
+        return { cookieName: candidate.name, state };
+      }
+    } catch {
+      // Ignore malformed/expired sibling state cookies. Only a timing-safe
+      // match is allowed to route this callback to a repository.
+    }
+  }
+  return null;
 }
 
 function completionUrl(
@@ -61,29 +84,22 @@ export async function GET(request: Request): Promise<Response> {
     action: "googleContent.oauth.callback",
   });
   const { searchParams } = new URL(request.url);
-  const returnedState = searchParams.get("state");
-  const repositoryId = repositoryIdFromState(returnedState);
-  if (!repositoryId) {
-    timer({ status: "error", reason: "invalid_state_routing" });
+  const cookieStore = await cookies();
+  const matchedState = await findMatchingOAuthState(
+    cookieStore,
+    searchParams.get("state") ?? "",
+  );
+  if (!matchedState) {
+    timer({ status: "error", reason: "invalid_state" });
     return Response.json({ error: "Invalid OAuth state" }, { status: 400 });
   }
-
-  const cookieStore = await cookies();
-  const cookieName = googleContentOAuthStateCookieName(repositoryId);
-  const encryptedState = cookieStore.get(cookieName)?.value;
-  cookieStore.delete(cookieName);
+  const { state } = matchedState;
+  const repositoryId = state.repositoryId;
+  cookieStore.delete(matchedState.cookieName);
   try {
-    // Validate CSRF/session state before branching on provider-controlled error
-    // or code parameters.
-    if (!encryptedState || !returnedState) {
-      throw new Error("OAuth state is missing");
-    }
-    const state = oauthStateSchema.parse(
-      JSON.parse(await decryptToken(encryptedState)) as unknown,
-    ) satisfies GoogleContentOAuthState;
     if (
-      state.repositoryId !== repositoryId ||
-      !safeEqual(state.state, returnedState) ||
+      matchedState.cookieName !==
+        googleContentOAuthStateCookieName(repositoryId) ||
       Date.now() - state.createdAt > STATE_MAX_AGE_MS
     ) {
       throw new Error("OAuth state is invalid or expired");
@@ -93,10 +109,9 @@ export async function GET(request: Request): Promise<Response> {
       throw new Error("OAuth session changed");
     }
 
-    const providerError = searchParams.get("error");
-    if (providerError) {
-      throw new Error("Google authorization was not completed");
-    }
+    // OAuth error callbacks do not carry a code. Treat the absence of a code as
+    // failure after unconditional state validation rather than branching on
+    // the provider-controlled `error` parameter.
     const code = searchParams.get("code");
     if (!code) throw new Error("Authorization code is missing");
 
