@@ -202,7 +202,13 @@ export function useEditorActions({
             // The widen the confirm dialog offered, if any. `grants` are omitted:
             // they are only meaningful for `level: "group"`, and the widen targets
             // are always `internal` or `public`.
-            ...(widenTo ? { visibility: { level: widenTo } } : {}),
+            // `widenOnly` marks this an OFFER: the server applies it only if it
+            // actually broadens the LOCKED current audience. PublishMenu already
+            // re-reads visibility before confirming, but a re-read is not a lock —
+            // this closes the remaining window in the one place that holds one.
+            ...(widenTo
+              ? { visibility: { level: widenTo, widenOnly: true } }
+              : {}),
           });
           // §26.4: a caller without public-publish authority returns
           // `approvalRequired`, which mapActionResult surfaces as `pending`

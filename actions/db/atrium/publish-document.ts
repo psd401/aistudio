@@ -66,7 +66,16 @@ export async function publishDocumentAction(
      * `group` only at the type boundary. `grants` are only meaningful (and only
      * accepted by the service) for `level: "group"`.
      */
-    visibility?: { level: string; grants?: { kind: string; value: string }[] };
+    visibility?: {
+      level: string;
+      grants?: { kind: string; value: string }[];
+      /**
+       * Treat the level as a WIDEN OFFER rather than an assignment (#1336):
+       * applied only if it actually broadens the object's locked current
+       * audience. Set by the editor's confirm dialog.
+       */
+      widenOnly?: boolean;
+    };
   },
 ): Promise<
   ActionState<{

@@ -78,6 +78,23 @@ export interface PublishInput {
   visibility?: {
     level: VisibilityLevel;
     grants?: VisibilityGrant[];
+    /**
+     * Treat the level as a WIDEN OFFER rather than an assignment (#1336). When
+     * set, it is applied only if it actually broadens the object's CURRENT
+     * (FOR-UPDATE-locked) audience; if the object already reaches at least that
+     * far, the visibility is left untouched and the publish proceeds unchanged.
+     *
+     * Set by the editor's confirm dialog. That dialog already re-reads
+     * visibility before submitting, but a re-read is not a lock: a change
+     * landing between it and this transaction would still be overwritten, and
+     * "confirming a widen silently NARROWS a concurrently-public object" is too
+     * sharp an edge to leave to a narrowed race window. This is the same
+     * decision made in the one place that actually holds the row lock.
+     *
+     * Omitted (the default) preserves assignment semantics — REST/MCP and the
+     * §26.4 approval replay narrow deliberately.
+     */
+    widenOnly?: boolean;
   };
   /**
    * Publish a SPECIFIC version rather than the object's current head. Used by
@@ -108,6 +125,18 @@ const adapters: Record<PublishDestination, PublishAdapter> = {
   // #1103, §36.2). Registered so the destination is pipeline-complete; the primary
   // collection-grained surface is `okfExportService` (export_okf).
   okf: okfAdapter,
+};
+
+/**
+ * Audience breadth, narrowest first — used ONLY to evaluate a `widenOnly`
+ * request against the locked current level. Not an authorization ordering: who
+ * may widen is decided by the §26.4 gate, not by this table.
+ */
+const AUDIENCE_RANK: Record<VisibilityLevel, number> = {
+  private: 0,
+  group: 1,
+  internal: 2,
+  public: 3,
 };
 
 /** A loaded object's fields the publish path needs. */
@@ -527,7 +556,17 @@ async function runPublishTx(
         // visibility change is requested, fold `status: "published"` into its
         // single level UPDATE (via `extraSet`) so the row is touched once;
         // otherwise issue a standalone status-only UPDATE.
-        if (input.visibility) {
+        // A `widenOnly` request is an OFFER: applied only when it genuinely
+        // broadens the LOCKED current audience. Evaluated here, inside the
+        // lock, so no client-side race window remains (#1336). When skipped it
+        // falls through to the status-only UPDATE below, exactly as if no
+        // visibility had been supplied.
+        const widenIsNoOp =
+          input.visibility?.widenOnly === true &&
+          AUDIENCE_RANK[locked[0].visibilityLevel as VisibilityLevel] >=
+            AUDIENCE_RANK[input.visibility.level];
+
+        if (input.visibility && !widenIsNoOp) {
           await visibilityService.setLevelInTx(tx, objectId, input.visibility, {
             status: "published",
           });

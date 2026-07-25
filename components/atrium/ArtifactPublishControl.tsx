@@ -55,7 +55,7 @@ export function ArtifactPublishControl({
         // Set when publication state actually changed on the server, so the
         // server-rendered surface above this control is re-derived.
         refreshRoute = false,
-      } = {}
+      } = {},
     ) => {
       setMessage(text);
       setMessageUrl(url);
@@ -70,7 +70,7 @@ export function ArtifactPublishControl({
       // on handing out a now-dead `/p/…` or `/c/…` link until a manual reload.
       if (refreshRoute) router.refresh();
     },
-    [router]
+    [router],
   );
 
   const handlePublish = useCallback(
@@ -81,7 +81,10 @@ export function ArtifactPublishControl({
         try {
           const res = await publishDocumentAction(artifactId, {
             destination,
-            ...(widenTo ? { visibility: { level: widenTo } } : {}),
+            // `widenOnly`: an OFFER, not an assignment — see use-editor-actions.
+            ...(widenTo
+              ? { visibility: { level: widenTo, widenOnly: true } }
+              : {}),
           });
           if (res.isSuccess) {
             finish(`Published to ${label}`, {
@@ -92,7 +95,9 @@ export function ArtifactPublishControl({
             // A §26.4 pending-approval outcome is not a failure; the in-app
             // surface grants authors public-publish authority (#1336), so this
             // is a genuine error path for humans.
-            finish(res.message ?? "Publish failed", { error: !res.approvalRequired });
+            finish(res.message ?? "Publish failed", {
+              error: !res.approvalRequired,
+            });
             log.warn("publishDocumentAction failed", { message: res.message });
           }
         } catch (e) {
@@ -103,7 +108,7 @@ export function ArtifactPublishControl({
         }
       })();
     },
-    [artifactId, finish]
+    [artifactId, finish],
   );
 
   const handleUnpublish = useCallback(
@@ -112,7 +117,7 @@ export function ArtifactPublishControl({
       if (
         typeof window !== "undefined" &&
         !window.confirm(
-          `Unpublish this artifact from ${label}? Readers will no longer see it (you can republish later).`
+          `Unpublish this artifact from ${label}? Readers will no longer see it (you can republish later).`,
         )
       ) {
         return;
@@ -120,7 +125,9 @@ export function ArtifactPublishControl({
       setBusy(true);
       void (async () => {
         try {
-          const res = await unpublishDocumentAction(artifactId, { destination });
+          const res = await unpublishDocumentAction(artifactId, {
+            destination,
+          });
           if (res.isSuccess) {
             finish(
               res.data.unpublished
@@ -128,7 +135,7 @@ export function ArtifactPublishControl({
                 : "Not currently published there",
               // Only a real retraction moved the share target; "nothing was
               // published there" changed no server state worth re-fetching.
-              { refreshRoute: res.data.unpublished }
+              { refreshRoute: res.data.unpublished },
             );
           } else {
             finish(res.message ?? "Unpublish failed", {
@@ -143,7 +150,7 @@ export function ArtifactPublishControl({
         }
       })();
     },
-    [artifactId, finish]
+    [artifactId, finish],
   );
 
   return (
