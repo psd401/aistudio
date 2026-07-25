@@ -208,19 +208,11 @@ FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 -- A connector can be deleted indirectly when the administrator who configured
 -- it is removed. Preserve the repository item/version audit trail, but fail the
 -- item closed before connector/source cascades erase the reconciliation link.
-CREATE OR REPLACE FUNCTION mark_repository_connector_items_unavailable()
-RETURNS TRIGGER AS $$
-BEGIN
-  UPDATE repository_items
-  SET lifecycle_status = 'unavailable', updated_at = NOW()
-  WHERE id IN (
-    SELECT repository_item_id
-    FROM repository_connector_sources
-    WHERE connector_id = OLD.id
-  );
-  RETURN OLD;
-END;
-$$ LANGUAGE plpgsql;
+-- Single-line single-quote-style body (migration-134 pattern): the db-init
+-- Lambda's statement splitter closes a dollar-quoted function block at any
+-- interior line ending in ");" and ships an unterminated fragment to the RDS
+-- Data API, failing the migration.
+CREATE OR REPLACE FUNCTION mark_repository_connector_items_unavailable() RETURNS TRIGGER AS 'BEGIN UPDATE repository_items SET lifecycle_status = ''unavailable'', updated_at = NOW() WHERE id IN (SELECT repository_item_id FROM repository_connector_sources WHERE connector_id = OLD.id); RETURN OLD; END;' LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_repository_connector_items_unavailable
   ON repository_connectors;
