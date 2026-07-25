@@ -11,11 +11,15 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
+import { execSync } from 'child_process';
 import {
   AuroraCostOptimizer,
   AuroraCostDashboard,
   VPCProvider,
   EnvironmentConfig,
+  ServiceRoleFactory,
 } from './constructs';
 
 export interface DatabaseStackProps extends cdk.StackProps {
@@ -370,6 +374,162 @@ export class DatabaseStack extends cdk.Stack {
       if (this.cluster instanceof rds.DatabaseCluster) {
         dbInit.node.addDependency(this.cluster);
       }
+    }
+
+    // =====================================================================
+    // Nexus conversation retention sweep (Issue #1330)
+    // =====================================================================
+    // Nightly Lambda that hard-deletes Nexus conversations whose last message
+    // is older than the admin-configured NEXUS_CONVERSATION_RETENTION_DAYS
+    // setting, unless the user flagged them Keep (is_saved) or pinned them.
+    //
+    // Ships INERT: migration 136 seeds that setting empty, and the handler
+    // exits as a no-op for a missing/empty/zero/negative/non-numeric value.
+    // Enabling it is a settings change in /admin/settings — no deploy — and
+    // clearing the value disables it again just as immediately.
+    //
+    // Modelled on AgentTelemetryPrune in agent-platform-stack.ts. Skipped on
+    // the snapshot-restore path: those clusters are one-off restore
+    // experiments and must never get a scheduled destructive job.
+    if (!restoreFromSnapshot) {
+      // The documents bucket lives in StorageStack, which is created after
+      // this stack. Read its name from SSM (deploy-time resolution) rather
+      // than a cross-stack prop, mirroring processing-stack.ts and
+      // frontend-stack-ecs.ts — this avoids inverting the stack ordering.
+      const documentsBucketName = ssm.StringParameter.valueForStringParameter(
+        this, `/aistudio/${props.environment}/documents-bucket-name`
+      );
+
+      const retentionRole = ServiceRoleFactory.createLambdaRole(this, 'NexusConversationRetentionRole', {
+        functionName: 'psd-nexus-conversation-retention',
+        environment: props.environment,
+        region: this.region,
+        account: this.account,
+        // vpcEnabled:false + the managed VPC policy attached below, per the
+        // AgentTelemetryPrune pattern — the factory's VPC policy shape is not
+        // what the Lambda service requires for ENI management.
+        vpcEnabled: false,
+        additionalPolicies: [
+          new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                sid: 'AuroraConnect',
+                effect: iam.Effect.ALLOW,
+                actions: ['secretsmanager:GetSecretValue'],
+                resources: [dbSecret.secretArn],
+              }),
+              new iam.PolicyStatement({
+                // Bucket-level listing is required to enumerate object
+                // VERSIONS: the documents bucket is versioned, so a plain
+                // DeleteObject only writes a delete marker and would leave the
+                // real content recoverable after a "permanent" deletion.
+                sid: 'DocumentsBucketListVersions',
+                effect: iam.Effect.ALLOW,
+                actions: ['s3:ListBucket', 's3:ListBucketVersions'],
+                resources: [`arn:${this.partition}:s3:::${documentsBucketName}`],
+              }),
+              new iam.PolicyStatement({
+                // Object-level grant is written explicitly instead of via the
+                // factory's s3Buckets option: that path attaches an
+                // aws:ResourceTag condition which never resolves for object
+                // ARNs and denies every object operation at runtime.
+                sid: 'DocumentsBucketDeleteVersions',
+                effect: iam.Effect.ALLOW,
+                actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+                resources: [`arn:${this.partition}:s3:::${documentsBucketName}/*`],
+              }),
+            ],
+          }),
+        ],
+      });
+      retentionRole.addManagedPolicy(
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+      );
+
+      const retentionFunctionName = `psd-nexus-conversation-retention-${props.environment}`;
+
+      // Explicit LogGroup named exactly /aws/lambda/<functionName> so the
+      // retention policy applies to the group Lambda actually writes to.
+      const retentionLogGroup = new logs.LogGroup(this, 'NexusConversationRetentionLogGroup', {
+        logGroupName: `/aws/lambda/${retentionFunctionName}`,
+        retention: config.monitoring.logRetention,
+        removalPolicy: props.environment === 'prod'
+          ? cdk.RemovalPolicy.RETAIN
+          : cdk.RemovalPolicy.DESTROY,
+      });
+
+      const retentionLambdaDir = path.join(__dirname, '..', 'lambdas', 'nexus-conversation-retention');
+      const retentionLambda = new lambda.Function(this, 'NexusConversationRetentionLambda', {
+        functionName: retentionFunctionName,
+        // Singleton sweep: two concurrent runs could race on the same
+        // conversation's storage and rows.
+        reservedConcurrentExecutions: 1,
+        runtime: lambda.Runtime.NODEJS_20_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromAsset(retentionLambdaDir, {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  execSync('bun install && bunx tsc', { cwd: retentionLambdaDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: retentionLambdaDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: retentionLambdaDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        }),
+        memorySize: 512,
+        timeout: cdk.Duration.minutes(15),
+        architecture: lambda.Architecture.ARM_64,
+        role: retentionRole,
+        logGroup: retentionLogGroup,
+        vpc,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        environment: {
+          ENVIRONMENT: props.environment,
+          DATABASE_HOST: this.cluster.clusterEndpoint.hostname,
+          DATABASE_SECRET_ARN: dbSecret.secretArn,
+          DATABASE_NAME: 'aistudio',
+          DOCUMENTS_BUCKET_NAME: documentsBucketName,
+          // Per-run cap. Bounds the blast radius of a misconfigured retention
+          // window: the first night after enabling can delete at most this
+          // many conversations, and the backlog drains over subsequent runs.
+          SWEEP_BATCH_LIMIT: '200',
+        },
+      });
+      cdk.Tags.of(retentionLambda).add('Environment', props.environment);
+      cdk.Tags.of(retentionLambda).add('ManagedBy', 'cdk');
+
+      const retentionSchedule = new events.Rule(this, 'NexusConversationRetentionSchedule', {
+        description: 'Nightly 05:00 UTC - hard-delete stale, unkept, unpinned Nexus conversations (no-op unless NEXUS_CONVERSATION_RETENTION_DAYS is set)',
+        schedule: events.Schedule.cron({ minute: '0', hour: '5' }),
+        targets: [new eventsTargets.LambdaFunction(retentionLambda)],
+      });
+      cdk.Tags.of(retentionSchedule).add('Environment', props.environment);
+      cdk.Tags.of(retentionSchedule).add('ManagedBy', 'cdk');
+
+      new cdk.CfnOutput(this, 'NexusConversationRetentionFunctionName', {
+        value: retentionLambda.functionName,
+        description: 'Invoke with {"dryRun": true} to preview retention candidates without deleting',
+      });
     }
 
     // Outputs

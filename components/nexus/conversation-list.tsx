@@ -163,6 +163,7 @@ const ConversationItemRow = memo(function ConversationItemRow({
       role="button"
       tabIndex={0}
       onKeyDown={handleKeyDown}
+      data-testid={`conversation-item-${conversation.id}`}
     >
       <div className="flex-grow px-3 py-2 min-w-0">
         <div className="flex items-start justify-between gap-2">
@@ -245,19 +246,19 @@ const ConversationItemRow = memo(function ConversationItemRow({
   )
 })
 
-export function ConversationList({ selectedConversationId, provider, onConversationSelect: onConversationSelectProp, onNewConversation }: ConversationListProps) {
+/**
+ * Fetches and validates the conversation list for the active tab / provider.
+ *
+ * Extracted from ConversationList so neither the component nor
+ * useConversationListState carries the whole fetch-and-validate body.
+ */
+function useConversationLoader(
+  activeTab: ConversationFilterTab,
+  provider: ConversationProvider | undefined
+) {
   const [conversations, setConversations] = useState<ConversationItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
-  const [togglingKeepId, setTogglingKeepId] = useState<string | null>(null)
-  /** Transient, non-blocking error for row-level actions (does not hide the list) */
-  const [actionError, setActionError] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<ConversationFilterTab>('chat')
-  const router = useRouter()
-
-  const handleTabChat = useCallback(() => setActiveTab('chat'), [])
-  const handleTabAssistants = useCallback(() => setActiveTab('assistants'), [])
 
   // Load conversations from database with comprehensive error handling
   // Server-side filtering based on active tab to avoid missing items with >500 conversations
@@ -354,6 +355,33 @@ export function ConversationList({ selectedConversationId, provider, onConversat
     loadConversations()
   }, [loadConversations])
 
+  return { conversations, setConversations, loading, error, setError, loadConversations }
+}
+
+/**
+ * All list state + side effects for ConversationList.
+ *
+ * Extracted from the component body so the component stays a render function.
+ * Nothing here is component-specific beyond the props it is handed.
+ */
+function useConversationListState({
+  selectedConversationId,
+  provider,
+  onConversationSelect: onConversationSelectProp,
+  onNewConversation,
+}: ConversationListProps) {
+  const [activeTab, setActiveTab] = useState<ConversationFilterTab>('chat')
+  const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
+  const [togglingKeepId, setTogglingKeepId] = useState<string | null>(null)
+  /** Transient, non-blocking error for row-level actions (does not hide the list) */
+  const [actionError, setActionError] = useState<string | null>(null)
+  const router = useRouter()
+
+  const { conversations, setConversations, loading, error, setError, loadConversations } =
+    useConversationLoader(activeTab, provider)
+
+  const handleTabChat = useCallback(() => setActiveTab('chat'), [])
+  const handleTabAssistants = useCallback(() => setActiveTab('assistants'), [])
 
   // Handle conversation selection with secure navigation
   const handleConversationSelect = useCallback((conversationId: string) => {
@@ -404,7 +432,9 @@ export function ConversationList({ selectedConversationId, provider, onConversat
     } finally {
       setTogglingKeepId(null)
     }
-  }, [])
+    // setConversations is a useState setter (stable identity); listed to satisfy
+    // exhaustive-deps now that it arrives via the loader hook's return value.
+  }, [setConversations])
 
   // Handle deleting a conversation using server action with comprehensive error handling
   const handleDeleteConversation = useCallback(async (conversationId: string) => {
@@ -458,7 +488,43 @@ export function ConversationList({ selectedConversationId, provider, onConversat
     } finally {
       setDeletingConversationId(null)
     }
-  }, [selectedConversationId, router, onNewConversation])
+    // setConversations / setError are useState setters (stable identities).
+  }, [selectedConversationId, router, onNewConversation, setConversations, setError])
+
+  return {
+    conversations,
+    loading,
+    error,
+    actionError,
+    activeTab,
+    deletingConversationId,
+    togglingKeepId,
+    handleTabChat,
+    handleTabAssistants,
+    loadConversations,
+    handleConversationSelect,
+    handleDeleteConversation,
+    handleToggleKeep,
+  }
+}
+
+export function ConversationList(props: ConversationListProps) {
+  const { provider, selectedConversationId } = props
+  const {
+    conversations,
+    loading,
+    error,
+    actionError,
+    activeTab,
+    deletingConversationId,
+    togglingKeepId,
+    handleTabChat,
+    handleTabAssistants,
+    loadConversations,
+    handleConversationSelect,
+    handleDeleteConversation,
+    handleToggleKeep,
+  } = useConversationListState(props)
 
   if (loading) {
     return (
