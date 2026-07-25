@@ -2,10 +2,10 @@
   "commands": {
     "lint": "bunx eslint .",
     "typecheck": "bun run typecheck",
-    "test": "cd infra/lambdas/group-sync && bun test"
+    "test": "(cd infra/lambdas/group-sync && bun test) && (cd infra/lambdas/nexus-conversation-retention && bun test)"
   },
   "e2e_required": false,
-  "e2e_flows": ["admin-groups"],
+  "e2e_flows": ["admin-groups", "nexus-keep-toggle"],
   "strictness": "block",
   "reviewers": ["chatgpt-codex-connector[bot]", "gemini-code-assist[bot]", "copilot-pull-request-reviewer[bot]"],
   "commit_learnings": true,

@@ -149,6 +149,18 @@ async function deleteVersionsUnderPrefix(
       deleted += identifiers.length;
     }
 
+    // Fail loudly rather than silently stopping half-way. A truncated page with
+    // no cursor would otherwise exit the loop reporting success, and the caller
+    // would go on to delete the database rows — permanently orphaning every
+    // object we had not reached yet. Throwing routes this into the fail-closed
+    // path, which leaves the conversation intact for the next run.
+    // Mirrors S3_PREFIX_LIST_CURSOR_ERROR in lib/aws/s3-client.ts.
+    if (page.IsTruncated && !page.NextKeyMarker) {
+      throw new Error(
+        `S3 returned a truncated version listing without a cursor for prefix ${prefix}`
+      );
+    }
+
     keyMarker = page.IsTruncated ? page.NextKeyMarker : undefined;
     versionIdMarker = page.IsTruncated ? page.NextVersionIdMarker : undefined;
   } while (keyMarker || versionIdMarker);
