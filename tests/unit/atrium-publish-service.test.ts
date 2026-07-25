@@ -479,6 +479,9 @@ describe("publishService.publish", () => {
       // adapter records a null external_ref by design) and returned so surfaces
       // can show the author where the content went.
       readerUrl: "/c/s1",
+      // Already public → re-saving public is NOT a new exposure, so the
+      // allow-then-notify signal stays false.
+      becamePublic: false,
     });
   });
 
@@ -552,6 +555,8 @@ describe("publishService.publish", () => {
       // #1336 C3: the adapter's external_ref is now also RETURNED, not merely
       // persisted — previously the public URL was computed and then dropped.
       readerUrl: PUBLIC_WEB_REF,
+      // No visibility supplied → no transition to report.
+      becamePublic: false,
     });
     // The public_web adapter ran with the object's slug and returned the URL.
     expect(publicWebPublishCalls).toBe(1);
@@ -595,6 +600,7 @@ describe("publishService.publish", () => {
       publicationId: "pub1",
       publishedVersionId: "v1",
       readerUrl: "/c/s1",
+      becamePublic: false,
     });
     expect(adapterPublishCalls).toBe(1);
     // No visibility provided -> setLevelInTx must NOT run (publish doesn't widen).
@@ -637,6 +643,7 @@ describe("publishService.publish", () => {
       publicationId: "pub1",
       publishedVersionId: "v-reviewed",
       readerUrl: "/c/s1",
+      becamePublic: false,
     });
     expect(getVersionByIdMock).toHaveBeenCalled();
     // Retrieval must index the PUBLISHED (pinned) version, not the head — else it

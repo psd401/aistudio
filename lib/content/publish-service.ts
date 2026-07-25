@@ -485,7 +485,17 @@ async function runPublishTx(
     mayPublishPublic: boolean;
     expectedVersionId?: string | null;
   }
-): Promise<string> {
+): Promise<{
+  publicationId: string;
+  /**
+   * Whether this transaction actually TRANSITIONED the object to public, judged
+   * against the FOR-UPDATE-locked previous level (#1336). Distinct from "the
+   * caller asked for public": a `widenOnly` request against an already-public
+   * row writes nothing, and the allow-then-notify policy must not report an
+   * exposure that did not occur.
+   */
+  becamePublic: boolean;
+}> {
   const {
     req,
     objectId,
@@ -610,7 +620,15 @@ async function runPublishTx(
           // INSERT ... RETURNING should always yield a row; guard rather than crash.
           throw new ValidationError("Failed to record publication", { objectId });
         }
-        return row.id;
+        return {
+          publicationId: row.id,
+          // A real transition: the visibility write actually ran, it targeted
+          // `public`, and the locked previous level was not already public.
+          becamePublic:
+            !widenIsNoOp &&
+            input.visibility?.level === "public" &&
+            locked[0].visibilityLevel !== "public",
+        };
 }
 
 /** One live publication of an object, as surfaced to authoring UIs (#1336). */
@@ -720,6 +738,15 @@ export const publishService = {
      * published under.
      */
     readerUrl: string | null;
+    /**
+     * Whether this publish actually TRANSITIONED the object to public, judged
+     * inside the transaction against the FOR-UPDATE-locked previous level
+     * (#1336). Surfaces use it for the allow-then-notify notification: a
+     * `widenOnly` request against an already-public row writes nothing, so
+     * keying the notice off the REQUESTED level would report an exposure that
+     * never occurred.
+     */
+    becamePublic: boolean;
   }> {
     const log = createLogger({ action: "publish.publish" });
 
@@ -816,7 +843,7 @@ export const publishService = {
     // `published_by` is nullable, so a null here is persisted as "system".
     const publishedBy = authorUserIdOf(req);
 
-    const publicationId = await executeTransaction(
+    const { publicationId, becamePublic } = await executeTransaction(
       (tx: DbTransaction) =>
         runPublishTx(tx, {
           req,
@@ -866,6 +893,7 @@ export const publishService = {
     return {
       publicationId,
       publishedVersionId,
+      becamePublic,
       readerUrl:
         externalRef ??
         (input.destination === "intranet" ? contentDeepLink(obj.slug) : null),

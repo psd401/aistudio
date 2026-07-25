@@ -42,7 +42,13 @@ jest.mock("@/utils/roles", () => ({
 const publishMock = jest.fn(async (..._a: unknown[]) => ({
   publicationId: "pub-1",
   publishedVersionId: "v-1",
-  readerUrl: "https://example.test/p/slug-1",
+  // `string | null` so a per-test override can model a publish with no reader
+  // URL; inferring from the literal alone would type this as `string`.
+  readerUrl: "https://example.test/p/slug-1" as string | null,
+  // The transition the locked transaction actually observed (#1336). Defaults
+  // to FALSE — the common case is a publish that changes no visibility — so a
+  // test asserting the widen-driven notification must opt in explicitly.
+  becamePublic: false,
 }));
 const unpublishMock = jest.fn(async (..._a: unknown[]) => ({
   unpublished: true,
@@ -245,11 +251,46 @@ describe("allow-then-notify records an admin-visible notification (#1336)", () =
     expect(recordContentAuditMock).not.toHaveBeenCalled();
   });
 
-  it("DOES notify when an intranet publish bundles a widen to public", async () => {
+  it("DOES notify when an intranet publish bundles a widen that COMMITTED", async () => {
+    publishMock.mockResolvedValueOnce({
+      publicationId: "pub-1",
+      publishedVersionId: "v-1",
+      readerUrl: "/c/slug-1",
+      becamePublic: true,
+    });
     await publishDocumentAction("obj-1", {
       destination: "intranet",
       visibility: { level: "public" },
     });
+    expect(recordContentAuditMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT notify when the bundled widen was SKIPPED in the transaction", async () => {
+    // A `widenOnly` offer against an already-public row writes nothing, so the
+    // requested level says "public" while no exposure occurred. Keying the
+    // notice off the request would report an exposure that never happened.
+    publishMock.mockResolvedValueOnce({
+      publicationId: "pub-1",
+      publishedVersionId: "v-1",
+      readerUrl: null,
+      becamePublic: false,
+    });
+    await publishDocumentAction("obj-1", {
+      destination: "intranet",
+      visibility: { level: "public", widenOnly: true },
+    });
+    expect(recordContentAuditMock).not.toHaveBeenCalled();
+  });
+
+  it("still notifies a public DESTINATION even when no widen committed", async () => {
+    // Publishing to public_web IS the exposure, regardless of visibility churn.
+    publishMock.mockResolvedValueOnce({
+      publicationId: "pub-1",
+      publishedVersionId: "v-1",
+      readerUrl: "https://example.test/p/slug-1",
+      becamePublic: false,
+    });
+    await publishDocumentAction("obj-1", { destination: "public_web" });
     expect(recordContentAuditMock).toHaveBeenCalledTimes(1);
   });
 

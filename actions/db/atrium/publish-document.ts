@@ -169,10 +169,13 @@ export async function publishDocumentAction(
     // Allow-then-NOTIFY: record the admin-visible notification for a non-admin
     // public exposure. Best-effort and post-commit, so it can never fail or roll
     // back the publish the author just completed.
-    if (
-      isPublicDestination(destination) ||
-      input.visibility?.level === "public"
-    ) {
+    // Gated on the COMMITTED outcome, not the request. A public-facing
+    // DESTINATION is always a real exposure, but a bundled visibility widen may
+    // have been skipped inside the transaction (a `widenOnly` offer against an
+    // already-public row writes nothing), so that arm reads `becamePublic` —
+    // the transition the locked transaction actually observed — rather than the
+    // level the caller asked for.
+    if (isPublicDestination(destination) || result.becamePublic) {
       await notifyPublicExposure({
         req: requester,
         action: "publish",
