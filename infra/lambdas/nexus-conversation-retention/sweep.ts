@@ -94,7 +94,7 @@ export interface SweepPorts {
    * OUTSIDE the conversation-scoped prefixes (which are swept wholesale by
    * deleteConversationStorage). Legacy rows only.
    */
-  getMessageObjectKeys(conversationId: string): Promise<string[]>;
+  getMessageObjectKeys(conversationId: string, ownerUserId: number): Promise<string[]>;
 
   /**
    * Delete every version + delete marker under the conversation-scoped
@@ -113,8 +113,19 @@ export interface SweepPorts {
   /** Delete every version + delete marker for one object key. */
   deleteObjectStorage(key: string): Promise<number>;
 
-  /** Delete `knowledge_repositories` rows (cascades repository_items etc.). */
-  deleteRepositoryRows(repositoryIds: number[]): Promise<number>;
+  /**
+   * Claim repositories for destruction by deleting their
+   * `knowledge_repositories` rows (cascades repository_items etc.), and return
+   * the IDs actually deleted.
+   *
+   * MUST re-assert `repository_kind = 'ephemeral'` in its WHERE clause.
+   * Filtering only at resolution time is not enough: a user can promote a
+   * repository to 'durable' in the window between resolution and cleanup, and
+   * a stale ID would otherwise take that user-preserved repository's storage
+   * with it. Deleting the row first, guarded, makes the claim atomic — storage
+   * is only touched for repositories this returns.
+   */
+  claimRepositoryRows(repositoryIds: number[]): Promise<number[]>;
 
   /** Delete `documents` rows by id. */
   deleteDocumentRows(documentIds: number[]): Promise<number>;
@@ -229,7 +240,7 @@ async function sweepConversation(
   // Resolve everything that becomes unreachable after the cascade FIRST.
   const repositoryIds = await ports.getBoundRepositoryIds(conversationId);
   const documents = await ports.getLegacyDocuments(conversationId);
-  const messageObjectKeys = await ports.getMessageObjectKeys(conversationId);
+  const messageObjectKeys = await ports.getMessageObjectKeys(conversationId, conversation.userId);
 
   const report: SweepConversationReport = {
     conversationId,
@@ -303,17 +314,32 @@ async function sweepConversation(
     }
   }
 
-  // 5. Ephemeral repository storage. A failure keeps that repository's row so
-  //    row and objects stay consistent as a pair — ERROR-logged because unlike
-  //    the single-key deletes above there is real bulk data behind it, and the
-  //    binding row that used to reach it from the conversation is gone. The
-  //    ephemeral-repository lifecycle (expires_at / lifecycle_status) is the
-  //    eventual reclaim path for such a repository.
-  const cleanedRepositoryIds: number[] = [];
-  for (const repositoryId of repositoryIds) {
+  // 5. Claim the repositories BEFORE touching their storage, the same
+  //    claim-before-destroy shape as the conversation itself. The row delete
+  //    re-asserts repository_kind = 'ephemeral', so a repository the user
+  //    promoted to 'durable' since resolution matches nothing, is not returned,
+  //    and keeps every byte. Resolution-time filtering alone could not cover
+  //    that interleaving.
+  const claimedRepositoryIds =
+    repositoryIds.length > 0 ? await ports.claimRepositoryRows(repositoryIds) : [];
+  report.repositoryRowsDeleted = claimedRepositoryIds.length;
+
+  const promotedMidSweep = repositoryIds.filter((id) => !claimedRepositoryIds.includes(id));
+  if (promotedMidSweep.length > 0) {
+    log.info("repository_no_longer_ephemeral", {
+      conversationId,
+      repositoryIds: promotedMidSweep,
+      message: "Repository was promoted or already removed mid-sweep; its storage was left intact.",
+    });
+  }
+
+  // 6. Storage for the claimed repositories only — best effort. The rows are
+  //    already gone, so a failure orphans objects rather than stranding a row,
+  //    and it is ERROR-logged because unlike the single-key deletes above there
+  //    is real bulk data behind it.
+  for (const repositoryId of claimedRepositoryIds) {
     try {
       report.storageObjectsDeleted += await ports.deleteRepositoryStorage(repositoryId);
-      cleanedRepositoryIds.push(repositoryId);
     } catch (error) {
       log.error("repository_storage_failed", {
         conversationId,
@@ -324,8 +350,8 @@ async function sweepConversation(
     }
   }
 
-  // 6. Rows that would otherwise be orphaned (repositories whose storage is
-  //    verifiably gone) or left as SET NULL stragglers (documents). The
+  // 7. Legacy documents rows, which would otherwise be left as SET NULL
+  //    stragglers pointing at a conversation that no longer exists. The
   //    conversation row itself went first — it was step 2, the claim.
   //
   //    Counts come from what the database actually deleted rather than from the
@@ -333,9 +359,6 @@ async function sweepConversation(
   //    can leave rows already gone, and reporting the planned count would
   //    overstate the sweep's effect in exactly the situation an operator is
   //    investigating.
-  if (cleanedRepositoryIds.length > 0) {
-    report.repositoryRowsDeleted = await ports.deleteRepositoryRows(cleanedRepositoryIds);
-  }
   if (report.documentIds.length > 0) {
     report.documentRowsDeleted = await ports.deleteDocumentRows(report.documentIds);
   }

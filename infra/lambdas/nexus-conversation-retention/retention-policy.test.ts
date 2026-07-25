@@ -36,6 +36,7 @@ import {
   documentUrlToObjectKey,
   toObjectKey,
   BOUND_EPHEMERAL_REPOSITORIES_SQL,
+  extractOutOfPrefixKeys,
 } from "./index";
 
 const silentLog: SweepLogger = {
@@ -279,6 +280,8 @@ interface FakeState {
    * guarded DELETE — i.e. the user won the race in the window between the two.
    */
   racedAtDelete?: string[];
+  /** Repository ids promoted to 'durable' between resolution and the claim. */
+  promotedMidSweep?: number[];
 }
 
 interface FakeRecorder {
@@ -347,10 +350,13 @@ function makeFakePorts(state: FakeState): { ports: SweepPorts; rec: FakeRecorder
       rec.deletedObjectKeys.push(key);
       return 1;
     },
-    deleteRepositoryRows: async (ids) => {
-      rec.calls.push(`deleteRepositoryRows:${ids.join(",")}`);
-      rec.deletedRepositoryRows.push(...ids);
-      return ids.length;
+    claimRepositoryRows: async (ids) => {
+      rec.calls.push(`claimRepositoryRows:${ids.join(",")}`);
+      // Models the guarded DELETE: a repository promoted to 'durable' since
+      // resolution matches nothing and is not returned.
+      const claimed = ids.filter((id) => !(state.promotedMidSweep ?? []).includes(id));
+      rec.deletedRepositoryRows.push(...claimed);
+      return claimed;
     },
     deleteDocumentRows: async (ids) => {
       rec.deletedDocumentRows.push(...ids);
@@ -613,12 +619,13 @@ describe("runRetentionSweep — dry run", () => {
 });
 
 describe("runRetentionSweep — storage failure policy", () => {
-  test("a failed repository prefix delete keeps that repository's row; the rest is cleaned", async () => {
-    // The claim already succeeded, so the conversation is gone regardless.
-    // Repository 101's storage delete failed: its row survives so row and
-    // objects stay consistent as a pair (ERROR-logged; the ephemeral lifecycle
-    // is the eventual reclaim path). Repository 102 swept fine and loses its
-    // row normally.
+  test("a failed repository prefix delete orphans objects but does not stop the sweep", async () => {
+    // The claim (row DELETE, guarded on repository_kind='ephemeral') is what
+    // authorises touching storage, so it necessarily precedes any failure.
+    // Repository 101's storage delete then fails: its objects are orphaned and
+    // ERROR-logged. That is the deliberate trade-off — the inverse ordering
+    // (storage first, claim second) is exactly what allowed a repository
+    // promoted mid-sweep to lose its data irreversibly.
     const { ports, rec } = makeFakePorts(baseState({ failRepositoryStorage: 101 }));
     const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
 
@@ -626,7 +633,21 @@ describe("runRetentionSweep — storage failure policy", () => {
     expect(rec.deletedConversations).toEqual(["conv-1"]);
     expect(result.conversations[0]!.storageFailures).toBe(1);
     expect(rec.deletedStoragePrefixes).toEqual([102]);
+    expect(rec.deletedRepositoryRows).toEqual([101, 102]);
+  });
+
+  test("a repository promoted mid-sweep keeps BOTH its row and its storage", async () => {
+    // The P1 this ordering exists for: resolution saw 101 as ephemeral, the
+    // user promoted it to 'durable' before the claim, so the guarded row
+    // DELETE matches nothing and its storage is never touched.
+    const { ports, rec } = makeFakePorts(baseState({ promotedMidSweep: [101] }));
+    const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
+
+    expect(result.conversationsDeleted).toBe(1);
     expect(rec.deletedRepositoryRows).toEqual([102]);
+    expect(rec.deletedStoragePrefixes).toEqual([102]);
+    expect(rec.deletedStoragePrefixes).not.toContain(101);
+    expect(result.repositoryRowsDeleted).toBe(1);
   });
 
   test("a failed single-object delete is best-effort — the conversation still goes", async () => {
@@ -655,8 +676,11 @@ describe("runRetentionSweep — storage failure policy", () => {
     const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
     expect(result.conversationsDeleted).toBe(2);
     expect(rec.deletedConversations).toEqual(["conv-1", "conv-2"]);
-    // Only the repository whose storage was verifiably removed loses its row.
-    expect(rec.deletedRepositoryRows).toEqual([201]);
+    // Both rows are claimed: the claim is what authorises touching storage, so
+    // it necessarily precedes the failure. A failed prefix delete therefore
+    // orphans objects (ERROR-logged) rather than stranding a row — the inverse
+    // trade-off is what let a promoted repository lose its data.
+    expect(rec.deletedRepositoryRows).toEqual([101, 201]);
   });
 });
 
@@ -720,7 +744,7 @@ describe("runRetentionSweep — unexpected error isolation", () => {
 
     // Simulates a partially-completed previous run: the IDs still resolve, but
     // the rows are already gone, so the delete affects fewer rows than planned.
-    ports.deleteRepositoryRows = async () => 1; // 2 ids resolved, 1 row actually deleted
+    ports.claimRepositoryRows = async () => [101]; // 2 ids resolved, 1 row actually claimed
     ports.deleteDocumentRows = async () => 0; // 1 id resolved, 0 rows actually deleted
 
     const result = await runRetentionSweep(ports, silentLog, { batchLimit: 100 });
@@ -728,5 +752,55 @@ describe("runRetentionSweep — unexpected error isolation", () => {
     expect(result.conversationsDeleted).toBe(1);
     expect(result.repositoryRowsDeleted).toBe(1);
     expect(result.documentRowsDeleted).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Legacy message-part key ownership
+// ---------------------------------------------------------------------------
+
+describe("extractOutOfPrefixKeys — ownership, not just syntax", () => {
+  const CONV = "11111111-1111-4111-8111-111111111111";
+  const OWNER = 7;
+
+  const rowsWith = (...s3Keys: string[]) => [
+    { parts: s3Keys.map((s3Key) => ({ type: "image", s3Key })) },
+  ];
+
+  test("keys inside the conversation prefixes are skipped (the prefix sweep covers them)", () => {
+    expect(
+      extractOutOfPrefixKeys(
+        rowsWith(`conversations/${CONV}/attachments/1-0-a.png`, `v2/generated-images/${CONV}/x.png`),
+        CONV,
+        OWNER
+      )
+    ).toEqual([]);
+  });
+
+  test("accepts an out-of-prefix key inside the OWNER's legacy namespace", () => {
+    expect(extractOutOfPrefixKeys(rowsWith("7/1700000000-a.png"), CONV, OWNER)).toEqual([
+      "7/1700000000-a.png",
+    ]);
+  });
+
+  test("refuses an out-of-prefix key belonging to a DIFFERENT user", () => {
+    // The Lambda's IAM grant is bucket-wide and these deletes remove every
+    // version, so a legacy row carrying a key copied from elsewhere must never
+    // be trusted on syntax alone.
+    expect(extractOutOfPrefixKeys(rowsWith("8/1700000000-a.png"), CONV, OWNER)).toEqual([]);
+    expect(extractOutOfPrefixKeys(rowsWith("conversations/other-conv/x.png"), CONV, OWNER)).toEqual(
+      []
+    );
+    expect(extractOutOfPrefixKeys(rowsWith("atrium/pending-assets/x.png"), CONV, OWNER)).toEqual([]);
+  });
+
+  test("a userId prefix must match on the whole segment, not as a string prefix", () => {
+    // user 7 must not reach user 70's namespace
+    expect(extractOutOfPrefixKeys(rowsWith("70/1700000000-a.png"), CONV, OWNER)).toEqual([]);
+  });
+
+  test("ignores malformed parts without throwing", () => {
+    expect(extractOutOfPrefixKeys([{ parts: null }, { parts: "nope" }], CONV, OWNER)).toEqual([]);
+    expect(extractOutOfPrefixKeys([{ parts: [null, 3, { type: "text" }] }], CONV, OWNER)).toEqual([]);
   });
 });

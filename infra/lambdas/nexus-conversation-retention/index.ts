@@ -281,8 +281,22 @@ interface MessagePartRow {
  * s3Key from the persisted row entirely. The prefix sweep is what actually
  * reclaims those objects.
  */
-function extractOutOfPrefixKeys(rows: MessagePartRow[], conversationId: string): string[] {
+export function extractOutOfPrefixKeys(
+  rows: MessagePartRow[],
+  conversationId: string,
+  ownerUserId: number
+): string[] {
   const prefixes = conversationStoragePrefixes(conversationId);
+  // Ownership, not just syntax. A legacy row can carry an s3Key that was
+  // copied from somewhere else, and this Lambda's IAM grant is bucket-wide, so
+  // a syntax-only check would let the sweep permanently destroy an object that
+  // belongs to another user and is still referenced. Out-of-prefix keys are
+  // therefore only accepted inside the OWNER's legacy upload namespace,
+  // `<userId>/...` — the shape uploadDocument() builds when repositoryId is
+  // null (lib/aws/s3-client.ts). Anything else is left alone; an orphaned
+  // legacy object is the pre-existing status quo and is strictly better than
+  // deleting someone else's data.
+  const ownerLegacyPrefix = `${ownerUserId}/`;
   const keys = new Set<string>();
   for (const row of rows) {
     if (!Array.isArray(row.parts)) continue;
@@ -291,6 +305,7 @@ function extractOutOfPrefixKeys(rows: MessagePartRow[], conversationId: string):
       const key = toObjectKey((part as { s3Key?: unknown }).s3Key as string | undefined);
       if (key === null) continue;
       if (prefixes.some((prefix) => key.startsWith(prefix))) continue;
+      if (!key.startsWith(ownerLegacyPrefix)) continue;
       keys.add(key);
     }
   }
@@ -391,14 +406,14 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       });
     },
 
-    getMessageObjectKeys: async (conversationId) => {
+    getMessageObjectKeys: async (conversationId, ownerUserId) => {
       const rows = await sql<MessagePartRow[]>`
         SELECT parts
         FROM nexus_messages
         WHERE conversation_id = ${conversationId}::uuid
           AND parts IS NOT NULL
       `;
-      return extractOutOfPrefixKeys(rows, conversationId);
+      return extractOutOfPrefixKeys(rows, conversationId, ownerUserId);
     },
 
     deleteConversationStorage: async (conversationId) => {
@@ -424,15 +439,22 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       return deleteVersionsUnderPrefix(objectKey, objectKey);
     },
 
-    deleteRepositoryRows: async (repositoryIds) => {
+    claimRepositoryRows: async (repositoryIds) => {
       // Cascades repository_items, repository_item_versions and the
       // nexus_repository_bindings row that pointed at it.
+      //
+      // repository_kind = 'ephemeral' is re-asserted HERE rather than relying
+      // on the resolution-time filter alone: a user can promote a repository
+      // to 'durable' in the window between resolution and cleanup, and this
+      // DELETE is what makes the claim atomic. A promoted repository matches
+      // nothing, is not returned, and therefore never has its storage swept.
       const rows = await sql<{ id: number }[]>`
         DELETE FROM knowledge_repositories
         WHERE id = ANY(${repositoryIds}::int[])
+          AND repository_kind = 'ephemeral'
         RETURNING id
       `;
-      return rows.length;
+      return rows.map((row) => row.id);
     },
 
     deleteDocumentRows: async (documentIds) => {
