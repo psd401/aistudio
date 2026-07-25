@@ -40,6 +40,7 @@ jest.mock("@/lib/db/schema", () => ({
     tokenEndpointAuthMethod: "token_endpoint_auth_method",
     requirePkce: "require_pkce",
     isActive: "is_active",
+    isFirstParty: "is_first_party",
   },
   oauthAuthorizationCodes: {
     id: "id",
@@ -188,6 +189,7 @@ describe("Drizzle OIDC adapter production durability (#1285)", () => {
         allowedScopes: ["openid", "content:read"],
         tokenEndpointAuthMethod: "none",
         requirePkce: true,
+        isFirstParty: true,
       },
     ])
 
@@ -199,6 +201,7 @@ describe("Drizzle OIDC adapter production durability (#1285)", () => {
         client_secret: undefined,
         redirect_uris: ["http://127.0.0.1/oauth/callback"],
         token_endpoint_auth_method: "none",
+        is_first_party: true,
       })
     )
   })
@@ -216,6 +219,7 @@ describe("Drizzle OIDC adapter production durability (#1285)", () => {
         allowedScopes: ["openid"],
         tokenEndpointAuthMethod: "client_secret_post",
         requirePkce: false,
+        isFirstParty: false,
       },
     ])
 

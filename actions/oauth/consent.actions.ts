@@ -41,8 +41,7 @@ interface ConsentResult {
 
 async function processConsent(
   interactionUid: string,
-  approved: boolean,
-  grantedScopes: string[] = []
+  approved: boolean
 ): Promise<ActionState<ConsentResult>> {
   const actionName = approved ? "approveConsent" : "denyConsent"
   const requestId = generateRequestId()
@@ -55,7 +54,7 @@ async function processConsent(
       throw ErrorFactories.authNoSession()
     }
 
-    log.info(`Processing consent ${approved ? "approval" : "denial"}`, { interactionUid })
+    log.info(`Processing consent ${approved ? "approval" : "denial"}`)
 
     const userId = await getUserIdByCognitoSubAsNumber(session.sub)
     if (!userId) {
@@ -71,18 +70,23 @@ async function processConsent(
             uid: interactionUid,
             userId,
             approved,
-            scopes: grantedScopes,
+            // The completion route derives grant scopes from oidc-provider's
+            // signed interaction state, never from browser-supplied values.
+            scopes: [],
             expiresAt: new Date(Date.now() + 5 * 60 * 1000),
           }),
       "storeConsentDecision"
     )
 
     const issuer = getIssuerUrl()
-    const path = approved ? "login" : "abort"
-    const redirectTo = `${issuer}/api/oauth/interaction/${interactionUid}/${path}`
+    const path = approved ? "consent" : "abort"
+    const redirectTo =
+      `${issuer}/oauth/authorize/interaction/${interactionUid}/${path}`
 
     timer({ status: "success" })
-    log.info(`Consent ${approved ? "approved" : "denied"}`, { interactionUid, userId })
+    log.info(`Consent ${approved ? "approved" : "denied"}`, {
+      userId,
+    })
 
     return createSuccess(
       { redirectTo },
@@ -103,10 +107,9 @@ async function processConsent(
 // ============================================
 
 export async function approveConsent(
-  interactionUid: string,
-  grantedScopes: string[]
+  interactionUid: string
 ): Promise<ActionState<ConsentResult>> {
-  return processConsent(interactionUid, true, grantedScopes)
+  return processConsent(interactionUid, true)
 }
 
 export async function denyConsent(

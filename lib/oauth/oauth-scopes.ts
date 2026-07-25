@@ -64,14 +64,23 @@ const PLATFORM_SCOPES = Object.keys(API_SCOPES).filter((s) =>
 )
 
 /**
+ * Scopes granted for the AI Studio API resource server. Standard OIDC scopes
+ * must remain in the OIDC grant portion and must not be duplicated as API
+ * resource scopes.
+ */
+export const RESOURCE_SERVER_SCOPES = [
+  ...MCP_SCOPES,
+  ...CONTENT_SCOPES,
+  ...PLATFORM_SCOPES,
+]
+
+/**
  * All scopes the OAuth provider supports (standard OIDC + MCP + Atrium content +
  * platform capability catalog).
  */
 export const ALL_OAUTH_SCOPES = [
   ...OIDC_SCOPES,
-  ...MCP_SCOPES,
-  ...CONTENT_SCOPES,
-  ...PLATFORM_SCOPES,
+  ...RESOURCE_SERVER_SCOPES,
 ]
 
 /**
