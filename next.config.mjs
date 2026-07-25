@@ -120,6 +120,12 @@ const nextConfig = {
     ];
   },
   experimental: {
+    // Next defaults this to the host's logical CPU count. On current developer
+    // and CI hosts that creates 10 static-generation workers, each loading the
+    // full application graph, and can push aggregate build RSS above 14 GiB.
+    // Keep limited parallelism without making build reliability depend on the
+    // host's CPU-to-memory ratio.
+    cpus: 2,
     serverActions: {
       bodySizeLimit: '100mb',
       timeout: 300,
@@ -130,11 +136,6 @@ const nextConfig = {
     authInterrupts: true,
   },
   webpack: (config, { isServer }) => {
-    config.cache = {
-      type: 'memory',
-      maxGenerations: 1,
-    };
-
     config.resolve.alias = {
       ...config.resolve.alias,
       '@codemirror/state': path.join(PROJECT_ROOT, 'node_modules/@codemirror/state'),
