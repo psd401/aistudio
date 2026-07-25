@@ -841,7 +841,10 @@ describe("NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL", () => {
     expect(placeholders).toEqual(["$1"]);
   });
 
-  test("is NOT part of the bulk candidate scan — that stays a cheap indexed range read", () => {
+  test("stays a separate fragment rather than being merged into the candidate clause", () => {
+    // Composed alongside CANDIDATE_WHERE_CLAUSE at each call site, so the
+    // partial-index predicate in migration 137 still matches the scan's own
+    // WHERE exactly.
     expect(CANDIDATE_WHERE_CLAUSE).not.toContain("NOT EXISTS");
     expect(CANDIDATE_WHERE_CLAUSE).not.toContain("nexus_messages");
   });

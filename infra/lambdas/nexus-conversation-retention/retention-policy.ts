@@ -155,11 +155,21 @@ export const CANDIDATE_WHERE_CLAUSE = `
  * delete on the denormalized column alone would destroy that message and the
  * conversation with it.
  *
- * Deliberately NOT part of CANDIDATE_WHERE_CLAUSE: the batch scan stays a cheap
- * indexed range read over `last_message_at`, and this per-row check runs only
- * in the authoritative gates (the late re-check and the claiming DELETE), where
- * `idx_nexus_messages_conversation (conversation_id, created_at)` makes it an
- * index lookup. Cheap scan, authoritative claim.
+ * Composed alongside CANDIDATE_WHERE_CLAUSE (not merged into it) in all three
+ * places that decide eligibility: the candidate scan, the late re-check, and
+ * the claiming DELETE.
+ *
+ * It has to be in the SCAN too, not just the gates. If the stats update fails
+ * permanently, a conversation keeps a stale `last_message_at` forever, so an
+ * unfiltered scan would re-select it every night, the authoritative gate would
+ * skip it, and it would consume a batch slot indefinitely — 200 such rows
+ * ahead of the real backlog and `ORDER BY ... LIMIT` starves the sweep
+ * completely.
+ *
+ * Cost is bounded: `idx_nexus_messages_conversation (conversation_id,
+ * created_at)` turns this into one index probe per row the outer index scan
+ * examines, and EXPLAIN confirms the scan stays a Nested Loop Anti Join over
+ * the partial index rather than degrading into a sequential scan.
  *
  * Uses $1 (the retention window) so it composes with CANDIDATE_WHERE_CLAUSE.
  */

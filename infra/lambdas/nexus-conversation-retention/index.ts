@@ -354,6 +354,7 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
         `SELECT id, user_id, last_message_at, is_archived
          FROM nexus_conversations
          WHERE ${CANDIDATE_WHERE_CLAUSE}
+           AND ${NO_COMMITTED_MESSAGE_INSIDE_WINDOW_SQL}
          ORDER BY last_message_at ASC
          LIMIT $2`,
         [retentionDays, limit]
@@ -489,6 +490,23 @@ function buildPorts(sql: postgres.Sql): SweepPorts {
       // losing the race still costs the user nothing.
       try {
         const documents = await sql.begin(async (tx) => {
+          // Lock the conversation row FIRST, as its own statement.
+          //
+          // Without this, under READ COMMITTED the DELETE below can evaluate
+          // its NOT EXISTS on a snapshot taken before a concurrent message
+          // INSERT commits, then block on that insert's FK (FOR KEY SHARE)
+          // lock, and proceed to delete once it commits — cascading away a
+          // message it never saw. FOR UPDATE conflicts with FOR KEY SHARE, so
+          // this waits for any in-flight message insert to finish, and because
+          // each statement in READ COMMITTED takes a fresh snapshot, the
+          // subsequent DELETE then sees that committed message and matches
+          // nothing.
+          await tx`
+            SELECT id FROM nexus_conversations
+            WHERE id = ${conversationId}::uuid
+            FOR UPDATE
+          `;
+
           const docRows = await tx<{ id: number; url: string | null }[]>`
             DELETE FROM documents
             WHERE conversation_id = ${conversationId}::uuid
