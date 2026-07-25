@@ -21,14 +21,14 @@ const FILE_FIELDS = [
   "webViewLink",
   "iconLink",
   "owners(displayName)",
-  "shortcutDetails(targetId,targetMimeType,resourceKey)",
+  "shortcutDetails(targetId,targetMimeType,targetResourceKey)",
 ].join(",");
 
 const driveUserSchema = z.object({ displayName: z.string().optional() });
 const shortcutDetailsSchema = z.object({
   targetId: z.string(),
   targetMimeType: z.string(),
-  resourceKey: z.string().optional(),
+  targetResourceKey: z.string().optional(),
 });
 
 export const googleDriveFileSchema = z.object({
@@ -183,13 +183,25 @@ export class GoogleDriveClient {
     throw new GoogleDriveApiError(message, response.status, reason);
   }
 
-  async getFile(fileId: string): Promise<GoogleDriveFile> {
+  async getFile(
+    fileId: string,
+    resourceKey?: string,
+  ): Promise<GoogleDriveFile> {
     const url = new URL(
       `${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}`,
     );
     url.searchParams.set("supportsAllDrives", "true");
     url.searchParams.set("fields", FILE_FIELDS);
-    const response = await this.request(url);
+    const response = await this.request(
+      url,
+      resourceKey
+        ? {
+            headers: {
+              "X-Goog-Drive-Resource-Keys": `${fileId}/${resourceKey}`,
+            },
+          }
+        : undefined,
+    );
     return googleDriveFileSchema.parse(await response.json());
   }
 

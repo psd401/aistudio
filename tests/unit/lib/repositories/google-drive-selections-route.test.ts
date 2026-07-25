@@ -66,25 +66,54 @@ describe("Google Drive selection replacement route", () => {
   test("bounds provider fanout and applies the route-local request budget", async () => {
     let active = 0;
     let peak = 0;
-    getFile.mockImplementation(async (fileId: string) => {
-      active += 1;
-      peak = Math.max(peak, active);
-      await new Promise((resolve) => setTimeout(resolve, 2));
-      active -= 1;
-      return {
-        id: fileId,
-        name: fileId,
-        mimeType: "text/plain",
-      };
-    });
+    getFile.mockImplementation(
+      async (fileId: string, resourceKey?: string) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        active -= 1;
+        if (fileId === "shortcut-file") {
+          return {
+            id: fileId,
+            name: "Linked handbook",
+            mimeType: "application/vnd.google-apps.shortcut",
+            shortcutDetails: {
+              targetId: "target-file",
+              targetMimeType: "application/vnd.google-apps.document",
+              targetResourceKey: "target-resource-key",
+            },
+          };
+        }
+        if (fileId === "target-file") {
+          expect(resourceKey).toBe("target-resource-key");
+          return {
+            id: fileId,
+            name: "Handbook",
+            mimeType: "application/vnd.google-apps.document",
+          };
+        }
+        return {
+          id: fileId,
+          name: fileId,
+          mimeType: "text/plain",
+        };
+      },
+    );
 
     const response = await POST(
-      request(Array.from({ length: 20 }, (_, index) => `file-${index}`)),
+      request([
+        "shortcut-file",
+        ...Array.from({ length: 19 }, (_, index) => `file-${index}`),
+      ]),
       context,
     );
 
     expect(response.status).toBe(200);
     expect(peak).toBe(5);
+    expect(getFile).toHaveBeenCalledWith(
+      "target-file",
+      "target-resource-key",
+    );
     expect(replaceGoogleDriveSelections).toHaveBeenCalledTimes(1);
     getFile.mockResolvedValue({
       id: "file",

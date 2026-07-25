@@ -47,13 +47,45 @@ describe("GoogleDriveClient", () => {
 
     expect(file.id).toBe("file-1");
     const [url, init] = fetchMock.mock.calls[0] ?? [];
-    expect(String(url)).toContain("/drive/v3/files/file-1");
-    expect(String(url)).toContain("supportsAllDrives=true");
+    const requestUrl = new URL(String(url));
+    expect(requestUrl.pathname).toBe("/drive/v3/files/file-1");
+    expect(requestUrl.searchParams.get("supportsAllDrives")).toBe("true");
+    expect(requestUrl.searchParams.get("fields")).toContain(
+      "shortcutDetails(targetId,targetMimeType,targetResourceKey)",
+    );
+    expect(requestUrl.searchParams.get("fields")).not.toContain(
+      "shortcutDetails(targetId,targetMimeType,resourceKey)",
+    );
     expect(init?.headers).toEqual(
       expect.objectContaining({ Authorization: "Bearer access-token" }),
     );
     expect(GOOGLE_DRIVE_SCOPE).toBe(
       "https://www.googleapis.com/auth/drive.readonly",
+    );
+  });
+
+  test("uses a shortcut target resource key for link-shared metadata", async () => {
+    const fetchMock = jest
+      .fn<ReturnType<typeof fetch>, Parameters<typeof fetch>>()
+      .mockResolvedValue(
+        jsonResponse({
+          id: "target-file",
+          name: "Linked handbook",
+          mimeType: "application/vnd.google-apps.document",
+        }),
+      );
+    const client = new GoogleDriveClient("access-token", {
+      fetch: fetchMock,
+    });
+
+    await client.getFile("target-file", "target-resource-key");
+
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual(
+      expect.objectContaining({
+        Authorization: "Bearer access-token",
+        "X-Goog-Drive-Resource-Keys":
+          "target-file/target-resource-key",
+      }),
     );
   });
 

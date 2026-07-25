@@ -157,8 +157,8 @@ versions. Do not remove migration 136 or delete connector records as a rollback.
 ## Verification
 
 - `tests/unit/lib/repositories/google-drive-client.test.ts` covers exact scope,
-  Drive metadata/cursor contracts, export mappings, and resumable Vids
-  operations.
+  valid Drive metadata/cursor field contracts, shortcut target resource-key
+  propagation, export mappings, and resumable Vids operations.
 - `tests/unit/lib/repositories/google-drive-oauth.test.ts` covers PKCE and
   fail-closed scope validation plus sanitized missing/malformed deployment
   configuration errors.
