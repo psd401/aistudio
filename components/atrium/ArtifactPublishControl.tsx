@@ -16,6 +16,7 @@
  */
 
 import { useCallback, useState } from "react";
+import { useRouter } from "next/navigation";
 import { PublishMenu } from "./PublishMenu";
 import { CopyableLink } from "./CopyableLink";
 import {
@@ -38,6 +39,7 @@ export function ArtifactPublishControl({
 }: {
   artifactId: string;
 }): React.JSX.Element {
+  const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [messageUrl, setMessageUrl] = useState<string | null>(null);
@@ -45,14 +47,30 @@ export function ArtifactPublishControl({
   const [seq, setSeq] = useState(0);
 
   const finish = useCallback(
-    (text: string, { url = null as string | null, error = false } = {}) => {
+    (
+      text: string,
+      {
+        url = null as string | null,
+        error = false,
+        // Set when publication state actually changed on the server, so the
+        // server-rendered surface above this control is re-derived.
+        refreshRoute = false,
+      } = {}
+    ) => {
       setMessage(text);
       setMessageUrl(url);
       setIsError(error);
       setSeq((n) => n + 1);
       setBusy(false);
+      // `ArtifactAuthoringView` resolves the Share target (`readerHref`) on the
+      // SERVER from live publication state. `seq` above only re-reads the
+      // menu's own state, so without this the Share button kept copying the
+      // pre-action URL: a freshly published artifact still shared the
+      // authenticated `/atrium/{id}/view` fallback, and an unpublished one went
+      // on handing out a now-dead `/p/…` or `/c/…` link until a manual reload.
+      if (refreshRoute) router.refresh();
     },
-    []
+    [router]
   );
 
   const handlePublish = useCallback(
@@ -66,7 +84,10 @@ export function ArtifactPublishControl({
             ...(widenTo ? { visibility: { level: widenTo } } : {}),
           });
           if (res.isSuccess) {
-            finish(`Published to ${label}`, { url: res.data.readerUrl });
+            finish(`Published to ${label}`, {
+              url: res.data.readerUrl,
+              refreshRoute: true,
+            });
           } else {
             // A §26.4 pending-approval outcome is not a failure; the in-app
             // surface grants authors public-publish authority (#1336), so this
@@ -104,7 +125,10 @@ export function ArtifactPublishControl({
             finish(
               res.data.unpublished
                 ? `Unpublished from ${label}`
-                : "Not currently published there"
+                : "Not currently published there",
+              // Only a real retraction moved the share target; "nothing was
+              // published there" changed no server state worth re-fetching.
+              { refreshRoute: res.data.unpublished }
             );
           } else {
             finish(res.message ?? "Unpublish failed", {
