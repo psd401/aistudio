@@ -36,6 +36,7 @@
  * the author's request.
  */
 
+import { createLogger } from "@/lib/logger";
 import { recordContentAudit } from "@/lib/content/audit";
 import type {
   ContentAuditAction,
@@ -43,6 +44,8 @@ import type {
 } from "@/lib/content/audit";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
 import type { Requester } from "@/lib/content/types";
+
+const log = createLogger({ context: "public-publish-policy" });
 
 /**
  * The authority the in-app authoring actions hand to the §26.4 gate. Always
@@ -75,14 +78,27 @@ export async function notifyPublicExposure(args: {
   if (req.kind === "user" && req.isAdmin) return;
 
   const surface: ContentAuditSurface = "ui";
-  await recordContentAudit({
-    req,
-    action,
-    surface,
-    objectId,
-    destination: destination ?? null,
-    outcome: "ok",
-    details: { publicExposure: true, note },
-    requestId: requestId ?? null,
-  });
+  try {
+    await recordContentAudit({
+      req,
+      action,
+      surface,
+      objectId,
+      destination: destination ?? null,
+      outcome: "ok",
+      details: { publicExposure: true, note },
+      requestId: requestId ?? null,
+    });
+  } catch (error) {
+    // `recordContentAudit` is itself best-effort and swallows its own DB
+    // errors, so this should be unreachable — but it is awaited on a path that
+    // runs AFTER the publish/visibility change has already committed, so a
+    // future change that let it throw would turn a successful mutation into a
+    // failed action. Fail closed on the notification, never on the mutation.
+    log.error("public-exposure notification failed", {
+      objectId,
+      action,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
