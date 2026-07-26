@@ -186,6 +186,25 @@ describe("listPublicationsAction results", () => {
     expect(res.data[0].readerUrl).toBeNull();
   });
 
+  it("never exposes a connector's external_ref as a reader URL, even when set", async () => {
+    queryResults.set("publish.listLive", [
+      {
+        destination: "okf",
+        // The OKF adapter stores a PRESIGNED S3 URL for the full export bundle
+        // here. Creating that export requires edit rights; listLive is
+        // canView-gated, so surfacing the ref would hand the bundle to every
+        // ordinary viewer of the object (Codex P1, round 5).
+        externalRef: "https://s3.example.test/bundle.zip?X-Amz-Signature=abc",
+        publishedVersionId: "v1",
+        publishedAt: null,
+      },
+    ]);
+    const res = await listPublicationsAction("obj-1");
+    expect(res.isSuccess).toBe(true);
+    if (!res.isSuccess) return;
+    expect(res.data[0].readerUrl).toBeNull();
+  });
+
   it("returns an empty list when nothing is live", async () => {
     const res = await listPublicationsAction("obj-1");
     expect(res.isSuccess).toBe(true);

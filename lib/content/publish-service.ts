@@ -722,9 +722,22 @@ export const publishService = {
 
     return rows.map((row) => {
       const destination = row.destination as PublishDestination;
+      // Reader URLs surface ONLY for the two first-party reader destinations.
+      // This method is canView-gated (any viewer of the object can call it),
+      // but a connector row's external_ref is an external handle, not a reader
+      // page — and okf's is a presigned S3 URL for the full portable export
+      // bundle, which requires EDIT rights to create. Preferring external_ref
+      // unconditionally here handed that bundle URL to ordinary viewers. For
+      // intranet/public_web the ref is just the /c/ / /p/ reader link (with
+      // slug-derived fallback); for every connector destination this is null
+      // regardless of what external_ref holds.
+      const readerUrl =
+        destination === "intranet" || destination === "public_web"
+          ? (row.externalRef ?? derivedReaderUrl(destination, obj.slug))
+          : null;
       return {
         destination,
-        readerUrl: row.externalRef ?? derivedReaderUrl(destination, obj.slug),
+        readerUrl,
         publishedVersionId: row.publishedVersionId ?? null,
         publishedAt: row.publishedAt ? row.publishedAt.toISOString() : null,
       };
