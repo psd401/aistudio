@@ -20,9 +20,16 @@ import { createLogger } from "@/lib/auth/edge-logger"
  * That has always been caught below (the sync is best-effort), but the explicit
  * EdgeRuntime guard means the refresh path no longer even attempts the load, and
  * stops emitting a misleading warning on every middleware-driven refresh.
- * Secrets Manager mirroring still happens on the Node paths that matter: initial
- * sign-in runs in the NextAuth route handler, and /agent-connect-data is the
- * explicit fallback for users whose token never makes it here.
+ *
+ * What this does and does not cover, precisely:
+ *   - Initial sign-in DOES mirror — the NextAuth callback route runs in Node.
+ *   - A refresh driven by a Node-runtime `auth()` call DOES mirror.
+ *   - A refresh driven by middleware does NOT mirror, so a Cognito-ROTATED
+ *     refresh token is not written through on that path. This is unchanged
+ *     behaviour (the import threw and was swallowed before), and
+ *     /agent-connect-data remains the explicit fallback for users whose token
+ *     never makes it here. Fixing it properly needs a real Node hop, not a
+ *     dynamic import — see docs/guides/edge-runtime-boundaries.md.
  */
 function syncCognitoRefreshForAgentBackground(
   email: string | undefined,

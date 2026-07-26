@@ -137,14 +137,17 @@ describe("#1297 session states", () => {
     await expect(refreshAccessToken(sessionToken(-1000))).resolves.toBeNull()
   })
 
-  it("never emits the refresh token to logs on the failure path", async () => {
+  it("redacts the refresh token even when an upstream error echoes it back", async () => {
     const warnSpy = jest.spyOn(console, "warn")
     const errorSpy = jest.spyOn(console, "error")
-    fetchMock.mockResolvedValue(jsonResponse(400, { __type: "NotAuthorizedException" }))
+    // Inject the token into the failure so the assertion exercises redaction
+    // rather than passing because the token was never a candidate for logging.
+    fetchMock.mockRejectedValue(new Error(`upstream said ${REFRESH_TOKEN}`))
 
     await refreshAccessToken(sessionToken(-1000))
 
     const emitted = [...warnSpy.mock.calls, ...errorSpy.mock.calls].flat().join("\n")
     expect(emitted).not.toContain(REFRESH_TOKEN)
+    expect(emitted).toContain("[REDACTED_TOKEN]")
   })
 })

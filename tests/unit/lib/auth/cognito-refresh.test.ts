@@ -294,6 +294,66 @@ describe("refreshCognitoTokens", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it("refuses to send an unsigned refresh when a client secret is configured", async () => {
+    // A confidential app client needs a SECRET_HASH this path cannot compute.
+    // Cognito would answer NotAuthorizedException, which classifies as
+    // "permanent" and reads in logs like mass token revocation. Name the real
+    // cause instead of silently signing out every user.
+    process.env.AUTH_COGNITO_CLIENT_SECRET = "some-secret"
+
+    const result = await refreshCognitoTokens({
+      refreshToken: VALID_REFRESH_TOKEN,
+      tokenSub: "user-1",
+    })
+    expect(result).toMatchObject({ ok: false, reason: "configuration" })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("never follows a redirect — the refresh token is in the request body", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { AuthenticationResult: { AccessToken: "a", IdToken: "b" } }),
+    )
+
+    await refreshCognitoTokens({ refreshToken: VALID_REFRESH_TOKEN, tokenSub: "user-1" })
+
+    const [, init] = fetchMock.mock.calls[0]
+    expect(init.redirect).toBe("error")
+  })
+
+  it("clamps an absurd ExpiresIn instead of throwing on an out-of-range date", async () => {
+    // Date#toISOString throws RangeError beyond ~8.64e15 ms, which would break
+    // the module's never-throws contract.
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        AuthenticationResult: { AccessToken: "a", IdToken: "b", ExpiresIn: 1e15 },
+      }),
+    )
+
+    const result = await refreshCognitoTokens({
+      refreshToken: VALID_REFRESH_TOKEN,
+      tokenSub: "user-1",
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error("expected success")
+    expect(() => new Date(result.tokens.expiresAt).toISOString()).not.toThrow()
+  })
+
+  it("does not let one session join another session's refresh", async () => {
+    // Same user, two devices, two different refresh tokens. Keying dedup on the
+    // sub alone let a revoked session ride along on a valid sibling's refresh.
+    const otherToken = "b".repeat(64)
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { AuthenticationResult: { AccessToken: "a", IdToken: "b" } }),
+    )
+
+    await Promise.all([
+      refreshCognitoTokens({ refreshToken: VALID_REFRESH_TOKEN, tokenSub: "user-1" }),
+      refreshCognitoTokens({ refreshToken: otherToken, tokenSub: "user-1" }),
+    ])
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it("deduplicates concurrent refreshes for the same user", async () => {
     let release: (r: Response) => void = () => {}
     fetchMock.mockReturnValue(

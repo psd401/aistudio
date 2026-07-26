@@ -65,10 +65,13 @@ export type RefreshResult =
 
 const log = createLogger({ context: "cognito-refresh" })
 
-// Rate limiting — carried over verbatim from the retired server action so the
-// observable behaviour of the refresh path is unchanged. Module state lives for
-// the life of the server process (middleware runs in an in-process sandbox, not
-// a per-request isolate), so these counters behave as they always did.
+// Rate limiting — constants, window semantics and eviction carried over from the
+// retired server action so the observable behaviour of the refresh path is
+// unchanged. Module state lives for the life of the server process (middleware
+// runs in an in-process sandbox, not a per-request isolate), so these counters
+// behave as they always did. One caveat worth knowing before tuning the numbers:
+// this module is bundled into BOTH the Edge and Node graphs, so each runtime
+// keeps its own counters and the effective budget is per-runtime, per-task.
 const MAX_REFRESH_ATTEMPTS = 8 // Increased for long polling operations
 const RATE_LIMIT_WINDOW_MS = 90 * 1000 // 90 second window for polling operations
 const MAX_RATE_LIMIT_ENTRIES = 1000 // Max users to track
@@ -98,10 +101,14 @@ const PERMANENT_ERROR_TYPES = new Set([
   "InvalidParameterException",
 ])
 
-// Matches `cognito-idp.{region}.amazonaws.com` and its FIPS variant
-// (`cognito-idp-fips.{region}.amazonaws.com`), anchored so a lookalike host such
-// as `cognito-idp.us-east-1.amazonaws.com.evil.test` cannot slip through.
-const COGNITO_IDP_HOST_RE = /^cognito-idp[a-z0-9.-]*\.amazonaws\.com(\.cn)?$/i
+// Exactly `cognito-idp.{region}.amazonaws.com` or its FIPS variant, and nothing
+// else. The label pattern deliberately excludes `.` so the middle segment cannot
+// expand into extra labels — a looser class would also accept unrelated AWS
+// services under the same suffix (`cognito-idp-anything.s3.amazonaws.com`), and
+// an S3 bucket name is globally first-come and covered by a real AWS
+// certificate. Anchoring at both ends also rejects
+// `cognito-idp.us-east-1.amazonaws.com.evil.test`.
+const COGNITO_IDP_HOST_RE = /^cognito-idp(-fips)?\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$/i
 
 /**
  * Resolve the Cognito IDP endpoint to POST `InitiateAuth` at.
@@ -164,6 +171,15 @@ function cleanupRateLimitingEntries(): void {
     for (let i = 0; i < toRemove; i++) {
       refreshAttempts.delete(entries[i][0])
     }
+  }
+
+  // Overflow valve for the dedup map. Entries normally remove themselves when
+  // their promise settles; `fetchWithTimeout` guarantees settlement, so this
+  // should never fire. It stays because a wedged entry is not a leak but a
+  // deadlock: every later refresh for that user would join a promise that never
+  // resolves and hang the JWT callback instead of failing closed.
+  if (activeRefreshPromises.size > MAX_RATE_LIMIT_ENTRIES) {
+    activeRefreshPromises.clear()
   }
 
   lastCleanupTime = now
@@ -269,22 +285,65 @@ export function classifyInitiateAuthError(
 }
 
 const FALLBACK_TOKEN_LIFETIME_SECONDS = 3600
+/** 30 days — far above any real Cognito access-token lifetime. */
+const MAX_TOKEN_LIFETIME_SECONDS = 30 * 24 * 60 * 60
+
+const isUsableLifetime = (value: number): boolean =>
+  Number.isFinite(value) && value > 0 && value <= MAX_TOKEN_LIFETIME_SECONDS
 
 /**
  * Access-token lifetime in seconds: Cognito's `ExpiresIn` when it is usable,
- * then the configured default, then a one-hour floor. Never returns 0/NaN — a
- * bad value would mark the fresh token as already expired and put the session
- * into a refresh loop.
+ * then the configured default, then a one-hour floor.
+ *
+ * Values are bounded at both ends. Zero/NaN would mark the fresh token as
+ * already expired and spin the session in a refresh loop; an absurdly large
+ * value would overflow the later `new Date(expiresAt).toISOString()` into a
+ * `RangeError`, breaking this module's never-throws contract.
  */
 function resolveLifetimeSeconds(expiresIn: number | undefined): number {
-  if (typeof expiresIn === "number" && Number.isFinite(expiresIn) && expiresIn > 0) {
+  if (typeof expiresIn === "number" && isUsableLifetime(expiresIn)) {
     return expiresIn
   }
 
   const configured = Number.parseInt(process.env.COGNITO_ACCESS_TOKEN_LIFETIME_SECONDS ?? "", 10)
-  return Number.isFinite(configured) && configured > 0
-    ? configured
-    : FALLBACK_TOKEN_LIFETIME_SECONDS
+  return isUsableLifetime(configured) ? configured : FALLBACK_TOKEN_LIFETIME_SECONDS
+}
+
+/**
+ * `fetch` that is GUARANTEED to settle within `REFRESH_TIMEOUT_MS`.
+ *
+ * This is load-bearing, not defensive dressing: the caller registers its promise
+ * in `activeRefreshPromises` and removes it in a `finally`. A request that never
+ * settles would wedge that entry forever, and every subsequent refresh for the
+ * user would join the dead promise and hang the JWT callback instead of failing
+ * closed. `AbortSignal.timeout` does the job where it exists; where it does not,
+ * a raced timer still settles the promise (the socket is left to finish on its
+ * own, which is strictly better than deadlocking the session).
+ */
+async function fetchWithTimeout(endpoint: string, init: RequestInit): Promise<Response> {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return fetch(endpoint, { ...init, signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS) })
+  }
+
+  const request = fetch(endpoint, init)
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  try {
+    return await Promise.race([
+      request,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Cognito refresh timed out")),
+          REFRESH_TIMEOUT_MS,
+        )
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+    // If the timer won the race, the request is still in flight; swallow its
+    // eventual outcome so it cannot surface as an unhandled rejection.
+    request.catch(() => {})
+  }
 }
 
 export interface RefreshCognitoTokensParams {
@@ -314,24 +373,37 @@ export async function refreshCognitoTokens(
     return { ok: false, reason: "invalid_input", message: "Invalid refresh token" }
   }
 
-  const existing = activeRefreshPromises.get(tokenSub)
+  // Keyed on the refresh token as well as the user. One user can hold several
+  // sessions (several devices), each with a DIFFERENT refresh token. Keying on
+  // `tokenSub` alone let a session whose token had been revoked join an
+  // in-flight refresh for a still-valid sibling session and receive working
+  // tokens — surviving its own revocation. The key never leaves this Map and is
+  // never logged.
+  const dedupKey = `${tokenSub}\u0000${params.refreshToken}`
+
+  const existing = activeRefreshPromises.get(dedupKey)
   if (existing) {
     log.info("Token refresh already in progress, joining existing request", { tokenSub })
     return existing
   }
 
   const promise = performRefresh(params)
-  activeRefreshPromises.set(tokenSub, promise)
+  activeRefreshPromises.set(dedupKey, promise)
 
   try {
     return await promise
   } finally {
-    activeRefreshPromises.delete(tokenSub)
+    activeRefreshPromises.delete(dedupKey)
   }
 }
 
 async function performRefresh(params: RefreshCognitoTokensParams): Promise<RefreshResult> {
   const { refreshToken, tokenSub, isPollingContext } = params
+  // The retired action wrapped this in `startTimer()` from @/lib/logger, which
+  // is winston-backed and cannot be used here. Emitting `status` + `durationMs`
+  // on every outcome keeps CloudWatch metric filters possible.
+  const startedAt = Date.now()
+  const elapsedMs = () => Date.now() - startedAt
 
   if (isRateLimited(tokenSub, isPollingContext)) {
     log.warn("Token refresh blocked by rate limit", { tokenSub, isPollingContext: !!isPollingContext })
@@ -344,6 +416,22 @@ async function performRefresh(params: RefreshCognitoTokensParams): Promise<Refre
     return { ok: false, reason: "configuration", message: "Authentication configuration error" }
   }
 
+  // This exchange is unsigned because the app client is public. If the client is
+  // ever given a secret, Cognito requires a SECRET_HASH and answers every
+  // refresh with NotAuthorizedException — which would otherwise be classified as
+  // "permanent" and log as a revoked token while silently signing out the whole
+  // user base. Name the real cause instead.
+  if (process.env.AUTH_COGNITO_CLIENT_SECRET) {
+    log.error(
+      "AUTH_COGNITO_CLIENT_SECRET is set, but this refresh path only supports a public app client (no SECRET_HASH)",
+    )
+    return {
+      ok: false,
+      reason: "configuration",
+      message: "Confidential Cognito app client is not supported by the Edge refresh path",
+    }
+  }
+
   const endpoint = resolveCognitoIdpEndpoint(
     process.env.AUTH_COGNITO_ISSUER,
     process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION,
@@ -353,17 +441,9 @@ async function performRefresh(params: RefreshCognitoTokensParams): Promise<Refre
     return { ok: false, reason: "configuration", message: "AWS region configuration required" }
   }
 
-  // Feature-detected: a missing `AbortSignal.timeout` in some runtime must
-  // degrade to "no timeout", never throw — throwing here would recreate exactly
-  // the failure mode this change exists to remove.
-  const signal =
-    typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-      ? AbortSignal.timeout(REFRESH_TIMEOUT_MS)
-      : undefined
-
   let response: Response
   try {
-    response = await fetch(endpoint, {
+    response = await fetchWithTimeout(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-amz-json-1.1",
@@ -375,13 +455,19 @@ async function performRefresh(params: RefreshCognitoTokensParams): Promise<Refre
         AuthParameters: { REFRESH_TOKEN: refreshToken },
       }),
       cache: "no-store",
-      ...(signal ? { signal } : {}),
+      // The refresh token travels in the request BODY, so a cross-origin
+      // redirect would not strip it the way it strips an Authorization header.
+      // Following a 307/308 would re-POST the credential to an arbitrary host
+      // and make the endpoint allowlist above meaningless.
+      redirect: "error",
     })
   } catch (error) {
     // Network failure / timeout. `error` is sanitized by the edge logger, which
     // redacts any long token-shaped substring.
     log.error("Cognito refresh request failed to complete", {
       tokenSub,
+      status: "error",
+      durationMs: elapsedMs(),
       error: error instanceof Error ? error.message : "Unknown error",
     })
     return { ok: false, reason: "transient", message: "Cognito request failed" }
@@ -402,7 +488,9 @@ async function performRefresh(params: RefreshCognitoTokensParams): Promise<Refre
     const { reason, errorType } = classifyInitiateAuthError(response.status, body)
     log.warn("Cognito refresh rejected", {
       tokenSub,
-      status: response.status,
+      status: "error",
+      durationMs: elapsedMs(),
+      httpStatus: response.status,
       errorType,
       classification: reason,
     })
@@ -413,6 +501,8 @@ async function performRefresh(params: RefreshCognitoTokensParams): Promise<Refre
   if (!authResult?.AccessToken || !authResult?.IdToken) {
     log.warn("Cognito refresh returned an incomplete result", {
       tokenSub,
+      status: "error",
+      durationMs: elapsedMs(),
       hasAuthenticationResult: !!authResult,
       hasAccessToken: !!authResult?.AccessToken,
       hasIdToken: !!authResult?.IdToken,
@@ -425,6 +515,8 @@ async function performRefresh(params: RefreshCognitoTokensParams): Promise<Refre
 
   log.info("Cognito refresh successful", {
     tokenSub,
+    status: "success",
+    durationMs: elapsedMs(),
     newExpiresAt: new Date(expiresAt).toISOString(),
     hasRotatedRefreshToken: !!authResult.RefreshToken,
     expiresInSeconds: lifetimeSeconds,

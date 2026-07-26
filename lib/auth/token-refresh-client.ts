@@ -122,8 +122,13 @@ export async function refreshAccessToken(token: JWT): Promise<RefreshedTokens | 
       tokenExpiresAt: token.expiresAt ? new Date(token.expiresAt as number).toISOString() : 'unknown'
     })
 
-    // Long-running/polling requests get a larger rate-limit budget, matching the
-    // wider refresh threshold shouldRefreshToken() applies to the same flag.
+    // Long-running/polling requests get a larger rate-limit budget. The retired
+    // action read this same flag internally, so this preserves its behaviour
+    // rather than adding one — but be aware of two pre-existing limitations:
+    // it is a PROCESS-wide global (one user's polling widens everyone's budget
+    // in that task), and it is set on the Node global by the polling adapter,
+    // which the Edge sandbox cannot see — so on the middleware path it is always
+    // false. `auth.ts` reads it the same way for `isLongRunningOperation`.
     // TODO: Replace with AsyncLocalStorage for request-scoped context isolation
     const isPollingContext = !!(globalThis as { __POLLING_CONTEXT__?: boolean }).__POLLING_CONTEXT__
 

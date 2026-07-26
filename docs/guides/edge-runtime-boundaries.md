@@ -87,13 +87,35 @@ Pick one:
 ## Regression guard
 
 `tests/unit/lib/auth/edge-refresh-boundary.test.ts` walks the static import
-graph from `lib/auth/token-refresh-client.ts` and fails if it reaches `winston`,
+graph from every Edge entrypoint — `middleware.ts`, `auth.ts`, and
+`lib/auth/token-refresh-client.ts` — and fails if it reaches `winston`,
 `@/lib/logger`, `@aws-sdk/*`, `node:*`, or `@/actions/*`. It runs in normal CI
 (`bun run test:ci`) with no build step, so a regression is caught on the PR that
-introduces it.
+introduces it. If you create a *new* Edge entrypoint, add it to `ENTRIES`.
 
-If you add a module to the Edge auth graph, it is covered automatically. If you
-create a *new* Edge entrypoint, add it to that test's entry list.
+### The one allowlisted edge
+
+`auth.ts` still reaches `@/lib/auth/agent-token-sync` → `@/lib/logger` →
+`winston`, so **winston is still present in the compiled middleware bundle**. It
+is never *evaluated* on Edge, because `syncCognitoRefreshForAgentBackground`
+returns early behind an `EdgeRuntime` check. That edge is listed in
+`GUARDED_EDGES`, and a second test asserts the guard is still in the file — so
+deleting that one line turns the suite red rather than silently reintroducing
+#1297.
+
+Do not add entries to `GUARDED_EDGES` to silence a violation. A runtime guard is
+weaker than not importing the module at all; it only holds because this import
+is lazy. A *static* import of the same module would break middleware at load
+time, before any guard could run.
+
+### Known footgun, not yet fixed
+
+`next.config.mjs` pushes `winston` (and friends) into `config.externals` under
+`if (isServer)`. Next sets `isServer === true` for the **Edge** compiler as well
+as the Node one, which is precisely what turns a bundled `@/lib/logger` into an
+unloadable `require("winston")`. Narrowing that to `nextRuntime === 'nodejs'`
+would move the failure to build time — a much better place for it — but it
+changes how the Edge bundle is produced and needs a full build to validate.
 
 ## Why this class of bug is so quiet
 
