@@ -1,5 +1,6 @@
 ---
 name: psd-schedules
+summary: Schedule agent work to run later — recurring cron or rate jobs, and one-shot at() reminders. Use when the user says remind me, wants a daily brief, morning brief, or weekly brief, needs a cron job, or when you promise to follow up later.
 description: Schedule an agent task to run later using Amazon EventBridge Scheduler — either a recurring cron/rate, OR a ONE-SHOT follow-up at a specific time. Use this for morning briefs, weekly summaries, reminders, cron jobs, AND ALSO for any "I'll get back to you in N minutes" promise you make to the user. Do NOT use OpenClaw's built-in cron subsystem; it is disabled in this deployment.
 allowed-tools: Bash(node:*)
 ---
