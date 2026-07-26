@@ -38,14 +38,15 @@
  * Exit codes: 0 — success (including "nothing to delete"); 2 — refused or failed.
  */
 
-import postgres from "postgres";
+import postgres, { type TransactionSql } from "postgres";
 import { scriptLogger as log } from "./script-logger";
 
 const DATABASE_URL =
   process.env.DATABASE_URL ||
   "postgresql://postgres:postgres@localhost:5432/aistudio";
 
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+// new URL().hostname returns IPv6 hosts WITH brackets (WHATWG URL spec).
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /** Title shapes the E2E specs generate. Keep in sync with tests/e2e/*.spec.ts. */
 const TITLE_PREFIXES = ["e2e %", "E2E %"] as const;
@@ -190,67 +191,80 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (candidates.length > 0) {
-      const ids = candidates.map((c) => c.id);
+    // One transaction for the whole multi-statement sequence: a failure in any
+    // later delete rolls back the earlier ones instead of leaving a partial
+    // prune (e.g. nav rows gone but the content delete rejected).
+    //
+    // The cast bridges a postgres.js typings wart: TransactionSql extends
+    // Omit<Sql, ...>, and Omit drops Sql's CALL signatures, so the (runtime-
+    // callable) tx object types as non-callable. Sql is its supertype minus
+    // members this block never touches (begin/end/listen/...).
+    await sql.begin(async (t: TransactionSql) => {
+      const tx = t as unknown as typeof sql;
+      if (candidates.length > 0) {
+        const ids = candidates.map((c) => c.id);
 
-      // Repository items the candidates were indexed into: captured BEFORE the
-      // content delete cascades away the content_index_links that reference
-      // them (repository_items itself does NOT hang off content_objects, so
-      // the cascade would orphan these rows and their chunks silently).
-      const linkedRepoItems = await sql<{ repository_item_id: number }[]>`
-        SELECT DISTINCT repository_item_id
-          FROM content_index_links
-         WHERE object_id IN ${sql(ids)}
-      `;
-
-      // Mirror contentService.delete: navigation_items.content_object_id is
-      // ON DELETE NO ACTION and unpublish only soft-hides the row, so debris
-      // from a published-then-abandoned probe would otherwise reject the whole
-      // batch delete with an FK violation.
-      await sql`
-        DELETE FROM navigation_items
-         WHERE content_object_id IN ${sql(ids)}
-      `;
-
-      const deleted = await sql<{ id: string }[]>`
-        DELETE FROM content_objects
-         WHERE id IN ${sql(ids)}
-         RETURNING id
-      `;
-      log.success(
-        `Deleted ${deleted.length} content_objects rows (children removed via ON DELETE CASCADE).`
-      );
-
-      // Now-unreferenced repository items from the captured set (an item still
-      // linked by any SURVIVING content is kept); chunks/versions cascade.
-      if (linkedRepoItems.length > 0) {
-        const orphaned = await sql<{ id: number }[]>`
-          DELETE FROM repository_items ri
-           WHERE ri.id IN ${sql(linkedRepoItems.map((r) => r.repository_item_id))}
-             AND NOT EXISTS (
-                   SELECT 1 FROM content_index_links l
-                    WHERE l.repository_item_id = ri.id
-                 )
-           RETURNING ri.id
+        // Repository items the candidates were indexed into: captured BEFORE
+        // the content delete cascades away the content_index_links that
+        // reference them (repository_items itself does NOT hang off
+        // content_objects, so the cascade would orphan these rows and their
+        // chunks silently).
+        const linkedRepoItems = await tx<{ repository_item_id: number }[]>`
+          SELECT DISTINCT repository_item_id
+            FROM content_index_links
+           WHERE object_id IN ${tx(ids)}
         `;
-        if (orphaned.length > 0) {
-          log.success(
-            `Deleted ${orphaned.length} orphaned repository_items rows (chunks/versions cascade).`
-          );
+
+        // Mirror contentService.delete: navigation_items.content_object_id is
+        // ON DELETE NO ACTION and unpublish only soft-hides the row, so debris
+        // from a published-then-abandoned probe would otherwise reject the
+        // whole batch delete with an FK violation.
+        await tx`
+          DELETE FROM navigation_items
+           WHERE content_object_id IN ${tx(ids)}
+        `;
+
+        const deleted = await tx<{ id: string }[]>`
+          DELETE FROM content_objects
+           WHERE id IN ${tx(ids)}
+           RETURNING id
+        `;
+        log.success(
+          `Deleted ${deleted.length} content_objects rows (children removed via ON DELETE CASCADE).`
+        );
+
+        // Now-unreferenced repository items from the captured set (an item
+        // still linked by any SURVIVING content is kept); chunks/versions
+        // cascade.
+        if (linkedRepoItems.length > 0) {
+          const orphaned = await tx<{ id: number }[]>`
+            DELETE FROM repository_items ri
+             WHERE ri.id IN ${tx(linkedRepoItems.map((r) => r.repository_item_id))}
+               AND NOT EXISTS (
+                     SELECT 1 FROM content_index_links l
+                      WHERE l.repository_item_id = ri.id
+                   )
+             RETURNING ri.id
+          `;
+          if (orphaned.length > 0) {
+            log.success(
+              `Deleted ${orphaned.length} orphaned repository_items rows (chunks/versions cascade).`
+            );
+          }
         }
       }
-    }
 
-    if (graphCandidates.length > 0) {
-      const deletedGraph = await sql<{ id: string }[]>`
-        DELETE FROM graph_nodes
-         WHERE id IN ${sql(graphCandidates.map((g) => g.id))}
-         RETURNING id
-      `;
-      log.success(
-        `Deleted ${deletedGraph.length} graph_nodes rows (edges removed via ON DELETE CASCADE).`
-      );
-    }
+      if (graphCandidates.length > 0) {
+        const deletedGraph = await tx<{ id: string }[]>`
+          DELETE FROM graph_nodes
+           WHERE id IN ${tx(graphCandidates.map((g) => g.id))}
+           RETURNING id
+        `;
+        log.success(
+          `Deleted ${deletedGraph.length} graph_nodes rows (edges removed via ON DELETE CASCADE).`
+        );
+      }
+    });
   } finally {
     await sql.end();
   }
