@@ -781,6 +781,218 @@ export class ProcessingStack extends cdk.Stack {
     groupSyncFailureAlarm.addAlarmAction(alarmAction);
     groupSyncStalenessAlarm.addAlarmAction(alarmAction);
 
+    // =====================================================================
+    // ClassLink OneRoster Sync Lambda (Epic #1308 / Issue #1310)
+    // =====================================================================
+    // A complete nightly pull stages all six v1 roster collections before
+    // reconciling them. The Lambda owns only the oneroster_* tables and uses
+    // one transaction per collection so upstream or DB failures retain each
+    // collection's last-known-good snapshot.
+    const oneRosterSecretArnPattern =
+      `arn:aws:secretsmanager:${this.region}:${this.account}:secret:aistudio-${props.environment}-oneroster-*`;
+    const oneRosterRole = ServiceRoleFactory.createLambdaRole(
+      this,
+      'OneRosterSyncRole',
+      {
+        functionName: `psd-oneroster-sync-${props.environment}`,
+        environment: props.environment,
+        region: this.region,
+        account: this.account,
+        vpcEnabled: false,
+        additionalPolicies: [
+          new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                sid: 'AuroraSecretAccess',
+                effect: iam.Effect.ALLOW,
+                actions: ['secretsmanager:GetSecretValue'],
+                resources: [databaseSecretArn],
+              }),
+              new iam.PolicyStatement({
+                sid: 'OneRosterCredentialSecretAccess',
+                effect: iam.Effect.ALLOW,
+                actions: ['secretsmanager:GetSecretValue'],
+                resources: [oneRosterSecretArnPattern],
+                conditions: {
+                  StringEquals: {
+                    'aws:ResourceTag/Environment': props.environment,
+                  },
+                },
+              }),
+              new iam.PolicyStatement({
+                sid: 'OneRosterSyncMetrics',
+                effect: iam.Effect.ALLOW,
+                actions: ['cloudwatch:PutMetricData'],
+                resources: ['*'],
+                conditions: {
+                  StringEquals: {
+                    'cloudwatch:namespace': 'AIStudio/RosterSync',
+                  },
+                },
+              }),
+            ],
+          }),
+        ],
+      },
+    );
+    oneRosterRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName(
+        'service-role/AWSLambdaVPCAccessExecutionRole',
+      ),
+    );
+
+    const oneRosterSg = new ec2.SecurityGroup(this, 'OneRosterSyncSg', {
+      vpc,
+      description:
+        'Security group for the OneRoster sync Lambda (Aurora + ClassLink egress)',
+      allowAllOutbound: true,
+    });
+    cdk.Tags.of(oneRosterSg).add('Environment', props.environment);
+    cdk.Tags.of(oneRosterSg).add('ManagedBy', 'cdk');
+
+    const oneRosterLambda = new lambda.Function(this, 'OneRosterSync', {
+      functionName: `psd-oneroster-sync-${props.environment}`,
+      // Manual and scheduled full snapshots must never race each other.
+      reservedConcurrentExecutions: 1,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '../lambdas/oneroster-sync'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(
+                    __dirname,
+                    '..',
+                    'lambdas',
+                    'oneroster-sync',
+                  );
+                  execSync('bun install && bunx tsc', {
+                    cwd: inputDir,
+                    stdio: 'inherit',
+                  });
+                  execSync(`cp -r dist/* ${outputDir}/`, {
+                    cwd: inputDir,
+                    stdio: 'inherit',
+                  });
+                  execSync(`cp package.json bun.lock ${outputDir}/`, {
+                    cwd: inputDir,
+                    stdio: 'inherit',
+                  });
+                  execSync('bun install --production --frozen-lockfile', {
+                    cwd: outputDir,
+                    stdio: 'inherit',
+                  });
+                  return true;
+                } catch (error) {
+                  process.stderr.write(
+                    `OneRoster local bundling failed, falling back to Docker: ${error}\n`,
+                  );
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash',
+              '-c',
+              [
+                'npm install',
+                'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      timeout: cdk.Duration.minutes(15),
+      memorySize: 1024,
+      architecture: lambda.Architecture.ARM_64,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [oneRosterSg],
+      environment: {
+        NODE_OPTIONS: '--enable-source-maps',
+        DATABASE_HOST: databaseHost,
+        DATABASE_SECRET_ARN: databaseSecretArn,
+        DATABASE_NAME: 'aistudio',
+        DATABASE_PORT: '5432',
+        ENVIRONMENT: props.environment,
+      },
+      role: oneRosterRole,
+    });
+    cdk.Tags.of(oneRosterLambda).add('Environment', props.environment);
+    cdk.Tags.of(oneRosterLambda).add('ManagedBy', 'cdk');
+
+    const oneRosterSchedule = new events.Rule(
+      this,
+      'OneRosterNightlySchedule',
+      {
+        description: 'Nightly ClassLink OneRoster full sync (#1310)',
+        schedule: events.Schedule.cron({ minute: '0', hour: '10' }),
+        targets: [new eventsTargets.LambdaFunction(oneRosterLambda)],
+      },
+    );
+    cdk.Tags.of(oneRosterSchedule).add('Environment', props.environment);
+    cdk.Tags.of(oneRosterSchedule).add('ManagedBy', 'cdk');
+
+    const oneRosterFailureAlarm = new cloudwatch.Alarm(
+      this,
+      'OneRosterSyncFailureAlarm',
+      {
+        alarmName: `psd-oneroster-sync-failure-${props.environment}`,
+        alarmDescription:
+          'The ClassLink OneRoster sync errored; failed collections retain their last-known-good rows.',
+        metric: oneRosterLambda.metricErrors({
+          period: cdk.Duration.days(1),
+          statistic: 'Sum',
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    cdk.Tags.of(oneRosterFailureAlarm).add('Environment', props.environment);
+    cdk.Tags.of(oneRosterFailureAlarm).add('ManagedBy', 'cdk');
+    const oneRosterStalenessAlarm = new cloudwatch.Alarm(
+      this,
+      'OneRosterSyncStalenessAlarm',
+      {
+        alarmName: `psd-oneroster-sync-staleness-${props.environment}`,
+        alarmDescription:
+          'No successful ClassLink OneRoster sync in approximately 48 hours.',
+        metric: new cloudwatch.Metric({
+          namespace: 'AIStudio/RosterSync',
+          metricName: 'SyncRunSucceeded',
+          dimensionsMap: { Environment: props.environment },
+          period: cdk.Duration.days(1),
+          statistic: 'Sum',
+        }),
+        threshold: 1,
+        evaluationPeriods: 2,
+        datapointsToAlarm: 2,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      },
+    );
+    cdk.Tags.of(oneRosterStalenessAlarm).add('Environment', props.environment);
+    cdk.Tags.of(oneRosterStalenessAlarm).add('ManagedBy', 'cdk');
+    oneRosterFailureAlarm.addAlarmAction(alarmAction);
+    oneRosterStalenessAlarm.addAlarmAction(alarmAction);
+
+    new cdk.CfnOutput(this, 'OneRosterSyncFunctionName', {
+      value: oneRosterLambda.functionName,
+      description: 'Name of the ClassLink OneRoster sync Lambda function',
+      exportName: `${props.environment}-OneRosterSyncFunctionName`,
+    });
+
     // Outputs
     new cdk.CfnOutput(this, 'GroupSyncFunctionName', {
       value: groupSyncLambda.functionName,

@@ -1,0 +1,21 @@
+{
+  "name": "oneroster-sync",
+  "version": "1.0.0",
+  "description": "Nightly ClassLink OneRoster full sync (Epic #1308 / Issue #1310).",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "prebuild": "rm -rf dist",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.0.0",
+    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "postgres": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
