@@ -10,15 +10,26 @@ import { createLogger } from "@/lib/auth/edge-logger"
  * Manager so the AgentCore agent (running in a different environment) can
  * authenticate to the data MCP server on their behalf.
  *
- * Dynamic import so this never loads on edge runtime, and any failure
- * (missing env vars, IAM, AWS unavailable) is logged but does NOT break
- * the auth flow.
+ * Skipped outright on the Edge Runtime, and any failure (missing env vars,
+ * IAM, AWS unavailable) is logged but does NOT break the auth flow.
+ *
+ * NOTE (#1297): a dynamic import with a static specifier is still *bundled*
+ * into the importing runtime — it is not a runtime boundary. `agent-token-sync`
+ * pulls in `@/lib/logger` → `winston`, which the Edge sandbox cannot load, so
+ * on Edge the import throws `TypeError: Native module not found: winston`.
+ * That has always been caught below (the sync is best-effort), but the explicit
+ * EdgeRuntime guard means the refresh path no longer even attempts the load, and
+ * stops emitting a misleading warning on every middleware-driven refresh.
+ * Secrets Manager mirroring still happens on the Node paths that matter: initial
+ * sign-in runs in the NextAuth route handler, and /agent-connect-data is the
+ * explicit fallback for users whose token never makes it here.
  */
 function syncCognitoRefreshForAgentBackground(
   email: string | undefined,
   refreshToken: string | undefined,
 ): void {
   if (!email || !refreshToken) return
+  if (typeof (globalThis as { EdgeRuntime?: unknown }).EdgeRuntime !== "undefined") return
   // REV-COR-247: route this failure through the edge logger like the rest of
   // auth.ts rather than console.error — auth.ts runs inside the Next.js runtime,
   // where console.* is banned (CLAUDE.md). Only the error message is logged, never

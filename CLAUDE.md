@@ -366,6 +366,12 @@ tree, and anti-patterns.
 - **Don't** omit `state: 'output-available'` and `input` on tool-call UIMessage parts — `convertToModelMessages` silently skips the `tool_result` block, causing `AI_MissingToolResultsError` on replay
 - **Don't** consolidate multi-step MCP responses into a single DB row — persist each step separately inside `executeTransaction` or reload fails with consecutive user turns (see `chat-helpers.ts:saveConversationSteps`)
 
+### Edge Runtime (see `docs/guides/edge-runtime-boundaries.md`)
+- **Don't** import `@/lib/logger` (winston), `@aws-sdk/*`, or `node:*` from anything reachable from `middleware.ts` — that includes all of `auth.ts` and its callbacks. Use `@/lib/auth/edge-logger` and `fetch`
+- **Don't** treat `await import("…")` as a runtime boundary — a static specifier is still bundled into the *importing* runtime's chunk
+- **Don't** treat a `"use server"` action as a Node boundary — it is only an RPC call when a **client** component imports it; from server/Edge code the implementation is inlined and runs in the caller's runtime
+- To actually reach Node from Edge, make a real HTTP hop to a Route Handler with `export const runtime = "nodejs"`
+
 ### React (see `docs/guides/react-patterns.md`)
 - **Don't** put `key` on Provider/context wrapper components
 - **Don't** use boolean `useRef` for init guards on parameterized routes — use ID-tracking refs
