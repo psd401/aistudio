@@ -9,10 +9,12 @@
  * plus a cross-environment data copy produced two rows per name.
  *
  * These tests pin the two halves of the fix that can silently rot:
- *   1. the migration repoints EVERY live FK column before deleting duplicates
- *      (a missed column would abort the deploy on an FK violation, or — worse
- *      with ON DELETE SET NULL — silently drop agent attribution), and
- *   2. the seed script upserts on `name` rather than read-then-insert.
+ *   1. the migration repoints EVERY live FK column (a missed column leaves
+ *      attribution split across the duplicate and its tombstone),
+ *   2. it NEVER deletes — every one of those FKs is ON DELETE SET NULL, and the
+ *      runner cannot span a transaction, so any delete races live writers and
+ *      loses their attribution SILENTLY. Duplicates are tombstoned instead, and
+ *   3. the seed script upserts on `name` rather than read-then-insert.
  */
 
 import fs from "node:fs";
@@ -21,6 +23,8 @@ import path from "node:path";
 const schemaDir = path.join(process.cwd(), "infra/database/schema");
 const migrationFile = "140-agent-identities-name-unique.sql";
 const migration = fs.readFileSync(path.join(schemaDir, migrationFile), "utf8");
+/** The migration with `--` comment lines removed — i.e. the SQL that runs. */
+const migrationSql = migration.replace(/--[^\n]*/g, "");
 
 const schemaFiles = fs
   .readdirSync(schemaDir)
@@ -85,7 +89,7 @@ describe("migration 140 — agent_identities name uniqueness (#1303)", () => {
     );
   });
 
-  it("repoints every live FK column onto the canonical row before deleting duplicates", () => {
+  it("repoints every live FK column onto the canonical row", () => {
     const { references, dropped } = collectAgentForeignKeys();
     const live = [...references].filter((ref) => !dropped.has(ref.split(".")[0])).sort();
 
@@ -113,46 +117,71 @@ describe("migration 140 — agent_identities name uniqueness (#1303)", () => {
     expect(uncovered).toEqual([]);
   });
 
-  it("repoints and deletes in ONE statement so a live writer cannot lose attribution", () => {
-    // The migration runner issues each statement as its own RDS Data API call
-    // with no way to span a transaction. Split across statements, a request
-    // could insert a child row referencing a duplicate AFTER that table's
-    // repoint committed; every one of these FKs is ON DELETE SET NULL, so the
-    // delete would then silently erase the new row's agent attribution.
-    // Everything therefore rides in a single data-modifying-CTE statement.
-    const statements = migration
-      .replace(/--[^\n]*/g, "")
+  it("NEVER deletes an agent identity — duplicates are tombstoned instead", () => {
+    // This is the load-bearing property of the whole migration, and it is not
+    // a stylistic choice. All six FKs are ON DELETE SET NULL, and the runner
+    // issues each statement as its own RDS Data API call with no way to span a
+    // transaction. Any delete therefore races live writers, and the race is
+    // LOSSY rather than loud: a child row the repoint missed gets its agent
+    // attribution silently stripped. PostgreSQL additionally documents the
+    // ordering between sibling data-modifying CTEs and a main-query DELETE
+    // whose FK action is SET NULL as UNDEFINED, so no single-statement
+    // formulation rescues it either. Removing the delete designs the failure
+    // mode out: a missed child row still points at a row that EXISTS.
+    // Asserted against the executable SQL, not the file: the header discusses
+    // DELETE and DROP TYPE at length explaining why neither appears.
+    expect(migrationSql).not.toMatch(/\bDELETE\s+FROM\b/i);
+    expect(migrationSql).not.toMatch(/\bDROP\b/i);
+    expect(migrationSql).not.toMatch(/\bTRUNCATE\b/i);
+  });
+
+  it("tombstones duplicates by renaming and deactivating them", () => {
+    const statements = migrationSql
       .split(";")
       .map((s) => s.trim())
       .filter(Boolean);
-    expect(statements).toHaveLength(2); // the dedupe, then the index
-
-    const dedupe = statements[0];
-    expect(dedupe).toMatch(/^WITH canon AS/i);
-    expect(dedupe).toMatch(/DELETE\s+FROM\s+agent_identities\s+a\s+USING\s+dupes\s+d\s+WHERE\s+a\.id\s*=\s*d\.dup_id/i);
-    expect(statements[1]).toMatch(/^CREATE UNIQUE INDEX/i);
+    // repoint, tombstone, index
+    expect(statements).toHaveLength(3);
+    expect(statements[0]).toMatch(/^WITH canon AS/i);
+    expect(statements[1]).toMatch(/UPDATE\s+agent_identities\s+a/i);
+    expect(statements[1]).toMatch(/is_active\s*=\s*false/i);
+    expect(statements[2]).toMatch(/^CREATE UNIQUE INDEX/i);
   });
 
-  it("locks the duplicate rows so concurrent FK writers block instead of losing rows", () => {
-    // Inserting a child row takes FOR KEY SHARE on the parent, which conflicts
-    // with FOR UPDATE — so a writer that would have raced the delete blocks
-    // and then fails loudly on an FK violation. MATERIALIZED is load-bearing:
-    // without it the CTE may be inlined into each dependent CTE rather than
-    // evaluated once up front, so the lock is not reliably taken first.
-    expect(migration).toMatch(/dupes AS MATERIALIZED \(/);
-    expect(migration).toMatch(/FOR UPDATE OF a/);
+  it("keeps a tombstoned name inside varchar(200)", () => {
+    // name is varchar(200). left(name,150) + '#dup-' (5) + a 36-char uuid = 191.
+    const truncation = migration.match(/left\(a\.name,\s*(\d+)\)/);
+    expect(truncation).not.toBeNull();
+    const keep = Number(truncation![1]);
+    const suffix = "#dup-".length + 36;
+    expect(keep + suffix).toBeLessThanOrEqual(200);
   });
 
-  it("states the canonical-row rule exactly once", () => {
+  it("every FK to agent_identities is ON DELETE SET NULL — the reason not to delete", () => {
+    // If a future FK is added WITHOUT ON DELETE SET NULL this test still holds,
+    // but if one of these is ever changed to CASCADE the stakes go up further,
+    // not down. Either way the no-delete rule above stays correct. This asserts
+    // the premise the header documents is actually true of the schema.
+    const audit = fs.readFileSync(
+      path.join(schemaDir, "090-atrium-content-audit.sql"),
+      "utf8"
+    );
+    expect(audit).toMatch(/agent_id\s+uuid\s+REFERENCES\s+agent_identities\(id\)\s+ON DELETE SET NULL/i);
+  });
+
+  it("states the canonical-row rule identically in every statement that needs it", () => {
     const orderings = [
       ...migration.matchAll(
         /ORDER BY name, \(id <> '0a710f00-0000-4000-a000-000000000f36'\), \(oauth_client_id IS NULL\), created_at, id/g
       ),
     ];
-    expect(orderings).toHaveLength(1);
+    // Once per statement that must pick a canonical row: the repoint and the
+    // tombstone. They MUST be byte-identical or the two passes could disagree
+    // about which row is canonical.
+    expect(orderings).toHaveLength(2);
   });
 
-  it("never deletes an agent identity id that application code pins", () => {
+  it("never tombstones an agent identity id that application code pins", () => {
     // lib/content/okf/import.ts writes ATRIUM_IMPORT_AGENT_ID into
     // content_publish_requests.requested_by_agent_id with no lookup. If the
     // dedupe ever picked a different `atrium-importer` row as canonical, every
@@ -168,8 +197,8 @@ describe("migration 140 — agent_identities name uniqueness (#1303)", () => {
     const id = pinned![1];
     // Sorts first in the canonical-row ORDER BY, so it is always the keeper.
     const rules = [...migration.matchAll(/ORDER BY name, \(id <> '([0-9a-f-]{36})'\)/g)];
-    expect(rules).toHaveLength(1);
-    expect(rules[0][1]).toBe(id);
+    expect(rules).toHaveLength(2);
+    for (const rule of rules) expect(rule[1]).toBe(id);
   });
 
   it("uses no DO $$ block (the db-init statement splitter cannot parse them)", () => {
