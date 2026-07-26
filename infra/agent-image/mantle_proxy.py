@@ -945,6 +945,14 @@ class AgentBrokerResponseTooLarge(RuntimeError):
     """Raised when a privileged broker exceeds the root relay response cap."""
 
 
+def _resolve_agent_broker_route(relay_route: str) -> str | None:
+    """Map the fixed local relay path to one exact allowlisted app route."""
+    if not relay_route.startswith("api/agent/"):
+        return None
+    route = f"/{relay_route}"
+    return route if route in ALLOWED_AGENT_BROKER_ROUTES else None
+
+
 async def _read_bounded_agent_broker_response(
     response,
     max_bytes: int = AGENT_BROKER_RESPONSE_MAX_BYTES,
@@ -975,8 +983,8 @@ async def _read_bounded_agent_broker_response(
 
 async def handle_agent_broker(request: web.Request) -> web.StreamResponse:
     """Relay only fixed, typed POST operations; never expose a signing oracle."""
-    route = f"/api/agent/{request.match_info.get('route', '')}"
-    if request.method != "POST" or route not in ALLOWED_AGENT_BROKER_ROUTES:
+    route = _resolve_agent_broker_route(request.match_info.get("route", ""))
+    if request.method != "POST" or route is None:
         return web.json_response({"error": "Unsupported agent operation"}, status=404)
     body = await request.read()
     try:

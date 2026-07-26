@@ -21,9 +21,17 @@ import {
   BedrockAgentCoreClient,
   InvokeAgentRuntimeCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
+import {
+  GetSecretValueCommand,
+  SecretsManagerClient,
+} from "@aws-sdk/client-secrets-manager";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 
 import { fetchTaskInstructions } from "./memory";
+import {
+  createOwnerInvocationContextToken,
+  deriveOwnerRequestProofKey,
+} from "./invocation-context";
 
 /**
  * Hard wall-clock budget for a single AgentCore invocation. Without this
@@ -36,6 +44,9 @@ const AGENTCORE_INVOKE_TIMEOUT_MS = 90_000;
 
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const ENVIRONMENT = process.env.ENVIRONMENT ?? "dev";
+const AGENT_INVOCATION_SIGNING_SECRET_ID =
+  process.env.AGENT_INVOCATION_SIGNING_SECRET_ID ?? "";
+const AUTHORITY_CACHE_TTL_MS = 5 * 60 * 1000;
 
 let cached: BedrockAgentCoreClient | null = null;
 function client(): BedrockAgentCoreClient {
@@ -46,6 +57,34 @@ function client(): BedrockAgentCoreClient {
 let cachedRuntimeId: string | null = null;
 let cachedAt = 0;
 const RUNTIME_ID_TTL_MS = 5 * 60 * 1000; // 5-minute cache; matches router pattern
+
+const secretsClient = new SecretsManagerClient({ region: REGION });
+let cachedInvocationSigningSecret: string | null = null;
+let invocationSigningSecretCachedAt = 0;
+
+async function getInvocationSigningSecret(): Promise<string> {
+  if (
+    cachedInvocationSigningSecret &&
+    Date.now() - invocationSigningSecretCachedAt < AUTHORITY_CACHE_TTL_MS
+  ) {
+    return cachedInvocationSigningSecret;
+  }
+  if (!AGENT_INVOCATION_SIGNING_SECRET_ID) {
+    throw new Error("AGENT_INVOCATION_SIGNING_SECRET_ID not configured");
+  }
+  const result = await secretsClient.send(
+    new GetSecretValueCommand({
+      SecretId: AGENT_INVOCATION_SIGNING_SECRET_ID,
+    }),
+  );
+  const secret = result.SecretString ?? "";
+  if (Buffer.byteLength(secret, "utf8") < 32) {
+    throw new Error("Agent invocation signing secret is missing or too short");
+  }
+  cachedInvocationSigningSecret = secret;
+  invocationSigningSecretCachedAt = Date.now();
+  return secret;
+}
 
 /**
  * Resolve the AgentCore Runtime ID. Tries (in order):
@@ -175,6 +214,30 @@ function buildPrompt(ctx: TaskCreationContext, userInstructions: string): string
   ].join("\n");
 }
 
+export function buildTaskInvocationPayload(
+  ctx: Pick<TaskCreationContext, "userEmail" | "workspacePrefix">,
+  prompt: string,
+  sessionId: string,
+  signingSecret: string,
+): Record<string, string> {
+  const invocationContext = createOwnerInvocationContextToken(signingSecret, {
+    ownerEmail: ctx.userEmail,
+    sessionId,
+    workspacePrefix: ctx.workspacePrefix,
+  });
+  return {
+    prompt,
+    user_email: ctx.userEmail,
+    workspace_prefix: ctx.workspacePrefix,
+    invocation_context: invocationContext,
+    invocation_request_proof_key: deriveOwnerRequestProofKey(
+      signingSecret,
+      invocationContext,
+    ),
+    source: "email-triage-task",
+  };
+}
+
 export async function requestTaskCreation(
   ctx: TaskCreationContext,
 ): Promise<TaskCreationResult> {
@@ -202,6 +265,21 @@ export async function requestTaskCreation(
 
   const sessionId = buildSessionId(ctx.workspacePrefix, ctx.messageId);
   const prompt = buildPrompt(ctx, userInstructions);
+  let payload: Record<string, string>;
+  try {
+    payload = buildTaskInvocationPayload(
+      ctx,
+      prompt,
+      sessionId,
+      await getInvocationSigningSecret(),
+    );
+  } catch {
+    return {
+      ok: false,
+      reason: "Agent invocation authority is unavailable",
+      rawReply: "",
+    };
+  }
 
   const cmd = new InvokeAgentRuntimeCommand({
     agentRuntimeArn: runtimeId.startsWith("arn:")
@@ -209,13 +287,7 @@ export async function requestTaskCreation(
       : `arn:aws:bedrock-agentcore:${REGION}:${process.env.AWS_ACCOUNT ?? ""}:runtime/${runtimeId}`,
     runtimeSessionId: sessionId,
     payload: new TextEncoder().encode(
-      JSON.stringify({
-        prompt,
-        // Field names match agentcore_wrapper.py's `invoke()` payload
-        // contract (see agent-image/agentcore_wrapper.py).
-        user_email: ctx.userEmail,
-        workspace_prefix: ctx.workspacePrefix,
-      }),
+      JSON.stringify(payload),
     ),
     qualifier: "DEFAULT",
   });

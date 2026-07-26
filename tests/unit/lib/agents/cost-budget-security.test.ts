@@ -7,15 +7,19 @@ type Tx = {
   update: jest.Mock<(table: unknown) => {
     set: (values: unknown) => { where: (condition: unknown) => Promise<void> }
   }>
-  select: jest.Mock<(selection: unknown) => {
-    from: (table: unknown) => { where: (condition: unknown) => Promise<Array<{ value: number }>> }
+  select: jest.Mock<(selection: Record<string, unknown>) => {
+    from: (table: unknown) => {
+      where: (condition: unknown) =>
+        | Promise<Array<Record<string, unknown>>>
+        | { limit: (count: number) => Promise<Array<Record<string, unknown>>> }
+    }
   }>
   insert: jest.Mock<(table: unknown) => {
     values: (values: unknown) => Promise<void>
   }>
 }
 
-let rows: Array<Array<{ value: number }>> = []
+let rows: Array<Array<Record<string, unknown>>> = []
 let tx: Tx
 
 function createTx(): Tx {
@@ -24,8 +28,13 @@ function createTx(): Tx {
     update: jest.fn(() => ({
       set: () => ({ where: async () => undefined }),
     })),
-    select: jest.fn(() => ({
-      from: () => ({ where: async () => rows.shift() ?? [] }),
+    select: jest.fn((selection) => ({
+      from: () => ({
+        where: () =>
+          "id" in selection
+            ? { limit: async () => rows.shift() ?? [] }
+            : Promise.resolve(rows.shift() ?? []),
+      }),
     })),
     insert: jest.fn(() => ({ values: async () => undefined })),
   }
@@ -55,6 +64,8 @@ jest.mock("@/lib/db/schema", () => ({
     executionId: "execution_id",
     reservedCostCents: "reserved_cost_cents",
     status: "status",
+    actualCostCents: "actual_cost_cents",
+    reconciledAt: "reconciled_at",
     reservedAt: "reserved_at",
     expiresAt: "expires_at",
   },
@@ -79,7 +90,7 @@ describe("agentic Assistant conservative cost reservations", () => {
   })
 
   it("atomically reserves the full configured run cap", async () => {
-    rows = [[{ value: 0 }], [{ value: 0 }]]
+    rows = [[], [{ value: 0 }], [{ value: 0 }]]
 
     await expect(reserveAgenticCost(42, 123, 250.2)).resolves.toEqual(
       expect.objectContaining({
@@ -92,7 +103,7 @@ describe("agentic Assistant conservative cost reservations", () => {
   })
 
   it("blocks before the tool loop when the user budget is exhausted", async () => {
-    rows = [[{ value: 900 }], [{ value: 900 }]]
+    rows = [[], [{ value: 900 }], [{ value: 900 }]]
 
     await expect(reserveAgenticCost(42, 123, 200)).resolves.toEqual({
       allowed: false,
@@ -109,6 +120,20 @@ describe("agentic Assistant conservative cost reservations", () => {
       /positive finite/,
     )
     expect(executeTransactionMock).not.toHaveBeenCalled()
+  })
+
+  it("rejects replay of an existing execution reservation", async () => {
+    rows = [[{
+      id: "existing",
+      userId: 42,
+      status: "released",
+      reservedCostCents: 100,
+    }]]
+    await expect(reserveAgenticCost(42, 123, 100)).resolves.toEqual({
+      allowed: false,
+      reason: "duplicate_execution",
+    })
+    expect(tx.insert).not.toHaveBeenCalled()
   })
 
   it("releases active leases while retaining their hourly budget record", async () => {

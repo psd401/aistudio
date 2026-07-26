@@ -246,7 +246,7 @@ export class AgentSkillsService {
       slug: name,
       files,
     })
-    const skillId = await executeTransaction(async (tx) => {
+    const skill = await executeTransaction(async (tx) => {
       const [row] = await tx
         .insert(psdAgentSkills)
         .values({
@@ -264,11 +264,16 @@ export class AgentSkillsService {
             s3Key: draftPrefix,
             summary,
             scanStatus: "pending",
+            scanLeaseId: null,
+            scanStartedAt: null,
             version: sql`${psdAgentSkills.version} + 1`,
             updatedAt: new Date(),
           },
         })
-        .returning({ id: psdAgentSkills.id })
+        .returning({
+          id: psdAgentSkills.id,
+          version: psdAgentSkills.version,
+        })
       if (!row) throw new Error("Skill draft upsert returned no id")
       await tx.insert(psdAgentSkillAudit).values({
         skillId: row.id,
@@ -276,13 +281,16 @@ export class AgentSkillsService {
         actorUserId: ownerId,
         details: { draftPrefix, destinationPrefix },
       })
-      return row.id
+      return row
     }, "agentSkills.author")
     const scanQueued = await invokeSkillScan({
-      skillId,
+      skillId: skill.id,
+      ownerKey: ownerEmail,
+      version: skill.version,
       draftPrefix,
       destinationPrefix,
+      idempotencyKey: `${skill.id}:${skill.version}`,
     })
-    return { skillId, name, scanQueued }
+    return { skillId: skill.id, name, scanQueued }
   }
 }

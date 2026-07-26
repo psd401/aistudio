@@ -691,29 +691,17 @@ async function handleDeepResearch(params: {
     { runDeepResearch },
     { saveAssistantMessage: persistAssistantMessage },
     { createUIMessageStream, createUIMessageStreamResponse },
+    { reserveDeepResearch, releaseDeepResearch },
   ] = await Promise.all([
     import('@/lib/ai/gemini-deep-research-service'),
     import('./chat-helpers'),
     import('ai'),
+    import('@/lib/ai/deep-research-budget'),
   ]);
 
-  // Conversation setup — same shape the standard flow uses, so the
-  // conversation list, history, and resume work without special-casing.
-  const convSetup = await setupConversation({
-    conversationIdValue: existingConversationId,
-    messages,
-    userId,
-    provider: modelConfig.provider,
-    modelId,
-    requestId,
-    log,
-  });
-  if ('error' in convSetup) return convSetup.error;
-  const { conversationId, conversationTitle } = convSetup;
-  await persistLastUserMessage({ conversationId, messages, dbModelId });
-
-  const { reserveDeepResearch, releaseDeepResearch } =
-    await import('@/lib/ai/deep-research-budget');
+  // Admission is deliberately before conversation creation and user-message
+  // persistence. A denied request must not leave durable chat state, and every
+  // failure before the stream takes ownership must release the active lease.
   const reservation = await reserveDeepResearch(userId);
   if (!reservation.allowed) {
     timer({ status: 'rate_limited', reason: reservation.reason });
@@ -728,6 +716,44 @@ async function handleDeepResearch(params: {
       }
     );
   }
+
+  // Conversation setup — same shape the standard flow uses, so the
+  // conversation list, history, and resume work without special-casing.
+  let convSetup: Awaited<ReturnType<typeof setupConversation>>;
+  try {
+    convSetup = await setupConversation({
+      conversationIdValue: existingConversationId,
+      messages,
+      userId,
+      provider: modelConfig.provider,
+      modelId,
+      requestId,
+      log,
+    });
+    if ('error' in convSetup) {
+      await releaseDeepResearch(reservation.leaseId);
+      return convSetup.error;
+    }
+    await persistLastUserMessage({
+      conversationId: convSetup.conversationId,
+      messages,
+      dbModelId,
+    });
+  } catch (error) {
+    await releaseDeepResearch(reservation.leaseId).catch(
+      (releaseError: unknown) => {
+        log.error('Failed to release Deep Research pre-stream lease', {
+          leaseId: reservation.leaseId,
+          error:
+            releaseError instanceof Error
+              ? releaseError.message
+              : String(releaseError),
+        });
+      },
+    );
+    throw error;
+  }
+  const { conversationId, conversationTitle } = convSetup;
 
   const messageId = `dr-${Date.now()}`;
   const isNewConversation = !existingConversationId;

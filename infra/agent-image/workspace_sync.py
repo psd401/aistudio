@@ -29,11 +29,15 @@ junk that bloats restores.
 from __future__ import annotations
 
 import logging
+import http.client
+import base64
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import stat
+import tempfile
 import threading
 import time
 import urllib.error
@@ -45,37 +49,25 @@ from typing import Optional
 logger = logging.getLogger("workspace_sync")
 
 WORKSPACE_DIR = Path("/home/node/.openclaw")
+MAX_SYNC_FILE_BYTES = 64 * 1024 * 1024
+MAX_SYNC_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_SYNC_FILES = 1_000
+SYNC_WORKERS = 4
+TRANSFER_CHUNK_BYTES = 64 * 1024
+WORKSPACE_UPLOAD_CONTENT_TYPE = "application/octet-stream"
+_uploaded_state: dict[tuple[str, str], tuple[int, int]] = {}
 
 
 def _download_workspace_file(
     source_url: str,
     destination: Path,
     workspace_root: Path,
+    content_length: int,
+    required_headers: dict[str, str],
 ) -> None:
-    """Restore as the node UID so root never follows paths in its writable tree."""
+    """Restore one exact bounded object without root writing into model state."""
     destination.relative_to(workspace_root)
-    if os.geteuid() != 0:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(
-            f".{destination.name}.{uuid.uuid4().hex}.tmp"
-        )
-        try:
-            with urllib.request.urlopen(source_url, timeout=60) as response:
-                with temporary.open("wb") as output:
-                    while True:
-                        chunk = response.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        output.write(chunk)
-            os.replace(temporary, destination)
-        finally:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-        return
-
-    writer = """
+    writer = r"""
 import os
 import pathlib
 import sys
@@ -100,34 +92,90 @@ finally:
     except FileNotFoundError:
         pass
 """
-    process = subprocess.Popen(
-        [sys.executable, "-c", writer, str(workspace_root), str(destination)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        user="node",
-        group="node",
-        extra_groups=[],
-        umask=0o077,
-        cwd=str(workspace_root),
+    request = urllib.request.Request(source_url, headers=required_headers)
+    written = 0
+    temporary_fd, temporary_name = tempfile.mkstemp(
+        prefix="workspace-download-",
+        dir="/tmp",
     )
-    assert process.stdin is not None
+    temporary_path = Path(temporary_name)
+    process: subprocess.Popen[bytes] | None = None
     try:
-        with urllib.request.urlopen(source_url, timeout=60) as response:
+        with os.fdopen(temporary_fd, "wb") as output:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                response_length = response.headers.get("Content-Length")
+                if response_length is not None and (
+                    not response_length.isdigit()
+                    or int(response_length) != content_length
+                ):
+                    raise RuntimeError("workspace download length mismatch")
+                while True:
+                    chunk = response.read(TRANSFER_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > content_length:
+                        raise RuntimeError(
+                            "workspace download exceeded declared length"
+                        )
+                    output.write(chunk)
+        if written != content_length:
+            raise RuntimeError("workspace download ended before declared length")
+
+        process_options: dict[str, object] = {}
+        if os.geteuid() == 0:
+            process_options = {
+                "user": "node",
+                "group": "node",
+                "extra_groups": [],
+                "umask": 0o077,
+            }
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                writer,
+                str(workspace_root),
+                str(destination),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            cwd=str(workspace_root),
+            **process_options,
+        )
+        assert process.stdin is not None
+        with temporary_path.open("rb") as source:
             while True:
-                chunk = response.read(1024 * 1024)
+                chunk = source.read(TRANSFER_CHUNK_BYTES)
                 if not chunk:
                     break
                 process.stdin.write(chunk)
-    finally:
         process.stdin.close()
-    stderr = process.stderr.read(500) if process.stderr else b""
-    return_code = process.wait(timeout=60)
-    if return_code != 0:
-        raise RuntimeError(
-            f"node workspace writer failed ({return_code}): "
-            f"{stderr.decode('utf-8', errors='replace')}"
-        )
+        stderr = process.stderr.read(500) if process.stderr else b""
+        return_code = process.wait(timeout=60)
+        if process.stderr is not None:
+            process.stderr.close()
+        if return_code != 0:
+            raise RuntimeError(
+                f"node workspace writer failed ({return_code}): "
+                f"{stderr.decode('utf-8', errors='replace')}"
+            )
+    except Exception:
+        if process is not None:
+            if process.stdin is not None and not process.stdin.closed:
+                process.stdin.close()
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            if process.stderr is not None and not process.stderr.closed:
+                process.stderr.close()
+        raise
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 # Paths (relative to WORKSPACE_DIR) we never sync in either direction.
 #
@@ -219,6 +267,46 @@ def _should_skip(path: Path) -> bool:
     return _should_skip_relative(relative)
 
 
+def _open_regular_no_follow(relative: str):
+    """Open a workspace file through no-follow dirfds.
+
+    Model-created symlinks must never turn workspace persistence into a reader
+    for invocation credentials, image-owned files, or host configuration.
+    """
+    parts = Path(relative).parts
+    if (
+        not parts
+        or any(part in ("", ".", "..") for part in parts)
+        or Path(relative).is_absolute()
+    ):
+        raise OSError("invalid workspace file path")
+    directory_fd = os.open(
+        WORKSPACE_DIR,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd = os.open(
+            parts[-1],
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
+    finally:
+        os.close(directory_fd)
+    metadata = os.fstat(file_fd)
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(file_fd)
+        raise OSError("workspace entry is not a regular file")
+    return os.fdopen(file_fd, "rb"), metadata
+
+
 def _broker_request(payload: dict) -> dict:
     """Call the trusted storage broker with the opaque signed owner context."""
     body = json.dumps(payload).encode("utf-8")
@@ -241,20 +329,140 @@ def _broker_request(payload: dict) -> dict:
     return result
 
 
-def _download_url(relative: str) -> str:
+def _download_spec(relative: str) -> tuple[str, int, dict[str, str]]:
     result = _broker_request({"operation": "download", "path": relative})
     url = result.get("downloadUrl")
-    if not isinstance(url, str):
-        raise RuntimeError("workspace broker returned no download URL")
-    return url
+    content_length = result.get("contentLength")
+    required_headers = result.get("requiredHeaders")
+    if (
+        not isinstance(url, str)
+        or not isinstance(content_length, int)
+        or isinstance(content_length, bool)
+        or content_length < 1
+        or content_length > MAX_SYNC_FILE_BYTES
+        or not isinstance(required_headers, dict)
+        or required_headers.get("Range") != f"bytes=0-{content_length - 1}"
+    ):
+        raise RuntimeError("workspace broker returned an invalid bounded download")
+    return url, content_length, {"Range": required_headers["Range"]}
 
 
-def _upload_url(relative: str) -> str:
-    result = _broker_request({"operation": "upload", "path": relative})
+def _upload_spec(
+    relative: str,
+    content_length: int,
+    idempotency_key: str,
+    checksum_sha256: str,
+) -> Optional[tuple[str, str, dict[str, str]]]:
+    result = _broker_request({
+        "operation": "upload",
+        "path": relative,
+        "contentType": WORKSPACE_UPLOAD_CONTENT_TYPE,
+        "contentLength": content_length,
+        "idempotencyKey": idempotency_key,
+        "checksumSha256": checksum_sha256,
+    })
     url = result.get("uploadUrl")
-    if not isinstance(url, str):
-        raise RuntimeError("workspace broker returned no upload URL")
-    return url
+    if result.get("unchanged") is True and isinstance(result.get("key"), str):
+        return None
+    reservation_id = result.get("reservationId")
+    required_headers = result.get("requiredHeaders")
+    if (
+        not isinstance(url, str)
+        or not isinstance(reservation_id, str)
+        or not isinstance(required_headers, dict)
+        or set(required_headers) != {
+            "Content-Length",
+            "Content-Type",
+            "x-amz-checksum-sha256",
+        }
+        or required_headers.get("Content-Length") != str(content_length)
+        or required_headers.get("Content-Type") != WORKSPACE_UPLOAD_CONTENT_TYPE
+        or required_headers.get("x-amz-checksum-sha256") != checksum_sha256
+    ):
+        raise RuntimeError("workspace broker returned no bounded upload")
+    return url, reservation_id, {
+        "Content-Length": str(content_length),
+        "Content-Type": WORKSPACE_UPLOAD_CONTENT_TYPE,
+        "x-amz-checksum-sha256": checksum_sha256,
+    }
+
+
+def _download_bounded(
+    url: str,
+    destination: Path,
+    content_length: int,
+    required_headers: dict[str, str],
+) -> None:
+    request = urllib.request.Request(url, headers=required_headers)
+    written = 0
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            response_length = response.headers.get("Content-Length")
+            if response_length is not None:
+                if not response_length.isdigit() or int(response_length) != content_length:
+                    raise RuntimeError("workspace download length mismatch")
+            with destination.open("wb") as output:
+                while True:
+                    chunk = response.read(TRANSFER_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > content_length:
+                        raise RuntimeError("workspace download exceeded declared length")
+                    output.write(chunk)
+        if written != content_length:
+            raise RuntimeError("workspace download ended before declared length")
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def _stream_upload(
+    url: str,
+    relative: str,
+    content_length: int,
+    required_headers: dict[str, str],
+) -> None:
+    parsed = urllib.parse.urlsplit(url)
+    local_http = parsed.scheme == "http" and parsed.hostname in {
+        "127.0.0.1",
+        "localhost",
+    }
+    if parsed.scheme != "https" and not local_http:
+        raise RuntimeError("workspace upload URL must use HTTPS")
+    connection_type = (
+        http.client.HTTPSConnection if parsed.scheme == "https"
+        else http.client.HTTPConnection
+    )
+    connection = connection_type(parsed.hostname, parsed.port, timeout=60)
+    target = urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
+    try:
+        connection.putrequest("PUT", target)
+        for name, value in required_headers.items():
+            connection.putheader(name, value)
+        connection.endheaders()
+        sent = 0
+        source, metadata = _open_regular_no_follow(relative)
+        if metadata.st_size != content_length:
+            source.close()
+            raise RuntimeError("workspace file changed during upload")
+        with source:
+            while True:
+                chunk = source.read(TRANSFER_CHUNK_BYTES)
+                if not chunk:
+                    break
+                sent += len(chunk)
+                if sent > content_length:
+                    raise RuntimeError("workspace file changed during upload")
+                connection.send(chunk)
+        if sent != content_length:
+            raise RuntimeError("workspace file changed during upload")
+        response = connection.getresponse()
+        response.read(TRANSFER_CHUNK_BYTES)
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(f"workspace upload HTTP {response.status}")
+    finally:
+        connection.close()
 
 
 def pull_workspace(prefix: str) -> int:
@@ -276,8 +484,7 @@ def pull_workspace(prefix: str) -> int:
 
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Collect everything we plan to download first so we can thread-pool
-    # the download phase. Listing is cheap (paginated, 1000 keys/page).
+    # Collect paths first, then obtain short-lived download URLs in each worker.
     to_download: list[tuple[str, Path]] = []
     skipped = 0
     continuation = None
@@ -322,20 +529,35 @@ def pull_workspace(prefix: str) -> int:
                 logger.warning("workspace pull skip (path escape) %s", relative)
                 skipped += 1
                 continue
+            if len(to_download) >= MAX_SYNC_FILES:
+                raise RuntimeError("workspace restore exceeds the file-count limit")
             to_download.append((relative, dest))
         continuation = page.get("continuationToken")
         if not isinstance(continuation, str) or not continuation:
             break
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor
 
-    def _download_one(key_dest: tuple[str, Path]) -> Optional[str]:
-        relative, dest = key_dest
+    total_bytes = 0
+    total_lock = threading.Lock()
+
+    def _download_one(item: tuple[str, Path]) -> Optional[str]:
+        nonlocal total_bytes
+        relative, dest = item
         try:
+            url, content_length, required_headers = _download_spec(relative)
+            with total_lock:
+                if total_bytes + content_length > MAX_SYNC_TOTAL_BYTES:
+                    raise RuntimeError(
+                        "workspace restore exceeds the aggregate byte limit"
+                    )
+                total_bytes += content_length
             _download_workspace_file(
-                _download_url(relative),
+                url,
                 dest,
                 workspace_root,
+                content_length,
+                required_headers,
             )
             return None
         except Exception as exc:  # noqa: BLE001
@@ -343,10 +565,7 @@ def pull_workspace(prefix: str) -> int:
 
     count = 0
     started = time.monotonic()
-    # boto3 clients are thread-safe per official docs; one client is shared.
-    # 24 workers empirically saturates S3 per-prefix throughput without
-    # starving the Python GIL on the small amount of CPU work per file.
-    with ThreadPoolExecutor(max_workers=24) as pool:
+    with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
         for err in pool.map(_download_one, to_download):
             if err is None:
                 count += 1
@@ -380,7 +599,11 @@ def pull_files(prefix: str, relative_paths: list) -> int:
 
     workspace_root = WORKSPACE_DIR.resolve()
     pulled = 0
+    total_bytes = 0
     for rel in relative_paths:
+        if pulled >= MAX_SYNC_FILES:
+            logger.warning("pull_files: file-count limit reached")
+            break
         if not isinstance(rel, str) or not rel:
             continue
         rel = rel.lstrip("/")
@@ -392,7 +615,18 @@ def pull_files(prefix: str, relative_paths: list) -> int:
             logger.warning("pull_files: refusing gateway-owned path: %s", rel)
             continue
         try:
-            _download_workspace_file(_download_url(rel), dest, workspace_root)
+            url, content_length, required_headers = _download_spec(rel)
+            if total_bytes + content_length > MAX_SYNC_TOTAL_BYTES:
+                logger.warning("pull_files: aggregate byte limit reached")
+                break
+            total_bytes += content_length
+            _download_workspace_file(
+                url,
+                dest,
+                workspace_root,
+                content_length,
+                required_headers,
+            )
             pulled += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("pull_files: failed %s: %s", rel, str(exc)[:200])
@@ -448,64 +682,93 @@ def push_workspace(prefix: str) -> int:
     # upload blocks both the idle-push background thread and the final
     # shutdown flush, so state can be lost if the microVM is torn down
     # mid-push.
-    to_upload: list[tuple[str, str]] = []
+    to_upload: list[tuple[str, str, int, int, str]] = []
+    total_bytes = 0
     for path in WORKSPACE_DIR.rglob("*"):
         if path.is_dir() or _should_skip(path):
             continue
         relative = path.relative_to(WORKSPACE_DIR).as_posix()
-        to_upload.append((str(path), relative))
+        try:
+            source, metadata = _open_regular_no_follow(relative)
+        except OSError as exc:
+            logger.warning("workspace push skip unsafe file %s: %s", relative, exc)
+            continue
+        if metadata.st_size < 1:
+            source.close()
+            continue
+        if metadata.st_size > MAX_SYNC_FILE_BYTES:
+            source.close()
+            logger.warning("workspace push skip oversized file %s", relative)
+            continue
+        signature = (metadata.st_size, metadata.st_mtime_ns)
+        state_key = (prefix, relative)
+        if _uploaded_state.get(state_key) == signature:
+            source.close()
+            continue
+        if len(to_upload) >= MAX_SYNC_FILES:
+            source.close()
+            logger.warning("workspace push file-count limit reached")
+            break
+        if total_bytes + metadata.st_size > MAX_SYNC_TOTAL_BYTES:
+            source.close()
+            logger.warning("workspace push aggregate byte limit reached")
+            break
+        total_bytes += metadata.st_size
+        digest = hashlib.sha256()
+        with source:
+            while True:
+                chunk = source.read(TRANSFER_CHUNK_BYTES)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        to_upload.append(
+            (
+                str(path),
+                relative,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                base64.b64encode(digest.digest()).decode("ascii"),
+            )
+        )
 
     from concurrent.futures import ThreadPoolExecutor
 
-    def _read_regular_file(relative: str) -> bytes:
-        parts = Path(relative).parts
-        if not parts or any(part in {"", ".", ".."} for part in parts):
-            raise RuntimeError("invalid workspace path")
-        no_follow = getattr(os, "O_NOFOLLOW", 0)
-        directory_flags = os.O_RDONLY | os.O_DIRECTORY | no_follow
-        opened: list[int] = []
+    def _upload_one(pair: tuple[str, str, int, int, str]) -> Optional[str]:
+        path, relative, content_length, modified_ns, checksum_sha256 = pair
         try:
-            directory_fd = os.open(WORKSPACE_DIR, directory_flags)
-            opened.append(directory_fd)
-            for part in parts[:-1]:
-                directory_fd = os.open(
-                    part,
-                    directory_flags,
-                    dir_fd=directory_fd,
+            prepared = _upload_spec(
+                relative,
+                content_length,
+                str(uuid.uuid4()),
+                checksum_sha256,
+            )
+            if prepared is None:
+                _uploaded_state[(prefix, relative)] = (
+                    content_length,
+                    modified_ns,
                 )
-                opened.append(directory_fd)
-            file_fd = os.open(
-                parts[-1],
-                os.O_RDONLY | no_follow,
-                dir_fd=directory_fd,
+                return None
+            upload_url, reservation_id, required_headers = prepared
+            _stream_upload(
+                upload_url, relative, content_length, required_headers
             )
-            opened.append(file_fd)
-            metadata = os.fstat(file_fd)
-            if not stat.S_ISREG(metadata.st_mode):
-                raise RuntimeError("workspace path is not a regular file")
-            with os.fdopen(os.dup(file_fd), "rb") as source:
-                return source.read()
-        finally:
-            for descriptor in reversed(opened):
-                os.close(descriptor)
-
-    def _upload_one(pair: tuple[str, str]) -> Optional[str]:
-        path, relative = pair
-        try:
-            request = urllib.request.Request(
-                _upload_url(relative),
-                data=_read_regular_file(relative),
-                method="PUT",
+            completed = _broker_request({
+                "operation": "complete-upload",
+                "reservationId": reservation_id,
+            })
+            if not isinstance(completed.get("key"), str):
+                raise RuntimeError("workspace broker did not verify upload")
+            _uploaded_state[(prefix, relative)] = (
+                content_length,
+                modified_ns,
             )
-            with urllib.request.urlopen(request, timeout=60):
-                pass
             return None
         except Exception as exc:  # noqa: BLE001
             return f"{path}: {exc}"
 
     count = 0
     started = time.monotonic()
-    with ThreadPoolExecutor(max_workers=24) as pool:
+    with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
         for err in pool.map(_upload_one, to_upload):
             if err is None:
                 count += 1

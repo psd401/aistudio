@@ -1,5 +1,7 @@
 import {
   executeClassifiedGatewayTool,
+  ClassifiedGatewayClient,
+  CLASSIFIED_SSE_LIMITS,
   parseSseFrames,
   resolveGatewayEndpoint,
   unwrapClassifiedToolResult,
@@ -21,6 +23,33 @@ describe("classified evaluation gateway boundary", () => {
       ],
       rest: "event: message\ndata: partial",
     })
+  })
+
+  it("rejects oversized frames before JSON parsing", () => {
+    expect(() =>
+      parseSseFrames(
+        `event: message\ndata: ${"x".repeat(
+          CLASSIFIED_SSE_LIMITS.frameBytes,
+        )}\n\n`,
+      ),
+    ).toThrow(/too large/)
+  })
+
+  it("detaches the caller abort listener when closed", () => {
+    const signal = new AbortController().signal
+    const add = jest.spyOn(signal, "addEventListener")
+    const remove = jest.spyOn(signal, "removeEventListener")
+    const client = new ClassifiedGatewayClient(
+      "https://gateway.example/sse",
+      "token",
+      undefined,
+      signal,
+    )
+    expect(add).toHaveBeenCalledWith("abort", expect.any(Function), {
+      once: true,
+    })
+    client.close()
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function))
   })
 
   it("binds announced message endpoints to the configured HTTPS origin", () => {
@@ -90,7 +119,13 @@ describe("classified evaluation gateway boundary", () => {
             ok: true,
             status: 200,
             body: stream,
-          } as Response
+            headers: {
+              get: (name: string) =>
+                name.toLowerCase() === "content-type"
+                  ? "text/event-stream"
+                  : null,
+            },
+          } as unknown as Response
         }
         const body = JSON.parse(String(init?.body)) as {
           id?: number

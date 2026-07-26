@@ -170,10 +170,11 @@ describe('Agent invocation context trust boundary', () => {
     ).not.toHaveProperty('AGENT_INVOCATION_SIGNING_SECRET_ID');
   });
 
-  it('supplies the secret id to the two trusted Lambda issuers', () => {
+  it('supplies the secret id to every trusted Lambda issuer', () => {
     for (const functionName of [
       `psd-agent-router-${ENV}`,
       `psd-agent-cron-${ENV}`,
+      `psd-agent-triage-worker-${ENV}`,
     ]) {
       const environment = lambdaEnvironment(template, functionName);
       expect(environment).toHaveProperty(
@@ -198,8 +199,8 @@ describe('Agent invocation context trust boundary', () => {
         )
       );
     });
-    // Router Lambda, cron Lambda, and async job-runner task.
-    expect(keyReads).toHaveLength(3);
+    // Router, cron, triage worker, and async job-runner task.
+    expect(keyReads).toHaveLength(4);
   });
 
   it('supplies the signing key id to the async job runner', () => {

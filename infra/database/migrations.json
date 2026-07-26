@@ -135,6 +135,10 @@
     "138-api-rate-limit-reservations.sql",
     "139-deep-research-reservations.sql",
     "140-agentic-cost-reservations.sql",
-    "141-agent-request-nonces.sql"
+    "141-agent-request-nonces.sql",
+    "142-resource-admission-leases.sql",
+    "143-agentic-cost-reconciliation.sql",
+    "144-agent-skill-scan-leases.sql",
+    "145-workspace-upload-reservations.sql"
   ]
 }

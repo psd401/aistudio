@@ -48,6 +48,7 @@ import mantle_proxy  # noqa: E402
 from mantle_proxy import (  # noqa: E402
     AgentBrokerResponseTooLarge,
     _read_bounded_agent_broker_response,
+    _resolve_agent_broker_route,
     _extract_usage,
     _is_anthropic_model,
     inject_include_usage,
@@ -61,6 +62,21 @@ from mantle_proxy import (  # noqa: E402
     _parse_anthropic_stream,
     _parse_anthropic_response,
 )
+
+
+class TestAgentBrokerRoute(unittest.TestCase):
+    def test_preserves_exact_allowlisted_app_route(self):
+        self.assertEqual(
+            _resolve_agent_broker_route("api/agent/credentials"),
+            "/api/agent/credentials",
+        )
+
+    def test_rejects_duplicated_or_non_allowlisted_routes(self):
+        self.assertIsNone(
+            _resolve_agent_broker_route("api/agent/api/agent/credentials")
+        )
+        self.assertIsNone(_resolve_agent_broker_route("credentials"))
+        self.assertIsNone(_resolve_agent_broker_route("api/agent/not-allowed"))
 
 
 class _FakeResponseContent:

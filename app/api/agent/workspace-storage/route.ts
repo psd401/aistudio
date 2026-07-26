@@ -3,9 +3,12 @@ import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-c
 import {
   createPublicArtifactUpload,
   createPublicArtifactDownloadUrl,
+  completeWorkspaceUpload,
   createWorkspaceDownloadUrl,
   createWorkspaceUploadUrl,
   listWorkspaceObjects,
+  WorkspaceStorageAdmissionError,
+  WorkspaceStorageCompletionError,
 } from "@/lib/agent-workspace/storage-broker"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 
@@ -15,13 +18,27 @@ const ALLOWED_FIELDS = new Set([
   "path",
   "continuationToken",
   "contentType",
+  "contentLength",
+  "idempotencyKey",
+  "checksumSha256",
+  "reservationId",
 ])
 
 type StorageRequest = {
-  operation: "list" | "download" | "upload" | "publish" | "download-public"
+  operation:
+    | "list"
+    | "download"
+    | "upload"
+    | "publish"
+    | "download-public"
+    | "complete-upload"
   path?: string
   continuationToken?: string
   contentType?: string
+  contentLength?: number
+  idempotencyKey?: string
+  checksumSha256?: string
+  reservationId?: string
 }
 
 function parseRequest(value: unknown): StorageRequest | null {
@@ -33,7 +50,8 @@ function parseRequest(value: unknown): StorageRequest | null {
     body.operation !== "download" &&
     body.operation !== "upload" &&
     body.operation !== "publish" &&
-    body.operation !== "download-public"
+    body.operation !== "download-public" &&
+    body.operation !== "complete-upload"
   ) {
     return null
   }
@@ -42,6 +60,18 @@ function parseRequest(value: unknown): StorageRequest | null {
     body.continuationToken !== undefined &&
       typeof body.continuationToken !== "string" ||
     body.contentType !== undefined && typeof body.contentType !== "string"
+    || body.contentLength !== undefined &&
+      (!Number.isSafeInteger(body.contentLength) || (body.contentLength as number) < 1)
+    || body.idempotencyKey !== undefined &&
+      (typeof body.idempotencyKey !== "string" ||
+        body.idempotencyKey.length < 8 ||
+        body.idempotencyKey.length > 128)
+    || body.checksumSha256 !== undefined &&
+      (typeof body.checksumSha256 !== "string" ||
+        !/^[A-Za-z0-9+/]{43}=$/.test(body.checksumSha256))
+    || body.reservationId !== undefined &&
+      (typeof body.reservationId !== "string" ||
+        !/^[0-9a-f-]{36}$/i.test(body.reservationId))
   ) {
     return null
   }
@@ -76,37 +106,57 @@ export async function POST(request: NextRequest) {
         input.continuationToken
       )
     } else if (input.operation === "download" && input.path) {
-      result = {
-        downloadUrl: await createWorkspaceDownloadUrl(
-          context.workspacePrefix,
-          input.path
-        ),
-      }
-    } else if (input.operation === "upload" && input.path) {
-      result = {
-        uploadUrl: await createWorkspaceUploadUrl(
+      result = await createWorkspaceDownloadUrl(
+        context.workspacePrefix,
+        input.path
+      )
+    } else if (
+      input.operation === "upload" &&
+      input.path &&
+      input.contentLength &&
+      input.idempotencyKey &&
+      input.checksumSha256
+    ) {
+      result = await createWorkspaceUploadUrl(
+          context.ownerEmail,
           context.workspacePrefix,
           input.path,
+          input.contentLength,
+          `${context.sessionId}:${context.nonce}`,
+          input.idempotencyKey,
+          input.checksumSha256,
           input.contentType
-        ),
-      }
+        )
     } else if (
       input.operation === "publish" &&
       input.path &&
-      input.contentType
+      input.contentType &&
+      input.contentLength &&
+      input.idempotencyKey &&
+      input.checksumSha256
     ) {
       result = await createPublicArtifactUpload(
         context.ownerEmail,
         input.path,
-        input.contentType
+        input.contentType,
+        input.contentLength,
+        `${context.sessionId}:${context.nonce}`,
+        input.idempotencyKey,
+        input.checksumSha256,
       )
     } else if (input.operation === "download-public" && input.path) {
-      result = {
-        downloadUrl: await createPublicArtifactDownloadUrl(
-          context.ownerEmail,
-          input.path
-        ),
-      }
+      result = await createPublicArtifactDownloadUrl(
+        context.ownerEmail,
+        input.path
+      )
+    } else if (
+      input.operation === "complete-upload" &&
+      input.reservationId
+    ) {
+      result = await completeWorkspaceUpload(
+        context.ownerEmail,
+        input.reservationId,
+      )
     } else {
       return NextResponse.json(
         { error: "Storage operation is missing required fields" },
@@ -141,7 +191,16 @@ export async function POST(request: NextRequest) {
       },
       {
         status:
-          error instanceof Error && error.message.startsWith("Invalid") ? 400 : 502,
+          error instanceof WorkspaceStorageAdmissionError
+            ? 429
+            : error instanceof WorkspaceStorageCompletionError
+              ? 409
+            : error instanceof Error && error.message.startsWith("Invalid")
+              ? 400
+              : 502,
+        ...(error instanceof WorkspaceStorageAdmissionError
+          ? { headers: { "Retry-After": "60" } }
+          : {}),
       }
     )
   }

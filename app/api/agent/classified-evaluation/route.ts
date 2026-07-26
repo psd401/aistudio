@@ -8,9 +8,22 @@ import {
 } from "@/lib/agent-services/classified-gateway"
 import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
+import {
+  acquireResourceAdmission,
+  finishResourceAdmission,
+} from "@/lib/resource-admission"
 
 const log = createLogger({ module: "agent-classified-evaluation-broker" })
 const MAX_REQUEST_BYTES = 256 * 1024
+const CLASSIFIED_GATEWAY_LIMITS = {
+  contextActive: 1,
+  ownerActive: 2,
+  globalActive: 24,
+  contextHourlyUnits: 30,
+  ownerHourlyUnits: 60,
+  globalHourlyUnits: 1_000,
+  leaseMs: 3 * 60 * 1000,
+} as const
 const RATING_VALUES = new Set([
   "Requires Improvement",
   "Fair",
@@ -151,11 +164,28 @@ export async function POST(request: NextRequest) {
     )
   }
 
+  const admission = await acquireResourceAdmission({
+    kind: "classified-gateway-calls",
+    ownerKey: context.ownerEmail,
+    contextKey: `${context.sessionId}:${context.nonce}`,
+    idempotencyKey: requestId,
+    units: 1,
+    limits: CLASSIFIED_GATEWAY_LIMITS,
+  })
+  if (!admission.allowed) {
+    return NextResponse.json(
+      { error: "Classified evaluation capacity is exhausted" },
+      { status: 429, headers: { "Retry-After": "60" } },
+    )
+  }
+
   try {
     const result = await classifiedGatewayDependencies.execute(
       { url: gatewayUrl.toString(), token: config.token },
       body.toolName,
-      args
+      args,
+      undefined,
+      request.signal,
     )
     log.info(
       "Owner-bound classified evaluation operation completed",
@@ -187,5 +217,21 @@ export async function POST(request: NextRequest) {
       { error: "Classified evaluation gateway failed" },
       { status: 502 }
     )
+  } finally {
+    try {
+      await finishResourceAdmission(admission.leaseId)
+    } catch (finishError) {
+      log.error(
+        "Classified gateway admission settlement failed",
+        sanitizeForLogging({
+          requestId,
+          leaseId: admission.leaseId,
+          error:
+            finishError instanceof Error
+              ? finishError.message
+              : String(finishError),
+        }),
+      )
+    }
   }
 }

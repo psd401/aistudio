@@ -54,11 +54,20 @@ import { createAgenticRepositoryContext } from '@/lib/assistant-architect/agenti
 import { updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { createMessageWithStats, updateConversationStats } from '@/lib/db/drizzle/nexus-messages';
 import type { AssistantArchitectMessageMetadata } from '@/lib/db/types/jsonb';
-import { buildCostRates } from '@/lib/agents/cost-rates';
 import {
+  buildCostRates,
+  conservativeAgenticReservationCents,
+  estimateUsageCostCents,
+  resolveTrustedAgenticTokenLimits,
+} from '@/lib/agents/cost-rates';
+import {
+  reconcileAgenticCost,
   releaseAgenticCost,
   reserveAgenticCost,
 } from '@/lib/agents/cost-budget';
+import {
+  AGENT_LIMIT_CEILINGS,
+} from '@/lib/agents/types';
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900;
@@ -172,7 +181,7 @@ interface AgenticConfig {
   enabledConnectorIds: string[];
   maxSteps: number;
   timeoutSeconds: number;
-  costCapCents: number | null;
+  costCapCents: number;
 }
 
 /**
@@ -1283,25 +1292,28 @@ async function persistAgenticResult(args: {
   usage?: AgenticFinishUsage;
   finishReason: string;
   steps: Array<{ toolCalls?: unknown[] }>;
-  /** Per-token USD rates used by the in-loop cost cap; null = model unpriced. */
-  costRates: { inputPerToken: number; outputPerToken: number } | null;
+  estimatedCostCents: number;
   modelRouting: AssistantArchitectRoutingMetadata;
   log: ReturnType<typeof createLogger>;
 }): Promise<void> {
-  const { context, drivingPromptId, agentStartTime, text, usage, finishReason, steps, costRates, modelRouting, log } = args;
+  const {
+    context,
+    drivingPromptId,
+    agentStartTime,
+    text,
+    usage,
+    finishReason,
+    steps,
+    estimatedCostCents,
+    modelRouting,
+    log,
+  } = args;
   const executionTimeMs = Date.now() - agentStartTime;
   const toolCallCount = steps.reduce((n, s) => n + (s.toolCalls?.length || 0), 0);
   // Persist the run's estimated spend (#926 — epic #922 completion audit): the
   // cap was enforced in-loop but the actual cost was never recorded for audit /
   // reconciliation. Same rates and formula as the adapter's cost predicate.
   // Null when the model is unpriced or usage was not reported.
-  const estimatedCostCents =
-    costRates && usage
-      ? Math.round(
-          (usage.promptTokens * costRates.inputPerToken +
-            usage.completionTokens * costRates.outputPerToken) * 100
-        )
-      : null;
   log.info('Agentic execution finished', {
     executionId: context.executionId,
     estimatedCostCents,
@@ -1619,7 +1631,7 @@ async function executeAgenticAssistant(args: {
   // the in-loop cap used. When the author configured a cap but the model has no
   // complete pricing, fail closed before streaming or tool execution.
   const costRates = buildCostRates(modelData);
-  if (typeof config.costCapCents === 'number' && config.costCapCents > 0 && costRates === null) {
+  if (costRates === null) {
     log.error('Agentic cost cap rejected unpriced model', {
       executionId: context.executionId,
       assistantName: architect.name,
@@ -1630,18 +1642,35 @@ async function executeAgenticAssistant(args: {
     throw ErrorFactories.invalidInput(
       'modelId',
       String(modelData.modelId),
-      'A model with complete input and output pricing is required when a cost cap is configured'
+      'A model with complete input and output pricing is required for agentic execution'
     );
   }
-  const costReservation =
-    typeof config.costCapCents === 'number' && config.costCapCents > 0
-      ? await reserveAgenticCost(
-          context.userId,
-          context.executionId,
-          config.costCapCents,
-        )
-      : undefined;
-  if (costReservation && !costReservation.allowed) {
+  const tokenLimits = resolveTrustedAgenticTokenLimits(
+    modelData,
+    AGENT_LIMIT_CEILINGS.maxOutputTokens,
+  );
+  if (tokenLimits === null) {
+    await closeAgentConnectorClients(resolved.connectorResults, requestId);
+    throw ErrorFactories.invalidInput(
+      'modelId',
+      String(modelData.modelId),
+      'A trusted model context-token ceiling is required for agentic execution'
+    );
+  }
+  const { contextTokens, maxOutputTokens } = tokenLimits;
+  const conservativeReservationCents =
+    conservativeAgenticReservationCents(
+      config.costCapCents,
+      contextTokens,
+      maxOutputTokens,
+      costRates,
+    );
+  const costReservation = await reserveAgenticCost(
+    context.userId,
+    context.executionId,
+    conservativeReservationCents,
+  );
+  if (!costReservation.allowed) {
     await closeAgentConnectorClients(resolved.connectorResults, requestId);
     throw ErrorFactories.invalidInput(
       'costCapCents',
@@ -1649,8 +1678,7 @@ async function executeAgenticAssistant(args: {
       `Agentic Assistant ${costReservation.reason.replace('_', ' ')} is exhausted`
     );
   }
-  const costLeaseId =
-    costReservation?.allowed === true ? costReservation.leaseId : undefined;
+  const costLeaseId = costReservation.leaseId;
   const connectorResults: McpConnectorToolsResult[] = resolved.connectorResults;
   let cleanedUp = false;
   const cleanupConnectors = async () => {
@@ -1659,14 +1687,12 @@ async function executeAgenticAssistant(args: {
     try {
       await closeAgentConnectorClients(connectorResults, requestId);
     } finally {
-      if (costLeaseId) {
-        await releaseAgenticCost(costLeaseId).catch((error: unknown) => {
+      await releaseAgenticCost(costLeaseId).catch((error: unknown) => {
           log.error('Failed to release agentic cost reservation', {
             executionId: context.executionId,
             error: error instanceof Error ? error.message : String(error),
           });
         });
-      }
     }
   };
 
@@ -1683,6 +1709,7 @@ async function executeAgenticAssistant(args: {
       // repository search. maxSteps drives the loop.
       tools: Object.keys(effectiveTools).length > 0 ? effectiveTools : undefined,
       maxSteps: config.maxSteps,
+      maxTokens: maxOutputTokens,
       // Per-run cost cap (#926): the streaming adapter stops the loop once the
       // estimated cost reaches the cap. Rates come from the model row (per-1k →
       // per-token). Missing pricing was rejected above when a cap is configured.
@@ -1697,9 +1724,25 @@ async function executeAgenticAssistant(args: {
         // promise (doing so blocked the response until the whole loop finished).
         onFinish: async ({ text, usage, finishReason, steps }) => {
           try {
+            const estimatedCostCents = usage
+              ? estimateUsageCostCents(costRates, usage)
+              : conservativeReservationCents;
+            const reconciliation = await reconcileAgenticCost(
+              costLeaseId,
+              estimatedCostCents,
+            );
+            if (!reconciliation.withinDeploymentBudget) {
+              log.error('Agentic actual cost exceeded the hourly platform budget', {
+                executionId: context.executionId,
+                deploymentHourlyCostCents:
+                  reconciliation.deploymentHourlyCostCents,
+                deploymentBudgetCents: reconciliation.deploymentBudgetCents,
+              });
+            }
             await persistAgenticResult({
               context, drivingPromptId: drivingPrompt.id, agentStartTime,
-              text: text || '', usage, finishReason, steps: steps || [], costRates,
+              text: text || '', usage, finishReason, steps: steps || [],
+              estimatedCostCents,
               modelRouting: modelRoute.metadata, log,
             });
           } catch (saveError) {

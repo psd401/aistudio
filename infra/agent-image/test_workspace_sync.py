@@ -28,6 +28,12 @@ import workspace_sync  # noqa: E402
 
 
 class _FakeResponse(io.BytesIO):
+    def __init__(self, body, content_length=None):
+        super().__init__(body)
+        self.headers = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
+
     def __enter__(self):
         return self
 
@@ -57,13 +63,17 @@ class PullTraversalTests(unittest.TestCase):
             self.assertEqual(payload, {"operation": "list"})
             return {"paths": keys}
 
-        def fake_download_url(relative):
+        def fake_download_spec(relative):
             downloaded.append((relative, str(self.root / relative)))
-            return f"https://download.invalid/{relative}"
+            return (
+                f"https://download.invalid/{relative}",
+                1,
+                {"Range": "bytes=0-0"},
+            )
 
         with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root), \
                 mock.patch.object(workspace_sync, "_broker_request", side_effect=fake_broker), \
-                mock.patch.object(workspace_sync, "_download_url", side_effect=fake_download_url), \
+                mock.patch.object(workspace_sync, "_download_spec", side_effect=fake_download_spec), \
                 mock.patch.object(
                     workspace_sync.urllib.request,
                     "urlopen",
@@ -149,21 +159,219 @@ class PullTraversalTests(unittest.TestCase):
         authority = self.root.parent / "request-proof-key"
         authority.write_text("do-not-upload")
         (self.root / "memory-link").symlink_to(authority)
-        uploads = []
-
-        def fake_urlopen(request, **_kwargs):
-            uploads.append(getattr(request, "data", b""))
-            return _FakeResponse(b"")
+        broker = mock.Mock()
 
         with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root), \
                 mock.patch.object(workspace_sync.os, "geteuid", return_value=1000), \
-                mock.patch.object(workspace_sync, "_upload_url", return_value="https://upload.invalid"), \
-                mock.patch.object(workspace_sync.urllib.request, "urlopen", side_effect=fake_urlopen):
+                mock.patch.object(workspace_sync, "_broker_request", broker):
             count = workspace_sync.push_workspace("userA")
 
         self.assertEqual(count, 0)
-        self.assertEqual(uploads, [])
+        broker.assert_not_called()
         self.assertEqual(authority.read_text(), "do-not-upload")
+
+
+class BoundedTransferTests(unittest.TestCase):
+    def setUp(self):
+        td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, td, ignore_errors=True)
+        self.root = Path(td).resolve()
+
+    def test_exact_download_succeeds_and_one_over_is_deleted(self):
+        exact = self.root / "exact.bin"
+        with mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            return_value=_FakeResponse(b"abcd", 4),
+        ):
+            workspace_sync._download_bounded(
+                "https://download.invalid/x",
+                exact,
+                4,
+                {"Range": "bytes=0-3"},
+            )
+        self.assertEqual(exact.read_bytes(), b"abcd")
+
+        oversized = self.root / "oversized.bin"
+        with mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            return_value=_FakeResponse(b"abcde"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exceeded"):
+                workspace_sync._download_bounded(
+                    "https://download.invalid/x",
+                    oversized,
+                    4,
+                    {"Range": "bytes=0-3"},
+                )
+        self.assertFalse(oversized.exists())
+
+    def test_short_workspace_download_preserves_existing_destination(self):
+        destination = self.root / "existing.bin"
+        destination.write_bytes(b"existing")
+        with mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            return_value=_FakeResponse(b"abc", 4),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "ended before"):
+                workspace_sync._download_workspace_file(
+                    "https://download.invalid/x",
+                    destination,
+                    self.root,
+                    4,
+                    {"Range": "bytes=0-3"},
+                )
+        self.assertEqual(destination.read_bytes(), b"existing")
+
+    def test_push_never_follows_model_created_symlink(self):
+        secret = self.root / "secret"
+        secret.write_text("authority-token")
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        (workspace / "leak").symlink_to(secret)
+        broker = mock.Mock()
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", workspace), \
+                mock.patch.object(workspace_sync, "_broker_request", broker):
+            self.assertEqual(workspace_sync.push_workspace("owner"), 0)
+        broker.assert_not_called()
+
+    def test_cold_start_unchanged_response_avoids_upload_sink(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        (workspace / "note.txt").write_bytes(b"same")
+
+        # Assert unchanged handling, without coupling this test to a literal
+        # digest value from the implementation.
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", workspace), \
+                mock.patch.object(workspace_sync, "_broker_request") as broker_mock, \
+                mock.patch.object(workspace_sync, "_stream_upload") as sink:
+            broker_mock.return_value = {
+                "unchanged": True,
+                "key": "owner/note.txt",
+            }
+            self.assertEqual(workspace_sync.push_workspace("owner"), 1)
+        sink.assert_not_called()
+        payload = broker_mock.call_args.args[0]
+        self.assertEqual(payload["operation"], "upload")
+        self.assertEqual(payload["contentLength"], 4)
+        self.assertEqual(len(payload["checksumSha256"]), 44)
+
+    def test_upload_cache_is_isolated_by_signed_workspace_prefix(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        note = workspace / "note.txt"
+        note.write_bytes(b"same")
+        metadata = note.stat()
+        workspace_sync._uploaded_state.clear()
+        workspace_sync._uploaded_state[("owner-a", "note.txt")] = (
+            metadata.st_size,
+            metadata.st_mtime_ns,
+        )
+        self.addCleanup(workspace_sync._uploaded_state.clear)
+
+        prepared = (
+            "https://upload.invalid/note",
+            "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+            {
+                "Content-Length": "4",
+                "Content-Type": "application/octet-stream",
+                "x-amz-checksum-sha256":
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            },
+        )
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", workspace), \
+                mock.patch.object(
+                    workspace_sync, "_upload_spec", return_value=prepared
+                ) as prepare, \
+                mock.patch.object(workspace_sync, "_stream_upload") as sink, \
+                mock.patch.object(
+                    workspace_sync,
+                    "_broker_request",
+                    return_value={"key": "owner-b/note.txt"},
+                ):
+            self.assertEqual(workspace_sync.push_workspace("owner-b"), 1)
+        prepare.assert_called_once()
+        sink.assert_called_once()
+        self.assertEqual(
+            workspace_sync._uploaded_state[("owner-b", "note.txt")],
+            (metadata.st_size, metadata.st_mtime_ns),
+        )
+
+    def test_upload_spec_rejects_untrusted_or_mismatched_headers(self):
+        valid = {
+            "uploadUrl": "https://upload.invalid/note",
+            "reservationId": "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+            "requiredHeaders": {
+                "Content-Length": "4",
+                "Content-Type": "application/octet-stream",
+                "x-amz-checksum-sha256":
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            },
+        }
+        with mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            return_value=valid,
+        ):
+            self.assertEqual(
+                workspace_sync._upload_spec(
+                    "note.txt",
+                    4,
+                    "idempotency",
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                ),
+                (
+                    valid["uploadUrl"],
+                    valid["reservationId"],
+                    valid["requiredHeaders"],
+                ),
+            )
+        for override in (
+            {
+                **valid,
+                "requiredHeaders": {
+                    **valid["requiredHeaders"],
+                    "X-Injected": "unsafe",
+                },
+            },
+            {
+                **valid,
+                "requiredHeaders": {
+                    **valid["requiredHeaders"],
+                    "Content-Length": "5",
+                },
+            },
+            {
+                **valid,
+                "requiredHeaders": {
+                    **valid["requiredHeaders"],
+                    "Content-Type": "text/html",
+                },
+            },
+            {
+                **valid,
+                "requiredHeaders": {
+                    **valid["requiredHeaders"],
+                    "x-amz-checksum-sha256":
+                        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+                },
+            },
+        ):
+            with self.subTest(headers=override["requiredHeaders"]), \
+                    mock.patch.object(
+                        workspace_sync,
+                        "_broker_request",
+                        return_value=override,
+                    ):
+                with self.assertRaisesRegex(RuntimeError, "bounded upload"):
+                    workspace_sync._upload_spec(
+                        "note.txt",
+                        4,
+                        "idempotency",
+                        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                    )
 
 
 class PeriodicPushLifecycleTests(unittest.TestCase):

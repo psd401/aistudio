@@ -151,7 +151,7 @@ export async function publishAssistantArchitectAsSkillAction(
     // (name, owner_user_id) partial unique index for draft scope so republishing
     // the same assistant bumps the version in place (matches the infra author
     // flow). updated_at must be set explicitly — no DB trigger.
-    const skillId = await executeTransaction(async (tx) => {
+    const skill = await executeTransaction(async (tx) => {
       const [row] = await tx
         .insert(psdAgentSkills)
         .values({
@@ -170,19 +170,27 @@ export async function publishAssistantArchitectAsSkillAction(
             s3Key: draftPrefix,
             summary: serialized.summary,
             scanStatus: "pending",
+            scanLeaseId: null,
+            scanStartedAt: null,
             allowedTools: serialized.allowedTools,
             version: sql`${psdAgentSkills.version} + 1`,
             updatedAt: new Date(),
           },
         })
-        .returning({ id: psdAgentSkills.id })
+        .returning({
+          id: psdAgentSkills.id,
+          version: psdAgentSkills.version,
+        })
 
       // Resolve id when ON CONFLICT did not return (defensive — returning() is
       // populated on both insert and update for postgres.js, but guard anyway).
-      let resolvedId = row?.id
-      if (!resolvedId) {
+      let resolved = row
+      if (!resolved) {
         const [existing] = await tx
-          .select({ id: psdAgentSkills.id })
+          .select({
+            id: psdAgentSkills.id,
+            version: psdAgentSkills.version,
+          })
           .from(psdAgentSkills)
           .where(
             and(
@@ -192,10 +200,10 @@ export async function publishAssistantArchitectAsSkillAction(
             )
           )
           .limit(1)
-        resolvedId = existing?.id
+        resolved = existing
       }
 
-      if (!resolvedId) {
+      if (!resolved) {
         throw ErrorFactories.dbQueryFailed(
           "register published skill",
           new Error("No skill id returned after upsert")
@@ -203,7 +211,7 @@ export async function publishAssistantArchitectAsSkillAction(
       }
 
       await tx.insert(psdAgentSkillAudit).values({
-        skillId: resolvedId,
+        skillId: resolved.id,
         action: "published_from_architect",
         actorUserId: ownerUserId,
         details: {
@@ -217,24 +225,27 @@ export async function publishAssistantArchitectAsSkillAction(
         },
       })
 
-      return resolvedId
+      return resolved
     }, "publishAssistantArchitectAsSkill")
 
     // 5. Best-effort scan invoke (non-fatal). Outside the transaction.
     const scanQueued = await invokeSkillScan({
-      skillId,
+      skillId: skill.id,
+      ownerKey: ownerEmail,
+      version: skill.version,
       draftPrefix,
       destinationPrefix,
+      idempotencyKey: `${skill.id}:${skill.version}`,
     })
 
     timer({ status: "success" })
     log.info(
       "Assistant published as skill",
-      sanitizeForLogging({ assistantId, skillId, slug: serialized.slug, scanQueued })
+      sanitizeForLogging({ assistantId, skillId: skill.id, slug: serialized.slug, scanQueued })
     )
 
     return createSuccess(
-      { skillId, slug: serialized.slug, scanQueued },
+      { skillId: skill.id, slug: serialized.slug, scanQueued },
       scanQueued
         ? "Published as a skill and queued for review."
         : "Published as a draft skill. An administrator will review it."

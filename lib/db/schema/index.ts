@@ -59,6 +59,8 @@ export * from "./tables/nexus-user-preferences";
 export * from "./tables/nexus-provider-metrics";
 export * from "./tables/deep-research-reservations";
 export * from "./tables/agentic-cost-reservations";
+export * from "./tables/resource-admission-leases";
+export * from "./tables/workspace-upload-reservations";
 export * from "./tables/nexus-repository-bindings";
 
 // ============================================

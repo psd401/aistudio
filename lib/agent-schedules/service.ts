@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb"
 import {
   DeleteCommand,
@@ -10,6 +10,8 @@ import {
   type PutCommandOutput,
   QueryCommand,
   type QueryCommandOutput,
+  TransactWriteCommand,
+  type TransactWriteCommandOutput,
 } from "@aws-sdk/lib-dynamodb"
 import {
   CreateScheduleCommand,
@@ -94,6 +96,7 @@ export interface AgentScheduleDynamoClient {
   send(command: GetCommand): Promise<GetCommandOutput>
   send(command: PutCommand): Promise<PutCommandOutput>
   send(command: DeleteCommand): Promise<DeleteCommandOutput>
+  send(command: TransactWriteCommand): Promise<TransactWriteCommandOutput>
 }
 
 export interface AgentScheduleServiceConfig {
@@ -155,6 +158,17 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function normalizeOwnerEmail(ownerEmail: string): string {
   return ownerEmail.trim().toLowerCase()
+}
+
+export function scheduleTransactionToken(
+  operation: "create" | "update" | "delete" | "reconcile",
+  scheduleId: string,
+  version?: number,
+): string {
+  return createHash("sha256")
+    .update(`${operation}:${scheduleId}:${version ?? ""}`)
+    .digest("hex")
+    .slice(0, 36)
 }
 
 function publicSchedule(record: AgentScheduleRecord): PublicAgentSchedule {
@@ -227,6 +241,24 @@ export class AgentScheduleService {
 
   private scheduleName(scheduleId: string): string {
     return `${this.config.scheduleGroup}-${scheduleId}`.slice(0, 64)
+  }
+
+  private ownerQuotaKey(ownerEmail: string): {
+    userId: string
+    scheduleId: string
+  } {
+    return { userId: ownerEmail, scheduleId: "__quota__" }
+  }
+
+  private ownerNameKey(ownerEmail: string, name: string): {
+    userId: string
+    scheduleId: string
+  } {
+    const digest = createHash("sha256")
+      .update(name.trim().toLowerCase())
+      .digest("hex")
+      .slice(0, 32)
+    return { userId: ownerEmail, scheduleId: `__name__${digest}` }
   }
 
   private targetInput(
@@ -302,17 +334,183 @@ export class AgentScheduleService {
     return parseRecord(response.Item, ownerEmail, scheduleId)
   }
 
+  private async ownerItems(
+    ownerEmail: string,
+  ): Promise<Record<string, unknown>[]> {
+    const items: Record<string, unknown>[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.dynamo.send(
+        new QueryCommand({
+          TableName: this.config.schedulesTable,
+          KeyConditionExpression: "userId = :owner",
+          ExpressionAttributeValues: { ":owner": ownerEmail },
+          ConsistentRead: true,
+          ExclusiveStartKey: exclusiveStartKey,
+        })
+      )
+      items.push(
+        ...((response.Items ?? []).filter(
+          (item): item is Record<string, unknown> =>
+            isObject(item) &&
+            typeof item.scheduleId === "string",
+        )),
+      )
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return items
+  }
+
+  /**
+   * Backfill quota/name metadata for owners whose schedules predate the
+   * transactional admission scheme. New mutations require the reconciled
+   * marker, so concurrent creates cannot increment an unseeded zero counter.
+   */
+  private async ensureOwnerMetadata(ownerEmail: string): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const items = await this.ownerItems(ownerEmail)
+      const records = items
+        .filter(
+          (item) =>
+            typeof item.scheduleId === "string" &&
+            !item.scheduleId.startsWith("__"),
+        )
+        .map((item) => parseRecord(item, ownerEmail))
+      const quota = items.find((item) => item.scheduleId === "__quota__")
+      const guards = new Map(
+        items
+          .filter(
+            (item) =>
+              typeof item.scheduleId === "string" &&
+              item.scheduleId.startsWith("__name__"),
+          )
+          .map((item) => [item.scheduleId as string, item]),
+      )
+      const transactItems: NonNullable<
+        ConstructorParameters<typeof TransactWriteCommand>[0]["TransactItems"]
+      > = []
+      const quotaActiveCount =
+        typeof quota?.activeCount === "number" &&
+        Number.isSafeInteger(quota.activeCount)
+          ? quota.activeCount
+          : null
+      if (
+        quota?.reconciled !== true ||
+        quotaActiveCount !== records.length
+      ) {
+        const alreadyReconciled = quota?.reconciled === true
+        transactItems.push({
+          Put: {
+            TableName: this.config.schedulesTable,
+            Item: {
+              ...this.ownerQuotaKey(ownerEmail),
+              activeCount: records.length,
+              reconciled: true,
+            },
+            ConditionExpression: alreadyReconciled
+              ? quotaActiveCount === null
+                ? "reconciled = :true AND attribute_not_exists(activeCount)"
+                : "reconciled = :true AND activeCount = :previous"
+              : "attribute_not_exists(reconciled) OR reconciled <> :true",
+            ExpressionAttributeValues:
+              alreadyReconciled && quotaActiveCount !== null
+                ? { ":true": true, ":previous": quotaActiveCount }
+                : { ":true": true },
+          },
+        })
+      }
+      const plannedGuards = new Map<string, string>()
+      for (const record of records) {
+        const key = this.ownerNameKey(ownerEmail, record.name)
+        const existingTarget = plannedGuards.get(key.scheduleId)
+        if (existingTarget && existingTarget !== record.scheduleId) {
+          throw new AgentScheduleConflictError(
+            "Legacy schedules contain duplicate names",
+          )
+        }
+        plannedGuards.set(key.scheduleId, record.scheduleId)
+        const existingGuard = guards.get(key.scheduleId)
+        if (!existingGuard) {
+          transactItems.push({
+            Put: {
+              TableName: this.config.schedulesTable,
+              Item: { ...key, targetScheduleId: record.scheduleId },
+              ConditionExpression:
+                "attribute_not_exists(userId) AND attribute_not_exists(scheduleId)",
+            },
+          })
+        } else if (existingGuard.targetScheduleId !== record.scheduleId) {
+          const previousTarget = existingGuard.targetScheduleId
+          transactItems.push({
+            Put: {
+              TableName: this.config.schedulesTable,
+              Item: { ...key, targetScheduleId: record.scheduleId },
+              ConditionExpression:
+                typeof previousTarget === "string"
+                  ? "targetScheduleId = :previous"
+                  : "attribute_not_exists(targetScheduleId)",
+              ...(typeof previousTarget === "string"
+                ? {
+                    ExpressionAttributeValues: {
+                      ":previous": previousTarget,
+                    },
+                  }
+                : {}),
+            },
+          })
+        }
+      }
+      for (const [guardId, guard] of guards) {
+        if (plannedGuards.has(guardId)) continue
+        transactItems.push({
+          Delete: {
+            TableName: this.config.schedulesTable,
+            Key: { userId: ownerEmail, scheduleId: guardId },
+            ...(typeof guard.targetScheduleId === "string"
+              ? {
+                  ConditionExpression: "targetScheduleId = :previous",
+                  ExpressionAttributeValues: {
+                    ":previous": guard.targetScheduleId,
+                  },
+                }
+              : {}),
+          },
+        })
+      }
+      if (transactItems.length === 0) return
+      try {
+        await this.dynamo.send(
+          new TransactWriteCommand({
+            ClientRequestToken: scheduleTransactionToken(
+              "reconcile",
+              ownerEmail,
+              attempt,
+            ),
+            TransactItems: transactItems,
+          }),
+        )
+        return
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.name === "TransactionCanceledException" &&
+          attempt < 2
+        ) {
+          continue
+        }
+        throw error
+      }
+    }
+  }
+
   async list(owner: string): Promise<PublicAgentSchedule[]> {
     const ownerEmail = normalizeOwnerEmail(owner)
-    const response = await this.dynamo.send(
-      new QueryCommand({
-        TableName: this.config.schedulesTable,
-        KeyConditionExpression: "userId = :owner",
-        ExpressionAttributeValues: { ":owner": ownerEmail },
-        ConsistentRead: true,
-      })
-    )
-    return (response.Items ?? [])
+    return (await this.ownerItems(ownerEmail))
+      .filter(
+        (item) =>
+          typeof item.scheduleId === "string" &&
+          !item.scheduleId.startsWith("__"),
+      )
       .map((item) => parseRecord(item, ownerEmail))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
       .map(publicSchedule)
@@ -332,16 +530,7 @@ export class AgentScheduleService {
       input.timezone ?? DEFAULT_TIMEZONE
     )
     const enabled = !parseDisabled(input.disabled)
-    const existing = await this.list(ownerEmail)
-    if (existing.length >= this.config.maxSchedulesPerOwner) {
-      throw new AgentScheduleQuotaError(this.config.maxSchedulesPerOwner)
-    }
-    if (existing.some((schedule) => schedule.name === name)) {
-      throw new AgentScheduleConflictError(
-        "A schedule with this name already exists"
-      )
-    }
-
+    await this.ensureOwnerMetadata(ownerEmail)
     const profile = await this.trustedOwnerProfile(ownerEmail)
     const scheduleId = randomUUID()
     const version = 1
@@ -383,11 +572,49 @@ export class AgentScheduleService {
     )
     try {
       await this.dynamo.send(
-        new PutCommand({
-          TableName: this.config.schedulesTable,
-          Item: record,
-          ConditionExpression:
-            "attribute_not_exists(userId) AND attribute_not_exists(scheduleId)",
+        new TransactWriteCommand({
+          ClientRequestToken: scheduleTransactionToken(
+            "create",
+            scheduleId,
+            version,
+          ),
+          TransactItems: [
+            {
+              Update: {
+                TableName: this.config.schedulesTable,
+                Key: this.ownerQuotaKey(ownerEmail),
+                UpdateExpression:
+                  "SET activeCount = if_not_exists(activeCount, :zero) + :one",
+                ConditionExpression:
+                  "reconciled = :true AND activeCount < :maximum",
+                ExpressionAttributeValues: {
+                  ":zero": 0,
+                  ":one": 1,
+                  ":maximum": this.config.maxSchedulesPerOwner,
+                  ":true": true,
+                },
+              },
+            },
+            {
+              Put: {
+                TableName: this.config.schedulesTable,
+                Item: {
+                  ...this.ownerNameKey(ownerEmail, name),
+                  targetScheduleId: scheduleId,
+                },
+                ConditionExpression:
+                  "attribute_not_exists(userId) AND attribute_not_exists(scheduleId)",
+              },
+            },
+            {
+              Put: {
+                TableName: this.config.schedulesTable,
+                Item: record,
+                ConditionExpression:
+                  "attribute_not_exists(userId) AND attribute_not_exists(scheduleId)",
+              },
+            },
+          ],
         })
       )
     } catch (error) {
@@ -403,6 +630,12 @@ export class AgentScheduleService {
           "Schedule persistence failed and scheduler rollback also failed"
         )
       }
+      if (
+        error instanceof Error &&
+        error.name === "TransactionCanceledException"
+      ) {
+        throw new AgentScheduleQuotaError(this.config.maxSchedulesPerOwner)
+      }
       throw error
     }
     return publicSchedule(record)
@@ -414,6 +647,7 @@ export class AgentScheduleService {
   ): Promise<PublicAgentSchedule> {
     const ownerEmail = normalizeOwnerEmail(owner)
     const scheduleId = validateScheduleId(input.scheduleId)
+    await this.ensureOwnerMetadata(ownerEmail)
     const current = await this.getRecord(ownerEmail, scheduleId)
     if (
       input.name === undefined &&
@@ -459,16 +693,59 @@ export class AgentScheduleService {
       enabled,
       updatedAt: new Date().toISOString(),
     }
-    await this.dynamo.send(
-      new PutCommand({
-        TableName: this.config.schedulesTable,
-        Item: updated,
-        ConditionExpression:
-          "attribute_exists(userId) AND attribute_exists(scheduleId) AND #version = :version",
-        ExpressionAttributeNames: { "#version": "version" },
-        ExpressionAttributeValues: { ":version": current.version },
-      })
-    )
+    if (name === current.name) {
+      await this.dynamo.send(
+        new PutCommand({
+          TableName: this.config.schedulesTable,
+          Item: updated,
+          ConditionExpression:
+            "attribute_exists(userId) AND attribute_exists(scheduleId) AND #version = :version",
+          ExpressionAttributeNames: { "#version": "version" },
+          ExpressionAttributeValues: { ":version": current.version },
+        })
+      )
+    } else {
+      await this.dynamo.send(
+        new TransactWriteCommand({
+          ClientRequestToken: scheduleTransactionToken(
+            "update",
+            scheduleId,
+            updated.version,
+          ),
+          TransactItems: [
+            {
+              Delete: {
+                TableName: this.config.schedulesTable,
+                Key: this.ownerNameKey(ownerEmail, current.name),
+                ConditionExpression: "targetScheduleId = :scheduleId",
+                ExpressionAttributeValues: { ":scheduleId": scheduleId },
+              },
+            },
+            {
+              Put: {
+                TableName: this.config.schedulesTable,
+                Item: {
+                  ...this.ownerNameKey(ownerEmail, name),
+                  targetScheduleId: scheduleId,
+                },
+                ConditionExpression:
+                  "attribute_not_exists(userId) AND attribute_not_exists(scheduleId)",
+              },
+            },
+            {
+              Put: {
+                TableName: this.config.schedulesTable,
+                Item: updated,
+                ConditionExpression:
+                  "attribute_exists(userId) AND attribute_exists(scheduleId) AND #version = :version",
+                ExpressionAttributeNames: { "#version": "version" },
+                ExpressionAttributeValues: { ":version": current.version },
+              },
+            },
+          ],
+        })
+      )
+    }
     try {
       await this.scheduler.send(
         new UpdateScheduleCommand({
@@ -500,6 +777,7 @@ export class AgentScheduleService {
   async delete(owner: string, rawScheduleId: unknown): Promise<string> {
     const ownerEmail = normalizeOwnerEmail(owner)
     const scheduleId = validateScheduleId(rawScheduleId)
+    await this.ensureOwnerMetadata(ownerEmail)
     const current = await this.getRecord(ownerEmail, scheduleId)
     try {
       await this.scheduler.send(
@@ -509,15 +787,45 @@ export class AgentScheduleService {
         })
       )
     } catch (error) {
-      if (!(error instanceof ResourceNotFoundException)) throw error
+      if (!(error instanceof ResourceNotFoundException)) {
+        throw new AgentScheduleSyncError(
+          "Scheduler cleanup failed; retry the delete",
+        )
+      }
     }
     await this.dynamo.send(
-      new DeleteCommand({
-        TableName: this.config.schedulesTable,
-        Key: { userId: ownerEmail, scheduleId },
-        ConditionExpression: "#version = :version",
-        ExpressionAttributeNames: { "#version": "version" },
-        ExpressionAttributeValues: { ":version": current.version },
+      new TransactWriteCommand({
+        ClientRequestToken: scheduleTransactionToken(
+          "delete",
+          scheduleId,
+          current.version,
+        ),
+        TransactItems: [
+          {
+            Delete: {
+              TableName: this.config.schedulesTable,
+              Key: { userId: ownerEmail, scheduleId },
+              ConditionExpression: "#version = :version",
+              ExpressionAttributeNames: { "#version": "version" },
+              ExpressionAttributeValues: { ":version": current.version },
+            },
+          },
+          {
+            Delete: {
+              TableName: this.config.schedulesTable,
+              Key: this.ownerNameKey(ownerEmail, current.name),
+            },
+          },
+          {
+            Update: {
+              TableName: this.config.schedulesTable,
+              Key: this.ownerQuotaKey(ownerEmail),
+              UpdateExpression: "SET activeCount = activeCount - :one",
+              ConditionExpression: "activeCount >= :one",
+              ExpressionAttributeValues: { ":one": 1 },
+            },
+          },
+        ],
       })
     )
     return scheduleId

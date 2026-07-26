@@ -216,7 +216,30 @@ export class AgentPlatformStack extends cdk.Stack {
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: environment !== 'prod',
-      // S3 Intelligent Tiering for cost optimization (no expiration — keep forever).
+      lifecycleRules: [
+        {
+          id: 'expire-unverified-upload-staging',
+          prefix: '.upload-staging/',
+          expiration: cdk.Duration.days(1),
+          noncurrentVersionExpiration: cdk.Duration.days(1),
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        },
+        {
+          id: 'expire-public-artifacts',
+          prefix: 'public-images/',
+          expiration: cdk.Duration.days(30),
+          noncurrentVersionExpiration: cdk.Duration.days(7),
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        },
+        {
+          id: 'cleanup-private-workspace-versions',
+          tagFilters: { Scope: 'private' },
+          noncurrentVersionExpiration: cdk.Duration.days(30),
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        },
+      ],
+      // S3 Intelligent Tiering reduces storage cost for long-lived private
+      // workspace memory. Public/staging data use the explicit expirations.
       // Archive Access (90d): objects retrievable in minutes.
       // Deep Archive (180d): objects require a Restore request (12-48 hours).
       // If ad-hoc access to older workspace data is needed (audits, replays),
@@ -2145,6 +2168,7 @@ export class AgentPlatformStack extends cdk.Stack {
         // Override knob — set to 'us.anthropic.claude-3-5-haiku-...' to
         // fall back from Nova Micro without redeploy.
         TRIAGE_LLM_MODEL_ID: 'us.amazon.nova-micro-v1:0',
+        AGENT_INVOCATION_SIGNING_SECRET_ID: agentInvocationSigningSecret.secretName,
         // AGENTCORE_RUNTIME_ID intentionally NOT set — resolved from SSM
         // at runtime (same pattern as router/cron Lambdas).
         AWS_ACCOUNT: this.account,
@@ -2158,6 +2182,7 @@ export class AgentPlatformStack extends cdk.Stack {
     });
     cdk.Tags.of(triageWorkerLambda).add('Environment', environment);
     cdk.Tags.of(triageWorkerLambda).add('ManagedBy', 'cdk');
+    agentInvocationSigningSecret.grantRead(triageWorkerRole);
 
     // Worker consumes the FIFO queue (SqsEventSource grants consume) and
     // re-enqueues sweep continuations (needs send).

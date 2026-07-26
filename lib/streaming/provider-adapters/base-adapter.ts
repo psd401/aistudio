@@ -283,6 +283,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
         tools: enhancedConfig.tools,
         toolChoice: enhancedConfig.toolChoice,
         temperature: enhancedConfig.temperature,
+        maxOutputTokens: enhancedConfig.maxTokens,
         ...(abortSignal && { abortSignal }),
         ...(stopConditions.length > 0 && { stopWhen: stopConditions }),
         ...(enhancedConfig.experimental_telemetry && enhancedConfig.experimental_telemetry.isEnabled && {

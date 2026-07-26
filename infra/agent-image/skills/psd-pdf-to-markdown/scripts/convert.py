@@ -171,7 +171,7 @@ def _download_s3(key: str, dest: Path, user_email: str) -> None:
         sys.path.insert(0, "/app")
         from artifact_publisher import download_public_artifact
         _ = user_email
-        download_public_artifact(key.lstrip("/"), dest)
+        download_public_artifact(key.lstrip("/"), dest, MAX_PDF_BYTES)
     except Exception as exc:
         _fail(f"failed to download owner artifact: {exc}", "upstream_error")
 

@@ -5,6 +5,20 @@ export const CLASSIFIED_EVALUATION_TOOLS = new Set([
   "list_supervised_employees",
   "submit_classified_evaluation",
 ])
+export const CLASSIFIED_SSE_LIMITS = {
+  rawBytes: 4 * 1024 * 1024,
+  chunkBytes: 256 * 1024,
+  bufferBytes: 256 * 1024,
+  frameBytes: 128 * 1024,
+  lineBytes: 64 * 1024,
+  dataBytes: 128 * 1024,
+  frames: 1_000,
+  resultBytes: 256 * 1024,
+  headerTimeoutMs: 10_000,
+  idleTimeoutMs: 30_000,
+  requestTimeoutMs: 60_000,
+  totalTimeoutMs: 150_000,
+} as const
 
 interface SseFrame {
   event: string
@@ -37,14 +51,23 @@ export function parseSseFrames(buffer: string): {
   frames: SseFrame[]
   rest: string
 } {
+  if (Buffer.byteLength(buffer, "utf8") > CLASSIFIED_SSE_LIMITS.bufferBytes) {
+    throw new ClassifiedGatewayError("Gateway SSE buffer is too large", "transport")
+  }
   const parts = buffer.replace(/\r\n/g, "\n").split("\n\n")
   const rest = parts.pop() ?? ""
   const frames: SseFrame[] = []
   for (const part of parts) {
     if (!part.trim()) continue
+    if (Buffer.byteLength(part, "utf8") > CLASSIFIED_SSE_LIMITS.frameBytes) {
+      throw new ClassifiedGatewayError("Gateway SSE frame is too large", "transport")
+    }
     let event = "message"
     const data: string[] = []
     for (const line of part.split("\n")) {
+      if (Buffer.byteLength(line, "utf8") > CLASSIFIED_SSE_LIMITS.lineBytes) {
+        throw new ClassifiedGatewayError("Gateway SSE line is too large", "transport")
+      }
       if (line.startsWith(":")) continue
       if (line.startsWith("event:")) {
         event = line.slice("event:".length).trim()
@@ -52,7 +75,14 @@ export function parseSseFrames(buffer: string): {
         data.push(line.slice("data:".length).replace(/^ /, ""))
       }
     }
-    frames.push({ event, data: data.join("\n") })
+    const joinedData = data.join("\n")
+    if (Buffer.byteLength(joinedData, "utf8") > CLASSIFIED_SSE_LIMITS.dataBytes) {
+      throw new ClassifiedGatewayError("Gateway SSE data is too large", "transport")
+    }
+    frames.push({ event, data: joinedData })
+    if (frames.length > CLASSIFIED_SSE_LIMITS.frames) {
+      throw new ClassifiedGatewayError("Gateway sent too many SSE frames", "transport")
+    }
   }
   return { frames, rest }
 }
@@ -95,7 +125,16 @@ export function unwrapClassifiedToolResult(result: unknown): {
       ? (value.content[0] as { text?: unknown })
       : null
   if (typeof first?.text !== "string") {
+    if (
+      Buffer.byteLength(JSON.stringify(result), "utf8") >
+      CLASSIFIED_SSE_LIMITS.resultBytes
+    ) {
+      throw new ClassifiedGatewayError("Gateway result is too large", "transport")
+    }
     return { isError: Boolean(value.isError), data: result }
+  }
+  if (Buffer.byteLength(first.text, "utf8") > CLASSIFIED_SSE_LIMITS.resultBytes) {
+    throw new ClassifiedGatewayError("Gateway result is too large", "transport")
   }
   try {
     return {
@@ -114,15 +153,46 @@ export class ClassifiedGatewayClient {
   private endpointResolve: (() => void) | null = null
   private endpointReject: ((error: Error) => void) | null = null
   private nextId = 1
+  private streamReader: ReadableStreamDefaultReader<Uint8Array> | null = null
+  private readonly totalTimer: ReturnType<typeof setTimeout>
+  private readonly externalAbort: (() => void) | null
+  private readonly externalSignal: AbortSignal | undefined
 
   constructor(
     private readonly url: string,
     private readonly token: string,
-    private readonly fetchImpl: typeof safeFetch = safeFetch
-  ) {}
+    private readonly fetchImpl: typeof safeFetch = safeFetch,
+    externalSignal?: AbortSignal,
+  ) {
+    this.externalSignal = externalSignal
+    this.totalTimer = setTimeout(
+      () => {
+        const error = new ClassifiedGatewayError(
+          "Gateway request exceeded its total timeout",
+          "transport",
+        )
+        this.controller.abort(error)
+        void this.streamReader?.cancel(error)
+        this.failAll(error)
+      },
+      CLASSIFIED_SSE_LIMITS.totalTimeoutMs,
+    )
+    this.externalAbort = externalSignal
+      ? () => this.controller.abort(externalSignal.reason)
+      : null
+    if (externalSignal?.aborted) {
+      this.controller.abort(externalSignal.reason)
+    } else if (externalSignal && this.externalAbort) {
+      externalSignal.addEventListener("abort", this.externalAbort, { once: true })
+    }
+  }
 
   async connect(): Promise<void> {
     let response: Response
+    const headerTimer = setTimeout(
+      () => this.controller.abort("classified gateway header timeout"),
+      CLASSIFIED_SSE_LIMITS.headerTimeoutMs,
+    )
     try {
       response = await this.fetchImpl(this.url, {
         method: "GET",
@@ -139,6 +209,8 @@ export class ClassifiedGatewayClient {
         }`,
         "transport"
       )
+    } finally {
+      clearTimeout(headerTimer)
     }
     if (!response.ok || !response.body) {
       throw new ClassifiedGatewayError(
@@ -146,7 +218,22 @@ export class ClassifiedGatewayClient {
         "transport"
       )
     }
-    void this.consume(response.body.getReader()).catch((error) => {
+    const contentType = response.headers.get("content-type")
+    const declaredLength = response.headers.get("content-length")
+    if (
+      contentType?.split(";", 1)[0]?.trim().toLowerCase() !==
+        "text/event-stream" ||
+      (declaredLength !== null &&
+        (!/^\d+$/.test(declaredLength) ||
+          Number(declaredLength) > CLASSIFIED_SSE_LIMITS.rawBytes))
+    ) {
+      throw new ClassifiedGatewayError(
+        "Gateway returned an invalid or oversized SSE stream",
+        "transport",
+      )
+    }
+    this.streamReader = response.body.getReader()
+    void this.consume(this.streamReader).catch((error) => {
       this.failAll(
         error instanceof Error
           ? error
@@ -159,19 +246,47 @@ export class ClassifiedGatewayClient {
   private async consume(
     reader: ReadableStreamDefaultReader<Uint8Array>
   ): Promise<void> {
-    const decoder = new TextDecoder()
+    const decoder = new TextDecoder("utf-8", { fatal: true })
     let buffer = ""
+    let rawBytes = 0
+    let frameCount = 0
     for (;;) {
-      const { value, done } = await reader.read()
+      let idleTimer: ReturnType<typeof setTimeout> | undefined
+      const read = reader.read()
+      const timeout = new Promise<never>((_, reject) => {
+        idleTimer = setTimeout(() => {
+          this.controller.abort("classified gateway idle timeout")
+          void reader.cancel("classified gateway idle timeout")
+          reject(
+            new ClassifiedGatewayError("Gateway SSE stream timed out", "transport"),
+          )
+        }, CLASSIFIED_SSE_LIMITS.idleTimeoutMs)
+      })
+      const { value, done } = await Promise.race([read, timeout]).finally(() => {
+        if (idleTimer) clearTimeout(idleTimer)
+      })
       if (done) {
         throw new ClassifiedGatewayError(
           "Gateway stream closed unexpectedly",
           "transport"
         )
       }
+      if (
+        value.byteLength > CLASSIFIED_SSE_LIMITS.chunkBytes ||
+        rawBytes + value.byteLength > CLASSIFIED_SSE_LIMITS.rawBytes
+      ) {
+        await reader.cancel("classified gateway SSE limit exceeded")
+        throw new ClassifiedGatewayError("Gateway SSE stream is too large", "transport")
+      }
+      rawBytes += value.byteLength
       buffer += decoder.decode(value, { stream: true })
       const parsed = parseSseFrames(buffer)
       buffer = parsed.rest
+      frameCount += parsed.frames.length
+      if (frameCount > CLASSIFIED_SSE_LIMITS.frames) {
+        await reader.cancel("classified gateway frame limit exceeded")
+        throw new ClassifiedGatewayError("Gateway sent too many SSE frames", "transport")
+      }
       for (const frame of parsed.frames) this.handleFrame(frame)
     }
   }
@@ -251,11 +366,11 @@ export class ClassifiedGatewayClient {
         this.pending.delete(id)
         reject(
           new ClassifiedGatewayError(
-            `Gateway did not respond to ${method} within 120 seconds`,
+            `Gateway did not respond to ${method} within 60 seconds`,
             "transport"
           )
         )
-      }, 120_000)
+      }, CLASSIFIED_SSE_LIMITS.requestTimeoutMs)
       this.pending.set(id, {
         resolve: (response) => {
           clearTimeout(timer)
@@ -338,7 +453,13 @@ export class ClassifiedGatewayClient {
   }
 
   close(): void {
+    clearTimeout(this.totalTimer)
+    if (this.externalSignal && this.externalAbort) {
+      this.externalSignal.removeEventListener("abort", this.externalAbort)
+    }
     this.controller.abort()
+    void this.streamReader?.cancel("classified gateway client closed")
+    this.streamReader = null
     this.failAll(
       new ClassifiedGatewayError("Gateway client closed", "transport")
     )
@@ -349,7 +470,8 @@ export async function executeClassifiedGatewayTool(
   config: { url: string; token: string },
   toolName: string,
   args: Record<string, unknown>,
-  fetchImpl?: typeof safeFetch
+  fetchImpl?: typeof safeFetch,
+  abortSignal?: AbortSignal,
 ): Promise<{ isError: boolean; data: unknown }> {
   if (!CLASSIFIED_EVALUATION_TOOLS.has(toolName)) {
     throw new ClassifiedGatewayError("Unsupported gateway tool", "tool")
@@ -357,7 +479,8 @@ export async function executeClassifiedGatewayTool(
   const client = new ClassifiedGatewayClient(
     config.url,
     config.token,
-    fetchImpl
+    fetchImpl,
+    abortSignal,
   )
   try {
     await client.connect()
@@ -366,7 +489,14 @@ export async function executeClassifiedGatewayTool(
       name: toolName,
       arguments: args,
     })
-    return unwrapClassifiedToolResult(result)
+    const unwrapped = unwrapClassifiedToolResult(result)
+    if (
+      Buffer.byteLength(JSON.stringify(unwrapped), "utf8") >
+      CLASSIFIED_SSE_LIMITS.resultBytes
+    ) {
+      throw new ClassifiedGatewayError("Gateway result is too large", "transport")
+    }
+    return unwrapped
   } finally {
     client.close()
   }

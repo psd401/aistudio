@@ -18,11 +18,15 @@ import * as path from 'path';
 import { execSync } from 'child_process';
 
 import {
+  assertSkillScanPrefixes,
+  claimSkillScan,
+  shouldRollbackDestinationUpload,
   installSkillDependencies,
   auditInstalledDeps,
   hashDependencyLockfile,
   downloadSkillFromS3,
 } from '../index';
+import type { RDSDataClient } from '@aws-sdk/client-rds-data';
 
 type Warn = { message: string; meta?: Record<string, unknown> };
 function collectingLogger(warnings: Warn[]) {
@@ -36,6 +40,72 @@ function collectingLogger(warnings: Warn[]) {
 function makeSkillDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'skillbuild-'));
 }
+
+const VALID_SCAN_EVENT = {
+  skillId: '123e4567-e89b-42d3-a456-426614174000',
+  ownerKey: 'owner@example.com',
+  version: 2,
+  scanLeaseId: '123e4567-e89b-42d3-a456-426614174001',
+  idempotencyKey: 'skill-version-2',
+  s3Key:
+    'skills/user/owner@example.com/drafts/report/versions/' +
+    '123e4567-e89b-42d3-a456-426614174002',
+  destinationPrefix:
+    'skills/user/owner@example.com/approved/report/versions/' +
+    '123e4567-e89b-42d3-a456-426614174002',
+  scope: 'user' as const,
+};
+
+describe('skill scan event binding', () => {
+  test('requires the exact deterministic draft-to-approved mapping', () => {
+    expect(() => assertSkillScanPrefixes(VALID_SCAN_EVENT)).not.toThrow();
+    expect(() =>
+      assertSkillScanPrefixes({
+        ...VALID_SCAN_EVENT,
+        destinationPrefix:
+          'skills/user/owner@example.com/approved/other/versions/' +
+          '123e4567-e89b-42d3-a456-426614174002',
+      }),
+    ).toThrow(/owner-bound/);
+  });
+
+  test('does not delete approved bytes when audit fails after DB promotion', () => {
+    expect(shouldRollbackDestinationUpload(true, true)).toBe(false);
+    expect(shouldRollbackDestinationUpload(true, false)).toBe(true);
+  });
+
+  test('binds a same-owner source substitution to the claimed database row', async () => {
+    const commands: Array<{ input?: {
+      sql?: string;
+      parameters?: Array<{ name?: string; value?: { stringValue?: string } }>;
+    } }> = [];
+    const fakeRds = {
+      send: async (command: typeof commands[number]) => {
+        commands.push(command);
+        return { records: [] };
+      },
+    } as unknown as RDSDataClient;
+    await expect(
+      claimSkillScan(
+        {
+          ...VALID_SCAN_EVENT,
+          s3Key:
+            'skills/user/owner@example.com/drafts/other/versions/' +
+            '123e4567-e89b-42d3-a456-426614174003',
+          destinationPrefix:
+            'skills/user/owner@example.com/approved/other/versions/' +
+            '123e4567-e89b-42d3-a456-426614174003',
+        },
+        fakeRds,
+      ),
+    ).resolves.toBe(false);
+    expect(commands[0]?.input?.sql).toContain('skill.s3_key = :source');
+    expect(
+      commands[0]?.input?.parameters?.find(({ name }) => name === 'source')
+        ?.value?.stringValue,
+    ).toContain('/drafts/other/');
+  });
+});
 
 // A postinstall that writes a sentinel file into the package cwd. If it runs,
 // the sentinel exists — i.e. arbitrary code executed during the build.
@@ -183,7 +253,13 @@ describe('downloadSkillFromS3 path-traversal guard (REV-INFRA-063)', () => {
       send: async (cmd: { constructor: { name: string }; input?: { Key?: string } }) => {
         const name = cmd.constructor.name;
         if (name === 'ListObjectsV2Command') {
-          return { Contents: keys.map((Key) => ({ Key })), NextContinuationToken: undefined };
+          return {
+            Contents: keys.map((Key) => ({
+              Key,
+              Size: Buffer.byteLength('file-content'),
+            })),
+            NextContinuationToken: undefined,
+          };
         }
         if (name === 'GetObjectCommand') {
           getCalls.push(cmd.input?.Key ?? '');

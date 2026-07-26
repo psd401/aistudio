@@ -7,6 +7,9 @@ let context:
 }
 const getSecretJsonMock = jest.fn()
 const executeToolMock = jest.fn()
+const acquireAdmissionMock = jest.fn()
+const finishAdmissionMock = jest.fn()
+const releaseAdmissionMock = jest.fn()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: jest.fn(async () => context),
@@ -24,6 +27,14 @@ jest.mock("@/lib/logger", () => ({
   generateRequestId: () => "request-test",
   sanitizeForLogging: (value: unknown) => value,
 }))
+jest.mock("@/lib/resource-admission", () => ({
+  acquireResourceAdmission: (...args: unknown[]) =>
+    acquireAdmissionMock(...args),
+  finishResourceAdmission: (...args: unknown[]) =>
+    finishAdmissionMock(...args),
+  releaseResourceAdmission: (...args: unknown[]) =>
+    releaseAdmissionMock(...args),
+}))
 
 import type { NextRequest } from "next/server"
 import { POST } from "@/app/api/agent/classified-evaluation/route"
@@ -33,6 +44,7 @@ function request(body: unknown): NextRequest {
   return {
     headers: { get: () => null },
     json: async () => body,
+    signal: new AbortController().signal,
   } as unknown as NextRequest
 }
 
@@ -51,6 +63,12 @@ beforeEach(() => {
     isError: false,
     data: { ok: true },
   })
+  acquireAdmissionMock.mockReset().mockResolvedValue({
+    allowed: true,
+    leaseId: "classified-lease",
+  })
+  finishAdmissionMock.mockReset().mockResolvedValue(undefined)
+  releaseAdmissionMock.mockReset().mockResolvedValue(undefined)
   classifiedGatewayDependencies.execute = executeToolMock
 })
 
@@ -103,7 +121,9 @@ describe("POST /api/agent/classified-evaluation", () => {
         token: "service-token",
       },
       "list_supervised_employees",
-      { evaluator_email: "owner@psd401.net" }
+      { evaluator_email: "owner@psd401.net" },
+      undefined,
+      expect.any(AbortSignal),
     )
     expect(JSON.stringify(await response.json())).not.toContain("service-token")
   })
@@ -127,7 +147,9 @@ describe("POST /api/agent/classified-evaluation", () => {
       expect.objectContaining({
         evaluator_email: "owner@psd401.net",
         employee_email: "employee@psd401.net",
-      })
+      }),
+      undefined,
+      expect.any(AbortSignal),
     )
     expect(
       (
@@ -150,5 +172,17 @@ describe("POST /api/agent/classified-evaluation", () => {
     )
     expect(response.status).toBe(400)
     expect(getSecretJsonMock).not.toHaveBeenCalled()
+  })
+
+  it("keeps consumed capacity charged when settlement fails", async () => {
+    finishAdmissionMock.mockRejectedValueOnce(new Error("database unavailable"))
+    const response = await POST(
+      request({
+        toolName: "get_classified_evaluation_schema",
+        arguments: {},
+      }),
+    )
+    expect(response.status).toBe(200)
+    expect(releaseAdmissionMock).not.toHaveBeenCalled()
   })
 })

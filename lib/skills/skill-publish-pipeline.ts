@@ -21,8 +21,13 @@ import {
   ListObjectsV2Command,
 } from "@aws-sdk/client-s3"
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda"
+import { randomUUID } from "node:crypto"
 import { createLogger } from "@/lib/logger"
 import { getSetting } from "@/lib/settings-manager"
+import {
+  acquireResourceAdmission,
+  releaseResourceAdmission,
+} from "@/lib/resource-admission"
 
 const log = createLogger({ service: "skill-publish-pipeline" })
 
@@ -128,8 +133,9 @@ export async function uploadSkillDraft(
 
   const { ownerEmail, slug, files } = params
   assertSafeKeyParts(ownerEmail, slug)
-  const draftPrefix = `skills/user/${ownerEmail}/drafts/${slug}`
-  const destinationPrefix = `skills/user/${ownerEmail}/approved/${slug}`
+  const generation = randomUUID()
+  const draftPrefix = `skills/user/${ownerEmail}/drafts/${slug}/versions/${generation}`
+  const destinationPrefix = `skills/user/${ownerEmail}/approved/${slug}/versions/${generation}`
   const safeOwnerEmail = ownerEmail.replace(/[^a-zA-Z0-9\s+=\-._ :/@]/g, "_")
   const tagging = `Environment=${ENVIRONMENT}&ManagedBy=cdk&Scope=draft&Owner=${encodeURIComponent(
     safeOwnerEmail
@@ -159,9 +165,22 @@ export async function uploadSkillDraft(
 
 export interface InvokeScanParams {
   skillId: string
+  ownerKey: string
+  version: number
   draftPrefix: string
   destinationPrefix: string
+  idempotencyKey: string
 }
+
+const SKILL_SCAN_LIMITS = {
+  contextActive: 1,
+  ownerActive: 2,
+  globalActive: 100,
+  contextHourlyUnits: 2,
+  ownerHourlyUnits: 10,
+  globalHourlyUnits: 200,
+  leaseMs: 10 * 60 * 1000,
+} as const
 
 /**
  * Best-effort invocation of the skill-builder Lambda for scanning + promotion.
@@ -180,6 +199,22 @@ export async function invokeSkillScan(
     return false
   }
 
+  const admission = await acquireResourceAdmission({
+    kind: "skill-scan-events",
+    ownerKey: params.ownerKey,
+    contextKey: `${params.skillId}:${params.version}`,
+    idempotencyKey: params.idempotencyKey,
+    units: 1,
+    limits: SKILL_SCAN_LIMITS,
+  })
+  if (!admission.allowed) {
+    log.warn("Skill scan admission rejected", {
+      skillId: params.skillId,
+      reason: admission.reason,
+    })
+    return false
+  }
+
   try {
     const client = getLambda()
     await client.send(
@@ -189,6 +224,10 @@ export async function invokeSkillScan(
         Payload: Buffer.from(
           JSON.stringify({
             skillId: params.skillId,
+            ownerKey: params.ownerKey.toLowerCase(),
+            version: params.version,
+            scanLeaseId: admission.leaseId,
+            idempotencyKey: params.idempotencyKey,
             s3Key: params.draftPrefix,
             destinationPrefix: params.destinationPrefix,
             scope: "user",
@@ -200,6 +239,7 @@ export async function invokeSkillScan(
     log.info("Dispatched skill-builder scan", { skillId: params.skillId })
     return true
   } catch (error) {
+    await releaseResourceAdmission(admission.leaseId)
     log.error("Skill-builder invoke failed (non-fatal)", {
       skillId: params.skillId,
       error: error instanceof Error ? error.message : String(error),

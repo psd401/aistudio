@@ -54,20 +54,19 @@ export function resolveAgentRunLimits(
     AGENT_LIMIT_DEFAULTS.timeoutSeconds,
     AGENT_LIMIT_CEILINGS.timeoutSeconds
   );
-  const costCapCents =
-    typeof config.agentCostCapCents === "number" &&
-    Number.isFinite(config.agentCostCapCents) &&
-    config.agentCostCapCents > 0
-      ? Math.floor(config.agentCostCapCents)
-      : null;
+  const costCapCents = clampPositive(
+    config.agentCostCapCents,
+    AGENT_LIMIT_DEFAULTS.costCapCents,
+    AGENT_LIMIT_CEILINGS.costCapCents
+  );
 
   return { maxSteps, timeoutSeconds, costCapCents };
 }
 
 /**
  * Decide whether an accumulated cost (in cents) has reached a run's cost cap.
- * Returns true when a cap is set AND `accumulatedCostCents >= cap`. A null cap
- * never trips.
+ * Returns true when `accumulatedCostCents >= cap`. Every run has a mandatory
+ * server-owned cap even when the assistant author leaves the field unset.
  *
  * NOTE: the loop's actual mid-run enforcement lives in the streaming provider
  * adapter's `stopWhen` cost condition (it has per-step token usage). This pure
@@ -78,7 +77,6 @@ export function isCostCapExceeded(
   limits: AgentRunLimits,
   accumulatedCostCents: number
 ): boolean {
-  if (limits.costCapCents === null) return false;
   return accumulatedCostCents >= limits.costCapCents;
 }
 
