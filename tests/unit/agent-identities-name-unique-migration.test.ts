@@ -113,25 +113,43 @@ describe("migration 140 — agent_identities name uniqueness (#1303)", () => {
     expect(uncovered).toEqual([]);
   });
 
-  it("keeps duplicates deleted only after the repoint, and never the canonical row", () => {
-    const repointEnd = migration.lastIndexOf("SET uploader_agent_id");
-    const deleteAt = migration.indexOf("DELETE FROM agent_identities");
-    expect(repointEnd).toBeGreaterThan(-1);
-    expect(deleteAt).toBeGreaterThan(repointEnd);
-    expect(migration).toMatch(/DELETE\s+FROM\s+agent_identities\s+a\s+USING\s+canon\s+c/i);
-    expect(migration).toMatch(/WHERE\s+c\.name\s*=\s*a\.name\s*\n\s*AND\s+a\.id\s*<>\s*c\.id/i);
+  it("repoints and deletes in ONE statement so a live writer cannot lose attribution", () => {
+    // The migration runner issues each statement as its own RDS Data API call
+    // with no way to span a transaction. Split across statements, a request
+    // could insert a child row referencing a duplicate AFTER that table's
+    // repoint committed; every one of these FKs is ON DELETE SET NULL, so the
+    // delete would then silently erase the new row's agent attribution.
+    // Everything therefore rides in a single data-modifying-CTE statement.
+    const statements = migration
+      .replace(/--[^\n]*/g, "")
+      .split(";")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    expect(statements).toHaveLength(2); // the dedupe, then the index
+
+    const dedupe = statements[0];
+    expect(dedupe).toMatch(/^WITH canon AS/i);
+    expect(dedupe).toMatch(/DELETE\s+FROM\s+agent_identities\s+a\s+USING\s+dupes\s+d\s+WHERE\s+a\.id\s*=\s*d\.dup_id/i);
+    expect(statements[1]).toMatch(/^CREATE UNIQUE INDEX/i);
   });
 
-  it("uses one canonical-row rule across every statement", () => {
+  it("locks the duplicate rows so concurrent FK writers block instead of losing rows", () => {
+    // Inserting a child row takes FOR KEY SHARE on the parent, which conflicts
+    // with FOR UPDATE — so a writer that would have raced the delete blocks
+    // and then fails loudly on an FK violation. MATERIALIZED is load-bearing:
+    // without it the CTE may be inlined into each dependent CTE rather than
+    // evaluated once up front, so the lock is not reliably taken first.
+    expect(migration).toMatch(/dupes AS MATERIALIZED \(/);
+    expect(migration).toMatch(/FOR UPDATE OF a/);
+  });
+
+  it("states the canonical-row rule exactly once", () => {
     const orderings = [
       ...migration.matchAll(
         /ORDER BY name, \(id <> '0a710f00-0000-4000-a000-000000000f36'\), \(oauth_client_id IS NULL\), created_at, id/g
       ),
     ];
-    // One per CTE: six repoint statements + the delete. The rule is repeated
-    // because the migration runner issues each statement as its own RDS Data
-    // API call, so a TEMP table holding the map would not survive between them.
-    expect(orderings).toHaveLength(7);
+    expect(orderings).toHaveLength(1);
   });
 
   it("never deletes an agent identity id that application code pins", () => {
@@ -148,10 +166,10 @@ describe("migration 140 — agent_identities name uniqueness (#1303)", () => {
     );
     expect(pinned).not.toBeNull();
     const id = pinned![1];
-    // Sorts first in every canonical-row ORDER BY, so it is always the keeper.
+    // Sorts first in the canonical-row ORDER BY, so it is always the keeper.
     const rules = [...migration.matchAll(/ORDER BY name, \(id <> '([0-9a-f-]{36})'\)/g)];
-    expect(rules).toHaveLength(7);
-    for (const rule of rules) expect(rule[1]).toBe(id);
+    expect(rules).toHaveLength(1);
+    expect(rules[0][1]).toBe(id);
   });
 
   it("uses no DO $$ block (the db-init statement splitter cannot parse them)", () => {
