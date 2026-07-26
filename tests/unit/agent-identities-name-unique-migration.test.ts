@@ -197,13 +197,29 @@ describe("migration 140 — agent_identities name uniqueness (#1303)", () => {
   it("states the canonical-row rule identically in every statement that needs it", () => {
     const orderings = [
       ...migration.matchAll(
-        /ORDER BY name, \(id <> '0a710f00-0000-4000-a000-000000000f36'\), \(oauth_client_id IS NULL\), created_at, id/g
+        /ORDER BY name, \(id <> '0a710f00-0000-4000-a000-000000000f36'\), \(NOT is_active\), \(oauth_client_id IS NULL\), created_at, id/g
       ),
     ];
     // Once per statement that must pick a canonical row: the repoint and the
     // tombstone. They MUST be byte-identical or the two passes could disagree
     // about which row is canonical.
     expect(orderings).toHaveLength(2);
+  });
+
+  it("prefers an ACTIVE row over an inactive one, above the binding test", () => {
+    // findAgentIdentity (lib/content/requester-from-auth.ts) filters on
+    // is_active, so a canonical row that is inactive leaves the agent with no
+    // resolvable identity. `(NOT is_active)` must therefore outrank
+    // `(oauth_client_id IS NULL)`: an inactive row is unusable at runtime
+    // whether or not it is bound, so an active-but-unbound row is the better
+    // survivor. The fixed-id pin still outranks both.
+    const order = migration.match(/ORDER BY name,[^\n]*/)![0];
+    const pinnedAt = order.indexOf("0a710f00");
+    const activeAt = order.indexOf("NOT is_active");
+    const boundAt = order.indexOf("oauth_client_id IS NULL");
+    expect(pinnedAt).toBeGreaterThan(-1);
+    expect(activeAt).toBeGreaterThan(pinnedAt);
+    expect(boundAt).toBeGreaterThan(activeAt);
   });
 
   it("never tombstones an agent identity id that application code pins", () => {

@@ -89,13 +89,22 @@
 --      and writes it straight into
 --      content_publish_requests.requested_by_agent_id without a lookup. This is
 --      the only id any code pins; the predicate is a no-op for every other name.
---   b. `(oauth_client_id IS NULL)` ascending -> rows BOUND to an OIDC client
---      sort first. Tombstoning a bound row would break that agent's
---      client-credentials authentication.
---   c. `created_at` ascending -> the oldest row wins. On prod that is the row
+--   b. `(NOT is_active)` ascending -> ACTIVE rows sort first. Runtime identity
+--      resolution requires is_active (lib/content/requester-from-auth.ts
+--      findAgentIdentity filters on it), so keeping an inactive row and
+--      tombstoning the active one would leave that agent with NO usable
+--      identity. Ranked above the binding test on purpose: an inactive row is
+--      already unusable at runtime whether or not it is bound to a client, so
+--      an active-but-unbound row is the better survivor of that pair.
+--   c. `(oauth_client_id IS NULL)` ascending -> among rows equal on (a)-(b),
+--      those BOUND to an OIDC client sort first. Tombstoning a bound row would
+--      break that agent's client-credentials authentication.
+--   d. `created_at` ascending -> the oldest row wins. On prod that is the row
 --      copied from dev, so dev and prod converge rather than diverging further.
---   d. `id` ascending -> a total order, so the choice is deterministic even
---      when (a)-(c) tie.
+--   e. `id` ascending -> a total order, so the choice is deterministic even
+--      when (a)-(d) tie.
+--
+--   `is_active` is NOT NULL (085), so (b) has no NULL-ordering subtlety.
 --
 -- FAIL-LOUD. If the tombstone pass somehow left two rows sharing a name,
 -- CREATE UNIQUE INDEX raises "could not create unique index ... is duplicated",
@@ -155,7 +164,7 @@ CREATE INDEX IF NOT EXISTS idx_content_assets_uploader_agent_id
 WITH canon AS (
   SELECT DISTINCT ON (name) name, id
   FROM agent_identities
-  ORDER BY name, (id <> '0a710f00-0000-4000-a000-000000000f36'), (oauth_client_id IS NULL), created_at, id
+  ORDER BY name, (id <> '0a710f00-0000-4000-a000-000000000f36'), (NOT is_active), (oauth_client_id IS NULL), created_at, id
 ), dupes AS (
   SELECT a.id AS dup_id, c.id AS keep_id
   FROM agent_identities a
@@ -207,7 +216,7 @@ WHERE t.uploader_agent_id = d.dup_id;
 WITH canon AS (
   SELECT DISTINCT ON (name) name, id
   FROM agent_identities
-  ORDER BY name, (id <> '0a710f00-0000-4000-a000-000000000f36'), (oauth_client_id IS NULL), created_at, id
+  ORDER BY name, (id <> '0a710f00-0000-4000-a000-000000000f36'), (NOT is_active), (oauth_client_id IS NULL), created_at, id
 )
 UPDATE agent_identities a
 SET name = left(a.name, 150) || '#dup-' || a.id,
