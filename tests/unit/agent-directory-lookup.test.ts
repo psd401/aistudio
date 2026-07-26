@@ -26,6 +26,8 @@ import {
   type FetchLike,
 } from "@/lib/agent-workspace/directory-lookup"
 
+const OWNER = "agnt_hagelk@psd401.net"
+
 beforeEach(() => {
   __clearDirectoryCache()
 })
@@ -94,7 +96,7 @@ describe("resolveEmail", () => {
         ],
       },
     }))
-    const r = await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl })
+    const r = await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl, ownerKey: OWNER })
     expect(r.found).toBe(true)
     if (!r.found) throw new Error("unreachable")
     expect(r.displayName).toBe("Kris Hagel")
@@ -114,7 +116,7 @@ describe("resolveEmail", () => {
         ],
       },
     }))
-    const r = await resolveEmail("hagel@psd401.net", "tok", { fetchImpl })
+    const r = await resolveEmail("hagel@psd401.net", "tok", { fetchImpl, ownerKey: OWNER })
     expect(r.found).toBe(false)
     if (r.found) throw new Error("unreachable")
     expect(r.reason).toBe("no exact address match")
@@ -131,7 +133,7 @@ describe("resolveEmail", () => {
       value: "kris.hagel@psd401.net",
     })
     const fetchImpl = stubFetch(() => ({ body: { people: [rec] } }))
-    const r = await resolveEmail("kris.hagel@psd401.net", "tok", { fetchImpl })
+    const r = await resolveEmail("kris.hagel@psd401.net", "tok", { fetchImpl, ownerKey: OWNER })
     expect(r.found).toBe(true)
     if (!r.found) throw new Error("unreachable")
     expect(r.email).toBe("hagelk@psd401.net")
@@ -142,13 +144,13 @@ describe("resolveEmail", () => {
     const other = person("2", "Someone Else", "else@psd401.net")
     other.emailAddresses.push({ metadata: { primary: false }, value: "se@psd401.net" })
     const fetchImpl = stubFetch(() => ({ body: { people: [other] } }))
-    const r = await resolveEmail("hagel@psd401.net", "tok", { fetchImpl })
+    const r = await resolveEmail("hagel@psd401.net", "tok", { fetchImpl, ownerKey: OWNER })
     expect(r.found).toBe(false)
   })
 
   it("requests only the DOMAIN_PROFILE source", async () => {
     const fetchImpl = stubFetch(() => ({ body: { people: [] } }))
-    await resolveEmail("x@psd401.net", "tok", { fetchImpl })
+    await resolveEmail("x@psd401.net", "tok", { fetchImpl, ownerKey: OWNER })
     expect(fetchImpl.calls[0]).toContain("sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE")
     expect(fetchImpl.calls[0]).toContain("/people:searchDirectoryPeople")
   })
@@ -163,7 +165,7 @@ describe("resolvePersonId", () => {
     const fetchImpl = stubFetch(() => ({
       body: person("116264913639920976203", "Kris Hagel", "hagelk@psd401.net"),
     }))
-    const r = await resolvePersonId("users/116264913639920976203", "tok", { fetchImpl })
+    const r = await resolvePersonId("users/116264913639920976203", "tok", { fetchImpl, ownerKey: OWNER })
     expect(r.found).toBe(true)
     expect(fetchImpl.calls[0]).toContain("/people/116264913639920976203")
   })
@@ -173,7 +175,7 @@ describe("resolvePersonId", () => {
     // context, and the trigger for the Option B admin-role escalation. If it
     // ever starts happening it must be visible.
     const fetchImpl = stubFetch(() => ({ body: { resourceName: "people/999" } }))
-    const r = await resolvePersonId("users/999", "tok", { fetchImpl })
+    const r = await resolvePersonId("users/999", "tok", { fetchImpl, ownerKey: OWNER })
     expect(r.found).toBe(false)
     if (r.found) throw new Error("unreachable")
     expect(r.reason).toBe("directory returned no usable fields")
@@ -184,7 +186,7 @@ describe("resolvePersonId", () => {
       status: 404,
       body: { error: { message: "Requested entity was not found." } },
     }))
-    const r = await resolvePersonId("users/404", "tok", { fetchImpl })
+    const r = await resolvePersonId("users/404", "tok", { fetchImpl, ownerKey: OWNER })
     expect(r.found).toBe(false)
   })
 })
@@ -215,7 +217,7 @@ describe("error classification", () => {
     // status is the only signal. Classifying on the body would make infra
     // errors indistinguishable from app errors.
     const fetchImpl = stubFetch(() => ({ status: 502, unparseable: true }))
-    await expect(resolveEmail("x@psd401.net", "tok", { fetchImpl })).rejects.toMatchObject({
+    await expect(resolveEmail("x@psd401.net", "tok", { fetchImpl, ownerKey: OWNER })).rejects.toMatchObject({
       code: "TRANSPORT",
     })
   })
@@ -224,14 +226,14 @@ describe("error classification", () => {
     // Degrading to {} would shape into found:false — reporting "not in the
     // directory" for a person who is in it, and caching that miss.
     const fetchImpl = stubFetch(() => ({ status: 200, unparseable: true }))
-    await expect(resolveEmail("x@psd401.net", "tok", { fetchImpl })).rejects.toMatchObject({
+    await expect(resolveEmail("x@psd401.net", "tok", { fetchImpl, ownerKey: OWNER })).rejects.toMatchObject({
       code: "LOOKUP_FAILED",
     })
   })
 
   it("raises DirectoryError instances so the route can map them", async () => {
     const fetchImpl = stubFetch(() => ({ status: 503, body: {} }))
-    await expect(resolveEmail("x@psd401.net", "tok", { fetchImpl })).rejects.toBeInstanceOf(
+    await expect(resolveEmail("x@psd401.net", "tok", { fetchImpl, ownerKey: OWNER })).rejects.toBeInstanceOf(
       DirectoryError,
     )
   })
@@ -242,8 +244,8 @@ describe("caching", () => {
     const fetchImpl = stubFetch(() => ({
       body: { people: [person("116", "Kris Hagel", "hagelk@psd401.net")] },
     }))
-    await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl })
-    const second = await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl })
+    await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl, ownerKey: OWNER })
+    const second = await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl, ownerKey: OWNER })
     expect(second.cached).toBe(true)
     expect(fetchImpl.calls.length).toBe(1)
   })
@@ -252,7 +254,7 @@ describe("caching", () => {
     const fetchImpl = stubFetch(() => ({
       body: { people: [person("116", "Kris Hagel", "hagelk@psd401.net")] },
     }))
-    await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl })
+    await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl, ownerKey: OWNER })
     await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl, noCache: true })
     expect(fetchImpl.calls.length).toBe(2)
   })
@@ -263,11 +265,72 @@ describe("caching", () => {
     expect(NEGATIVE_TTL_MS).toBeLessThan(POSITIVE_TTL_MS)
     const fetchImpl = stubFetch(() => ({ body: { people: [] } }))
     const t0 = 2_000_000
-    await resolveEmail("ghost@psd401.net", "tok", { fetchImpl, now: t0 })
+    await resolveEmail("ghost@psd401.net", "tok", { fetchImpl, ownerKey: OWNER, now: t0 })
     await resolveEmail("ghost@psd401.net", "tok", {
       fetchImpl,
+      ownerKey: OWNER,
       now: t0 + NEGATIVE_TTL_MS + 1,
     })
+    expect(fetchImpl.calls.length).toBe(2)
+  })
+
+  it("NEVER serves one owner's cached result to another (codex P1)", async () => {
+    // The cache is process-global — one Next.js instance serves every agent —
+    // so an unpartitioned key would let owner B receive owner A's authorized
+    // result without B's token ever being used. Directory visibility is
+    // per-account and this directory contains STUDENT records, so that is a
+    // cross-account disclosure, not a staleness bug.
+    //
+    // It is also a regression created by moving the cache server-side: the
+    // previous per-container cache was partitioned by construction.
+    const fetchA = stubFetch(() => ({
+      body: { people: [person("116", "Kris Hagel", "hagelk@psd401.net")] },
+    }))
+    const fetchB = stubFetch(() => ({ body: { people: [] } }))
+
+    const a = await resolveEmail("hagelk@psd401.net", "tok-a", {
+      fetchImpl: fetchA,
+      ownerKey: "agnt_owner-a@psd401.net",
+    })
+    expect(a.found).toBe(true)
+
+    // Owner B has no visibility of that person. B must get their OWN answer,
+    // which means B's token has to be used — not A's cached hit.
+    const b = await resolveEmail("hagelk@psd401.net", "tok-b", {
+      fetchImpl: fetchB,
+      ownerKey: "agnt_owner-b@psd401.net",
+    })
+    expect(b.found).toBe(false)
+    expect(b.cached).toBeUndefined()
+    expect(fetchB.calls.length).toBe(1)
+  })
+
+  it("partitions the id cache by owner too", async () => {
+    const fetchA = stubFetch(() => ({
+      body: person("999", "Someone", "someone@psd401.net"),
+    }))
+    const fetchB = stubFetch(() => ({ body: { resourceName: "people/999" } }))
+    const a = await resolvePersonId("users/999", "tok-a", {
+      fetchImpl: fetchA,
+      ownerKey: "agnt_owner-a@psd401.net",
+    })
+    expect(a.found).toBe(true)
+    const b = await resolvePersonId("users/999", "tok-b", {
+      fetchImpl: fetchB,
+      ownerKey: "agnt_owner-b@psd401.net",
+    })
+    expect(b.found).toBe(false)
+    expect(fetchB.calls.length).toBe(1)
+  })
+
+  it("skips caching entirely when there is no owner to partition by", async () => {
+    // Fails closed: no shared fallback bucket.
+    const fetchImpl = stubFetch(() => ({
+      body: { people: [person("116", "Kris Hagel", "hagelk@psd401.net")] },
+    }))
+    await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl })
+    const second = await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl })
+    expect(second.cached).toBeUndefined()
     expect(fetchImpl.calls.length).toBe(2)
   })
 
@@ -276,8 +339,8 @@ describe("caching", () => {
       body: { people: [person("116", "Kris Hagel", "hagelk@psd401.net")] },
     }))
     const fetchId = stubFetch(() => ({ body: person("999", "Someone Else", "else@psd401.net") }))
-    await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl: fetchEmail })
-    const byId = await resolvePersonId("users/999", "tok", { fetchImpl: fetchId })
+    await resolveEmail("hagelk@psd401.net", "tok", { fetchImpl: fetchEmail, ownerKey: OWNER })
+    const byId = await resolvePersonId("users/999", "tok", { fetchImpl: fetchId, ownerKey: OWNER })
     expect(byId.found).toBe(true)
     if (!byId.found) throw new Error("unreachable")
     expect(byId.displayName).toBe("Someone Else")

@@ -37,6 +37,27 @@ describe('status -> exit code', () => {
     );
   });
 
+  test('an untyped broker 5xx is retryable 12, not 2 (codex P2)', () => {
+    // Failures BELOW the route — the local relay's own 502/503, or a
+    // mint-boundary error the route could not classify — arrive with no typed
+    // status. Mapping those to 2 ("do not retry blindly") presents a
+    // transient proxy or Lambda blip as a permanent lookup failure.
+    expect(exitCodeForStatus(null, 502)).toBe(12);
+    expect(exitCodeForStatus(null, 503)).toBe(12);
+    expect(exitCodeForStatus(undefined, 500)).toBe(12);
+  });
+
+  test('an untyped 4xx stays 2 — a bad request is not retryable', () => {
+    expect(exitCodeForStatus(null, 400)).toBe(2);
+    expect(exitCodeForStatus(null, 403)).toBe(2);
+  });
+
+  test('a typed status still wins over the HTTP status', () => {
+    // A 409 carrying DIRECTORY_SHARING_DISABLED must keep its own code.
+    expect(exitCodeForStatus('DIRECTORY_SHARING_DISABLED', 409)).toBe(16);
+    expect(exitCodeForStatus('account-not-provisioned', 409)).toBe(14);
+  });
+
   test('an unknown or missing status falls back to 2, never 0', () => {
     // A failure must never be reported as success — exit 0 is reserved for a
     // real answer, including a found:false miss.

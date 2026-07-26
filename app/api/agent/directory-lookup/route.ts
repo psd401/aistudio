@@ -89,7 +89,13 @@ export async function POST(request: NextRequest) {
     const { accessToken } = await mintAgentWorkspaceTokenViaBoundary(
       context.ownerEmail,
     )
-    const opts = { noCache: body.noCache === true }
+    // ownerKey partitions the process-global lookup cache. It MUST come from
+    // the signed context, never the body — that is what stops one agent's
+    // authorized result being served to another.
+    const opts = {
+      noCache: body.noCache === true,
+      ownerKey: context.ownerEmail,
+    }
     const result = body.email
       ? await resolveEmail(body.email, accessToken, opts)
       : await resolvePersonId(body.chatId as string, accessToken, opts)

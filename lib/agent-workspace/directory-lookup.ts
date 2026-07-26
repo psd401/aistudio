@@ -318,9 +318,35 @@ export function shapePerson(person: PeoplePerson | null | undefined): DirectoryP
 }
 
 export interface LookupOptions {
+  /**
+   * REQUIRED for caching. The trusted owner identity this lookup is being
+   * performed as — from the proxy-signed invocation context, never the
+   * request body.
+   *
+   * The cache is process-global (one Next.js instance serves every agent), so
+   * an unpartitioned key would let owner B receive owner A's result without B's
+   * token ever being used. Directory visibility is per-account, and this
+   * directory contains STUDENT records, so that is a cross-account disclosure
+   * — not merely a stale-data bug. It is also a regression risk created by
+   * moving the cache server-side: the previous per-container cache was
+   * partitioned by construction, because a container serves one owner.
+   *
+   * When absent, caching is skipped entirely rather than sharing a bucket.
+   */
+  ownerKey?: string
   now?: number
   noCache?: boolean
   fetchImpl?: FetchLike
+}
+
+/**
+ * Namespace a cache key by owner. Returns null when there is no owner to
+ * partition by, which callers treat as "do not cache" — failing closed rather
+ * than falling back to a shared bucket.
+ */
+function cacheKeyFor(ownerKey: string | undefined, suffix: string): string | null {
+  if (!ownerKey) return null
+  return `${ownerKey.toLowerCase()}|${suffix}`
 }
 
 /**
@@ -334,6 +360,29 @@ export interface LookupOptions {
  * a pre-name-change address), which are exactly the addresses a human is most
  * likely to supply.
  */
+/**
+ * Build the result for an email lookup. Split out of resolveEmail to keep that
+ * function under the complexity ceiling, and because the alias-reporting rule
+ * is worth reading on its own: when the query matched a NON-primary address we
+ * say so, otherwise the answer looks like it is about a different person than
+ * the one that was asked about.
+ */
+function emailResult(
+  shaped: DirectoryPerson | null,
+  normalized: string,
+  candidateCount: number,
+): DirectoryResult {
+  if (!shaped) {
+    return {
+      found: false,
+      query: normalized,
+      reason: candidateCount > 0 ? "no exact address match" : "not in directory",
+    }
+  }
+  const isAlias = Boolean(shaped.email) && shaped.email?.toLowerCase() !== normalized
+  return { found: true, ...shaped, ...(isAlias ? { matchedAlias: normalized } : {}) }
+}
+
 export async function resolveEmail(
   email: string,
   accessToken: string,
@@ -344,9 +393,9 @@ export async function resolveEmail(
     throw new DirectoryError("INVALID_INPUT", `Not a valid email address: ${email}`)
   }
   const now = opts.now ?? Date.now()
-  const key = `email:${normalized}`
+  const key = cacheKeyFor(opts.ownerKey, `email:${normalized}`)
 
-  if (!opts.noCache) {
+  if (key && !opts.noCache) {
     const hit = readCache(key, now)
     if (hit) return { ...hit, cached: true }
   }
@@ -362,22 +411,8 @@ export async function resolveEmail(
 
   const candidates = Array.isArray(body.people) ? body.people : []
   const match = candidates.find((p) => addressesOf(p).includes(normalized)) ?? null
-  const shaped = match ? shapePerson(match) : null
-
-  // When the query matched an alias, say so — otherwise the answer looks like
-  // it is about a different address than the one that was asked about.
-  const matchedAlias =
-    shaped?.email && shaped.email.toLowerCase() !== normalized ? normalized : undefined
-
-  const result: DirectoryResult = shaped
-    ? { found: true, ...shaped, ...(matchedAlias ? { matchedAlias } : {}) }
-    : {
-        found: false,
-        query: normalized,
-        reason:
-          candidates.length > 0 ? "no exact address match" : "not in directory",
-      }
-  writeCache(key, result, now)
+  const result = emailResult(match ? shapePerson(match) : null, normalized, candidates.length)
+  if (key) writeCache(key, result, now)
   return result
 }
 
@@ -392,9 +427,9 @@ export async function resolvePersonId(
     throw new DirectoryError("INVALID_INPUT", `Not a valid person/Chat id: ${rawId}`)
   }
   const now = opts.now ?? Date.now()
-  const key = `id:${id}`
+  const key = cacheKeyFor(opts.ownerKey, `id:${id}`)
 
-  if (!opts.noCache) {
+  if (key && !opts.noCache) {
     const hit = readCache(key, now)
     if (hit) return { ...hit, cached: true }
   }
@@ -415,7 +450,7 @@ export async function resolvePersonId(
         query: id,
         reason: "not in directory",
       }
-      writeCache(key, miss, now)
+      if (key) writeCache(key, miss, now)
       return miss
     }
     throw err
@@ -429,6 +464,6 @@ export async function resolvePersonId(
         query: id,
         reason: "directory returned no usable fields",
       }
-  writeCache(key, result, now)
+  if (key) writeCache(key, result, now)
   return result
 }

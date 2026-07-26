@@ -90,7 +90,7 @@ function parseArgs(argv) {
  * Exported for testing — run.js cannot be loaded wholesale in unit tests
  * because it executes main() on require.
  */
-function exitCodeForStatus(status) {
+function exitCodeForStatus(status, httpStatus) {
   switch (status) {
     case 'account-not-provisioned':
       return 14;
@@ -103,13 +103,19 @@ function exitCodeForStatus(status) {
     case 'INVALID_INPUT':
       return 1;
     default:
-      return 2;
+      // No typed status in the body. That happens when the failure is BELOW
+      // the route: the local relay's own 502/503, or a mint-boundary error
+      // the route could not classify. Those are transient infrastructure, so
+      // they must map to the documented retryable 12 rather than 2 ("do not
+      // retry blindly") — otherwise a proxy blip looks like a permanent
+      // lookup failure.
+      return typeof httpStatus === 'number' && httpStatus >= 500 ? 12 : 2;
   }
 }
 
-function handleErrorResponse(response, fallbackMessage) {
+function handleErrorResponse(response, fallbackMessage, httpStatus) {
   const status = response && typeof response.status === 'string' ? response.status : null;
-  const code = exitCodeForStatus(status);
+  const code = exitCodeForStatus(status, httpStatus);
   if (code === 14) {
     emit({ status: 'account-provisioning' });
     process.exit(14);
@@ -148,7 +154,7 @@ async function main() {
     // The broker helper throws on any non-2xx and attaches the parsed body,
     // which is where the server puts its typed status.
     if (err && err.responseBody) {
-      handleErrorResponse(err.responseBody, err.message);
+      handleErrorResponse(err.responseBody, err.message, err.status);
       return 2;
     }
     fail(`directory lookup failed: ${err && err.message}`, 12);
