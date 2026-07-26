@@ -186,7 +186,14 @@ function SelectableCard({
 }
 
 /** The zero-match empty state for an active search/tag filter (#1336). */
-function SearchEmpty({ query }: { query: string }): React.JSX.Element {
+function SearchEmpty({
+  query,
+  /** Which input produced the zero-match, so the recovery hint names it. */
+  source = "search",
+}: {
+  query: string;
+  source?: "search" | "tag";
+}): React.JSX.Element {
   return (
     <div className="mer-lib-empty" role="status" data-testid="library-search-empty">
       <span className="mer-lib-empty-icon" aria-hidden="true">
@@ -194,8 +201,9 @@ function SearchEmpty({ query }: { query: string }): React.JSX.Element {
       </span>
       <p className="mer-lib-empty-title">No matches for “{query}”</p>
       <p className="mer-lib-empty-sub">
-        Nothing in your library matches that title or tag. Try a shorter term, or
-        clear the search to see everything.
+        {source === "tag"
+          ? "Nothing in your library carries that tag. Try a different tag, or clear the tag filter to see everything."
+          : "Nothing in your library matches that title or tag. Try a shorter term, or clear the search to see everything."}
       </p>
     </div>
   );
@@ -261,6 +269,15 @@ interface LibraryListProps {
    * library — the copy and the missing "create" affordance differ).
    */
   searchTerm: string;
+  /**
+   * The active tag-chip filter, non-empty only while a tag is applied. A
+   * SEPARATE input from `searchTerm` (the free-text box), and it needs the same
+   * zero-match empty state: a tag that matches nothing otherwise falls through
+   * to the ordinary empty-library grid + create card — exactly the "is my
+   * library empty, or did my filter match nothing?" confusion this state exists
+   * to remove (#1336).
+   */
+  tagTerm: string;
 }
 
 export function LibraryList({
@@ -273,6 +290,7 @@ export function LibraryList({
   selected,
   onToggleSelect,
   searchTerm,
+  tagTerm,
 }: LibraryListProps): React.JSX.Element {
   if (loading) {
     return (
@@ -289,12 +307,16 @@ export function LibraryList({
     );
   }
 
-  // A search that matched nothing gets its own empty state — and NO create card,
+  // A filter that matched nothing gets its own empty state — and NO create card,
   // which would otherwise read as "your library is empty" (#1336). Checked
-  // before the archived-empty branch so searching inside Archived also explains
-  // itself as a zero-match rather than "nothing archived".
-  if (items.length === 0 && searchTerm.trim().length > 0) {
-    return <SearchEmpty query={searchTerm.trim()} />;
+  // before the archived-empty branch so filtering inside Archived also explains
+  // itself as a zero-match rather than "nothing archived". The free-text box
+  // wins when both are active, since it is the more specific of the two.
+  if (items.length === 0) {
+    const search = searchTerm.trim();
+    if (search.length > 0) return <SearchEmpty query={search} />;
+    const tag = tagTerm.trim();
+    if (tag.length > 0) return <SearchEmpty query={tag} source="tag" />;
   }
 
   // Archived view + nothing archived: its own empty state, no create card.

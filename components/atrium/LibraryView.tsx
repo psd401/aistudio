@@ -350,7 +350,25 @@ function useLibraryPage(filter: ListFilter) {
     [collectionId, kind, owner, status, tag, query]
   );
 
-  return { items, loading, loadingMore, hasMore, error, fetchPage };
+  // A STABLE re-fetch handle that always runs the CURRENT `fetchPage`.
+  //
+  // `fetchPage`'s identity changes with the filters, so a consumer that captures
+  // it at click time (e.g. `LibraryBulkBar.run()` holding `onRefresh` across a
+  // multi-second fan-out) would, if the user changed a filter mid-flight, call
+  // the OLD closure and refetch the STALE filter set. That late call still bumps
+  // `reqSeqRef`, so it wins the "latest response wins" race and repopulates the
+  // grid with results for a filter no longer shown anywhere in the UI.
+  //
+  // Routing through a ref assigned in the render body (never in an effect —
+  // see CLAUDE.md's React patterns) keeps `refresh` referentially stable while
+  // always resolving to the newest filters.
+  const fetchPageRef = useRef(fetchPage);
+  fetchPageRef.current = fetchPage;
+  const refresh = useCallback(() => {
+    void fetchPageRef.current(0);
+  }, []);
+
+  return { items, loading, loadingMore, hasMore, error, fetchPage, refresh };
 }
 
 /**
@@ -435,7 +453,7 @@ export function LibraryView({
   const { kind, owner, status } = viewToFilter(view);
   const archivedView = view === "archived";
 
-  const { items, loading, loadingMore, hasMore, error, fetchPage } =
+  const { items, loading, loadingMore, hasMore, error, fetchPage, refresh } =
     useLibraryPage({
       collectionId: collectionId ?? undefined,
       kind,
@@ -461,11 +479,10 @@ export function LibraryView({
     void fetchPage(items.length);
   }, [fetchPage, items.length]);
 
-  // Re-fetch page one after a bulk mutation so the grid reflects the new state
-  // (archived rows leave the default views, moved rows leave a section view).
-  const refresh = useCallback(() => {
-    void fetchPage(0);
-  }, [fetchPage]);
+  // `refresh` (re-fetch page one after a bulk mutation, so archived rows leave
+  // the default views and moved rows leave a section view) comes from the hook
+  // and is referentially STABLE — see the note there for why re-deriving it from
+  // `fetchPage` here would reintroduce a stale-filter refetch.
 
   return (
     <div className="w-full px-5 py-6 md:px-8 md:py-8">
@@ -504,6 +521,7 @@ export function LibraryView({
           selected={selected}
           onToggleSelect={toggleSelect}
           searchTerm={debouncedSearch}
+          tagTerm={debouncedTag}
         />
 
         {/* Pagination: hidden once a short page signals the end, while the first
