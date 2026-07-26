@@ -77,6 +77,21 @@ jobs:
       env:
         CI: true
 
+    # psd-schedules (Bun). Same reason as above: plain CJS outside the jest
+    # roots. Runs the whole directory, which covers two suites:
+    #   - skill-frontmatter: DISCOVERABILITY. agent-platform-stack.ts
+    #     substitutes "Bundled skill: <name>" when the frontmatter has no
+    #     `summary`, and psd-skills-meta's skills.search matches on name +
+    #     summary only. Without a summary the scheduling skill is reachable
+    #     only by searching the literal word "schedules", so "remind me",
+    #     "cron" and "follow up" all silently return nothing.
+    #   - authority: the request-authority binding added in 38c18aec, which
+    #     shipped with no runner and so had never actually executed in CI.
+    - name: Run psd-schedules skill tests (Bun)
+      run: bun run test:skill:schedules
+      env:
+        CI: true
+
     # Optional: Upload test coverage if you generate it
     # - name: Upload coverage reports
     #   uses: codecov/codecov-action@v3
