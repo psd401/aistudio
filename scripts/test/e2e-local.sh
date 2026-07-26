@@ -62,6 +62,43 @@ if [ "${SKIP_E2E:-}" = "1" ]; then echo "e2e-local: SKIP_E2E=1 — skipping"; ex
 
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT" || exit 1
 
+# Single exit trap for everything this run owns: the started server, Next's
+# automatic tsconfig.json edit (running `next dev` with a custom distDir appends
+# "<distDir>/types" to the tsconfig include), and the machine-wide run lock.
+STARTED_PID=""
+LOCK_ACQUIRED=0
+LOCK_DIR="/tmp/aistudio-e2e-local.lock"
+on_exit() {
+  if [ -n "$STARTED_PID" ]; then
+    kill "$STARTED_PID" >/dev/null 2>&1
+    git checkout -- tsconfig.json >/dev/null 2>&1
+  fi
+  [ "$LOCK_ACQUIRED" = "1" ] && rm -rf "$LOCK_DIR"
+  return 0
+}
+trap on_exit EXIT INT TERM
+
+# --- One run at a time per machine --------------------------------------------------
+# Two concurrent e2e-local runs (e.g. pushes from two worktrees) share ONE local
+# postgres and one laptop: the younger suite re-seeds and mutates rows under the
+# older one, and the resource contention can wedge a dev server for good. On
+# 2026-07-26 a ~9-minute overlap left the younger server permanently hanging every
+# /api route (92 spurious failures over the following hour), while the identical
+# suite alone passed clean. Serialize instead: wait for the running instance.
+while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+  holder_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+  if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
+    echo "e2e-local: stale lock (pid $holder_pid is gone) — taking over."
+    rm -rf "$LOCK_DIR"
+    continue
+  fi
+  echo "e2e-local: another run (pid ${holder_pid:-unknown}, root: $(cat "$LOCK_DIR/root" 2>/dev/null || echo unknown)) is in progress — waiting 30s (bypass once with SKIP_E2E=1)…"
+  sleep 30
+done
+LOCK_ACQUIRED=1
+echo "$$" > "$LOCK_DIR/pid"
+echo "$ROOT" > "$LOCK_DIR/root"
+
 E2E_PORT="${E2E_PORT:-3100}"
 
 # --- Local secrets (AUTH_SECRET + AUTH_COGNITO_* from .env.local) -----------------
@@ -113,7 +150,10 @@ E2E_PORT="$CHOSEN_PORT"
 BASE="http://localhost:${E2E_PORT}"
 
 # --- Reuse this worktree's dev server, or start our own ----------------------------
-STARTED_PID=""
+# Port-scoped log: two sequential runs on different ports (or a foreign server
+# also logging) must not clobber one file — a shared name produced an unreadable
+# interleaved log during the 2026-07-26 incident diagnosis.
+SERVER_LOG="/tmp/e2e-local-server-${E2E_PORT}.log"
 if [ "$REUSE" = "1" ]; then
   echo "e2e-local: reusing this worktree's dev server on :$E2E_PORT"
 else
@@ -142,16 +182,8 @@ else
   DATABASE_URL="${E2E_DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/aistudio}" \
   ATRIUM_LOCAL_STORAGE_DIR="${E2E_ATRIUM_STORAGE_DIR:-/tmp/aistudio-atrium-e2e-${E2E_PORT}}" \
   DB_SSL="${E2E_DB_SSL:-false}" PORT="$E2E_PORT" HOSTNAME=127.0.0.1 \
-    bun run server.ts > /tmp/e2e-local-server.log 2>&1 &
-  STARTED_PID=$!
-  # On exit: stop our server and undo Next's automatic tsconfig.json edit (running
-  # `next dev` with a custom distDir appends "<distDir>/types" to tsconfig include).
-  cleanup() {
-    [ -n "$STARTED_PID" ] && kill "$STARTED_PID" >/dev/null 2>&1
-    git checkout -- tsconfig.json >/dev/null 2>&1
-    return 0
-  }
-  trap cleanup EXIT INT TERM
+    bun run server.ts > "$SERVER_LOG" 2>&1 &
+  STARTED_PID=$!   # the on_exit trap (set at the top) stops it and restores tsconfig.json
   echo -n "e2e-local: waiting for $BASE "
   ready=0
   for attempt in $(seq 1 90); do
@@ -159,8 +191,8 @@ else
     echo -n "."; sleep 2
   done
   if [ "$ready" != "1" ]; then
-    echo ""; echo "❌ e2e-local: dev server never became healthy. Last log lines:"
-    tail -20 /tmp/e2e-local-server.log; exit 1
+    echo ""; echo "❌ e2e-local: dev server never became healthy. Last log lines ($SERVER_LOG):"
+    tail -20 "$SERVER_LOG"; exit 1
   fi
 fi
 
