@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * author.js — skills.author
- * Usage: node author.js --user <email> --name <name> --summary <summary>
+ * Usage: node author.js --name <name> --summary <summary>
  *        --skill-md <base64-encoded SKILL.md> --files <JSON array of {path, content_base64}>
  *
  * Creates a skill draft in S3, registers it in the database, and triggers
@@ -12,24 +12,22 @@
 
 const {
   fail,
-  validateEnv,
-  validateUserEmail,
+  rejectAuthorityArgs,
   parseArgs,
   emit,
-  authorSkill,
+  skillBroker,
 } = require('./common');
 
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
     console.log(
-      'Usage: author.js --user <email> --name <name> --summary <summary> ' +
+      'Usage: author.js --name <name> --summary <summary> ' +
       '--skill-md <base64> --files <json>'
     );
     process.exit(0);
   }
-  validateEnv();
-  validateUserEmail(args.user);
+  rejectAuthorityArgs(args);
 
   if (!args.name) fail('--name is required (skill name)');
   if (!args.summary) fail('--summary is required (one-line summary for catalog)');
@@ -103,16 +101,15 @@ async function main() {
   }
 
   try {
-    const skillId = await authorSkill(
-      args.name,
-      args.summary,
-      skillMdContent,
+    const result = await skillBroker('author', {
+      name: args.name,
+      summary: args.summary,
+      skillMdBase64: Buffer.from(skillMdContent, 'utf8').toString('base64'),
       files,
-      args.user,
-    );
+    });
 
     emit({
-      skillId,
+      skillId: result.skillId,
       name: args.name,
       status: 'draft_submitted',
       message: `Skill "${args.name}" has been submitted as a draft. ` +

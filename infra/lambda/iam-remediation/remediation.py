@@ -192,42 +192,56 @@ def remediate_iam_role(finding: Dict[str, Any]) -> Dict[str, Any]:
             'reason': f'Role environment {tags.get("Environment")} does not match {ENVIRONMENT}'
         }
 
-    # List inline policies
-    policies_response = iam_client.list_role_policies(RoleName=role_name)
-    inline_policies = policies_response.get('PolicyNames', [])
+    if ENVIRONMENT != 'dev':
+        return {'success': False, 'reason': 'IAM trust remediation is dev-only'}
 
-    remediation_actions = []
+    # Access Analyzer role findings concern the assume-role trust policy. Never
+    # delete unrelated identity policies as a proxy for fixing that finding.
+    offending_principal = finding.get('principal')
+    if not offending_principal:
+        return {'success': False, 'reason': 'Finding does not identify an external principal'}
 
-    # Check each inline policy for violations
-    for policy_name in inline_policies:
-        policy_response = iam_client.get_role_policy(
-            RoleName=role_name,
-            PolicyName=policy_name
-        )
-        policy_document = policy_response['PolicyDocument']
+    trust = role.get('AssumeRolePolicyDocument', {})
+    statements = trust.get('Statement', [])
+    if isinstance(statements, dict):
+        statements = [statements]
 
-        # Check for wildcard resources
-        has_wildcards = check_for_wildcards(policy_document)
+    retained = []
+    removed = 0
+    for statement in statements:
+        if (
+            statement.get('Effect') == 'Allow'
+            and statement.get('Principal') == offending_principal
+        ):
+            removed += 1
+        else:
+            retained.append(statement)
 
-        if has_wildcards:
-            # In dev, we can delete overly permissive policies
-            # In production, we only alert
-            if ENVIRONMENT == 'dev':
-                iam_client.delete_role_policy(
-                    RoleName=role_name,
-                    PolicyName=policy_name
-                )
-                remediation_actions.append(f'Deleted policy {policy_name}')
+    if removed == 0:
+        return {'success': False, 'reason': 'Offending trust statement was not found exactly'}
+    if not retained:
+        return {'success': False, 'reason': 'Refusing to leave the role without a valid trust statement'}
 
-    if remediation_actions:
+    updated_trust = dict(trust)
+    updated_trust['Statement'] = retained
+    iam_client.update_assume_role_policy(
+        RoleName=role_name,
+        PolicyDocument=json.dumps(updated_trust)
+    )
+
+    # Do not report success until Access Analyzer confirms the original finding
+    # has resolved. Propagation can be asynchronous; a later event may verify it.
+    finding_id = finding.get('id')
+    verification = get_finding_details(finding_id) if finding_id else finding
+    if verification.get('status') != 'RESOLVED':
         return {
-            'success': True,
-            'action': '; '.join(remediation_actions)
+            'success': False,
+            'action': f'Removed {removed} offending trust statement(s)',
+            'reason': 'Trust updated; Access Analyzer verification is pending'
         }
-
     return {
-        'success': False,
-        'reason': 'No remediable violations found'
+        'success': True,
+        'action': f'Removed {removed} offending trust statement(s) and verified resolution'
     }
 
 

@@ -1,12 +1,11 @@
 /**
- * Shared internal-API authentication for agent → Next.js endpoints (#912, #1232,
- * #1233).
+ * Legacy shared internal-API authentication for non-model service callers
+ * (#912, #1232, #1233).
  *
  * The agent runtime authenticates to /api/agent/* endpoints with a pre-shared
  * secret (Bearer) from psd-agent/{env}/internal-api-key. This module centralizes
- * the secret resolution + constant-time comparison so consent-link, the DWD
- * workspace-token broker, and the account-request provisioning endpoint all use
- * exactly the same auth (previously inline in consent-link/route.ts).
+ * the secret resolution + constant-time comparison for older callers. Model
+ * skills use router-signed invocation contexts instead.
  */
 
 import { NextRequest } from "next/server"

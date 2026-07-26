@@ -58,6 +58,8 @@ export const psdAgentSkills = pgTable("psd_agent_skills", {
   allowedTools: jsonb("allowed_tools").$type<string[]>().notNull().default([]),
   scanStatus: varchar("scan_status", { length: 16 }).$type<AgentSkillScanStatus>().notNull().default("pending"),
   scanFindings: jsonb("scan_findings").$type<SkillScanFindings>(),
+  scanLeaseId: uuid("scan_lease_id"),
+  scanStartedAt: timestamp("scan_started_at", { withTimezone: true }),
   // Added in migration 075. NULL = open to all; non-null = capability required.
   // NOTE: No FK constraint to `tools` — the column stores a capability
   // identifier string (e.g. "skill.image-gen") validated at application

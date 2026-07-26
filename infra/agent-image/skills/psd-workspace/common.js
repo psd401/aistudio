@@ -4,42 +4,12 @@
  * Environment contract (set in agent-platform-stack.ts):
  *   AWS_REGION                         — e.g. us-east-1
  *   ENVIRONMENT                        — dev/staging/prod
- *   GOOGLE_OAUTH_CLIENT_SECRET_ID      — Secrets Manager ID for OAuth client creds
- *   AGENT_INTERNAL_API_KEY_SECRET_ID   — Secrets Manager ID for internal API key
- *   APP_BASE_URL                       — Base URL of the Next.js app (consent-link host)
  */
 
 'use strict';
 
-const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
-
-const {
-  SecretsManagerClient,
-  GetSecretValueCommand,
-} = require('@aws-sdk/client-secrets-manager');
-
-const REGION = process.env.AWS_REGION || 'us-east-1';
-const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
 const APP_BASE_URL = process.env.APP_BASE_URL || '';
-const GOOGLE_OAUTH_CLIENT_SECRET_ID = process.env.GOOGLE_OAUTH_CLIENT_SECRET_ID
-  || `psd-agent/${ENVIRONMENT}/google-oauth-client`;
-const AGENT_INTERNAL_API_KEY_SECRET_ID = process.env.AGENT_INTERNAL_API_KEY_SECRET_ID
-  || `psd-agent/${ENVIRONMENT}/internal-api-key`;
-
-// Two slots per user (#912 Phase 1 — see secrets-manager.ts):
-//   'agent_account' = OAuth on agnt_<uniqname>@psd401.net (broad scopes)
-//   'user_account'  = OAuth on the human user (scopes:
-//                     gmail.modify, calendar, tasks, drive.file)
-//
-// The user_account path is suffixed (-user) so revocation tools can iterate
-// by prefix and tell the slots apart.
-const WORKSPACE_SECRET_PATH = (email, kind = 'agent_account') => {
-  const suffix = kind === 'user_account' ? '-user' : '';
-  return `psd-agent-creds/${ENVIRONMENT}/user/${email}/google-workspace${suffix}`;
-};
-
-const smClient = new SecretsManagerClient({ region: REGION });
 
 // Strict email regex — must stay in sync with lib/agent-workspace/validation.ts.
 // The email is interpolated into a Secrets Manager path, so we reject anything
@@ -85,137 +55,6 @@ function validateUserEmail(email) {
   }
 }
 
-async function getSecretJson(secretId) {
-  const resp = await smClient.send(new GetSecretValueCommand({ SecretId: secretId }));
-  if (!resp.SecretString) {
-    throw new Error(`Secret ${secretId} has no SecretString value`);
-  }
-  try {
-    return JSON.parse(resp.SecretString);
-  } catch (err) {
-    throw new Error(`Secret ${secretId} is not valid JSON: ${err.message}`);
-  }
-}
-
-async function getSecretString(secretId) {
-  const resp = await smClient.send(new GetSecretValueCommand({ SecretId: secretId }));
-  if (!resp.SecretString) {
-    throw new Error(`Secret ${secretId} has no SecretString value`);
-  }
-  return resp.SecretString;
-}
-
-/**
- * Fetch the per-user workspace refresh-token record from Secrets Manager.
- * Returns null if not provisioned yet.
- * Record shape: { refresh_token, granted_scopes, obtained_at }
- *
- * `kind` selects which slot to read:
- *   'agent_account' (default) — agent's own identity, broad scopes
- *   'user_account'            — user's own identity, narrow Phase 1 scopes
- */
-async function getUserWorkspaceToken(userEmail, kind = 'agent_account') {
-  try {
-    return await getSecretJson(WORKSPACE_SECRET_PATH(userEmail, kind));
-  } catch (err) {
-    if (err.name === 'ResourceNotFoundException') return null;
-    throw err;
-  }
-}
-
-/**
- * Exchange a refresh token for an access token via Google's OAuth2 endpoint.
- * Throws with code='invalid_grant' on revocation so callers can mark stale.
- */
-async function refreshAccessToken(refreshToken, clientId, clientSecret) {
-  const body = new URLSearchParams({
-    client_id: clientId,
-    client_secret: clientSecret,
-    refresh_token: refreshToken,
-    grant_type: 'refresh_token',
-  });
-
-  const resp = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
-
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    const err = new Error(`Google token exchange failed: ${resp.status} ${data.error || ''}`);
-    err.code = data.error || `http_${resp.status}`;
-    throw err;
-  }
-  return {
-    access_token: data.access_token,
-    expires_in: data.expires_in,
-    scope: data.scope,
-  };
-}
-
-/**
- * Ask the Next.js app for a fresh, signed consent URL for the given owner
- * and slot kind. The kind determines which scopes Google will be asked for
- * and which login_hint is set in the OAuth URL.
- */
-async function mintConsentUrl(ownerEmail, kind = 'agent_account') {
-  if (!APP_BASE_URL) {
-    throw new Error('APP_BASE_URL env var not set — cannot mint consent URL');
-  }
-  const apiKey = await getSecretString(AGENT_INTERNAL_API_KEY_SECRET_ID);
-  const resp = await fetch(`${APP_BASE_URL.replace(/\/$/, '')}/api/agent/consent-link`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ ownerEmail, kind }),
-  });
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok || !data.url) {
-    throw new Error(`Consent-link API failed: ${resp.status} ${data.error || ''}`);
-  }
-  return data.url;
-}
-
-/**
- * Fetch a short-lived Google access token for the caller's AGENT account from
- * the DWD token broker (#1232). Replaces the agent-slot refresh-token read +
- * refresh: no consent, no stored token — the broker mints on demand.
- *
- * Returns one of:
- *   { accessToken, expiresAt }   — a ~1h token for agnt_<owner>@psd401.net
- *   { notProvisioned: true }     — the agnt_ account doesn't exist yet (the
- *                                  router auto-provisions it; the user waits)
- * Throws on any other transport/auth failure.
- */
-async function fetchBrokerToken(ownerEmail) {
-  if (!APP_BASE_URL) {
-    throw new Error('APP_BASE_URL env var not set — cannot fetch agent workspace token');
-  }
-  const apiKey = await getSecretString(AGENT_INTERNAL_API_KEY_SECRET_ID);
-  const resp = await fetch(`${APP_BASE_URL.replace(/\/$/, '')}/api/agent/workspace-token`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ ownerEmail }),
-  });
-  if (resp.status === 404) {
-    const body = await resp.json().catch(() => ({}));
-    if (body && body.status === 'account-not-provisioned') {
-      return { notProvisioned: true };
-    }
-    throw new Error(`workspace-token endpoint 404: ${JSON.stringify(body).slice(0, 200)}`);
-  }
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok || !data.accessToken) {
-    throw new Error(`workspace-token endpoint failed: ${resp.status} ${data.error || ''}`);
-  }
-  return { accessToken: data.accessToken, expiresAt: data.expiresAt };
-}
 
 /**
  * Parse --command into argv-style tokens. Supports single-quoted segments so
@@ -385,32 +224,6 @@ function extractJsonArgFromTokens(tokens) {
  * (see resolvePayloadFiles). Substitution happens AFTER splitCommand, so the
  * content becomes exactly one argv token regardless of quotes/newlines.
  */
-function execGws(commandString, accessToken, payloads) {
-  let tokens = splitCommand(commandString);
-  if (payloads && typeof payloads === 'object') {
-    tokens = tokens.map((t) =>
-      Object.prototype.hasOwnProperty.call(payloads, t) ? payloads[t] : t
-    );
-  }
-  if (tokens.length === 0) {
-    fail('--command is empty');
-  }
-  // Call the real binary directly. In the agent container the model-facing
-  // `gws` on PATH is a refuse-by-default wrapper (bin/gws-wrapper.sh) that
-  // blocks direct data access; run.js is the only sanctioned caller, so it
-  // must reach the unwrapped binary at /usr/local/bin/gws.real. Local/dev
-  // images that ship no wrapper fall back to `gws` on PATH.
-  const REAL_GWS = '/usr/local/bin/gws.real';
-  const bin = fs.existsSync(REAL_GWS) ? REAL_GWS : 'gws';
-  const result = spawnSync(bin, tokens, {
-    env: { ...process.env, GOOGLE_WORKSPACE_CLI_TOKEN: accessToken },
-    stdio: ['ignore', 'inherit', 'inherit'],
-  });
-  if (result.error) {
-    fail(`Failed to exec gws: ${result.error.message}`, 2);
-  }
-  return result.status == null ? 1 : result.status;
-}
 
 // ============================================================================
 // Phase 1 hard gates (#912 Phase 1)
@@ -477,6 +290,21 @@ const USER_SCOPE_FORBIDDEN = [
     reason: 'creating a Google Sheet owned by the user (create as the agent and share explicitly instead)' },
   { pattern: /\bslides[\s.]+presentations[\s.]+create\b/i,
     reason: 'creating a Google Slides deck owned by the user (create as the agent and share explicitly instead)' },
+];
+
+const PROVENANCE_REQUIRED = [
+  { pattern: /\bcalendar[\s.]+events[\s.]+(patch|update)\b/i,
+    reason: 'calendar updates require server-recorded agent-created provenance' },
+  { pattern: /\btasks[\s.]+tasks[\s.]+(patch|update)\b/i,
+    reason: 'task updates require server-recorded agent-created provenance' },
+  { pattern: /\bdocs[\s.]+documents[\s.]+batchupdate\b/i,
+    reason: 'document mutations require server-recorded agent-created provenance' },
+  { pattern: /\bsheets[\s.]+spreadsheets[\s.]+batchupdate\b/i,
+    reason: 'spreadsheet mutations require server-recorded agent-created provenance' },
+  { pattern: /\bslides[\s.]+presentations[\s.]+batchupdate\b/i,
+    reason: 'presentation mutations require server-recorded agent-created provenance' },
+  { pattern: /\bdrive[\s.]+permissions[\s.]+create\b/i,
+    reason: 'permission creation requires server-recorded agent-created provenance' },
 ];
 
 const PHASE1_FORBIDDEN = [
@@ -928,9 +756,8 @@ function missingScopesForCommand(commandString, grantedScopeString) {
  * The check is intentionally permissive on whitespace and dot-vs-space
  * separators so different gws invocation styles all hit the same rules.
  *
- * Optional `context` argument enables narrow per-request exceptions:
+ * Optional `context` argument applies account-scope restrictions:
  *   { scope: 'agent_account' | 'user_account', ownerEmail: '<caller@…>' }
- * Currently used for the share-to-caller handoff on Drive permissions.
  */
 function enforcePhase1Gates(commandString, context) {
   if (!commandString || typeof commandString !== 'string') {
@@ -946,6 +773,10 @@ function enforcePhase1Gates(commandString, context) {
   const spaceJoined = tokens.join(' ').toLowerCase();
   const dotJoined = tokens.join('.').toLowerCase();
   const hits = (pattern) => pattern.test(spaceJoined) || pattern.test(dotJoined);
+
+  for (const { pattern, reason } of PROVENANCE_REQUIRED) {
+    if (hits(pattern)) return { allowed: false, reason };
+  }
 
   // Scope-conditional gates: file creation as the USER is impersonation
   // (2026-07-07, see USER_SCOPE_FORBIDDEN). Checked first — these have no
@@ -967,14 +798,6 @@ function enforcePhase1Gates(commandString, context) {
   }
   for (const { pattern, reason } of PHASE1_FORBIDDEN) {
     if (hits(pattern)) {
-      // Exception: agent grants explicit, bounded in-district permissions
-      // on files it owns (see isPermittedExplicitShare).
-      if (
-        hits(/\bdrive[\s.]+permissions[\s.]+create\b/i) &&
-        isPermittedExplicitShare(commandString, tokens, context)
-      ) {
-        return { allowed: true };
-      }
       return { allowed: false, reason };
     }
   }
@@ -1211,24 +1034,12 @@ function mutateJsonField(commandString, mutator) {
 }
 
 module.exports = {
-  REGION,
-  ENVIRONMENT,
   APP_BASE_URL,
-  GOOGLE_OAUTH_CLIENT_SECRET_ID,
-  AGENT_INTERNAL_API_KEY_SECRET_ID,
-  WORKSPACE_SECRET_PATH,
   fail,
   emit,
   parseArgs,
   validateUserEmail,
-  getSecretJson,
-  getSecretString,
-  getUserWorkspaceToken,
-  refreshAccessToken,
-  mintConsentUrl,
-  fetchBrokerToken,
   splitCommand,
-  execGws,
   enforcePhase1Gates,
   injectMarkers,
   resolvePayloadFiles,
@@ -1237,6 +1048,7 @@ module.exports = {
   isPermittedFolderCreate,
   isMetadataOnlyDriveUpdate,
   PHASE1_FORBIDDEN,
+  PROVENANCE_REQUIRED,
   USER_SCOPE_FORBIDDEN,
   DRIVE_FOLDER_MIME,
   DRIVE_READ_SCOPE,

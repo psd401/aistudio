@@ -8,7 +8,7 @@ import {
   type TemporaryAttachmentReference,
 } from "@/lib/repositories/temporary-attachment-contract";
 
-const MAX_ATTACHMENTS_PER_TURN = 20;
+export const MAX_ATTACHMENTS_PER_TURN = 20;
 
 interface NexusRequestMessage {
   role?: string;
@@ -60,12 +60,18 @@ function deduplicateReferences(
 export async function preflightNexusAttachmentReferences(input: {
   ownerId: number;
   messages: NexusRequestMessage[];
+  additionalAttachmentCount?: number;
 }): Promise<NexusAttachmentRequestPreflight | null> {
   const currentMessage = lastUserMessage(input.messages);
   const references = deduplicateReferences(
     temporaryAttachmentReferencesFromValue(currentMessage)
   );
-  if (references.length > MAX_ATTACHMENTS_PER_TURN) {
+  const additionalAttachmentCount = input.additionalAttachmentCount ?? 0;
+  if (
+    !Number.isSafeInteger(additionalAttachmentCount) ||
+    additionalAttachmentCount < 0 ||
+    references.length + additionalAttachmentCount > MAX_ATTACHMENTS_PER_TURN
+  ) {
     throw new NexusAttachmentTurnLimitError();
   }
   if (references.length === 0) {

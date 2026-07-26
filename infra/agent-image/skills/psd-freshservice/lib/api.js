@@ -91,7 +91,6 @@ function getApiKey(userEmail) {
   try {
     stdout = execFileSync('node', [
       CREDENTIALS_GET,
-      '--user', userEmail,
       '--name', 'freshservice_api_key',
     ], {
       encoding: 'utf8',
@@ -142,7 +141,6 @@ function promptForKey(userEmail, reason) {
       cmd: 'node',
       args: [
         '/opt/psd-skills/psd-credentials/put.js',
-        '--user', userEmail,
         '--name', 'freshservice_api_key',
         '--value', '%%VALUE%%',
       ],

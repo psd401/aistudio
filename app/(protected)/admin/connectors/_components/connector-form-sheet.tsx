@@ -338,18 +338,18 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
       {(authType === "api_key" || authType === "jwt") && (
         <div>
           <Label htmlFor="credentialsKey">
-            Credentials Key <span className="text-destructive">*</span>
+            Credential Profile <span className="text-destructive">*</span>
           </Label>
           <Input
             id="credentialsKey"
             value={credentialsKey}
             onChange={(e) => setCredentialsKey(e.target.value)}
-            placeholder="AWS Secrets Manager key"
+            placeholder="Server-configured profile id"
             maxLength={255}
             required
           />
           <p className="text-xs text-muted-foreground mt-1">
-            Reference to credentials stored in AWS Secrets Manager
+            Opaque profile configured by the deployment and bound to this provider origin
           </p>
         </div>
       )}

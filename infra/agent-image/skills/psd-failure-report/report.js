@@ -2,9 +2,8 @@
 /**
  * psd-failure-report/report.js
  *
- * Agent self-reports a semantic failure. Writes to agent_failures via RDS Data
- * API. Best-effort: emits structured CloudWatch line either way so failures are
- * recoverable even when the DB is unreachable.
+ * Agent self-reports a semantic failure through the owner-bound web broker.
+ * Best-effort: emits a structured CloudWatch line either way.
  *
  * Usage:
  *   node report.js \
@@ -18,20 +17,14 @@
 'use strict';
 
 const {
-  RDSDataClient,
-  ExecuteStatementCommand,
-} = require('@aws-sdk/client-rds-data');
-const {
   CloudWatchClient,
   PutMetricDataCommand,
 } = require('@aws-sdk/client-cloudwatch');
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
-const DATABASE_RESOURCE_ARN = process.env.DATABASE_RESOURCE_ARN || '';
-const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
-const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
 const SESSION_ID = process.env.AGENT_SESSION_ID || process.env.SESSION_ID || null;
+const { requestAgentBroker } = require('../_shared/agent-broker');
 
 const VALID_REASONS = new Set([
   'missing_credentials',
@@ -113,11 +106,11 @@ async function main() {
 
   const errorClass = truncate(args.reason, 128);
   const errorMessage = truncate(args.details, 4000);
-  const context = JSON.stringify({
+  const context = {
     tool,
     user_facing: userFacing,
     self_reported: true,
-  });
+  };
 
   // Always emit a structured CloudWatch line first so the failure is
   // recoverable even when the DB write fails.
@@ -155,46 +148,18 @@ async function main() {
     // Best-effort — metric emission failure must not affect the skill output
   }
 
-  if (!DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
-    emit({ logged: false, reason: 'database_not_configured' });
-    return;
-  }
-
-  const client = new RDSDataClient({ region: REGION });
-
   try {
-    const resp = await client.send(
-      new ExecuteStatementCommand({
-        resourceArn: DATABASE_RESOURCE_ARN,
-        secretArn: DATABASE_SECRET_ARN,
-        database: DATABASE_NAME,
-        sql: `INSERT INTO agent_failures
-                (source, severity, user_id, session_id,
-                 error_class, error_message, context, occurred_at)
-              VALUES
-                ('agent_self_report', 'warn', :user_id, :session_id,
-                 :error_class, :error_message, CAST(:context AS jsonb), NOW())
-              RETURNING id`,
-        parameters: [
-          { name: 'user_id', value: { stringValue: args.user } },
-          SESSION_ID
-            ? { name: 'session_id', value: { stringValue: SESSION_ID } }
-            : { name: 'session_id', value: { isNull: true } },
-          { name: 'error_class', value: { stringValue: errorClass } },
-          { name: 'error_message', value: { stringValue: errorMessage } },
-          { name: 'context', value: { stringValue: context } },
-        ],
-      }),
-    );
-    const records = resp.records || [];
-    let id = null;
-    if (records.length > 0 && records[0].length > 0) {
-      id = records[0][0].longValue ?? records[0][0].stringValue ?? null;
-    }
-    emit({ logged: true, failure_id: id });
+    const response = await requestAgentBroker('/api/agent/failures', {
+      source: 'agent_self_report',
+      severity: 'warn',
+      errorClass,
+      errorMessage,
+      context,
+    });
+    emit({ logged: response.logged === true, failure_id: response.failureId ?? null });
   } catch (err) {
-    process.stderr.write(`agent_failures insert failed: ${err instanceof Error ? err.message : String(err)}\n`);
-    emit({ logged: false, reason: 'database_error' });
+    process.stderr.write(`agent failure broker failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    emit({ logged: false, reason: 'broker_error' });
   }
 }
 

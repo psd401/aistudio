@@ -21,7 +21,7 @@
  */
 
 import crypto from "node:crypto";
-import { eq, and, count } from "drizzle-orm";
+import { eq, and, count, sql } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { apiKeys } from "@/lib/db/schema";
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger";
@@ -201,11 +201,13 @@ export async function generateApiKey(
     const keyHash = await hashKey(rawKey);
     const keyPrefix = randomHex.slice(0, DISPLAY_PREFIX_LENGTH);
 
-    // ATOMIC: Check quota + insert within transaction to prevent race conditions.
-    // Uses READ COMMITTED isolation (Drizzle default) — sufficient since count
-    // and insert are in the same transaction, preventing concurrent bypasses.
+    // Serialize quota checks per user. A transaction alone at READ COMMITTED does
+    // not prevent two concurrent count-then-insert operations from both seeing 9.
     const inserted = await executeTransaction(
       async (tx) => {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(1095780673, ${userId})`
+        );
         // Count active keys for this user
         const [countResult] = await tx
           .select({ value: count() })

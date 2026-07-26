@@ -8,15 +8,14 @@
  * common.js's callTool/digestRecording/listTools are overridden on the shared
  * module.exports object BEFORE run.js is required, so run.js's top-level
  * `const { callTool, ... } = require('./common')` destructures our stubs
- * instead of hitting the network/Secrets Manager. The AWS SDK is mocked so
- * requiring the (otherwise unmodified) common.js doesn't crash at module load.
+ * instead of hitting the network or credential broker.
  */
 
 'use strict';
 
 const { test, expect, beforeEach } = require('bun:test');
 
-require('./mcp-test-support'); // registers the shared Secrets Manager mock
+require('./mcp-test-support');
 
 const common = require('./common');
 
@@ -34,12 +33,12 @@ const originalCallTool = common.callTool;
 const originalDigestRecording = common.digestRecording;
 const originalListTools = common.listTools;
 
-common.callTool = async (toolName, toolArgs, userEmail) => {
-  toolCalls.push({ toolName, toolArgs, userEmail });
+common.callTool = async (toolName, toolArgs) => {
+  toolCalls.push({ toolName, toolArgs });
   return { ok: true };
 };
-common.digestRecording = async (userEmail, id, opts) => {
-  digestCalls.push({ userEmail, id, opts });
+common.digestRecording = async (id, opts) => {
+  digestCalls.push({ id, opts });
 };
 common.listTools = async () => {};
 
@@ -48,8 +47,6 @@ const { main } = require('./run');
 common.callTool = originalCallTool;
 common.digestRecording = originalDigestRecording;
 common.listTools = originalListTools;
-
-const EMAIL = 'teacher@psd401.net';
 
 beforeEach(() => {
   toolCalls = [];
@@ -62,7 +59,7 @@ async function runCli(argv) {
 }
 
 test('file subcommand sends file_id (not id) to the MCP tool', async () => {
-  await runCli(['--user', EMAIL, 'file', '--id', 'rec-123']);
+  await runCli(['file', '--id', 'rec-123']);
   expect(toolCalls).toHaveLength(1);
   expect(toolCalls[0].toolName).toBe('get_file');
   expect(toolCalls[0].toolArgs).toEqual({ file_id: 'rec-123' });
@@ -70,22 +67,40 @@ test('file subcommand sends file_id (not id) to the MCP tool', async () => {
 });
 
 test('transcript subcommand sends file_id (not id) to the MCP tool', async () => {
-  await runCli(['--user', EMAIL, 'transcript', '--id', 'rec-999']);
+  await runCli(['transcript', '--id', 'rec-999']);
   expect(toolCalls).toHaveLength(1);
   expect(toolCalls[0].toolName).toBe('get_transcript');
   expect(toolCalls[0].toolArgs).toEqual({ file_id: 'rec-999' });
 });
 
 test('summary subcommand sends file_id (not id) to the MCP tool', async () => {
-  await runCli(['--user', EMAIL, 'summary', '--id', 'rec-777']);
+  await runCli(['summary', '--id', 'rec-777']);
   expect(toolCalls).toHaveLength(1);
   expect(toolCalls[0].toolName).toBe('get_note');
   expect(toolCalls[0].toolArgs).toEqual({ file_id: 'rec-777' });
 });
 
 test('digest subcommand forwards the raw --id through to digestRecording', async () => {
-  await runCli(['--user', EMAIL, 'digest', '--id', 'rec-555']);
+  await runCli(['digest', '--id', 'rec-555']);
   expect(digestCalls).toHaveLength(1);
   expect(digestCalls[0].id).toBe('rec-555');
   expect(toolCalls).toHaveLength(0); // digest never calls callTool directly
+});
+
+test('legacy --user is rejected before any Plaud operation', async () => {
+  const originalExit = process.exit;
+  let code;
+  process.exit = (value) => {
+    code = value;
+    throw new Error('__exit__');
+  };
+  try {
+    await expect(
+      runCli(['--user', 'victim@psd401.net', 'whoami']),
+    ).rejects.toThrow('__exit__');
+  } finally {
+    process.exit = originalExit;
+  }
+  expect(code).toBe(1);
+  expect(toolCalls).toHaveLength(0);
 });

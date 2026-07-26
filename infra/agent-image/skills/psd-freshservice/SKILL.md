@@ -32,7 +32,6 @@ When you see `freshservice_key_missing`, ask the user to paste their key. After 
 
 ```bash
 node /opt/psd-skills/psd-credentials/put.js \
-  --user <email> \
   --name freshservice_api_key \
   --value "<pasted-key>"
 ```

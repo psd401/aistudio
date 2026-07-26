@@ -15,12 +15,17 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const {
+  APP_BASE_URL,
   splitCommand,
   resolvePayloadFiles,
   extractJsonArg,
   injectMarkers,
   enforcePhase1Gates,
 } = require('./common');
+
+test('module exports the configured workspace broker URL', () => {
+  expect(typeof APP_BASE_URL).toBe('string');
+});
 
 function tmpFile(content, ext = '.json') {
   const p = path.join(
@@ -83,8 +88,8 @@ describe('resolvePayloadFiles', () => {
   });
 
   test('gates see the real payload through the synthetic command', () => {
-    // An explicit share via --json-file: the gate's payload validation must
-    // be able to read type/role/emailAddress through the file indirection.
+    // Permission mutation via --json-file remains provenance-gated through
+    // the file indirection, even when the requested grant was formerly valid.
     const p = tmpFile(JSON.stringify({
       fileId: 'f1', type: 'user', role: 'reader', emailAddress: 'hagelk@psd401.net',
     }));
@@ -95,7 +100,7 @@ describe('resolvePayloadFiles', () => {
       scope: 'agent_account',
       ownerEmail: 'hagelk@psd401.net',
     });
-    expect(gate.allowed).toBe(true);
+    expect(gate.allowed).toBe(false);
     // External recipients must stay blocked even through a file payload.
     const p2 = tmpFile(JSON.stringify({
       fileId: 'f1', type: 'user', role: 'reader', emailAddress: 'evil@outside.com',
@@ -168,7 +173,7 @@ describe('user-scope file creation is impersonation — hard blocked (2026-07-07
   });
 });
 
-describe('explicit in-district sharing (widened gate, 2026-07-07)', () => {
+describe('permission mutation provenance gate', () => {
   const CTX = { scope: 'agent_account', ownerEmail: 'hagelk@psd401.net' };
   const share = (perm) =>
     enforcePhase1Gates(
@@ -176,31 +181,16 @@ describe('explicit in-district sharing (widened gate, 2026-07-07)', () => {
       CTX
     ).allowed;
 
-  test('named district colleague (not the caller) is now allowed', () => {
-    expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'songstadw@psd401.net' })).toBe(true);
-    expect(share({ fileId: 'f', type: 'user', role: 'commenter', emailAddress: 'colleague@psd401.net' })).toBe(true);
-  });
-
-  test('domain-wide reader for psd401.net is allowed', () => {
-    expect(share({ fileId: 'f', type: 'domain', role: 'reader', domain: 'psd401.net' })).toBe(true);
-  });
-
-  test('domain shares are reader-only and our-domain-only', () => {
+  test('all permission creates fail closed without server-recorded provenance', () => {
+    expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'songstadw@psd401.net' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'user', role: 'commenter', emailAddress: 'colleague@psd401.net' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'hagelk@psd401.net' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'domain', role: 'reader', domain: 'psd401.net' })).toBe(false);
     expect(share({ fileId: 'f', type: 'domain', role: 'commenter', domain: 'psd401.net' })).toBe(false);
     expect(share({ fileId: 'f', type: 'domain', role: 'writer', domain: 'psd401.net' })).toBe(false);
     expect(share({ fileId: 'f', type: 'domain', role: 'reader', domain: 'gmail.com' })).toBe(false);
-  });
-
-  test('writer allowed for explicitly NAMED district users (2026-07-08)', () => {
-    expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'hagelk@psd401.net' })).toBe(true);
-    expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'songstadw@psd401.net' })).toBe(true);
-    // Writer never crosses the district boundary or widens to domain/owner.
     expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'evil@outside.com' })).toBe(false);
-    expect(share({ fileId: 'f', type: 'domain', role: 'writer', domain: 'psd401.net' })).toBe(false);
     expect(share({ fileId: 'f', type: 'user', role: 'owner', emailAddress: 'hagelk@psd401.net' })).toBe(false);
-  });
-
-  test('external, anyone, and group stay blocked', () => {
     expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'evil@outside.com' })).toBe(false);
     expect(share({ fileId: 'f', type: 'anyone', role: 'reader' })).toBe(false);
     expect(share({ fileId: 'f', type: 'group', role: 'reader', emailAddress: 'staff@psd401.net' })).toBe(false);

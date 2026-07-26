@@ -39,6 +39,298 @@ for _m in _stubbed_by_us:
 _safe = agentcore_wrapper._safe_header_value
 
 
+class TestInvocationContextInstaller(unittest.TestCase):
+    def test_installs_authority_atomically_with_root_only_modes(self):
+        import os
+        import tempfile
+
+        token = f"v1.{'a' * 40}.{'b' * 43}"
+        proof_key = "c" * 43
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            key_path = os.path.join(directory, "request-proof-key")
+            with mock.patch.multiple(
+                agentcore_wrapper,
+                _AUTHORITY_DIRECTORY=directory,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
+            ):
+                self.assertTrue(
+                    agentcore_wrapper._install_invocation_authority(
+                        token, proof_key
+                    )
+                )
+            with open(context_path, encoding="ascii") as context_file:
+                self.assertEqual(context_file.read(), token + "\n")
+            with open(key_path, encoding="ascii") as key_file:
+                self.assertEqual(key_file.read(), proof_key + "\n")
+            self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(context_path).st_mode & 0o777, 0o600)
+            self.assertEqual(os.stat(key_path).st_mode & 0o777, 0o600)
+
+    def test_rejects_malformed_authority_and_removes_stale_values(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            key_path = os.path.join(directory, "request-proof-key")
+            with open(context_path, "w", encoding="ascii") as context_file:
+                context_file.write(f"v1.{'a' * 40}.{'b' * 43}\n")
+            with open(key_path, "w", encoding="ascii") as key_file:
+                key_file.write("c" * 43)
+            with mock.patch.multiple(
+                agentcore_wrapper,
+                _AUTHORITY_DIRECTORY=directory,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
+            ):
+                self.assertFalse(
+                    agentcore_wrapper._install_invocation_authority(
+                        "attacker-controlled", "c" * 43
+                    )
+                )
+            self.assertFalse(os.path.exists(context_path))
+            self.assertFalse(os.path.exists(key_path))
+
+    def test_revokes_both_authority_files(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            key_path = os.path.join(directory, "request-proof-key")
+            with open(context_path, "w", encoding="ascii") as context_file:
+                context_file.write("context")
+            with open(key_path, "w", encoding="ascii") as key_file:
+                key_file.write("proof")
+            with mock.patch.multiple(
+                agentcore_wrapper,
+                _AUTHORITY_DIRECTORY=directory,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
+            ):
+                agentcore_wrapper._revoke_invocation_authority()
+            self.assertFalse(os.path.exists(context_path))
+            self.assertFalse(os.path.exists(key_path))
+
+    def test_image_keeps_wrapper_and_relay_immutable_to_model_uid(self):
+        from pathlib import Path
+
+        dockerfile = Path(__file__).with_name("Dockerfile").read_text()
+        harness = Path(__file__).with_name("harness_adapter.py").read_text()
+        self.assertIn("chown -R root:root /app", dockerfile)
+        self.assertIn("chmod -R a-w /app", dockerfile)
+        self.assertIn('user="node"', harness)
+        self.assertIn('group="node"', harness)
+        self.assertIn("extra_groups=[]", harness)
+        self.assertIn("umask=0o077", harness)
+        self.assertIn('cwd="/home/node"', harness)
+
+    @unittest.skipUnless(__import__("os").geteuid() == 0, "requires UID drop")
+    def test_model_uid_cannot_read_authority_or_mutate_relay_source(self):
+        import os
+        import pwd
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        node = pwd.getpwnam("node")
+        with tempfile.TemporaryDirectory() as directory:
+            os.chmod(directory, 0o755)
+            authority = Path(directory) / "authority"
+            authority.mkdir(mode=0o700)
+            proof_key = authority / "request-proof-key"
+            proof_key.write_text("secret")
+            proof_key.chmod(0o600)
+            source = Path(directory) / "mantle_proxy.py"
+            source.write_text("trusted")
+            source.chmod(0o444)
+
+            def drop_to_node():
+                os.setgroups([])
+                os.setgid(node.pw_gid)
+                os.setuid(node.pw_uid)
+
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; import os, sys; "
+                    "\nassert os.getuid() != 0 and os.getgid() != 0"
+                    "\nassert 0 not in os.getgroups()"
+                    f"\ntry: Path({str(proof_key)!r}).read_text(); sys.exit(10)"
+                    "\nexcept PermissionError: pass"
+                    f"\ntry: Path({str(source)!r}).open('a').write('x'); sys.exit(11)"
+                    "\nexcept PermissionError: pass",
+                ],
+                check=False,
+                preexec_fn=drop_to_node,
+            )
+            self.assertEqual(probe.returncode, 0)
+
+
+class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
+    async def test_second_drain_failure_restarts_stuck_proxy_again(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            key_path = os.path.join(directory, "request-proof-key")
+            flush_path = os.path.join(directory, "workspace-flush-token")
+            for path in (context_path, key_path):
+                with open(path, "w", encoding="ascii") as authority_file:
+                    authority_file.write("authority")
+
+            with mock.patch.multiple(
+                agentcore_wrapper,
+                _AUTHORITY_DIRECTORY=directory,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
+                _current_workspace_prefix=None,
+            ), mock.patch.object(
+                agentcore_wrapper,
+                "_set_proxy_finalization",
+                side_effect=RuntimeError("drain failed"),
+            ) as transition, mock.patch.object(
+                agentcore_wrapper,
+                "_restart_mantle_proxy",
+            ) as restart:
+                await agentcore_wrapper._finalize_invocation_authority()
+
+            self.assertEqual(transition.call_count, 2)
+            self.assertEqual(restart.call_count, 2)
+            self.assertFalse(os.path.exists(context_path))
+            self.assertFalse(os.path.exists(key_path))
+            self.assertFalse(os.path.exists(flush_path))
+
+    async def test_post_turn_relay_authority_is_gone_after_final_push(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            key_path = os.path.join(directory, "request-proof-key")
+            flush_path = os.path.join(directory, "workspace-flush-token")
+            with open(context_path, "w", encoding="ascii") as context_file:
+                context_file.write("context")
+            with open(key_path, "w", encoding="ascii") as key_file:
+                key_file.write("proof")
+
+            async def invocation():
+                yield {"type": "start"}
+                yield {"result": "done"}
+
+            serialized = agentcore_wrapper._serialize_invocations(invocation)
+            with mock.patch.multiple(
+                agentcore_wrapper,
+                _AUTHORITY_DIRECTORY=directory,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
+                _current_workspace_prefix="owner-prefix",
+            ), mock.patch.object(
+                agentcore_wrapper.workspace_sync,
+                "stop_periodic_push",
+            ) as stop, mock.patch.object(
+                agentcore_wrapper.workspace_sync,
+                "push_workspace",
+                return_value=1,
+            ) as push, mock.patch.object(
+                agentcore_wrapper,
+                "_set_proxy_finalization",
+            ) as transition:
+                stream = serialized()
+                self.assertEqual(await anext(stream), {"type": "start"})
+                self.assertTrue(os.path.exists(context_path))
+                self.assertEqual(await anext(stream), {"result": "done"})
+                self.assertFalse(os.path.exists(context_path))
+                self.assertFalse(os.path.exists(key_path))
+                self.assertFalse(os.path.exists(flush_path))
+                with self.assertRaises(StopAsyncIteration):
+                    await anext(stream)
+
+            stop.assert_called_once_with()
+            self.assertEqual(push.call_args.args, ("owner-prefix",))
+            self.assertGreater(
+                push.call_args.kwargs["deadline_monotonic"],
+                agentcore_wrapper.time.monotonic(),
+            )
+            self.assertEqual(
+                [call.args[0] for call in transition.call_args_list],
+                ["begin", "end"],
+            )
+            self.assertFalse(os.path.exists(context_path))
+            self.assertFalse(os.path.exists(key_path))
+
+    async def test_client_disconnect_still_revokes_authority(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            key_path = os.path.join(directory, "request-proof-key")
+            flush_path = os.path.join(directory, "workspace-flush-token")
+            for path in (context_path, key_path):
+                with open(path, "w", encoding="ascii") as authority_file:
+                    authority_file.write("authority")
+
+            async def invocation():
+                yield {"type": "start"}
+                yield {"result": "not-consumed"}
+
+            serialized = agentcore_wrapper._serialize_invocations(invocation)
+            with mock.patch.multiple(
+                agentcore_wrapper,
+                _AUTHORITY_DIRECTORY=directory,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
+                _current_workspace_prefix="owner-prefix",
+            ), mock.patch.object(
+                agentcore_wrapper.workspace_sync,
+                "stop_periodic_push",
+            ), mock.patch.object(
+                agentcore_wrapper.workspace_sync,
+                "push_workspace",
+                return_value=1,
+            ), mock.patch.object(
+                agentcore_wrapper,
+                "_set_proxy_finalization",
+            ):
+                stream = serialized()
+                self.assertEqual(await anext(stream), {"type": "start"})
+                await stream.aclose()
+
+            self.assertFalse(os.path.exists(context_path))
+            self.assertFalse(os.path.exists(key_path))
+
+
+class TestWorkspacePrefixBinding(unittest.TestCase):
+    def setUp(self):
+        agentcore_wrapper._current_workspace_prefix = None
+        agentcore_wrapper._workspace_prefix_bound = False
+        agentcore_wrapper._workspace_prefix_hydrated = False
+
+    def tearDown(self):
+        agentcore_wrapper._current_workspace_prefix = None
+        agentcore_wrapper._workspace_prefix_bound = False
+        agentcore_wrapper._workspace_prefix_hydrated = False
+
+    def test_live_microvm_rejects_a_different_prefix(self):
+        self.assertTrue(agentcore_wrapper._bind_workspace_prefix("owner-a"))
+        agentcore_wrapper._workspace_prefix_hydrated = True
+        self.assertTrue(agentcore_wrapper._bind_workspace_prefix("owner-a"))
+        self.assertFalse(agentcore_wrapper._bind_workspace_prefix("owner-b"))
+        self.assertEqual(
+            agentcore_wrapper._current_workspace_prefix,
+            "owner-a",
+        )
+        self.assertTrue(agentcore_wrapper._workspace_prefix_hydrated)
+
+
 class SafeHeaderValueTests(unittest.TestCase):
     def test_strips_brackets_and_newlines(self):
         for ch in ("[", "]", "\n", "\r"):
@@ -210,41 +502,63 @@ class TestPullFiles(unittest.TestCase):
     """workspace_sync.pull_files — the per-turn attachment fetch (#1138 F1)."""
 
     def _run(self, relative_paths):
+        import io
         import tempfile
         from pathlib import Path
         from unittest import mock
 
         import workspace_sync
 
+        class FakeResponse(io.BytesIO):
+            def __init__(self, body):
+                super().__init__(body)
+                self.headers = {"Content-Length": str(len(body))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.close()
+
         with tempfile.TemporaryDirectory() as tmp:
-            s3 = mock.MagicMock()
+            downloaded = []
+
+            def fake_download_spec(relative):
+                downloaded.append(relative)
+                return (
+                    f"https://download.invalid/{relative}",
+                    1,
+                    {"Range": "bytes=0-0"},
+                )
+
             with mock.patch.object(workspace_sync, "WORKSPACE_DIR", Path(tmp)), \
-                 mock.patch.object(workspace_sync, "_bucket", return_value="b"), \
-                 mock.patch.object(workspace_sync, "_s3", return_value=s3):
+                 mock.patch.object(
+                     workspace_sync, "_download_spec", side_effect=fake_download_spec
+                 ), \
+                 mock.patch.object(
+                     workspace_sync.urllib.request,
+                     "urlopen",
+                     side_effect=lambda *_args, **_kwargs: FakeResponse(b"x"),
+                 ):
                 pulled = workspace_sync.pull_files("user-prefix", relative_paths)
-        return pulled, s3
+        return pulled, downloaded
 
     def test_downloads_valid_attachment_key(self):
-        pulled, s3 = self._run(["attachments/20260706T235133-0-a.pdf"])
+        pulled, downloaded = self._run(["attachments/20260706T235133-0-a.pdf"])
         self.assertEqual(pulled, 1)
-        args = s3.download_file.call_args[0]
-        self.assertEqual(args[0], "b")
-        self.assertEqual(args[1], "user-prefix/attachments/20260706T235133-0-a.pdf")
+        self.assertEqual(downloaded, ["attachments/20260706T235133-0-a.pdf"])
 
     def test_refuses_traversal_and_gateway_paths(self):
-        pulled, s3 = self._run(
+        pulled, downloaded = self._run(
             ["../outside.txt", "attachments/../../etc/passwd", "openclaw.json", "SOUL.md"]
         )
         self.assertEqual(pulled, 0)
-        s3.download_file.assert_not_called()
+        self.assertEqual(downloaded, [])
 
-    def test_no_bucket_is_a_noop(self):
-        from unittest import mock
-
+    def test_empty_prefix_is_a_noop(self):
         import workspace_sync
 
-        with mock.patch.object(workspace_sync, "_bucket", return_value=None):
-            self.assertEqual(workspace_sync.pull_files("p", ["attachments/x"]), 0)
+        self.assertEqual(workspace_sync.pull_files("", ["attachments/x"]), 0)
 
 
 class TestSanitizeHeaderField(unittest.TestCase):
@@ -258,38 +572,6 @@ class TestSanitizeHeaderField(unittest.TestCase):
     def test_non_string_returns_empty(self):
         self.assertEqual(_sanitize_header_field(None, 10), "")
         self.assertEqual(_sanitize_header_field(123, 10), "")
-
-
-class TestInlineBearerToken(unittest.TestCase):
-    """Boot must not abort when the native aws-sdk provider is active (#1138 r10 regression)."""
-
-    def _run(self, cfg):
-        import json as _json
-        import tempfile, os
-        from agentcore_wrapper import _inline_bearer_token
-        fd, path = tempfile.mkstemp(suffix=".json")
-        with os.fdopen(fd, "w") as f:
-            _json.dump(cfg, f)
-        try:
-            result = _inline_bearer_token(path, "tok-123")
-            with open(path) as f:
-                return result, _json.load(f)
-        finally:
-            os.unlink(path)
-
-    def test_native_provider_config_returns_false_untouched(self):
-        cfg = {"models": {"providers": {"amazon-bedrock": {"auth": "aws-sdk"}}}}
-        result, after = self._run(cfg)
-        self.assertFalse(result)
-        self.assertEqual(after, cfg)
-
-    def test_mantle_provider_gets_token_inlined(self):
-        cfg = {"models": {"providers": {"amazon-bedrock-mantle": {"apiKey": "env:X"}}}}
-        result, after = self._run(cfg)
-        self.assertTrue(result)
-        self.assertEqual(
-            after["models"]["providers"]["amazon-bedrock-mantle"]["apiKey"], "tok-123"
-        )
 
 
 if __name__ == "__main__":

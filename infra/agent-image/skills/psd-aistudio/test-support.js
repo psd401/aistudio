@@ -7,10 +7,8 @@
  * SecretId via `secretsStore`; each test populates/clears it in beforeEach. This
  * covers the SHARED-key fallback path.
  *
- * The PER-USER key path (which shells out to `psd-credentials/get.js` via
- * execFileSync) is NOT stubbed here — bun's mock.module does not intercept
- * `node:` builtin requires. It is stubbed via common's `_internals.execFileSync`
- * seam directly in common.test.js instead.
+ * Per-user key resolution stays inside the owner-bound web route and is
+ * covered by route tests rather than this shared-key fixture.
  */
 
 'use strict';

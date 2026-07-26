@@ -167,26 +167,13 @@ def _download_url(url: str, dest: Path) -> None:
 
 
 def _download_s3(key: str, dest: Path, user_email: str) -> None:
-    bucket = os.environ.get("WORKSPACE_BUCKET")
-    if not bucket:
-        _fail("WORKSPACE_BUCKET env var not set — cannot read --s3-key", "misconfigured")
-    # The shared AgentCore execution role can GetObject anywhere in the workspace
-    # bucket, so scope --s3-key to the caller's own public-images/<email>/ prefix
-    # to prevent reading another user's objects (IDOR). Reject path traversal too.
-    norm = key.lstrip("/")
-    allowed = f"public-images/{user_email}/"
-    if ".." in norm.split("/") or not norm.startswith(allowed):
-        _fail(f"--s3-key must be under {allowed} (the caller's own prefix)", "forbidden")
-    region = os.environ.get("AWS_REGION", "us-east-1")
     try:
-        import boto3  # baked into the container venv
-    except ImportError:
-        _fail("boto3 not available in the runtime", "misconfigured")
-    s3 = boto3.client("s3", region_name=region)
-    try:
-        s3.download_file(bucket, norm, str(dest))
-    except Exception as exc:  # botocore ClientError etc.
-        _fail(f"failed to download s3://{bucket}/{norm}: {exc}", "upstream_error")
+        sys.path.insert(0, "/app")
+        from artifact_publisher import download_public_artifact
+        _ = user_email
+        download_public_artifact(key.lstrip("/"), dest, MAX_PDF_BYTES)
+    except Exception as exc:
+        _fail(f"failed to download owner artifact: {exc}", "upstream_error")
 
 
 def parse_pages(spec: str):
@@ -244,7 +231,7 @@ def main():
                 _fail("--s3-key requires --user (caller email) for access scoping", "bad_args")
             local = Path(tmp) / "input.pdf"
             _download_s3(args.s3_key, local, args.user)
-            source = f"s3://{os.environ.get('WORKSPACE_BUCKET', '')}/{args.s3_key}"
+            source = f"owner-artifact:{args.s3_key}"
             stem = Path(args.s3_key).stem or "document"
         else:
             local = Path(args.path).expanduser()

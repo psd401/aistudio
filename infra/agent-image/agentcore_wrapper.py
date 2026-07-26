@@ -4,36 +4,29 @@ contract.
 
 Flow on container start:
   1. Log BUILD_MARKER so CloudWatch proves which image is running
-  2. Fetch the Bedrock API key from Secrets Manager and export it as
-     AWS_BEARER_TOKEN_BEDROCK so OpenClaw can authenticate to Bedrock Mantle
-     (the OpenAI-compatible endpoint)
-  3. Start the OpenClaw gateway configured for Mantle — no local proxy
+  2. Start a credential-isolating local model proxy
+  3. Start the OpenClaw gateway pointed only at that loopback proxy
   4. Register the agent_invocation entrypoint with BedrockAgentCoreApp
   5. Route incoming payloads through the harness adapter via WebSocket
 
 Environment variables (injected by AgentCore from the CDK stack):
   ENVIRONMENT                 — dev/staging/prod
-  WORKSPACE_BUCKET            — S3 bucket for agent workspaces
-  USERS_TABLE                 — DynamoDB table for user identity
-  BEDROCK_API_KEY_SECRET_ARN  — Secrets Manager ARN holding the Bedrock
-                                 API key (service-specific credential). CDK
-                                 provisions + rotates this; we just read it
-                                 on startup and forget about it.
   AWS_REGION                  — AWS region for the task role's SDK calls
   BUILD_MARKER                — `tag@sha256:…` of the deployed image
+  APP_BASE_URL                — trusted web tier that owns privileged brokers
 
-We intentionally no longer run a local Bedrock proxy. Mantle is AWS's
-OpenAI-compatible Bedrock endpoint — OpenClaw speaks OpenAI natively, so
-we point its provider config directly at Mantle. Killing the proxy also
-kills the class of Converse format-translation bugs we used to own
-(orphaned toolUse, parallel tool-result grouping, etc.).
+The model process never receives the Bedrock bearer, a service-secret
+identifier, or direct S3/DynamoDB/Data API authority. Privileged operations
+cross signed, owner-bound broker boundaries in the trusted web tier.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -55,8 +48,7 @@ import workspace_sync
 from agent_failures import emit_agent_metric
 from check_bootstrap_budget import check_runtime_bootstrap
 
-# Runtime path OpenClaw reads its config + auto-loaded bootstrap files from.
-# Same path hydrate_bedrock_api_key() inlines the bearer token into.
+# Runtime path OpenClaw reads its credential-free config and bootstrap files from.
 OPENCLAW_CONFIG_PATH = "/home/node/.openclaw/openclaw.json"
 OPENCLAW_WORKSPACE_DIR = "/home/node/.openclaw"
 
@@ -72,7 +64,7 @@ DEFAULT_AGENT_MODEL_ID = "claude-sonnet-5"
 
 adapter = OpenClawAdapter()
 
-# Transparent logging proxy sitting between OpenClaw and Mantle.
+# Credential-isolating logging proxy sitting between OpenClaw and the web broker.
 # Track the process so we can reap it on shutdown and log if it crashes.
 _mantle_proxy_process: subprocess.Popen | None = None
 
@@ -84,6 +76,257 @@ def _safe_header_value(value: str, limit: int = 100) -> str:
     attacker-controlled display name / email cannot inject a new header line
     (REV-COR-318)."""
     return re.sub(r'[\[\]\n\r]', '', value or '')[:limit]
+
+
+_AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
+_INVOCATION_CONTEXT_PATH = f"{_AUTHORITY_DIRECTORY}/invocation-context"
+_REQUEST_PROOF_KEY_PATH = f"{_AUTHORITY_DIRECTORY}/request-proof-key"
+_WORKSPACE_FLUSH_TOKEN_PATH = f"{_AUTHORITY_DIRECTORY}/workspace-flush-token"
+_INVOCATION_CONTEXT_RE = re.compile(
+    r"^v1\.[A-Za-z0-9_-]{40,3500}\.[A-Za-z0-9_-]{43}$"
+)
+_REQUEST_PROOF_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_invocation_lock = asyncio.Lock()
+FINAL_WORKSPACE_FLUSH_SECONDS = 120
+
+
+def _install_invocation_authority(token, request_proof_key) -> bool:
+    """Install authority for the root-owned local relay.
+
+    OpenClaw and every model-launched skill run as the unprivileged ``node``
+    user. They can call fixed relay operations, but cannot read either the
+    signed context or the derived per-invocation signing key.
+    """
+    if (
+        not isinstance(token, str)
+        or not _INVOCATION_CONTEXT_RE.fullmatch(token)
+        or not isinstance(request_proof_key, str)
+        or not _REQUEST_PROOF_KEY_RE.fullmatch(request_proof_key)
+    ):
+        for path in (_INVOCATION_CONTEXT_PATH, _REQUEST_PROOF_KEY_PATH):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+        return False
+
+    os.makedirs(_AUTHORITY_DIRECTORY, mode=0o700, exist_ok=True)
+    os.chmod(_AUTHORITY_DIRECTORY, 0o700)
+    for path, value in (
+        (_INVOCATION_CONTEXT_PATH, token),
+        (_REQUEST_PROOF_KEY_PATH, request_proof_key),
+    ):
+        temporary_path = f"{path}.{os.getpid()}.tmp"
+        with open(temporary_path, "w", encoding="ascii") as handle:
+            handle.write(value)
+            handle.write("\n")
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+    return True
+
+
+def _revoke_invocation_authority() -> None:
+    """Remove all local relay signing authority at the end of every turn."""
+    for path in (_INVOCATION_CONTEXT_PATH, _REQUEST_PROOF_KEY_PATH):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def _invocation_authority_is_installed() -> bool:
+    return all(
+        os.path.isfile(path)
+        for path in (_INVOCATION_CONTEXT_PATH, _REQUEST_PROOF_KEY_PATH)
+    )
+
+
+def _install_workspace_flush_lock() -> str:
+    """Block model-originated relay calls while root flushes owner state."""
+    os.makedirs(_AUTHORITY_DIRECTORY, mode=0o700, exist_ok=True)
+    os.chmod(_AUTHORITY_DIRECTORY, 0o700)
+    temporary_path = f"{_WORKSPACE_FLUSH_TOKEN_PATH}.{os.getpid()}.tmp"
+    token = secrets.token_urlsafe(32)
+    with open(temporary_path, "w", encoding="ascii") as handle:
+        handle.write(token)
+        handle.write("\n")
+    os.chmod(temporary_path, 0o600)
+    os.replace(temporary_path, _WORKSPACE_FLUSH_TOKEN_PATH)
+    return token
+
+
+def _remove_workspace_flush_lock() -> None:
+    try:
+        os.unlink(_WORKSPACE_FLUSH_TOKEN_PATH)
+    except FileNotFoundError:
+        pass
+
+
+def _set_proxy_finalization(action: str, token: str) -> None:
+    """Ask the loopback proxy to atomically drain or reopen privileged calls."""
+    import urllib.error
+    import urllib.request
+
+    if action not in {"begin", "end"}:
+        raise ValueError("invalid proxy finalization transition")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:18791/internal/finalization/{action}",
+        data=b"",
+        method="POST",
+        headers={"X-Agent-Workspace-Flush": token},
+    )
+    timeout = FINAL_WORKSPACE_FLUSH_SECONDS + 5 if action == "begin" else 5
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise RuntimeError(
+                    f"proxy finalization {action} returned {response.status}"
+                )
+    except urllib.error.HTTPError as exc:
+        exc.read(500)
+        raise RuntimeError(
+            f"proxy finalization {action} returned {exc.code}"
+        ) from exc
+
+
+def _restart_mantle_proxy() -> None:
+    """Cancel stuck relay calls and replace the proxy with an empty drain set."""
+    global _mantle_proxy_process
+    process = _mantle_proxy_process
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    _mantle_proxy_process = None
+    start_mantle_proxy()
+
+
+async def _finalize_invocation_authority() -> None:
+    """Lock the relay, flush once as root, then revoke all turn authority."""
+    loop = asyncio.get_running_loop()
+    periodic_stopped = False
+    proxy_finalizing = False
+    proxy_needs_recovery = False
+    flush_token: str | None = None
+    try:
+        try:
+            flush_token = _install_workspace_flush_lock()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("turn-final relay lock failed: %s", exc)
+            return
+        try:
+            await loop.run_in_executor(
+                None,
+                _set_proxy_finalization,
+                "begin",
+                flush_token,
+            )
+            proxy_finalizing = True
+        except Exception as exc:  # noqa: BLE001
+            # A timed-out drain remains closed in the old proxy. Terminating it
+            # cancels those in-flight signed calls; the fresh proxy begins with
+            # an empty active set and is immediately moved into finalization.
+            logger.warning("turn-final proxy drain failed; restarting: %s", exc)
+            proxy_needs_recovery = True
+            try:
+                await loop.run_in_executor(None, _restart_mantle_proxy)
+                await loop.run_in_executor(
+                    None,
+                    _set_proxy_finalization,
+                    "begin",
+                    flush_token,
+                )
+                proxy_finalizing = True
+                proxy_needs_recovery = False
+            except Exception as restart_exc:  # noqa: BLE001
+                logger.error(
+                    "turn-final proxy restart/drain failed: %s",
+                    restart_exc,
+                )
+                return
+        try:
+            await loop.run_in_executor(None, workspace_sync.stop_periodic_push)
+            periodic_stopped = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("turn-final periodic workspace stop failed: %s", exc)
+        if (
+            periodic_stopped
+            and _current_workspace_prefix
+            and _invocation_authority_is_installed()
+        ):
+            try:
+                deadline = time.monotonic() + FINAL_WORKSPACE_FLUSH_SECONDS
+                push = functools.partial(
+                    workspace_sync.push_workspace,
+                    _current_workspace_prefix,
+                    deadline_monotonic=deadline,
+                )
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, push),
+                    timeout=FINAL_WORKSPACE_FLUSH_SECONDS + 5,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("turn-final workspace push exceeded deadline")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("turn-final workspace push failed: %s", exc)
+    finally:
+        _revoke_invocation_authority()
+        if proxy_finalizing and flush_token is not None:
+            try:
+                await loop.run_in_executor(
+                    None,
+                    _set_proxy_finalization,
+                    "end",
+                    flush_token,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Do not leave the next turn behind a permanently closed gate.
+                logger.warning(
+                    "turn-final proxy reopen failed; restarting: %s",
+                    exc,
+                )
+                try:
+                    await loop.run_in_executor(None, _restart_mantle_proxy)
+                except Exception as restart_exc:  # noqa: BLE001
+                    logger.error(
+                        "turn-final proxy recovery failed: %s",
+                        restart_exc,
+                    )
+        elif proxy_needs_recovery:
+            try:
+                await loop.run_in_executor(None, _restart_mantle_proxy)
+            except Exception as restart_exc:  # noqa: BLE001
+                logger.error(
+                    "turn-final stuck proxy recovery failed: %s",
+                    restart_exc,
+                )
+        _remove_workspace_flush_lock()
+
+
+def _serialize_invocations(function):
+    """Hold one owner's authority and revoke it before the terminal result."""
+    async def serialized(*args, **kwargs):
+        finalized = False
+        async with _invocation_lock:
+            try:
+                async for event in function(*args, **kwargs):
+                    if (
+                        not finalized
+                        and isinstance(event, dict)
+                        and "result" in event
+                    ):
+                        await _finalize_invocation_authority()
+                        finalized = True
+                    yield event
+            finally:
+                # Async-generator finalization also runs this path when the
+                # streaming client disconnects or the invocation raises.
+                if not finalized:
+                    await _finalize_invocation_authority()
+    return serialized
 
 
 def start_mantle_proxy() -> None:
@@ -101,17 +344,20 @@ def start_mantle_proxy() -> None:
         [sys.executable, "/app/mantle_proxy.py"],
         stdout=sys.stdout,
         stderr=sys.stderr,
-        env={**os.environ},
+        stdin=subprocess.DEVNULL,
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("AWS_BEARER_TOKEN_BEDROCK", "BEDROCK_API_KEY_SECRET_ARN")
+        },
     )
-
     deadline = time.time() + 20
     while time.time() < deadline:
         if _mantle_proxy_process.poll() is not None:
-            logger.error(
-                "Mantle proxy exited during startup (rc=%s)",
-                _mantle_proxy_process.returncode,
+            raise RuntimeError(
+                "Mantle proxy exited during startup "
+                f"(rc={_mantle_proxy_process.returncode})"
             )
-            sys.exit(1)
         try:
             with urllib.request.urlopen(
                 "http://127.0.0.1:18791/health", timeout=2
@@ -123,20 +369,10 @@ def start_mantle_proxy() -> None:
             pass
         time.sleep(0.5)
 
-    logger.error("Mantle proxy did not become ready within 20s")
-    sys.exit(1)
+    raise RuntimeError("Mantle proxy did not become ready within 20s")
 
 def resolve_model_call_count(proxy_model_calls: int, tool_call_count: int) -> int:
-    """Per-turn model-call count (issue #1161), robust to the serving path.
-
-    The mantle_proxy `usage_events` delta is authoritative WHEN OpenClaw routes
-    through the proxy — but #1159 ("direct-Mantle provider") pointed the baseUrl
-    at the real Bedrock Mantle endpoint, so on the current image the proxy sees
-    no model traffic and its delta is 0. Fall back to a harness-derived count
-    from the real event stream: one model call per tool round plus the final
-    response (tool_call_count + 1). Prefer the proxy value only when it's > 0, so
-    this stays correct if the proxy is ever restored to the serving path.
-    """
+    """Resolve a per-turn model-call count from broker telemetry or events."""
     if proxy_model_calls > 0:
         return proxy_model_calls
     return tool_call_count + 1
@@ -194,211 +430,28 @@ def read_proxy_usage() -> dict:
 # Track which workspace prefix this microVM is currently serving so we can
 # (a) skip redundant S3 pulls and (b) push to the right prefix on shutdown.
 _current_workspace_prefix: str | None = None
+_workspace_prefix_bound = False
+_workspace_prefix_hydrated = False
 
-# Track which user the on-disk `gh` auth file is currently written for, so we
-# only re-hit Secrets Manager when the invoking user changes within a microVM.
-_current_gh_user: str | None = None
 
+def _bind_workspace_prefix(prefix: str) -> bool:
+    """Permanently bind a live microVM to its first workspace prefix.
+
+    The local OpenClaw tree is not proven-cleanable while its gateway and
+    background processes remain alive. Rejecting a prefix change prevents files
+    and in-memory upload state from crossing owners.
+    """
+    global _current_workspace_prefix, _workspace_prefix_bound
+    if _workspace_prefix_bound:
+        return prefix == _current_workspace_prefix
+    _current_workspace_prefix = prefix
+    _workspace_prefix_bound = True
+    return True
 
 def hydrate_github_auth(user_email: str) -> None:
-    """
-    Write ~/.config/gh/hosts.yml so the `gh` CLI (baked into the image at
-    /usr/local/bin/gh) is authenticated for the current invoking user.
-
-    The `gh` binary persists across container restarts, but its auth state
-    (normally written by `gh auth login`) does NOT — `~/.config/gh/` is
-    ephemeral filesystem and not synced via workspace_sync. Skills that
-    shell out to `gh` (notably the user-authored psd-github skill) hit
-    "not authenticated" errors after every microVM cold-start.
-
-    Setting GH_TOKEN in os.environ does not help here: OpenClaw is spawned
-    once at container start with a frozen env snapshot, and skill
-    subprocesses inherit that snapshot rather than the wrapper's current
-    environment. Writing the on-disk config is the only mechanism that
-    propagates to every gh invocation regardless of process tree.
-
-    Per-user PAT location:
-        psd-agent-creds/{ENVIRONMENT}/user/{user_email}/github_pat
-
-    Non-fatal: many users don't have a PAT provisioned. Log and continue.
-    """
-    global _current_gh_user
-
-    if not user_email or user_email == "unknown":
-        return
-    if user_email == _current_gh_user:
-        return
-
-    import boto3
-    from botocore.exceptions import ClientError
-
-    env = os.environ.get("ENVIRONMENT", "dev")
-    secret_id = f"psd-agent-creds/{env}/user/{user_email}/github_pat"
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
-
-    try:
-        # Avoid AWS_PROFILE leakage — same reason as hydrate_bedrock_api_key.
-        saved_profile = os.environ.pop("AWS_PROFILE", None)
-        try:
-            sm = boto3.client("secretsmanager", region_name=region)
-        finally:
-            if saved_profile is not None:
-                os.environ["AWS_PROFILE"] = saved_profile
-        resp = sm.get_secret_value(SecretId=secret_id)
-    except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "")
-        if code == "ResourceNotFoundException":
-            logger.info("No github_pat provisioned for %s — gh remains unauthenticated", user_email)
-        else:
-            logger.warning("gh hydrate ClientError for %s: %s", user_email, code)
-        return
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("gh hydrate failed for %s: %s", user_email, exc)
-        return
-
-    pat = (resp.get("SecretString") or "").strip()
-    if not pat:
-        logger.warning("github_pat secret for %s is empty", user_email)
-        return
-
-    gh_dir = "/home/node/.config/gh"
-    hosts_path = os.path.join(gh_dir, "hosts.yml")
-    try:
-        os.makedirs(gh_dir, exist_ok=True)
-        os.chmod(gh_dir, 0o700)
-        # Minimal hosts.yml — `gh` will resolve the username via /user on demand.
-        content = (
-            "github.com:\n"
-            f"    oauth_token: {pat}\n"
-            "    git_protocol: https\n"
-        )
-        tmp_path = hosts_path + ".tmp"
-        # Use os.open with O_CREAT|O_WRONLY|O_TRUNC and explicit 0600 mode so
-        # the token never lands on disk readable by anyone but `node`.
-        fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, content.encode("utf-8"))
-        finally:
-            os.close(fd)
-        os.replace(tmp_path, hosts_path)
-    except OSError as exc:
-        logger.warning("failed to write gh hosts.yml for %s: %s", user_email, exc)
-        return
-
-    _current_gh_user = user_email
-    logger.info("gh auth hydrated for %s", user_email)
-
-
-def hydrate_bedrock_api_key() -> None:
-    """
-    Fetch the Bedrock API key from Secrets Manager, export it as
-    AWS_BEARER_TOKEN_BEDROCK, AND inline the literal value into
-    openclaw.json's provider config.
-
-    Why inline and not just env var: OpenClaw has (at least) two code paths
-    that read the provider apiKey — the main chat pipeline and the
-    embedded-agent runner used by plugins. In practice the embedded path
-    has not been resolving `${AWS_BEARER_TOKEN_BEDROCK}` / `env:VAR` refs
-    correctly in the installed gateway version, causing plugins (notably
-    active-memory) to send an empty or literal-string bearer to Mantle and
-    get HTTP 401 on every call. The embedded failure cascades to the main
-    reply as `surface_error` on follow-up turns, breaking memory entirely.
-
-    Writing the literal token into the on-disk config eliminates env-var
-    resolution as a variable. The token is short-lived in the container FS
-    (ephemeral microVM, no persistent storage for this path). We still
-    export the env var for belt-and-suspenders and for any OpenClaw
-    auto-discovery that reads it directly.
-
-    Fails fast (SystemExit) if the secret is unreachable.
-    """
-    import boto3
-    import json
-
-    secret_arn = os.environ.get("BEDROCK_API_KEY_SECRET_ARN")
-    if not secret_arn:
-        logger.error("BEDROCK_API_KEY_SECRET_ARN env var is not set")
-        sys.exit(1)
-
-    try:
-        # AWS_PROFILE may be set elsewhere to satisfy OpenClaw's pre-flight
-        # auth-detection heuristic; pop it here so boto3 doesn't try to load
-        # a (non-existent) profile file. Restored after the client is built.
-        # AgentCore doesn't inject AWS_REGION, and secretsmanager requires
-        # one. Default to us-east-1 (where this stack lives); make it
-        # overridable via env for multi-region deployments.
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
-        saved_profile = os.environ.pop("AWS_PROFILE", None)
-        try:
-            sm = boto3.client("secretsmanager", region_name=region)
-        finally:
-            if saved_profile is not None:
-                os.environ["AWS_PROFILE"] = saved_profile
-
-        resp = sm.get_secret_value(SecretId=secret_arn)
-        value = resp.get("SecretString")
-        if not value:
-            logger.error("secret %s has empty SecretString", secret_arn)
-            sys.exit(1)
-        value = value.strip()
-        if not value:
-            logger.error("secret %s resolved to empty value after trimming", secret_arn)
-            sys.exit(1)
-        os.environ["AWS_BEARER_TOKEN_BEDROCK"] = value
-        version = resp.get("VersionId", "?")
-
-        # Inline the literal token into openclaw.json IF the config still
-        # uses the token-authenticated mantle provider. The native
-        # `amazon-bedrock` provider (#1138 native program) authenticates via
-        # the aws-sdk credential chain (execution role) and has no apiKey
-        # field — nothing to inline, and its absence is NOT an error. The
-        # env var above stays hydrated either way (memorySearch's native
-        # bedrock path consumes AWS_BEARER_TOKEN_BEDROCK).
-        # BOOT-ABORT REGRESSION (2026-07-08, r10): this step used to
-        # sys.exit(1) when amazon-bedrock-mantle was absent, which killed
-        # every microVM boot after the provider switch (AgentCore 424
-        # "error when starting"). Absent provider now logs and continues.
-        config_path = "/home/node/.openclaw/openclaw.json"
-        inlined = _inline_bearer_token(config_path, value)
-        if inlined:
-            logger.info(
-                "Bedrock API key hydrated + inlined (secret=%s version=%s "
-                "config=%s)",
-                secret_arn.split(":")[-1], version, config_path,
-            )
-        else:
-            logger.info(
-                "Bedrock API key hydrated to env only (no token-auth "
-                "provider in openclaw.json — native aws-sdk provider active)"
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.error("failed to hydrate Bedrock API key: %s", exc)
-        sys.exit(1)
-
-
-def _inline_bearer_token(config_path: str, value: str) -> bool:
-    """Inline the bearer token into the mantle provider's apiKey, if present.
-
-    Returns True when a token-auth provider existed and was updated, False
-    when the config has no `amazon-bedrock-mantle` provider (the native
-    aws-sdk-auth provider path — nothing to inline). Config read/write
-    errors are fatal: a half-written openclaw.json would break the gateway
-    in stranger ways than a clean abort.
-    """
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        providers = cfg.get("models", {}).get("providers", {})
-        mantle = providers.get("amazon-bedrock-mantle")
-        if not mantle:
-            return False
-        mantle["apiKey"] = value
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-        return True
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.error("failed to inline API key into %s: %s", config_path, exc)
-        sys.exit(1)
+    """Compatibility no-op: GitHub authentication lives in the web broker."""
+    if user_email and user_email != "unknown":
+        logger.debug("GitHub broker will derive credential for %s", user_email)
 
 
 def handle_shutdown(signum, frame):
@@ -640,14 +693,8 @@ def main():
         )
         sys.exit(1)
 
-    # Step 1: hydrate the Bedrock API key for OpenClaw's Mantle provider.
-    # This MUST happen before adapter.configure() because OpenClaw reads the
-    # env var once at gateway start.
-    hydrate_bedrock_api_key()
-
-    # Step 1b: start the transparent Mantle proxy BEFORE OpenClaw. Its role
-    # is purely diagnostic (logging every request + response to CloudWatch)
-    # but it must be healthy first because OpenClaw's baseUrl points at it.
+    # Start the local request-shaping proxy before OpenClaw. It forwards only
+    # to the owner-bound web broker and never receives a provider credential.
     start_mantle_proxy()
 
     # Step 2: start the OpenClaw gateway
@@ -659,6 +706,7 @@ def main():
     app = BedrockAgentCoreApp()
 
     @app.entrypoint
+    @_serialize_invocations
     async def agent_invocation(payload, context):
         """
         Handle an agent invocation from AgentCore.
@@ -683,6 +731,9 @@ def main():
             user_email                — caller's email (used as stable identity)
             user_display_name         — caller's display name for greetings
             workspace_prefix          — S3 prefix to mount as long-term memory
+            invocation_context        — router-signed actor/owner/mode context
+            invocation_request_proof_key
+                                      — root-relay-only derived signing key
             model                     — optional model override
             invoked_by_email          — cross-user: email of the person consulting this agent
             invoked_by_display_name   — cross-user: display name of the invoker
@@ -691,13 +742,17 @@ def main():
                                         [{name, mimeType, source, driveFileId?,
                                           attachmentResourceName?}]
         """
-        global _current_workspace_prefix
+        global _workspace_prefix_hydrated
 
         session_id = getattr(context, "session_id", "unknown")
         user_message = payload.get("prompt", "")
         user_email = payload.get("user_email") or payload.get("user_id", "unknown")
         display_name = payload.get("user_display_name", "")
         workspace_prefix = payload.get("workspace_prefix", "")
+        invocation_context = payload.get("invocation_context", "")
+        invocation_request_proof_key = payload.get(
+            "invocation_request_proof_key", ""
+        )
         model_override = payload.get("model")
         # Optional turn-deadline override (async-job runner, #1138). Only the
         # job runner sends this; interactive router turns omit it and get the
@@ -726,16 +781,85 @@ def main():
             yield {"result": "I didn't receive a message. Could you try again?"}
             return
 
-        # Hydrate `gh` auth for the invoking user (no-op if same user, missing
-        # PAT, or unknown identity). Runs every invocation cheaply because the
-        # function short-circuits when _current_gh_user already matches.
+        # A previous turn's periodic workspace push may still be using the
+        # current authority. It must be fully stopped before authority can be
+        # replaced for this serialized turn; otherwise a background request
+        # can be signed as the next owner.
+        try:
+            workspace_sync.stop_periodic_push()
+        except RuntimeError as exc:
+            logger.error(
+                "Invocation rejected: prior owner workspace push is still active: %s",
+                exc,
+            )
+            yield {
+                "result": "The agent is still securing the previous workspace. Please retry.",
+                "metadata": {
+                    "failed": True,
+                    "error_class": "InvocationAuthorityBusy",
+                },
+            }
+            return
+
+        # A model-visible email or workspace prefix is never authority. Install
+        # the signed context before any skill can run; fail closed when an old
+        # or untrusted caller invokes the runtime without one.
+        if not _install_invocation_authority(
+            invocation_context,
+            invocation_request_proof_key,
+        ):
+            logger.error(
+                "Invocation rejected: missing or malformed signed context "
+                "(session=%s)",
+                session_id,
+            )
+            yield {
+                "result": (
+                    "I couldn't verify the identity for this request. "
+                    "Please try again after the agent service is updated."
+                ),
+                "metadata": {
+                    "failed": True,
+                    "error_class": "InvocationContextInvalid",
+                },
+            }
+            return
+
+        # Only a successfully signed invocation may bind the persistent
+        # runtime. The gateway can retain open files and in-memory upload state,
+        # so one live microVM may serve exactly one workspace prefix.
+        if not _bind_workspace_prefix(workspace_prefix):
+            # Do not let the decorator's final flush pair this rejected
+            # invocation's authority with the already-bound owner's prefix.
+            _revoke_invocation_authority()
+            logger.error(
+                "Invocation rejected: workspace prefix changed in a live "
+                "microVM (current=%s requested=%s)",
+                _current_workspace_prefix or "-",
+                workspace_prefix or "-",
+            )
+            yield {
+                "result": (
+                    "This agent runtime is still bound to another workspace. "
+                    "Please retry in a fresh runtime."
+                ),
+                "metadata": {
+                    "failed": True,
+                    "error_class": "WorkspaceAuthorityChanged",
+                },
+            }
+            return
+
+        # Compatibility hook. GitHub authentication and authorization are
+        # enforced only by the signed, owner-bound web broker.
         if user_email and user_email != "unknown":
             await asyncio.get_running_loop().run_in_executor(
                 None, hydrate_github_auth, user_email
             )
 
-        # First invocation for a new workspace prefix → pull memory from S3.
-        if workspace_prefix and workspace_prefix != _current_workspace_prefix:
+        # This microVM is permanently bound to the prefix above, so a pull can
+        # never overlay a previous owner's local files.
+        if workspace_prefix and not _workspace_prefix_hydrated:
             try:
                 pulled = await asyncio.get_running_loop().run_in_executor(
                     None, workspace_sync.pull_workspace, workspace_prefix
@@ -744,10 +868,11 @@ def main():
                     "workspace mounted: prefix=%s files=%d",
                     workspace_prefix, pulled,
                 )
-                _current_workspace_prefix = workspace_prefix
-                workspace_sync.start_periodic_push(workspace_prefix, interval_s=120)
+                _workspace_prefix_hydrated = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning("workspace mount failed: %s", exc)
+        if workspace_prefix:
+            workspace_sync.start_periodic_push(workspace_prefix, interval_s=120)
 
         # Per-turn attachment delivery (issue #1138 F1): the router uploaded
         # Chat attachment bytes to S3 AFTER this microVM's one-time workspace
@@ -1014,13 +1139,13 @@ def main():
         }
 
     logger.info(
-        "AgentCore wrapper starting — env=%s bucket=%s",
+        "AgentCore wrapper starting — env=%s broker=%s",
         os.environ.get("ENVIRONMENT", "unknown"),
-        os.environ.get("WORKSPACE_BUCKET", "unknown"),
+        os.environ.get("APP_BASE_URL", "unknown"),
     )
 
     # Gateway is ready (adapter.configure blocked until /health 200), the
-    # provider key is hydrated, and the proxy is healthy — verify model/provider
+    # credential-isolating proxy is healthy — verify model/provider
     # resolution and emit BOOT_OK. Best-effort: a verification failure withholds
     # BOOT_OK (surfaced by the dead-boot alarm) but must not stop the server
     # from trying to serve.

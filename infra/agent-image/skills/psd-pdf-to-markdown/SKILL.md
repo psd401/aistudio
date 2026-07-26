@@ -67,9 +67,10 @@ A single JSON object on stdout:
 ## Errors
 
 - **`bad_args`** — missing/invalid input flag, non-PDF file, or a refused `--url`.
-- **`forbidden`** — `--url` resolved to a non-public address (SSRF guard), or `--s3-key` was outside the caller's own `public-images/<email>/` prefix.
-- **`misconfigured`** — `WORKSPACE_BUCKET` unset for an `--s3-key` request.
-- **`upstream_error`** — the URL fetch or S3 download failed.
+- **`forbidden`** — `--url` resolved to a non-public address (SSRF guard), or
+  an artifact key was outside the signed caller's public prefix.
+- **`misconfigured`** — the trusted artifact broker is unavailable.
+- **`upstream_error`** — the URL fetch or brokered artifact download failed.
 - **`convert_error`** — the PDF could not be parsed (corrupt or unsupported).
 - **`too_large`** — the input exceeds 100 MB.
 - **`empty_output`** — no extractable text (likely a scanned PDF needing OCR).

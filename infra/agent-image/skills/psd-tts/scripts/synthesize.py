@@ -6,11 +6,9 @@ Convert text to a shareable MP3 with Amazon Polly, upload it to the workspace S3
 bucket under the public `public-images/` prefix, and return an unsigned HTTPS
 URL (same delivery model as psd-image-gen / psd-html-artifact).
 
-Polly is NOT Bedrock: it authenticates with the AgentCore execution role's
-SigV4 credential chain (the same role that does S3/Secrets), NOT the
-AWS_BEARER_TOKEN_BEDROCK token. boto3 needs an explicit region because
-AgentCore does not inject AWS_REGION into every SDK path — we read AWS_REGION
-(set on the runtime) and fall back to us-east-1.
+Polly authenticates with the AgentCore execution role's SigV4 credential
+chain. The resulting MP3 is uploaded through the owner-bound workspace broker;
+the model role has no S3 or Secrets Manager access.
 
 Usage (text from --text, --file, or stdin):
     python3 synthesize.py --user name@psd401.net --text "Hello there."
@@ -104,23 +102,10 @@ def synthesize(text, voice, engine, region):
 
 
 def upload_mp3(audio, user_email, region):
-    bucket = os.environ.get("WORKSPACE_BUCKET")
-    if not bucket:
-        _fail("WORKSPACE_BUCKET env var not set — cannot upload audio", "misconfigured")
-    import boto3
-
-    key = f"public-images/{user_email}/{uuid.uuid4()}.mp3"
-    s3 = boto3.client("s3", region_name=region)
-    s3.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=audio,
-        ContentType="audio/mpeg",
-        Metadata={"generated_by": "psd-tts"},
-    )
-    encoded_key = "/".join(quote(seg) for seg in key.split("/"))
-    url = f"https://{bucket}.s3.{region}.amazonaws.com/{encoded_key}"
-    return url, key
+    sys.path.insert(0, "/app")
+    from artifact_publisher import publish_artifact
+    _ = (user_email, region)
+    return publish_artifact(audio, ".mp3", "audio/mpeg")
 
 
 def resolve_text(args):

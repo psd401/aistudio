@@ -4,9 +4,11 @@
  *
  * Gives the agent VERSION-BASED read/write access to Atrium — PSD's collaborative
  * document + live-artifact workspace with an intranet publishing flow — over the
- * existing `/api/v1/content/*` REST surface, authenticated with a scoped `sk-`
- * content key. Reads return the last saved version; writes create a new version
- * (the honest external equivalent of an edit). The live collaborative rail
+ * owner-bound `/api/agent/atrium` broker. The broker resolves the signed request
+ * owner to a Content Requester and calls the shared content services directly;
+ * no reusable content key enters the workspace. Reads return the last saved
+ * version; writes create a new version (the honest external equivalent of an
+ * edit). The live collaborative rail
  * (comment/suggest, real-time Yjs) is session-only and NOT reachable here — see
  * SKILL.md.
  *
@@ -38,7 +40,7 @@
  *   0   success (JSON result printed to stdout; incl. approval_required outcomes)
  *   1   usage / config error
  *   2   internal / unexpected
- *   11  unauthorized (content API key missing/invalid or lacks the scope)
+ *   11  unauthorized (signed owner authority is unavailable)
  *   12  upstream content-API error (403/404/422/5xx) or network
  *   14  rate-limited
  */
@@ -327,7 +329,7 @@ async function main() {
 
     case 'archive': {
       // Soft-remove: flip status to "archived" via the metadata PATCH (needs
-      // content:update, which the content key holds). Reversible and still findable
+      // owner-authorized content update). Reversible and still findable
       // under `find --status archived`. Archiving also takes any live publication
       // offline (server-side). Use `delete` for permanent removal.
       const id = requireStr(args, 'id', 'id');
@@ -340,7 +342,7 @@ async function main() {
 
     case 'delete': {
       // HARD delete: permanently removes the object and every version/body. Needs
-      // content:delete (which the content key holds) AND you must OWN it (the key
+      // content delete authority AND you must own it (the signed owner
       // deletes as its owner) — a non-owner object comes back as an error you
       // relay verbatim. Refused with a clear message while the object is published
       // anywhere: delete NEVER auto-unpublishes — run `unpublish` first, then

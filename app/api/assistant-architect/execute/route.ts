@@ -54,6 +54,20 @@ import { createAgenticRepositoryContext } from '@/lib/assistant-architect/agenti
 import { updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { createMessageWithStats, updateConversationStats } from '@/lib/db/drizzle/nexus-messages';
 import type { AssistantArchitectMessageMetadata } from '@/lib/db/types/jsonb';
+import {
+  buildCostRates,
+  conservativeAgenticReservationCents,
+  estimateUsageCostCents,
+  resolveTrustedAgenticTokenLimits,
+} from '@/lib/agents/cost-rates';
+import {
+  reconcileAgenticCost,
+  releaseAgenticCost,
+  reserveAgenticCost,
+} from '@/lib/agents/cost-budget';
+import {
+  AGENT_LIMIT_CEILINGS,
+} from '@/lib/agents/types';
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900;
@@ -167,7 +181,7 @@ interface AgenticConfig {
   enabledConnectorIds: string[];
   maxSteps: number;
   timeoutSeconds: number;
-  costCapCents: number | null;
+  costCapCents: number;
 }
 
 /**
@@ -1193,35 +1207,6 @@ async function executePromptChain(
   return lastStreamResponse;
 }
 
-/**
- * Derive per-token USD cost rates from a model row's per-1k-token numeric
- * columns (stored as strings). Returns null when either rate is missing/invalid,
- * which makes the cost cap a no-op for that model (the maxSteps bound still
- * applies). (Issue #926.)
- */
-function buildCostRates(
-  modelData: { inputCostPer1kTokens?: string | null; outputCostPer1kTokens?: string | null }
-): { inputPerToken: number; outputPerToken: number } | null {
-  // A cost cap needs COMPLETE pricing. Parse each rate; a missing/blank/non-finite/
-  // negative column yields null ("unknown"). If EITHER rate is unknown we cannot
-  // compute an accurate per-step cost — treating the unknown side as 0 would
-  // UNDER-count (e.g. a model with priced input but a null output column would let
-  // the cap never trip). Return null so the cap is simply not enforced (the
-  // maxSteps/timeout bounds still apply) rather than silently under-counting.
-  // (Correctness review — corrects the earlier "missing => 0" behavior.)
-  const parseRate = (raw: string | null | undefined): number | null => {
-    if (raw === null || raw === undefined || raw === "") return null;
-    const n = Number(raw);
-    return Number.isFinite(n) && n >= 0 ? n : null;
-  };
-  const inPer1k = parseRate(modelData.inputCostPer1kTokens);
-  const outPer1k = parseRate(modelData.outputCostPer1kTokens);
-  if (inPer1k === null || outPer1k === null) return null;
-  // A genuinely free model (both rates 0) has no cost to cap.
-  if (inPer1k === 0 && outPer1k === 0) return null;
-  return { inputPerToken: inPer1k / 1000, outputPerToken: outPer1k / 1000 };
-}
-
 /** The agentic-mode fields read off the architect row (Issue #926). */
 interface AgenticArchitectFields {
   name: string;
@@ -1307,25 +1292,28 @@ async function persistAgenticResult(args: {
   usage?: AgenticFinishUsage;
   finishReason: string;
   steps: Array<{ toolCalls?: unknown[] }>;
-  /** Per-token USD rates used by the in-loop cost cap; null = model unpriced. */
-  costRates: { inputPerToken: number; outputPerToken: number } | null;
+  estimatedCostCents: number;
   modelRouting: AssistantArchitectRoutingMetadata;
   log: ReturnType<typeof createLogger>;
 }): Promise<void> {
-  const { context, drivingPromptId, agentStartTime, text, usage, finishReason, steps, costRates, modelRouting, log } = args;
+  const {
+    context,
+    drivingPromptId,
+    agentStartTime,
+    text,
+    usage,
+    finishReason,
+    steps,
+    estimatedCostCents,
+    modelRouting,
+    log,
+  } = args;
   const executionTimeMs = Date.now() - agentStartTime;
   const toolCallCount = steps.reduce((n, s) => n + (s.toolCalls?.length || 0), 0);
   // Persist the run's estimated spend (#926 — epic #922 completion audit): the
   // cap was enforced in-loop but the actual cost was never recorded for audit /
   // reconciliation. Same rates and formula as the adapter's cost predicate.
   // Null when the model is unpriced or usage was not reported.
-  const estimatedCostCents =
-    costRates && usage
-      ? Math.round(
-          (usage.promptTokens * costRates.inputPerToken +
-            usage.completionTokens * costRates.outputPerToken) * 100
-        )
-      : null;
   log.info('Agentic execution finished', {
     executionId: context.executionId,
     estimatedCostCents,
@@ -1641,23 +1629,71 @@ async function executeAgenticAssistant(args: {
   const agentStartTime = Date.now();
   // Hoisted so onFinish can persist the run's estimated cost with the SAME rates
   // the in-loop cap used. When the author configured a cap but the model has no
-  // complete pricing, the cap is unenforceable — say so loudly (structured warn →
-  // CloudWatch) instead of silently skipping it (epic #922 completion audit).
+  // complete pricing, fail closed before streaming or tool execution.
   const costRates = buildCostRates(modelData);
-  if (typeof config.costCapCents === 'number' && config.costCapCents > 0 && costRates === null) {
-    log.warn('Agentic cost cap configured but NOT enforceable: model has no complete pricing', {
+  if (costRates === null) {
+    log.error('Agentic cost cap rejected unpriced model', {
       executionId: context.executionId,
       assistantName: architect.name,
       modelId: String(modelData.modelId),
       costCapCents: config.costCapCents,
     });
+    await closeAgentConnectorClients(resolved.connectorResults, requestId);
+    throw ErrorFactories.invalidInput(
+      'modelId',
+      String(modelData.modelId),
+      'A model with complete input and output pricing is required for agentic execution'
+    );
   }
+  const tokenLimits = resolveTrustedAgenticTokenLimits(
+    modelData,
+    AGENT_LIMIT_CEILINGS.maxOutputTokens,
+  );
+  if (tokenLimits === null) {
+    await closeAgentConnectorClients(resolved.connectorResults, requestId);
+    throw ErrorFactories.invalidInput(
+      'modelId',
+      String(modelData.modelId),
+      'A trusted model context-token ceiling is required for agentic execution'
+    );
+  }
+  const { contextTokens, maxOutputTokens } = tokenLimits;
+  const conservativeReservationCents =
+    conservativeAgenticReservationCents(
+      config.costCapCents,
+      contextTokens,
+      maxOutputTokens,
+      costRates,
+    );
+  const costReservation = await reserveAgenticCost(
+    context.userId,
+    context.executionId,
+    conservativeReservationCents,
+  );
+  if (!costReservation.allowed) {
+    await closeAgentConnectorClients(resolved.connectorResults, requestId);
+    throw ErrorFactories.invalidInput(
+      'costCapCents',
+      config.costCapCents,
+      `Agentic Assistant ${costReservation.reason.replace('_', ' ')} is exhausted`
+    );
+  }
+  const costLeaseId = costReservation.leaseId;
   const connectorResults: McpConnectorToolsResult[] = resolved.connectorResults;
   let cleanedUp = false;
   const cleanupConnectors = async () => {
     if (cleanedUp) return;
     cleanedUp = true;
-    await closeAgentConnectorClients(connectorResults, requestId);
+    try {
+      await closeAgentConnectorClients(connectorResults, requestId);
+    } finally {
+      await releaseAgenticCost(costLeaseId).catch((error: unknown) => {
+          log.error('Failed to release agentic cost reservation', {
+            executionId: context.executionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+    }
   };
 
   return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
@@ -1673,9 +1709,10 @@ async function executeAgenticAssistant(args: {
       // repository search. maxSteps drives the loop.
       tools: Object.keys(effectiveTools).length > 0 ? effectiveTools : undefined,
       maxSteps: config.maxSteps,
+      maxTokens: maxOutputTokens,
       // Per-run cost cap (#926): the streaming adapter stops the loop once the
       // estimated cost reaches the cap. Rates come from the model row (per-1k →
-      // per-token). Skipped when the model has no cost data or no cap is set.
+      // per-token). Missing pricing was rejected above when a cap is configured.
       costCapCents: config.costCapCents,
       costRates,
       timeout: config.timeoutSeconds * 1000,
@@ -1687,9 +1724,25 @@ async function executeAgenticAssistant(args: {
         // promise (doing so blocked the response until the whole loop finished).
         onFinish: async ({ text, usage, finishReason, steps }) => {
           try {
+            const estimatedCostCents = usage
+              ? estimateUsageCostCents(costRates, usage)
+              : conservativeReservationCents;
+            const reconciliation = await reconcileAgenticCost(
+              costLeaseId,
+              estimatedCostCents,
+            );
+            if (!reconciliation.withinDeploymentBudget) {
+              log.error('Agentic actual cost exceeded the hourly platform budget', {
+                executionId: context.executionId,
+                deploymentHourlyCostCents:
+                  reconciliation.deploymentHourlyCostCents,
+                deploymentBudgetCents: reconciliation.deploymentBudgetCents,
+              });
+            }
             await persistAgenticResult({
               context, drivingPromptId: drivingPrompt.id, agentStartTime,
-              text: text || '', usage, finishReason, steps: steps || [], costRates,
+              text: text || '', usage, finishReason, steps: steps || [],
+              estimatedCostCents,
               modelRouting: modelRoute.metadata, log,
             });
           } catch (saveError) {

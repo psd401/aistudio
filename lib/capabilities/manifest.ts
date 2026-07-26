@@ -112,4 +112,11 @@ export const CAPABILITY_MANIFEST: readonly CapabilityManifestEntry[] = [
       "Create and version Atrium content objects (documents and artifacts).",
     defaultRoles: ["administrator", "staff"],
   },
+  {
+    identifier: "skill.redrover",
+    name: "Agent skill: Red Rover",
+    description:
+      "Allow owner-bound agents to read district employee absence and vacancy data from Red Rover.",
+    defaultRoles: ["administrator", "staff"],
+  },
 ] as const;

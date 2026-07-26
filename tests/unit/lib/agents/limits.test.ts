@@ -11,7 +11,7 @@ describe("resolveAgentRunLimits", () => {
     const limits = resolveAgentRunLimits({})
     expect(limits.maxSteps).toBe(AGENT_LIMIT_DEFAULTS.maxSteps)
     expect(limits.timeoutSeconds).toBe(AGENT_LIMIT_DEFAULTS.timeoutSeconds)
-    expect(limits.costCapCents).toBeNull()
+    expect(limits.costCapCents).toBe(AGENT_LIMIT_DEFAULTS.costCapCents)
   })
 
   it("passes through valid in-range values", () => {
@@ -43,10 +43,16 @@ describe("resolveAgentRunLimits", () => {
     expect(limits.timeoutSeconds).toBe(AGENT_LIMIT_DEFAULTS.timeoutSeconds)
   })
 
-  it("treats a zero or negative cost cap as no cap (null)", () => {
-    expect(resolveAgentRunLimits({ agentCostCapCents: 0 }).costCapCents).toBeNull()
-    expect(resolveAgentRunLimits({ agentCostCapCents: -10 }).costCapCents).toBeNull()
-    expect(resolveAgentRunLimits({ agentCostCapCents: null }).costCapCents).toBeNull()
+  it("applies the mandatory server cap to unset or non-positive values", () => {
+    expect(resolveAgentRunLimits({ agentCostCapCents: 0 }).costCapCents).toBe(
+      AGENT_LIMIT_DEFAULTS.costCapCents,
+    )
+    expect(resolveAgentRunLimits({ agentCostCapCents: -10 }).costCapCents).toBe(
+      AGENT_LIMIT_DEFAULTS.costCapCents,
+    )
+    expect(resolveAgentRunLimits({ agentCostCapCents: null }).costCapCents).toBe(
+      AGENT_LIMIT_DEFAULTS.costCapCents,
+    )
   })
 
   it("floors fractional values", () => {
@@ -76,9 +82,9 @@ describe("resolveAgentRunLimits", () => {
 })
 
 describe("isCostCapExceeded", () => {
-  it("never trips when the cap is null", () => {
+  it("always enforces the server-owned default cap", () => {
     const limits = resolveAgentRunLimits({})
-    expect(isCostCapExceeded(limits, 1_000_000)).toBe(false)
+    expect(isCostCapExceeded(limits, limits.costCapCents)).toBe(true)
   })
 
   it("trips at or above the cap", () => {

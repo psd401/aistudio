@@ -62,5 +62,6 @@ expire; do not presign or re-upload it.
 - **`bad_args`** — missing/invalid `--user`, or no text supplied.
 - **`too_large`** — text exceeds 200,000 characters.
 - **`upstream_error`** — Polly rejected the request (e.g. a voice not offered by the chosen
-  engine) or S3/synthesis failed. Check the voice/engine pairing in `references/voices.md`.
-- **`misconfigured`** — `WORKSPACE_BUCKET` env var not set.
+  engine) or the owner-bound artifact broker failed. Check the voice/engine pairing in
+  `references/voices.md`.
+- **`misconfigured`** — the trusted web broker is not configured.

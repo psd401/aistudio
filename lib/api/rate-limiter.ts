@@ -1,27 +1,28 @@
 /**
- * Per-Key API Rate Limiter
- * Sliding window rate limiting using api_key_usage table.
+ * Durable API Rate Limiter
+ * Sliding-window reservations shared by every authentication mode.
  * Part of Epic #674 (External API Platform) - Issue #677
  *
  * Strategy:
- * - COUNT requests in api_key_usage where request_at > NOW() - 1 minute
+ * - Serialize per principal with a PostgreSQL advisory transaction lock
+ * - COUNT and INSERT a durable reservation before request dispatch
  * - Default: 60 req/min (configurable per key via rate_limit_rpm)
  * - Returns 429 with Retry-After + X-RateLimit-* headers when exceeded
  * - Usage records double as analytics (endpoint, method, status_code, response_time_ms)
  *
  * Design decisions:
  * - Database-backed for accuracy across multiple server instances
- * - Fire-and-forget usage logging (non-blocking)
- * - Session-based auth bypasses per-key rate limiting (uses existing rate-limit.ts)
+ * - Analytics usage logging remains separate and non-blocking
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { executeQuery } from "@/lib/db/drizzle-client";
-import { apiKeyUsage, apiKeys } from "@/lib/db/schema";
-import { eq, and, gte, count } from "drizzle-orm";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import { apiKeyUsage, apiKeys, apiRateLimitReservations } from "@/lib/db/schema";
+import { eq, count, lt, sql } from "drizzle-orm";
 import { createLogger } from "@/lib/logger";
 import type { ApiAuthContext } from "./auth-middleware";
 import { createErrorResponse } from "./auth-middleware";
+import { createHash } from "node:crypto";
 
 // ============================================
 // Types
@@ -58,79 +59,64 @@ const WINDOW_MS = 60 * 1000; // 1 minute sliding window
 export async function checkRateLimit(
   auth: ApiAuthContext
 ): Promise<RateLimitResult> {
-  // Session users are not rate-limited by per-key limiter
-  // JWT auth users are rate-limited via the same mechanism (by oauthClientId)
-  if (auth.authType === "session") {
-    return {
-      allowed: true,
-      limit: 0,
-      remaining: 0,
-      resetAt: 0,
-    };
-  }
-
-  // JWT auth without an API key uses default rate limiting
-  // Rate limiting for JWT is based on the auth context, not a specific key
-  if (auth.authType === "jwt" && !auth.apiKeyId) {
-    // For JWT auth, we allow the request but don't track per-key usage
-    // OAuth clients have their own rate limits managed at the provider level
-    return {
-      allowed: true,
-      limit: DEFAULT_RPM,
-      remaining: DEFAULT_RPM - 1,
-      resetAt: Math.ceil((Date.now() + WINDOW_MS) / 1000),
-    };
-  }
-
-  if (!auth.apiKeyId) {
-    return {
-      allowed: true,
-      limit: 0,
-      remaining: 0,
-      resetAt: 0,
-    };
-  }
-
   const log = createLogger({ action: "checkRateLimit" });
 
   try {
-    // Get the key's rate limit setting
-    const keyConfig = await executeQuery(
-      (db) =>
-        db
-          .select({ rateLimitRpm: apiKeys.rateLimitRpm })
-          .from(apiKeys)
-          .where(eq(apiKeys.id, auth.apiKeyId!))
-          .limit(1),
-      "getRateLimitConfig"
-    );
-
+    const keyConfig = auth.apiKeyId
+      ? await executeQuery(
+          (db) =>
+            db
+              .select({ rateLimitRpm: apiKeys.rateLimitRpm })
+              .from(apiKeys)
+              .where(eq(apiKeys.id, auth.apiKeyId!))
+              .limit(1),
+          "getRateLimitConfig"
+        )
+      : [];
     const rpm = keyConfig[0]?.rateLimitRpm ?? DEFAULT_RPM;
-    const windowStart = new Date(Date.now() - WINDOW_MS);
+    const principal = [
+      auth.authType,
+      auth.apiKeyId ?? auth.oauthClientId ?? auth.userId,
+    ].join(":");
+    const principalHash = createHash("sha256").update(principal).digest("hex");
+    const now = Date.now();
+    const windowStart = new Date(now - WINDOW_MS);
+    const retentionStart = new Date(now - 24 * 60 * 60 * 1000);
 
-    // Count requests in the current window
-    const [usageCount] = await executeQuery(
-      (db) =>
-        db
+    const currentCount = await executeTransaction(
+      async (tx) => {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${principalHash}, 0))`
+        );
+        await tx
+          .delete(apiRateLimitReservations)
+          .where(lt(apiRateLimitReservations.requestAt, retentionStart));
+        const [usage] = await tx
           .select({ value: count() })
-          .from(apiKeyUsage)
+          .from(apiRateLimitReservations)
           .where(
-            and(
-              eq(apiKeyUsage.apiKeyId, auth.apiKeyId!),
-              gte(apiKeyUsage.requestAt, windowStart)
-            )
-          ),
-      "countApiKeyUsage"
+            sql`${apiRateLimitReservations.principalHash} = ${principalHash}
+                AND ${apiRateLimitReservations.requestAt} >= ${windowStart}`
+          );
+        const used = usage?.value ?? 0;
+        if (used < rpm) {
+          await tx.insert(apiRateLimitReservations).values({
+            principalHash,
+            endpoint: "/api/mcp",
+          });
+        }
+        return used;
+      },
+      "reserveApiRateLimit"
     );
 
-    const currentCount = usageCount?.value ?? 0;
     const resetAt = Math.ceil((Date.now() + WINDOW_MS) / 1000);
 
     if (currentCount >= rpm) {
       const retryAfterSeconds = Math.ceil(WINDOW_MS / 1000);
 
       log.warn("Rate limit exceeded", {
-        apiKeyId: auth.apiKeyId,
+        authType: auth.authType,
         userId: auth.userId,
         currentCount,
         limit: rpm,
@@ -155,7 +141,8 @@ export async function checkRateLimit(
     // Fail closed: deny requests when rate limit check fails.
     // This prevents attackers from bypassing rate limits by causing DB errors.
     log.error("Rate limit check failed, denying request", {
-      apiKeyId: auth.apiKeyId,
+      authType: auth.authType,
+      userId: auth.userId,
       error: error instanceof Error ? error.message : String(error),
     });
 

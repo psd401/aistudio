@@ -3,30 +3,21 @@
  *
  * Triggered by EventBridge Scheduler. Each user-defined schedule in the
  * psd-agent-schedules-{env} DynamoDB table has exactly one corresponding
- * EventBridge Scheduler entry that targets this Lambda with a payload
- * describing a single invocation:
+ * EventBridge Scheduler entry that targets this Lambda with a compact,
+ * non-authoritative record reference:
  *
  *   {
- *     scheduleId:      "3f1e9d...",       // UUID, primary key in schedules table
- *     scheduleName:    "Morning Brief",   // user-defined label
- *     userEmail:       "hagelk@psd401.net",
- *     googleIdentity:  "users/12345",     // Google Chat stable user ID
- *     prompt:          "Generate my morning brief...",
- *     dmSpaceName:     "spaces/abc"       // optional — resolved on demand if absent
+ *     ownerEmail: "hagelk@psd401.net",
+ *     scheduleId: "3f1e9d...",
+ *     version: 3
  *   }
  *
- * One payload = one user = one AgentCore invocation = one DM. No batching,
- * no cross-user stagger, no hard cap. Writes a row to `agent_scheduled_runs`
- * for every invocation (success or failure).
+ * Cron loads the authoritative DynamoDB row and validates owner, version,
+ * enabled state, prompt, and delivery destination before invoking anything.
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import {
-  DynamoDBDocumentClient,
-  GetCommand,
-  UpdateCommand,
-  QueryCommand,
-} from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import {
   SecretsManagerClient,
   GetSecretValueCommand,
@@ -41,6 +32,14 @@ import * as chatPkg from '@googleapis/chat';
 import * as crypto from 'crypto';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { extractRichEnvelope } from './rich-envelope';
+import {
+  createScheduledInvocationContextToken,
+  deriveScheduledRequestProofKey,
+} from './invocation-context';
+import {
+  loadAuthorizedSchedule,
+  type ScheduleReferenceEvent,
+} from './schedule-record';
 
 // ---------------------------------------------------------------------------
 // PII sanitization — mask email addresses in logs (FERPA compliance)
@@ -114,12 +113,13 @@ const agentCoreSigner = new SignatureV4({
 // ---------------------------------------------------------------------------
 
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
-const USERS_TABLE = process.env.USERS_TABLE || '';
 const SCHEDULES_TABLE = process.env.SCHEDULES_TABLE || '';
 const GOOGLE_CREDENTIALS_SECRET_ARN = process.env.GOOGLE_CREDENTIALS_SECRET_ARN || '';
 const DATABASE_RESOURCE_ARN = process.env.DATABASE_RESOURCE_ARN || '';
 const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
 const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
+const AGENT_INVOCATION_SIGNING_SECRET_ID =
+  process.env.AGENT_INVOCATION_SIGNING_SECRET_ID || '';
 
 // ---------------------------------------------------------------------------
 // Cached secrets and clients
@@ -135,19 +135,13 @@ let cachedRuntimeId: string | null = null;
 let runtimeIdCachedAt: number | null = null;
 const RUNTIME_ID_TTL_MS = 10 * 60 * 1000;
 
+let cachedInvocationSigningSecret: string | null = null;
+let invocationSigningSecretCachedAt: number | null = null;
+
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-interface ScheduleEvent {
-  scheduleId: string;
-  scheduleName: string;
-  userEmail: string;
-  googleIdentity?: string;
-  prompt: string;
-  dmSpaceName?: string;
-}
 
 interface InvokeResult {
   response: string;
@@ -178,6 +172,29 @@ async function getGoogleCredentials(): Promise<string> {
   credentialsCachedAt = Date.now();
   cachedChatClient = null;
   return cachedGoogleCredentials;
+}
+
+async function getInvocationSigningSecret(): Promise<string> {
+  if (
+    cachedInvocationSigningSecret
+    && invocationSigningSecretCachedAt
+    && Date.now() - invocationSigningSecretCachedAt < CREDENTIALS_TTL_MS
+  ) {
+    return cachedInvocationSigningSecret;
+  }
+  if (!AGENT_INVOCATION_SIGNING_SECRET_ID) {
+    throw new Error('AGENT_INVOCATION_SIGNING_SECRET_ID not configured');
+  }
+  const result = await secretsClient.send(
+    new GetSecretValueCommand({ SecretId: AGENT_INVOCATION_SIGNING_SECRET_ID }),
+  );
+  const secret = result.SecretString || '';
+  if (Buffer.byteLength(secret, 'utf8') < 32) {
+    throw new Error('Agent invocation signing secret is missing or too short');
+  }
+  cachedInvocationSigningSecret = secret;
+  invocationSigningSecretCachedAt = Date.now();
+  return secret;
 }
 
 async function getChatClient(): Promise<ReturnType<typeof chatPkg.chat>> {
@@ -219,42 +236,6 @@ async function getRuntimeId(log: Logger): Promise<string> {
     });
   }
   return runtimeId;
-}
-
-async function resolveDmSpace(
-  googleIdentity: string,
-  log: Logger,
-): Promise<string | null> {
-  try {
-    const chatClient = await getChatClient();
-    // List spaces and find the DM that contains this user.
-    // Bounded by the bot's DM count (one per user who has messaged the bot),
-    // so this is cheap and has no per-user N+1 when handling a single user.
-    let pageToken: string | undefined;
-    do {
-      const resp = await chatClient.spaces.list({ pageToken, pageSize: 100 });
-      const spaces = resp.data.spaces || [];
-      for (const space of spaces) {
-        if (!space.name || !space.singleUserBotDm) continue;
-        const membersResp = await chatClient.spaces.members.list({
-          parent: space.name,
-          pageSize: 10,
-        });
-        for (const m of membersResp.data.memberships || []) {
-          if (m.member?.type === 'HUMAN' && m.member?.name === googleIdentity) {
-            return space.name;
-          }
-        }
-      }
-      pageToken = resp.data.nextPageToken || undefined;
-    } while (pageToken);
-  } catch (error) {
-    log.error('Failed to resolve DM space', {
-      googleIdentity,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  return null;
 }
 
 /**
@@ -378,11 +359,25 @@ async function invokeAgentCore(
       runtimeArn = `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`;
     }
 
+    const invocationSecret = await getInvocationSigningSecret();
+    const invocationContext = createScheduledInvocationContextToken(
+      invocationSecret,
+      {
+        ownerEmail: userEmail,
+        sessionId,
+        workspacePrefix: userContext.workspacePrefix ?? '',
+      },
+    );
     const body = JSON.stringify({
       prompt,
       user_email: userEmail,
       user_display_name: userContext.displayName ?? '',
       workspace_prefix: userContext.workspacePrefix ?? '',
+      invocation_context: invocationContext,
+      invocation_request_proof_key: deriveScheduledRequestProofKey(
+        invocationSecret,
+        invocationContext,
+      ),
       source: 'scheduled',
     });
 
@@ -659,299 +654,79 @@ async function recordCronFailure(
   }
 }
 
-/**
- * Backfill a freshly resolved Google Chat DM space back into the schedule
- * row so subsequent invocations skip the API scan (which is O(spaces) for
- * the bot, paginated). Best-effort — failure just means the next run does
- * another scan.
- */
-async function backfillScheduleIdentity(
-  userId: string,
-  scheduleId: string,
-  updates: { dmSpaceName?: string; googleIdentity?: string },
-  log: Logger,
-): Promise<void> {
-  if (!SCHEDULES_TABLE) return;
-  const sets: string[] = ['updatedAt = :now'];
-  const values: Record<string, unknown> = { ':now': new Date().toISOString() };
-  if (updates.dmSpaceName) {
-    sets.push('dmSpaceName = :dm');
-    values[':dm'] = updates.dmSpaceName;
-  }
-  if (updates.googleIdentity) {
-    sets.push('googleIdentity = :gid');
-    values[':gid'] = updates.googleIdentity;
-  }
-  if (sets.length === 1) return;
-  try {
-    await dynamoClient.send(
-      new UpdateCommand({
-        TableName: SCHEDULES_TABLE,
-        Key: { userId, scheduleId },
-        UpdateExpression: 'SET ' + sets.join(', '),
-        ExpressionAttributeValues: values,
-        ConditionExpression: 'attribute_exists(scheduleId)',
-      }),
-    );
-    log.info('Backfilled identity fields on schedule row', {
-      scheduleId,
-      fields: Object.keys(updates).filter((k) => (updates as Record<string, unknown>)[k]),
-    });
-  } catch (error) {
-    log.warn('Schedule identity backfill failed (non-fatal)', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
-/**
- * Resolve a user record by email via the email-index GSI.
- * Returns the googleIdentity-keyed item so the caller can follow up with
- * lookupUserByGoogleIdentity or use dmSpaceName directly.
- *
- * Handles the real-world case where a single email has multiple user rows
- * (test records, force-new-user debugging). Picks the item whose
- * googleIdentity looks like a real Google ID (starts with "users/" and
- * contains digits), falling back to the first result if nothing matches.
- */
-async function lookupUserByEmail(
-  email: string,
-  log: Logger,
-): Promise<{
-  googleIdentity?: string;
-  displayName?: string;
-  workspacePrefix?: string;
-  dmSpaceName?: string;
-  email?: string;
-} | null> {
-  if (!USERS_TABLE || !email) return null;
-  try {
-    const resp = await dynamoClient.send(
-      new QueryCommand({
-        TableName: USERS_TABLE,
-        IndexName: 'email-index',
-        KeyConditionExpression: 'email = :e',
-        ExpressionAttributeValues: { ':e': email },
-      }),
-    );
-    const items = (resp.Items ?? []) as Array<Record<string, unknown>>;
-    if (items.length === 0) return null;
-    const real = items.find((item) => {
-      const gid = item.googleIdentity;
-      return typeof gid === 'string' && /^users\/\d+/.test(gid);
-    });
-    const pick = real ?? items[0];
-    return {
-      googleIdentity: pick.googleIdentity as string | undefined,
-      displayName: pick.displayName as string | undefined,
-      workspacePrefix: pick.workspacePrefix as string | undefined,
-      dmSpaceName: pick.dmSpaceName as string | undefined,
-      email: pick.email as string | undefined,
-    };
-  } catch (error) {
-    log.error('User lookup by email failed', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
-}
-
-async function lookupUserByGoogleIdentity(
-  googleIdentity: string,
-  log: Logger,
-): Promise<{
-  displayName?: string;
-  workspacePrefix?: string;
-  dmSpaceName?: string;
-  email?: string;
-} | null> {
-  if (!USERS_TABLE) return null;
-  try {
-    const resp = await dynamoClient.send(
-      new GetCommand({
-        TableName: USERS_TABLE,
-        Key: { googleIdentity },
-      }),
-    );
-    const item = resp.Item;
-    if (!item) return null;
-    return {
-      displayName: item.displayName as string | undefined,
-      workspacePrefix: item.workspacePrefix as string | undefined,
-      dmSpaceName: item.dmSpaceName as string | undefined,
-      email: item.email as string | undefined,
-    };
-  } catch (error) {
-    log.error('User lookup failed', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
 
 export async function handler(
-  event: ScheduleEvent,
+  event: ScheduleReferenceEvent,
   _context: LambdaContext,
 ): Promise<{ status: 'success' | 'error' | 'skipped'; scheduleId: string }> {
+  const referencedScheduleId =
+    typeof event?.scheduleId === 'string' ? event.scheduleId : 'unknown';
   const requestId = generateRequestId();
   const log = createLogger({
     requestId,
     environment: ENVIRONMENT,
-    scheduleId: event?.scheduleId,
+    scheduleId: referencedScheduleId,
   });
-
-  // Validate payload.
-  if (!event?.scheduleId || !event?.userEmail || !event?.prompt) {
-    log.error('Invalid schedule payload', {
-      hasScheduleId: !!event?.scheduleId,
-      hasUserEmail: !!event?.userEmail,
-      hasPrompt: !!event?.prompt,
+  let loaded;
+  try {
+    loaded = await loadAuthorizedSchedule(event, dynamoClient, SCHEDULES_TABLE);
+  } catch (error) {
+    log.error('Authoritative schedule lookup failed', {
+      error: error instanceof Error ? error.message : String(error),
     });
-    return { status: 'error', scheduleId: event?.scheduleId ?? 'unknown' };
+    return { status: 'error', scheduleId: referencedScheduleId };
   }
-
-  const scheduleName = event.scheduleName || 'Scheduled Task';
+  if (!loaded.authorized) {
+    log.warn('Schedule reference rejected before invocation', {
+      reason: loaded.reason,
+    });
+    return { status: 'skipped', scheduleId: referencedScheduleId };
+  }
+  const schedule = loaded.schedule;
+  const scheduleName = schedule.name;
   const startTime = Date.now();
 
   log.info('Scheduled task started', {
-    scheduleId: event.scheduleId,
+    scheduleId: schedule.scheduleId,
+    version: schedule.version,
     scheduleName,
-    email: sanitizeEmail(event.userEmail),
+    email: sanitizeEmail(schedule.ownerEmail),
   });
-
-  // Resolve user metadata. Two paths:
-  //   1. googleIdentity in the event payload — cross-checked against the
-  //      users table to prevent a spoofed schedule from spraying to someone
-  //      else's DM. If mismatch, reject the run outright.
-  //   2. googleIdentity missing — self-heal by looking up the user by email
-  //      via the email-index GSI. This is the common case for schedules
-  //      created before identity population landed, and for future schedules
-  //      where the agent did not capture googleIdentity at create time.
-  let userContext: { displayName?: string; workspacePrefix?: string; dmSpaceName?: string } = {};
-  let trustedGoogleIdentity: string | undefined;
-  if (event.googleIdentity) {
-    const lookup = await lookupUserByGoogleIdentity(event.googleIdentity, log);
-    if (lookup && lookup.email && lookup.email.toLowerCase() === event.userEmail.toLowerCase()) {
-      userContext = lookup;
-      trustedGoogleIdentity = event.googleIdentity;
-    } else if (lookup) {
-      log.error('googleIdentity / userEmail mismatch — refusing to deliver', {
-        email: sanitizeEmail(event.userEmail),
-        identityEmail: lookup.email ? sanitizeEmail(lookup.email) : null,
-      });
-      await recordRun(
-        {
-          userEmail: event.userEmail,
-          scheduleId: event.scheduleId,
-          scheduleName,
-          sessionId: 'rejected',
-          inputTokens: 0,
-          outputTokens: 0,
-          latencyMs: Date.now() - startTime,
-          status: 'error',
-          errorMessage: 'googleIdentity does not match userEmail',
-        },
-        log,
-      );
-      return { status: 'error', scheduleId: event.scheduleId };
-    }
-  } else {
-    const lookup = await lookupUserByEmail(event.userEmail, log);
-    if (lookup) {
-      userContext = lookup;
-      if (lookup.googleIdentity) {
-        trustedGoogleIdentity = lookup.googleIdentity;
-        log.info('Self-healed googleIdentity from email', {
-          email: sanitizeEmail(event.userEmail),
-          scheduleId: event.scheduleId,
-        });
-      }
-    }
-  }
-
-  // Resolve DM space: payload > user record > Google Chat API scan.
-  // The API scan only runs against a googleIdentity that we trust — either
-  // provided in the event and validated, or resolved from the email lookup.
-  let dmSpace = event.dmSpaceName || userContext.dmSpaceName || null;
-  let dmSpaceResolvedViaApi = false;
-  if (!dmSpace && trustedGoogleIdentity) {
-    dmSpace = await resolveDmSpace(trustedGoogleIdentity, log);
-    dmSpaceResolvedViaApi = !!dmSpace;
-  }
-  if (!dmSpace) {
-    log.warn('No DM space found — skipping (user has not DM\'d the bot yet)', {
-      email: sanitizeEmail(event.userEmail),
-      googleIdentity: event.googleIdentity,
-    });
-    await recordRun(
-      {
-        userEmail: event.userEmail,
-        scheduleId: event.scheduleId,
-        scheduleName,
-        sessionId: 'skipped',
-        inputTokens: 0,
-        outputTokens: 0,
-        latencyMs: Date.now() - startTime,
-        status: 'skipped',
-        errorMessage: 'No DM space — user has not initiated DM with bot',
-      },
-      log,
-    );
-    return { status: 'skipped', scheduleId: event.scheduleId };
-  }
 
   // Session ID — unique per schedule invocation, not shared with interactive
   // sessions. Keeps scheduled context isolated. Bound the length so a long
   // workspace prefix can't push us past AgentCore's session-id limits.
   const dateKey = new Date().toISOString().split('T')[0];
-  const rawPrefix =
-    userContext.workspacePrefix || event.userEmail.split('@')[0] || 'unknown';
-  const prefix = rawPrefix.substring(0, 40);
-  const sessionId = `${prefix}-sched-${event.scheduleId.substring(0, 12)}-${dateKey}`;
+  const prefix = schedule.workspacePrefix.substring(0, 40);
+  const sessionId =
+    `${prefix}-sched-${schedule.scheduleId.substring(0, 12)}-${dateKey}`;
 
   // Invoke AgentCore.
   log.info('Invoking agent for scheduled task', {
-    email: sanitizeEmail(event.userEmail),
+    email: sanitizeEmail(schedule.ownerEmail),
     scheduleName,
     sessionId,
   });
 
   const result = await invokeAgentCore(
-    event.prompt,
-    event.userEmail,
+    schedule.prompt,
+    schedule.ownerEmail,
     sessionId,
     log,
     {
-      displayName: userContext.displayName,
-      workspacePrefix: userContext.workspacePrefix,
+      displayName: schedule.displayName,
+      workspacePrefix: schedule.workspacePrefix,
     },
   );
 
   // Deliver response to DM regardless of success (so user sees errors).
   try {
     await sendChatMessage(
-      dmSpace,
+      schedule.dmSpaceName,
       `📋 **${scheduleName}**\n\n${result.response}`,
-      log,
-    );
-    // Delivery succeeded — backfill whatever identity we had to resolve at
-    // runtime so the next fire skips those lookups. This covers three cases:
-    //  * DM space resolved via the Google Chat API scan (expensive)
-    //  * googleIdentity resolved via email-index GSI when the event was
-    //    missing it (schedule created before identity population)
-    const identityBackfill: { dmSpaceName?: string; googleIdentity?: string } = {};
-    if (dmSpaceResolvedViaApi) identityBackfill.dmSpaceName = dmSpace;
-    if (!event.googleIdentity && trustedGoogleIdentity) {
-      identityBackfill.googleIdentity = trustedGoogleIdentity;
-    }
-    await backfillScheduleIdentity(
-      event.userEmail,
-      event.scheduleId,
-      identityBackfill,
       log,
     );
   } catch (error) {
@@ -960,8 +735,8 @@ export async function handler(
     });
     await recordRun(
       {
-        userEmail: event.userEmail,
-        scheduleId: event.scheduleId,
+        userEmail: schedule.ownerEmail,
+        scheduleId: schedule.scheduleId,
         scheduleName,
         sessionId,
         inputTokens: result.inputTokens,
@@ -972,14 +747,14 @@ export async function handler(
       },
       log,
     );
-    return { status: 'error', scheduleId: event.scheduleId };
+    return { status: 'error', scheduleId: schedule.scheduleId };
   }
 
   const status: 'success' | 'error' = result.ok ? 'success' : 'error';
   await recordRun(
     {
-      userEmail: event.userEmail,
-      scheduleId: event.scheduleId,
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
       scheduleName,
       sessionId,
       inputTokens: result.inputTokens,
@@ -992,14 +767,14 @@ export async function handler(
   );
 
   log.info('Scheduled task completed', {
-    scheduleId: event.scheduleId,
+    scheduleId: schedule.scheduleId,
     scheduleName,
     status,
-    email: sanitizeEmail(event.userEmail),
+    email: sanitizeEmail(schedule.ownerEmail),
     inputTokens: result.inputTokens,
     outputTokens: result.outputTokens,
     latencyMs: Date.now() - startTime,
   });
 
-  return { status, scheduleId: event.scheduleId };
+  return { status, scheduleId: schedule.scheduleId };
 }

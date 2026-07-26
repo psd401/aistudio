@@ -329,6 +329,7 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         tools: enhancedConfig.tools,
         toolChoice: enhancedConfig.toolChoice,
         temperature: enhancedConfig.temperature,
+        maxOutputTokens: enhancedConfig.maxTokens,
         ...(abortSignal && { abortSignal }),
         ...(stopConditions.length > 0 && { stopWhen: stopConditions }),
         // Capture tool calls as each step finishes
