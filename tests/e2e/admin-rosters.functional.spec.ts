@@ -38,6 +38,12 @@ test.describe("Admin OneRoster page (#1311)", () => {
     const studentId = `e2e-student-${stamp}`;
     const teacherEnrollmentId = `e2e-teacher-enrollment-${stamp}`;
     const studentEnrollmentId = `e2e-student-enrollment-${stamp}`;
+    const deploymentRegion =
+      process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2";
+    const deploymentAccountId =
+      process.env.AWS_ACCOUNT_ID ?? "123456789012";
+    const deploymentEnvironment =
+      process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev";
     const originalSettings = await sql<{
       key: string;
       value: string | null;
@@ -57,7 +63,7 @@ test.describe("Admin OneRoster page (#1311)", () => {
         ["ONEROSTER_AUTH_MODE", "oauth1"],
         [
           "ONEROSTER_CREDENTIALS_SECRET_ARN",
-          "arn:aws:secretsmanager:us-west-2:123456789012:secret:aistudio-dev-oneroster-e2e",
+          `arn:aws:secretsmanager:${deploymentRegion}:${deploymentAccountId}:secret:aistudio-${deploymentEnvironment}-oneroster-e2e`,
         ],
         ["ONEROSTER_API_VERSION", "v1p1"],
         ["ONEROSTER_PAGE_SIZE", "10000"],

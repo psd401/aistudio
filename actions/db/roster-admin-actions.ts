@@ -27,8 +27,9 @@ import {
 } from "@/lib/logger"
 import { revalidateSettingsCache } from "@/lib/settings-manager"
 import {
+  createOneRosterSettingsInputSchema,
+  getOneRosterDeploymentIdentity,
   getOneRosterSettings,
-  oneRosterSettingsInputSchema,
   ONEROSTER_SETTING_KEYS,
   type OneRosterSettings,
   type OneRosterSettingsInput,
@@ -128,7 +129,9 @@ export async function saveOneRosterSettingsAction(
 
   try {
     await requireAdminSession(log, "save OneRoster settings")
-    const parsed = oneRosterSettingsInputSchema.parse(input)
+    const parsed = createOneRosterSettingsInputSchema(
+      getOneRosterDeploymentIdentity()
+    ).parse(input)
     const now = new Date()
     const rows = [
       {

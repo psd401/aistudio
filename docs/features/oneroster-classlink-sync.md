@@ -143,9 +143,10 @@ layers. It has three tabs:
 - **Settings** stores the six operator-managed values above in one database
   transaction. The base URL must use HTTPS, the auth mode is limited to
   `oauth1` or `proxy`, the API path is limited to `v1p1` or `v1p2`, the page
-  size is 1–10,000, and the secret ARN must match the
-  `aistudio-{environment}-oneroster-*` family. There is intentionally no token
-  URL or generic client-credentials configuration.
+  size is 1–10,000, and the secret ARN must match the current deployment's
+  environment, region, account, and `aistudio-{environment}-oneroster-*`
+  family. There is intentionally no token URL or generic client-credentials
+  configuration.
 - **Sync** shows active/inactive totals and last-sync timestamps for all six
   collections. **Sync now** writes a unique queued run ID, invokes the same
   Lambda used by EventBridge, and polls `ONEROSTER_SYNC_STATUS` until that run

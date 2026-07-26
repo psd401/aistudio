@@ -33,8 +33,14 @@ export interface OneRosterSettings {
   pageSize: number;
 }
 
+export interface OneRosterDeploymentIdentity {
+  environment: string;
+  region: string | null;
+  accountId: string | null;
+}
+
 const secretArnPattern =
-  /^arn:(?:aws|aws-us-gov|aws-cn):secretsmanager:[a-z0-9-]+:\d{12}:secret:aistudio-[a-z0-9-]+-oneroster-[a-z0-9/_+=.@-]+$/i;
+  /^arn:(?:aws|aws-us-gov|aws-cn):secretsmanager:([a-z0-9-]+):(\d{12}):secret:aistudio-([a-z0-9-]+)-oneroster-[a-z0-9/_+=.@-]+$/i;
 
 export const oneRosterSettingsInputSchema = z.object({
   enabled: z.boolean(),
@@ -85,6 +91,46 @@ export const oneRosterSettingsInputSchema = z.object({
     .min(1, "Page size must be at least 1")
     .max(10_000, "Page size must not exceed 10,000"),
 }).strict();
+
+export function getOneRosterDeploymentIdentity(): OneRosterDeploymentIdentity {
+  return {
+    environment:
+      process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev",
+    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? null,
+    accountId: process.env.AWS_ACCOUNT_ID ?? null,
+  };
+}
+
+export function createOneRosterSettingsInputSchema(
+  deployment: OneRosterDeploymentIdentity
+) {
+  return oneRosterSettingsInputSchema.superRefine((value, context) => {
+    const match = secretArnPattern.exec(value.credentialsSecretArn);
+    if (!match) return;
+    const [, region, accountId, environment] = match;
+    const mismatches = [
+      environment.toLowerCase() !== deployment.environment.toLowerCase()
+        ? "environment"
+        : null,
+      deployment.region && region.toLowerCase() !== deployment.region.toLowerCase()
+        ? "region"
+        : null,
+      deployment.accountId && accountId !== deployment.accountId
+        ? "account"
+        : null,
+    ].filter((entry): entry is string => entry !== null);
+
+    if (mismatches.length > 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["credentialsSecretArn"],
+        message: `Secret ARN must belong to this deployment's ${mismatches.join(
+          ", "
+        )}`,
+      });
+    }
+  });
+}
 
 export type OneRosterSettingsInput = z.input<
   typeof oneRosterSettingsInputSchema

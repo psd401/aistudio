@@ -37,7 +37,19 @@ describe("OneRoster administrator contracts", () => {
     expect(lambda).toContain('"failed"');
     expect(component).toContain("syncInFlightRef");
     expect(component).toContain("pollForRun");
+    expect(component).toContain("monitorPersistedRun");
     expect(component).not.toMatch(/token[_ -]?url/i);
+  });
+
+  it("discards stale school and class roster responses", () => {
+    const component = source(
+      "app/(protected)/admin/rosters/_components/rosters-admin.tsx"
+    );
+
+    expect(component).toContain("schoolRequestRef");
+    expect(component).toContain("rosterRequestRef");
+    expect(component).toContain("requestId !== schoolRequestRef.current");
+    expect(component).toContain("requestId !== rosterRequestRef.current");
   });
 
   it("keeps roster rows read-only in the application layer", () => {

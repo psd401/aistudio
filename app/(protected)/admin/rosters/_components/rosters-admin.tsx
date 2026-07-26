@@ -120,6 +120,40 @@ async function pollForRun(
   return null
 }
 
+function usePersistedRunMonitor(
+  runId: string | null,
+  router: ReturnType<typeof useRouter>,
+  syncInFlightRef: { current: boolean },
+  mountedRef: { current: boolean }
+) {
+  useEffect(() => {
+    if (!runId) return
+    let cancelled = false
+    syncInFlightRef.current = true
+
+    const monitorPersistedRun = async () => {
+      while (!cancelled && mountedRef.current) {
+        const status = await pollForRun(
+          runId,
+          () => mountedRef.current && !cancelled
+        )
+        if (cancelled || !mountedRef.current) return
+        if (status) {
+          syncInFlightRef.current = false
+          router.refresh()
+          return
+        }
+      }
+    }
+
+    void monitorPersistedRun()
+    return () => {
+      cancelled = true
+      syncInFlightRef.current = false
+    }
+  }, [mountedRef, router, runId, syncInFlightRef])
+}
+
 interface RostersAdminProps {
   initialData: OneRosterAdminData | null
   initialError: string | null
@@ -132,9 +166,14 @@ export function RostersAdmin({
   const router = useRouter()
   const { toast } = useToast()
   const [isPending, startTransition] = useTransition()
-  const [isSyncing, setIsSyncing] = useState(
-    initialData?.overview.status?.state === "queued" ||
-      initialData?.overview.status?.state === "running"
+  const [isManualSyncing, setIsManualSyncing] = useState(false)
+  const persistedStatus = initialData?.overview.status
+  const persistedRunId =
+    persistedStatus && !isTerminal(persistedStatus)
+      ? persistedStatus.runId
+      : null
+  const isSyncing = Boolean(
+    isManualSyncing || persistedRunId
   )
   const syncInFlightRef = useRef(false)
   const mountedRef = useRef(true)
@@ -145,6 +184,13 @@ export function RostersAdmin({
       mountedRef.current = false
     }
   }, [])
+
+  usePersistedRunMonitor(
+    persistedRunId,
+    router,
+    syncInFlightRef,
+    mountedRef
+  )
 
   if (!initialData) {
     return (
@@ -160,13 +206,13 @@ export function RostersAdmin({
   const handleSyncNow = async () => {
     if (syncInFlightRef.current) return
     syncInFlightRef.current = true
-    setIsSyncing(true)
+    setIsManualSyncing(true)
 
     const trigger = await triggerOneRosterSyncAction()
     if (!mountedRef.current) return
     if (!trigger.isSuccess) {
       syncInFlightRef.current = false
-      setIsSyncing(false)
+      setIsManualSyncing(false)
       toast({
         title: "Sync could not start",
         description: trigger.message,
@@ -185,7 +231,7 @@ export function RostersAdmin({
     )
     if (!mountedRef.current) return
     syncInFlightRef.current = false
-    setIsSyncing(false)
+    setIsManualSyncing(false)
 
     if (!status) {
       toast({
@@ -635,14 +681,19 @@ function RosterBrowser({ data }: { data: OneRosterAdminData }) {
   const [selectedClass, setSelectedClass] = useState<RosterClass | null>(null)
   const [loadingClasses, setLoadingClasses] = useState(false)
   const [loadingStudents, setLoadingStudents] = useState(false)
+  const schoolRequestRef = useRef(0)
+  const rosterRequestRef = useRef(0)
 
   const handleSchoolChange = async (value: string) => {
+    const requestId = ++schoolRequestRef.current
+    rosterRequestRef.current += 1
     setSchoolId(value)
     setClasses([])
     setStudents([])
     setSelectedClass(null)
     setLoadingClasses(true)
     const result = await listRosterClassesAction(value)
+    if (requestId !== schoolRequestRef.current) return
     setLoadingClasses(false)
     if (result.isSuccess) {
       setClasses(result.data)
@@ -656,10 +707,12 @@ function RosterBrowser({ data }: { data: OneRosterAdminData }) {
   }
 
   const handleViewRoster = async (rosterClass: RosterClass) => {
+    const requestId = ++rosterRequestRef.current
     setSelectedClass(rosterClass)
     setStudents([])
     setLoadingStudents(true)
     const result = await listRosterStudentsAction(rosterClass.sourcedId)
+    if (requestId !== rosterRequestRef.current) return
     setLoadingStudents(false)
     if (result.isSuccess) {
       setStudents(result.data)

@@ -1,4 +1,5 @@
 import {
+  createOneRosterSettingsInputSchema,
   oneRosterSettingsInputSchema,
   ONEROSTER_SETTING_KEYS,
 } from "@/lib/roster/settings";
@@ -53,6 +54,40 @@ describe("OneRoster administrator settings", () => {
     expect(() =>
       oneRosterSettingsInputSchema.parse({ ...validInput, pageSize: 10_001 })
     ).toThrow();
+  });
+
+  it("rejects secret ARNs outside the current deployment", () => {
+    const deploymentSchema = createOneRosterSettingsInputSchema({
+      environment: "dev",
+      region: "us-west-2",
+      accountId: "123456789012",
+    });
+
+    expect(() =>
+      deploymentSchema.parse({
+        ...validInput,
+        credentialsSecretArn:
+          "arn:aws:secretsmanager:us-west-2:123456789012:secret:aistudio-prod-oneroster-abc123",
+      })
+    ).toThrow(/environment/);
+    expect(() =>
+      deploymentSchema.parse({
+        ...validInput,
+        credentialsSecretArn:
+          "arn:aws:secretsmanager:us-east-1:123456789012:secret:aistudio-dev-oneroster-abc123",
+      })
+    ).toThrow(/region/);
+    expect(() =>
+      deploymentSchema.parse({
+        ...validInput,
+        credentialsSecretArn:
+          "arn:aws:secretsmanager:us-west-2:210987654321:secret:aistudio-dev-oneroster-abc123",
+      })
+    ).toThrow(/account/);
+    expect(deploymentSchema.parse(validInput)).toMatchObject({
+      ...validInput,
+      baseUrl: "https://district.example.org",
+    });
   });
 
   it("includes the durable status key in the shared settings contract", () => {
