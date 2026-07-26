@@ -72,18 +72,24 @@ test.describe('Atrium archived-content view (authenticated)', () => {
       const page = await context.newPage()
       await page.goto('/atrium')
 
-      // Select "Archived", then pin an impossible tag so the archived result set
-      // is deterministically empty regardless of any archived seed data — the
-      // exact same empty-state component the zero-archived case renders.
+      // Select "Archived", then pin an impossible tag so the archived result
+      // set is deterministically empty regardless of any archived data — seed
+      // OR a sibling spec's in-flight archive/restore (the bulk spec archives
+      // fixtures for a few seconds under parallel workers). With a tag filter
+      // active, a zero-result grid deliberately renders the ZERO-MATCH empty
+      // state, not "Nothing archived" (#1336: the filter that excluded the
+      // results explains itself), so that is the state this asserts. The old
+      // "Nothing archived" expectation only ever passed by racing the tag
+      // debounce while the archive list happened to be empty.
       await archivedChip(page).click()
       await expect(archivedChip(page)).toHaveAttribute('aria-pressed', 'true')
       await page
         .getByRole('textbox', { name: 'Filter by tag' })
         .fill('no-such-tag-zzz-e2e')
 
-      await expect(page.getByText('Nothing archived')).toBeVisible({
-        timeout: 15000,
-      })
+      const zeroMatch = page.getByTestId('library-search-empty')
+      await expect(zeroMatch).toBeVisible({ timeout: 15000 })
+      await expect(zeroMatch).toContainText('No matches for “no-such-tag-zzz-e2e”')
       // The create affordance is suppressed in the archived management view.
       await expect(
         page.getByRole('button', { name: /Create with the agent/i })
