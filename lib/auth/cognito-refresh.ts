@@ -84,8 +84,19 @@ const REFRESH_TIMEOUT_MS = 10_000
 const refreshAttempts = new Map<string, { count: number; lastAttempt: number; windowStart: number }>()
 let lastCleanupTime = 0
 
-/** Promise deduplication so concurrent requests for one user issue one refresh. */
-const activeRefreshPromises = new Map<string, Promise<RefreshResult>>()
+/**
+ * Promise deduplication so concurrent requests for one user issue one refresh.
+ *
+ * The value is a wrapper object rather than the bare promise so that ownership
+ * can be established by comparing the *entry* (`get(key) === entry`) when
+ * cleaning up. Comparing the promise itself would read to CodeQL's
+ * `js/missing-await` as a promise used in a non-promise context — a false
+ * positive, since identity is exactly what is wanted there, but an avoidable one.
+ */
+interface RefreshEntry {
+  promise: Promise<RefreshResult>
+}
+const activeRefreshPromises = new Map<string, RefreshEntry>()
 
 /**
  * Cognito error codes that mean "this refresh token will never work again".
@@ -398,22 +409,22 @@ export async function refreshCognitoTokens(
   const existing = activeRefreshPromises.get(dedupKey)
   if (existing) {
     log.info("Token refresh already in progress, joining existing request", { tokenSub })
-    return existing
+    return existing.promise
   }
 
-  const promise = performRefresh(params)
-  activeRefreshPromises.set(dedupKey, promise)
+  const entry: RefreshEntry = { promise: performRefresh(params) }
+  activeRefreshPromises.set(dedupKey, entry)
 
   try {
-    return await promise
+    return await entry.promise
   } finally {
     // Delete only the entry THIS call registered. `cleanupRateLimitingEntries()`
     // clears the whole map once it exceeds MAX_RATE_LIMIT_ENTRIES, after which a
-    // later request can register a *new* promise under this same key while this
+    // later request can register a *new* entry under this same key while this
     // one is still in flight. An unconditional delete would evict that newer
     // entry, silently disabling dedup for it — every subsequent caller would
     // issue its own Cognito call and burn the user's refresh budget.
-    if (activeRefreshPromises.get(dedupKey) === promise) {
+    if (activeRefreshPromises.get(dedupKey) === entry) {
       activeRefreshPromises.delete(dedupKey)
     }
   }
