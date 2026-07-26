@@ -952,6 +952,42 @@ async function healthCheck() {
 }
 ```
 
+### Timeouts, Pool Deadlines, and Wedged-Pool Self-Heal
+
+Added after the 2026-07-26 dev-server wedge: client-aborted requests (e.g.
+Playwright's 60s timeout) do not propagate into route handlers, so every abort
+left a zombie awaiting the pool, and nothing in the stack applied a timeout —
+a starved pool queue meant every DB-bound request hung forever with no
+self-healing.
+
+Three layers now bound DB waits (all configured via env, all in
+`lib/db/drizzle-client.ts` and `lib/db/pool-guard.ts`):
+
+| Env var | Default | What it bounds |
+|---------|---------|----------------|
+| `DB_STATEMENT_TIMEOUT_MS` | 60000 dev / 0 (off) prod | Server-side per-statement cap, including lock waits. A blocked query is cancelled by PostgreSQL (error `57014`, retryable). |
+| `DB_QUERY_DEADLINE_MS` | 90000 | Per-attempt app-side cap on `executeQuery` work, **including time queued in the postgres.js pool**. Fires only when work never reached a connection (it is above the statement timeout). Rejects with non-retryable `DbPoolDeadlineError`. |
+| `DB_TX_DEADLINE_MS` | 300000 | Same, for `executeTransaction` (higher: a transaction holds a connection across many statements). |
+
+`0` disables any of them. Per-call override for known-long operations:
+
+```typescript
+await executeQuery((db) => db.execute(longRunningSql), "bulkBackfill", {
+  deadlineMs: 0, // or a higher bound in ms
+});
+```
+
+**Self-heal:** three consecutive deadline failures with no other DB outcome in
+between mean the pool itself is wedged (queued work never reaches a
+connection). The pool is then discarded and rebuilt (`rebuildWedgedPool`),
+force-closing the old client after 5s — which also rejects every zombie query
+still queued on it. Rebuilds are rate-limited to one per 60s. A real database
+error resets the detector, since it proves the pool is alive.
+
+Connections also carry `application_name` (default `aistudio`, override via
+`DB_APPLICATION_NAME`) so the app's connections are attributable in
+`pg_stat_activity` during incident diagnosis.
+
 ---
 
 ## Related Documentation

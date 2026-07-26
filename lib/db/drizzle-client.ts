@@ -24,6 +24,7 @@ import {
   getCircuitBreakerState,
   resetCircuitBreaker,
 } from "./rds-error-handler";
+import { resolvePoolDeadlineMs, withPoolDeadline } from "./pool-guard";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import * as schema from "./schema";
 
@@ -104,6 +105,19 @@ function getPgClient(): ReturnType<typeof postgres> {
     // Set SQL_LOGGING=true to see all queries in console
     const sqlLoggingEnabled = process.env.SQL_LOGGING === "true";
 
+    // Server-side statement timeout (2026-07-26 dev-server wedge): bounds any
+    // single statement — including lock waits — so a blocked query cannot hold
+    // a pool connection forever. Dev defaults to 60s; production defaults to
+    // disabled (0) to avoid changing query behavior there without an explicit
+    // opt-in via DB_STATEMENT_TIMEOUT_MS.
+    const statementTimeoutMs = (() => {
+      const raw = process.env.DB_STATEMENT_TIMEOUT_MS;
+      const fallback = process.env.NODE_ENV === "production" ? 0 : 60_000;
+      if (raw === undefined || raw === "") return fallback;
+      const parsed = Number.parseInt(raw, 10);
+      return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
+    })();
+
     pgClient = postgres(getDatabaseUrl(), {
       max: Number.parseInt(process.env.DB_MAX_CONNECTIONS || "20", 10),
       idle_timeout: Number.parseInt(process.env.DB_IDLE_TIMEOUT || "20", 10),
@@ -113,9 +127,66 @@ function getPgClient(): ReturnType<typeof postgres> {
       ssl: sslEnabled ? "require" : false, // SSL required for AWS, optional for local dev
       onnotice: () => {}, // Suppress PostgreSQL notices
       debug: sqlLoggingEnabled, // Opt-in via SQL_LOGGING=true (default: off)
+      connection: {
+        // Identifies this app's connections in pg_stat_activity — the
+        // 2026-07-26 wedge diagnosis had no way to attribute connections.
+        application_name: process.env.DB_APPLICATION_NAME || "aistudio",
+        ...(statementTimeoutMs > 0
+          ? { statement_timeout: statementTimeoutMs }
+          : {}),
+      },
     });
   }
   return pgClient;
+}
+
+// ============================================
+// Wedged-Pool Self-Heal
+// ============================================
+
+/** Minimum interval between pool rebuilds — one burst of queued queries all
+ * hitting their deadline must trigger at most one rebuild. */
+const POOL_REBUILD_MIN_INTERVAL_MS = 60_000;
+let lastPoolRebuildAt = 0;
+
+/**
+ * Discard a wedged pool so the next query builds a fresh one.
+ *
+ * Invoked by the pool guard after consecutive deadline failures (queries
+ * queued in postgres.js that never reached a connection). Whatever leaked the
+ * pool's capacity — client-aborted requests piling zombie queries into the
+ * queue, or connections lost without the driver noticing — replacing the
+ * client restores it. `end({ timeout: 5 })` force-closes the old pool's
+ * sockets after 5s, which also rejects every zombie query still queued on it
+ * so their abandoned handlers finally settle.
+ */
+function rebuildWedgedPool(consecutiveFailures: number): void {
+  const log = createLogger({ context: "drizzle-client", operation: "rebuildWedgedPool" });
+  const now = Date.now();
+  if (now - lastPoolRebuildAt < POOL_REBUILD_MIN_INTERVAL_MS) {
+    log.warn("Pool wedge detected again within rebuild cooldown - skipping", {
+      consecutiveFailures,
+      msSinceLastRebuild: now - lastPoolRebuildAt,
+    });
+    return;
+  }
+  const old = pgClient;
+  if (!old) return;
+  lastPoolRebuildAt = now;
+  pgClient = null;
+  _db = null;
+  log.error("Database pool wedged - rebuilding", {
+    consecutiveFailures,
+    hint: "queries exceeded their pool deadline without reaching a connection",
+  });
+  old
+    .end({ timeout: 5 })
+    .then(() => log.info("Wedged pool closed"))
+    .catch((error: unknown) =>
+      log.warn("Error while closing wedged pool", {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
 }
 
 // ============================================
@@ -259,9 +330,20 @@ export interface QueryRetryOptions {
   backoffMultiplier?: number;
   /** Maximum jitter in milliseconds to add to backoff delay (default: 100) */
   jitterMax?: number;
+  /**
+   * Per-attempt upper bound in ms on how long this DB work may run —
+   * including time spent queued in the postgres.js pool. `0` disables it.
+   * Defaults: DB_QUERY_DEADLINE_MS (90s) for executeQuery,
+   * DB_TX_DEADLINE_MS (300s) for executeTransaction. Raise or disable for
+   * known-long operations. On expiry the call rejects with a non-retryable
+   * DbPoolDeadlineError instead of awaiting the pool forever.
+   */
+  deadlineMs?: number;
 }
 
-const DEFAULT_QUERY_OPTIONS: Required<QueryRetryOptions> = {
+// deadlineMs is resolved separately (its default depends on query vs
+// transaction — see resolvePoolDeadlineMs), so it is not defaulted here.
+const DEFAULT_QUERY_OPTIONS: Required<Omit<QueryRetryOptions, "deadlineMs">> = {
   maxRetries: 3,
   initialDelay: 100,
   maxDelay: 5000,
@@ -328,9 +410,16 @@ export async function executeQuery<T>(
     maxRetries: opts.maxRetries,
   });
 
+  const deadlineMs = options?.deadlineMs ?? resolvePoolDeadlineMs("query");
+
   try {
     const result = await executeWithRetry(
-      () => queryFn(db),
+      () =>
+        withPoolDeadline(queryFn(db), {
+          deadlineMs,
+          context,
+          onWedged: rebuildWedgedPool,
+        }),
       context,
       {
         maxRetries: opts.maxRetries,
@@ -484,9 +573,11 @@ export async function executeTransaction<T>(
     isolationLevel: opts.isolationLevel,
   });
 
+  const deadlineMs = options?.deadlineMs ?? resolvePoolDeadlineMs("transaction");
+
   try {
     const result = await executeWithRetry(
-      async () => {
+      () => {
         // postgres.js driver supports full PostgreSQL transaction options
         const txOptions: {
           isolationLevel?: typeof opts.isolationLevel;
@@ -505,10 +596,16 @@ export async function executeTransaction<T>(
         }
 
         // Pass transaction options if any were specified
-        if (Object.keys(txOptions).length > 0) {
-          return await db.transaction(transactionFn, txOptions);
-        }
-        return await db.transaction(transactionFn);
+        const work =
+          Object.keys(txOptions).length > 0
+            ? db.transaction(transactionFn, txOptions)
+            : db.transaction(transactionFn);
+
+        return withPoolDeadline(work, {
+          deadlineMs,
+          context: `tx_${context}`,
+          onWedged: rebuildWedgedPool,
+        });
       },
       context,
       {
