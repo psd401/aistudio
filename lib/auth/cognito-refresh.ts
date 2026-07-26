@@ -245,6 +245,17 @@ export function __resetRefreshStateForTests(): void {
   lastCleanupTime = 0
 }
 
+/**
+ * Narrow a value parsed out of an untrusted JSON body to a non-empty string.
+ *
+ * Returns `undefined` for every other shape, so callers can fail closed with a
+ * single falsy check instead of trusting the declared interface — which is only
+ * an assertion over `JSON.parse`, never a runtime guarantee.
+ */
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
 interface InitiateAuthResponse {
   AuthenticationResult?: {
     AccessToken?: string
@@ -396,7 +407,15 @@ export async function refreshCognitoTokens(
   try {
     return await promise
   } finally {
-    activeRefreshPromises.delete(dedupKey)
+    // Delete only the entry THIS call registered. `cleanupRateLimitingEntries()`
+    // clears the whole map once it exceeds MAX_RATE_LIMIT_ENTRIES, after which a
+    // later request can register a *new* promise under this same key while this
+    // one is still in flight. An unconditional delete would evict that newer
+    // entry, silently disabling dedup for it — every subsequent caller would
+    // issue its own Cognito call and burn the user's refresh budget.
+    if (activeRefreshPromises.get(dedupKey) === promise) {
+      activeRefreshPromises.delete(dedupKey)
+    }
   }
 }
 
@@ -501,14 +520,30 @@ async function performRefresh(params: RefreshCognitoTokensParams): Promise<Refre
   }
 
   const authResult = body?.AuthenticationResult
-  if (!authResult?.AccessToken || !authResult?.IdToken) {
-    log.warn("Cognito refresh returned an incomplete result", {
+  // Type-check the tokens; do not merely test them for truthiness.
+  // `InitiateAuthResponse` is an *assertion* over `JSON.parse` output, not a
+  // guarantee. A 2xx body from Cognito or an intermediary can carry token fields
+  // that are objects, numbers or arrays — all truthy. Those would flow into the
+  // NextAuth JWT and be handed out as session tokens, leaving a session that
+  // looks refreshed but carries a credential no downstream API can use. Fail
+  // closed instead: a forced re-authentication is recoverable, a poisoned
+  // session is not.
+  const accessToken = nonEmptyString(authResult?.AccessToken)
+  const idToken = nonEmptyString(authResult?.IdToken)
+  // `authResult` is tested explicitly (rather than left to the token checks) so
+  // it stays narrowed to non-undefined for the success path below.
+  if (!authResult || !accessToken || !idToken) {
+    log.warn("Cognito refresh returned an incomplete or malformed result", {
       tokenSub,
       status: "error",
       durationMs: elapsedMs(),
       hasAuthenticationResult: !!authResult,
-      hasAccessToken: !!authResult?.AccessToken,
-      hasIdToken: !!authResult?.IdToken,
+      hasAccessToken: !!accessToken,
+      hasIdToken: !!idToken,
+      // Distinguishes "Cognito omitted a field" from "a field came back with the
+      // wrong type", which are very different incidents to debug.
+      accessTokenType: typeof authResult?.AccessToken,
+      idTokenType: typeof authResult?.IdToken,
     })
     return { ok: false, reason: "transient", message: "Incomplete token refresh response" }
   }
@@ -528,11 +563,13 @@ async function performRefresh(params: RefreshCognitoTokensParams): Promise<Refre
   return {
     ok: true,
     tokens: {
-      accessToken: authResult.AccessToken,
-      idToken: authResult.IdToken,
+      accessToken,
+      idToken,
       // REFRESH_TOKEN_AUTH normally does not rotate the refresh token; keep the
-      // existing one so the session stays refreshable.
-      refreshToken: authResult.RefreshToken || refreshToken,
+      // existing one so the session stays refreshable. A rotated value is only
+      // accepted when it is actually a non-empty string — a malformed one here
+      // would silently make the session unrefreshable on the *next* cycle.
+      refreshToken: nonEmptyString(authResult.RefreshToken) ?? refreshToken,
       expiresAt,
     },
   }
