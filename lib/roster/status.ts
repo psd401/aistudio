@@ -46,9 +46,9 @@ export const oneRosterSyncStatusSchema = z.object({
 
 export type OneRosterSyncStatus = z.infer<typeof oneRosterSyncStatusSchema>;
 
-// Lambda async invocation can make the initial attempt plus two retries. With
-// the 15-minute function timeout and the default retry delays, one hour covers
-// the complete execution window while still recovering abandoned status rows.
+// CDK disables implicit async retries and caps queued event age at 30 minutes,
+// so one hour covers dispatch plus the 15-minute execution timeout with margin
+// while still recovering abandoned status rows.
 export const ONEROSTER_SYNC_ACTIVE_WINDOW_MS = 60 * 60 * 1000;
 
 export function isOneRosterSyncStatusActive(
