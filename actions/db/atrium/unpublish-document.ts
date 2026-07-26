@@ -28,6 +28,11 @@ import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
+import {
+  IN_APP_PUBLISH_PUBLIC_CAPABILITY,
+  notifyPublicExposure,
+} from "@/lib/atrium/public-publish-policy";
+import { isPublicDestination } from "@/lib/content/publish-adapters/types";
 
 export async function unpublishDocumentAction(
   objectId: string,
@@ -76,8 +81,27 @@ export async function unpublishDocumentAction(
     const result = await publishService.unpublish(
       requester,
       objectId,
-      destination
+      destination,
+      {
+        // #1336: an author who may publish publicly must be able to RETRACT
+        // just as freely — otherwise the new allow-then-notify policy would let
+        // authors expose content publicly but leave them unable to take it back
+        // down without an admin, which is strictly worse for review safety.
+        // Same surface-only scope as publishing; see public-publish-policy.ts.
+        hasPublishPublicCapability: IN_APP_PUBLISH_PUBLIC_CAPABILITY,
+      }
     );
+
+    if (result.unpublished && isPublicDestination(destination)) {
+      await notifyPublicExposure({
+        req: requester,
+        action: "unpublish",
+        objectId,
+        destination,
+        note: `Unpublished from ${destination} without administrator approval (allow-then-notify policy)`,
+        requestId,
+      });
+    }
 
     timer({ status: "success" });
     log.info("Document unpublished", {

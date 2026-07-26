@@ -67,18 +67,20 @@ test.describe("Atrium Meridian rich content (authenticated)", () => {
       });
 
       // --- Cover band + emoji (DB metadata, persisted via updateContentAction) ---
-      // Fresh doc → "Add cover"; a doc that already carries a cover (idempotent
-      // re-runs) → "Change cover". Handle both, then open the picker.
+      // Fresh doc → "Add cover" creates the band; a doc that already carries one
+      // (idempotent re-runs) already has it. Either way the "Change cover" pill
+      // is the ONLY way to open the picker — adding a cover deliberately no
+      // longer auto-opens it (#1336 B1, which used to show the clipped popover
+      // as the very first impression). Wait for the pill rather than racing a
+      // `count()` against the band's optimistic re-render.
       const addCover = page.locator('[data-testid="editor-add-cover"]');
       if (await addCover.count()) {
         await addCover.click();
-      } else {
-        await page.locator('[data-testid="editor-change-cover"]').click();
       }
+      const changeCover = page.locator('[data-testid="editor-change-cover"]');
+      await expect(changeCover).toBeVisible({ timeout: 30000 });
+      await changeCover.click();
       const picker = page.locator('[data-testid="editor-cover-picker"]');
-      if (!(await picker.count())) {
-        await page.locator('[data-testid="editor-change-cover"]').click();
-      }
       await expect(picker).toBeVisible({ timeout: 15000 });
 
       // Pick the "forest" preset gradient and set the emoji.

@@ -536,7 +536,7 @@ export class DatabaseStack extends cdk.Stack {
           // Per-run cap. Bounds the blast radius of a misconfigured retention
           // window: the first night after enabling can delete at most this
           // many conversations, and the backlog drains over subsequent runs.
-          SWEEP_BATCH_LIMIT: '200',
+          SWEEP_BATCH_LIMIT: '500',
         },
       });
       cdk.Tags.of(retentionLambda).add('Environment', props.environment);

@@ -1,5 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 import { ProcessingStack } from '../../lib/processing-stack';
 
 interface PolicyStatement {
@@ -130,5 +130,72 @@ describe('ProcessingStack embedding visual-artifact access', () => {
     expect(JSON.stringify(topics)).not.toContain('psd-group-sync-alarms-dev');
     const subscriptions = template.findResources('AWS::SNS::Subscription');
     expect(JSON.stringify(subscriptions)).not.toContain('"Protocol":"email"');
+  });
+
+  it('provisions a singleton nightly OneRoster sync with failure and staleness alarms', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      FunctionName: 'psd-oneroster-sync-dev',
+      ReservedConcurrentExecutions: 1,
+      Timeout: 900,
+      MemorySize: 1024,
+      Architectures: ['arm64'],
+      VpcConfig: {
+        SecurityGroupIds: Match.anyValue(),
+        SubnetIds: Match.anyValue(),
+      },
+      Tags: Match.arrayWith([
+        { Key: 'Environment', Value: 'dev' },
+        { Key: 'ManagedBy', Value: 'cdk' },
+      ]),
+    });
+    template.hasResourceProperties('AWS::Events::Rule', {
+      Description: 'Nightly ClassLink OneRoster full sync (#1310)',
+      ScheduleExpression: 'cron(0 10 * * ? *)',
+      State: 'ENABLED',
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'psd-oneroster-sync-failure-dev',
+      Threshold: 1,
+      TreatMissingData: 'notBreaching',
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'psd-oneroster-sync-staleness-dev',
+      Threshold: 1,
+      EvaluationPeriods: 2,
+      DatapointsToAlarm: 2,
+      TreatMissingData: 'breaching',
+    });
+  });
+
+  it('scopes OneRoster secret reads and conditions metric publication', () => {
+    const secretStatement = statements.find(
+      (candidate) => candidate.Sid === 'OneRosterCredentialSecretAccess',
+    );
+    expect(secretStatement).toMatchObject({
+      Effect: 'Allow',
+      Action: 'secretsmanager:GetSecretValue',
+      Condition: {
+        StringEquals: {
+          'aws:ResourceTag/Environment': 'dev',
+        },
+      },
+    });
+    expect(JSON.stringify(secretStatement?.Resource)).toContain(
+      ':secret:aistudio-dev-oneroster-*',
+    );
+
+    const metricsStatement = statements.find(
+      (candidate) => candidate.Sid === 'OneRosterSyncMetrics',
+    );
+    expect(metricsStatement).toMatchObject({
+      Effect: 'Allow',
+      Action: 'cloudwatch:PutMetricData',
+      Resource: '*',
+      Condition: {
+        StringEquals: {
+          'cloudwatch:namespace': 'AIStudio/RosterSync',
+        },
+      },
+    });
   });
 });

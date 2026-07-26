@@ -227,6 +227,18 @@ export * from "./tables/group-role-mappings";
 export * from "./tables/resource-access-grants";
 
 // ============================================
+// OneRoster Core Schema (Epic #1308 / Issue #1309)
+// ============================================
+export * from "./tables/oneroster-orgs";
+export * from "./tables/oneroster-academic-sessions";
+export * from "./tables/oneroster-courses";
+export * from "./tables/oneroster-classes";
+export * from "./tables/oneroster-class-terms";
+export * from "./tables/oneroster-users";
+export * from "./tables/oneroster-user-roles";
+export * from "./tables/oneroster-enrollments";
+
+// ============================================
 // Relations
 // ============================================
 export * from "./relations";

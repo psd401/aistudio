@@ -176,6 +176,8 @@ AI integration patterns using Vercel AI SDK v6, provider factory implementation,
 
 **[Google Workspace content synchronization](./features/google-workspace-content-sync.md)** — PKCE OAuth and Picker selection across My Drive and user-accessible Shared Drives, durable cursor/version reconciliation, deployment-owned configuration, deletion grace, and operations.
 
+**[ClassLink OneRoster synchronization](./features/oneroster-classlink-sync.md)** — Nightly full-collection roster ingestion, OAuth1 and static-bearer Proxy configuration, fail-safe reconciliation invariants, metrics, alarms, rollout, and rollback.
+
 #### [features/navigation.md](./features/navigation.md)
 Dynamic navigation system with role-based menu items.
 

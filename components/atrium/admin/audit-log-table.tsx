@@ -44,7 +44,9 @@ const ACTIONS = [
   "export_okf",
   "import_okf",
 ] as const
-const SURFACES = ["mcp", "rest"] as const
+// `ui` is the in-app authoring surface — the source of the #1336
+// public-exposure notifications, so it must be filterable here.
+const SURFACES = ["mcp", "rest", "ui"] as const
 const OUTCOMES = ["ok", "error", "approval_required"] as const
 
 function formatTime(iso: string | null): string {
@@ -232,7 +234,19 @@ export function AuditLogTable({ initialData, initialError }: AuditLogTableProps)
                 <TableCell className="whitespace-nowrap">
                   {formatTime(row.createdAt)}
                 </TableCell>
-                <TableCell>{row.action}</TableCell>
+                <TableCell>
+                  {row.action}
+                  {row.publicExposure && (
+                    <Badge
+                      variant="secondary"
+                      className="ml-1.5"
+                      title={row.note ?? "Public exposure"}
+                      data-testid="audit-public-exposure"
+                    >
+                      public
+                    </Badge>
+                  )}
+                </TableCell>
                 <TableCell>{row.surface}</TableCell>
                 <TableCell>{actorOf(row)}</TableCell>
                 <TableCell>

@@ -56,6 +56,15 @@ export interface ContentAuditRowDTO {
   error: string | null;
   requestId: string | null;
   createdAt: string | null;
+  /**
+   * True on the admin-visible notification recorded when a non-admin author
+   * makes content publicly reachable (#1336). The §26.4 approval queue no
+   * longer blocks that action — it is allow-then-notify — so this row IS the
+   * notification, and the table flags it distinctly.
+   */
+  publicExposure: boolean;
+  /** Short human-readable note accompanying `publicExposure`. */
+  note: string | null;
 }
 
 export interface ContentAuditPage {
@@ -156,6 +165,8 @@ export async function listContentAuditAction(
         error: row.error,
         requestId: row.requestId,
         createdAt: row.createdAt ? row.createdAt.toISOString() : null,
+        publicExposure: row.details?.publicExposure === true,
+        note: row.details?.note ?? null,
       })),
       total: Number(totalRows[0]?.count ?? 0),
       page,

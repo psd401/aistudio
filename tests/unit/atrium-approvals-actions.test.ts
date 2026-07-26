@@ -385,6 +385,10 @@ describe("listContentAuditAction", () => {
         error: null,
         requestId: "r-1",
         createdAt: "2026-07-02T08:00:00.000Z",
+        // #1336: the DTO now carries the public-exposure notification flag +
+        // note, derived from the row's `details` JSONB (absent here → defaults).
+        publicExposure: false,
+        note: null,
       },
     ]);
   });

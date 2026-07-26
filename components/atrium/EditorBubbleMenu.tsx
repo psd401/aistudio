@@ -445,16 +445,13 @@ export interface EditorBubbleMenuProps {
   askAgentHref: string;
 }
 
-export function EditorBubbleMenu({
-  editor,
-  askAgentHref,
-}: EditorBubbleMenuProps): React.JSX.Element {
-  const router = useRouter();
-  const [pop, setPop] = useState<BubblePop>("none");
-
-  // Re-render the toolbar when the active-mark state changes so B/I/U/S and the
-  // Text ▾ label reflect the current selection.
-  const marks = useEditorState({
+/**
+ * Re-render the toolbar when the active-mark state changes so B/I/U/S and the
+ * Text ▾ label reflect the current selection. Extracted so `EditorBubbleMenu`
+ * stays under the max-lines-per-function lint.
+ */
+function useActiveMarks(editor: EditorBubbleMenuProps["editor"]) {
+  return useEditorState({
     editor,
     selector: ({ editor: e }) => ({
       bold: e.isActive("bold"),
@@ -462,12 +459,39 @@ export function EditorBubbleMenu({
       underline: e.isActive("underline"),
       strike: e.isActive("strike"),
       bulletList: e.isActive("bulletList"),
-      blockLabel:
-        BLOCK_STYLES.find((b) => b.isActive(e))?.label ?? "Text",
+      blockLabel: BLOCK_STYLES.find((b) => b.isActive(e))?.label ?? "Text",
     }),
   });
+}
+
+export function EditorBubbleMenu({
+  editor,
+  askAgentHref,
+}: EditorBubbleMenuProps): React.JSX.Element {
+  const router = useRouter();
+  const [pop, setPop] = useState<BubblePop>("none");
+
+  const marks = useActiveMarks(editor);
 
   const closePops = () => setPop("none");
+
+  // Escape closes an open sub-popover (block style / color / callout / media)
+  // without collapsing the text selection — matching DocumentCover's dismissal
+  // pattern. Outside interactions already close everything for free: clicking
+  // elsewhere in the document moves the selection and clicking outside the
+  // editor blurs it, and the bubble plugin hides this whole menu (state resets
+  // with it) in both cases.
+  useEffect(() => {
+    if (pop === "none") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation(); // dismiss the popover only, not the selection
+        setPop("none");
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [pop]);
 
   return (
     <BubbleMenu
@@ -475,6 +499,9 @@ export function EditorBubbleMenu({
       // Only over a real, non-empty text selection, and only for editors (a
       // read-only viewer never gets the formatting UI).
       shouldShow={({ editor: e, from, to }) => e.isEditable && to > from}
+      // The default 250ms debounce made every selection feel laggy — the
+      // toolbar appeared a beat after the user finished dragging (#1336 B4).
+      updateDelay={0}
       options={{ placement: "top", offset: 8 }}
     >
       <div

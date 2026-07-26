@@ -132,13 +132,15 @@
     "135-atrium-asset-initiation-idempotency.sql",
     "136-google-content-connectors.sql",
     "137-nexus-conversation-retention.sql",
-    "138-api-rate-limit-reservations.sql",
-    "139-deep-research-reservations.sql",
-    "140-agentic-cost-reservations.sql",
-    "141-agent-request-nonces.sql",
-    "142-resource-admission-leases.sql",
-    "143-agentic-cost-reconciliation.sql",
-    "144-agent-skill-scan-leases.sql",
-    "145-workspace-upload-reservations.sql"
+    "138-atrium-capture-browser-registration.sql",
+    "141-oneroster-core.sql",
+    "146-api-rate-limit-reservations.sql",
+    "147-deep-research-reservations.sql",
+    "148-agentic-cost-reservations.sql",
+    "149-agent-request-nonces.sql",
+    "150-resource-admission-leases.sql",
+    "151-agentic-cost-reconciliation.sql",
+    "152-agent-skill-scan-leases.sql",
+    "153-workspace-upload-reservations.sql"
   ]
 }

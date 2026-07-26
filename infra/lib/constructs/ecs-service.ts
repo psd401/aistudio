@@ -476,6 +476,8 @@ export class EcsServiceConstruct extends Construct {
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
                 // #1203: admin "Sync now" async-invokes the hourly group-sync Lambda
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-group-sync-${environment}`,
+                // #1310: admin "Sync now" invokes the nightly OneRoster Lambda.
+                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-oneroster-sync-${environment}`,
                 // #1232 confused-deputy isolation: trusted Workspace execution
                 // and /api/agent/account-request invoke the isolated mint
                 // Lambda instead of running WIF/signJwt in-process. INVOKE-ONLY —

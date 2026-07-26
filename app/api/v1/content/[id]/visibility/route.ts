@@ -79,7 +79,16 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId, p
     });
     log.info("Set visibility via REST", { objectId: obj.id, level: result.visibilityLevel });
     return createApiResponse(
-      { data: { id: obj.id, visibility: result }, meta: { requestId } },
+      // Project the field explicitly — `setLevel` also returns `becamePublic`,
+      // an internal allow-then-notify signal that is not part of the documented
+      // v1 response body (docs/API/v1/openapi.yaml).
+      {
+        data: {
+          id: obj.id,
+          visibility: { visibilityLevel: result.visibilityLevel },
+        },
+        meta: { requestId },
+      },
       requestId
     );
   } catch (err) {

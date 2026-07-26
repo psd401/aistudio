@@ -146,8 +146,9 @@ export interface ListFilter {
   kind?: ContentKind;
   tag?: string;
   /**
-   * Case-insensitive title substring search. The service clamps it to 200
-   * chars and LIKE-escapes `\`/`%`/`_`, so callers pass raw user text.
+   * Case-insensitive substring search over the title OR any tag (#1336). The
+   * service clamps it to 200 chars and LIKE-escapes `\`/`%`/`_`, so callers pass
+   * raw user text. Distinct from `tag`, which is an exact whole-tag match.
    */
   query?: string;
   status?: "draft" | "published" | "archived";
