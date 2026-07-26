@@ -23,7 +23,12 @@ const ISSUER = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123"
 const REFRESH_TOKEN = "r".repeat(64)
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000
 
-type FetchMock = jest.Mock<(url: string, init: RequestInit) => Promise<Response>>
+// `@types/jest`'s `jest.Mock<TReturn, TArgs>` takes the RETURN type first and the
+// argument tuple second — it is not `jest.Mock<TSignature>` (that form belongs to
+// `@jest/globals`, which this file does not import). Passing a function type as
+// TReturn makes `ResolvedValue<TReturn>` collapse to `never`, so every
+// `mockResolvedValue(...)` fails to compile.
+type FetchMock = jest.Mock<Promise<Response>, [url: string, init: RequestInit]>
 
 const jsonResponse = (status: number, body: unknown): Response =>
   ({

@@ -20,7 +20,12 @@ import {
 const ISSUER = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123"
 const VALID_REFRESH_TOKEN = "a".repeat(64)
 
-type FetchMock = jest.Mock<(url: string, init: RequestInit) => Promise<Response>>
+// `@types/jest`'s `jest.Mock<TReturn, TArgs>` takes the RETURN type first and the
+// argument tuple second — it is not `jest.Mock<TSignature>` (that form belongs to
+// `@jest/globals`, which this file does not import). Passing a function type as
+// TReturn makes `ResolvedValue<TReturn>` collapse to `never`, so every
+// `mockResolvedValue(...)` fails to compile.
+type FetchMock = jest.Mock<Promise<Response>, [url: string, init: RequestInit]>
 
 const jsonResponse = (status: number, body: unknown): Response =>
   ({
@@ -267,6 +272,55 @@ describe("refreshCognitoTokens", () => {
       tokenSub: "user-1",
     })
     expect(result).toMatchObject({ ok: false, reason: "transient" })
+  })
+
+  // A 2xx body whose token fields are the wrong TYPE is the dangerous case: the
+  // values are truthy, so a bare `!authResult.AccessToken` check waves them
+  // through and they end up installed in the NextAuth JWT as session tokens.
+  // The session then looks refreshed but carries a credential no API accepts.
+  const malformedResults: ReadonlyArray<{ label: string; AuthenticationResult: unknown }> = [
+    { label: "objects", AuthenticationResult: { AccessToken: {}, IdToken: {} } },
+    { label: "numbers", AuthenticationResult: { AccessToken: 12345, IdToken: 67890 } },
+    { label: "arrays", AuthenticationResult: { AccessToken: ["a"], IdToken: ["b"] } },
+    { label: "empty strings", AuthenticationResult: { AccessToken: "", IdToken: "" } },
+    {
+      label: "a well-typed access token beside a malformed ID token",
+      AuthenticationResult: { AccessToken: "ok", IdToken: 1 },
+    },
+  ]
+
+  for (const { label, AuthenticationResult } of malformedResults) {
+    it(`fails closed when Cognito returns tokens as ${label}`, async () => {
+      fetchMock.mockResolvedValue(jsonResponse(200, { AuthenticationResult }))
+
+      const result = await refreshCognitoTokens({
+        refreshToken: VALID_REFRESH_TOKEN,
+        tokenSub: "user-1",
+      })
+
+      expect(result).toMatchObject({ ok: false, reason: "transient" })
+      // Nothing token-shaped may leak out on the failure path.
+      expect(result).not.toHaveProperty("tokens")
+    })
+  }
+
+  it("ignores a malformed rotated refresh token and keeps the working one", async () => {
+    // Dropping the old token here would leave the session unrefreshable on the
+    // NEXT cycle — a failure that surfaces an hour later, far from its cause.
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        AuthenticationResult: { AccessToken: "a", IdToken: "b", RefreshToken: 42 },
+      }),
+    )
+
+    const result = await refreshCognitoTokens({
+      refreshToken: VALID_REFRESH_TOKEN,
+      tokenSub: "user-1",
+    })
+
+    expect(result).toMatchObject({ ok: true })
+    if (!result.ok) throw new Error("expected a successful refresh")
+    expect(result.tokens.refreshToken).toBe(VALID_REFRESH_TOKEN)
   })
 
   it("rejects malformed input without calling Cognito", async () => {
