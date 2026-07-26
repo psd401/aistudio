@@ -526,7 +526,9 @@ const PHASE1_FORBIDDEN = [
   // across the user's whole Drive. Blocked on BOTH slots: Phase 1 policy is
   // "never destructive", and `trashed` is also absent from the
   // metadata-update allowlist, so two independent rules have to fail for a
-  // trash to get through.
+  // trash to get through. This raw-string form is a fast fail only — the
+  // authoritative check is detectDriveTrashedWrite on the PARSED payload,
+  // which a JSON key escape cannot dodge (codex P1, PR #1346).
   { pattern: /"trashed"\s*:\s*true/i,
     reason: 'trashing a Drive file (Phase 1: never destructive — ask the user to trash it themselves)' },
   { pattern: /\bdrive[\s.]+files[\s.]+untrash\b/i,
@@ -667,6 +669,37 @@ function isMetadataOnlyDriveUpdate(commandString, tokens) {
   const keys = Object.keys(resource);
   if (keys.length === 0) return false;
   return keys.every((key) => DRIVE_METADATA_FIELDS.has(key.toLowerCase()));
+}
+
+/**
+ * REFUSE any Drive files write whose PARSED payload carries a `trashed` key.
+ *
+ * The raw-string PHASE1_FORBIDDEN pattern ('"trashed": true') is kept as a
+ * fast fail, but it can be routed around with a JSON string escape in the
+ * key — `--json '{"tr\u0061shed":true}'` — which the raw-string regex never
+ * matches while gws's JSON.parse decodes it right back to `trashed` and
+ * executes the trash (codex P1, PR #1346). The user slot happens to survive
+ * that because isMetadataOnlyDriveUpdate judges decoded keys, but the agent
+ * slot skips the user-slot allowlists entirely, so the gate must also judge
+ * the DECODED resource — same dual extraction the allowlists use.
+ *
+ * ANY value is refused, not just `true`: `trashed:false` is an untrash, and
+ * `files.untrash` is already blocked ("the agent does not manage the trash").
+ * Covers update/patch (trash/untrash) and create/copy (pre-trashed spawn).
+ * A payload our parse cannot read is not judged here — extractDriveResource
+ * uses the same JSON.parse gws does, and the unparseable case dies in gws.
+ */
+function detectDriveTrashedWrite(commandString, tokens) {
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const driveWriteRe = /\bdrive[\s.]+files[\s.]+(update|patch|create|copy)\b/i;
+  if (!driveWriteRe.test(spaceJoined) && !driveWriteRe.test(dotJoined)) return null;
+  const resource = extractDriveResource(commandString, tokens);
+  if (!resource) return null;
+  const hasTrashed = Object.keys(resource).some((k) => k.toLowerCase() === 'trashed');
+  return hasTrashed
+    ? 'trashing/untrashing a Drive file (Phase 1: never destructive — ask the user to manage the trash themselves)'
+    : null;
 }
 
 // gws gmail "helper" verbs that put a message on the wire. The `+`-prefixed
@@ -944,6 +977,14 @@ function enforcePhase1Gates(commandString, context) {
       }
       return { allowed: false, reason };
     }
+  }
+
+  // Trash travels as a body field, and the raw-string pattern above can be
+  // dodged with a JSON escape in the key — judge the DECODED payload too,
+  // on BOTH slots (codex P1, PR #1346).
+  const trashedReason = detectDriveTrashedWrite(commandString, tokens);
+  if (trashedReason) {
+    return { allowed: false, reason: trashedReason };
   }
 
   // Helper-form send/reply/forward (REV-COR-350) — `gws gmail +send`,

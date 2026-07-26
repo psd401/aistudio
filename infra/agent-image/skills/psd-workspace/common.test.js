@@ -495,6 +495,41 @@ describe('#1305 user-slot Drive: files.update is metadata-only', () => {
     ).toBe(false);
   });
 
+  test('a JSON-escaped `trashed` key cannot dodge the ban on either slot (codex P1)', () => {
+    // `{"tr\u0061shed":true}` never matches the raw-string PHASE1 pattern,
+    // but gws's JSON.parse decodes the key straight back to `trashed` and
+    // executes the trash. The gate must judge the DECODED payload. The raw
+    // command below carries the literal backslash-u escape, exactly as an
+    // adversarial model would emit it.
+    const AGENT_CTX = { scope: 'agent_account', ownerEmail: 'hagelk@psd401.net' };
+    const escaped = `drive files update --params '{"fileId":"f1"}' --json '{"tr\\u0061shed":true}'`;
+    const agentVerdict = enforcePhase1Gates(escaped, AGENT_CTX);
+    expect(agentVerdict.allowed).toBe(false);
+    expect(agentVerdict.reason).toContain('trash');
+    expect(enforcePhase1Gates(escaped, USER_CTX).allowed).toBe(false);
+  });
+
+  test('untrash smuggled as `trashed:false` in the body is refused on both slots', () => {
+    // `files.untrash` is blocked as a verb; the body form must not be a way
+    // around it — the agent does not manage the trash in either direction.
+    const AGENT_CTX = { scope: 'agent_account', ownerEmail: 'hagelk@psd401.net' };
+    const untrash = `drive files update --params '{"fileId":"f1"}' --json '{"trashed":false}'`;
+    expect(enforcePhase1Gates(untrash, AGENT_CTX).allowed).toBe(false);
+    expect(enforcePhase1Gates(untrash, USER_CTX).allowed).toBe(false);
+  });
+
+  test('a pre-trashed folder create is refused even though the mimeType is permitted', () => {
+    // isPermittedFolderCreate only proves mimeType; without the parsed-payload
+    // trash check a folder create carrying an escaped `trashed` key would ride
+    // the #1305 carve-out through USER_SCOPE_FORBIDDEN.
+    expect(
+      enforcePhase1Gates(
+        `drive files create --json '{"mimeType":"application/vnd.google-apps.folder","name":"x","tr\\u0061shed":true}'`,
+        USER_CTX
+      ).allowed
+    ).toBe(false);
+  });
+
   test('any field outside the metadata allowlist refuses the whole call', () => {
     // One unknown key poisons the payload — the allowlist is all-or-nothing.
     expect(update({ name: 'ok', contentHints: { indexableText: 'x' } }).allowed).toBe(false);

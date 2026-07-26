@@ -39,7 +39,7 @@ and you **cannot** — each refuses with a plain-language reason:
 | Create a doc/sheet/deck/file in the user's Drive | the skill gate (impersonation ban, 2026-07-07) |
 | Copy a file into the user's Drive | the skill gate — the copy would be owned by the user |
 | Change any file's **content** | **Google** — no granted scope permits a content write |
-| Trash a file (`{"trashed":true}`) | the skill gate, on both slots |
+| Trash or untrash a file (any `trashed` field) | the skill gate, on both slots — judged on the **parsed** payload, so a JSON key escape does not get around it |
 | Permanently delete, or empty trash | **Google** — needs `drive`/`drive.file` on that file, which you do not have for anything you did not create |
 
 Note the asymmetry: content edits and permanent deletion are impossible at the
