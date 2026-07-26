@@ -162,6 +162,35 @@ async function resolveToken(tokenOrProvider) {
   return typeof tokenOrProvider === 'function' ? await tokenOrProvider() : tokenOrProvider;
 }
 
+/**
+ * Build the memoized, LAZY token provider the lookups call on a cache miss.
+ *
+ * Lives here rather than in run.js so the failure paths are testable: the
+ * broker call is injected, so "account not provisioned" (exit 14) and a broker
+ * transport failure (exit 12) can be exercised without an image or a network.
+ *
+ * Memoized so a single CLI invocation can never mint twice, and so a caller
+ * that resolves several identities spends one token rather than one each.
+ */
+function makeTokenMinter(fetchBrokerToken, ownerEmail) {
+  let minted = null;
+  return async () => {
+    if (!minted) {
+      let broker;
+      try {
+        broker = await fetchBrokerToken(ownerEmail);
+      } catch (err) {
+        throw new DirectoryError('MINT_TRANSPORT', `could not mint an agent token: ${err.message}`);
+      }
+      if (broker && broker.notProvisioned) {
+        throw new DirectoryError('ACCOUNT_NOT_PROVISIONED', 'account-not-provisioned');
+      }
+      minted = broker;
+    }
+    return minted.accessToken;
+  };
+}
+
 async function callPeople(url, accessToken, fetchImpl) {
   const doFetch = fetchImpl || globalThis.fetch;
   let resp;
@@ -312,6 +341,7 @@ module.exports = {
   resolveEmail,
   addressesOf,
   resolveToken,
+  makeTokenMinter,
   resolvePersonId,
   shapePerson,
   normalizeEmail,

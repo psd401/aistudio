@@ -366,6 +366,63 @@ describe('caching', () => {
   });
 });
 
+describe('makeTokenMinter', () => {
+  // These are run.js's exit-14 and exit-12 paths. They live in lib.js with the
+  // broker injected precisely so they can be exercised here — previously the
+  // only coverage was "it works in the container".
+  test('mints once and memoizes across repeated calls', async () => {
+    let calls = 0;
+    const broker = async () => {
+      calls += 1;
+      return { accessToken: 'tok-' + calls };
+    };
+    const mint = lib.makeTokenMinter(broker, 'owner@psd401.net');
+    expect(await mint()).toBe('tok-1');
+    expect(await mint()).toBe('tok-1');
+    expect(calls).toBe(1);
+  });
+
+  test('passes the owner through to the broker', async () => {
+    let seen = null;
+    const broker = async (email) => {
+      seen = email;
+      return { accessToken: 't' };
+    };
+    await lib.makeTokenMinter(broker, 'owner@psd401.net')();
+    expect(seen).toBe('owner@psd401.net');
+  });
+
+  test('an unprovisioned account is a typed error (run.js exit 14)', async () => {
+    const broker = async () => ({ notProvisioned: true });
+    await expect(lib.makeTokenMinter(broker, 'o@psd401.net')()).rejects.toMatchObject({
+      code: 'ACCOUNT_NOT_PROVISIONED',
+    });
+  });
+
+  test('a broker failure is a typed transport error (run.js exit 12)', async () => {
+    const broker = async () => {
+      throw new Error('connect ECONNREFUSED');
+    };
+    await expect(lib.makeTokenMinter(broker, 'o@psd401.net')()).rejects.toMatchObject({
+      code: 'MINT_TRANSPORT',
+    });
+  });
+
+  test('a failed mint is not memoized as success', async () => {
+    // A transient broker blip must not poison the minter for the rest of the
+    // invocation — the next call has to be allowed to try again.
+    let calls = 0;
+    const broker = async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('transient');
+      return { accessToken: 'tok' };
+    };
+    const mint = lib.makeTokenMinter(broker, 'o@psd401.net');
+    await expect(mint()).rejects.toMatchObject({ code: 'MINT_TRANSPORT' });
+    expect(await mint()).toBe('tok');
+  });
+});
+
 describe('SKILL.md registration frontmatter', () => {
   // The stack parses this frontmatter at registration
   // (infra/lib/agent-platform-stack.ts) and substitutes the useless string

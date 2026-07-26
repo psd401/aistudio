@@ -83,34 +83,10 @@ async function main() {
   if (wantEmail && wantChatId) fail('--email and --chat-id are mutually exclusive');
 
   // Agent-slot token via the DWD broker (directory.readonly already granted).
-  //
-  // LAZY ON PURPOSE. The broker rate-limits to 120 mints/hour per owner
-  // (lib/agent-workspace/token-rate-limit.ts) and that budget is SHARED with
-  // psd-workspace. Minting up-front would charge a token to every lookup even
-  // when the on-disk cache answers it, so a chatty-but-cached workload could
-  // exhaust the limit and take Gmail/Calendar/Drive down with it. The lookup
-  // calls this only after its cache has missed. Memoized so a single
-  // invocation can never mint twice.
-  let minted = null;
-  const mintToken = async () => {
-    if (!minted) {
-      let broker;
-      try {
-        broker = await WS.fetchBrokerToken(userEmail);
-      } catch (err) {
-        const e = new Error(`could not mint an agent token: ${err.message}`);
-        e.code = 'MINT_TRANSPORT';
-        throw e;
-      }
-      if (broker && broker.notProvisioned) {
-        const e = new Error('account-not-provisioned');
-        e.code = 'ACCOUNT_NOT_PROVISIONED';
-        throw e;
-      }
-      minted = broker;
-    }
-    return minted.accessToken;
-  };
+  // LAZY on purpose — the lookup calls this only after its cache misses, so a
+  // cache hit spends no mint against the broker's shared rate limit. See
+  // makeTokenMinter in lib.js for why that matters and for its test coverage.
+  const mintToken = lib.makeTokenMinter(WS.fetchBrokerToken, userEmail);
 
   const opts = { noCache: args.no_cache === true };
   try {
