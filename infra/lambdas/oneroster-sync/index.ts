@@ -75,6 +75,9 @@ interface PersistedSyncStatus {
   error: string | null;
 }
 
+const INCOMPLETE_SYNC_ERROR =
+  "OneRoster sync was incomplete; failed collections retain last-known-good rows";
+
 export async function handler(
   event: OneRosterSyncEvent = {}
 ): Promise<HandlerResult> {
@@ -155,9 +158,7 @@ export async function handler(
     await emitMetrics(result);
     metricsEmitted = true;
     if (!result.fullySuccessful) {
-      throw new Error(
-        "OneRoster sync was incomplete; failed collections retain last-known-good rows"
-      );
+      throw new Error(INCOMPLETE_SYNC_ERROR);
     }
     log.info("OneRoster sync completed", {
       unchanged: result.unchanged,
@@ -173,9 +174,14 @@ export async function handler(
     );
     return { status: "ok", result };
   } catch (error) {
+    const thrownErrorMessage = safeErrorMessage(error);
+    const collectionError = syncResult?.collections.find(
+      (collection) => collection.failed > 0
+    )?.error;
     const errorMessage =
-      syncResult?.collections.find((collection) => collection.failed > 0)
-        ?.error ?? safeErrorMessage(error);
+      thrownErrorMessage === INCOMPLETE_SYNC_ERROR && collectionError
+        ? collectionError
+        : thrownErrorMessage;
     log.error("OneRoster sync failed", { error: errorMessage, runId });
     if (!metricsEmitted) {
       await emitMetrics(null).catch(() => {});
