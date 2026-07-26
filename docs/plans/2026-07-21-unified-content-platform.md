@@ -366,17 +366,16 @@ scheduled dev-environment suite validates the real services.
 
 ## Worktree and branch model
 
-The active Google synchronization branch is
-`codex/unified-content-google-sync` in the main checkout:
+The active Agents and Projects branch is
+`codex/unified-content-agents-projects` in the main checkout:
 
 ```text
 /Users/hagelk/non-ic-code/aistudio
 ```
 
-The main checkout stays on `dev`, so other agents or projects can use separate
-branches/worktrees without touching this work. PRs target `dev`. Each workstream
-may split into its own `codex/` branch after the foundation contracts merge; no
-two worktrees should edit the same migration or contract file concurrently.
+The branch was created from current `origin/dev`, and its PR targets `dev`.
+Other agents or projects should use separate branches/worktrees; no two
+worktrees should edit the same migration or contract file concurrently.
 
 ## Progress ledger
 
@@ -393,7 +392,7 @@ two worktrees should edit the same migration or contract file concurrently.
 - [x] Retrieval v2 and visual search
 - [x] Google Workspace sync
 - [x] Universal product UI migration
-- [ ] OpenClaw and Projects integration
+- [x] OpenClaw and Projects integration
 - [ ] Backfill, cutover, and legacy retirement
 
 Update this checklist and the linked GitHub issues at every delivery boundary.
@@ -1174,3 +1173,75 @@ that field across metadata, change, and traversal requests and forwards the
 target resource key through `X-Goog-Drive-Resource-Keys` when resolving a
 link-shared shortcut. Focused client and selection-route tests now assert the
 exact provider field projection and resource-key propagation.
+
+### Agents and Projects checkpoint (2026-07-26)
+
+Issue #1266 was selected because this ledger names OpenClaw and Projects as the
+first unchecked workstream and explicitly sequences backfill/cutover work
+afterward in #1267. The epic, all linked workstreams, current open and merged
+pull requests, ADR-007, repository guidance, and relevant feature/API
+documentation were inspected before selection; no active pull request
+overlapped this work.
+
+Implemented on `codex/unified-content-agents-projects`, ready for dev review:
+
+- Five catalog-backed operations list, describe, search, disclose exact source,
+  and stream repository changes through the shared internal catalog, MCP, and
+  documented v1 REST surfaces. Granular API scopes authorize each operation;
+  current durable-repository, item, role/user, and segment ACLs authorize every
+  resource. Search and source resolve only the current immutable item version
+  in the repository's active generation.
+- OpenClaw uses an owner-bound AI Studio authorization-code flow with S256 PKCE,
+  one-time state, an exact same-owner AI Studio session, exact registered
+  scopes, short-lived access tokens, rotating refresh tokens, identity
+  verification, revocation, and per-user Secrets Manager storage. The
+  model-facing psd-aistudio skill sends no owner selector and sees no provider
+  token or signing material; the router-signed invocation context (landed in
+  prerequisite PR #1353) is the sole credential-owner authority. The trusted
+  broker refreshes grants and provides repository list, describe, search,
+  source, and change commands; a manually stored personal key remains a
+  compatibility fallback.
+- Published Assistant Architect skills persist normalized repository bindings.
+  Nexus reloads those bindings, checks the executing user's current ACLs, and
+  searches the active generation on every turn, so repository publication and
+  revocation take effect without republishing the skill.
+- Nexus Projects provide a private durable project repository, connected
+  durable repositories, owner/editor/viewer membership, exact member grants,
+  project instructions, and durable user-owned project conversations. Project
+  and conversation bindings are server-derived, and every chat turn filters
+  connected repositories against the executing member's current access.
+- Additive migration 139 introduces the first-party native OAuth client,
+  `aistudio` consent nonces, skill bindings, project/membership/repository
+  records, and a nullable project reference on existing conversations. Existing
+  chats remain backward-compatible, and deployment/rollback ordering is
+  documented.
+
+Verification at this checkpoint passed whole-repository typecheck and lint,
+the production Next.js build, OpenAPI generation/drift checking, 365 application
+Jest suites with 3,584 tests passing (3 suites/26 tests skipped), all 43
+infrastructure suites with 406 tests, the infrastructure build and all-stack
+dev/prod CDK synthesis, and all 51 OpenClaw adapter tests. The real PostgreSQL
+migration/authorization smoke passed schema replay, current-generation source
+disclosure, skill binding, project membership/grant/revocation, durable chat,
+OAuth-client, and cleanup checks. Seven focused Playwright cases passed,
+including authenticated project persistence and member removal plus a real
+staff-scoped API key exercising REST, MCP, the live change feed, exact
+repository ACL exclusion, UI revocation, and post-revocation denial.
+
+The 2026-07-26 dev deployment was checked before delivery. CloudFormation
+reported the database stack and migration custom resource `UPDATE_COMPLETE`;
+the migration Lambda and live `migration_log` showed only the already-merged
+`141-oneroster-core.sql` running successfully. Neither migration 139 nor its
+tables were present in dev. The runner tracks completion by exact filename
+rather than by a highest numeric watermark, so deploying 139 after 141 remains
+supported; the PostgreSQL smoke replayed that exact manifest order. A refreshed
+parallel-work audit found only the expected manifest overlap with open PR
+#1344, whose migration 140 deliberately reserved its number around this
+in-flight migration and has no schema dependency on it.
+
+Rollout is migration-first: deploy migration 139 before the application and
+agent image. The new OAuth client is public/PKCE-only and limited to the three
+registered callback origins; production token storage continues to use the
+existing `psd-agent-creds/<environment>/user/*` encrypted secret boundary. No
+legacy route or table is removed here; inventory, backfill, cutover, and legacy
+retirement remain exclusively in #1267.

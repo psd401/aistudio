@@ -21,17 +21,18 @@ const PUBLIC_PATHS = [
   "/api/oauth", // OAuth2/OIDC endpoints handle their own auth (#686)
   "/.well-known", // OIDC discovery document (#686)
   "/auth/error",
-  // Agent Workspace OAuth bootstrap (#912) — all three endpoints authenticate
-  // via signed tokens in the URL or a Bearer shared-secret from the agent
-  // runtime. A PSD session is not required (and would be impossible on the
-  // first visit, since consent happens outside the PSD web session).
+  // Agent Workspace bootstrap (#912). API calls verify router-signed invocation
+  // context. The original Google Workspace flow remains link-authenticated;
+  // provider-specific reusable grants are deliberately excluded below and
+  // require a same-owner AI Studio session.
   "/api/agent", // Agent endpoints verify router-signed invocation context
   "/agent-connect", // Consent page and OAuth callback — signed JWT in URL
-  // Canva and Plaud intentionally are NOT public. Their external OAuth grants
-  // are stored in a local owner's reusable credential slot, so both the start
-  // and callback must carry a live AI Studio session whose email matches that
-  // immutable owner. A signed link alone proves integrity, not who opened it.
-  // The Cognito data flow remains separate and has its own identity semantics.
+  // Canva, Plaud, and AI Studio intentionally are NOT public. Their external
+  // OAuth grants are stored in a local owner's reusable credential slot, so
+  // both the start and callback must carry a live AI Studio session whose email
+  // matches that immutable owner. A signed link alone proves integrity, not who
+  // opened it. The Cognito data flow remains separate and has its own identity
+  // semantics.
   "/agent-connect-data",
   // Atrium public reader (#1057): /p/[slug] is the anonymous public_web reader
   // route (spec §20). It is world-readable by design — the page itself gates

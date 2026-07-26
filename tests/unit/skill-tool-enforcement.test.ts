@@ -14,6 +14,9 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 jest.mock("@/lib/db/schema/tables/agent-skills", () => ({
   psdAgentSkills: {},
 }))
+jest.mock("@/lib/db/schema/tables/skill-repository-bindings", () => ({
+  skillRepositoryBindings: {},
+}))
 jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
   eq: (...a: unknown[]) => a,
@@ -139,13 +142,15 @@ describe("getApprovedSkillAllowedTools (DB path)", () => {
 
   it("returns the skill's allowed-tools when approved", async () => {
     // The underlying getApprovedSkillSession query now also selects name/s3Key.
-    executeQueryMock.mockResolvedValue([
-      {
-        name: "weather-helper",
-        allowedTools: ["webSearch", "imageGen"],
-        s3Key: "skills/shared/weather-helper/",
-      },
-    ])
+    executeQueryMock
+      .mockResolvedValueOnce([
+        {
+          name: "weather-helper",
+          allowedTools: ["webSearch", "imageGen"],
+          s3Key: "skills/shared/weather-helper/",
+        },
+      ])
+      .mockResolvedValueOnce([{ repositoryId: 41 }])
     await expect(getApprovedSkillAllowedTools("11111111-2222-4333-8444-555555555555")).resolves.toEqual([
       "webSearch",
       "imageGen",
@@ -155,9 +160,11 @@ describe("getApprovedSkillAllowedTools (DB path)", () => {
   it("returns an empty array (no pin) when allowedTools is null in the row", async () => {
     // An approved skill that pins nothing stores null/non-array; the accessor
     // normalizes to [] so callers keep all available tools (no pin), NOT null.
-    executeQueryMock.mockResolvedValue([
-      { name: "no-pin", allowedTools: null, s3Key: "skills/shared/no-pin/" },
-    ])
+    executeQueryMock
+      .mockResolvedValueOnce([
+        { name: "no-pin", allowedTools: null, s3Key: "skills/shared/no-pin/" },
+      ])
+      .mockResolvedValueOnce([])
     await expect(getApprovedSkillAllowedTools("11111111-2222-4333-8444-555555555555")).resolves.toEqual([])
   })
 })
@@ -167,18 +174,24 @@ describe("getApprovedSkillSession (epic #922 completion audit)", () => {
     executeQueryMock.mockReset()
   })
 
-  it("returns name, allowedTools, and s3Key for an approved skill", async () => {
-    executeQueryMock.mockResolvedValue([
-      {
-        name: "weather-helper",
-        allowedTools: ["documents.create@v1"],
-        s3Key: "skills/shared/weather-helper/",
-      },
-    ])
+  it("returns instructions, tool pins, and live repository bindings for an approved skill", async () => {
+    executeQueryMock
+      .mockResolvedValueOnce([
+        {
+          name: "weather-helper",
+          allowedTools: ["documents.create@v1"],
+          s3Key: "skills/shared/weather-helper/",
+        },
+      ])
+      .mockResolvedValueOnce([
+        { repositoryId: 41 },
+        { repositoryId: 87 },
+      ])
     await expect(getApprovedSkillSession("11111111-2222-4333-8444-555555555555")).resolves.toEqual({
       name: "weather-helper",
       allowedTools: ["documents.create@v1"],
       s3Key: "skills/shared/weather-helper/",
+      repositoryIds: [41, 87],
     })
   })
 
@@ -190,13 +203,16 @@ describe("getApprovedSkillSession (epic #922 completion audit)", () => {
   })
 
   it("normalizes a null allowedTools column to an empty pin", async () => {
-    executeQueryMock.mockResolvedValue([
-      { name: "no-pin", allowedTools: null, s3Key: "skills/shared/no-pin/" },
-    ])
+    executeQueryMock
+      .mockResolvedValueOnce([
+        { name: "no-pin", allowedTools: null, s3Key: "skills/shared/no-pin/" },
+      ])
+      .mockResolvedValueOnce([])
     await expect(getApprovedSkillSession("11111111-2222-4333-8444-555555555555")).resolves.toEqual({
       name: "no-pin",
       allowedTools: [],
       s3Key: "skills/shared/no-pin/",
+      repositoryIds: [],
     })
   })
 })

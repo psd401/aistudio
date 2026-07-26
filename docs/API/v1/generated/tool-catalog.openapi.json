@@ -94,6 +94,180 @@
           }
         }
       }
+    },
+    "/api/v1/repositories": {
+      "get": {
+        "operationId": "listRepositories",
+        "summary": "List accessible repositories",
+        "x-tool-identifier": "repositories.list",
+        "x-tool-version": "v1",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "repositories:list"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "500": {
+            "description": "Internal error."
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/{id}": {
+      "get": {
+        "operationId": "describeRepository",
+        "summary": "Describe an accessible repository",
+        "x-tool-identifier": "repositories.describe",
+        "x-tool-version": "v1",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "repositories:list"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "500": {
+            "description": "Internal error."
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/{id}/source": {
+      "get": {
+        "operationId": "getRepositorySource",
+        "summary": "Get authorized repository source segments",
+        "x-tool-identifier": "repositories.get_source",
+        "x-tool-version": "v1",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "repositories:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "500": {
+            "description": "Internal error."
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/changes": {
+      "get": {
+        "operationId": "listRepositoryChanges",
+        "summary": "List authorized repository changes",
+        "x-tool-identifier": "repositories.list_changes",
+        "x-tool-version": "v1",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "repositories:changes"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "500": {
+            "description": "Internal error."
+          }
+        }
+      }
+    },
+    "/api/v1/repositories/search": {
+      "post": {
+        "operationId": "searchRepositories",
+        "summary": "Search accessible repositories",
+        "x-tool-identifier": "repositories.search",
+        "x-tool-version": "v1",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "repositories:search"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Validation error — malformed body or invalid inputs."
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "404": {
+            "description": "Resource not found, or the tool is disabled in the catalog."
+          },
+          "429": {
+            "description": "Concurrent-execution or rate limit exceeded."
+          },
+          "500": {
+            "description": "Internal error."
+          }
+        }
+      }
     }
   }
 }

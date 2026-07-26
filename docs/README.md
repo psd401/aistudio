@@ -174,6 +174,8 @@ AI integration patterns using Vercel AI SDK v6, provider factory implementation,
 
 **[Unified repository product integration](./features/unified-repository-product-integration.md)** — Authoritative Repository Manager source/ACL/version UI, Assistant Architect repository-only knowledge, Nexus private ephemeral attachments, promotion, retention, and rollback boundaries.
 
+**[Unified content agents and Projects](./features/unified-content-agents-and-projects.md)** — Repository catalog MCP/REST scopes, per-user OpenClaw PKCE OAuth, live skill repository bindings, and durable Nexus Project membership/repository/chat boundaries.
+
 **[Google Workspace content synchronization](./features/google-workspace-content-sync.md)** — PKCE OAuth and Picker selection across My Drive and user-accessible Shared Drives, durable cursor/version reconciliation, deployment-owned configuration, deletion grace, and operations.
 
 **[ClassLink OneRoster synchronization](./features/oneroster-classlink-sync.md)** — Nightly full-collection roster ingestion, OAuth1 and static-bearer Proxy configuration, fail-safe reconciliation invariants, metrics, alarms, rollout, and rollback.

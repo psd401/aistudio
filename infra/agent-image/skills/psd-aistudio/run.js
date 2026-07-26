@@ -8,18 +8,17 @@
  *     capabilities  live capability catalog (describe_capabilities)
  *     list          raw MCP tools/list (scope-filtered to the resolved key)
  *
- *   ACTION (#1223) — each maps 1:1 to an MCP tools/call and runs as the CALLER:
+ *   ACTION (#1223) — each maps 1:1 to an MCP tools/call and runs as the OWNER:
  *     list-assistants   / execute-assistant
  *     search-decisions  / capture-decision / get-decision-graph
  *
- * KEY MODEL (#1223): every subcommand accepts an optional `--user <caller-email>`
- * (from the harness `[caller: Name <email>]` line). When that caller has stored
- * their OWN AI Studio API key (`psd-credentials put --name
- * aistudio_personal_key`) it OVERRIDES the shared key, so the agent can do exactly what that key is scoped
- * for — enforced server-side. With no `--user` / no stored key, the shared,
- * read-only platform:read key is used (discovery works; action subcommands come
- * back insufficient-scope with a hint to store a personal key). Scope is NEVER
- * hardcoded here — this is a thin passthrough.
+ * IDENTITY MODEL: every operation crosses the local owner-bound broker. The
+ * router signs the immutable workspace owner into a replay-bound request proof;
+ * AI Studio derives the credential path only from that proof. `--user` remains
+ * accepted for CLI compatibility and display-oriented harnesses, but it never
+ * selects an owner or credential and is never forwarded to the broker. Provider
+ * tokens and API keys stay in the trusted web tier. Scope and resource ACLs are
+ * enforced server-side.
  *
  * Usage:
  *   node run.js capabilities [--section actions|features|scopes|all]
@@ -44,7 +43,15 @@
 
 'use strict';
 
-const { fail, emit, parseArgs, callMcp, callTool } = require('./common');
+const {
+  fail,
+  emit,
+  parseArgs,
+  callMcp,
+  callTool,
+  mintConsentUrl,
+  disconnectOAuth,
+} = require('./common');
 
 const SECTIONS = ['actions', 'features', 'scopes', 'all'];
 const SURFACES = ['mcp', 'ai_sdk', 'rest', 'internal'];
@@ -54,9 +61,14 @@ function usage() {
     [
       'Usage: node run.js <subcommand> [...]',
       '',
-      'Every subcommand accepts an optional --user <caller-email>. When that caller',
-      'has stored their own AI Studio API key it overrides the shared read-only key,',
-      'unlocking exactly what that key is scoped for (enforced server-side).',
+      'Every subcommand accepts an optional legacy --user <caller-email> hint.',
+      'It never selects an identity; the signed invocation owner is authoritative.',
+      'When that owner has connected AI Studio with OAuth, that grant is used first.',
+      'A legacy stored API key remains supported as a compatibility fallback.',
+      '',
+      'Connection:',
+      '  connect --user <email>       Mint a one-click delegated OAuth link.',
+      '  disconnect --user <email>    Revoke the delegated grant.',
       '',
       'Discovery (shared platform:read key is enough):',
       '  capabilities [--section actions|features|scopes|all]',
@@ -81,6 +93,14 @@ function usage() {
       '                    [--conditions a,b] [--alternatives a,b] [--related-to uuid,uuid]',
       '                    [--agent-id <t>]   (admin-only: needs mcp:capture_decision)',
       '  get-decision-graph [--user <email>] --node-id <uuid>',
+      '',
+      'Repositories (delegated OAuth or a key with repository scopes):',
+      '  repositories-list [--query <text>] [--limit N]',
+      '  repositories-describe --repository-id N',
+      '  repositories-search --query <text> [--repository-ids 1,2] [--mode keyword|vector|hybrid]',
+      '                      [--modalities text,image,audio,video,table] [--limit N]',
+      '  repositories-source --repository-id N --item-id N [--chunk-id N] [--limit N]',
+      '  repositories-changes --repository-ids 1,2 [--cursor C] [--limit N]',
       '',
     ].join('\n')
   );
@@ -127,9 +147,36 @@ function parseList(value, label) {
   return items.length ? items : undefined;
 }
 
+function parseIntegerList(value, label) {
+  const values = parseList(value, label);
+  if (values === undefined) return undefined;
+  const numbers = values.map(Number);
+  if (numbers.some((number) => !Number.isSafeInteger(number) || number <= 0)) {
+    fail(`--${label} must be a comma-separated list of positive integers`);
+  }
+  return numbers;
+}
+
+function requiredScopeForTool(toolName) {
+  const repositoryScopes = {
+    repositories_list: 'repositories:list',
+    repositories_describe: 'repositories:list',
+    repositories_search: 'repositories:search',
+    repositories_get_source: 'repositories:read',
+    repositories_list_changes: 'repositories:changes',
+  };
+  return repositoryScopes[toolName] || `mcp:${toolName}`;
+}
+
 /** The remediation hint for an insufficient-scope failure — different when the
  *  caller is already on a personal key (re-mint) vs the shared key (store one). */
 function scopeHint(keySource, scope) {
+  if (keySource === 'oauth') {
+    return (
+      `Your delegated AI Studio connection lacks ${scope}. Disconnect and run ` +
+      '`connect --user <your-email>` to authorize the current scope set.'
+    );
+  }
   if (keySource === 'personal') {
     return (
       `Your stored AI Studio key lacks ${scope}. Mint a NEW key that includes ` +
@@ -163,7 +210,9 @@ function surfaceToolError(res, toolName) {
       tool: toolName,
       http_status: res.httpStatus,
       jsonrpc_error: res.jsonrpcError,
-      ...(insufficient && { hint: scopeHint(res.keySource, `mcp:${toolName}`) }),
+      ...(insufficient && {
+        hint: scopeHint(res.keySource, requiredScopeForTool(toolName)),
+      }),
     });
     process.exit(12);
   }
@@ -200,10 +249,31 @@ async function main() {
     process.exit(0);
   }
 
-  // Optional caller email — present on every subcommand. Absent → shared key.
+  // Legacy compatibility hint only. common.js intentionally ignores it; the
+  // signed invocation context is the sole credential-owner authority.
   const email = optStr(args, 'user', 'user');
 
   switch (subcommand) {
+    case 'connect': {
+      const ownerEmail = requireStr(args, 'user', 'user');
+      const url = await mintConsentUrl(ownerEmail);
+      emit({
+        status: 'needs-auth',
+        kind: 'aistudio',
+        consent_url: url,
+        consent_chat_hyperlink: `<${url}|Connect AI Studio>`,
+        message:
+          'Paste consent_chat_hyperlink on its own line, without surrounding markdown.',
+      });
+      return;
+    }
+
+    case 'disconnect': {
+      const ownerEmail = requireStr(args, 'user', 'user');
+      emit(await disconnectOAuth(ownerEmail));
+      return;
+    }
+
     case 'capabilities': {
       const toolArgs = {};
       if (args.section !== undefined) {
@@ -355,6 +425,90 @@ async function main() {
     case 'get-decision-graph': {
       const nodeId = requireStr(args, 'node_id', 'node-id');
       await runToolAndEmit('get_decision_graph', { nodeId }, email);
+      return;
+    }
+
+    case 'repositories-list': {
+      const toolArgs = {};
+      const query = optStr(args, 'query', 'query');
+      const limit = optInt(args, 'limit', 'limit');
+      if (query !== undefined) toolArgs.query = query;
+      if (limit !== undefined) toolArgs.limit = limit;
+      await runToolAndEmit('repositories_list', toolArgs, email);
+      return;
+    }
+
+    case 'repositories-describe': {
+      const repositoryId = optInt(
+        args,
+        'repository_id',
+        'repository-id'
+      );
+      if (repositoryId === undefined) {
+        fail('--repository-id is required');
+      }
+      await runToolAndEmit(
+        'repositories_describe',
+        { repositoryId },
+        email
+      );
+      return;
+    }
+
+    case 'repositories-search': {
+      const query = requireStr(args, 'query', 'query');
+      const toolArgs = { query };
+      const repositoryIds = parseIntegerList(
+        args.repository_ids,
+        'repository-ids'
+      );
+      const mode = optStr(args, 'mode', 'mode');
+      const modalities = parseList(args.modalities, 'modalities');
+      const limit = optInt(args, 'limit', 'limit');
+      if (repositoryIds !== undefined) toolArgs.repositoryIds = repositoryIds;
+      if (mode !== undefined) {
+        if (!['keyword', 'vector', 'hybrid'].includes(mode)) {
+          fail('--mode must be keyword, vector, or hybrid');
+        }
+        toolArgs.mode = mode;
+      }
+      if (modalities !== undefined) toolArgs.modalities = modalities;
+      if (limit !== undefined) toolArgs.limit = limit;
+      await runToolAndEmit('repositories_search', toolArgs, email);
+      return;
+    }
+
+    case 'repositories-source': {
+      const repositoryId = optInt(
+        args,
+        'repository_id',
+        'repository-id'
+      );
+      const itemId = optInt(args, 'item_id', 'item-id');
+      if (repositoryId === undefined || itemId === undefined) {
+        fail('--repository-id and --item-id are required');
+      }
+      const toolArgs = { repositoryId, itemId };
+      const chunkId = optInt(args, 'chunk_id', 'chunk-id');
+      const limit = optInt(args, 'limit', 'limit');
+      if (chunkId !== undefined) toolArgs.chunkId = chunkId;
+      if (limit !== undefined) toolArgs.limit = limit;
+      await runToolAndEmit('repositories_get_source', toolArgs, email);
+      return;
+    }
+
+    case 'repositories-changes': {
+      const repositoryIds = parseIntegerList(
+        args.repository_ids,
+        'repository-ids'
+      );
+      if (!repositoryIds) fail('--repository-ids is required');
+      const toolArgs = { repositoryIds };
+      const cursor = optStr(args, 'cursor', 'cursor');
+      const limit = optInt(args, 'limit', 'limit');
+      if (cursor !== undefined) toolArgs.cursor = cursor;
+      if (limit !== undefined) toolArgs.limit = limit;
+      await runToolAndEmit('repositories_list_changes', toolArgs, email);
       return;
     }
 

@@ -43,7 +43,9 @@ The body documents the assistant: `# name`, `## Inputs` (field table),
 2. The serialized folder uploads to S3 under
    `skills/user/{email}/drafts/{slug}/` and a `psd_agent_skills` row is written
    with `scope: 'draft'`, `scan_status: 'pending'` (republish bumps `version`
-   in place while still a draft).
+   in place while still a draft). Prompt repository ids are re-authorized and
+   replace `skill_repository_bindings` in the same transaction as the skill and
+   audit rows.
 3. The **agent-skill-builder Lambda** is invoked async
    (`lib/skills/skill-publish-pipeline.ts`): it downloads the folder, scans it
    (secrets / PII / npm audit / SKILL.md lint, including malformed
@@ -64,7 +66,7 @@ The body documents the assistant: `# name`, `## Inputs` (field table),
 
 | Surface | Mechanism |
 |---------|-----------|
-| **Nexus chat** | Session binding, not a callable tool: `/skills/{id}` → "Use in chat" passes `skillId`; the chat route re-validates approval server-side, intersects the session's built-in tools with `allowed-tools`, drops MCP connector tools unless a pin explicitly namespaces them (`connector:{name}` or `connector:{serverId}:{name}` — a bare pin never admits an external tool, which could otherwise shadow the pinned built-in), and injects the SKILL.md instructions into the system prompt. An unknown/unapproved id neither loosens tools nor injects anything. |
+| **Nexus chat** | Session binding, not a callable tool: `/skills/{id}` → "Use in chat" passes `skillId`; the chat route re-validates approval server-side, intersects the session's built-in tools with `allowed-tools`, drops MCP connector tools unless a pin explicitly namespaces them (`connector:{name}` or `connector:{serverId}:{name}` — a bare pin never admits an external tool, which could otherwise shadow the pinned built-in), injects the SKILL.md instructions, and supplies `searchSkillRepositories` for current prompt-bound repositories. Repository bindings and the executing user's ACL are re-read every turn, so revocation or updated content takes effect without republishing. An unknown/unapproved id neither loosens tools nor injects anything. |
 | **Agentic assistants / MCP** | The `skill.{slug}` catalog tool is invocable; dispatch resolves `handlerRef: skill:{id}` via `lib/skills/skill-tool-executor.ts`, which re-checks approval (uncached) and returns the SKILL.md document as the tool result (progressive disclosure — a skill is an instruction folder, not a function). |
 
 ## Export for Claude Code / Claude Desktop

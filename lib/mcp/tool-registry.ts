@@ -240,6 +240,120 @@ Example:
       },
     },
   },
+  {
+    name: "repositories_list",
+    description:
+      "List durable repositories the authenticated user can currently access.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Optional case-insensitive name or description filter.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum repositories to return (1-50, default 50).",
+          default: 50,
+        },
+      },
+    },
+  },
+  {
+    name: "repositories_describe",
+    description:
+      "Describe one durable repository if the authenticated user can currently access it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repositoryId: {
+          type: "number",
+          description: "Repository numeric id.",
+        },
+      },
+      required: ["repositoryId"],
+    },
+  },
+  {
+    name: "repositories_search",
+    description:
+      "Search one or more authorized repositories using the active retrieval generation and live repository and segment ACLs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query." },
+        repositoryIds: {
+          type: "array",
+          items: { type: "number" },
+          description:
+            "Repository ids to search. Omit to search every accessible durable repository.",
+        },
+        mode: {
+          type: "string",
+          enum: ["keyword", "vector", "hybrid"],
+          description: "Retrieval mode (default hybrid).",
+        },
+        modalities: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional text, image, audio, video, or table filters.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum results (1-50, default 10).",
+          default: 10,
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "repositories_get_source",
+    description:
+      "Get exact citation source segments from an authorized repository's active generation and current item version.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repositoryId: { type: "number", description: "Repository numeric id." },
+        itemId: { type: "number", description: "Repository item numeric id." },
+        chunkId: {
+          type: "number",
+          description: "Optional exact source chunk id.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum source segments (1-50, default 20).",
+          default: 20,
+        },
+      },
+      required: ["repositoryId", "itemId"],
+    },
+  },
+  {
+    name: "repositories_list_changes",
+    description:
+      "List item changes in authorized repositories using a stable opaque cursor.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repositoryIds: {
+          type: "array",
+          items: { type: "number" },
+          description: "One or more repository ids.",
+        },
+        cursor: {
+          type: "string",
+          description: "Opaque cursor returned by the previous call.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum changes (1-100, default 50).",
+          default: 50,
+        },
+      },
+      required: ["repositoryIds"],
+    },
+  },
   // Atrium content tools (Phase 5, Issue #1055) — listed so scoped callers
   // discover them via tools/list.
   ...CONTENT_MCP_TOOLS,
