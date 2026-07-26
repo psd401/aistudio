@@ -13,6 +13,10 @@
  */
 
 import { isIP } from "node:net"
+import {
+  safeFetch,
+  safeFetchAdapter,
+} from "@/lib/security/safe-fetch"
 import { createMCPClient } from "@ai-sdk/mcp"
 import { eq, and, or, sql } from "drizzle-orm"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
@@ -40,8 +44,7 @@ import type {
 } from "./connector-types"
 import type { McpToolSet } from "./connector-types"
 import { loadCustomTools } from "./custom-tools/registry"
-import { ServerSideOAuthProvider } from "./mcp-oauth-provider"
-import { getIssuerUrl } from "@/lib/oauth/issuer-config"
+import { resolveCredentialProfile } from "./credential-profiles"
 
 const log = createLogger({ action: "mcp-connector-service" })
 
@@ -240,19 +243,13 @@ export async function getConnectorTools(
         headers: { Authorization: `Bearer ${accessToken}` },
       }
     } else {
-      // MCP-native OAuth: let the SDK handle token injection via authProvider
-      const baseUrl = getIssuerUrl()
-      const redirectUrl = `${baseUrl}/api/connectors/mcp-auth/callback`
-      const authProvider = new ServerSideOAuthProvider({
-        serverId,
-        userId,
-        redirectUrl,
-      })
-      transportConfig = {
-        type: "http",
-        url: server.url,
-        authProvider,
-      }
+      // The SDK's native flow performs its own discovery and token requests.
+      // Those requests cannot be bound to the admin-approved endpoint/profile,
+      // so native OAuth is disabled. Pre-register a server-owned credential
+      // profile and explicit authorization/token endpoints instead.
+      throw new Error(
+        "MCP-native OAuth is disabled; configure a pre-registered credential profile"
+      )
     }
   } else if (authType === "cognito_passthrough") {
     // Cognito passthrough: forward session idToken as Bearer header.
@@ -280,6 +277,11 @@ export async function getConnectorTools(
       headers,
     }
   }
+
+  // The connector hostname remains attacker-controlled after persistence.
+  // Pin every runtime MCP request to freshly approved public DNS answers and
+  // reject redirects so a later DNS change cannot reach an internal address.
+  transportConfig = hardenMcpTransportConfig(transportConfig)
 
   // 6. Create MCP client and fetch tools with timeout + cleanup on failure.
   // Both createMCPClient and client.tools() make outbound HTTP calls to
@@ -340,6 +342,22 @@ export async function getConnectorTools(
     serverName: server.name,
     tools,
     close: () => client.close(),
+  }
+}
+
+export function hardenMcpTransportConfig(
+  config: Parameters<typeof createMCPClient>[0]["transport"]
+): Parameters<typeof createMCPClient>[0]["transport"] {
+  if (!config || typeof config !== "object" || !("type" in config)) {
+    throw new Error("A configured MCP transport is required")
+  }
+  if (config.type !== "http") {
+    throw new Error("Only HTTP MCP transports can be hardened")
+  }
+  return {
+    ...config,
+    redirect: "error",
+    fetch: safeFetchAdapter,
   }
 }
 
@@ -704,11 +722,11 @@ async function exchangeRefreshToken(
   }
 
   try {
-    const resp = await fetch(tokenEndpoint, {
+    const resp = await safeFetch(tokenEndpoint, {
       method: "POST",
       headers,
       signal: AbortSignal.timeout(15_000),
-      body: new URLSearchParams(body),
+      body: new URLSearchParams(body).toString(),
     })
 
     if (!resp.ok) {
@@ -764,7 +782,7 @@ export async function getOAuthCredentials(
     }
   }
   if (server.credentialsKey) {
-    return loadOAuthCredentials(server.credentialsKey)
+    return loadOAuthCredentials(server.credentialsKey, server.url)
   }
   return null
 }
@@ -803,18 +821,20 @@ const CREDENTIALS_CACHE_MAX = 100
  * { clientId, clientSecret, tokenEndpointUrl?, authorizationEndpointUrl?, scopes? }.
  */
 export async function loadOAuthCredentials(
-  credentialsKey: string
+  credentialsKey: string,
+  connectorUrl: string
 ): Promise<OAuthClientCredentials> {
+  const profile = resolveCredentialProfile(credentialsKey, connectorUrl)
   const cached = credentialsCache.get(credentialsKey)
   if (cached && Date.now() - cached.fetchedAt < CREDENTIALS_CACHE_TTL) {
     return cached.value
   }
 
   const result = await getSecretsClient().send(
-    new GetSecretValueCommand({ SecretId: credentialsKey })
+    new GetSecretValueCommand({ SecretId: profile.secretId })
   )
   if (!result.SecretString) {
-    throw new Error(`OAuth credentials secret is empty: ${credentialsKey}`)
+    throw new Error(`OAuth credential profile is empty: ${credentialsKey}`)
   }
   const parsed: unknown = JSON.parse(result.SecretString)
   if (
@@ -1038,4 +1058,3 @@ function toMcpConnector(row: typeof nexusMcpServers.$inferSelect): McpConnector 
     allowedUsers: row.allowedUsers ?? [],
   }
 }
-

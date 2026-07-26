@@ -9,7 +9,13 @@ allowed-tools: Bash(node:*)
 
 Read-only access to Red Rover absence/vacancy data for PSD. The skill never performs POST/PUT/DELETE/PATCH calls — every HTTP request goes through a single `rrGet()` chokepoint in `lib/api.js`. There is no companion write helper; adding one would violate the read-only contract.
 
-**Identity.** Every command requires `--user <caller-email>`. Pass the email verbatim from the `[caller: Name <email>]` header in the user turn. The email is used only as the `--user` argument to `psd-credentials/get.js`; the credential itself is district-wide (shared scope), not per-user.
+**Identity.** The district-wide credential is resolved through the owner-bound broker. Existing commands retain their caller argument for compatibility, but it is never forwarded to credential lookup.
+
+**Authorization.** The trusted web broker requires the signed workspace owner to
+hold the code-managed `skill.redrover` capability before it resolves or uses the
+district-wide credential. Administrator and staff roles receive this capability
+by default; administrators can change role assignments without introducing an
+API scope.
 
 **Credentials.** A single shared secret at `psd-agent-creds/{env}/shared/redrover_credentials` with shape `{"username":"...","password":"...","apiKey":"..."}`. The skill uses Basic Auth (`username` + `password`) for the `/organization` endpoint, then uses the dynamic `apiKey` returned there for vacancy calls. The static `apiKey` field is a fallback if Red Rover ever stops minting a dynamic one.
 
@@ -141,7 +147,9 @@ PENINSULA HIGH SCHOOL, GIG HARBOR HIGH SCHOOL, HENDERSON BAY HIGH SCHOOL, GOODMA
 ## Read-only enforcement
 
 - All HTTP traffic flows through `rrGet()` in `lib/api.js`. There is no `rrPost`/`rrPut`/`rrDelete`.
+- The trusted credentials route checks `skill.redrover` before calling the
+  operation broker, so denied owners never resolve or use the shared credential.
 - The skill performs **no** filesystem writes (no `fs.writeFile`, `fs.appendFile`, `fs.mkdir`, `fs.unlink`, etc.).
-- The only `child_process` invocation is `node psd-credentials/get.js` — never `put.js`.
+- Provider credentials stay inside the fixed read-only Red Rover operation broker and are never returned to this process.
 - `/opt/psd-skills` is `chmod a-w` at container build time; the agent process cannot modify the skill at runtime.
 - Credential values are kept in module-scope memory only — never logged, echoed, or persisted to workspace/S3.

@@ -16,7 +16,6 @@
 
 import { createHash, timingSafeEqual } from "node:crypto"
 import { cookies } from "next/headers"
-import { exchangeMcpOAuthTokens } from "@/lib/mcp/mcp-auth-utils"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq } from "drizzle-orm"
@@ -26,6 +25,7 @@ import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { rejectUnsafeMcpUrl, getOAuthCredentials } from "@/lib/mcp/connector-service"
 import { ServerSideOAuthProvider } from "@/lib/mcp/mcp-oauth-provider"
 import { UUID_RE, getMcpAuthCookieName, classifyMcpOAuthError } from "@/lib/mcp/mcp-auth-utils"
+import { safeFetch } from "@/lib/security/safe-fetch"
 
 const log = createLogger({ action: "mcp-auth-callback" })
 
@@ -347,10 +347,10 @@ export async function GET(req: Request): Promise<Response> {
         if (credentials.clientSecret) body.client_secret = credentials.clientSecret
       }
 
-      const resp = await fetch(credentials.tokenEndpointUrl, {
+      const resp = await safeFetch(credentials.tokenEndpointUrl, {
         method: "POST",
         headers,
-        body: new URLSearchParams(body),
+        body: new URLSearchParams(body).toString(),
         signal: AbortSignal.timeout(15_000),
       })
 
@@ -398,34 +398,14 @@ export async function GET(req: Request): Promise<Response> {
       return renderCallbackHtml(true, serverId)
     }
 
-    // ── MCP-native OAuth flow (no credentialsKey) ──────────────────────────
-    // 7. Create provider with pre-loaded code verifier and call auth() with code
-    const provider = new ServerSideOAuthProvider({
+    // Dynamic MCP discovery/registration uses SDK-internal network calls that
+    // cannot be DNS-pinned. Require administrator-registered endpoints instead.
+    timer({ status: "error", reason: "preregistered_oauth_required" })
+    return renderCallbackHtml(
+      false,
       serverId,
-      userId: cookieData.userId,
-      redirectUrl,
-      preloadedCodeVerifier: cookieData.codeVerifier,
-    })
-
-    const result = await exchangeMcpOAuthTokens(provider, {
-      serverUrl: server.url,
-      authorizationCode: code,
-    })
-
-    if (result !== "AUTHORIZED") {
-      log.warn("MCP auth callback did not result in AUTHORIZED", { requestId, serverId, result })
-      timer({ status: "error", reason: "not_authorized" })
-      return renderCallbackHtml(false, serverId, "Authorization failed. Please try again.")
-    }
-
-    timer({ status: "success" })
-    log.info("MCP auth callback completed successfully", {
-      requestId,
-      serverId,
-      userId: cookieData.userId,
-    })
-
-    return renderCallbackHtml(true, serverId)
+      "This connector must be configured with pre-registered OAuth endpoints."
+    )
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error)
     log.error("MCP auth callback failed", {

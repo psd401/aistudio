@@ -49,6 +49,7 @@ Current capability identifiers (from the manifest):
 | `decision-capture` | Nexus Decision Capture |
 | `voice-mode` | Nexus voice conversations |
 | `atrium-content` | Atrium content workspace (documents, artifacts, collections) |
+| `skill.redrover` | Owner-bound agent access to district Red Rover absence and vacancy data |
 | `internal-performance-monitoring` | Internal performance dashboards |
 | `internal-system-administration` | Internal system admin tooling |
 
@@ -57,6 +58,11 @@ Current capability identifiers (from the manifest):
 > generation, web search, reasoning) on a model record — it has nothing to do
 > with user authorization. Do not confuse the two; use `hasCapabilityAccess`
 > for role-gated access.
+
+Owner-bound internal agent operations still act with a human owner's authority.
+For example, the trusted Red Rover broker checks the owner's
+`skill.redrover` capability before it may resolve the district-wide shared
+credential. This remains a human role capability; it is not an API-key scope.
 
 ---
 

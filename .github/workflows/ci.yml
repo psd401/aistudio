@@ -57,6 +57,41 @@ jobs:
         # Dedicated collab-token signing key (mirrors the smoke's own default).
         COLLAB_JWT_SECRET: ci-collab-secret-0123456789
     
+    # psd-workspace skill gate (Bun). infra/agent-image/skills/psd-workspace is
+    # plain CJS outside the Next.js/jest roots, so `test:ci` never saw it — the
+    # regex gate that is the ONLY barrier against the agent sending mail,
+    # deleting, or creating files as the user (#912 Phase 1, #1138, #1305) had
+    # no CI coverage at all. It does now.
+    - name: Run psd-workspace skill gate tests (Bun)
+      run: bun run test:skill:workspace
+      env:
+        CI: true
+
+    # psd-directory (#1239). Same story as psd-workspace above: plain CJS
+    # outside the jest roots, so `test:ci` cannot see it. What these tests
+    # guard is identity CORRECTNESS — the exact-address rule that stops a
+    # fuzzy search result being reported as the person, and the absence of any
+    # directory-enumeration entry point.
+    - name: Run psd-directory lookup tests (Bun)
+      run: bun run test:skill:directory
+      env:
+        CI: true
+
+    # psd-schedules (Bun). Same reason as above: plain CJS outside the jest
+    # roots. Runs the whole directory, which covers two suites:
+    #   - skill-frontmatter: DISCOVERABILITY. agent-platform-stack.ts
+    #     substitutes "Bundled skill: <name>" when the frontmatter has no
+    #     `summary`, and psd-skills-meta's skills.search matches on name +
+    #     summary only. Without a summary the scheduling skill is reachable
+    #     only by searching the literal word "schedules", so "remind me",
+    #     "cron" and "follow up" all silently return nothing.
+    #   - authority: the request-authority binding added in 38c18aec, which
+    #     shipped with no runner and so had never actually executed in CI.
+    - name: Run psd-schedules skill tests (Bun)
+      run: bun run test:skill:schedules
+      env:
+        CI: true
+
     # Optional: Upload test coverage if you generate it
     # - name: Upload coverage reports
     #   uses: codecov/codecov-action@v3

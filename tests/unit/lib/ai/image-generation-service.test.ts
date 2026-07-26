@@ -5,6 +5,13 @@
  * Uses the global `jest` (not @jest/globals) so jest.mock hoisting works.
  */
 import { fetchReferenceImageSafely } from "@/lib/ai/image-generation-service";
+import { setSafeFetchTransportForTests } from "@/lib/security/safe-fetch";
+
+setSafeFetchTransportForTests((input, init) => global.fetch(input, init));
+
+afterAll(() => {
+  setSafeFetchTransportForTests(undefined);
+});
 
 describe("fetchReferenceImageSafely — SSRF guard (REV-COR-497)", () => {
   let fetchMock: jest.Mock;

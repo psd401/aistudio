@@ -2,10 +2,8 @@
  * Shared helpers for the psd-redrover OpenClaw skill.
  *
  * READ-ONLY contract:
- *   - Every HTTP call goes through rrGet() — GET only, no method override.
- *   - No fs.write*, no child_process other than psd-credentials/get.js.
- *   - Credential values are held in module-scope memory only and never
- *     written to disk, workspace, or chat.
+ *   - Every provider call goes through a fixed read-only web-tier operation.
+ *   - No provider credential enters this model-launched process.
  *
  * Authenticates with a single district-wide credential set fetched on
  * demand from psd-credentials at:
@@ -21,12 +19,9 @@
 
 'use strict';
 
-const { execFileSync } = require('node:child_process');
-const path = require('node:path');
+const { requestAgentBroker } = require('../../_shared/agent-broker');
 
 const BASE_URL = 'https://connect.redroverk12.com';
-const CREDENTIALS_GET = path.resolve(__dirname, '..', '..', 'psd-credentials', 'get.js');
-
 const EMAIL_RE = /^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/;
 
 function fail(message, code = 'error') {
@@ -70,100 +65,13 @@ function requireUser(args) {
   return args.user;
 }
 
-let _credentialsCache = null;
-
 /**
- * Fetch the shared Red Rover credential bundle from psd-credentials.
- * Cached for the process lifetime. Never logged, never echoed.
+ * Compatibility marker for existing command modules. Provider credentials are
+ * resolved only inside the trusted operation broker and never enter this
+ * model-launched process.
  */
-function getCredentials(userEmail) {
-  if (_credentialsCache) return _credentialsCache;
-
-  let stdout = '';
-  try {
-    stdout = execFileSync('node', [
-      CREDENTIALS_GET,
-      '--user', userEmail,
-      '--name', 'redrover_credentials',
-      '--shared',
-    ], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'inherit'],
-      timeout: 10_000,
-    });
-  } catch (err) {
-    fail(
-      `redrover credentials not provisioned. Ask an administrator to create the shared secret at psd-agent-creds/<env>/shared/redrover_credentials with shape {"username","password","apiKey"}. (psd-credentials error: ${err.message})`,
-      'redrover_credentials_missing'
-    );
-  }
-
-  const lines = stdout.split('\n').filter((l) => l.trim().length > 0);
-  if (lines.length === 0) fail('psd-credentials returned no output', 'redrover_credentials_missing');
-
-  let parsed;
-  try {
-    parsed = JSON.parse(lines[lines.length - 1]);
-  } catch (err) {
-    fail(`psd-credentials returned non-JSON: ${err.message}`, 'redrover_credentials_missing');
-  }
-  if (parsed.error || !parsed.value) {
-    fail('psd-credentials returned no value', 'redrover_credentials_missing');
-  }
-
-  // Secret value is a JSON-encoded string; parse it once.
-  let creds;
-  try {
-    creds = JSON.parse(parsed.value);
-  } catch (err) {
-    fail(
-      'redrover_credentials secret value is not valid JSON. Expected shape: {"username","password","apiKey"}.',
-      'redrover_credentials_malformed'
-    );
-  }
-  if (!creds || typeof creds.username !== 'string' || typeof creds.password !== 'string') {
-    fail(
-      'redrover_credentials secret missing required fields. Expected shape: {"username","password","apiKey"}.',
-      'redrover_credentials_malformed'
-    );
-  }
-  _credentialsCache = {
-    username: creds.username,
-    password: creds.password,
-    apiKey: typeof creds.apiKey === 'string' ? creds.apiKey : null,
-  };
-  return _credentialsCache;
-}
-
-function basicAuthHeader(username, password) {
-  return 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
-}
-
-/**
- * Read-only HTTP chokepoint. All Red Rover API access in this skill
- * goes through this function. There is no companion rrPost/rrPut —
- * adding one would be a violation of the read-only contract.
- *
- * urlOrPath: absolute URL string OR a path beginning with '/'.
- * headers: extra headers to merge in (Authorization is added here).
- */
-async function rrGet(urlOrPath, creds, extraHeaders = {}) {
-  const url = urlOrPath.startsWith('http') ? urlOrPath : `${BASE_URL}${urlOrPath}`;
-  const resp = await fetch(url, {
-    method: 'GET',
-    signal: AbortSignal.timeout(30_000),
-    headers: {
-      Authorization: basicAuthHeader(creds.username, creds.password),
-      Accept: 'application/json',
-      ...extraHeaders,
-    },
-  });
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    return { __ok: false, status: resp.status, error: `Red Rover API error ${resp.status}: ${body.slice(0, 500)}` };
-  }
-  const json = await resp.json().catch(() => ({}));
-  return { __ok: true, status: resp.status, data: json };
+function getCredentials(_userEmail) {
+  return Object.freeze({ ownerBoundOperationBroker: true });
 }
 
 let _orgCache = null;
@@ -174,20 +82,16 @@ let _orgCache = null;
  * in Secrets Manager if Red Rover ever stops returning it.
  */
 async function getOrganization(creds) {
+  void creds;
   if (_orgCache) return _orgCache;
-  const resp = await rrGet('/api/v1/organization', creds);
-  if (!resp.__ok) {
-    throw new Error(resp.error);
-  }
-  const data = Array.isArray(resp.data) ? resp.data[0] : resp.data;
-  if (!data || !data.orgId) {
+  const data = await requestAgentBroker('/api/agent/credentials', {
+    operation: 'redrover',
+    action: 'organization',
+  });
+  if (!data || typeof data.orgId !== 'string') {
     throw new Error('Red Rover /organization response missing orgId');
   }
-  const apiKey = data.apiKey || creds.apiKey;
-  if (!apiKey) {
-    throw new Error('Red Rover did not return an apiKey and no static apiKey is provisioned in Secrets Manager');
-  }
-  _orgCache = { orgId: data.orgId, apiKey, raw: data };
+  _orgCache = { orgId: data.orgId, apiKey: null, raw: data.raw || {} };
   return _orgCache;
 }
 
@@ -197,32 +101,16 @@ async function getOrganization(creds) {
  * hood. Returns { data: [...] } on success or { error } on API failure.
  */
 async function getVacancyDetails(orgId, apiKey, creds, startDate, endDate, filledFilter) {
-  const url = new URL(`${BASE_URL}/api/v1/${orgId}/Vacancy/details`);
-  url.searchParams.set('fromDate', `${startDate}T00:00:00Z`);
-  url.searchParams.set('toDate', `${endDate}T23:59:59Z`);
-  url.searchParams.set('pageSize', '100');
-  if (filledFilter === 'filled') url.searchParams.set('filled', 'true');
-  else if (filledFilter === 'unfilled') url.searchParams.set('filled', 'false');
-
-  let allData = [];
-  let page = 1;
-  while (true) {
-    url.searchParams.set('page', String(page));
-    const resp = await rrGet(url.toString(), creds, { apiKey });
-    if (!resp.__ok) {
-      return { error: resp.error, status: resp.status };
-    }
-    const result = resp.data || {};
-    allData = allData.concat(result.data || []);
-    if (!result.hasMoreData) break;
-    page++;
-    // Defensive ceiling to prevent runaway loops on a misbehaving API.
-    // Return an explicit error so callers know results are incomplete.
-    if (page > 200) {
-      return { error: 'Query exceeded maximum page limit (200). Please narrow the date range for complete results.', status: 400 };
-    }
-  }
-  return { data: allData, total: allData.length };
+  void orgId;
+  void apiKey;
+  void creds;
+  return requestAgentBroker('/api/agent/credentials', {
+    operation: 'redrover',
+    action: 'vacancies',
+    startDate,
+    endDate,
+    filledFilter,
+  });
 }
 
 // ---------- Date helpers ----------
@@ -336,7 +224,6 @@ module.exports = {
   parseArgs,
   requireUser,
   getCredentials,
-  rrGet,
   getOrganization,
   getVacancyDetails,
   formatDate,

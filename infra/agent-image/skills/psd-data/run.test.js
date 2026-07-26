@@ -12,7 +12,7 @@
  * common.js's callMcp is overridden on the shared module.exports object
  * BEFORE run.js is required, so run.js's top-level
  * `const { callMcp, ... } = require('./common')` destructures our stub
- * instead of hitting the network/Secrets Manager. process.exit is also
+ * instead of hitting the network/credential broker. process.exit is also
  * stubbed so a `fail()` call doesn't kill the test process.
  */
 
@@ -20,15 +20,15 @@
 
 const { test, expect, beforeEach, afterAll } = require('bun:test');
 
-require('./mcp-test-support'); // registers the shared Secrets Manager mock
+require('./mcp-test-support');
 
 const common = require('./common');
 
 let mcpCalls;
 
 const originalCallMcp = common.callMcp;
-common.callMcp = async (method, params, ownerEmail) => {
-  mcpCalls.push({ method, params, ownerEmail });
+common.callMcp = async (method, params) => {
+  mcpCalls.push({ method, params });
   return { ok: true };
 };
 
@@ -42,7 +42,6 @@ delete require.cache[require.resolve('./run')];
 
 common.callMcp = originalCallMcp;
 
-const EMAIL = 'teacher@psd401.net';
 const originalExit = process.exit;
 
 beforeEach(() => {
@@ -64,7 +63,6 @@ async function runCli(argv) {
 test('query with an explicit-precision cast reaches the MCP server', async () => {
   await runCli([
     'query',
-    '--user', EMAIL,
     '--reason', 'iReady score export',
     '--sql', 'SELECT CAST(score AS NUMERIC(10,2)) FROM iready_scores',
   ]);
@@ -80,7 +78,6 @@ test('query with a bare CAST(...AS NUMERIC) is rejected before hitting the MCP s
   try {
     await runCli([
       'query',
-      '--user', EMAIL,
       '--reason', 'iReady score export',
       '--sql', 'SELECT CAST(score AS NUMERIC) FROM iready_scores',
       '--export',
@@ -98,7 +95,6 @@ test('query with bare ::decimal shorthand is rejected before hitting the MCP ser
   try {
     await runCli([
       'query',
-      '--user', EMAIL,
       '--reason', 'iReady score export',
       '--sql', 'SELECT score::decimal FROM iready_scores',
       '--export',
@@ -114,7 +110,6 @@ test('query with bare ::decimal shorthand is rejected before hitting the MCP ser
 test('query with no numeric casts reaches the MCP server unaffected', async () => {
   await runCli([
     'query',
-    '--user', EMAIL,
     '--reason', 'Headcount sanity check',
     '--sql', 'SELECT COUNT(*) FROM students WHERE active = true',
   ]);
@@ -127,7 +122,6 @@ test('call --tool query_data with a bare cast is rejected before hitting the MCP
   try {
     await runCli([
       'call',
-      '--user', EMAIL,
       '--tool', 'query_data',
       '--args', JSON.stringify({
         reason: 'iReady score export via passthrough',
@@ -145,7 +139,6 @@ test('call --tool query_data with a bare cast is rejected before hitting the MCP
 test('call --tool query_data with an explicit-precision cast reaches the MCP server', async () => {
   await runCli([
     'call',
-    '--user', EMAIL,
     '--tool', 'query_data',
     '--args', JSON.stringify({
       reason: 'iReady score export via passthrough',
@@ -159,10 +152,25 @@ test('call --tool query_data with an explicit-precision cast reaches the MCP ser
 test('call --tool <other-tool> is never checked, even with cast-like text in its args', async () => {
   await runCli([
     'call',
-    '--user', EMAIL,
     '--tool', 'list_available_tables',
     '--args', JSON.stringify({ sql_query: 'SELECT CAST(score AS NUMERIC) FROM t' }),
   ]);
   expect(mcpCalls).toHaveLength(1);
   expect(mcpCalls[0].params.name).toBe('list_available_tables');
+});
+
+test('legacy --user is rejected before reaching the MCP server', async () => {
+  let thrown;
+  try {
+    await runCli([
+      'tables',
+      '--user',
+      'victim@psd401.net',
+    ]);
+  } catch (error) {
+    thrown = error;
+  }
+  expect(thrown).toBeDefined();
+  expect(thrown.exitCode).toBe(1);
+  expect(mcpCalls).toHaveLength(0);
 });

@@ -1,37 +1,9 @@
-/**
- * Shared helpers for the psd-atrium OpenClaw skill (Issue #1055 Path 2).
- *
- * Thin REST client for AI Studio's Atrium content surface (`/api/v1/content/*`).
- * Like psd-aistudio (discovery), this authenticates with a single scoped API key
- * (`sk-…`) — but a CONTENT key holding `content:*` data scopes, not the read-only
- * `platform:read` catalog key. The agent therefore works **version-based**: reads
- * return the last saved version, writes create a new version. It acts as the KEY
- * OWNER's identity (visibility-gated by that user's roles) — NOT per-caller
- * delegation. Per-user delegated tokens (`/api/v1/agents/delegated-token`) are a
- * designed later phase and are not provisioned yet (see SKILL.md + the design doc
- * docs/features/atrium-agent-access.md).
- *
- * Environment contract (set by infra/lib/agent-platform-stack.ts + deploy):
- *   APP_BASE_URL                        — deployed AI Studio base (…/api/v1/content
- *                                         is derived from it).
- *   AISTUDIO_CONTENT_API_URL            — explicit override of the /api/v1/content
- *                                         base (tests / split deployments).
- *   AISTUDIO_MCP_URL                    — the discovery skill's …/api/mcp URL; used
- *                                         only as a last-resort base derivation.
- *   AISTUDIO_CONTENT_API_KEY            — scoped `sk-…` content key. Direct.
- *   AISTUDIO_CONTENT_API_KEY_SECRET_ID  — Secrets Manager id holding the `sk-…`
- *                                         content key (used when the env var is
- *                                         absent).
- */
+/** Owner-bound Atrium client. Authority comes from the signed agent invocation. */
 
 'use strict';
 
-const APP_BASE_URL = process.env.APP_BASE_URL || '';
-const AISTUDIO_CONTENT_API_URL = process.env.AISTUDIO_CONTENT_API_URL || '';
-const AISTUDIO_MCP_URL = process.env.AISTUDIO_MCP_URL || '';
-const AISTUDIO_CONTENT_API_KEY = process.env.AISTUDIO_CONTENT_API_KEY || '';
-const AISTUDIO_CONTENT_API_KEY_SECRET_ID =
-  process.env.AISTUDIO_CONTENT_API_KEY_SECRET_ID || '';
+const { requestAgentBroker } = require('../_shared/agent-broker');
+const _internals = { requestAgentBroker };
 
 /** Per-request timeout (ms) so a hung upstream surfaces as a clear error instead
  *  of hanging the CLI invocation. Overridable via AISTUDIO_CONTENT_API_TIMEOUT_MS. */
@@ -104,99 +76,15 @@ function parseArgs(argv, startIndex = 2) {
 }
 
 /**
- * Resolve the `/api/v1/content` base URL. Explicit override wins (tests / split
- * deployments); otherwise derive from the deployed app base; last resort, strip
- * the discovery skill's `…/api/mcp` suffix. Returns '' when nothing is set so the
- * caller can fail with a clear config error.
- */
-function resolveContentBaseUrl() {
-  const strip = (u) => u.replace(/\/+$/, '');
-  if (AISTUDIO_CONTENT_API_URL) return strip(AISTUDIO_CONTENT_API_URL);
-  if (APP_BASE_URL) return `${strip(APP_BASE_URL)}/api/v1/content`;
-  if (AISTUDIO_MCP_URL) {
-    const withoutMcp = strip(AISTUDIO_MCP_URL).replace(/\/api\/mcp$/, '');
-    if (withoutMcp !== strip(AISTUDIO_MCP_URL)) {
-      return `${withoutMcp}/api/v1/content`;
-    }
-  }
-  return '';
-}
-
-/**
- * Load the AWS SDK the same way psd-aistudio/psd-data do — prefer psd-workspace's
- * already-installed copy so this skill adds no image dependency, falling back to a
- * bare require for local/testing. Only reached when the secret path is used.
- */
-function requireSecretsManager() {
-  try {
-    return require('/opt/psd-skills/psd-workspace/node_modules/@aws-sdk/client-secrets-manager');
-  } catch {
-    return require('@aws-sdk/client-secrets-manager');
-  }
-}
-
-/**
- * Resolve the scoped content API key: the direct env var wins (dev + local
- * validation); otherwise read it from Secrets Manager. Returns the raw `sk-…`
- * string.
- */
-async function resolveApiKey() {
-  if (AISTUDIO_CONTENT_API_KEY) return AISTUDIO_CONTENT_API_KEY;
-  if (AISTUDIO_CONTENT_API_KEY_SECRET_ID) {
-    let value;
-    try {
-      const { SecretsManagerClient, GetSecretValueCommand } =
-        requireSecretsManager();
-      const client = new SecretsManagerClient({
-        region: process.env.AWS_REGION || 'us-east-1',
-      });
-      const resp = await client.send(
-        new GetSecretValueCommand({
-          SecretId: AISTUDIO_CONTENT_API_KEY_SECRET_ID,
-        })
-      );
-      value = (resp.SecretString || '').trim();
-    } catch (err) {
-      // A retrieval failure (permission / decryption / network) is an infra
-      // error, not a malformed invocation — surface it clearly (exit 12).
-      fail(
-        `Failed to retrieve content API key from Secrets Manager ` +
-          `(${AISTUDIO_CONTENT_API_KEY_SECRET_ID}): ${err.message}`,
-        12
-      );
-    }
-    // NOTE: `fail()` calls `process.exit()`, which never returns — so if the
-    // catch above ran (retrieval error), execution stopped there and we never
-    // reach this line. This guard only handles the retrieval-SUCCEEDED-but-empty
-    // case (a real, distinct outcome), not a double-fail after the catch.
-    if (!value) {
-      fail(
-        `Secret ${AISTUDIO_CONTENT_API_KEY_SECRET_ID} has no SecretString value`,
-        11
-      );
-    }
-    return value;
-  }
-  // No credential configured at all — Atrium content access is not set up.
-  fail(
-    'No content API key configured. Set AISTUDIO_CONTENT_API_KEY (a scoped sk- ' +
-      'key holding content: scopes) or AISTUDIO_CONTENT_API_KEY_SECRET_ID. See ' +
-      'SKILL.md for the deployment prerequisites.',
-    11
-  );
-  return ''; // unreachable
-}
-
-/**
  * The result of a REST call. `approvalRequired` marks the §26.4 structured 202
  * (queued-for-approval) — a SUCCESS-shaped outcome, NOT an error: the caller must
  * surface `payload.message` verbatim so the agent tells the user it is queued.
  */
 
 /**
- * Single entry point for every Atrium content REST call. Handles auth (bearer sk-
- * content key), query serialization, the v1 `{ data, meta }` / `{ error }`
- * envelope, and uniform error surfacing.
+ * Single entry point for every Atrium content operation. The web tier resolves
+ * the signed owner to a Content Requester and invokes the shared service layer;
+ * no reusable content credential is exposed to the workspace.
  *
  *   - method: HTTP method ('GET' | 'POST' | 'PATCH' | 'DELETE')
  *   - path:   path under the content base (e.g. '', '/<id>', '/<id>/publish')
@@ -209,38 +97,25 @@ async function resolveApiKey() {
  * an app response (CLAUDE.md silent-failure pattern).
  */
 async function restFetch(method, path, opts = {}) {
-  const base = resolveContentBaseUrl();
-  if (!base) {
-    fail(
-      'AI Studio content API URL is not configured. Set AISTUDIO_CONTENT_API_URL ' +
-        'or APP_BASE_URL.',
-      1
-    );
-  }
-
-  const apiKey = await resolveApiKey();
-
-  let url = base + path;
+  const query = {};
   if (opts.query) {
-    const params = new URLSearchParams();
     for (const [k, v] of Object.entries(opts.query)) {
-      if (v !== undefined && v !== null && v !== '') params.set(k, String(v));
+      if (v !== undefined && v !== null && v !== '') query[k] = String(v);
     }
-    const qs = params.toString();
-    if (qs) url += `?${qs}`;
   }
 
-  const headers = { Authorization: `Bearer ${apiKey}` };
-  if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
-
-  let resp;
+  let result;
   try {
-    resp = await fetch(url, {
-      method,
-      headers,
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    result = await _internals.requestAgentBroker(
+      '/api/agent/atrium',
+      {
+        method,
+        path,
+        ...(Object.keys(query).length ? { query } : {}),
+        ...(opts.body !== undefined ? { body: opts.body } : {}),
+      },
+      { timeoutMs: REQUEST_TIMEOUT_MS + 5_000 }
+    );
   } catch (err) {
     // AbortSignal.timeout rejects with a DOMException named 'TimeoutError'.
     if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
@@ -252,30 +127,20 @@ async function restFetch(method, path, opts = {}) {
     fail(`Network error calling AI Studio content API: ${err.message}`, 12);
   }
 
-  // Read the body ONCE as text, then try to parse it as JSON. Keeping the raw text
-  // lets the error branches surface a NON-JSON infra body (an ALB/nginx 502/503
-  // HTML page) verbatim, instead of the useless "{}" a consumed `.json()` gives.
-  const rawText = await resp.text().catch(() => '');
-  let data = null;
-  if (rawText) {
-    try {
-      data = JSON.parse(rawText);
-    } catch {
-      data = null; // non-JSON body (e.g. an infra proxy error page)
-    }
-  }
+  const status = Number(result.httpStatus);
+  const data = result.payload;
+  const rawText = String(result.rawText || '');
 
-  if (resp.status === 401) {
+  if (status === 401) {
     emit({
       status: 'unauthorized',
       message:
-        'AI Studio rejected the content API key (401). The key must be a valid ' +
-        'sk- key holding the content: scopes for this operation.',
+        'AI Studio rejected the signed owner authority for this operation.',
       detail: rawText.slice(0, 512),
     });
     process.exit(11);
   }
-  if (resp.status === 429) {
+  if (status === 429) {
     emit({
       status: 'rate-limited',
       message: 'AI Studio is rate-limiting this key. Wait and retry.',
@@ -286,23 +151,23 @@ async function restFetch(method, path, opts = {}) {
   // §26.4: a public publish/unpublish/widen the caller may not perform directly
   // comes back as HTTP 202 with { data: { status: 'approval_required', message } }.
   // This is NOT an error — it is queued for a human/admin to approve.
-  if (resp.status === 202) {
+  if (status === 202) {
     const payload = data && data.data !== undefined ? data.data : data;
     return { approvalRequired: true, status: 202, payload };
   }
 
-  if (!resp.ok) {
+  if (status < 200 || status >= 300) {
     // Error envelope is { error: { code, message, details? }, requestId }. Surface
     // it verbatim (exit 12); a non-JSON body (infra 502/503) has no envelope, so
     // fall back to the RAW text for debug context rather than an empty "{}".
     const err = data && data.error ? data.error : null;
     emit({
       status: 'error',
-      http_status: resp.status,
+      http_status: status,
       code: err ? err.code : undefined,
       message: err
         ? err.message
-        : `AI Studio content API returned HTTP ${resp.status}`,
+        : `AI Studio content API returned HTTP ${status}`,
       detail: err ? undefined : rawText.slice(0, 512),
     });
     process.exit(12);
@@ -311,7 +176,7 @@ async function restFetch(method, path, opts = {}) {
   if (!data) fail(`AI Studio content API returned a non-JSON body`, 12);
 
   const payload = data.data !== undefined ? data.data : data;
-  return { approvalRequired: false, status: resp.status, payload };
+  return { approvalRequired: false, status, payload };
 }
 
 /**
@@ -362,9 +227,8 @@ module.exports = {
   parseArgs,
   parseList,
   parseGrants,
-  resolveContentBaseUrl,
-  resolveApiKey,
   restFetch,
   encodeContentBody,
   withEncodedBody,
+  _internals,
 };

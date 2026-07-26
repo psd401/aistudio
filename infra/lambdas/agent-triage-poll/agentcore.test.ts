@@ -4,7 +4,48 @@
  * various shapes Bedrock + agent skill can return.
  */
 import { describe, expect, test } from "bun:test";
-import { parseAgentReply } from "./agentcore";
+import { buildTaskInvocationPayload, parseAgentReply } from "./agentcore";
+
+describe("task invocation authority", () => {
+  test("binds the gesture to its owner without granting workspace authority", () => {
+    const payload = buildTaskInvocationPayload(
+      {
+        userEmail: "Owner@PSD401.NET",
+        workspacePrefix: "owner-prefix",
+      },
+      "create the task",
+      "owner-prefix-task-message-1234567890",
+      "a-secure-invocation-signing-secret-with-more-than-32-bytes",
+    );
+    const parts = payload.invocation_context.split(".");
+    expect(parts).toHaveLength(3);
+    const claims = JSON.parse(
+      Buffer.from(parts[1], "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    expect(claims).toMatchObject({
+      audience: "psd-agent-internal",
+      actorEmail: "owner@psd401.net",
+      ownerEmail: "owner@psd401.net",
+      mode: "email-task",
+      sessionId: "owner-prefix-task-message-1234567890",
+      workspacePrefix: "",
+    });
+    expect(payload.workspace_prefix).toBe("");
+    expect(payload.invocation_request_proof_key.length).toBeGreaterThan(32);
+    expect(payload.source).toBe("email-triage-task");
+  });
+
+  test("rejects an undersized invocation signing secret", () => {
+    expect(() =>
+      buildTaskInvocationPayload(
+        { userEmail: "owner@psd401.net", workspacePrefix: "owner-prefix" },
+        "create the task",
+        "owner-prefix-task-message-1234567890",
+        "too-short",
+      ),
+    ).toThrow("at least 32 bytes");
+  });
+});
 
 describe("parseAgentReply", () => {
   test("success — life-os issue", () => {

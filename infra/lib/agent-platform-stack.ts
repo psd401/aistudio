@@ -216,7 +216,30 @@ export class AgentPlatformStack extends cdk.Stack {
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: environment !== 'prod',
-      // S3 Intelligent Tiering for cost optimization (no expiration — keep forever).
+      lifecycleRules: [
+        {
+          id: 'expire-unverified-upload-staging',
+          prefix: '.upload-staging/',
+          expiration: cdk.Duration.days(1),
+          noncurrentVersionExpiration: cdk.Duration.days(1),
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        },
+        {
+          id: 'expire-public-artifacts',
+          prefix: 'public-images/',
+          expiration: cdk.Duration.days(30),
+          noncurrentVersionExpiration: cdk.Duration.days(7),
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        },
+        {
+          id: 'cleanup-private-workspace-versions',
+          tagFilters: { Scope: 'private' },
+          noncurrentVersionExpiration: cdk.Duration.days(30),
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        },
+      ],
+      // S3 Intelligent Tiering reduces storage cost for long-lived private
+      // workspace memory. Public/staging data use the explicit expirations.
       // Archive Access (90d): objects retrievable in minutes.
       // Deep Archive (180d): objects require a Restore request (12-48 hours).
       // If ad-hoc access to older workspace data is needed (audits, replays),
@@ -426,10 +449,10 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(interAgentTable).add('Environment', environment);
     cdk.Tags.of(interAgentTable).add('ManagedBy', 'cdk');
 
-    // 4e. Agent Schedules table — user-defined schedules, one row per schedule.
-    // The psd-schedules OpenClaw skill writes to this table AND to EventBridge
-    // Scheduler in the same transaction (with rollback on failure). No streams
-    // or sync Lambda — the agent owns both sides and keeps them consistent.
+    // 4e. Agent Schedules table — authoritative owner-bound schedule records.
+    // Only the authenticated web broker writes this table and EventBridge
+    // Scheduler. AgentCore submits specs without identity selectors; cron loads
+    // and validates a versioned row before invoking or delivering anything.
     const schedulesTable = new dynamodb.Table(this, 'AgentSchedulesTable', {
       tableName: `psd-agent-schedules-${environment}`,
       partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
@@ -671,6 +694,27 @@ export class AgentPlatformStack extends cdk.Stack {
     });
     cdk.Tags.of(agentInternalApiKeySecret).add('Environment', environment);
     cdk.Tags.of(agentInternalApiKeySecret).add('ManagedBy', 'cdk');
+
+    // HMAC key for short-lived actor/owner/mode assertions carried into the
+    // model-facing runtime. The router/cron tier issues assertions and the web
+    // tier verifies them. AgentCore receives assertions but is explicitly
+    // denied this key below, so prompt-driven code cannot forge another owner.
+    const agentInvocationSigningSecret = new secretsmanager.Secret(
+      this,
+      'AgentInvocationSigningSecret',
+      {
+        secretName: `psd-agent/${environment}/invocation-signing-key`,
+        description:
+          'HMAC key for owner-bound AgentCore invocation contexts. Never readable by the AgentCore execution role.',
+        generateSecretString: {
+          excludePunctuation: true,
+          includeSpace: false,
+          passwordLength: 64,
+        },
+      },
+    );
+    cdk.Tags.of(agentInvocationSigningSecret).add('Environment', environment);
+    cdk.Tags.of(agentInvocationSigningSecret).add('ManagedBy', 'cdk');
 
     // 4f-b. PSD Agent Gateway config (#1230). The psd-classified-evaluation skill
     // reads ONE JSON secret `psd-agent/{env}/agent-gateway` shaped
@@ -1189,72 +1233,38 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.agentCoreExecutionRole).add('Environment', environment);
     cdk.Tags.of(this.agentCoreExecutionRole).add('ManagedBy', 'cdk');
 
-    // Bedrock model invocation
-    // INTENTIONAL: Broad model access (foundation-model/*) because the agent platform
-    // must support model selection at runtime based on admin configuration in AI Studio.
-    // Cost guardrails are enforced at the application layer via the Guardrails stack,
-    // not at the IAM layer. Tighten to specific model ARNs if static model set is adopted.
+    // Defense in depth: the model-facing runtime has no Secrets Manager
+    // allows, and this explicit deny protects the trust root used to authorize
+    // owner-scoped broker operations if a broad grant is added in the future.
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'BedrockModelInvocation',
+      sid: 'DenyInvocationSigningSecret',
+      effect: iam.Effect.DENY,
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [agentInvocationSigningSecret.secretArn],
+    }));
+
+    // The main generative model is reached only through the owner-bound web
+    // broker, which holds the provider credential and enforces a model/output
+    // allowlist. The model-facing role retains only the single embedding model
+    // required by OpenClaw's local memory index.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'BedrockMemoryEmbeddingOnly',
       effect: iam.Effect.ALLOW,
       actions: [
         'bedrock:InvokeModel',
-        'bedrock:InvokeModelWithResponseStream',
-        'bedrock:Converse',
-        'bedrock:ConverseStream',
       ],
       resources: [
-        // Cross-region us.* profiles authorize against the DESTINATION
-        // region's foundation-model ARN (verified live for the guardrail
-        // profile, #1138) — grant all three regions the profiles span.
-        `arn:aws:bedrock:us-east-1::foundation-model/*`,
-        `arn:aws:bedrock:us-east-2::foundation-model/*`,
-        `arn:aws:bedrock:us-west-2::foundation-model/*`,
-        `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
-        // Cross-region inference profiles use region-less format (us, eu, ap)
-        // See: https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html
-        `arn:aws:bedrock:us:${this.account}:inference-profile/*`,
+        `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`,
       ],
     }));
 
-    // ListFoundationModels does not support resource-level permissions — must use '*'
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'BedrockListModels',
-      effect: iam.Effect.ALLOW,
-      actions: ['bedrock:ListFoundationModels'],
-      resources: ['*'],
-    }));
-
-    // S3 workspace read/write. PutObjectTagging is required because the
-    // psd-skills-meta skill's authorSkill() writes objects with a Tagging=
-    // header (scope, environment, owner) so the skill-builder Lambda can
-    // scope tag-based policies later.
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'S3WorkspaceAccess',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        's3:GetObject',
-        's3:GetObjectVersion',
-        's3:PutObject',
-        's3:PutObjectTagging',
-        's3:DeleteObject',
-        's3:ListBucket',
-        's3:GetBucketLocation',
-      ],
-      resources: [
-        this.workspaceBucket.bucketArn,
-        `${this.workspaceBucket.bucketArn}/*`,
-      ],
-    }));
-
-    // Amazon Polly text-to-speech (psd-tts skill). Polly is NOT Bedrock — it
-    // authenticates via this execution role's standard SigV4 credential chain,
-    // NOT the AWS_BEARER_TOKEN_BEDROCK token used for model invocation. The
+    // Amazon Polly text-to-speech (psd-tts skill). It authenticates via this
+    // execution role's standard SigV4 credential chain. The
     // skill uses only the synchronous SynthesizeSpeech API (it chunks long text
     // and concatenates the MP3s), so we grant exactly that action and nothing
     // else. SynthesizeSpeech does not support resource-level permissions, so the
-    // resource must be '*'. Synthesized MP3s are written to the workspace bucket
-    // by the skill using the S3WorkspaceAccess grant above (public-images/ prefix).
+    // resource must be '*'. Synthesized MP3s are published through the
+    // owner-bound workspace storage broker; this role has no S3 permissions.
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'PollyTextToSpeech',
       effect: iam.Effect.ALLOW,
@@ -1263,20 +1273,15 @@ export class AgentPlatformStack extends cdk.Stack {
     }));
 
     // HyperFrames render invocation (psd-hyperframes skill, #1175). Scoped to
-    // the single render function ARN — same least-privilege pattern as the S3
-    // and Polly grants above (the skill invokes it synchronously via the AWS
-    // SDK using these execution-role credentials; the rendered MP4 lands in the
-    // public-images/ prefix the S3WorkspaceAccess grant already covers).
+    // the single render function ARN. The skill invokes it synchronously using
+    // these execution-role credentials; the render Lambda owns publication of
+    // its output, so the model-facing role needs no S3 permissions.
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'HyperframesRenderInvoke',
       effect: iam.Effect.ALLOW,
       actions: ['lambda:InvokeFunction'],
       resources: [this.hyperframesRenderFunction.function.functionArn],
     }));
-
-    // Read the Bedrock API key secret at container startup so the wrapper
-    // can expose it to OpenClaw as AWS_BEARER_TOKEN_BEDROCK.
-    this.bedrockApiKeySecret.grantRead(this.agentCoreExecutionRole);
 
     // ECR pull for agent images
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
@@ -1350,43 +1355,6 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
     }));
 
-    // DynamoDB read/write — agent container accesses USERS_TABLE and SIGNALS_TABLE
-    // Note: DynamoDB does not support aws:ResourceTag condition keys.
-    // Table ARN scoping provides equivalent isolation.
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'DynamoDBAccess',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:UpdateItem',
-        'dynamodb:DeleteItem',
-        'dynamodb:Query',
-        'dynamodb:Scan',
-      ],
-      resources: [
-        this.usersTable.tableArn,
-        `${this.usersTable.tableArn}/index/*`,
-        this.signalsTable.tableArn,
-        `${this.signalsTable.tableArn}/index/*`,
-        schedulesTable.tableArn,
-        `${schedulesTable.tableArn}/index/*`,
-        // Email triage state (Phase 1) — agent skill reads/writes per-user
-        // rules, label IDs, escalation lists, and recent decisions/corrections.
-        this.triageTable.tableArn,
-      ],
-    }));
-
-    // Aurora access — agent container uses DATABASE_RESOURCE_ARN for telemetry writes
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'AuroraAccess',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'rds-data:ExecuteStatement',
-        'rds-data:BatchExecuteStatement',
-      ],
-      resources: [props.databaseResourceArn],
-    }));
 
     // CloudWatch custom metrics — harness emits PSD/AgentPlatform/{env}/AgentFailuresHarness
     // via boto3 put_metric_data. Resource must be '*' per AWS API contract; we
@@ -1403,110 +1371,6 @@ export class AgentPlatformStack extends cdk.Stack {
       },
     }));
 
-    // Secrets Manager — read DB credentials referenced by DATABASE_SECRET_ARN
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'SecretsManagerAccess',
-      effect: iam.Effect.ALLOW,
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [props.databaseSecretArn],
-    }));
-
-    // Secrets Manager — psd-credentials skill (#910): read shared + per-user
-    // agent credentials and list them by prefix.
-    //
-    // SECURITY NOTE: Per-user isolation is currently enforced at the application
-    // layer (psd-credentials skill resolves the user's email from the --user arg
-    // injected by the AgentCore runtime). The IAM policy below is scoped to the
-    // psd-agent-creds namespace but does not enforce per-user boundaries via tags.
-    //
-    // Future hardening: Add tag-based conditions (CredentialScope + Owner tags)
-    // once the secret provisioning workflow supports tagging at creation time
-    // and ECS task sessions carry per-user principal tags. This requires:
-    //   1. Secrets tagged with CredentialScope=shared|user and Owner=<email>
-    //   2. ECS task role sessions tagged with Owner=<authenticated-email>
-    //   3. IAM conditions: aws:ResourceTag/Owner = ${aws:PrincipalTag/Owner}
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'AgentCredentialsRead',
-      effect: iam.Effect.ALLOW,
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/*`,
-      ],
-    }));
-
-    // ListSecrets does not support resource-level permissions — must use '*'
-    // with name-prefix filtering in the application layer.
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'AgentCredentialsList',
-      effect: iam.Effect.ALLOW,
-      actions: ['secretsmanager:ListSecrets'],
-      resources: ['*'],
-    }));
-
-    // Per-user credential WRITE — for the psd-credentials/put.js helper.
-    // Scope is intentionally locked to the per-user prefix
-    // (psd-agent-creds/{env}/user/*) so a skill cannot write or rotate
-    // a shared (district-wide) secret. Shared-scope provisioning stays
-    // an admin-only operation done out of band.
-    //
-    // CreateSecret and TagResource are constrained by aws:RequestTag
-    // conditions matching what psd-credentials/put.js sets on new secrets.
-    // This prevents a compromised task from re-tagging existing per-user
-    // secrets with arbitrary Environment or ManagedBy values.
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'AgentCredentialsWritePerUser',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'secretsmanager:CreateSecret',
-        'secretsmanager:TagResource',
-      ],
-      resources: [
-        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/user/*`,
-      ],
-      conditions: {
-        StringEquals: {
-          'aws:RequestTag/Environment': environment,
-          'aws:RequestTag/ManagedBy': 'psd-credentials-skill',
-        },
-        'ForAllValues:StringEquals': {
-          'aws:TagKeys': ['Environment', 'ManagedBy', 'Scope'],
-        },
-      },
-    }));
-
-    // PutSecretValue does not support tag conditions — it only updates
-    // the secret value, not tags. Scoped to the per-user resource prefix.
-    //
-    // KNOWN LIMITATION (AWS API): PutSecretValue cannot be scoped to a
-    // single user's email path because the action does not support
-    // aws:RequestTag/* or aws:ResourceTag/* conditions. This means any
-    // skill running on the AgentCore task can rotate any user's credential
-    // under the `psd-agent-creds/{env}/user/*` prefix. Compensating
-    // controls: (1) skills validate --user is the authenticated caller,
-    // (2) psd_agent_credentials_audit logs all writes with action/email,
-    // (3) the ECS task is isolated per-session. This is not a gap in our
-    // design — it is a Secrets Manager API constraint.
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'AgentCredentialsUpdatePerUser',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'secretsmanager:PutSecretValue',
-      ],
-      resources: [
-        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/user/*`,
-      ],
-    }));
-
-    // Secrets Manager — psd-workspace skill (#912): read shared OAuth client
-    // credentials and the internal API key for consent-link generation.
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'AgentWorkspaceSecretsRead',
-      effect: iam.Effect.ALLOW,
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent/${environment}/*`,
-      ],
-    }));
 
     // Lambda invoke — psd-skills-meta skill triggers the Skill Builder
     // Lambda asynchronously (InvocationType: Event) for draft scanning.
@@ -1621,22 +1485,16 @@ export class AgentPlatformStack extends cdk.Stack {
     );
     dbSecret.grantRead(this.routerLambdaRole);
 
-    // 5c. Cron Lambda role — via ServiceRoleFactory
-    // Note: ServiceRoleFactory grants full DynamoDB CRUD; cron only needs read.
-    // Accepted tradeoff for consistency — table ARN scoping limits blast radius.
-    // TODO(#887): Tighten to read-only DynamoDB when ServiceRoleFactory supports
-    // granular permission levels (track as follow-up).
-    // NOTE: Cron Lambda role only has access to the users table — intentionally
-    // no access to the inter-agent table. The cron Lambda invokes AgentCore for
-    // scheduled tasks and delivers results to DMs. Only the Router Lambda handles
-    // inter-agent governance (rate limiting, anti-loop) and needs interAgentTable.
+    // 5c. Cron Lambda role — via ServiceRoleFactory. The trigger carries only
+    // ownerEmail + scheduleId + version; cron gets exactly GetItem on the
+    // authoritative schedule table and cannot mutate schedules or users.
     this.cronLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'CronLambdaRole', {
       functionName: 'psd-agent-cron',
       environment,
       region: this.region,
       account: this.account,
       vpcEnabled: false,
-      dynamodbTables: [{ name: this.usersTable.tableName }],
+      dynamodbTables: [],
       additionalPolicies: [
         // AgentCore session invoke
         new iam.PolicyDocument({
@@ -1645,6 +1503,14 @@ export class AgentPlatformStack extends cdk.Stack {
             effect: iam.Effect.ALLOW,
             actions: ['bedrock-agentcore:InvokeAgentRuntime', 'bedrock-agentcore:InvokeAgentRuntimeForUser'],
             resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
+          })],
+        }),
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AuthoritativeScheduleRead',
+            effect: iam.Effect.ALLOW,
+            actions: ['dynamodb:GetItem'],
+            resources: [schedulesTable.tableArn],
           })],
         }),
         // SSM Parameter Store — resolve AgentCore Runtime ID at runtime
@@ -1719,7 +1585,7 @@ export class AgentPlatformStack extends cdk.Stack {
     const runtimeEnvVars: Record<string, string> = {
       ENVIRONMENT: environment,
       // AgentCore does NOT inject AWS_REGION into the microVM environment, and
-      // the AWS SDK requires a region for Bedrock/Secrets Manager/etc. The
+      // the AWS SDK requires a region for Bedrock and other signed services. The
       // Python wrapper and every in-image skill compensate with a hardcoded
       // `|| us-east-1` fallback (see agentcore_wrapper.py, workspace_sync.py),
       // but the vendored OpenClaw binary has no such fallback: its native
@@ -1731,58 +1597,19 @@ export class AgentPlatformStack extends cdk.Stack {
       // components (this.region is already their hardcoded default).
       AWS_REGION: this.region,
       AWS_DEFAULT_REGION: this.region,
-      WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
       // Render function the psd-hyperframes skill invokes (#1175). The skill
       // reads this to target the InvokeFunction call; the grant is the
       // HyperframesRenderInvoke statement on the AgentCore execution role.
       HYPERFRAMES_RENDER_FUNCTION: this.hyperframesRenderFunction.function.functionName,
-      USERS_TABLE: this.usersTable.tableName,
-      SIGNALS_TABLE: this.signalsTable.tableName,
-      SCHEDULES_TABLE: schedulesTable.tableName,
-      TRIAGE_TABLE: this.triageTable.tableName,
-      EVENTBRIDGE_SCHEDULE_GROUP: `psd-agent-${environment}`,
-      CRON_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${cronFunctionName}`,
-      TRIAGE_DIGEST_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${triageDigestFunctionName}`,
-      EVENTBRIDGE_ROLE_ARN: `arn:aws:iam::${this.account}:role/psd-agent-scheduler-invoke-${environment}`,
       GUARDRAIL_ARN: props.guardrailArn,
-      DATABASE_RESOURCE_ARN: props.databaseResourceArn,
-      DATABASE_SECRET_ARN: props.databaseSecretArn,
-      DATABASE_NAME: props.databaseName ?? 'aistudio',
-      BEDROCK_API_KEY_SECRET_ARN: this.bedrockApiKeySecret.secretArn,
       SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${skillBuilderFunctionName}`,
-      GOOGLE_OAUTH_CLIENT_SECRET_ID: googleOAuthClientSecret.secretName,
-      AGENT_INTERNAL_API_KEY_SECRET_ID: agentInternalApiKeySecret.secretName,
       APP_BASE_URL: props.appBaseUrl ?? '',
       PSD_DATA_MCP_URL:
         (this.node.tryGetContext('psdDataMcpUrl') as string | undefined)
         ?? 'https://l3jpggwgsojgql275k6axcboue0syeuq.lambda-url.us-west-2.on.aws/mcp',
-      // AI Studio's own MCP endpoint (Issue #1100) — the psd-aistudio skill POSTs
-      // JSON-RPC here to read the live capability catalog (describe_capabilities).
-      // Derived from APP_BASE_URL so it always tracks the deployed web app;
-      // overridable via `-c aistudioMcpUrl=…` for a split/edge deployment.
-      AISTUDIO_MCP_URL:
-        (this.node.tryGetContext('aistudioMcpUrl') as string | undefined)
-        ?? (props.appBaseUrl
-          ? `${props.appBaseUrl.replace(/\/+$/, '')}/api/mcp`
-          : ''),
-      // Secrets Manager id of the scoped sk- content key the psd-atrium skill uses
-      // to reach AI Studio's Atrium content REST surface (/api/v1/content, derived
-      // from APP_BASE_URL). The skill resolves the key from this secret at call
-      // time; populate the secret post-deploy (Issue #1055, see the secret above).
-      AISTUDIO_CONTENT_API_KEY_SECRET_ID: atriumContentApiKeySecret.secretName,
-      // Secrets Manager id of the scoped sk- platform:read key the psd-aistudio
-      // skill reads to authenticate its describe_capabilities call to
-      // AISTUDIO_MCP_URL. Auto-provisioned each deploy by AistudioMcpKeyBootstrap
-      // (§4h). Without this the skill's resolveApiKey() exits 11. Issue #1100.
-      AISTUDIO_MCP_API_KEY_SECRET_ID: aistudioMcpApiKeySecret.secretName,
-      // PSD Agent Gateway (#1230) for the psd-classified-evaluation skill. Both
-      // the SSE endpoint URL and the bearer token live in ONE JSON secret
-      // `psd-agent/{env}/agent-gateway` ({"url":"…","token":"…"}), created +
-      // populated out-of-band (see the note by AgentGatewayTokenSecret's removal
-      // above). The skill reads it lazily at call time; an absent/incomplete
-      // secret → the skill fails closed with its exit-11 "not-configured"
-      // contract. No CDK context flag, no value in this public repo.
-      AGENT_GATEWAY_CONFIG_SECRET_ID: `psd-agent/${environment}/agent-gateway`,
+      // Service credentials and their endpoint selectors intentionally stay out
+      // of the model-facing runtime environment. Skills reach the fixed,
+      // allowlisted web-tier brokers via APP_BASE_URL.
       AUTH_COGNITO_USER_POOL_ID: cdk.Fn.importValue(
         `${environment}-CognitoUserPoolId`,
       ),
@@ -2064,37 +1891,22 @@ export class AgentPlatformStack extends cdk.Stack {
       logGroup: cronLogGroup,
       environment: {
         ENVIRONMENT: environment,
-        USERS_TABLE: this.usersTable.tableName,
         SCHEDULES_TABLE: schedulesTable.tableName,
         GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
         DATABASE_RESOURCE_ARN: props.databaseResourceArn,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
         DATABASE_NAME: props.databaseName ?? 'aistudio',
         AWS_ACCOUNT_ID: this.account,
+        AGENT_INVOCATION_SIGNING_SECRET_ID: agentInvocationSigningSecret.secretName,
       },
     });
 
     cdk.Tags.of(cronLambda).add('Environment', environment);
     cdk.Tags.of(cronLambda).add('ManagedBy', 'cdk');
 
-    // Cron Lambda backfills resolved DM space into the schedules row so
-    // subsequent invocations skip the Google Chat API scan.
-    schedulesTable.grantWriteData(this.cronLambdaRole);
-
-    // Cron Lambda self-heals missing googleIdentity on a schedule by looking
-    // the user up via email-index GSI when the event payload omits identity
-    // (common for schedules created before the skill populated it).
-    // ServiceRoleFactory's DynamoDB grant scopes to the base table ARN but
-    // not to GSIs — add the GSI Query permission explicitly.
-    this.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'UsersEmailIndexQuery',
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:Query'],
-      resources: [`${this.usersTable.tableArn}/index/*`],
-    }));
-
     // Grant Cron Lambda access to Google credentials secret
     this.googleCredentialsSecret.grantRead(this.cronLambdaRole);
+    agentInvocationSigningSecret.grantRead(this.cronLambdaRole);
 
     // CloudWatch Logs permissions are granted automatically by CDK when the
     // function is constructed with a managed logGroup prop (see CronLambda
@@ -2110,8 +1922,9 @@ export class AgentPlatformStack extends cdk.Stack {
     // all required for user-owned, independently-timed schedules.
     //
     // The Scheduler service assumes `schedulerInvokeRole` to invoke the Cron
-    // Lambda. Entries are created/updated/deleted by the psd-schedules
-    // OpenClaw skill running inside the agent container (no sync Lambda).
+    // Lambda. Entries are created/updated/deleted only by the authenticated
+    // Next.js broker; the model-facing AgentCore role has no schedule-table,
+    // Scheduler, or PassRole authority.
 
     const scheduleGroup = new scheduler.CfnScheduleGroup(this, 'AgentScheduleGroup', {
       name: `psd-agent-${environment}`,
@@ -2126,40 +1939,6 @@ export class AgentPlatformStack extends cdk.Stack {
       description: 'Assumed by EventBridge Scheduler to invoke the agent cron Lambda',
     });
     cronLambda.grantInvoke(schedulerInvokeRole);
-
-    // =====================================================================
-    // 7c. Agent → EventBridge Scheduler authorization
-    // =====================================================================
-    // The psd-schedules OpenClaw skill runs inside the agent container and
-    // writes EventBridge Scheduler entries directly under the AgentCore
-    // execution role. Grant scheduler:* on the schedule group and iam:PassRole
-    // on the invoke role so the skill can Create/Update/Delete schedules.
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'SchedulerCrud',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'scheduler:CreateSchedule',
-        'scheduler:UpdateSchedule',
-        'scheduler:DeleteSchedule',
-        'scheduler:GetSchedule',
-        'scheduler:ListSchedules',
-      ],
-      resources: [
-        `arn:aws:scheduler:${this.region}:${this.account}:schedule/psd-agent-${environment}/*`,
-        `arn:aws:scheduler:${this.region}:${this.account}:schedule-group/psd-agent-${environment}`,
-      ],
-    }));
-    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'SchedulerPassRole',
-      effect: iam.Effect.ALLOW,
-      actions: ['iam:PassRole'],
-      resources: [schedulerInvokeRole.roleArn],
-      conditions: {
-        StringEquals: {
-          'iam:PassedToService': 'scheduler.amazonaws.com',
-        },
-      },
-    }));
 
     // =====================================================================
     // 7d. Email Triage fanout — dispatcher + worker + FIFO work queue (#1172)
@@ -2389,6 +2168,7 @@ export class AgentPlatformStack extends cdk.Stack {
         // Override knob — set to 'us.anthropic.claude-3-5-haiku-...' to
         // fall back from Nova Micro without redeploy.
         TRIAGE_LLM_MODEL_ID: 'us.amazon.nova-micro-v1:0',
+        AGENT_INVOCATION_SIGNING_SECRET_ID: agentInvocationSigningSecret.secretName,
         // AGENTCORE_RUNTIME_ID intentionally NOT set — resolved from SSM
         // at runtime (same pattern as router/cron Lambdas).
         AWS_ACCOUNT: this.account,
@@ -2402,6 +2182,7 @@ export class AgentPlatformStack extends cdk.Stack {
     });
     cdk.Tags.of(triageWorkerLambda).add('Environment', environment);
     cdk.Tags.of(triageWorkerLambda).add('ManagedBy', 'cdk');
+    agentInvocationSigningSecret.grantRead(triageWorkerRole);
 
     // Worker consumes the FIFO queue (SqsEventSource grants consume) and
     // re-enqueues sweep continuations (needs send).
@@ -2779,6 +2560,7 @@ export class AgentPlatformStack extends cdk.Stack {
         // Empty APP_BASE_URL → the router hook is a no-op (fails closed).
         APP_BASE_URL: props.appBaseUrl ?? '',
         AGENT_INTERNAL_API_KEY_SECRET_ID: agentInternalApiKeySecret.secretName,
+        AGENT_INVOCATION_SIGNING_SECRET_ID: agentInvocationSigningSecret.secretName,
         // Account ID needed to construct AgentCore Runtime ARN from the runtime ID
         AWS_ACCOUNT_ID: this.account,
         NODE_ENV: 'production',
@@ -2808,6 +2590,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // account-request call to the Next.js app. (The router role's `secrets: []`
     // means this explicit grant is required.)
     agentInternalApiKeySecret.grantRead(this.routerLambdaRole);
+    agentInvocationSigningSecret.grantRead(this.routerLambdaRole);
 
     // =====================================================================
     // 9b. Agent Mint Lambda — confused-deputy isolation (#1232 hardening)
@@ -3010,6 +2793,7 @@ export class AgentPlatformStack extends cdk.Stack {
         NODE_ENV: 'production',
         SESSION_LOCKS_TABLE: this.sessionLocksTable.tableName,
         GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
+        AGENT_INVOCATION_SIGNING_SECRET_ID: agentInvocationSigningSecret.secretName,
         DATABASE_HOST: props.databaseHost,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
         DATABASE_NAME: props.databaseName || 'aistudio',
@@ -3029,6 +2813,7 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
     }));
     this.googleCredentialsSecret.grantRead(jobTaskDef.taskRole);
+    agentInvocationSigningSecret.grantRead(jobTaskDef.taskRole);
     dbSecret.grantRead(jobTaskDef.taskRole);
     this.sessionLocksTable.grantReadWriteData(jobTaskDef.taskRole);
 
@@ -3112,6 +2897,15 @@ export class AgentPlatformStack extends cdk.Stack {
     // itself is the simplest correct value.
 
     const gcpPubsubAudience = this.node.tryGetContext('gcpPubsubAudience') as string | undefined;
+    const gcpPubsubServiceAccountEmail = this.node.tryGetContext(
+      'gcpPubsubServiceAccountEmail',
+    ) as string | undefined;
+    const gcpPubsubServiceAccountSubject = this.node.tryGetContext(
+      'gcpPubsubServiceAccountSubject',
+    ) as string | undefined;
+    const gcpPubsubSubscription = this.node.tryGetContext(
+      'gcpPubsubSubscription',
+    ) as string | undefined;
 
     const bridgeLogGroup = new logs.LogGroup(this, 'ChatBridgeLogGroup', {
       logGroupName: `/aws/lambda/psd-agent-chat-bridge-${environment}`,
@@ -3166,6 +2960,9 @@ export class AgentPlatformStack extends cdk.Stack {
       logGroup: bridgeLogGroup,
       environment: {
         ROUTER_QUEUE_URL: this.routerQueue.queueUrl,
+        EXPECTED_OIDC_SUBJECT: gcpPubsubServiceAccountSubject ?? '',
+        EXPECTED_OIDC_EMAIL: gcpPubsubServiceAccountEmail ?? '',
+        EXPECTED_PUBSUB_SUBSCRIPTION: gcpPubsubSubscription ?? '',
       },
     });
     this.routerQueue.grantSendMessages(bridgeLambda);
@@ -3181,7 +2978,12 @@ export class AgentPlatformStack extends cdk.Stack {
     // the configured value are accepted. If audience is not yet configured,
     // skip authorizer wiring; the route below will then 401 every request,
     // which is the safe default (no anonymous access).
-    if (gcpPubsubAudience) {
+    if (
+      gcpPubsubAudience &&
+      gcpPubsubServiceAccountEmail &&
+      gcpPubsubServiceAccountSubject &&
+      gcpPubsubSubscription
+    ) {
       // Google Pub/Sub signs the OIDC token's `aud` field with the push
       // subscription's configured audience. Depending on how the
       // subscription is set up, this may be either the API origin
@@ -3221,9 +3023,13 @@ export class AgentPlatformStack extends cdk.Stack {
     }
 
     new cdk.CfnOutput(this, 'ChatBridgeEndpoint', {
-      value: gcpPubsubAudience
+      value:
+        gcpPubsubAudience &&
+        gcpPubsubServiceAccountEmail &&
+        gcpPubsubServiceAccountSubject &&
+        gcpPubsubSubscription
         ? `${chatHttpApi.apiEndpoint}/chat`
-        : 'NOT CONFIGURED — pass --context gcpPubsubAudience=<https-url> (set this to the API endpoint URL itself), then redeploy. Update Pub/Sub push subscription endpoint + audience to match.',
+        : 'NOT CONFIGURED — set gcpPubsubAudience, gcpPubsubServiceAccountEmail, gcpPubsubServiceAccountSubject, and gcpPubsubSubscription, then redeploy.',
       description: 'Google Chat Pub/Sub push endpoint URL',
     });
 

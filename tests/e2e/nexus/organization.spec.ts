@@ -324,6 +324,14 @@ test.describe('Nexus Sidebar — Authenticated', () => {
   })
 
   test('new conversation URL resolves on /nexus', async ({ page }) => {
+    // Same live-model dependency as the two gated siblings above/below: the
+    // conversation id only appears once a streamed turn creates the row, so a
+    // keyless environment 500s the send and this can never pass. This was the
+    // only ungated sendMessage() test in the file.
+    test.skip(
+      process.env.E2E_RUN_EXTERNAL !== '1',
+      'Creating a conversation via chat needs a live model — set E2E_RUN_EXTERNAL=1'
+    )
     await gotoNexus(page)
 
     await sendMessage(page, 'Create conversation for direct URL navigation test')

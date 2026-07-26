@@ -33,6 +33,7 @@ import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-wor
 import { verifyConsentToken } from "@/lib/agent-workspace/consent-token"
 import { getSecretJson, storeCanvaRefreshToken } from "@/lib/agent-workspace/secrets-manager"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
+import { getServerSession } from "@/lib/auth/server-session"
 
 const CANVA_AUTHORIZE_URL = process.env.CANVA_AUTHORIZE_URL ?? "https://www.canva.com/api/oauth/authorize"
 const CANVA_TOKEN_URL = process.env.CANVA_TOKEN_URL ?? "https://api.canva.com/rest/v1/oauth/token"
@@ -96,6 +97,14 @@ function s256Challenge(verifier: string): string {
   return createHash("sha256").update(verifier).digest("base64url")
 }
 
+async function isAuthenticatedOwner(ownerEmail: string): Promise<boolean> {
+  const session = await getServerSession()
+  return (
+    typeof session?.email === "string" &&
+    session.email.trim().toLowerCase() === ownerEmail.trim().toLowerCase()
+  )
+}
+
 export interface CanvaConsentVerifyResult {
   valid: boolean
   ownerEmail?: string
@@ -122,6 +131,13 @@ export async function verifyCanvaConsentAndGetOAuthUrl(
       timer({ status: "error" })
       return createSuccess({ valid: false, error: "This consent link is invalid or for a different flow." })
     }
+    if (!(await isAuthenticatedOwner(payload.sub))) {
+      timer({ status: "error" })
+      return createSuccess({
+        valid: false,
+        error: "Sign in as the AI Studio owner named in this link to connect Canva.",
+      })
+    }
 
     const creds = await getCanvaClientCreds(log)
     if (!creds) {
@@ -134,7 +150,11 @@ export async function verifyCanvaConsentAndGetOAuthUrl(
     const [row] = await executeQuery(
       (db) =>
         db
-          .select({ codeVerifier: psdAgentWorkspaceConsentNonces.codeVerifier })
+          .select({
+            ownerEmail: psdAgentWorkspaceConsentNonces.ownerEmail,
+            tokenKind: psdAgentWorkspaceConsentNonces.tokenKind,
+            codeVerifier: psdAgentWorkspaceConsentNonces.codeVerifier,
+          })
           .from(psdAgentWorkspaceConsentNonces)
           .where(
             sql`${psdAgentWorkspaceConsentNonces.nonce} = ${payload.nonce}
@@ -145,7 +165,12 @@ export async function verifyCanvaConsentAndGetOAuthUrl(
           .limit(1),
       "lookupCanvaNonce"
     )
-    if (!row || !row.codeVerifier) {
+    if (
+      !row ||
+      row.tokenKind !== "canva" ||
+      row.ownerEmail.toLowerCase() !== payload.sub.toLowerCase() ||
+      !row.codeVerifier
+    ) {
       timer({ status: "error" })
       return createSuccess({ valid: false, error: "This consent link has expired or was already used. Ask your agent for a new one." })
     }
@@ -229,6 +254,13 @@ export async function handleCanvaCallback(
     if (!row || row.tokenKind !== "canva" || !row.codeVerifier) {
       timer({ status: "error" })
       return createSuccess({ success: false, error: "This consent link has already been used or has expired. Ask your agent for a new one." })
+    }
+    if (!(await isAuthenticatedOwner(row.ownerEmail))) {
+      timer({ status: "error" })
+      return createSuccess({
+        success: false,
+        error: "This Canva consent link belongs to a different AI Studio user.",
+      })
     }
 
     const creds = await getCanvaClientCreds(log)

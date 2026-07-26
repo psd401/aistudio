@@ -4,7 +4,7 @@
  * server, authenticated per-user with an OAuth refresh token.
  *
  * Usage:
- *   node run.js --user <email> <subcommand> [flags]
+ *   node run.js <subcommand> [flags]
  *
  * Subcommands (map to Plaud MCP tools):
  *   list      [--page N] [--page-size N] [--query kw] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
@@ -32,7 +32,7 @@
 'use strict';
 
 const {
-  fail, validateUserEmail, parseArgs, callTool, digestRecording, listTools,
+  fail, rejectAuthorityArgs, parseArgs, callTool, digestRecording, listTools,
 } = require('./common');
 
 async function main() {
@@ -43,21 +43,20 @@ async function main() {
 
   if (args.help || !sub) {
     process.stdout.write(
-      'Usage: run.js --user <email> <list|search|file|digest|transcript|summary|whoami|tools> [flags]\n'
+      'Usage: run.js <list|search|file|digest|transcript|summary|whoami|tools> [flags]\n'
     );
     process.exit(sub ? 0 : 1);
   }
 
-  const userEmail = args.user;
-  validateUserEmail(userEmail);
+  rejectAuthorityArgs(args);
 
   switch (sub) {
     case 'whoami':
-      await callTool('get_current_user', {}, userEmail);
+      await callTool('get_current_user', {});
       break;
 
     case 'tools':
-      await listTools(userEmail);
+      await listTools();
       break;
 
     case 'list':
@@ -70,19 +69,19 @@ async function main() {
       if (args.from && args.from !== true) toolArgs.from = args.from;
       if (args.to && args.to !== true) toolArgs.to = args.to;
       if (sub === 'search' && !toolArgs.keyword) fail('search requires --query <keyword>');
-      await callTool('list_files', toolArgs, userEmail);
+      await callTool('list_files', toolArgs);
       break;
     }
 
     case 'file': {
       if (!args.id || args.id === true) fail('file requires --id <recording-id>');
-      await callTool('get_file', { file_id: args.id }, userEmail);
+      await callTool('get_file', { file_id: args.id });
       break;
     }
 
     case 'digest': {
       if (!args.id || args.id === true) fail('digest requires --id <recording-id>');
-      await digestRecording(userEmail, args.id, {
+      await digestRecording(args.id, {
         profiles: typeof args.profiles === 'string' ? args.profiles : undefined,
         output: typeof args.output === 'string' ? args.output : undefined,
         length: typeof args.length === 'string' ? args.length : undefined,
@@ -92,13 +91,13 @@ async function main() {
 
     case 'transcript': {
       if (!args.id || args.id === true) fail('transcript requires --id <recording-id>');
-      await callTool('get_transcript', { file_id: args.id }, userEmail);
+      await callTool('get_transcript', { file_id: args.id });
       break;
     }
 
     case 'summary': {
       if (!args.id || args.id === true) fail('summary requires --id <recording-id>');
-      await callTool('get_note', { file_id: args.id }, userEmail);
+      await callTool('get_note', { file_id: args.id });
       break;
     }
 

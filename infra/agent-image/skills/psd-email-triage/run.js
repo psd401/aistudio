@@ -100,14 +100,10 @@ async function cmd_enable(args) {
   const existing = await lib.getRow(user);
   const accessToken = await lib.getUserAccessToken(user);
 
-  // Merge: defaults first (so new keys like `task` get picked up on
-  // re-enable), existing user-renamed keys win (so we don't trample
-  // their `@psd/P0` rename). Phase 1.5 added the `task` key so users
-  // who enabled before that ship need a way to get it without resetting.
-  const labels = {
-    ...lib.DEFAULT_LABELS,
-    ...((existing && existing.labels) || {}),
-  };
+  // Label names and IDs are resolved and persisted only by the trusted,
+  // owner-bound broker operation. Model-controlled state updates cannot
+  // choose Gmail label IDs.
+  const labels = { ...lib.DEFAULT_LABELS };
   const labelIdsByKey = await lib.ensureLabels(accessToken, labels);
 
   // Idempotent path for already-enabled users — refresh labels (so
@@ -118,9 +114,6 @@ async function cmd_enable(args) {
     const labelsChanged =
       JSON.stringify(labels) !== JSON.stringify(existing.labels || {}) ||
       JSON.stringify(labelIdsByKey) !== JSON.stringify(existing.labelIdsByKey || {});
-    if (labelsChanged) {
-      await lib.updateRow(user, { labels, labelIdsByKey });
-    }
     emit({
       ok: true,
       subcommand: 'enable',
@@ -143,8 +136,6 @@ async function cmd_enable(args) {
     classifierStartHistoryId: startHistoryId,
     lastHistoryId: startHistoryId,
     lastPollAt: now,
-    labels,
-    labelIdsByKey,
     rules: (existing && existing.rules) || lib.DEFAULT_RULES,
     escalation: (existing && existing.escalation) || lib.DEFAULT_ESCALATION,
     digestEnabled: existing ? existing.digestEnabled !== false : true,
@@ -232,7 +223,8 @@ async function cmd_disable(args) {
   let labelsDeleted = 0;
   try {
     const accessToken = await lib.getUserAccessToken(user);
-    for (const [, labelId] of Object.entries(row.labelIdsByKey || {})) {
+    const trustedLabelIds = await lib.ensureLabels(accessToken, lib.DEFAULT_LABELS);
+    for (const [, labelId] of Object.entries(trustedLabelIds)) {
       try { await lib.deleteLabel(accessToken, labelId); labelsDeleted++; } catch (_) {}
     }
   } catch (_) {
@@ -534,12 +526,13 @@ async function cmd_training(args) {
     const prior = (row.recentDecisions || []).find((d) => d.messageId === messageId);
     const fromLabel = prior ? prior.label : 'unknown';
     const accessToken = await lib.getUserAccessToken(user);
+    const trustedLabelIds = await lib.ensureLabels(accessToken, lib.DEFAULT_LABELS);
 
     // Swap labels in Gmail.
-    const newLabelId = (row.labelIdsByKey || {})[newLabel];
+    const newLabelId = trustedLabelIds[newLabel];
     if (!newLabelId) bail('missing-label', `Gmail label for "${newLabel}" not configured`, 'training correct');
     const removeLabelIds = [];
-    for (const [k, id] of Object.entries(row.labelIdsByKey || {})) {
+    for (const [k, id] of Object.entries(trustedLabelIds)) {
       if (k !== newLabel) removeLabelIds.push(id);
     }
     // If the correction is to important, also re-inbox the message.
@@ -623,21 +616,11 @@ async function cmd_labels(args) {
     return;
   }
   if (verb === 'rename') {
-    const user = requireUser(args, 'labels rename');
-    const [, key, newName] = requirePositional(args, 3, 'labels rename');
-    if (!['important', 'later', 'news'].includes(key)) {
-      bail('bad-key', `Label key must be important|later|news (got "${key}")`, 'labels rename');
-    }
-    const row = await requireEnabledRow(user, 'labels rename');
-    const labelId = (row.labelIdsByKey || {})[key];
-    if (!labelId) bail('missing-label', `Gmail label for "${key}" not configured`, 'labels rename');
-    const accessToken = await lib.getUserAccessToken(user);
-    await lib.renameLabel(accessToken, labelId, newName);
-    await lib.updateRow(user, {
-      labels: { ...row.labels, [key]: newName },
-    });
-    emit({ ok: true, subcommand: 'labels rename', summary: `Renamed ${key} → ${newName}` });
-    return;
+    bail(
+      'fixed-labels',
+      'Triage label names are fixed so scheduled classification can verify them safely.',
+      'labels rename',
+    );
   }
   bail('bad-verb', `Unknown labels subcommand: ${verb}`, 'labels');
 }
@@ -696,16 +679,10 @@ async function cmd_tasks(args) {
     // Lazily create the @psd/Task Gmail label if it's missing — when
     // a user upgrades from a pre-Phase-1.5 enable to invoke-agent mode,
     // they need the label to exist before the gesture works.
-    if (mode === 'invoke-agent' && !((row.labelIdsByKey || {}).task)) {
+    if (mode === 'invoke-agent') {
       const accessToken = await lib.getUserAccessToken(user);
-      const labels = {
-        ...lib.DEFAULT_LABELS,
-        ...(row.labels || {}),
-      };
-      const labelIdsByKey = await lib.ensureLabels(accessToken, labels);
-      updates.labels = labels;
-      updates.labelIdsByKey = labelIdsByKey;
-      labelCreated = true;
+      await lib.ensureLabels(accessToken, lib.DEFAULT_LABELS);
+      labelCreated = !((row.labelIdsByKey || {}).task);
     }
     await lib.updateRow(user, updates);
     emit({

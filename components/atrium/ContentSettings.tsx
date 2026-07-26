@@ -93,7 +93,14 @@ async function runUpdate(
     if (res.isSuccess) {
       setOpen(false);
       if (patch.status === "archived") {
-        router.push("/atrium");
+        // FULL document navigation, deliberately not router.push: the editor
+        // mounts a burst of server-action fetches (session, collection tree,
+        // versions, comments, …), and a client-side push that lands while one
+        // is still in flight gets rolled back when the straggler resolves —
+        // the App Router rebases onto the action's origin route and yanks the
+        // user back into the editor they just archived. A document navigation
+        // tears the editor down, so no straggler can rebase it.
+        window.location.assign("/atrium");
       } else {
         router.refresh();
       }
@@ -122,13 +129,12 @@ async function runUpdate(
 async function runDelete(
   objectId: string,
   ctx: {
-    router: ReturnType<typeof useRouter>;
     setDeleting: (v: boolean) => void;
     setError: (v: string | null) => void;
     setOpen: (v: boolean) => void;
   }
 ): Promise<void> {
-  const { router, setDeleting, setError, setOpen } = ctx;
+  const { setDeleting, setError, setOpen } = ctx;
   if (
     typeof window !== "undefined" &&
     !window.confirm(
@@ -145,7 +151,9 @@ async function runDelete(
     const res = await deleteContentAction(objectId);
     if (res.isSuccess) {
       setOpen(false);
-      router.push("/atrium");
+      // Full document navigation for the same straggling-server-action reason
+      // as the archive branch in `runUpdate` above.
+      window.location.assign("/atrium");
     } else {
       setError(res.message ?? "Could not delete this content");
       log.warn("deleteContentAction failed", { message: res.message });
@@ -429,8 +437,8 @@ export function ContentSettings({
   // Extracted to the module-level `runDelete` to keep this component under the
   // max-lines-per-function lint.
   const deleteContent = useCallback(
-    () => runDelete(objectId, { router, setDeleting, setError, setOpen }),
-    [objectId, router]
+    () => runDelete(objectId, { setDeleting, setError, setOpen }),
+    [objectId]
   );
 
   const busy = saving || deleting;

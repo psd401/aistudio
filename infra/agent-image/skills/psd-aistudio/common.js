@@ -1,56 +1,9 @@
-/**
- * Shared helpers for the psd-aistudio OpenClaw skill (Issues #1100, #1223).
- *
- * Thin JSON-RPC client for AI Studio's existing `/api/mcp` endpoint.
- *
- * Key resolution (#1223) is per-caller with a shared fallback:
- *   1. OVERRIDE — the caller's OWN AI Studio API key, if they have stored one
- *      (`psd-credentials get --user <email> --name aistudio_personal_key`). When
- *      present it replaces the shared key for that caller, unlocking exactly
- *      whatever that key's scopes grant (execute assistants, capture decisions, …).
- *      Scope is enforced SERVER-SIDE by the key; this skill is a thin passthrough.
- *   2. FALLBACK — the pre-provisioned, shared `platform:read` key (discovery only).
- *      A caller with no personal key still works, limited to discovery.
- * The skill emits WHICH key was used (`personal` vs `shared`) to stderr — never
- * the value — so the agent can steer the user to store their own key.
- *
- * Environment contract (set by infra/lib/agent-platform-stack.ts + deploy):
- *   AISTUDIO_MCP_URL                 — AI Studio MCP JSON-RPC endpoint (/api/mcp)
- *   AISTUDIO_MCP_API_KEY             — shared scoped `sk-…` key (platform:read).
- *                                      Direct. The FALLBACK key — not a new secret.
- *   AISTUDIO_MCP_API_KEY_SECRET_ID   — Secrets Manager id holding the shared `sk-…`
- *                                      key (used when the direct env var is absent).
- *
- * The per-user override reuses the EXISTING psd-credentials contract
- * (user-scoped secret at psd-agent-creds/{env}/user/<email>/aistudio_personal_key);
- * this skill introduces no new secret and no new resolver.
- */
+/** Owner-bound AI Studio MCP client. Provider keys stay in the trusted web tier. */
 
 'use strict';
 
-const path = require('node:path');
-const childProcess = require('node:child_process');
-
-// Absolute path to the shared psd-credentials `get.js` (…/skills/psd-credentials).
-const CREDENTIALS_GET = path.resolve(
-  __dirname,
-  '..',
-  'psd-credentials',
-  'get.js'
-);
-
-// Indirection seam so unit tests can stub the psd-credentials subprocess without
-// mocking a `node:` builtin (bun's mock.module does not intercept builtin requires).
-const _internals = { execFileSync: childProcess.execFileSync };
-
-const AISTUDIO_MCP_URL = process.env.AISTUDIO_MCP_URL || '';
-const AISTUDIO_MCP_API_KEY = process.env.AISTUDIO_MCP_API_KEY || '';
-const AISTUDIO_MCP_API_KEY_SECRET_ID =
-  process.env.AISTUDIO_MCP_API_KEY_SECRET_ID || '';
-
-// Per-user credential name in psd-credentials (stored via
-// `psd-credentials put --user <email> --name aistudio_personal_key --value sk-…`).
-const PERSONAL_KEY_NAME = 'aistudio_personal_key';
+const { requestAgentBroker } = require('../_shared/agent-broker');
+const _internals = { requestAgentBroker };
 
 // Upper bound on a single /api/mcp call. Without an explicit signal a hung
 // upstream (ALB/proxy that never closes the response) would stall the agent for
@@ -70,13 +23,6 @@ function timeoutForTool(toolName) {
     ? MCP_EXECUTE_TIMEOUT_MS
     : MCP_FETCH_TIMEOUT_MS;
 }
-
-// Stderr notice emitted when the caller falls back to the shared discovery key.
-// Never contains a key value.
-const SHARED_KEY_NOTICE =
-  'psd-aistudio: using the shared platform:read key (discovery only). Store your ' +
-  'own AI Studio API key (psd-credentials put --user <your-email> --name ' +
-  'aistudio_personal_key) to act as yourself and unlock execute/capture.\n';
 
 function fail(message, code = 1) {
   process.stderr.write(`psd-aistudio: ${message}\n`);
@@ -115,150 +61,9 @@ function parseArgs(argv) {
 }
 
 /**
- * Load the AWS SDK the same way psd-data does — prefer psd-workspace's
- * already-installed copy so this skill adds no image dependency, falling back to
- * a bare require for local/testing. Only reached when the secret path is used.
- */
-function requireSecretsManager() {
-  try {
-    return require('/opt/psd-skills/psd-workspace/node_modules/@aws-sdk/client-secrets-manager');
-  } catch {
-    return require('@aws-sdk/client-secrets-manager');
-  }
-}
-
-/**
- * Read the caller's per-user AI Studio key from psd-credentials, if stored.
- * Shells out to the SAME `psd-credentials/get.js` contract every other skill
- * uses (user-scoped first, then shared) — no new resolver. Returns the raw
- * `sk-…` string on success, or `null` when no personal key is stored / the
- * per-user store is unreachable (in which case we degrade to the shared key).
- * The value is returned to the caller and used only as a Bearer token — never
- * logged, never written to disk. The subprocess call goes through the
- * `_internals` seam so tests can stub it.
- */
-function readPersonalKey(callerEmail) {
-  let stdout;
-  try {
-    // stderr is CAPTURED (not inherited): get.js error text can echo the
-    // --user value or the user-scoped secret path, which must not reach this
-    // process's stderr raw. It is captured onto err.stderr and never printed —
-    // the catch below emits only the sanitized exit-status notice.
-    stdout = _internals.execFileSync(
-      'node',
-      [CREDENTIALS_GET, '--user', callerEmail, '--name', PERSONAL_KEY_NAME],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }
-    );
-  } catch (err) {
-    // get.js exited non-zero (bad env / Secrets Manager error / crash) or timed
-    // out. Not fatal: the caller can still use the shared discovery key. Report
-    // only the exit status/code — execFileSync's err.message echoes the full
-    // argv (including the caller's email), which doesn't belong on stderr.
-    process.stderr.write(
-      `psd-aistudio: could not read your personal key ` +
-        `(psd-credentials get failed: ${err.status ?? err.code ?? 'unknown'}); ` +
-        'falling back to the shared key.\n'
-    );
-    return null;
-  }
-
-  const lines = String(stdout)
-    .split('\n')
-    .filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return null;
-
-  let parsed;
-  try {
-    parsed = JSON.parse(lines[lines.length - 1]);
-  } catch {
-    return null;
-  }
-  // get.js emits `{error:"not_found", …}` (exit 0) when nothing is stored, and
-  // `scope: 'user' | 'shared'` on a hit. Only a USER-scoped hit is a personal
-  // key: get.js falls back to the shared namespace for the same name, and a
-  // same-named shared secret (admin-provisioned out of band) must not be
-  // relabeled `personal` — that would mislabel stderr and give the wrong
-  // remediation hint. Treat it like not-found and use the platform:read
-  // fallback. Guard the parse result too: `JSON.parse('null')` yields null
-  // (property access would throw), and the value must be a string because it
-  // becomes a Bearer header.
-  if (!parsed || typeof parsed !== 'object' || parsed.error) return null;
-  if (typeof parsed.value !== 'string' || !parsed.value) return null;
-  if (parsed.scope !== 'user') return null;
-  return parsed.value;
-}
-
-/**
- * Resolve the API key to authenticate with, honoring the #1223 override model.
- * Returns `{ key, source }` where `source` is `'personal'` (the caller's own
- * stored key) or `'shared'` (the pre-provisioned platform:read fallback). Emits
- * the source to stderr (never the value). Does NOT cache: each invocation makes
- * exactly one MCP call, so one resolution per process.
- */
-async function resolveApiKey(callerEmail) {
-  // 1. OVERRIDE — the caller's own stored key wins when present.
-  if (callerEmail) {
-    const personal = readPersonalKey(callerEmail);
-    if (personal) {
-      process.stderr.write(
-        'psd-aistudio: using your personal AI Studio API key (overrides the ' +
-          'shared key; you can do whatever that key is scoped for).\n'
-      );
-      return { key: personal, source: 'personal' };
-    }
-  }
-
-  // 2. FALLBACK — the existing shared platform:read key (direct env wins).
-  if (AISTUDIO_MCP_API_KEY) {
-    process.stderr.write(SHARED_KEY_NOTICE);
-    return { key: AISTUDIO_MCP_API_KEY, source: 'shared' };
-  }
-  if (AISTUDIO_MCP_API_KEY_SECRET_ID) {
-    let value;
-    try {
-      const { SecretsManagerClient, GetSecretValueCommand } =
-        requireSecretsManager();
-      const client = new SecretsManagerClient({
-        region: process.env.AWS_REGION || 'us-east-1',
-      });
-      const resp = await client.send(
-        new GetSecretValueCommand({ SecretId: AISTUDIO_MCP_API_KEY_SECRET_ID })
-      );
-      value = (resp.SecretString || '').trim();
-    } catch (err) {
-      // A retrieval failure (permission / decryption / network) is an infra
-      // error, not a malformed invocation — surface it clearly (exit 12) instead
-      // of letting it bubble to the generic exit-2 handler.
-      fail(
-        `Failed to retrieve API key from Secrets Manager ` +
-          `(${AISTUDIO_MCP_API_KEY_SECRET_ID}): ${err.message}`,
-        12
-      );
-    }
-    // Secret exists but is empty — the credential is effectively missing.
-    if (!value) {
-      fail(
-        `Secret ${AISTUDIO_MCP_API_KEY_SECRET_ID} has no SecretString value`,
-        11
-      );
-    }
-    process.stderr.write(SHARED_KEY_NOTICE);
-    return { key: value, source: 'shared' };
-  }
-
-  // 3. No credential configured at all — access to AI Studio is not set up.
-  fail(
-    'No API key configured. Set AISTUDIO_MCP_API_KEY (a scoped sk- key holding ' +
-      'platform:read) or AISTUDIO_MCP_API_KEY_SECRET_ID, or store your own key ' +
-      'with psd-credentials put --user <your-email> --name aistudio_personal_key.',
-    11
-  );
-  return { key: '', source: 'shared' }; // unreachable
-}
-
-/**
- * Low-level MCP call. Resolves the key (honoring the per-user override), sends
- * the JSON-RPC envelope, and handles the terminal transport failures uniformly
+ * Low-level MCP call through the owner-bound broker. The model runtime never
+ * receives either the owner's personal key or the platform fallback key.
+ * Handles terminal transport failures uniformly
  * (401 → exit 11, 429 → exit 14, network / non-JSON / non-2xx-without-error →
  * exit 12). It does NOT emit/exit for a JSON-RPC error or a success — it RETURNS
  * those so the caller can add a scope hint or post-process a tool result:
@@ -271,32 +76,14 @@ async function resolveApiKey(callerEmail) {
  * parse failures use HTTP status codes; both are handled.
  */
 async function callMcpRaw(method, params, callerEmail, timeoutMs = MCP_FETCH_TIMEOUT_MS) {
-  if (!AISTUDIO_MCP_URL) {
-    fail('AISTUDIO_MCP_URL is not set');
-  }
-
-  const { key: apiKey, source: keySource } = await resolveApiKey(callerEmail);
-
-  const requestId = Math.floor(Math.random() * 1e9);
-  const rpcBody = {
-    jsonrpc: '2.0',
-    id: requestId,
-    method,
-    params: params || {},
-  };
-
-  let resp;
+  void callerEmail;
+  let brokerResult;
   try {
-    resp = await fetch(AISTUDIO_MCP_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        'mcp-protocol-version': '2024-11-05',
-      },
-      body: JSON.stringify(rpcBody),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    brokerResult = await _internals.requestAgentBroker(
+      '/api/agent/aistudio',
+      { method, params: params || {} },
+      { timeoutMs }
+    );
   } catch (err) {
     const timedOut =
       err && (err.name === 'TimeoutError' || err.name === 'AbortError');
@@ -308,21 +95,24 @@ async function callMcpRaw(method, params, callerEmail, timeoutMs = MCP_FETCH_TIM
     );
   }
 
-  if (resp.status === 401) {
-    const text = await resp.text().catch(() => '');
+  const httpStatus = Number(brokerResult.httpStatus);
+  const keySource =
+    brokerResult.keySource === 'personal' ? 'personal' : 'shared';
+  const data = brokerResult.payload;
+  if (httpStatus === 401) {
     emit({
       status: 'unauthorized',
       message:
         'AI Studio MCP rejected the API key (401). ' +
         (keySource === 'personal'
           ? 'Your stored AI Studio key is invalid or revoked — re-store a current ' +
-            'key with psd-credentials put --user <your-email> --name aistudio_personal_key.'
+            'key with psd-credentials put --name aistudio_personal_key.'
           : 'The shared key must be a valid sk- key holding at least platform:read.'),
-      detail: text.slice(0, 512),
+      detail: String(brokerResult.rawText || '').slice(0, 512),
     });
     process.exit(11);
   }
-  if (resp.status === 429) {
+  if (httpStatus === 429) {
     emit({
       status: 'rate-limited',
       message:
@@ -331,25 +121,23 @@ async function callMcpRaw(method, params, callerEmail, timeoutMs = MCP_FETCH_TIM
     process.exit(14);
   }
 
-  const data = await resp.json().catch(() => null);
   if (!data) {
-    const text = resp.ok ? '' : ` (HTTP ${resp.status})`;
-    fail(`AI Studio MCP returned a non-JSON body${text}`, 12);
+    fail(`AI Studio MCP returned a non-JSON body (HTTP ${httpStatus})`, 12);
   }
 
   if (data.error) {
     // JSON-RPC error (e.g. "Insufficient scope for tool: execute_assistant",
     // unknown tool). Return it verbatim; the caller surfaces it (+ scope hint)
     // and exits — do NOT retry, do NOT fall back to another key.
-    return { jsonrpcError: data.error, httpStatus: resp.status, keySource };
+    return { jsonrpcError: data.error, httpStatus, keySource };
   }
 
   // A non-2xx status with a JSON body but NO JSON-RPC error field (e.g. an infra
   // 502/503 proxy page) must NOT be treated as success — otherwise we'd silently
   // return `null`, hiding the real HTTP status (CLAUDE.md silent-failure pattern).
-  if (!resp.ok) {
+  if (httpStatus < 200 || httpStatus >= 300) {
     fail(
-      `AI Studio MCP returned HTTP ${resp.status}: ` +
+      `AI Studio MCP returned HTTP ${httpStatus}: ` +
         `${JSON.stringify(data).slice(0, 512)}`,
       12
     );
@@ -446,7 +234,6 @@ module.exports = {
   fail,
   emit,
   parseArgs,
-  resolveApiKey,
   callMcpRaw,
   callMcp,
   callTool,
@@ -454,7 +241,5 @@ module.exports = {
   timeoutForTool,
   MCP_FETCH_TIMEOUT_MS,
   MCP_EXECUTE_TIMEOUT_MS,
-  AISTUDIO_MCP_URL,
-  PERSONAL_KEY_NAME,
   _internals,
 };

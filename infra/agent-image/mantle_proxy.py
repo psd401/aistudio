@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Transparent logging proxy for Bedrock Mantle.
+Transparent logging proxy for the owner-bound AI Studio model broker.
 
 Why: we need ground-truth visibility into what OpenClaw actually sends to
 Mantle. OpenClaw's logs don't include request bodies, and the "!"-loop
 degeneracy we see isn't reproducible via direct curl calls with the same
 apparent payload. This proxy sits on 127.0.0.1:18791, logs request +
-response to stdout (CloudWatch), and forwards byte-for-byte to
-https://bedrock-mantle.us-east-1.api.aws.
+response to stdout (CloudWatch), and forwards byte-for-byte to the trusted web
+tier. The web tier holds the provider credential and enforces the signed owner
+context plus a model/output allowlist.
 
 If this process dies, OpenClaw's requests also fail — so the entrypoint
 should (a) verify the proxy's /health before starting the gateway and
@@ -15,12 +16,16 @@ should (a) verify the proxy's /health before starting the gateway and
 error bodies.
 """
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
 import sys
 import time
+import uuid
 from typing import Optional
 
 from aiohttp import web, ClientSession, ClientTimeout
@@ -41,7 +46,204 @@ def j(msg: str, **kw) -> str:
     return json.dumps(payload, default=str)
 
 
-UPSTREAM = "https://bedrock-mantle.us-east-1.api.aws"
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "").rstrip("/")
+UPSTREAM = APP_BASE_URL + "/api/agent/model-proxy"
+AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
+INVOCATION_CONTEXT_PATH = f"{AUTHORITY_DIRECTORY}/invocation-context"
+REQUEST_PROOF_KEY_PATH = f"{AUTHORITY_DIRECTORY}/request-proof-key"
+WORKSPACE_FLUSH_TOKEN_PATH = f"{AUTHORITY_DIRECTORY}/workspace-flush-token"
+FINALIZATION_DRAIN_TIMEOUT_SECONDS = 120
+ALLOWED_AGENT_BROKER_ROUTES = frozenset({
+    "/api/agent/account-request",
+    "/api/agent/aistudio",
+    "/api/agent/atrium",
+    "/api/agent/canva",
+    "/api/agent/classified-evaluation",
+    "/api/agent/consent-link",
+    "/api/agent/credentials",
+    "/api/agent/email-triage",
+    "/api/agent/failures",
+    "/api/agent/github-execute",
+    "/api/agent/schedules",
+    "/api/agent/skills",
+    "/api/agent/workspace-execute",
+    "/api/agent/workspace-storage",
+})
+
+
+def _read_authority() -> tuple[str, bytes]:
+    """Read authority that is inaccessible to the model's node UID."""
+    with open(INVOCATION_CONTEXT_PATH, "r", encoding="ascii") as handle:
+        context = handle.read().strip()
+    with open(REQUEST_PROOF_KEY_PATH, "r", encoding="ascii") as handle:
+        encoded_key = handle.read().strip()
+    padded = encoded_key + ("=" * (-len(encoded_key) % 4))
+    return context, base64.urlsafe_b64decode(padded)
+
+
+def _authority_headers(method: str, route: str, body: bytes) -> dict:
+    context, proof_key = _read_authority()
+    timestamp = str(int(time.time()))
+    nonce = str(uuid.uuid4())
+    body_sha256 = hashlib.sha256(body).hexdigest()
+    canonical = "\n".join([
+        "v1",
+        timestamp,
+        nonce,
+        method.upper(),
+        route,
+        body_sha256,
+    ]).encode("utf-8")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(proof_key, canonical, hashlib.sha256).digest()
+    ).rstrip(b"=").decode("ascii")
+    return {
+        "X-Agent-Invocation-Context": context,
+        "X-Agent-Request-Proof-Version": "v1",
+        "X-Agent-Request-Proof-Timestamp": timestamp,
+        "X-Agent-Request-Proof-Nonce": nonce,
+        "X-Agent-Request-Proof-Body-Sha256": body_sha256,
+        "X-Agent-Request-Proof-Signature": signature,
+    }
+
+
+def _read_workspace_flush_token() -> str | None:
+    try:
+        with open(WORKSPACE_FLUSH_TOKEN_PATH, "r", encoding="ascii") as handle:
+            token = handle.read().strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return ""
+    return token if re.fullmatch(r"[A-Za-z0-9_-]{43}", token) else ""
+
+
+def _workspace_flush_request_allowed(
+    route: str,
+    payload: dict,
+    supplied_token: str | None,
+    flush_token: str | None,
+) -> bool:
+    if flush_token is None:
+        return True
+    return (
+        route == "/api/agent/workspace-storage"
+        and payload.get("operation") in {"upload", "complete-upload"}
+        and isinstance(supplied_token, str)
+        and bool(flush_token)
+        and hmac.compare_digest(supplied_token, flush_token)
+    )
+
+
+class _FinalizationGate:
+    """Drain privileged traffic before granting the root-only final flush."""
+
+    def __init__(self) -> None:
+        self._condition = asyncio.Condition()
+        self._state = "open"
+        self._active_requests = 0
+
+    async def enter(self, *, final_flush: bool = False) -> bool:
+        async with self._condition:
+            if self._state == "draining":
+                return False
+            if self._state == "flushing" and not final_flush:
+                return False
+            self._active_requests += 1
+            return True
+
+    async def leave(self) -> None:
+        async with self._condition:
+            if self._active_requests <= 0:
+                raise RuntimeError("finalization gate request count underflow")
+            self._active_requests -= 1
+            if self._active_requests == 0:
+                self._condition.notify_all()
+
+    async def begin(self) -> None:
+        async with self._condition:
+            self._state = "draining"
+            while self._active_requests:
+                await self._condition.wait()
+            self._state = "flushing"
+
+    async def end(self) -> None:
+        async with self._condition:
+            self._state = "open"
+            self._condition.notify_all()
+
+
+_finalization_gate = _FinalizationGate()
+
+
+def _valid_finalization_token(supplied_token: str | None) -> bool:
+    expected_token = _read_workspace_flush_token()
+    return (
+        isinstance(supplied_token, str)
+        and bool(expected_token)
+        and hmac.compare_digest(supplied_token, expected_token)
+    )
+
+
+async def handle_finalization_transition(
+    request: web.Request,
+) -> web.Response:
+    """Root-authenticated begin/end transition for the proxy-owned drain gate."""
+    if not _valid_finalization_token(
+        request.headers.get("X-Agent-Workspace-Flush")
+    ):
+        return web.json_response({"error": "Not found"}, status=404)
+    action = request.match_info.get("action", "")
+    if action == "begin":
+        try:
+            await asyncio.wait_for(
+                _finalization_gate.begin(),
+                timeout=FINALIZATION_DRAIN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # Stay closed. The wrapper will terminate this proxy, which cancels
+            # the stuck requests, start a fresh proxy, and retry the transition.
+            return web.json_response(
+                {"error": "Privileged request drain timed out"},
+                status=503,
+            )
+        return web.json_response({"finalizing": True})
+    if action == "end":
+        await _finalization_gate.end()
+        return web.json_response({"finalizing": False})
+    return web.json_response({"error": "Not found"}, status=404)
+
+
+@web.middleware
+async def finalization_gate_middleware(request, handler):
+    """Count every authority-bearing request for an atomic drain boundary."""
+    if request.path in {
+        "/internal/finalization/begin",
+        "/internal/finalization/end",
+    }:
+        return await handler(request)
+    if request.path in {"/health", "/usage"}:
+        return await handler(request)
+
+    final_flush = False
+    if request.path == "/agent-broker/api/agent/workspace-storage":
+        flush_token = _read_workspace_flush_token()
+        supplied_token = request.headers.get("X-Agent-Workspace-Flush")
+        # Classify before reading the potentially slow, attacker-controlled
+        # body. The unguessable root token is sufficient for gate admission;
+        # handle_agent_broker still validates the exact operation after read.
+        final_flush = (
+            isinstance(supplied_token, str)
+            and bool(flush_token)
+            and hmac.compare_digest(supplied_token, flush_token)
+        )
+
+    if not await _finalization_gate.enter(final_flush=final_flush):
+        return web.json_response({"error": "Turn is finalizing"}, status=503)
+    try:
+        return await handler(request)
+    finally:
+        await _finalization_gate.leave()
 
 # ---------------------------------------------------------------------------
 # Cumulative token-usage accounting (issue #1083)
@@ -877,7 +1079,105 @@ async def handle_usage(_request: web.Request) -> web.Response:
     return web.json_response(payload)
 
 
+AGENT_BROKER_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
+
+
+class AgentBrokerResponseTooLarge(RuntimeError):
+    """Raised when a privileged broker exceeds the root relay response cap."""
+
+
+def _resolve_agent_broker_route(relay_route: str) -> str | None:
+    """Map the fixed local relay path to one exact allowlisted app route."""
+    if not relay_route.startswith("api/agent/"):
+        return None
+    route = f"/{relay_route}"
+    return route if route in ALLOWED_AGENT_BROKER_ROUTES else None
+
+
+async def _read_bounded_agent_broker_response(
+    response,
+    max_bytes: int = AGENT_BROKER_RESPONSE_MAX_BYTES,
+) -> bytes:
+    """Read an upstream broker response without allowing root-memory exhaustion."""
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > max_bytes:
+            response.close()
+            raise AgentBrokerResponseTooLarge(
+                "agent broker response exceeds the configured limit"
+            )
+
+    body = bytearray()
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        if len(body) + len(chunk) > max_bytes:
+            response.close()
+            raise AgentBrokerResponseTooLarge(
+                "agent broker response exceeds the configured limit"
+            )
+        body.extend(chunk)
+    return bytes(body)
+
+
+async def handle_agent_broker(request: web.Request) -> web.StreamResponse:
+    """Relay only fixed, typed POST operations; never expose a signing oracle."""
+    route = _resolve_agent_broker_route(request.match_info.get("route", ""))
+    if request.method != "POST" or route is None:
+        return web.json_response({"error": "Unsupported agent operation"}, status=404)
+    body = await request.read()
+    try:
+        parsed = json.loads(body)
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+    if not isinstance(parsed, dict):
+        return web.json_response({"error": "Invalid request body"}, status=400)
+    if not _workspace_flush_request_allowed(
+        route,
+        parsed,
+        request.headers.get("X-Agent-Workspace-Flush"),
+        _read_workspace_flush_token(),
+    ):
+        return web.json_response({"error": "Unsupported agent operation"}, status=404)
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            **_authority_headers("POST", route, body),
+        }
+        timeout = ClientTimeout(total=920, sock_read=920, sock_connect=30)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{APP_BASE_URL}{route}",
+                data=body,
+                headers=headers,
+                allow_redirects=False,
+            ) as upstream:
+                response_body = await _read_bounded_agent_broker_response(upstream)
+                content_type = upstream.headers.get(
+                    "Content-Type", "application/json"
+                )
+                return web.Response(
+                    status=upstream.status,
+                    body=response_body,
+                    headers={"Content-Type": content_type},
+                )
+    except AgentBrokerResponseTooLarge:
+        return web.json_response({"error": "Agent operation failed"}, status=502)
+    except (OSError, ValueError):
+        return web.json_response(
+            {"error": "Invocation authority is unavailable"},
+            status=503,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(j("agent_broker_failed", route=route, error=str(exc)[:200]))
+        return web.json_response({"error": "Agent operation failed"}, status=502)
+
+
 async def handle_proxy(request: web.Request) -> web.StreamResponse:
+    if _read_workspace_flush_token() is not None:
+        return web.json_response({"error": "Turn is finalizing"}, status=503)
     path = request.match_info.get("path", "")
     url = f"{UPSTREAM}/{path}"
     req_id = f"{int(time.time()*1000)}-{id(request) % 100000}"
@@ -970,11 +1270,24 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
     _log_request_body(req_id, req_body, parsed)
 
-    # Forward — preserve auth + content-type, drop hop-by-hop headers
+    # Forward content headers but strip any model-supplied authority. The root
+    # relay signs the final rewritten body for each upstream attempt.
     fwd_headers = {}
     for k, v in request.headers.items():
         kl = k.lower()
-        if kl in {"host", "content-length", "connection", "transfer-encoding"}:
+        if kl in {
+            "host",
+            "content-length",
+            "connection",
+            "transfer-encoding",
+            "x-api-key",
+            "x-agent-invocation-context",
+            "x-agent-request-proof-version",
+            "x-agent-request-proof-timestamp",
+            "x-agent-request-proof-nonce",
+            "x-agent-request-proof-body-sha256",
+            "x-agent-request-proof-signature",
+        }:
             continue
         fwd_headers[k] = v
 
@@ -1007,9 +1320,17 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         `/usage` counters by the caller.
         """
         body_to_send = body_override if body_override is not None else req_body
+        proof_headers = _authority_headers(
+            request.method,
+            f"/api/agent/model-proxy/{path}",
+            body_to_send or b"",
+        )
         async with ClientSession(timeout=timeout) as session:
             async with session.request(
-                request.method, url, data=body_to_send, headers=fwd_headers,
+                request.method,
+                url,
+                data=body_to_send,
+                headers={**fwd_headers, **proof_headers},
                 allow_redirects=False,
             ) as upstream:
                 status = upstream.status
@@ -1359,9 +1680,19 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
 
 def main() -> None:
-    app = web.Application(client_max_size=50 * 1024 * 1024)
+    if not UPSTREAM.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+        raise RuntimeError("APP_BASE_URL is not a trusted model broker URL")
+    app = web.Application(
+        client_max_size=50 * 1024 * 1024,
+        middlewares=[finalization_gate_middleware],
+    )
     app.router.add_get("/health", handle_health)
     app.router.add_get("/usage", handle_usage)
+    app.router.add_post(
+        "/internal/finalization/{action}",
+        handle_finalization_transition,
+    )
+    app.router.add_route("*", "/agent-broker/{route:.*}", handle_agent_broker)
     app.router.add_route("*", "/{path:.*}", handle_proxy)
     log.info(j("starting", host="127.0.0.1", port=18791, upstream=UPSTREAM))
     web.run_app(app, host="127.0.0.1", port=18791, access_log=None,

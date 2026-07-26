@@ -11,8 +11,8 @@ allowed-tools: Bash(node:*)
 **documents** (markdown) and interactive **artifacts** (HTML/JS or JSX) together,
 organize them into collections, control who can view them, and **publish** them to
 internal destinations (the "intranet" reader) — with a review gate before anything
-goes public. This skill lets you (the agent) act on that content over AI Studio's
-`/api/v1/content` REST API.
+goes public. This skill lets you (the agent) act on that content through AI
+Studio's owner-bound internal broker.
 
 Use it to answer "what's in Atrium about X?", to read a document/artifact, to draft
 a new one, to revise one, or to publish one internally.
@@ -20,8 +20,8 @@ a new one, to revise one, or to publish one internally.
 ## What this skill can and cannot do
 
 **Version-based (what you get here):** reads return the **last saved version**;
-writes create a **new version**. This is the same surface any `sk-`-keyed MCP/REST
-client uses.
+writes create a **new version**, using the same shared services as the MCP/REST
+surfaces.
 
 **NOT reachable here** (session-only, by design — do not claim you can do these):
 
@@ -39,16 +39,14 @@ client uses.
 
 ## Authentication & identity
 
-The skill authenticates with a single scoped `sk-` **content key** (holding
-`content:` scopes), read from `AISTUDIO_CONTENT_API_KEY` or from Secrets Manager via
-`AISTUDIO_CONTENT_API_KEY_SECRET_ID`. You do not handle auth yourself.
+The skill calls an owner-bound internal broker. Its signed invocation proof names
+the workspace owner; the web tier resolves that active user to an Atrium
+Requester and calls the shared content services directly. No reusable content
+credential enters the workspace.
 
-You act as **that key's owner identity** — reads and writes are visibility-gated by
-that user's roles (an agent does what that person could do). This is **not**
-per-caller delegation: every operation is attributed to the content key's owner, not
-to the specific user who asked you. Per-user delegated tokens
-(`/api/v1/agents/delegated-token`) are a designed later phase and are **not
-provisioned yet** — see `docs/features/atrium-agent-access.md`.
+You act as **the signed workspace owner** — reads and writes are visibility-,
+ownership-, and capability-gated by that user's authority. Operations are
+attributed to that owner, never to a shared service principal.
 
 ## Subcommands
 
@@ -117,8 +115,8 @@ body is returned inline (small content). For a large (externally stored) body, u
 node run.js archive --id <id>
 ```
 
-Flips the object's status to `archived` (via the metadata PATCH; needs
-`content:update`, which the content key holds). Reversible, and the object still
+Flips the object's status to `archived` (via the metadata PATCH; needs the
+owner's Atrium authoring authority). Reversible, and the object still
 shows up under `find --status archived`. Archiving also takes any live publication
 offline. Prefer archive when you might want the content back; use `delete` (below)
 only when it should be gone for good.
@@ -131,11 +129,11 @@ node run.js delete --id <id>
 
 Permanently removes the object and **every** version, body, comment, and index
 entry. There is **no undo** — after this, `find`/`read` no longer return it and the
-reader/editor URLs 404. Needs `content:delete` (which the content key holds).
+reader/editor URLs 404. Needs owner-authorized content deletion.
 
 Two guardrails the server enforces — relay either refusal verbatim:
 
-- **Owner-only.** You delete as the content key's owner, so you can only delete
+- **Owner-only.** You delete as the signed workspace owner, so you can only delete
   content that owner owns. Deleting someone else's object returns a `403` error
   (the object's existence is masked as `404` if you couldn't view it at all).
 - **Unpublish first.** A published object is refused with a clear `409` message
@@ -180,7 +178,7 @@ node run.js set-visibility --id <id> --level group --grants role:staff,building:
 |------|---------|----------------|
 | 0 | Success (incl. approval_required) | Use the result |
 | 1 | Config / usage error | Fix the invocation; do not retry blindly |
-| 11 | Unauthorized — content key missing/invalid or lacks the scope | Tell the user Atrium access isn't configured; do not retry |
+| 11 | Unauthorized — signed owner authority is unavailable | Tell the user Atrium access isn't configured; do not retry |
 | 12 | Upstream content-API error (403 forbidden / 404 not found / 422 blocked / 5xx) or network | Surface the error verbatim |
 | 14 | Rate-limited | Wait a moment, retry once |
 
@@ -191,15 +189,11 @@ node run.js set-visibility --id <id> --level group --grants role:staff,building:
 2. **Version-based only.** Your reads are the last saved version and your writes are
    new versions; you cannot type on the live editor rail or leave live
    comments/suggestions.
-3. **You act as the content key's owner, not the asking user.** Do not imply an edit
-   is attributed to the person who asked (delegation is a future phase).
+3. **You act as the signed workspace owner.** Do not imply a shared service
+   principal owns or authorized the operation.
 4. **Relay approval_required verbatim.** A queued public publish is not a failure —
    tell the user it is awaiting approval.
 5. **New content is private + draft.** Creating does not publish or share it; use
    `publish` (destination) and/or `set-visibility` as separate, explicit steps.
-6. **Your writes are NOT §28.3 agent-screened — you are accountable as the key
-   owner.** The Bedrock Guardrails / PII screening runs only for *agent-identity*
-   writes (the future delegated path). An `sk-` content key resolves to its owner
-   (a human / service account), so your create/edit content goes in as that owner's
-   trusted content, un-screened. Keep everything you write appropriate; it is
-   attributed to, and gated by the permissions of, the content key's owner.
+6. **Your writes use the signed owner's requester.** Keep everything you write
+   appropriate; it is attributed to, and gated by, that user's permissions.

@@ -18,6 +18,7 @@ the parsing logic, not the HTTP server.
 import sys
 import types
 import unittest
+from unittest import mock
 
 # Stub aiohttp BEFORE importing mantle_proxy so the module-level
 # `from aiohttp import web, ClientSession, ClientTimeout` succeeds without the
@@ -32,11 +33,16 @@ if "aiohttp" not in sys.modules:
         def __init__(self, payload):
             self.payload = payload
 
+    def _middleware(function):
+        function.__middleware_version__ = 1
+        return function
+
     _aiohttp.web = types.SimpleNamespace(
         Request=object, Response=object, StreamResponse=object,
         Application=object,
         json_response=lambda payload, *a, **k: _FakeJsonResponse(payload),
         run_app=lambda *a, **k: None,
+        middleware=_middleware,
     )
     _aiohttp.ClientSession = object
     _aiohttp.ClientTimeout = object
@@ -46,6 +52,10 @@ import asyncio  # noqa: E402
 
 import mantle_proxy  # noqa: E402
 from mantle_proxy import (  # noqa: E402
+    AgentBrokerResponseTooLarge,
+    _read_bounded_agent_broker_response,
+    _resolve_agent_broker_route,
+    _workspace_flush_request_allowed,
     _extract_usage,
     _is_anthropic_model,
     inject_include_usage,
@@ -59,6 +69,198 @@ from mantle_proxy import (  # noqa: E402
     _parse_anthropic_stream,
     _parse_anthropic_response,
 )
+
+
+class TestAgentBrokerRoute(unittest.TestCase):
+    def test_preserves_exact_allowlisted_app_route(self):
+        self.assertEqual(
+            _resolve_agent_broker_route("api/agent/credentials"),
+            "/api/agent/credentials",
+        )
+
+    def test_rejects_duplicated_or_non_allowlisted_routes(self):
+        self.assertIsNone(
+            _resolve_agent_broker_route("api/agent/api/agent/credentials")
+        )
+        self.assertIsNone(_resolve_agent_broker_route("credentials"))
+        self.assertIsNone(_resolve_agent_broker_route("api/agent/not-allowed"))
+
+    def test_final_flush_accepts_only_token_bound_private_workspace_writes(self):
+        token = "a" * 43
+        self.assertTrue(
+            _workspace_flush_request_allowed(
+                "/api/agent/workspace-storage",
+                {"operation": "upload"},
+                token,
+                token,
+            )
+        )
+        self.assertFalse(
+            _workspace_flush_request_allowed(
+                "/api/agent/workspace-storage",
+                {"operation": "publish"},
+                token,
+                token,
+            )
+        )
+        self.assertFalse(
+            _workspace_flush_request_allowed(
+                "/api/agent/credentials",
+                {"operation": "upload"},
+                token,
+                token,
+            )
+        )
+        self.assertFalse(
+            _workspace_flush_request_allowed(
+                "/api/agent/workspace-storage",
+                {"operation": "upload"},
+                None,
+                token,
+            )
+        )
+
+
+class TestFinalizationGate(unittest.IsolatedAsyncioTestCase):
+    def test_aiohttp_uses_modern_middleware_calling_convention(self):
+        self.assertEqual(
+            mantle_proxy.finalization_gate_middleware.__middleware_version__,
+            1,
+        )
+
+    async def test_begin_blocks_new_calls_and_drains_in_flight_call(self):
+        gate = mantle_proxy._FinalizationGate()
+        self.assertTrue(await gate.enter())
+
+        begin = asyncio.create_task(gate.begin())
+        await asyncio.sleep(0)
+        self.assertFalse(begin.done())
+        self.assertFalse(await gate.enter())
+        self.assertFalse(await gate.enter(final_flush=True))
+
+        await gate.leave()
+        await asyncio.wait_for(begin, timeout=1)
+
+        # The root-only flush may run only after begin has acknowledged the
+        # empty active set; normal model and broker traffic remains closed.
+        self.assertTrue(await gate.enter(final_flush=True))
+        self.assertFalse(await gate.enter())
+        await gate.leave()
+
+        await gate.end()
+        self.assertTrue(await gate.enter())
+        await gate.leave()
+
+    async def test_bogus_slow_body_is_denied_before_read_during_drain(self):
+        gate = mantle_proxy._FinalizationGate()
+        self.assertTrue(await gate.enter())
+        begin = asyncio.create_task(gate.begin())
+        await asyncio.sleep(0)
+
+        class SlowRequest:
+            path = "/agent-broker/api/agent/workspace-storage"
+            headers = {"X-Agent-Workspace-Flush": "b" * 43}
+
+            def __init__(self):
+                self.read_called = False
+                self.release = asyncio.Event()
+
+            async def read(self):
+                self.read_called = True
+                await self.release.wait()
+                return b'{"operation":"upload"}'
+
+        request = SlowRequest()
+        handler_called = False
+
+        async def handler(_request):
+            nonlocal handler_called
+            handler_called = True
+            return object()
+
+        with mock.patch.object(
+            mantle_proxy, "_finalization_gate", gate
+        ), mock.patch.object(
+            mantle_proxy,
+            "_read_workspace_flush_token",
+            return_value="a" * 43,
+        ):
+            await asyncio.wait_for(
+                mantle_proxy.finalization_gate_middleware(request, handler),
+                timeout=1,
+            )
+
+        self.assertFalse(request.read_called)
+        self.assertFalse(handler_called)
+        await gate.leave()
+        await asyncio.wait_for(begin, timeout=1)
+
+    async def test_unrouted_internal_prefix_is_not_exempt_from_gate(self):
+        gate = mantle_proxy._FinalizationGate()
+        await gate.begin()
+
+        request = types.SimpleNamespace(
+            path="/internal/finalization/not-a-route/extra",
+            headers={},
+        )
+        handler_called = False
+
+        async def handler(_request):
+            nonlocal handler_called
+            handler_called = True
+            return object()
+
+        with mock.patch.object(mantle_proxy, "_finalization_gate", gate):
+            await mantle_proxy.finalization_gate_middleware(request, handler)
+
+        self.assertFalse(handler_called)
+
+
+class _FakeResponseContent:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    async def iter_chunked(self, _size):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _FakeBrokerResponse:
+    def __init__(self, chunks, content_length=None):
+        self.headers = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
+        self.content = _FakeResponseContent(chunks)
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class TestBoundedAgentBrokerResponse(unittest.TestCase):
+    def test_accepts_response_at_limit(self):
+        response = _FakeBrokerResponse([b"ab", b"cd"], content_length=4)
+        body = asyncio.run(
+            _read_bounded_agent_broker_response(response, max_bytes=4)
+        )
+        self.assertEqual(body, b"abcd")
+        self.assertFalse(response.closed)
+
+    def test_rejects_declared_oversize_before_streaming(self):
+        response = _FakeBrokerResponse([b"not-read"], content_length=5)
+        with self.assertRaises(AgentBrokerResponseTooLarge):
+            asyncio.run(
+                _read_bounded_agent_broker_response(response, max_bytes=4)
+            )
+        self.assertTrue(response.closed)
+
+    def test_rejects_chunked_oversize_and_closes_response(self):
+        response = _FakeBrokerResponse([b"abc", b"de"])
+        with self.assertRaises(AgentBrokerResponseTooLarge):
+            asyncio.run(
+                _read_bounded_agent_broker_response(response, max_bytes=4)
+            )
+        self.assertTrue(response.closed)
 
 
 class TestExtractUsage(unittest.TestCase):

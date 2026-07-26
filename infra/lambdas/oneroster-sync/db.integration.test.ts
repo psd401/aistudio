@@ -8,7 +8,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import postgres from "postgres";
-import { reconcileCollection } from "./db";
+import { reconcileCollection, writeSyncStatus } from "./db";
 import type { CollectionPullSuccess } from "./oneroster-client";
 
 const databaseUrl = process.env.ONEROSTER_DB_TEST_URL;
@@ -33,6 +33,16 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
     if (!sql) return;
     await sql.unsafe(`
       CREATE EXTENSION IF NOT EXISTS pgcrypto;
+      CREATE TABLE IF NOT EXISTS settings (
+        id serial PRIMARY KEY,
+        key varchar(255) NOT NULL UNIQUE,
+        value text,
+        description text,
+        category varchar(100),
+        is_secret boolean DEFAULT false,
+        created_at timestamp DEFAULT now(),
+        updated_at timestamp DEFAULT now()
+      );
       CREATE OR REPLACE FUNCTION update_updated_at_column()
       RETURNS TRIGGER AS $$
       BEGIN
@@ -61,6 +71,9 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
         oneroster_academic_sessions,
         oneroster_orgs
     `);
+    await sql`
+      DELETE FROM settings WHERE key = 'ONEROSTER_SYNC_STATUS'
+    `;
   });
 
   afterAll(async () => {
@@ -165,5 +178,36 @@ describeDatabase("OneRoster PostgreSQL reconciliation", () => {
         last_synced_at: expect.any(Date),
       })
     );
+  });
+
+  it("upserts the durable administrator sync status without marking it secret", async () => {
+    if (!sql) throw new Error("database connection was not initialized");
+    const status = {
+      runId: "integration-run",
+      trigger: "manual",
+      state: "succeeded",
+      startedAt: "2026-07-26T18:00:00.000Z",
+      completedAt: "2026-07-26T18:01:00.000Z",
+      unchanged: false,
+      collections: [],
+      error: null,
+    };
+
+    await writeSyncStatus(sql, status);
+    const [row] = await sql<
+      Array<{
+        value: string;
+        category: string | null;
+        is_secret: boolean | null;
+      }>
+    >`
+      SELECT value, category, is_secret
+        FROM settings
+       WHERE key = 'ONEROSTER_SYNC_STATUS'
+    `;
+
+    expect(JSON.parse(row.value)).toEqual(status);
+    expect(row.category).toBe("integrations");
+    expect(row.is_secret).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 {
   "summary": {
     "actions": 24,
-    "features": 8,
+    "features": 9,
     "scopes": 25,
     "agentInvocableActions": 17
   },
@@ -573,6 +573,16 @@
       "identifier": "model-compare",
       "name": "Model Compare",
       "description": "Compare AI model responses side-by-side.",
+      "defaultRoles": [
+        "administrator",
+        "staff"
+      ],
+      "humanDriven": true
+    },
+    {
+      "identifier": "skill.redrover",
+      "name": "Agent skill: Red Rover",
+      "description": "Allow owner-bound agents to read district employee absence and vacancy data from Red Rover.",
       "defaultRoles": [
         "administrator",
         "staff"

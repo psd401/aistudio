@@ -22,7 +22,6 @@
 
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
-import { exchangeMcpOAuthTokens } from "@/lib/mcp/mcp-auth-utils"
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
@@ -31,7 +30,6 @@ import { nexusMcpServers } from "@/lib/db/schema"
 import { requireUserAccess, rejectUnsafeMcpUrl, getOAuthCredentials } from "@/lib/mcp/connector-service"
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
-import { ServerSideOAuthProvider } from "@/lib/mcp/mcp-oauth-provider"
 import {
   UUID_RE,
   getMcpAuthCookieName,
@@ -179,61 +177,13 @@ export async function GET(req: Request): Promise<Response> {
       return NextResponse.json({ url: authUrl.toString() })
     }
 
-    // ── MCP-native OAuth flow (no credentialsKey) ──────────────────────────
-    // 5. Create provider and call auth()
-    const provider = new ServerSideOAuthProvider({
-      serverId,
-      userId,
-      redirectUrl,
-    })
-
-    const result = await exchangeMcpOAuthTokens(provider, {
-      serverUrl: server.url,
-    })
-
-    if (result === "AUTHORIZED") {
-      // User already has valid tokens — no redirect needed
-      timer({ status: "success", outcome: "already_authorized" })
-      log.info("User already authorized for MCP server", { requestId, serverId })
-      return NextResponse.json({ authorized: true })
-    }
-
-    // result === "REDIRECT" — provider.capturedAuthUrl has the authorization URL
-    const authUrl = provider.capturedAuthUrl
-    if (!authUrl) {
-      log.error("auth() returned REDIRECT but no auth URL was captured", { requestId, serverId })
-      timer({ status: "error", reason: "no_auth_url" })
-      return NextResponse.json(
-        { error: "Failed to generate authorization URL" },
-        { status: 500 }
-      )
-    }
-
-    // 6. Encrypt code verifier + state into cookie for callback.
-    // oauthState is the exact state param the SDK embedded in authUrl — stored so
-    // the callback can do a timing-safe comparison for CSRF protection.
-    const cookiePayload = JSON.stringify({
-      codeVerifier: await provider.codeVerifier(),
-      serverId,
-      userId,
-      createdAt: Date.now(),
-      oauthState: authUrl.searchParams.get("state") ?? null,
-    })
-    const encryptedState = await encryptToken(cookiePayload)
-
-    const cookieStore = await cookies()
-    cookieStore.set(getMcpAuthCookieName(serverId), encryptedState, {
-      httpOnly: true,
-      secure: process.env.ENVIRONMENT === "prod" || process.env.ENVIRONMENT === "staging" || process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: STATE_COOKIE_MAX_AGE,
-      path: "/api/connectors/mcp-auth",
-    })
-
-    timer({ status: "success" })
-    log.info("MCP-native OAuth authorization URL generated", { requestId, serverId })
-
-    return NextResponse.json({ url: authUrl.toString() })
+    // Dynamic discovery/registration performs SDK-internal fetches that cannot
+    // be IP-pinned. Administrators must explicitly register OAuth endpoints.
+    timer({ status: "error", reason: "preregistered_oauth_required" })
+    return NextResponse.json(
+      { error: "Pre-registered OAuth endpoints are required for this connector." },
+      { status: 400 }
+    )
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error)
     log.error("MCP auth initiate failed", {

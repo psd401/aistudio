@@ -15,9 +15,16 @@
  * Part of Epic #910 — Agent Skills Platform
  */
 
-import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { execSync, type ExecSyncOptionsWithStringEncoding } from 'child_process';
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Handler } from 'aws-lambda';
@@ -29,6 +36,9 @@ const BUCKET = process.env.SKILLS_BUCKET || '';
 const DATABASE_RESOURCE_ARN = process.env.DATABASE_RESOURCE_ARN || '';
 const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
 const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
+const MAX_SKILL_INPUT_FILES = 50;
+const MAX_SKILL_INPUT_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_SKILL_INPUT_TOTAL_BYTES = 10 * 1024 * 1024;
 
 const s3 = new S3Client({ region: REGION });
 const rds = new RDSDataClient({ region: REGION });
@@ -93,6 +103,10 @@ const PII_PATTERNS = [
 
 interface SkillBuildEvent {
   skillId: string;
+  ownerKey: string;
+  version: number;
+  scanLeaseId: string;
+  idempotencyKey: string;
   s3Key: string;
   destinationPrefix: string;
   scope: 'user' | 'shared';
@@ -108,16 +122,59 @@ interface ScanFindings {
   summary: string;
 }
 
+export function assertSkillScanPrefixes(event: Pick<
+  SkillBuildEvent,
+  'ownerKey' | 's3Key' | 'destinationPrefix'
+>): void {
+  const ownerPrefix = `skills/user/${event.ownerKey.toLowerCase()}/`;
+  const draftMatch = event.s3Key.match(
+    new RegExp(
+      `^${ownerPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` +
+        'drafts/([a-zA-Z0-9_.-]+)/versions/' +
+        '([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$',
+      'i',
+    ),
+  );
+  if (!draftMatch) {
+    throw new Error('Invalid owner-bound skill scan prefixes');
+  }
+  const [, slug, generation] = draftMatch;
+  const expectedDestination =
+    `${ownerPrefix}approved/${slug}/versions/${generation}`;
+  if (event.destinationPrefix !== expectedDestination) {
+    throw new Error('Invalid owner-bound skill scan prefixes');
+  }
+}
+
+export function shouldRollbackDestinationUpload(
+  destinationUploaded: boolean,
+  promotionCommitted: boolean,
+): boolean {
+  return destinationUploaded && !promotionCommitted;
+}
+
 export const handler: Handler<SkillBuildEvent> = async (event) => {
   const log = createLogger({ skillId: event.skillId });
 
   // Validate scope at the entry point so a bad value fails fast with a
   // clear error rather than surfacing as a CAST failure inside the RDS Data
   // API call. The DB enum is the source of truth for allowed values.
-  if (!isValidScope(event.scope)) {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(event.skillId) ||
+    typeof event.ownerKey !== 'string' ||
+    !/^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/.test(event.ownerKey) ||
+    !isValidScope(event.scope) ||
+    !Number.isSafeInteger(event.version) ||
+    event.version < 1 ||
+    !/^[0-9a-f-]{36}$/i.test(event.scanLeaseId) ||
+    typeof event.idempotencyKey !== 'string' ||
+    event.idempotencyKey.length < 1 ||
+    event.idempotencyKey.length > 256
+  ) {
     log.error('Invalid scope in SkillBuildEvent', { scope: event.scope });
-    throw new Error(`Invalid scope: ${event.scope}. Must be one of: ${VALID_SCOPES.join(', ')}`);
+    throw new Error('Invalid skill scan event');
   }
+  assertSkillScanPrefixes(event);
 
   log.info('Skill build event received', {
     s3Key: event.s3Key,
@@ -125,8 +182,18 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
   });
 
   const workDir = path.join('/tmp', `skill-${event.skillId}-${Date.now()}`);
+  let claimed = false;
+  let destinationUploaded = false;
+  let promotionCommitted = false;
 
   try {
+    claimed = await claimSkillScan(event);
+    if (!claimed) {
+      log.warn('Ignoring stale or duplicate skill scan event', {
+        version: event.version,
+      });
+      return { status: 'stale', skillId: event.skillId };
+    }
     // 1. Download skill files from S3
     await downloadSkillFromS3(event.s3Key, workDir, log);
 
@@ -142,7 +209,9 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
 
     if (isFlagged) {
       // Update DB: mark as flagged with findings
-      await updateSkillStatus(event.skillId, 'flagged', findings);
+      if (!await updateSkillStatus(event, 'flagged', findings)) {
+        return { status: 'stale', skillId: event.skillId };
+      }
       await writeAuditLog(event.skillId, 'scan_flagged', event.actorUserId, {
         findings: findings.summary,
       });
@@ -156,18 +225,21 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
 
     // 4. Run npm install in sandbox
     const packageJsonPath = path.join(workDir, 'package.json');
+    let dependencyAuditEvidence:
+      | { status: 'not_applicable' }
+      | { status: 'clean'; lockfileSha256: string };
     if (fs.existsSync(packageJsonPath)) {
       try {
         installSkillDependencies(workDir);
       } catch (npmErr: unknown) {
         const message = npmErr instanceof Error ? npmErr.message : String(npmErr);
-        await updateSkillStatus(event.skillId, 'flagged', {
+        if (!await updateSkillStatus(event, 'flagged', {
           secrets: [],
           pii: [],
           npmAudit: [],
           skillMdLint: [`npm install failed: ${message.substring(0, 500)}`],
           summary: 'npm install failed',
-        });
+        })) return { status: 'stale', skillId: event.skillId };
         await writeAuditLog(event.skillId, 'build_failed', event.actorUserId, {
           error: message.substring(0, 500),
         });
@@ -184,7 +256,32 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
       // (ENOLOCK) before install, which is why the pre-install scan could never
       // catch dependency CVEs (REV-INFRA-062). A high/critical advisory flags
       // the skill and skips promotion — nothing has been uploaded yet.
-      const npmAudit = auditInstalledDeps(workDir, log);
+      let npmAudit: { severity: string; title: string }[];
+      let lockfileSha256: string;
+      try {
+        npmAudit = auditInstalledDeps(workDir, log);
+        lockfileSha256 = hashDependencyLockfile(workDir);
+      } catch (auditErr: unknown) {
+        const message = auditErr instanceof Error ? auditErr.message : String(auditErr);
+        const auditFindings: ScanFindings = {
+          secrets: [],
+          pii: [],
+          npmAudit: [],
+          skillMdLint: [`Dependency audit unavailable: ${message.substring(0, 500)}`],
+          summary: 'dependency audit unavailable',
+        };
+        if (!await updateSkillStatus(event, 'flagged', auditFindings)) {
+          return { status: 'stale', skillId: event.skillId };
+        }
+        await writeAuditLog(event.skillId, 'audit_error', event.actorUserId, {
+          error: message.substring(0, 500),
+        });
+        return {
+          status: 'audit_error',
+          skillId: event.skillId,
+          findings: auditFindings,
+        };
+      }
       if (npmAudit.some(a => a.severity === 'critical' || a.severity === 'high')) {
         const auditFindings: ScanFindings = {
           secrets: [],
@@ -193,9 +290,16 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
           skillMdLint: [],
           summary: `${npmAudit.length} high/critical npm vulnerability(ies)`,
         };
-        await updateSkillStatus(event.skillId, 'flagged', auditFindings);
+        if (!await updateSkillStatus(event, 'flagged', auditFindings)) {
+          return { status: 'stale', skillId: event.skillId };
+        }
         await writeAuditLog(event.skillId, 'scan_flagged', event.actorUserId, {
           findings: auditFindings.summary,
+          dependencyAudit: {
+            status: 'vulnerable',
+            lockfileSha256,
+            findings: npmAudit,
+          },
         });
 
         return {
@@ -204,22 +308,36 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
           findings: auditFindings,
         };
       }
+      dependencyAuditEvidence = { status: 'clean', lockfileSha256 };
+    } else {
+      dependencyAuditEvidence = { status: 'not_applicable' };
     }
 
     // 5. Upload built skill to destination prefix
     await uploadSkillToS3(workDir, event.destinationPrefix);
+    destinationUploaded = true;
 
     // 6. Update DB: mark as clean, update scope and s3_key
-    await updateSkillAfterPromotion(
-      event.skillId,
+    const promotionApplied = await updateSkillAfterPromotion(
+      event,
       event.scope,
       event.destinationPrefix,
     );
+    if (!promotionApplied) {
+      await deleteSkillPrefix(event.destinationPrefix);
+      destinationUploaded = false;
+      return { status: 'stale', skillId: event.skillId };
+    }
+    // The clean DB row now authoritatively points at these approved bytes.
+    // Audit is a subsequent side effect and must never make the catch path
+    // delete a destination that has already been durably committed.
+    promotionCommitted = true;
 
     // 7. Write audit log
     const action = event.scope === 'shared' ? 'promoted_to_shared' : 'auto_promoted';
     await writeAuditLog(event.skillId, action, event.actorUserId, {
       destinationPrefix: event.destinationPrefix,
+      dependencyAudit: dependencyAuditEvidence,
     });
 
     return {
@@ -232,6 +350,15 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
     const message = err instanceof Error ? err.message : String(err);
     log.error('Skill build failed', { error: message });
 
+    if (shouldRollbackDestinationUpload(
+      destinationUploaded,
+      promotionCommitted,
+    )) {
+      await deleteSkillPrefix(event.destinationPrefix).catch(() => undefined);
+    }
+    if (claimed) {
+      await clearFailedSkillClaim(event).catch(() => undefined);
+    }
     await writeAuditLog(event.skillId, 'build_error', event.actorUserId, {
       error: message.substring(0, 1000),
     }).catch((auditErr: unknown) => {
@@ -241,6 +368,16 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
 
     throw err;
   } finally {
+    if (claimed) await finishSkillAdmission(event, 1).catch(
+      (finishError: unknown) => {
+        log.error('Failed to finish skill scan admission lease', {
+          error:
+            finishError instanceof Error
+              ? finishError.message
+              : String(finishError),
+        });
+      },
+    );
     // Cleanup /tmp
     try {
       fs.rmSync(workDir, { recursive: true, force: true });
@@ -261,6 +398,8 @@ export async function downloadSkillFromS3(
   // H5 fix: Paginate ListObjectsV2 to handle skills with >1000 files
   const normalizedPrefix = prefix.endsWith('/') ? prefix : `${prefix}/`;
   let continuationToken: string | undefined;
+  let downloadedFiles = 0;
+  let downloadedBytes = 0;
   // Resolve the work-dir root once for the traversal containment check below.
   const destRoot = path.resolve(destDir) + path.sep;
 
@@ -273,6 +412,17 @@ export async function downloadSkillFromS3(
 
     for (const obj of listResp.Contents || []) {
       if (!obj.Key || obj.Key.endsWith('/')) continue;
+      if (downloadedFiles >= MAX_SKILL_INPUT_FILES) {
+        throw new Error('Skill input exceeds the file-count limit');
+      }
+      if (
+        typeof obj.Size !== 'number' ||
+        obj.Size < 0 ||
+        obj.Size > MAX_SKILL_INPUT_FILE_BYTES ||
+        downloadedBytes + obj.Size > MAX_SKILL_INPUT_TOTAL_BYTES
+      ) {
+        throw new Error('Skill input exceeds its declared byte limits');
+      }
 
       const relativePath = obj.Key.slice(normalizedPrefix.length);
       // Path-traversal guard (REV-INFRA-063): S3 keys are user-influenced —
@@ -295,15 +445,132 @@ export async function downloadSkillFromS3(
 
       if (getResp.Body) {
         const chunks: Buffer[] = [];
+        let objectBytes = 0;
         for await (const chunk of getResp.Body as AsyncIterable<Buffer>) {
-          chunks.push(chunk);
+          const safeChunk = Buffer.from(chunk);
+          objectBytes += safeChunk.byteLength;
+          if (
+            objectBytes > obj.Size ||
+            downloadedBytes + objectBytes > MAX_SKILL_INPUT_TOTAL_BYTES
+          ) {
+            throw new Error('Skill object exceeded its declared byte limit');
+          }
+          chunks.push(safeChunk);
+        }
+        if (objectBytes !== obj.Size) {
+          throw new Error('Skill object length did not match its S3 metadata');
         }
         fs.writeFileSync(destPath, Buffer.concat(chunks));
+        downloadedFiles += 1;
+        downloadedBytes += objectBytes;
       }
     }
 
     continuationToken = listResp.NextContinuationToken;
   } while (continuationToken);
+}
+
+export async function claimSkillScan(
+  event: SkillBuildEvent,
+  rdsClient: RDSDataClient = rds,
+): Promise<boolean> {
+  const response = await rdsClient.send(new ExecuteStatementCommand({
+    resourceArn: DATABASE_RESOURCE_ARN,
+    secretArn: DATABASE_SECRET_ARN,
+    database: DATABASE_NAME,
+    sql: `UPDATE psd_agent_skills AS skill
+          SET scan_lease_id = CAST(:lease AS UUID),
+              scan_started_at = NOW(),
+              updated_at = NOW()
+          FROM users AS owner, resource_admission_leases AS admission
+          WHERE skill.id = CAST(:id AS UUID)
+            AND skill.owner_user_id = owner.id
+            AND LOWER(owner.email) = :owner
+            AND skill.version = :version
+            AND skill.s3_key = :source
+            AND skill.scan_status = 'pending'
+            AND admission.id = CAST(:lease AS UUID)
+            AND admission.kind = 'skill-scan-events'
+            AND admission.owner_key = :owner
+            AND admission.context_key = :context
+            AND admission.idempotency_key = :idempotency
+            AND admission.status = 'active'
+            AND admission.expires_at > NOW()
+            AND (
+              skill.scan_lease_id IS NULL
+              OR (
+                skill.scan_lease_id = CAST(:lease AS UUID)
+                AND skill.scan_started_at < NOW() - INTERVAL '10 minutes'
+              )
+            )
+          RETURNING skill.id`,
+    parameters: [
+      { name: 'lease', value: { stringValue: event.scanLeaseId } },
+      { name: 'id', value: { stringValue: event.skillId } },
+      { name: 'version', value: { longValue: event.version } },
+      { name: 'source', value: { stringValue: event.s3Key } },
+      { name: 'owner', value: { stringValue: event.ownerKey.toLowerCase() } },
+      {
+        name: 'context',
+        value: { stringValue: `${event.skillId}:${event.version}` },
+      },
+      {
+        name: 'idempotency',
+        value: { stringValue: event.idempotencyKey },
+      },
+    ],
+  }));
+  return (response.records?.length ?? 0) === 1;
+}
+
+async function clearFailedSkillClaim(event: SkillBuildEvent): Promise<void> {
+  await rds.send(new ExecuteStatementCommand({
+    resourceArn: DATABASE_RESOURCE_ARN,
+    secretArn: DATABASE_SECRET_ARN,
+    database: DATABASE_NAME,
+    sql: `UPDATE psd_agent_skills
+          SET scan_lease_id = NULL,
+              scan_started_at = NULL,
+              updated_at = NOW()
+          WHERE id = CAST(:id AS UUID)
+            AND version = :version
+            AND scan_status = 'pending'
+            AND scan_lease_id = CAST(:lease AS UUID)`,
+    parameters: [
+      { name: 'id', value: { stringValue: event.skillId } },
+      { name: 'version', value: { longValue: event.version } },
+      { name: 'lease', value: { stringValue: event.scanLeaseId } },
+    ],
+  }));
+}
+
+async function finishSkillAdmission(
+  event: SkillBuildEvent,
+  actualUnits: 1,
+): Promise<void> {
+  await rds.send(new ExecuteStatementCommand({
+    resourceArn: DATABASE_RESOURCE_ARN,
+    secretArn: DATABASE_SECRET_ARN,
+    database: DATABASE_NAME,
+    sql: `UPDATE resource_admission_leases
+          SET status = 'completed',
+              actual_units = :actual,
+              finished_at = NOW()
+          WHERE id = CAST(:lease AS UUID)
+            AND kind = 'skill-scan-events'
+            AND owner_key = :owner
+            AND context_key = :context
+            AND status = 'active'`,
+    parameters: [
+      { name: 'actual', value: { longValue: actualUnits } },
+      { name: 'lease', value: { stringValue: event.scanLeaseId } },
+      { name: 'owner', value: { stringValue: event.ownerKey.toLowerCase() } },
+      {
+        name: 'context',
+        value: { stringValue: `${event.skillId}:${event.version}` },
+      },
+    ],
+  }));
 }
 
 async function uploadSkillToS3(srcDir: string, destPrefix: string): Promise<void> {
@@ -342,6 +609,26 @@ async function uploadSkillToS3(srcDir: string, destPrefix: string): Promise<void
       }),
     );
   }
+}
+
+async function deleteSkillPrefix(prefix: string): Promise<void> {
+  const normalizedPrefix = prefix.endsWith('/') ? prefix : `${prefix}/`;
+  let continuationToken: string | undefined;
+  do {
+    const page = await s3.send(new ListObjectsV2Command({
+      Bucket: BUCKET,
+      Prefix: normalizedPrefix,
+      ContinuationToken: continuationToken,
+    }));
+    await Promise.all(
+      (page.Contents ?? [])
+        .filter((item): item is typeof item & { Key: string } =>
+          typeof item.Key === 'string' && item.Key.startsWith(normalizedPrefix))
+        .map((item) =>
+          s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: item.Key }))),
+    );
+    continuationToken = page.NextContinuationToken;
+  } while (continuationToken);
 }
 
 async function scanSkill(skillDir: string): Promise<ScanFindings> {
@@ -495,11 +782,8 @@ export function installSkillDependencies(workDir: string): void {
  * exist — `npm audit` is a no-op (ENOLOCK) without them, which is why the
  * pre-install scan could never see dependency vulns (REV-INFRA-062).
  *
- * Graceful degradation (documented behavior): if the audit tooling itself
- * cannot produce parseable JSON (npm/network error), we log a WARNING and
- * return []. A tooling error is therefore VISIBLE in logs, never a silent
- * "clean" — but it does not hard-block promotion, matching the best-effort
- * intent of the other scan steps. `exec` is injectable for testing.
+ * Audit tooling failures throw and block promotion. An unevaluated audit is not
+ * equivalent to a clean dependency tree. `exec` is injectable for testing.
  */
 export function auditInstalledDeps(
   dir: string,
@@ -534,7 +818,7 @@ export function auditInstalledDeps(
       log.warn('npm audit could not run; dependency vulnerabilities were NOT evaluated', {
         error: message.substring(0, 300),
       });
-      return results;
+      throw new Error(`Dependency audit could not run: ${message}`);
     }
   }
 
@@ -543,7 +827,7 @@ export function auditInstalledDeps(
     audit = JSON.parse(auditOutput);
   } catch {
     log.warn('npm audit produced no parseable JSON; dependency vulnerabilities were NOT evaluated');
-    return results;
+    throw new Error('Dependency audit produced no parseable JSON');
   }
 
   // A registry/auth failure can still exit with valid JSON that carries a
@@ -556,7 +840,7 @@ export function auditInstalledDeps(
     log.warn('npm audit did not evaluate dependencies; dependency vulnerabilities were NOT evaluated', {
       error: audit.error ? JSON.stringify(audit.error).substring(0, 300) : undefined,
     });
-    return results;
+    throw new Error('Dependency audit did not evaluate dependencies');
   }
 
   const vulns = audit.vulnerabilities;
@@ -568,12 +852,21 @@ export function auditInstalledDeps(
   return results;
 }
 
+/** Return auditable evidence for the exact dependency graph that was scanned. */
+export function hashDependencyLockfile(dir: string): string {
+  const lockfilePath = path.join(dir, 'package-lock.json');
+  if (!fs.existsSync(lockfilePath)) {
+    throw new Error('Dependency audit completed without package-lock.json evidence');
+  }
+  return createHash('sha256').update(fs.readFileSync(lockfilePath)).digest('hex');
+}
+
 async function updateSkillStatus(
-  skillId: string,
+  event: SkillBuildEvent,
   scanStatus: string,
   findings: ScanFindings,
-): Promise<void> {
-  await rds.send(new ExecuteStatementCommand({
+): Promise<boolean> {
+  const response = await rds.send(new ExecuteStatementCommand({
     resourceArn: DATABASE_RESOURCE_ARN,
     secretArn: DATABASE_SECRET_ARN,
     database: DATABASE_NAME,
@@ -585,21 +878,27 @@ async function updateSkillStatus(
           SET scan_status = :status,
               scan_findings = CAST(:findings AS JSONB),
               updated_at = NOW()
-          WHERE id = CAST(:id AS UUID)`,
+          WHERE id = CAST(:id AS UUID)
+            AND version = :version
+            AND scan_lease_id = CAST(:lease AS UUID)
+          RETURNING id`,
     parameters: [
       { name: 'status', value: { stringValue: scanStatus } },
       { name: 'findings', value: { stringValue: JSON.stringify(findings) } },
-      { name: 'id', value: { stringValue: skillId } },
+      { name: 'id', value: { stringValue: event.skillId } },
+      { name: 'version', value: { longValue: event.version } },
+      { name: 'lease', value: { stringValue: event.scanLeaseId } },
     ],
   }));
+  return (response.records?.length ?? 0) === 1;
 }
 
 async function updateSkillAfterPromotion(
-  skillId: string,
+  event: SkillBuildEvent,
   scope: string,
   s3Key: string,
-): Promise<void> {
-  await rds.send(new ExecuteStatementCommand({
+): Promise<boolean> {
+  const response = await rds.send(new ExecuteStatementCommand({
     resourceArn: DATABASE_RESOURCE_ARN,
     secretArn: DATABASE_SECRET_ARN,
     database: DATABASE_NAME,
@@ -609,13 +908,19 @@ async function updateSkillAfterPromotion(
               scan_status = 'clean',
               s3_key = :s3key,
               updated_at = NOW()
-          WHERE id = CAST(:id AS UUID)`,
+          WHERE id = CAST(:id AS UUID)
+            AND version = :version
+            AND scan_lease_id = CAST(:lease AS UUID)
+          RETURNING id`,
     parameters: [
       { name: 'scope', value: { stringValue: scope } },
       { name: 's3key', value: { stringValue: s3Key } },
-      { name: 'id', value: { stringValue: skillId } },
+      { name: 'id', value: { stringValue: event.skillId } },
+      { name: 'version', value: { longValue: event.version } },
+      { name: 'lease', value: { stringValue: event.scanLeaseId } },
     ],
   }));
+  return (response.records?.length ?? 0) === 1;
 }
 
 async function writeAuditLog(

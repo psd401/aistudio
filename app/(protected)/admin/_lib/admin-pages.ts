@@ -14,6 +14,7 @@ import {
   Library,
   Plug,
   Settings,
+  School,
   ShieldCheck,
   Users,
   UsersRound,
@@ -69,6 +70,14 @@ export const ADMIN_SECTIONS: AdminSection[] = [
           "Google Directory group sync — selection rules, membership, and manual sync",
         icon: UsersRound,
         slug: "groups",
+      },
+      {
+        href: "/admin/rosters",
+        title: "Rosters",
+        description:
+          "ClassLink OneRoster settings, sync status, and read-only roster browser",
+        icon: School,
+        slug: "rosters",
       },
       {
         href: "/admin/oauth-clients",

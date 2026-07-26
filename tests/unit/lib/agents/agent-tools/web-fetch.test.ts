@@ -13,6 +13,13 @@ import {
   MAX_BYTES,
 } from "@/lib/agents/agent-tools/web-fetch";
 import type { McpToolContext } from "@/lib/mcp/types";
+import { setSafeFetchTransportForTests } from "@/lib/security/safe-fetch";
+
+setSafeFetchTransportForTests((input, init) => global.fetch(input, init));
+
+afterAll(() => {
+  setSafeFetchTransportForTests(undefined);
+});
 
 const ctx: McpToolContext = {
   userId: 1,

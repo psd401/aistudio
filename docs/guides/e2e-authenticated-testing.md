@@ -39,7 +39,12 @@ mint it.
 For the complete local suite, prefer `bun run test:e2e:local`. The runner starts
 or reuses the host development server, seeds the test users and every committed
 authenticated fixture (including Atrium visibility/group content and resource
-grant rows), warms the routes, and then runs Playwright serially. This makes a
+grant rows), warms the routes, and then runs Playwright serially. A server on
+`:3100` is reused **only when it belongs to the same worktree** the runner is
+invoked from (the listener's cwd must match the repo root) — a healthy server
+from another worktree serves different code and a different `node_modules`, so
+the runner instead scans `E2E_PORT+1..+9` for a free port and starts its own,
+after syncing dependencies with `bun install --frozen-lockfile`. This makes a
 freshly reset local database sufficient without manually applying individual SQL
 files from `tests/e2e/fixtures/`. A runner-started server also sets
 `ATRIUM_LOCAL_STORAGE_DIR` to a port-scoped directory under `/tmp`, so Atrium
@@ -106,3 +111,4 @@ Two non-obvious requirements (both encoded in the helper):
 | `401` despite matching secret | token missing `tokenLifetimeMs` / near expiry | use `mintSessionToken()` (sets a 12h lifetime) |
 | Empty navigation / page errors | local DB behind on migrations | run `scripts/db/run-migrations.ts` (step 1) |
 | `/api/auth/session` → `200 null` | cookie not reaching server | use `authenticateContext()` (addCookies), not raw fetch |
+| List/search specs degrade over weeks of runs | E2E probe rows accumulating in the shared local DB | `bun run db:cleanup:e2e` (dry run), then `-- --yes` to prune |

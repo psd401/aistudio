@@ -57,6 +57,10 @@ export * from "./tables/nexus-shares";
 export * from "./tables/nexus-templates";
 export * from "./tables/nexus-user-preferences";
 export * from "./tables/nexus-provider-metrics";
+export * from "./tables/deep-research-reservations";
+export * from "./tables/agentic-cost-reservations";
+export * from "./tables/resource-admission-leases";
+export * from "./tables/workspace-upload-reservations";
 export * from "./tables/nexus-repository-bindings";
 
 // ============================================
@@ -167,12 +171,14 @@ export * from "./tables/agent-credential-requests";
 // ============================================
 export * from "./tables/agent-workspace-tokens";
 export * from "./tables/agent-workspace-consent-nonces";
+export * from "./tables/agent-request-nonces";
 
 // ============================================
 // API Keys (External API Platform)
 // ============================================
 export * from "./tables/api-keys";
 export * from "./tables/api-key-usage";
+export * from "./tables/api-rate-limit-reservations";
 
 // ============================================
 // OAuth2/OIDC Provider (#686)

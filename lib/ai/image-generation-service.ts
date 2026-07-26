@@ -19,6 +19,7 @@ import { createLogger, generateRequestId } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
 import { assertSafeFetchUrl } from '@/lib/agents/agent-tools/web-fetch';
+import { safeFetch } from '@/lib/security/safe-fetch';
 
 // Type for OpenAI image size
 type OpenAIImageSize = '256x256' | '512x512' | '1024x1024' | '1792x1024' | '1024x1792';
@@ -104,8 +105,7 @@ export async function fetchReferenceImageSafely(
       });
       throw createImageError('NO_IMAGE', 'Reference image URL is not allowed');
     }
-    const res = await fetch(currentUrl, {
-      redirect: 'manual',
+    const res = await safeFetch(currentUrl, {
       signal: AbortSignal.timeout(REFERENCE_IMAGE_TIMEOUT_MS),
     });
     if (REDIRECT_STATUS_CODES.has(res.status)) {

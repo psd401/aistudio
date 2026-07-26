@@ -16,10 +16,13 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
 import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle/utils"
-import { executeQuery } from "@/lib/db/drizzle-client"
+import { executeTransaction } from "@/lib/db/drizzle-client"
 import { oauthConsentDecisions } from "@/lib/db/schema"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import type { ActionState } from "@/types/actions-types"
+import { count, eq, lt, sql } from "drizzle-orm"
+import { headers } from "next/headers"
+import { getOAuthInteractionSummary } from "@/lib/oauth/interaction-service"
 
 // ============================================
 // Types
@@ -61,10 +64,47 @@ async function processConsent(
       throw ErrorFactories.authNoSession()
     }
 
-    // Store consent decision in database (5 min TTL)
-    await executeQuery(
-      (db) =>
-        db
+    // The uid comes from the browser, but oidc-provider's signed interaction
+    // cookie is authoritative. Refuse arbitrary or expired identifiers before
+    // allocating a durable decision row.
+    const interaction = await getOAuthInteractionSummary(
+      interactionUid,
+      new Headers(await headers())
+    )
+    if (
+      !interaction
+      || interaction.uid !== interactionUid
+      || interaction.promptName !== "consent"
+    ) {
+      throw ErrorFactories.validationFailed([{
+        field: "interactionUid",
+        message: "OAuth interaction is invalid or expired",
+        value: interactionUid,
+      }])
+    }
+
+    // Bound outstanding decisions per authenticated user. The advisory lock
+    // makes expiry cleanup + count + insert one atomic reservation.
+    await executeTransaction(
+      async (tx) => {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(1129270867, ${userId})`
+        )
+        await tx
+          .delete(oauthConsentDecisions)
+          .where(lt(oauthConsentDecisions.expiresAt, new Date()))
+        const [outstanding] = await tx
+          .select({ value: count() })
+          .from(oauthConsentDecisions)
+          .where(eq(oauthConsentDecisions.userId, userId))
+        if ((outstanding?.value ?? 0) >= 10) {
+          throw ErrorFactories.bizQuotaExceeded(
+            "OAuth consent decisions",
+            10,
+            outstanding?.value ?? 0
+          )
+        }
+        await tx
           .insert(oauthConsentDecisions)
           .values({
             uid: interactionUid,
@@ -74,7 +114,8 @@ async function processConsent(
             // signed interaction state, never from browser-supplied values.
             scopes: [],
             expiresAt: new Date(Date.now() + 5 * 60 * 1000),
-          }),
+          })
+      },
       "storeConsentDecision"
     )
 
