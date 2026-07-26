@@ -1323,7 +1323,11 @@ paths:
             enum: [draft, published, archived]
         - name: query
           in: query
-          description: Case-insensitive title substring search
+          description: >-
+            Case-insensitive substring search over the title OR any tag. An
+            object matches when the text appears anywhere in its title or
+            anywhere within one of its tags. Distinct from the `tag` parameter,
+            which is a whole-tag equality filter; combining the two ANDs them.
           schema:
             type: string
             minLength: 1
