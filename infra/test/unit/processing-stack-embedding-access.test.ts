@@ -148,6 +148,10 @@ describe('ProcessingStack embedding visual-artifact access', () => {
         { Key: 'ManagedBy', Value: 'cdk' },
       ]),
     });
+    template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
+      MaximumRetryAttempts: 0,
+      MaximumEventAgeInSeconds: 1_800,
+    });
     template.hasResourceProperties('AWS::Events::Rule', {
       Description: 'Nightly ClassLink OneRoster full sync (#1310)',
       ScheduleExpression: 'cron(0 10 * * ? *)',

@@ -911,6 +911,10 @@ export class ProcessingStack extends cdk.Stack {
         },
       ),
       timeout: cdk.Duration.minutes(15),
+      // A persisted failed status must be terminal. Implicit async retries can
+      // otherwise overlap with a new manual run between attempts.
+      retryAttempts: 0,
+      maxEventAge: cdk.Duration.minutes(30),
       memorySize: 1024,
       architecture: lambda.Architecture.ARM_64,
       vpc,

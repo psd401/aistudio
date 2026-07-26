@@ -22,7 +22,8 @@ export function getOneRosterSyncFunctionName(): string {
 }
 
 export async function triggerOneRosterSyncNow(
-  requestedByUserId: number | null
+  requestedByUserId: number | null,
+  runId?: string
 ): Promise<void> {
   const functionName = getOneRosterSyncFunctionName();
   await getLambdaClient().send(
@@ -30,7 +31,7 @@ export async function triggerOneRosterSyncNow(
       FunctionName: functionName,
       InvocationType: "Event",
       Payload: Buffer.from(
-        JSON.stringify({ trigger: "manual", requestedByUserId })
+        JSON.stringify({ trigger: "manual", requestedByUserId, runId })
       ),
     })
   );

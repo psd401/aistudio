@@ -18,6 +18,8 @@ export const ONEROSTER_SETTING_KEYS = {
   pageSize: "ONEROSTER_PAGE_SIZE",
   /** Internal sync checkpoint; not an administrator-entered credential/config. */
   lastPermRev: "ONEROSTER_LAST_PERM_REV",
+  /** Internal run status consumed by the administrator dashboard poll. */
+  syncStatus: "ONEROSTER_SYNC_STATUS",
 } as const;
 
 export type OneRosterAuthMode = "oauth1" | "proxy";

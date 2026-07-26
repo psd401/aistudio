@@ -30,6 +30,8 @@ import type { CollectionPullSuccess } from "./oneroster-client";
 const secretsClient = new SecretsManagerClient({});
 const UPSERT_CHUNK_SIZE = 4_000;
 const LAST_PERM_REV_SETTING_KEY = "ONEROSTER_LAST_PERM_REV";
+// Keep synchronized with lib/roster/settings.ts and config.ts.
+const SYNC_STATUS_SETTING_KEY = "ONEROSTER_SYNC_STATUS";
 
 let sqlSingleton: postgres.Sql | null = null;
 let initPromise: Promise<postgres.Sql> | null = null;
@@ -119,6 +121,34 @@ export async function writeLastPermRev(
     ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value,
           description = EXCLUDED.description,
+          updated_at = now()
+  `;
+}
+
+export async function writeSyncStatus(
+  sql: postgres.Sql,
+  status: unknown
+): Promise<void> {
+  await sql`
+    INSERT INTO settings (
+      key,
+      value,
+      description,
+      category,
+      is_secret
+    )
+    VALUES (
+      ${SYNC_STATUS_SETTING_KEY},
+      ${JSON.stringify(status)},
+      'Internal OneRoster sync run status for the administrator dashboard',
+      'integrations',
+      false
+    )
+    ON CONFLICT (key) DO UPDATE
+      SET value = EXCLUDED.value,
+          description = EXCLUDED.description,
+          category = EXCLUDED.category,
+          is_secret = false,
           updated_at = now()
   `;
 }

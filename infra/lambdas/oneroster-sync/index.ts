@@ -6,6 +6,7 @@
  * exception. Credentials are read from Secrets Manager and never logged.
  */
 
+import { randomUUID } from "node:crypto";
 import {
   CloudWatchClient,
   PutMetricDataCommand,
@@ -22,6 +23,7 @@ import {
   readLastPermRev,
   reconcileCollection,
   writeLastPermRev,
+  writeSyncStatus,
 } from "./db";
 import { OneRosterClient } from "./oneroster-client";
 import { runOneRosterSync, type OneRosterSyncResult } from "./sync";
@@ -45,6 +47,7 @@ const log = {
 interface OneRosterSyncEvent {
   trigger?: string;
   requestedByUserId?: number | null;
+  runId?: string;
 }
 
 interface HandlerResult {
@@ -53,25 +56,82 @@ interface HandlerResult {
   result?: OneRosterSyncResult;
 }
 
+type SyncState = "running" | "succeeded" | "failed" | "skipped";
+
+interface PersistedSyncStatus {
+  runId: string;
+  trigger: "manual" | "schedule";
+  state: SyncState;
+  startedAt: string;
+  completedAt: string | null;
+  unchanged: boolean;
+  collections: Array<{
+    name: string;
+    recordsTotal: number;
+    synced: number;
+    deactivated: number;
+    failed: number;
+  }>;
+  error: string | null;
+}
+
+const INCOMPLETE_SYNC_ERROR =
+  "OneRoster sync was incomplete; failed collections retain last-known-good rows";
+
 export async function handler(
   event: OneRosterSyncEvent = {}
 ): Promise<HandlerResult> {
   const manual = event.trigger === "manual";
+  const trigger = manual ? "manual" : "schedule";
+  const runId = resolveRunId(event.runId);
+  const startedAt = new Date().toISOString();
   let metricsEmitted = false;
+  let syncResult: OneRosterSyncResult | null = null;
   log.info("OneRoster sync invoked", {
-    trigger: manual ? "manual" : "schedule",
+    trigger,
     requestedByUserId: event.requestedByUserId ?? null,
+    runId,
   });
 
   const sql = await getSql();
   try {
+    await writeStatusSafely(sql, {
+      runId,
+      trigger,
+      state: "running",
+      startedAt,
+      completedAt: null,
+      unchanged: false,
+      collections: [],
+      error: null,
+    });
     const config = await resolveConfig(sql);
     if (!config.baseUrl || !config.authMode || !config.credentialsSecretArn) {
       log.warn("OneRoster sync is not fully configured; skipping");
+      await writeStatusSafely(sql, {
+        runId,
+        trigger,
+        state: "skipped",
+        startedAt,
+        completedAt: new Date().toISOString(),
+        unchanged: false,
+        collections: [],
+        error: "OneRoster settings are incomplete.",
+      });
       return { status: "skipped", reason: "not-configured" };
     }
     if (!manual && !config.enabled) {
       log.info("Nightly OneRoster sync is disabled; skipping");
+      await writeStatusSafely(sql, {
+        runId,
+        trigger,
+        state: "skipped",
+        startedAt,
+        completedAt: new Date().toISOString(),
+        unchanged: false,
+        collections: [],
+        error: "Scheduled OneRoster synchronization is disabled.",
+      });
       return { status: "skipped", reason: "disabled" };
     }
 
@@ -93,13 +153,12 @@ export async function handler(
       writeLastPermRev: (permRev) => writeLastPermRev(sql, permRev),
       log,
     });
+    syncResult = result;
 
     await emitMetrics(result);
     metricsEmitted = true;
     if (!result.fullySuccessful) {
-      throw new Error(
-        "OneRoster sync was incomplete; failed collections retain last-known-good rows"
-      );
+      throw new Error(INCOMPLETE_SYNC_ERROR);
     }
     log.info("OneRoster sync completed", {
       unchanged: result.unchanged,
@@ -109,15 +168,82 @@ export async function handler(
         0
       ),
     });
+    await writeStatusSafely(
+      sql,
+      statusFromResult(runId, trigger, startedAt, "succeeded", result, null)
+    );
     return { status: "ok", result };
   } catch (error) {
-    log.error("OneRoster sync failed", { error: safeErrorMessage(error) });
+    const thrownErrorMessage = safeErrorMessage(error);
+    const collectionError = syncResult?.collections.find(
+      (collection) => collection.failed > 0
+    )?.error;
+    const errorMessage =
+      thrownErrorMessage === INCOMPLETE_SYNC_ERROR && collectionError
+        ? collectionError
+        : thrownErrorMessage;
+    log.error("OneRoster sync failed", { error: errorMessage, runId });
     if (!metricsEmitted) {
       await emitMetrics(null).catch(() => {});
     }
+    await writeStatusSafely(
+      sql,
+      statusFromResult(
+        runId,
+        trigger,
+        startedAt,
+        "failed",
+        syncResult,
+        errorMessage
+      )
+    );
     throw error;
   } finally {
     await closeSql().catch(() => {});
+  }
+}
+
+function statusFromResult(
+  runId: string,
+  trigger: "manual" | "schedule",
+  startedAt: string,
+  state: "succeeded" | "failed",
+  result: OneRosterSyncResult | null,
+  error: string | null
+): PersistedSyncStatus {
+  return {
+    runId,
+    trigger,
+    state,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    unchanged: result?.unchanged ?? false,
+    collections:
+      result?.collections.map((collection) => ({
+        name: collection.name,
+        recordsTotal: collection.recordsTotal,
+        synced: collection.synced,
+        deactivated: collection.deactivated,
+        failed: collection.failed,
+      })) ?? [],
+    error: error ? safeErrorMessage(error) : null,
+  };
+}
+
+async function writeStatusSafely(
+  sql: Awaited<ReturnType<typeof getSql>>,
+  status: PersistedSyncStatus
+): Promise<void> {
+  try {
+    await writeSyncStatus(sql, status);
+  } catch (error) {
+    // Dashboard observability must never turn a safe roster reconciliation into
+    // a failed run. The Lambda error/staleness alarms remain the fallback.
+    log.warn("Failed to persist OneRoster sync status", {
+      runId: status.runId,
+      state: status.state,
+      error: safeErrorMessage(error),
+    });
   }
 }
 
@@ -220,5 +346,13 @@ async function emitMetrics(result: OneRosterSyncResult | null): Promise<void> {
 
 function safeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+  return message.length > 500 ? `${message.slice(0, 499)}…` : message;
+}
+
+function resolveRunId(value: unknown): string {
+  if (typeof value !== "string") return randomUUID();
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= 100
+    ? normalized
+    : randomUUID();
 }

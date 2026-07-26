@@ -28,6 +28,7 @@ describe("OneRoster sync cross-bundle contracts", () => {
       "ONEROSTER_API_VERSION",
       "ONEROSTER_PAGE_SIZE",
       "ONEROSTER_LAST_PERM_REV",
+      "ONEROSTER_SYNC_STATUS",
     ]) {
       expect(appSettings).toContain(key);
       expect(lambdaSettings).toContain(key);
