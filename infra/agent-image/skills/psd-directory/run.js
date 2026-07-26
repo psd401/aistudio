@@ -4,15 +4,15 @@
  *
  * Resolve a district identity instead of guessing:
  *
- *   node run.js --user <owner@psd401.net> --email <someone@psd401.net>
- *   node run.js --user <owner@psd401.net> --chat-id users/1162649136399...
+ *   node run.js --email someone@psd401.net
+ *   node run.js --chat-id users/116264913639920976203
  *
- * Authentication uses the AGENT slot only. `directory.readonly` is already in
- * AGENT_DWD_SCOPES, so this needs no new scope, no consent flow, and no admin
- * role — the token comes from the same DWD broker psd-workspace uses.
- * (The user slot also carries directory.readonly, but resolving "who is this
- * district person" is agent-context work and does not need the human's
- * consent grant; keeping it on one slot keeps the failure modes to one set.)
+ * NO --user FLAG, BY DESIGN. The owner is derived from the proxy-signed
+ * invocation context on the server side (#1353), never from something the
+ * model can type. An earlier draft of this skill took `--user` and minted a
+ * Google token inside the container; both are exactly what the security
+ * remediation removed, so the lookup now happens server-side and this process
+ * only ever sees the shaped person record.
  *
  * Output is a single JSON line on stdout:
  *   {"found":true,"personId":"...","displayName":"...","email":"...",
@@ -20,42 +20,39 @@
  *   {"found":false,"query":"...","reason":"not in directory"}
  *
  * A miss is exit 0 with found:false — "this person is not in the directory"
- * is an ANSWER, not a failure, and the agent must be able to act on it
- * without treating it as an error.
+ * is an ANSWER the agent must be able to act on, not a failure.
  *
  * Exit codes:
  *   0  success (including a found:false miss)
- *   1  usage / config error
+ *   1  usage / bad input
  *   2  lookup failed (unexpected People API error)
- *   12 transport error (broker or People API unreachable)
- *   14 account-provisioning (agnt_ account is being auto-created; retry later)
+ *   12 transport error (broker unreachable, or People API 5xx)
+ *   14 account-provisioning (the agnt_ account is being created; retry later)
  *   16 directory-sharing-disabled — the Workspace admin console setting
- *      "External Directory Sharing" is restrictive. Distinct from every other
- *      code because NO code change fixes it: it is an admin action, and
- *      collapsing it into a generic 403 is what made this issue expensive to
- *      diagnose the first time.
- *   17 insufficient-scope — the token genuinely lacks directory.readonly.
+ *      "External Directory Sharing" is restrictive. Its own code because NO
+ *      code change or retry fixes it: it is an admin action, and it looks
+ *      identical to a permissions bug unless the message names the setting.
+ *   17 insufficient-scope — the agent token lacks directory.readonly.
  */
 
 'use strict';
 
-const WS = require('/opt/psd-skills/psd-workspace/common.js');
-const lib = require('./lib');
+const { requestAgentBroker } = require('../_shared/agent-broker');
 
 const USAGE = `psd-directory — resolve a district email or Chat user id to a real person
 
 Usage:
-  run.js --user <owner@psd401.net> --email <address>
-  run.js --user <owner@psd401.net> --chat-id <users/{id} | {id}>
+  run.js --email <address>
+  run.js --chat-id <users/{id} | {id}>
 
 Options:
-  --user      Required. The owner whose agnt_ account brokers the lookup.
   --email     Resolve an email address to a directory person.
   --chat-id   Resolve a Chat users/{id} (or bare numeric id) to a person.
-  --no-cache  Bypass the lookup cache for this call.
+  --no-cache  Bypass the server-side lookup cache for this call.
   --help      Show this message.
 
-Exactly one of --email / --chat-id is required.`;
+Exactly one of --email / --chat-id is required. The owner comes from the
+signed invocation context — there is no --user flag.`;
 
 function fail(message, code = 1) {
   process.stderr.write(`psd-directory: ${message}\n`);
@@ -66,72 +63,106 @@ function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
+/** Minimal argv parse — this skill takes only long flags. */
+function parseArgs(argv) {
+  const args = {};
+  for (let i = 2; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--help' || arg === '-h') {
+      args.help = true;
+      continue;
+    }
+    if (!arg.startsWith('--')) fail(`Unexpected positional argument: ${arg}`);
+    const key = arg.slice(2).replace(/-/g, '_');
+    const next = argv[i + 1];
+    if (!next || next.startsWith('--')) {
+      args[key] = true;
+    } else {
+      args[key] = next;
+      i++;
+    }
+  }
+  return args;
+}
+
+/**
+ * Map the server's typed status onto this skill's documented exit codes.
+ * Exported for testing — run.js cannot be loaded wholesale in unit tests
+ * because it executes main() on require.
+ */
+function exitCodeForStatus(status) {
+  switch (status) {
+    case 'account-not-provisioned':
+      return 14;
+    case 'DIRECTORY_SHARING_DISABLED':
+      return 16;
+    case 'INSUFFICIENT_SCOPE':
+      return 17;
+    case 'TRANSPORT':
+      return 12;
+    case 'INVALID_INPUT':
+      return 1;
+    default:
+      return 2;
+  }
+}
+
+function handleErrorResponse(response, fallbackMessage) {
+  const status = response && typeof response.status === 'string' ? response.status : null;
+  const code = exitCodeForStatus(status);
+  if (code === 14) {
+    emit({ status: 'account-provisioning' });
+    process.exit(14);
+  }
+  if (code === 16) {
+    fail(
+      'the Workspace directory is not shared with API callers. An admin must set ' +
+        'Directory > Directory settings > Sharing settings > External Directory Sharing to ' +
+        '"Organization data and authenticated user basic profile fields". ' +
+        `(Google said: ${(response && response.error) || 'no detail'})`,
+      16
+    );
+  }
+  fail((response && response.error) || fallbackMessage, code);
+}
+
 async function main() {
-  const args = WS.parseArgs(process.argv);
+  const args = parseArgs(process.argv);
   if (args.help) {
     process.stdout.write(`${USAGE}\n`);
     return 0;
   }
-
-  const userEmail = args.user;
-  if (!userEmail || userEmail === true) fail('--user is required');
-  WS.validateUserEmail(userEmail);
 
   const wantEmail = typeof args.email === 'string' ? args.email : null;
   const wantChatId = typeof args.chat_id === 'string' ? args.chat_id : null;
   if (!wantEmail && !wantChatId) fail('one of --email or --chat-id is required');
   if (wantEmail && wantChatId) fail('--email and --chat-id are mutually exclusive');
 
-  // Agent-slot token via the DWD broker (directory.readonly already granted).
-  // LAZY on purpose — the lookup calls this only after its cache misses, so a
-  // cache hit spends no mint against the broker's shared rate limit. See
-  // makeTokenMinter in lib.js for why that matters and for its test coverage.
-  const mintToken = lib.makeTokenMinter(WS.fetchBrokerToken, userEmail);
+  const payload = wantEmail ? { email: wantEmail } : { chatId: wantChatId };
+  if (args.no_cache === true) payload.noCache = true;
 
-  const opts = { noCache: args.no_cache === true };
+  let result;
   try {
-    const result = wantEmail
-      ? await lib.resolveEmail(wantEmail, mintToken, opts)
-      : await lib.resolvePersonId(wantChatId, mintToken, opts);
-    emit({ cached: false, ...result });
-    return 0;
+    result = await requestAgentBroker('/api/agent/directory-lookup', payload);
   } catch (err) {
-    if (err && err.code === 'ACCOUNT_NOT_PROVISIONED') {
-      emit({ status: 'account-provisioning', ownerEmail: userEmail });
-      return 14;
+    // The broker helper throws on any non-2xx and attaches the parsed body,
+    // which is where the server puts its typed status.
+    if (err && err.responseBody) {
+      handleErrorResponse(err.responseBody, err.message);
+      return 2;
     }
-    if (err && err.code === 'MINT_TRANSPORT') {
-      fail(err.message, 12);
-    }
-    if (err instanceof lib.DirectoryError) {
-      switch (err.code) {
-        case 'DIRECTORY_SHARING_DISABLED':
-          fail(
-            'the Workspace directory is not shared with API callers. An admin must set ' +
-              'Directory > Directory settings > Sharing settings > External Directory Sharing to ' +
-              '"Organization data and authenticated user basic profile fields". ' +
-              `(Google said: ${err.message})`,
-            16
-          );
-          break;
-        case 'INSUFFICIENT_SCOPE':
-          fail(`the agent token lacks directory.readonly: ${err.message}`, 17);
-          break;
-        case 'TRANSPORT':
-          fail(err.message, 12);
-          break;
-        case 'INVALID_INPUT':
-          fail(err.message, 1);
-          break;
-        default:
-          fail(`directory lookup failed: ${err.message}`, 2);
-      }
-    }
-    fail(`directory lookup failed: ${err.message}`, 2);
+    fail(`directory lookup failed: ${err && err.message}`, 12);
+    return 12;
   }
+
+  emit(result);
   return 0;
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err) => fail(`unexpected error: ${err && err.message}`, 2));
+module.exports = { exitCodeForStatus, parseArgs };
+
+if (require.main === module) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((err) => fail(`unexpected error: ${err && err.message}`, 2));
+}

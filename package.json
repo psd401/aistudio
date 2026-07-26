@@ -38,7 +38,7 @@
     "test:smoke:unified-content-lambda-artifact": "bun run scripts/test/unified-content-lambda-artifact.smoke.ts",
     "test:smoke:embedding-lambda-artifact": "bun run scripts/test/embedding-lambda-artifact.smoke.ts",
     "test:skill:workspace": "cd infra/agent-image/skills/psd-workspace && bun test common.test.js",
-    "test:skill:directory": "cd infra/agent-image/skills/psd-directory && bun test lib.test.js",
+    "test:skill:directory": "cd infra/agent-image/skills/psd-directory && bun test run.test.js",
     "test:skill:schedules": "cd infra/agent-image/skills/psd-schedules && bun test",
     "test:smoke:atrium": "bun run test:smoke:atrium-render && bun run test:smoke:atrium-collab && bun run test:smoke:atrium-collab-token && bun run test:smoke:atrium-agent-bridge && bun run test:smoke:atrium-agent-read && bun run test:smoke:atrium-html-sanitize && bun run test:smoke:atrium-provenance-rail && bun run test:smoke:atrium-collab-schema && bun run test:smoke:atrium-suggestions-resolve && bun run test:smoke:atrium-suggestion-mode && bun run test:smoke:atrium-sandbox-config && bun run test:smoke:atrium-sandbox-host",
     "test:ci": "jest --config=jest.config.ci.js",
