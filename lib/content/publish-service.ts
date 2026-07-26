@@ -61,6 +61,7 @@ import { schoologyAdapter } from "./publish-adapters/schoology";
 import { googleAdapter } from "./publish-adapters/google";
 import { okfAdapter } from "./publish-adapters/okf";
 import { contentDeepLink } from "./reader-links";
+import { reachesAtLeast } from "./audience-rank";
 import type {
   Requester,
   VisibilityGrant,
@@ -125,18 +126,6 @@ const adapters: Record<PublishDestination, PublishAdapter> = {
   // #1103, §36.2). Registered so the destination is pipeline-complete; the primary
   // collection-grained surface is `okfExportService` (export_okf).
   okf: okfAdapter,
-};
-
-/**
- * Audience breadth, narrowest first — used ONLY to evaluate a `widenOnly`
- * request against the locked current level. Not an authorization ordering: who
- * may widen is decided by the §26.4 gate, not by this table.
- */
-const AUDIENCE_RANK: Record<VisibilityLevel, number> = {
-  private: 0,
-  group: 1,
-  internal: 2,
-  public: 3,
 };
 
 /** A loaded object's fields the publish path needs. */
@@ -573,8 +562,10 @@ async function runPublishTx(
         // visibility had been supplied.
         const widenIsNoOp =
           input.visibility?.widenOnly === true &&
-          AUDIENCE_RANK[locked[0].visibilityLevel as VisibilityLevel] >=
-            AUDIENCE_RANK[input.visibility.level];
+          reachesAtLeast(
+            locked[0].visibilityLevel as VisibilityLevel,
+            input.visibility.level
+          );
 
         if (input.visibility && !widenIsNoOp) {
           await visibilityService.setLevelInTx(tx, objectId, input.visibility, {

@@ -49,7 +49,11 @@ import type {
 /** Upper bound on a `listVisible` tag filter, mirroring the tags column width. */
 const MAX_TAG_LENGTH = 100;
 
-/** Upper bound on a `listVisible` free-text `query` filter (title search). */
+/**
+ * Upper bound on a `listVisible` free-text `query` filter. Bounds BOTH arms of
+ * that filter — the title `ILIKE` and the per-tag `unnest(tags) ILIKE` added in
+ * #1336 — since they share one escaped, truncated pattern.
+ */
 const MAX_QUERY_LENGTH = 200;
 
 /**

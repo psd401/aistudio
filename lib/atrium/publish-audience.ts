@@ -17,19 +17,8 @@
  */
 
 import type { VisibilityLevel } from "@/lib/content";
+import { reachesAtLeast } from "@/lib/content/audience-rank";
 import type { EditorPublishDestination } from "@/actions/db/atrium/publish-document";
-
-/**
- * Audience breadth, narrowest first. Used only to compare reach — it is NOT an
- * authorization ordering, and nothing here decides who may widen (the service's
- * §26.4 gate does that, against the FOR-UPDATE-locked row).
- */
-const AUDIENCE_RANK: Record<VisibilityLevel, number> = {
-  private: 0,
-  group: 1,
-  internal: 2,
-  public: 3,
-};
 
 /**
  * The minimum visibility a destination's readers need.
@@ -67,7 +56,7 @@ export function widenNeededFor(
 ): VisibilityLevel | null {
   const required = requiredVisibilityFor(destination);
   if (!required) return null;
-  return AUDIENCE_RANK[current] < AUDIENCE_RANK[required] ? required : null;
+  return reachesAtLeast(current, required) ? null : required;
 }
 
 /** Human-readable label for a visibility level, for confirm/warning copy. */

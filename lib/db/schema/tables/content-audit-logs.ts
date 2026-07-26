@@ -66,7 +66,11 @@ export const contentAuditLogs = pgTable("content_audit_logs", {
   objectId: uuid("object_id"),
   /** create | update | create_version | set_visibility | publish | unpublish */
   action: varchar("action", { length: 40 }).notNull(),
-  /** mcp | rest (the surface the mutation arrived on) */
+  /**
+   * mcp | rest | ui — the surface the mutation arrived on. `ui` is the in-app
+   * authoring surface, added in #1336 for the public-exposure notification.
+   * Mirrors `ContentAuditSurface` in `lib/content/audit.ts`.
+   */
   surface: varchar("surface", { length: 16 }).notNull(),
   actorKind: actorKindEnum("actor_kind").notNull(),
   /** The human author, when there is one (null for autonomous agents). */
