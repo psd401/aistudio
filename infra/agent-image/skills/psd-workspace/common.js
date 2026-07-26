@@ -446,9 +446,31 @@ function execGws(commandString, accessToken, payloads) {
 // isPermittedExplicitShare. Drafts/calendar/tasks on the user slot remain
 // allowed: they are marker-stamped, land in review surfaces (Drafts folder,
 // own calendar), and were explicitly designed as user-slot writes.
+//
+// Refined 2026-07-25 (#1305): the user slot now also holds drive.readonly +
+// drive.metadata so the agent can READ and ORGANIZE the user's Drive. The
+// impersonated-CREATION ban is untouched — with one deliberate exception,
+// creating a FOLDER, which is an organizing act and carries no content. See
+// isPermittedFolderCreate below.
 const USER_SCOPE_FORBIDDEN = [
-  { pattern: /\bdrive[\s.]+files[\s.]+(create|copy)\b/i,
-    reason: 'creating files owned by the user (create as the agent and share explicitly instead)' },
+  // `copy` is unconditional: a copy always produces a content-bearing file.
+  { pattern: /\bdrive[\s.]+files[\s.]+copy\b/i,
+    reason: 'copying a file into the user\'s Drive — the copy would be owned by the user (create as the agent and share explicitly instead)' },
+  // `create` has exactly ONE exception — mimeType application/vnd.google-apps.folder
+  // (isPermittedFolderCreate). Everything else still refuses here.
+  { pattern: /\bdrive[\s.]+files[\s.]+create\b/i,
+    exception: isPermittedFolderCreate,
+    reason: 'creating files owned by the user (only folders may be created on this slot; create documents as the agent and share explicitly instead)' },
+  // `update` is newly reachable across the user's whole Drive now that
+  // drive.metadata is granted, so it needs a gate it never needed under
+  // drive.file. Allowed ONLY for metadata-field writes
+  // (isMetadataOnlyDriveUpdate): rename, move, star. Content/media uploads and
+  // `trashed` are refused. Google also rejects content writes under
+  // readonly+metadata+file, so this is belt-and-suspenders — its real value is
+  // a comprehensible error instead of an opaque 403.
+  { pattern: /\bdrive[\s.]+files[\s.]+update\b/i,
+    exception: isMetadataOnlyDriveUpdate,
+    reason: 'writing file content or trashing in the user\'s Drive (this slot may only change metadata: rename, move, star, describe)' },
   { pattern: /\bdocs[\s.]+documents[\s.]+create\b/i,
     reason: 'creating a Google Doc owned by the user (create as the agent and share explicitly instead)' },
   { pattern: /\bsheets[\s.]+spreadsheets[\s.]+create\b/i,
@@ -496,10 +518,189 @@ const PHASE1_FORBIDDEN = [
   { pattern: /\btasks[\s.]+tasklists[\s.]+delete\b/i,
     reason: 'deleting tasklists (Phase 1: never destructive)' },
 
+  // Trashing a Drive file. `files.delete` and `emptyTrash` are blocked above,
+  // but trashing travels as a METADATA write — `files update {"trashed":true}`
+  // — so it does not match them. Before #1305 the user slot held only
+  // drive.file and Google refused this on any file the app had not created;
+  // now that drive.metadata is granted it would otherwise become reachable
+  // across the user's whole Drive. Blocked on BOTH slots: Phase 1 policy is
+  // "never destructive", and `trashed` is also absent from the
+  // metadata-update allowlist, so two independent rules have to fail for a
+  // trash to get through. This raw-string form is a fast fail only — the
+  // authoritative check is detectDriveTrashedWrite on the PARSED payload,
+  // which a JSON key escape cannot dodge (codex P1, PR #1346).
+  { pattern: /"trashed"\s*:\s*true/i,
+    reason: 'trashing a Drive file (Phase 1: never destructive — ask the user to trash it themselves)' },
+  { pattern: /\bdrive[\s.]+files[\s.]+untrash\b/i,
+    reason: 'untrashing a Drive file (Phase 1: the agent does not manage the trash)' },
+
   // Sharing externally / changing permissions on user data
   { pattern: /\bdrive[\s.]+permissions[\s.]+(create|update|delete)\b/i,
     reason: 'modifying Drive sharing permissions (Phase 1: no permission changes)' },
 ];
+
+// ============================================================================
+// User-slot Drive: read + organize (#1305)
+// ============================================================================
+//
+// The user slot gained drive.readonly + drive.metadata on 2026-07-25 so the
+// agent can read and ORGANIZE the user's Drive. Two narrow exceptions to
+// USER_SCOPE_FORBIDDEN implement "organize" without reopening impersonated
+// creation:
+//
+//   isPermittedFolderCreate   — files.create, folder mimeType ONLY
+//   isMetadataOnlyDriveUpdate — files.update, metadata fields ONLY
+//
+// Both are ALLOWLISTS. Anything they cannot positively prove is safe falls
+// through to the block, so a payload shape we did not anticipate is refused
+// rather than permitted.
+
+const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
+
+// Fields on the Drive `files` resource that carry no content and are covered
+// by drive.metadata. `trashed` is deliberately absent (see PHASE1_FORBIDDEN),
+// and so is anything that could carry bytes.
+const DRIVE_METADATA_FIELDS = new Set([
+  'name',
+  'starred',
+  'description',
+  'foldercolorrgb',
+  'properties',
+  'appproperties',
+]);
+
+// Flags that would attach a body/media stream to a Drive call. `--json` and
+// `--json-file` are the metadata resource and are fine; `--params` carries
+// query parameters (fileId, addParents, removeParents, supportsAllDrives) and
+// is checked separately for uploadType.
+const DRIVE_CONTENT_FLAG = /^--(media|media-file|media-body|upload|upload-file|upload-type|content|content-file|data|data-file|body|body-file|text|text-file|file|source|source-file)$/i;
+
+/**
+ * Pull the JSON resource out of a gws command, using the SAME dual extraction
+ * as isPermittedExplicitShare: prefer the argv token that actually executes
+ * (REV-COR-346 — the gate must see what gws sees), and fall back to the
+ * brace-balanced raw-string scan for the payload-file flow, whose synthetic
+ * command inlines minified JSON unquoted and so mangles under splitCommand.
+ * Returns the parsed object, or null when there is no parseable payload.
+ */
+function extractDriveResource(commandString, tokens) {
+  let payload = null;
+  const tokenJson = extractJsonArgFromTokens(tokens);
+  if (tokenJson) {
+    try { payload = JSON.parse(tokenJson); } catch { payload = null; }
+  }
+  if (!payload) {
+    const rawJson = extractJsonArg(commandString);
+    if (!rawJson) return null;
+    try { payload = JSON.parse(rawJson); } catch { return null; }
+  }
+  const resource = payload.resource || payload.requestBody || payload;
+  return resource && typeof resource === 'object' && !Array.isArray(resource)
+    ? resource
+    : null;
+}
+
+/** True if any argv token would attach content/media to the call. */
+function carriesDriveContent(tokens) {
+  for (let i = 0; i < tokens.length; i++) {
+    if (DRIVE_CONTENT_FLAG.test(tokens[i])) return true;
+    // `--params '{"uploadType":"media"}'` is a resumable/multipart upload in
+    // query-parameter clothing. Checked ONLY in the --params value, not across
+    // every token: a file the user asked to rename to "uploadType notes.txt"
+    // is a rename, and refusing it would be a false positive.
+    if (tokens[i] === '--params' && /uploadtype/i.test(tokens[i + 1] || '')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * ALLOW `drive files create` on the user slot for a FOLDER and nothing else.
+ *
+ * A folder holds no content, so creating one is an organizing act rather than
+ * impersonated authorship — it does not reintroduce the 2026-07-07 hole
+ * (#1138: "do not create documents as my account"). It rides the existing
+ * drive.file grant, which also means the agent keeps access to the folder it
+ * created so it can move files into it afterwards.
+ *
+ * ALL must hold: the command is files.create; a payload parses; its mimeType
+ * is EXACTLY the folder mimeType; and no token attaches content. A create with
+ * no parseable payload is refused — absence of proof is not proof of absence.
+ */
+function isPermittedFolderCreate(commandString, tokens) {
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const createRe = /\bdrive[\s.]+files[\s.]+create\b/i;
+  if (!createRe.test(spaceJoined) && !createRe.test(dotJoined)) return false;
+  if (carriesDriveContent(tokens)) return false;
+
+  const resource = extractDriveResource(commandString, tokens);
+  if (!resource) return false;
+  const mimeType = typeof resource.mimeType === 'string'
+    ? resource.mimeType.trim().toLowerCase()
+    : '';
+  return mimeType === DRIVE_FOLDER_MIME;
+}
+
+/**
+ * ALLOW `drive files update` on the user slot when every field it writes is
+ * metadata: rename, move (addParents/removeParents ride --params, not the
+ * body), star, describe, recolour.
+ *
+ * Google enforces this too — neither drive.readonly nor drive.metadata permits
+ * a content write, so an upload against a file the agent did not create 403s
+ * regardless. The gate exists so the agent gets a comprehensible refusal
+ * instead of an opaque 403, and so `trashed` is refused by our own rule as
+ * well as by policy.
+ *
+ * An update with no parseable payload is refused: without a body we cannot
+ * prove the call is metadata-only.
+ */
+function isMetadataOnlyDriveUpdate(commandString, tokens) {
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const updateRe = /\bdrive[\s.]+files[\s.]+update\b/i;
+  if (!updateRe.test(spaceJoined) && !updateRe.test(dotJoined)) return false;
+  if (carriesDriveContent(tokens)) return false;
+
+  const resource = extractDriveResource(commandString, tokens);
+  if (!resource) return false;
+  const keys = Object.keys(resource);
+  if (keys.length === 0) return false;
+  return keys.every((key) => DRIVE_METADATA_FIELDS.has(key.toLowerCase()));
+}
+
+/**
+ * REFUSE any Drive files write whose PARSED payload carries a `trashed` key.
+ *
+ * The raw-string PHASE1_FORBIDDEN pattern ('"trashed": true') is kept as a
+ * fast fail, but it can be routed around with a JSON string escape in the
+ * key — `--json '{"tr\u0061shed":true}'` — which the raw-string regex never
+ * matches while gws's JSON.parse decodes it right back to `trashed` and
+ * executes the trash (codex P1, PR #1346). The user slot happens to survive
+ * that because isMetadataOnlyDriveUpdate judges decoded keys, but the agent
+ * slot skips the user-slot allowlists entirely, so the gate must also judge
+ * the DECODED resource — same dual extraction the allowlists use.
+ *
+ * ANY value is refused, not just `true`: `trashed:false` is an untrash, and
+ * `files.untrash` is already blocked ("the agent does not manage the trash").
+ * Covers update/patch (trash/untrash) and create/copy (pre-trashed spawn).
+ * A payload our parse cannot read is not judged here — extractDriveResource
+ * uses the same JSON.parse gws does, and the unparseable case dies in gws.
+ */
+function detectDriveTrashedWrite(commandString, tokens) {
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const driveWriteRe = /\bdrive[\s.]+files[\s.]+(update|patch|create|copy)\b/i;
+  if (!driveWriteRe.test(spaceJoined) && !driveWriteRe.test(dotJoined)) return null;
+  const resource = extractDriveResource(commandString, tokens);
+  if (!resource) return null;
+  const hasTrashed = Object.keys(resource).some((k) => k.toLowerCase() === 'trashed');
+  return hasTrashed
+    ? 'trashing/untrashing a Drive file (Phase 1: never destructive — ask the user to manage the trash themselves)'
+    : null;
+}
 
 // gws gmail "helper" verbs that put a message on the wire. The `+`-prefixed
 // forms are unambiguous (they never appear as a search-query value), so they
@@ -635,6 +836,90 @@ function isPermittedExplicitShare(commandString, tokens, context) {
   return false;
 }
 
+// ============================================================================
+// Lazy scope upgrades (#1305)
+// ============================================================================
+//
+// drive.readonly + drive.metadata were added to the user slot on 2026-07-25.
+// Existing refresh tokens keep the scope set they were ISSUED with — Google
+// does not retroactively widen them — so a user who has not re-consented since
+// then has a token that cannot perform the new Drive read/organize calls. There
+// is no forced migration; users upgrade lazily on their next consent click.
+//
+// WHY THIS IS A PRE-FLIGHT CHECK AND NOT 403 PARSING. The issue asked for
+// "missing-scope 403 detection". The skill CANNOT observe such a 403: execGws
+// spawns gws with stdio ['ignore', 'inherit', 'inherit'], so gws writes its
+// output straight to our stdout/stderr and the skill never sees a byte of it.
+// Intercepting would mean buffering every gws response, which would also break
+// the streaming behaviour the agent relies on. The token refresh response,
+// however, carries the GRANTED scope string — so the gap is detectable one step
+// earlier, before the call is even attempted. That is strictly better for the
+// user: a re-authorize link instead of a failed operation plus a link.
+//
+// The result is emitted through the SAME consent-link path as revoked-token
+// handling (run.js, invalid_grant -> exit 11), just with its own status and
+// exit code so a caller can tell "you never authorized me" from "your
+// authorization expired" from "you authorized me before this feature existed".
+
+const DRIVE_READ_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+const DRIVE_METADATA_SCOPE = 'https://www.googleapis.com/auth/drive.metadata';
+
+// Commands that only work once the user has re-consented. Deliberately narrow:
+// only the operations #1305 introduced. Everything the slot could already do
+// keeps working on an old token with no prompt.
+const SCOPE_REQUIREMENTS = [
+  {
+    pattern: /\bdrive[\s.]+files[\s.]+(list|get|export)\b/i,
+    scope: DRIVE_READ_SCOPE,
+    capability: 'read files in your Drive',
+  },
+  {
+    pattern: /\bdrive[\s.]+(about|changes)[\s.]+/i,
+    scope: DRIVE_READ_SCOPE,
+    capability: 'read files in your Drive',
+  },
+  {
+    pattern: /\bdrive[\s.]+files[\s.]+update\b/i,
+    scope: DRIVE_METADATA_SCOPE,
+    capability: 'rename and move files in your Drive',
+  },
+];
+
+/**
+ * Given a gws command and the space-separated `scope` string Google returned
+ * with the access token, report which newly-required scopes are missing.
+ *
+ * Returns `null` when the command needs nothing new (the overwhelmingly common
+ * case, so the caller pays nothing), otherwise
+ * `{ scopes: [...], capability: '<human phrase>' }`.
+ *
+ * Fail-OPEN on an absent/unparseable scope string: Google always returns
+ * `scope` on a refresh, but if it ever did not, refusing every Drive call
+ * would be a self-inflicted outage. A genuinely missing scope still fails at
+ * Google with a 403 — the pre-flight is an improvement to the error, not the
+ * security boundary. The security boundaries are the OAuth grant itself and
+ * enforcePhase1Gates.
+ */
+function missingScopesForCommand(commandString, grantedScopeString) {
+  if (!commandString || typeof grantedScopeString !== 'string' || !grantedScopeString.trim()) {
+    return null;
+  }
+  const tokens = splitCommand(commandString);
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  const granted = new Set(grantedScopeString.split(/\s+/).filter(Boolean));
+
+  const missing = [];
+  let capability = null;
+  for (const req of SCOPE_REQUIREMENTS) {
+    if (!req.pattern.test(spaceJoined) && !req.pattern.test(dotJoined)) continue;
+    if (granted.has(req.scope)) continue;
+    if (!missing.includes(req.scope)) missing.push(req.scope);
+    if (!capability) capability = req.capability;
+  }
+  return missing.length ? { scopes: missing, capability } : null;
+}
+
 /**
  * Test the gws command against Phase 1 forbidden patterns. Returns
  * `{allowed: true}` if the command can proceed, or
@@ -668,8 +953,14 @@ function enforcePhase1Gates(commandString, context) {
   // apply the user-slot rules (run.js always passes a resolved scope; only
   // a buggy caller would omit it, and the agent slot is the privileged one).
   if (!context || context.scope !== 'agent_account') {
-    for (const { pattern, reason } of USER_SCOPE_FORBIDDEN) {
+    for (const { pattern, reason, exception } of USER_SCOPE_FORBIDDEN) {
       if (hits(pattern)) {
+        // #1305: `create` and `update` carry narrow allowlisted exceptions
+        // (folder-only create, metadata-only update). Every other entry has
+        // no `exception` and stays absolute.
+        if (exception && exception(commandString, tokens)) {
+          continue;
+        }
         return { allowed: false, reason };
       }
     }
@@ -686,6 +977,14 @@ function enforcePhase1Gates(commandString, context) {
       }
       return { allowed: false, reason };
     }
+  }
+
+  // Trash travels as a body field, and the raw-string pattern above can be
+  // dodged with a JSON escape in the key — judge the DECODED payload too,
+  // on BOTH slots (codex P1, PR #1346).
+  const trashedReason = detectDriveTrashedWrite(commandString, tokens);
+  if (trashedReason) {
+    return { allowed: false, reason: trashedReason };
   }
 
   // Helper-form send/reply/forward (REV-COR-350) — `gws gmail +send`,
@@ -766,11 +1065,35 @@ function injectMarkers(commandString) {
   // Drive files create: prefix filename + appProperties marker
   if (/\bdrive[\s.]+files[\s.]+create\b/i.test(commandString)) {
     return mutateJsonField(commandString, (obj) => {
-      if (obj.name && !obj.name.startsWith('[Agent] ')) {
-        obj.name = `[Agent] ${obj.name}`;
+      // Mark the FILE RESOURCE, not the envelope. gws accepts the resource at
+      // top level or wrapped under `resource` / `requestBody`, and the gate
+      // (isPermittedFolderCreate / isMetadataOnlyDriveUpdate, via
+      // extractDriveResource) unwraps all three. Marking only the outer object
+      // meant a wrapped payload was ALLOWED through the gate but its actual
+      // folder/file resource got neither the appProperties marker nor the
+      // folder-name handling — the audit trail silently went missing for
+      // exactly the shapes the gate accepts. Unwrap identically here so the
+      // gate and the marker can never disagree about which object is the file.
+      const target =
+        (obj.resource && typeof obj.resource === 'object' && !Array.isArray(obj.resource) && obj.resource) ||
+        (obj.requestBody && typeof obj.requestBody === 'object' && !Array.isArray(obj.requestBody) && obj.requestBody) ||
+        obj;
+
+      // FOLDERS are exempt from the visible `[Agent] ` prefix (#1305). A folder
+      // is an organizing container the USER asked for by name — "file these
+      // under Budget 2026" must not produce "[Agent] Budget 2026" in their own
+      // Drive. The prefix exists to mark agent-AUTHORED artifacts; a folder
+      // has no content to author. The invisible appProperties marker below is
+      // still applied, so the audit trail is unchanged and the folder remains
+      // identifiable as agent-created.
+      const isFolder =
+        typeof target.mimeType === 'string' &&
+        target.mimeType.trim().toLowerCase() === DRIVE_FOLDER_MIME;
+      if (target.name && !isFolder && !target.name.startsWith('[Agent] ')) {
+        target.name = `[Agent] ${target.name}`;
       }
-      obj.appProperties = obj.appProperties || {};
-      obj.appProperties.psdAgentCreated = 'true';
+      target.appProperties = target.appProperties || {};
+      target.appProperties.psdAgentCreated = 'true';
       return obj;
     });
   }
@@ -910,5 +1233,12 @@ module.exports = {
   injectMarkers,
   resolvePayloadFiles,
   extractJsonArg,
+  missingScopesForCommand,
+  isPermittedFolderCreate,
+  isMetadataOnlyDriveUpdate,
   PHASE1_FORBIDDEN,
+  USER_SCOPE_FORBIDDEN,
+  DRIVE_FOLDER_MIME,
+  DRIVE_READ_SCOPE,
+  DRIVE_METADATA_SCOPE,
 };

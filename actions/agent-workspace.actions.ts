@@ -44,8 +44,25 @@ const SCOPES_BY_KIND: Record<"user_account", string[]> = {
     // Tasks for to-do management.
     "https://www.googleapis.com/auth/tasks",
     // Drive scoped to files the app creates or the user explicitly opens
-    // with the app — narrowest possible Drive grant.
+    // with the app. On the user slot this is now used for exactly ONE write:
+    // creating a FOLDER (the skill gate refuses every other files.create).
     "https://www.googleapis.com/auth/drive.file",
+    // Read + organize the user's own Drive (#1305, approved 2026-07-25).
+    // drive.readonly => list/get/export any file the user can see.
+    // drive.metadata => rename, move (add/removeParents), star — metadata
+    // writes ONLY. Neither scope permits a content write or an upload, and
+    // permanent delete still requires `drive`/`drive.file` on the target, so
+    // deleting a file the agent did not create is impossible at the GOOGLE
+    // layer rather than merely refused by our regex gate. Creating a non-folder
+    // item in the user's Drive stays banned by the skill gate — the
+    // impersonation barrier from 2026-07-06/07 is unchanged.
+    //
+    // Adding these does NOT affect existing refresh tokens: a stored token
+    // keeps the scope set it was issued with, and users pick the new ones up
+    // lazily on their next consent click. The OAuth client is Internal, so
+    // there is no restricted-scope verification or CASA burden.
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive.metadata",
     // People API directory scope — enables resolving user IDs to names
     // for Chat senders and calendar attendees.
     "https://www.googleapis.com/auth/directory.readonly",

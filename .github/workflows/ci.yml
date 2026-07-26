@@ -57,6 +57,16 @@ jobs:
         # Dedicated collab-token signing key (mirrors the smoke's own default).
         COLLAB_JWT_SECRET: ci-collab-secret-0123456789
     
+    # psd-workspace skill gate (Bun). infra/agent-image/skills/psd-workspace is
+    # plain CJS outside the Next.js/jest roots, so `test:ci` never saw it — the
+    # regex gate that is the ONLY barrier against the agent sending mail,
+    # deleting, or creating files as the user (#912 Phase 1, #1138, #1305) had
+    # no CI coverage at all. It does now.
+    - name: Run psd-workspace skill gate tests (Bun)
+      run: bun run test:skill:workspace
+      env:
+        CI: true
+
     # Optional: Upload test coverage if you generate it
     # - name: Upload coverage reports
     #   uses: codecov/codecov-action@v3

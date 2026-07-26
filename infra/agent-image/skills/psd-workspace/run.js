@@ -10,10 +10,15 @@
  *
  *   --scope user (default for Phase 1) →
  *     OAuth on the human user's identity (hagelk@psd401.net), scopes
- *     (gmail.modify, calendar, tasks, drive.file). gmail.modify covers
- *     read + draft + archive/label + (technically) send — sending is
- *     blocked by the skill's regex gate, not by the OAuth scope. Use for
- *     reading/writing the human's own data.
+ *     (gmail.modify, calendar, tasks, drive.file, drive.readonly,
+ *     drive.metadata). gmail.modify covers read + draft + archive/label +
+ *     (technically) send — sending is blocked by the skill's regex gate, not
+ *     by the OAuth scope. drive.readonly + drive.metadata (#1305) let the
+ *     agent READ and ORGANIZE the user's Drive: list/get/export anything,
+ *     rename/move/star, and create FOLDERS. Creating a non-folder item,
+ *     writing file content, trashing and deleting all remain impossible —
+ *     see the Phase 1 gate notes below. Use for reading/writing the human's
+ *     own data.
  *
  *   --scope agent →
  *     The agent account (agnt_hagelk@psd401.net), broad scopes. As of #1232
@@ -51,6 +56,9 @@
  *   12 transport error (broker/network failure)
  *   13 phase1-forbidden (Phase 1 hard gate refused the command)
  *   14 account-provisioning (agent slot; agnt_ account being auto-created)
+ *   15 scope-upgrade-required (user slot; the stored token predates a scope
+ *      this command needs — #1305. Distinct from 10/11 so the caller can say
+ *      "one more permission" rather than "you never authorized me")
  */
 
 'use strict';
@@ -70,6 +78,7 @@ const {
   injectMarkers,
   resolvePayloadFiles,
   extractJsonArg,
+  missingScopesForCommand,
 } = require('./common');
 
 async function main() {
@@ -243,6 +252,38 @@ async function main() {
     if (!access || !access.access_token) {
       fail('Token refresh returned no access_token');
     }
+
+    // Lazy scope upgrade (#1305). drive.readonly + drive.metadata joined the
+    // user slot on 2026-07-25; a refresh token issued before then still
+    // carries only the old scopes, and Google does not widen it retroactively.
+    // Check the GRANTED scope string that came back with this token rather
+    // than waiting for a 403 — execGws inherits stdio, so the skill never sees
+    // gws's output and could not detect the 403 anyway. Same consent-link
+    // pattern as the revoked-token path above, with its own status/exit code so
+    // "authorized before this feature existed" is distinguishable from
+    // "never authorized" (10) and "authorization revoked" (11).
+    const scopeGap = missingScopesForCommand(guardedCommand, access.scope);
+    if (scopeGap) {
+      let consentUrl;
+      try {
+        consentUrl = await mintConsentUrl(ownerEmail, scope);
+      } catch (e) {
+        fail(`Additional Google permission required but consent-link mint failed: ${e.message}`);
+      }
+      emit({
+        status: 'scope-upgrade-required',
+        consent_url: consentUrl,
+        consent_chat_hyperlink: `<${consentUrl}|Re-authorize Google Workspace>`,
+        kind: scope,
+        missing_scopes: scopeGap.scopes,
+        message:
+          'Paste consent_chat_hyperlink on its own line, no surrounding markdown. Then on a separate line: ' +
+          `"I need one more permission to ${scopeGap.capability} — click the link to grant it." ` +
+          'Do not retry until the user confirms they clicked it.',
+      });
+      process.exit(15);
+    }
+
     accessToken = access.access_token;
   }
 
