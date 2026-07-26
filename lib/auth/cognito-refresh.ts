@@ -141,7 +141,10 @@ export function resolveCognitoIdpEndpoint(
 
   // Region must look like a real AWS region; never interpolate arbitrary input
   // into a hostname we are about to POST a refresh token to.
-  if (envRegion && /^[a-z]{2}(-gov)?(-iso[a-z]?)?-[a-z]+-\d$/.test(envRegion)) {
+  // The `(-iso|-iso[a-z])?` alternation is deliberate: the equivalent
+  // `(-iso[a-z]?)?` nests a quantifier inside a quantified group, which is star
+  // height 2 and an error under security/detect-unsafe-regex.
+  if (envRegion && /^[a-z]{2}(-gov)?(-iso|-iso[a-z])?-[a-z]+-\d$/.test(envRegion)) {
     return `https://cognito-idp.${envRegion}.amazonaws.com/`
   }
 

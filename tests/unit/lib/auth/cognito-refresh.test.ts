@@ -69,6 +69,15 @@ describe("resolveCognitoIdpEndpoint", () => {
     expect(resolveCognitoIdpEndpoint("https://evil.example.com/pool")).toBeNull()
   })
 
+  it.each(["us-east-1", "eu-central-1", "ap-southeast-4", "us-gov-west-1", "us-iso-east-1", "us-isob-east-1"])(
+    "accepts the real AWS region %s",
+    (region) => {
+      expect(resolveCognitoIdpEndpoint(undefined, region)).toBe(
+        `https://cognito-idp.${region}.amazonaws.com/`,
+      )
+    },
+  )
+
   it("refuses a region that is not shaped like an AWS region", () => {
     expect(resolveCognitoIdpEndpoint(undefined, "evil.example.com")).toBeNull()
     expect(resolveCognitoIdpEndpoint(undefined, "")).toBeNull()
