@@ -1,0 +1,7 @@
+{
+  "name": "psd-directory",
+  "version": "1.0.0",
+  "description": "OpenClaw skill — resolve a district email address or Google Chat users/{id} to a real person via the People API directory surface (#1239). Targeted lookups only; no enumeration.",
+  "private": true,
+  "dependencies": {}
+}

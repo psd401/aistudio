@@ -67,6 +67,16 @@ jobs:
       env:
         CI: true
 
+    # psd-directory (#1239). Same story as psd-workspace above: plain CJS
+    # outside the jest roots, so `test:ci` cannot see it. What these tests
+    # guard is identity CORRECTNESS — the exact-address rule that stops a
+    # fuzzy search result being reported as the person, and the absence of any
+    # directory-enumeration entry point.
+    - name: Run psd-directory lookup tests (Bun)
+      run: bun run test:skill:directory
+      env:
+        CI: true
+
     # Optional: Upload test coverage if you generate it
     # - name: Upload coverage reports
     #   uses: codecov/codecov-action@v3
