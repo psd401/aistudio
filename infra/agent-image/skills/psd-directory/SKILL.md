@@ -88,8 +88,8 @@ or renamed, since that one does spend a mint.
 |---|---|---|
 | 0 | Success, including `found:false` | Use the answer |
 | 1 | Bad usage or malformed input | Fix the arguments |
-| 2 | Unexpected People API error | Report it; do not retry blindly |
-| 12 | Broker or People API unreachable | Transient — retry once |
+| 2 | Unexpected People API error (bad request, or a malformed response) | Report it; do not retry blindly |
+| 12 | Broker or People API unreachable, or the People API returned 5xx | Transient — retry once |
 | 14 | The `agnt_` account is still being created | Tell the user to retry shortly |
 | 16 | **Directory sharing is disabled in the Workspace admin console** | No code or retry fixes this. An admin must set Directory → Directory settings → Sharing settings → External Directory Sharing to "Organization data and authenticated user basic profile fields". Say that plainly rather than reporting a generic permission error. |
 | 17 | The agent token lacks `directory.readonly` | A scope/deploy problem — report it |

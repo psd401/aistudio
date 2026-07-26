@@ -138,6 +138,16 @@ function classifyError(status, body) {
   if (status === 403 || status === 401) {
     return { code: 'FORBIDDEN', message };
   }
+  // 5xx is an upstream outage, not a bad request. It has to classify as
+  // TRANSPORT so run.js exits 12 ("transient — retry once") rather than 2
+  // ("do not retry blindly"), which is what SKILL.md promises callers. A 502
+  // from a load balancer also carries an HTML body, so `message` is empty
+  // here and the status is the only signal — classify on it, never on the
+  // parsed body (AGENTS.md: infra errors must stay distinguishable from app
+  // errors).
+  if (status >= 500) {
+    return { code: 'TRANSPORT', message: message || `People API returned HTTP ${status}` };
+  }
   return { code: 'LOOKUP_FAILED', message: message || `HTTP ${status}` };
 }
 
@@ -199,12 +209,22 @@ async function callPeople(url, accessToken, fetchImpl) {
   } catch (err) {
     throw new DirectoryError('TRANSPORT', `People API request failed: ${err.message}`);
   }
-  const body = await resp.json().catch(() => ({}));
+  // Status first, body second. On a failure the body is only used to enrich
+  // the message — the STATUS decides the class, so an HTML 502 from a load
+  // balancer still classifies as transport rather than as an app error.
   if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
     const { code, message } = classifyError(resp.status, body);
     throw new DirectoryError(code, message);
   }
-  return body;
+  // A 2xx whose body will not parse must NOT degrade to `{}`. That used to
+  // shape into found:false — reporting "not in the directory" for a person who
+  // is in it, and caching that miss. A malformed success is a failure.
+  try {
+    return await resp.json();
+  } catch (err) {
+    throw new DirectoryError('LOOKUP_FAILED', `People API returned an unparseable body: ${err.message}`);
+  }
 }
 
 /**

@@ -43,8 +43,15 @@ function stubFetch(responder) {
   const calls = [];
   const impl = async (url) => {
     calls.push(url);
-    const { status = 200, body = {} } = responder(url) || {};
-    return { ok: status >= 200 && status < 300, status, json: async () => body };
+    const { status = 200, body = {}, unparseable = false } = responder(url) || {};
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => {
+        if (unparseable) throw new SyntaxError('Unexpected token < in JSON at position 0');
+        return body;
+      },
+    };
   };
   impl.calls = calls;
   return impl;
@@ -210,6 +217,36 @@ describe('error classification', () => {
     expect(
       lib.classifyError(403, { error: { message: 'Request had insufficient authentication scopes.' } }).code
     ).toBe('INSUFFICIENT_SCOPE');
+  });
+
+  test('a 5xx is TRANSPORT, not a generic lookup failure (codex P2)', async () => {
+    // run.js maps TRANSPORT to exit 12 ("transient — retry once") and
+    // LOOKUP_FAILED to exit 2 ("do not retry blindly"). Misclassifying an
+    // upstream outage as exit 2 tells callers not to retry during exactly the
+    // situation retrying is for.
+    for (const status of [500, 502, 503, 504]) {
+      expect(lib.classifyError(status, {}).code).toBe('TRANSPORT');
+    }
+  });
+
+  test('a 502 with an HTML body still classifies on status', async () => {
+    // A load-balancer 502 carries HTML, so the parsed error message is empty
+    // and the status is the ONLY signal. Classifying on the body would make
+    // infra errors indistinguishable from app errors (AGENTS.md).
+    const fetchImpl = stubFetch(() => ({ status: 502, unparseable: true }));
+    await expect(lib.resolveEmail('x@psd401.net', 'tok', { fetchImpl })).rejects.toMatchObject({
+      code: 'TRANSPORT',
+    });
+  });
+
+  test('a 2xx with an unparseable body FAILS instead of becoming a false miss', async () => {
+    // Previously the body was parsed with .catch(() => ({})), so a malformed
+    // 200 shaped into found:false — reporting "not in the directory" for a
+    // person who is in it, and caching that miss for 5 minutes.
+    const fetchImpl = stubFetch(() => ({ status: 200, unparseable: true }));
+    await expect(lib.resolveEmail('x@psd401.net', 'tok', { fetchImpl })).rejects.toMatchObject({
+      code: 'LOOKUP_FAILED',
+    });
   });
 
   test('the sharing-disabled 403 propagates as a typed error', async () => {
