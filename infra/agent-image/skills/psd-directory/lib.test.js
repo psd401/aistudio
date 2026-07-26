@@ -319,6 +319,45 @@ describe('caching', () => {
   });
 });
 
+describe('SKILL.md registration frontmatter', () => {
+  // The stack parses this frontmatter at registration
+  // (infra/lib/agent-platform-stack.ts) and substitutes the useless string
+  // "Bundled skill: <name>" when `summary` is absent. psd-skills-meta's
+  // skills.search then matches on NAME and SUMMARY only — never description.
+  // A skill without a keyword-rich summary is therefore findable only by
+  // someone who already knows it is called "directory", which defeats the
+  // point of shipping it. Caught by codex on PR #1351.
+  const frontmatter = () => {
+    const raw = fs.readFileSync(path.join(__dirname, 'SKILL.md'), 'utf8');
+    const fm = raw.match(/^---\n([\s\S]*?)\n---/);
+    expect(fm).not.toBeNull();
+    const fields = {};
+    for (const line of fm[1].split('\n')) {
+      const m = line.match(/^([a-z-]+):\s*(.*)$/);
+      if (m) fields[m[1]] = m[2].trim();
+    }
+    return fields;
+  };
+
+  test('declares name, summary, description and allowed-tools', () => {
+    const fm = frontmatter();
+    expect(fm.name).toBe('psd-directory');
+    expect(fm.summary && fm.summary.length).toBeGreaterThan(0);
+    expect(fm.description && fm.description.length).toBeGreaterThan(0);
+    // Without this the skill cannot shell out to node, so it cannot run at all.
+    expect(fm['allowed-tools']).toBe('Bash(node:*)');
+  });
+
+  test('the summary carries the words someone would actually search', () => {
+    // Not cosmetic: these are the natural queries for this capability, and
+    // summary is the only free-text field skills.search looks at.
+    const summary = frontmatter().summary.toLowerCase();
+    for (const term of ['email', 'chat', 'person', 'name', 'title', 'who']) {
+      expect(summary).toContain(term);
+    }
+  });
+});
+
 describe('no enumeration surface', () => {
   test('the module exposes no directory-listing entry point', () => {
     // The district directory contains ClassLink-provisioned STUDENT records.

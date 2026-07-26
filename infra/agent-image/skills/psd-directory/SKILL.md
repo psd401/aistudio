@@ -1,6 +1,8 @@
 ---
 name: psd-directory
+summary: Who is this person? Look up an unknown email address or a Google Chat sender (users/{id}) and get the real person — name, job title, department, school. Identity lookup for staff and colleagues by email, Chat id, or message sender.
 description: Resolve a district email address or a Google Chat `users/{id}` to the real person in the Peninsula SD directory — name, title, department. Use this whenever you are about to refer to someone by a raw email address or a Chat sender id, instead of guessing who they are.
+allowed-tools: Bash(node:*)
 ---
 
 # psd-directory — who is this person, actually
