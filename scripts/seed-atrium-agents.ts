@@ -115,22 +115,32 @@ async function seedAgent(agent: SeedAgent, roleId: number | null): Promise<void>
         },
       });
 
-    // Upsert the identity and bind it to the client.
-    if (existing) {
-      await tx
-        .update(agentIdentities)
-        .set({ scopes: agent.scopes, kind: agent.kind, roleId, oauthClientId: clientId, isActive: true })
-        .where(eq(agentIdentities.id, existing.id));
-    } else {
-      await tx.insert(agentIdentities).values({
+    // Upsert the identity by NAME and bind it to the client. The earlier
+    // read-then-insert (#1303) had no conflict target, so a concurrent or
+    // independent seeding path — migration 085's own name-guarded INSERT, a
+    // cross-environment data copy keyed on `id` — could land a SECOND row for
+    // the same name. `uq_agent_identities_name` (migration 140) is the arbiter:
+    // one row per name, whatever id it happens to hold.
+    await tx
+      .insert(agentIdentities)
+      .values({
         name: agent.name,
         kind: agent.kind,
         roleId,
         scopes: agent.scopes,
         oauthClientId: clientId,
         isActive: true,
+      })
+      .onConflictDoUpdate({
+        target: agentIdentities.name,
+        set: {
+          kind: agent.kind,
+          roleId,
+          scopes: agent.scopes,
+          oauthClientId: clientId,
+          isActive: true,
+        },
       });
-    }
   }, "seedAtriumAgents.seed");
 
   log.info(`+ ${agent.name}: created client ${clientId}`);

@@ -132,6 +132,7 @@
     "135-atrium-asset-initiation-idempotency.sql",
     "136-google-content-connectors.sql",
     "137-nexus-conversation-retention.sql",
-    "138-atrium-capture-browser-registration.sql"
+    "138-atrium-capture-browser-registration.sql",
+    "140-agent-identities-name-unique.sql"
   ]
 }
