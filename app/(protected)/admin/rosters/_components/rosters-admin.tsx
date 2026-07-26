@@ -59,7 +59,10 @@ import type {
   OneRosterAuthMode,
   OneRosterApiVersion,
 } from "@/lib/roster/settings"
-import type { OneRosterSyncStatus } from "@/lib/roster/status"
+import {
+  isOneRosterSyncStatusActive,
+  type OneRosterSyncStatus,
+} from "@/lib/roster/status"
 
 type DateValue = Date | string | null
 
@@ -88,6 +91,12 @@ function collectionLabel(value: string): string {
 
 function statusLabel(status: OneRosterSyncStatus | null): string {
   if (!status) return "No run recorded"
+  if (
+    (status.state === "queued" || status.state === "running") &&
+    !isOneRosterSyncStatusActive(status)
+  ) {
+    return "Timed out"
+  }
   if (status.state === "succeeded" && status.unchanged) return "No changes"
   return status.state.charAt(0).toUpperCase() + status.state.slice(1)
 }
@@ -121,29 +130,35 @@ async function pollForRun(
 }
 
 function usePersistedRunMonitor(
-  runId: string | null,
+  status: OneRosterSyncStatus | null,
   router: ReturnType<typeof useRouter>,
   syncInFlightRef: { current: boolean },
   mountedRef: { current: boolean }
 ) {
   useEffect(() => {
-    if (!runId) return
+    if (!status || !isOneRosterSyncStatusActive(status)) return
     let cancelled = false
     syncInFlightRef.current = true
+    const shouldContinue = () =>
+      mountedRef.current &&
+      !cancelled &&
+      isOneRosterSyncStatusActive(status)
 
     const monitorPersistedRun = async () => {
-      while (!cancelled && mountedRef.current) {
-        const status = await pollForRun(
-          runId,
-          () => mountedRef.current && !cancelled
+      while (shouldContinue()) {
+        const terminalStatus = await pollForRun(
+          status.runId,
+          shouldContinue
         )
         if (cancelled || !mountedRef.current) return
-        if (status) {
+        if (terminalStatus) {
           syncInFlightRef.current = false
           router.refresh()
           return
         }
       }
+      syncInFlightRef.current = false
+      router.refresh()
     }
 
     void monitorPersistedRun()
@@ -151,7 +166,7 @@ function usePersistedRunMonitor(
       cancelled = true
       syncInFlightRef.current = false
     }
-  }, [mountedRef, router, runId, syncInFlightRef])
+  }, [mountedRef, router, status, syncInFlightRef])
 }
 
 interface RostersAdminProps {
@@ -168,12 +183,12 @@ export function RostersAdmin({
   const [isPending, startTransition] = useTransition()
   const [isManualSyncing, setIsManualSyncing] = useState(false)
   const persistedStatus = initialData?.overview.status
-  const persistedRunId =
-    persistedStatus && !isTerminal(persistedStatus)
-      ? persistedStatus.runId
+  const persistedRun =
+    persistedStatus && isOneRosterSyncStatusActive(persistedStatus)
+      ? persistedStatus
       : null
   const isSyncing = Boolean(
-    isManualSyncing || persistedRunId
+    isManualSyncing || persistedRun
   )
   const syncInFlightRef = useRef(false)
   const mountedRef = useRef(true)
@@ -186,7 +201,7 @@ export function RostersAdmin({
   }, [])
 
   usePersistedRunMonitor(
-    persistedRunId,
+    persistedRun,
     router,
     syncInFlightRef,
     mountedRef

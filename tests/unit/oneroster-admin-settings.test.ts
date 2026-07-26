@@ -3,7 +3,11 @@ import {
   oneRosterSettingsInputSchema,
   ONEROSTER_SETTING_KEYS,
 } from "@/lib/roster/settings";
-import { parseOneRosterSyncStatus } from "@/lib/roster/status";
+import {
+  isOneRosterSyncStatusActive,
+  ONEROSTER_SYNC_ACTIVE_WINDOW_MS,
+  parseOneRosterSyncStatus,
+} from "@/lib/roster/status";
 
 const validInput = {
   enabled: true,
@@ -152,5 +156,40 @@ describe("OneRoster sync status parsing", () => {
         })
       )
     ).toBeNull();
+  });
+
+  it("expires abandoned nonterminal runs after the retry window", () => {
+    const now = Date.parse("2026-07-26T21:00:00.000Z");
+    const activeStatus = parseOneRosterSyncStatus(
+      JSON.stringify({
+        runId: "run-active",
+        trigger: "manual",
+        state: "running",
+        startedAt: new Date(
+          now - ONEROSTER_SYNC_ACTIVE_WINDOW_MS + 1
+        ).toISOString(),
+        completedAt: null,
+        unchanged: false,
+        collections: [],
+        error: null,
+      })
+    );
+    const staleStatus = activeStatus
+      ? {
+          ...activeStatus,
+          runId: "run-stale",
+          startedAt: new Date(
+            now - ONEROSTER_SYNC_ACTIVE_WINDOW_MS - 1
+          ).toISOString(),
+        }
+      : null;
+
+    expect(activeStatus).not.toBeNull();
+    expect(activeStatus && isOneRosterSyncStatusActive(activeStatus, now)).toBe(
+      true
+    );
+    expect(staleStatus && isOneRosterSyncStatusActive(staleStatus, now)).toBe(
+      false
+    );
   });
 });

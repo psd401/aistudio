@@ -38,6 +38,7 @@ describe("OneRoster administrator contracts", () => {
     expect(component).toContain("syncInFlightRef");
     expect(component).toContain("pollForRun");
     expect(component).toContain("monitorPersistedRun");
+    expect(component).toContain("isOneRosterSyncStatusActive");
     expect(component).not.toMatch(/token[_ -]?url/i);
   });
 

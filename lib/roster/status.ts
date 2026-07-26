@@ -46,6 +46,24 @@ export const oneRosterSyncStatusSchema = z.object({
 
 export type OneRosterSyncStatus = z.infer<typeof oneRosterSyncStatusSchema>;
 
+// Lambda async invocation can make the initial attempt plus two retries. With
+// the 15-minute function timeout and the default retry delays, one hour covers
+// the complete execution window while still recovering abandoned status rows.
+export const ONEROSTER_SYNC_ACTIVE_WINDOW_MS = 60 * 60 * 1000;
+
+export function isOneRosterSyncStatusActive(
+  status: OneRosterSyncStatus,
+  now = Date.now()
+): boolean {
+  if (status.state !== "queued" && status.state !== "running") return false;
+  const startedAt = Date.parse(status.startedAt);
+  return (
+    Number.isFinite(startedAt) &&
+    startedAt <= now &&
+    now - startedAt <= ONEROSTER_SYNC_ACTIVE_WINDOW_MS
+  );
+}
+
 export function parseOneRosterSyncStatus(
   value: string | null
 ): OneRosterSyncStatus | null {

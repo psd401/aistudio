@@ -150,8 +150,10 @@ layers. It has three tabs:
 - **Sync** shows active/inactive totals and last-sync timestamps for all six
   collections. **Sync now** writes a unique queued run ID, invokes the same
   Lambda used by EventBridge, and polls `ONEROSTER_SYNC_STATUS` until that run
-  succeeds, fails, skips, or times out. A client-side in-flight ref prevents
-  two same-tick clicks from dispatching duplicate runs.
+  succeeds, fails, skips, or times out. Nonterminal status rows older than the
+  one-hour Lambda execution-and-retry window are shown as timed out and no
+  longer block a manual retry. A client-side in-flight ref prevents two
+  same-tick clicks from dispatching duplicate runs.
 - **Roster browser** lazily reads schools, their classes (including active term,
   teacher-of-record, and student count), and each class's student enrollments.
   It never edits sync-owned rows.
