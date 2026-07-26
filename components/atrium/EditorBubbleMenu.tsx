@@ -475,6 +475,24 @@ export function EditorBubbleMenu({
 
   const closePops = () => setPop("none");
 
+  // Escape closes an open sub-popover (block style / color / callout / media)
+  // without collapsing the text selection — matching DocumentCover's dismissal
+  // pattern. Outside interactions already close everything for free: clicking
+  // elsewhere in the document moves the selection and clicking outside the
+  // editor blurs it, and the bubble plugin hides this whole menu (state resets
+  // with it) in both cases.
+  useEffect(() => {
+    if (pop === "none") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation(); // dismiss the popover only, not the selection
+        setPop("none");
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [pop]);
+
   return (
     <BubbleMenu
       editor={editor}

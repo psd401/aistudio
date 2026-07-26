@@ -669,6 +669,20 @@ function useAtriumEditor(ydoc: Y.Doc, userId: number, editable: boolean) {
   // some unrelated doc-changing transaction — e.g. adding a comment — forced a
   // re-evaluation. Running this layout effect first means the plugin constructor
   // observes the correct editability.
+  //
+  // DEPENDENCY (re-verify on @tiptap/react upgrades — checked at 3.27.1):
+  // this ordering argument holds because `@tiptap/react`'s BubbleMenu registers
+  // its plugin in a PASSIVE effect. If a future version moved that registration
+  // into a layout effect, child-before-parent ordering would apply within the
+  // layout tier too and this fix alone would not suffice. The user-visible
+  // invariant is pinned end-to-end by the `atrium-editor-sync-status` flow in
+  // tests/e2e/atrium-editor-polish.functional.spec.ts (bubble toolbar on the
+  // FIRST selection of a fresh session, mouse + keyboard, no comment added) —
+  // that spec, not this comment, is what catches a regression here. A unit test
+  // cannot cover it: TipTap is ESM-only (not jest-loadable, see
+  // docs/learnings/testing/2026-06-26-next-jest-cannot-transform-esm-node-modules.md)
+  // and a jsdom re-derivation of React's effect ordering would test the
+  // framework, not this code.
   useLayoutEffect(() => {
     editor?.setEditable(editable);
   }, [editor, editable]);

@@ -177,6 +177,7 @@ function LibraryHeader({
           placeholder="Search titles and tags…"
           value={search}
           onChange={(e) => onSearch(e.target.value)}
+          maxLength={200}
           className="mer-search-input"
         />
         <kbd className="mer-search-kbd" aria-hidden="true">
@@ -241,6 +242,7 @@ function LibraryChips({
           placeholder="Tag…"
           value={tag}
           onChange={(e) => onTag(e.target.value)}
+          maxLength={100}
           className="h-9 w-28"
         />
         <span className="mer-sorted-label">Sorted by recent</span>
@@ -388,7 +390,18 @@ function useLibrarySelection() {
       return next;
     });
   }, []);
-  return { selected, clearSelection, toggleSelect };
+  // Subtractive deselect for post-bulk-action cleanup: removes exactly the ids
+  // a completed action succeeded on, so picks made WHILE the fan-out was in
+  // flight (and failed ids awaiting a retry) survive. A whole-set reset here
+  // silently discarded them.
+  const removeFromSelection = useCallback((ids: string[]) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
+  }, []);
+  return { selected, clearSelection, toggleSelect, removeFromSelection };
 }
 
 export interface LibraryViewProps {
@@ -463,7 +476,8 @@ export function LibraryView({
       query: debouncedSearch.trim() || undefined,
     });
 
-  const { selected, clearSelection, toggleSelect } = useLibrarySelection();
+  const { selected, clearSelection, toggleSelect, removeFromSelection } =
+    useLibrarySelection();
 
   // Filters changed (or first mount): reload page one and drop the selection.
   // `fetchPage`'s identity changes exactly when a server filter changes, so it
@@ -507,6 +521,7 @@ export function LibraryView({
         <LibraryBulkBar
           selectedIds={[...selected]}
           onClear={clearSelection}
+          onActed={removeFromSelection}
           onRefresh={refresh}
           archivedView={archivedView}
         />

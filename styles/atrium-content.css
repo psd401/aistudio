@@ -279,8 +279,13 @@
    * (`--mer-human-other-2`) and collides with neither provenance color.
    * Deletion stays red — a strikethrough reads as "removed", not "human vs
    * agent". */
-  --atrium-suggest-insert: #4a7ce8; /* blue underline — proposed insertion */
-  --atrium-suggest-insert-soft: rgba(74, 124, 232, 0.14);
+  /* Cyan, deliberately outside every other color family in the editor: not the
+     human/agent provenance greens/violets, not any TEXT_COLORS swatch in
+     EditorBubbleMenu (whose "Blue" #4a7ce8 this used to collide with — manually
+     blue-colored text read as a pending suggestion), and not a presence color
+     (#4a7ce8 is also --mer-human-other-2 / PRESENCE_OTHERS blue). */
+  --atrium-suggest-insert: #0e7490; /* cyan underline — proposed insertion */
+  --atrium-suggest-insert-soft: rgba(14, 116, 144, 0.14);
   --atrium-suggest-delete: #dc2626; /* red strikethrough — proposed deletion */
   --atrium-suggest-cue: rgba(74, 124, 232, 0.55);
 }

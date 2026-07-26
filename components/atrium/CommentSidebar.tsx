@@ -307,9 +307,10 @@ export function CommentSidebar({
     [threads]
   );
 
-  // Report the open count upward (topbar chip + initial rail visibility). Only
-  // reported once the first load has settled, so the editor does not decide
-  // "no open comments → keep the rail hidden" from the empty pre-fetch state.
+  // Report the open count upward (topbar chip + initial rail visibility). This
+  // fires on EVERY count change; the `loading` guard only suppresses it until
+  // the first load has settled, so the editor never decides "no open comments →
+  // keep the rail hidden" from the empty pre-fetch state.
   useEffect(() => {
     if (loading) return;
     onOpenCountChange?.(openCount);

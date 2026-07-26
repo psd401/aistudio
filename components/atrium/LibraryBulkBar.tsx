@@ -13,8 +13,11 @@
  *
  * Partial failure is the normal case (e.g. bulk-deleting a mixed selection:
  * published objects are refused with a 409 while drafts succeed), so the fan-out
- * uses `Promise.allSettled` over a bounded pool and aggregates the outcome into
- * ONE message instead of a toast storm.
+ * runs a bounded worker pool that never rejects (`runBounded` in
+ * `lib/atrium/bulk-run.ts`) and aggregates the outcome into ONE message instead
+ * of a toast storm. After a run, only the ids that actually SUCCEEDED are
+ * dropped from the selection: failed ids stay selected for retry, and picks the
+ * user made while the fan-out was in flight are never touched.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -36,59 +39,11 @@ import {
   NO_COLLECTION,
   type CollectionOption,
 } from "@/lib/atrium/collection-options";
-import {
-  summarize,
-  type BulkOutcome,
-} from "@/lib/atrium/bulk-summary";
+import { summarize } from "@/lib/atrium/bulk-summary";
+import { runBounded } from "@/lib/atrium/bulk-run";
 import { createLogger } from "@/lib/client-logger";
 
 const log = createLogger({ component: "LibraryBulkBar" });
-
-/**
- * Max in-flight server actions during a fan-out. Bounded so selecting a full
- * 50-row page cannot open 50 simultaneous requests (each of which takes a DB
- * connection from the pool).
- */
-const BULK_CONCURRENCY = 4;
-
-/**
- * Run `task` over `ids` with bounded concurrency, collecting per-id outcomes.
- * Never rejects: a thrown task is recorded as a failure like any other, so one
- * network error cannot abandon the rest of the selection.
- */
-async function runBounded(
-  ids: string[],
-  task: (id: string) => Promise<{ isSuccess: boolean; message?: string }>
-): Promise<BulkOutcome> {
-  const outcome: BulkOutcome = { succeeded: 0, failures: new Map() };
-  const queue = [...ids];
-
-  const recordFailure = (message: string) => {
-    outcome.failures.set(message, (outcome.failures.get(message) ?? 0) + 1);
-  };
-
-  async function worker(): Promise<void> {
-    for (;;) {
-      const id = queue.shift();
-      if (id === undefined) return;
-      try {
-        const res = await task(id);
-        if (res.isSuccess) outcome.succeeded += 1;
-        else recordFailure(res.message ?? "Refused by the server");
-      } catch (e) {
-        log.error("bulk task threw", {
-          error: e instanceof Error ? e.message : String(e),
-        });
-        recordFailure("Request failed — please try again");
-      }
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(BULK_CONCURRENCY, ids.length) }, worker)
-  );
-  return outcome;
-}
 
 /**
  * Load the visibility-filtered move-target sections once a selection exists —
@@ -226,8 +181,16 @@ function BulkControls({
 export interface LibraryBulkBarProps {
   /** The selected object ids (order is irrelevant). */
   selectedIds: string[];
-  /** Clear the selection (the "×" control and the post-action reset). */
+  /** Clear the WHOLE selection (the "×" control only). */
   onClear: () => void;
+  /**
+   * Remove exactly these ids from the selection after a bulk action succeeded
+   * on them. Deliberately NOT `onClear`: the user can keep selecting while a
+   * fan-out is in flight, and a whole-selection reset would silently discard
+   * those mid-flight picks (and deselect failed ids the user may want to
+   * retry).
+   */
+  onActed: (ids: string[]) => void;
   /** Reload the current page after a mutation so the grid reflects reality. */
   onRefresh: () => void;
   /**
@@ -240,6 +203,7 @@ export interface LibraryBulkBarProps {
 export function LibraryBulkBar({
   selectedIds,
   onClear,
+  onActed,
   onRefresh,
   archivedView,
 }: LibraryBulkBarProps): React.JSX.Element | null {
@@ -259,17 +223,22 @@ export function LibraryBulkBar({
       setBusy(true);
       setMessage(null);
       try {
-        const outcome = await runBounded(ids, task);
+        const { outcome, succeededIds } = await runBounded(ids, task, (id, e) =>
+          log.error("bulk task threw", {
+            id,
+            error: e instanceof Error ? e.message : String(e),
+          })
+        );
         setMessage(summarize(outcome, verb, ids.length));
         if (outcome.succeeded > 0) onRefresh();
-        // Keep the selection when NOTHING succeeded so the user can retry or
-        // narrow it; clear it once the grid has actually changed underneath.
-        if (clearOnDone && outcome.succeeded > 0) onClear();
+        // Deselect ONLY the ids that succeeded: failed ids stay selected for
+        // retry, and any picks made while the fan-out was in flight survive.
+        if (clearOnDone && succeededIds.length > 0) onActed(succeededIds);
       } finally {
         setBusy(false);
       }
     },
-    [selectedIds, onClear, onRefresh]
+    [selectedIds, onActed, onRefresh]
   );
 
   const setStatus = useCallback(

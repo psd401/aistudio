@@ -758,12 +758,23 @@ export const visibilityService = {
     }
     if (filter.tag) {
       // Bound parameter (injection-safe); cap length so an oversized tag string
-      // cannot be pushed to the driver on every list call. Array-overlap (`&&`
-      // against a one-element text[]) rather than `= ANY(tags)`: only the
-      // overlap operator can use the `idx_content_tags` GIN index (migration
-      // 085) — `<tag> = ANY(column)` forces a sequential scan.
+      // cannot be pushed to the driver on every list call. CASE-INSENSITIVE
+      // whole-tag equality (#1336 review): tags are stored case-preserved
+      // ("Science") and never normalized on write, so the previous
+      // case-sensitive `&&` array-overlap silently zero-matched a user typing
+      // "science" — while the free-text `filter.query` arm below matched it via
+      // ILIKE. The two entry points must agree. `lower() = lower()` over
+      // `unnest` cannot use the `idx_content_tags` GIN index (which only serves
+      // case-sensitive overlap), but like the query arm this runs only on
+      // explicit user filter text and is bounded by the visibility predicate +
+      // LIMIT.
       const tag = filter.tag.slice(0, MAX_TAG_LENGTH);
-      filters.push(sql`${o.tags} && ARRAY[${tag}]::text[]`);
+      filters.push(
+        sql`EXISTS (
+          SELECT 1 FROM unnest(${o.tags}) AS exact_tag
+          WHERE lower(exact_tag) = lower(${tag})
+        )`
+      );
     }
     if (filter.query) {
       // Case-insensitive substring search over the TITLE **or any TAG** (#1336:
