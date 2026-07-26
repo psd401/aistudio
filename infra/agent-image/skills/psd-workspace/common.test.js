@@ -630,3 +630,46 @@ describe('#1305 uploadType is caught in --params without false-refusing renames'
     ).toBe(true);
   });
 });
+
+describe('#1305 marker injection marks the nested resource, not the envelope', () => {
+  // gws accepts the file resource at top level or wrapped under `resource` /
+  // `requestBody`, and the gate unwraps all three. The marker must unwrap the
+  // same way or a wrapped payload sails through the gate with NO audit marker
+  // on the object Google actually creates.
+  const shapes = [
+    ['top level', (r) => r],
+    ['resource wrapper', (r) => ({ resource: r })],
+    ['requestBody wrapper', (r) => ({ requestBody: r })],
+  ];
+
+  for (const [label, wrap] of shapes) {
+    test(`${label}: a folder keeps its name and gets the marker on the resource`, () => {
+      const payload = wrap({ name: 'Budget 2026', mimeType: DRIVE_FOLDER_MIME });
+      const out = injectMarkers(`drive files create --json '${JSON.stringify(payload)}'`);
+      const parsed = JSON.parse(extractJsonArg(out));
+      const resource = parsed.resource || parsed.requestBody || parsed;
+      expect(resource.name).toBe('Budget 2026');
+      expect(resource.appProperties.psdAgentCreated).toBe('true');
+      // The envelope itself must NOT be marked when it is only an envelope.
+      if (parsed !== resource) expect(parsed.appProperties).toBeUndefined();
+    });
+
+    test(`${label}: a non-folder gets the [Agent] prefix on the resource`, () => {
+      const payload = wrap({ name: 'Report.pdf' });
+      const out = injectMarkers(`drive files create --json '${JSON.stringify(payload)}'`);
+      const parsed = JSON.parse(extractJsonArg(out));
+      const resource = parsed.resource || parsed.requestBody || parsed;
+      expect(resource.name).toBe('[Agent] Report.pdf');
+      expect(resource.appProperties.psdAgentCreated).toBe('true');
+    });
+
+    test(`${label}: the gate and the marker agree on what the resource is`, () => {
+      const USER_CTX = { scope: 'user_account', ownerEmail: 'hagelk@psd401.net' };
+      const folder = wrap({ name: 'Q3', mimeType: DRIVE_FOLDER_MIME });
+      const doc = wrap({ name: 'Q3', mimeType: 'application/vnd.google-apps.document' });
+      const cmd = (p) => `drive files create --json '${JSON.stringify(p)}'`;
+      expect(enforcePhase1Gates(cmd(folder), USER_CTX).allowed).toBe(true);
+      expect(enforcePhase1Gates(cmd(doc), USER_CTX).allowed).toBe(false);
+    });
+  }
+});

@@ -1024,6 +1024,20 @@ function injectMarkers(commandString) {
   // Drive files create: prefix filename + appProperties marker
   if (/\bdrive[\s.]+files[\s.]+create\b/i.test(commandString)) {
     return mutateJsonField(commandString, (obj) => {
+      // Mark the FILE RESOURCE, not the envelope. gws accepts the resource at
+      // top level or wrapped under `resource` / `requestBody`, and the gate
+      // (isPermittedFolderCreate / isMetadataOnlyDriveUpdate, via
+      // extractDriveResource) unwraps all three. Marking only the outer object
+      // meant a wrapped payload was ALLOWED through the gate but its actual
+      // folder/file resource got neither the appProperties marker nor the
+      // folder-name handling — the audit trail silently went missing for
+      // exactly the shapes the gate accepts. Unwrap identically here so the
+      // gate and the marker can never disagree about which object is the file.
+      const target =
+        (obj.resource && typeof obj.resource === 'object' && !Array.isArray(obj.resource) && obj.resource) ||
+        (obj.requestBody && typeof obj.requestBody === 'object' && !Array.isArray(obj.requestBody) && obj.requestBody) ||
+        obj;
+
       // FOLDERS are exempt from the visible `[Agent] ` prefix (#1305). A folder
       // is an organizing container the USER asked for by name — "file these
       // under Budget 2026" must not produce "[Agent] Budget 2026" in their own
@@ -1032,13 +1046,13 @@ function injectMarkers(commandString) {
       // still applied, so the audit trail is unchanged and the folder remains
       // identifiable as agent-created.
       const isFolder =
-        typeof obj.mimeType === 'string' &&
-        obj.mimeType.trim().toLowerCase() === DRIVE_FOLDER_MIME;
-      if (obj.name && !isFolder && !obj.name.startsWith('[Agent] ')) {
-        obj.name = `[Agent] ${obj.name}`;
+        typeof target.mimeType === 'string' &&
+        target.mimeType.trim().toLowerCase() === DRIVE_FOLDER_MIME;
+      if (target.name && !isFolder && !target.name.startsWith('[Agent] ')) {
+        target.name = `[Agent] ${target.name}`;
       }
-      obj.appProperties = obj.appProperties || {};
-      obj.appProperties.psdAgentCreated = 'true';
+      target.appProperties = target.appProperties || {};
+      target.appProperties.psdAgentCreated = 'true';
       return obj;
     });
   }
