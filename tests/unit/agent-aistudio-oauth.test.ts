@@ -263,4 +263,18 @@ describe("AI Studio OAuth callback", () => {
     expect(mockExecutedLabels).toEqual(["lookupAistudioCallbackNonce"]);
     expect(global.fetch).not.toHaveBeenCalled();
   });
+
+  it("lets the fixed OAuth issuer reject an invalid authorization code", async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ error: "invalid_grant" }, 400)
+      ) as unknown as typeof fetch;
+
+    const result = await handleAistudioCallback("", mockNonce);
+
+    expect(result.data).toMatchObject({ success: false });
+    expect(mockStoreTokens).not.toHaveBeenCalled();
+    expect(mockExecutedLabels).toEqual(["lookupAistudioCallbackNonce"]);
+  });
 });

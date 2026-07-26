@@ -157,13 +157,6 @@ export async function handleAistudioCallback(
   const timer = startTimer("handleAistudioCallback")
   const log = createLogger({ requestId, action: "handleAistudioCallback" })
   try {
-    if (!code) {
-      timer({ status: "error" })
-      return createSuccess({
-        success: false,
-        error: "Invalid authorization response. Ask your agent for a new link.",
-      })
-    }
     // Treat the server-side, single-use nonce record as the state validator.
     // A format check is not an authorization boundary: only an exact,
     // unconsumed, unexpired nonce issued by this application may proceed.
