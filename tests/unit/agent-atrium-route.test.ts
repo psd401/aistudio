@@ -1,17 +1,24 @@
 let context:
-  | { ownerEmail: string; actorEmail: string; mode: "owner" | "scheduled" }
+  | {
+      ownerEmail: string
+      actorEmail: string
+      mode: "owner" | "scheduled"
+      sessionId: string
+    }
   | null = {
   ownerEmail: "owner@psd401.net",
   actorEmail: "owner@psd401.net",
   mode: "owner",
+  sessionId: "session-1",
 }
-const getSecretStringMock = jest.fn()
+const executeOwnerAtriumOperationMock = jest.fn()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: jest.fn(async () => context),
 }))
-jest.mock("@/lib/agent-workspace/secrets-manager", () => ({
-  getSecretString: (...args: unknown[]) => getSecretStringMock(...args),
+jest.mock("@/lib/agent-workspace/atrium-owner-operation", () => ({
+  executeOwnerAtriumOperation: (...args: unknown[]) =>
+    executeOwnerAtriumOperationMock(...args),
 }))
 jest.mock("@/lib/logger", () => ({
   createLogger: () => ({
@@ -34,27 +41,17 @@ function request(body: unknown): NextRequest {
   } as unknown as NextRequest
 }
 
-const originalFetch = globalThis.fetch
-
 beforeEach(() => {
   context = {
     ownerEmail: "owner@psd401.net",
     actorEmail: "owner@psd401.net",
     mode: "owner",
+    sessionId: "session-1",
   }
-  process.env.APP_BASE_URL = "https://app.example"
-  process.env.ENVIRONMENT = "test"
-  getSecretStringMock.mockReset().mockResolvedValue("content-key")
-  globalThis.fetch = jest.fn(async () =>
-    ({
-      status: 200,
-      text: async () => JSON.stringify({ data: { id: "content-1" } }),
-    }) as Response
-  ) as typeof fetch
-})
-
-afterAll(() => {
-  globalThis.fetch = originalFetch
+  executeOwnerAtriumOperationMock.mockReset().mockResolvedValue({
+    httpStatus: 201,
+    payload: { data: { id: "content-1" } },
+  })
 })
 
 describe("POST /api/agent/atrium", () => {
@@ -65,6 +62,7 @@ describe("POST /api/agent/atrium", () => {
       ownerEmail: "owner@psd401.net",
       actorEmail: "owner@psd401.net",
       mode: "owner",
+      sessionId: "session-1",
     }
     expect(
       (
@@ -77,10 +75,10 @@ describe("POST /api/agent/atrium", () => {
         )
       ).status
     ).toBe(400)
-    expect(getSecretStringMock).not.toHaveBeenCalled()
+    expect(executeOwnerAtriumOperationMock).not.toHaveBeenCalled()
   })
 
-  it("uses only the fixed platform content secret and origin", async () => {
+  it("executes the operation directly as only the signed owner", async () => {
     const response = await POST(
       request({
         method: "POST",
@@ -89,16 +87,17 @@ describe("POST /api/agent/atrium", () => {
       })
     )
     expect(response.status).toBe(200)
-    expect(getSecretStringMock).toHaveBeenCalledWith(
-      "psd-agent/test/atrium-content-api-key"
-    )
-    const [url, init] = (globalThis.fetch as jest.Mock).mock.calls[0]
-    expect(String(url)).toBe(
-      "https://app.example/api/v1/content/content-1/versions"
-    )
-    expect(init.headers.Authorization).toBe("Bearer content-key")
-    expect(init.redirect).toBe("error")
-    expect(JSON.stringify(await response.json())).not.toContain("content-key")
+    expect(executeOwnerAtriumOperationMock).toHaveBeenCalledWith({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-test",
+      method: "POST",
+      path: "/content-1/versions",
+      body: { title: "v2" },
+    })
+    expect(await response.json()).toEqual({
+      httpStatus: 201,
+      payload: { data: { id: "content-1" } },
+    })
   })
 
   it.each([
@@ -109,7 +108,7 @@ describe("POST /api/agent/atrium", () => {
   ])("rejects operation %s %s outside the fixed API surface", async (method, path) => {
     const response = await POST(request({ method, path }))
     expect(response.status).toBe(400)
-    expect(getSecretStringMock).not.toHaveBeenCalled()
+    expect(executeOwnerAtriumOperationMock).not.toHaveBeenCalled()
   })
 
   it("rejects unexpected query fields", async () => {
@@ -121,5 +120,6 @@ describe("POST /api/agent/atrium", () => {
       })
     )
     expect(response.status).toBe(400)
+    expect(executeOwnerAtriumOperationMock).not.toHaveBeenCalled()
   })
 })

@@ -8,11 +8,7 @@
 
 'use strict';
 
-const {
-  agentRequestHeaders,
-} = require('../_shared/invocation-context');
-
-const APP_BASE_URL = process.env.APP_BASE_URL || '';
+const { requestAgentBroker } = require('../_shared/agent-broker');
 const DEFAULT_TIMEZONE = 'America/Los_Angeles';
 
 function fail(message, code = 1) {
@@ -21,7 +17,7 @@ function fail(message, code = 1) {
 }
 
 function validateEnv() {
-  if (!APP_BASE_URL) fail('APP_BASE_URL environment variable is not set');
+  return true;
 }
 
 function rejectLegacyAuthorityArgs(args) {
@@ -139,21 +135,7 @@ function emit(value) {
 
 async function requestScheduleOperation(payload) {
   validateEnv();
-  const response = await fetch(
-    `${APP_BASE_URL.replace(/\/+$/, '')}/api/agent/schedules`,
-    {
-      method: 'POST',
-      headers: agentRequestHeaders(),
-      body: JSON.stringify(payload),
-    },
-  );
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(
-      `Schedule broker failed (${response.status}): ${body.error || 'unknown error'}`,
-    );
-  }
-  return body;
+  return requestAgentBroker('/api/agent/schedules', payload);
 }
 
 module.exports = {

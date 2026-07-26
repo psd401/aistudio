@@ -4,7 +4,6 @@
  * Environment contract (set in agent-platform-stack.ts):
  *   AWS_REGION                         — e.g. us-east-1
  *   ENVIRONMENT                        — dev/staging/prod
- *   APP_BASE_URL                       — Base URL of the owner-bound workspace broker
  */
 
 'use strict';
@@ -271,6 +270,21 @@ const USER_SCOPE_FORBIDDEN = [
     reason: 'creating a Google Slides deck owned by the user (create as the agent and share explicitly instead)' },
 ];
 
+const PROVENANCE_REQUIRED = [
+  { pattern: /\bcalendar[\s.]+events[\s.]+(patch|update)\b/i,
+    reason: 'calendar updates require server-recorded agent-created provenance' },
+  { pattern: /\btasks[\s.]+tasks[\s.]+(patch|update)\b/i,
+    reason: 'task updates require server-recorded agent-created provenance' },
+  { pattern: /\bdocs[\s.]+documents[\s.]+batchupdate\b/i,
+    reason: 'document mutations require server-recorded agent-created provenance' },
+  { pattern: /\bsheets[\s.]+spreadsheets[\s.]+batchupdate\b/i,
+    reason: 'spreadsheet mutations require server-recorded agent-created provenance' },
+  { pattern: /\bslides[\s.]+presentations[\s.]+batchupdate\b/i,
+    reason: 'presentation mutations require server-recorded agent-created provenance' },
+  { pattern: /\bdrive[\s.]+permissions[\s.]+create\b/i,
+    reason: 'permission creation requires server-recorded agent-created provenance' },
+];
+
 const PHASE1_FORBIDDEN = [
   // Send mail — any path that puts a message on the wire
   { pattern: /\bgmail[\s.]+users[\s.]+messages[\s.]+send\b/i,
@@ -347,108 +361,6 @@ function detectGmailSendHelper(tokens) {
   return null;
 }
 
-// District domain for the explicit-share exception. Env-overridable so
-// non-prod environments could narrow/redirect it; the default is the only
-// domain the platform serves.
-const AGENT_SHARE_DOMAIN = (process.env.AGENT_SHARE_DOMAIN || 'psd401.net').toLowerCase();
-
-/**
- * Exception to the `drive.permissions.create` block: the agent may grant
- * EXPLICIT, bounded permissions on files it owns (scope === 'agent_account').
- *
- * Rationale: the agent stores artifacts it creates (reports, generated docs,
- * meeting summaries) on its own agent_account Drive. Originally it could
- * share them only back to the CALLER; product decision 2026-07-07 (Hagel,
- * #1138 — team docs must land in shared Chat spaces) widened this to
- * in-district sharing with explicit grants.
- *
- * Hard constraints (ALL must be true to allow):
- *   - context.scope is 'agent_account'  (sharing FROM the agent's own Drive;
- *     permission changes on user-owned files remain fully blocked)
- *   - create only (update/delete remain blocked)
- *   - EITHER type === 'user' with an @psd401.net emailAddress,
- *     role ∈ {reader, commenter, writer} (writer added 2026-07-08, Hagel:
- *     explicitly NAMED district individuals may edit agent-owned docs —
- *     team collaboration on posted docs)
- *   - OR     type === 'domain' with domain === psd401.net, role === 'reader'
- *     (broad in-district visibility for docs posted to shared spaces;
- *     domain-wide stays read-only — district-wide edit is vandalism surface)
- *   - NEVER: type 'anyone' or 'group', external addresses/domains,
- *     owner transfer.
- *
- * Returns true if the share request fits the explicit in-district shape;
- * false otherwise. False means fall through to the existing block.
- */
-function isPermittedExplicitShare(commandString, tokens, context) {
-  if (!context || context.scope !== 'agent_account' || !context.ownerEmail) {
-    return false;
-  }
-  // Must be the create variant — update/delete remain blocked. Match against
-  // the executed tokenization (REV-COR-346), not the raw string.
-  const spaceJoined = tokens.join(' ').toLowerCase();
-  const dotJoined = tokens.join('.').toLowerCase();
-  const createRe = /\bdrive[\s.]+permissions[\s.]+create\b/i;
-  if (!createRe.test(spaceJoined) && !createRe.test(dotJoined)) {
-    return false;
-  }
-
-  // Read the --json payload from the argv token that actually executes, so the
-  // exception cannot be granted on a benign-looking payload that differs from
-  // what gws receives (REV-COR-346). The payload-file flow's synthetic command
-  // inlines minified JSON UNQUOTED, which splitCommand's quote handling mangles
-  // (the embedded `"` toggle quote state) — for that flow fall back to the
-  // brace-balanced raw-string scan. The fallback only fires when the executed
-  // token is not itself valid JSON, in which case gws rejects the payload
-  // rather than executing a diverging one.
-  let payload = null;
-  const tokenJson = extractJsonArgFromTokens(tokens);
-  if (tokenJson) {
-    try {
-      payload = JSON.parse(tokenJson);
-    } catch {
-      payload = null;
-    }
-  }
-  if (!payload) {
-    const rawJson = extractJsonArg(commandString);
-    if (!rawJson) return false;
-    try {
-      payload = JSON.parse(rawJson);
-    } catch {
-      return false;
-    }
-  }
-
-  // gws drive permissions create wraps the permission under `resource`,
-  // `requestBody`, or accepts the fields at top level depending on the
-  // invocation style. Look in all three.
-  const perm = payload.resource || payload.requestBody || payload;
-  if (!perm || typeof perm !== 'object') return false;
-
-  const type = typeof perm.type === 'string' ? perm.type.toLowerCase() : '';
-  const role = typeof perm.role === 'string' ? perm.role.toLowerCase() : '';
-  const emailAddress = typeof perm.emailAddress === 'string'
-    ? perm.emailAddress.toLowerCase()
-    : '';
-  const domain = typeof perm.domain === 'string' ? perm.domain.toLowerCase() : '';
-
-  if (type === 'user') {
-    // Explicit named recipient — must be in-district. Writer allowed for
-    // named individuals (2026-07-08); owner transfer never.
-    if (role !== 'reader' && role !== 'commenter' && role !== 'writer') {
-      return false;
-    }
-    return emailAddress.endsWith(`@${AGENT_SHARE_DOMAIN}`);
-  }
-  if (type === 'domain') {
-    // Whole-district visibility (docs linked in shared Chat spaces) —
-    // read-only, and ONLY our own domain.
-    return role === 'reader' && domain === AGENT_SHARE_DOMAIN;
-  }
-  // 'anyone', 'group', and everything else stay blocked.
-  return false;
-}
-
 /**
  * Test the gws command against Phase 1 forbidden patterns. Returns
  * `{allowed: true}` if the command can proceed, or
@@ -457,9 +369,8 @@ function isPermittedExplicitShare(commandString, tokens, context) {
  * The check is intentionally permissive on whitespace and dot-vs-space
  * separators so different gws invocation styles all hit the same rules.
  *
- * Optional `context` argument enables narrow per-request exceptions:
+ * Optional `context` argument applies account-scope restrictions:
  *   { scope: 'agent_account' | 'user_account', ownerEmail: '<caller@…>' }
- * Currently used for the share-to-caller handoff on Drive permissions.
  */
 function enforcePhase1Gates(commandString, context) {
   if (!commandString || typeof commandString !== 'string') {
@@ -476,6 +387,10 @@ function enforcePhase1Gates(commandString, context) {
   const dotJoined = tokens.join('.').toLowerCase();
   const hits = (pattern) => pattern.test(spaceJoined) || pattern.test(dotJoined);
 
+  for (const { pattern, reason } of PROVENANCE_REQUIRED) {
+    if (hits(pattern)) return { allowed: false, reason };
+  }
+
   // Scope-conditional gates: file creation as the USER is impersonation
   // (2026-07-07, see USER_SCOPE_FORBIDDEN). Checked first — these have no
   // exceptions. Fail-closed default: when scope is missing/unknown we still
@@ -490,14 +405,6 @@ function enforcePhase1Gates(commandString, context) {
   }
   for (const { pattern, reason } of PHASE1_FORBIDDEN) {
     if (hits(pattern)) {
-      // Exception: agent grants explicit, bounded in-district permissions
-      // on files it owns (see isPermittedExplicitShare).
-      if (
-        hits(/\bdrive[\s.]+permissions[\s.]+create\b/i) &&
-        isPermittedExplicitShare(commandString, tokens, context)
-      ) {
-        return { allowed: true };
-      }
       return { allowed: false, reason };
     }
   }
@@ -702,7 +609,6 @@ function mutateJsonField(commandString, mutator) {
 }
 
 module.exports = {
-  APP_BASE_URL,
   fail,
   emit,
   parseArgs,
@@ -713,4 +619,5 @@ module.exports = {
   resolvePayloadFiles,
   extractJsonArg,
   PHASE1_FORBIDDEN,
+  PROVENANCE_REQUIRED,
 };

@@ -31,17 +31,103 @@ from __future__ import annotations
 import logging
 import json
 import os
+import subprocess
+import sys
+import stat
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("workspace_sync")
 
 WORKSPACE_DIR = Path("/home/node/.openclaw")
+
+
+def _download_workspace_file(
+    source_url: str,
+    destination: Path,
+    workspace_root: Path,
+) -> None:
+    """Restore as the node UID so root never follows paths in its writable tree."""
+    destination.relative_to(workspace_root)
+    if os.geteuid() != 0:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(
+            f".{destination.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with urllib.request.urlopen(source_url, timeout=60) as response:
+                with temporary.open("wb") as output:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+            os.replace(temporary, destination)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        return
+
+    writer = """
+import os
+import pathlib
+import sys
+import uuid
+root = pathlib.Path(sys.argv[1]).resolve()
+destination = pathlib.Path(sys.argv[2])
+resolved = destination.resolve(strict=False)
+resolved.relative_to(root)
+resolved.parent.mkdir(parents=True, exist_ok=True)
+temporary = resolved.with_name(f".{resolved.name}.{uuid.uuid4().hex}.tmp")
+try:
+    with temporary.open("xb") as output:
+        while True:
+            chunk = sys.stdin.buffer.read(1024 * 1024)
+            if not chunk:
+                break
+            output.write(chunk)
+    os.replace(temporary, resolved)
+finally:
+    try:
+        temporary.unlink()
+    except FileNotFoundError:
+        pass
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", writer, str(workspace_root), str(destination)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        user="node",
+        group="node",
+        extra_groups=[],
+        umask=0o077,
+        cwd=str(workspace_root),
+    )
+    assert process.stdin is not None
+    try:
+        with urllib.request.urlopen(source_url, timeout=60) as response:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                process.stdin.write(chunk)
+    finally:
+        process.stdin.close()
+    stderr = process.stderr.read(500) if process.stderr else b""
+    return_code = process.wait(timeout=60)
+    if return_code != 0:
+        raise RuntimeError(
+            f"node workspace writer failed ({return_code}): "
+            f"{stderr.decode('utf-8', errors='replace')}"
+        )
 
 # Paths (relative to WORKSPACE_DIR) we never sync in either direction.
 #
@@ -135,28 +221,12 @@ def _should_skip(path: Path) -> bool:
 
 def _broker_request(payload: dict) -> dict:
     """Call the trusted storage broker with the opaque signed owner context."""
-    base = os.environ.get("APP_BASE_URL", "").rstrip("/")
-    parsed = urllib.parse.urlparse(base)
-    local_http = parsed.scheme == "http" and parsed.hostname in {
-        "127.0.0.1",
-        "localhost",
-    }
-    if parsed.scheme != "https" and not local_http:
-        raise RuntimeError("APP_BASE_URL must use HTTPS")
-    context_path = os.environ.get(
-        "PSD_INVOCATION_CONTEXT_FILE",
-        "/tmp/psd-agent-invocation-context",
-    )
-    token = Path(context_path).read_text(encoding="ascii").strip()
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
-        f"{base}/api/agent/workspace-storage",
+        "http://127.0.0.1:18791/agent-broker/api/agent/workspace-storage",
         data=body,
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Agent-Invocation-Context": token,
-        },
+        headers={"Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
@@ -252,7 +322,6 @@ def pull_workspace(prefix: str) -> int:
                 logger.warning("workspace pull skip (path escape) %s", relative)
                 skipped += 1
                 continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
             to_download.append((relative, dest))
         continuation = page.get("continuationToken")
         if not isinstance(continuation, str) or not continuation:
@@ -263,13 +332,11 @@ def pull_workspace(prefix: str) -> int:
     def _download_one(key_dest: tuple[str, Path]) -> Optional[str]:
         relative, dest = key_dest
         try:
-            with urllib.request.urlopen(_download_url(relative), timeout=60) as response:
-                with dest.open("wb") as output:
-                    while True:
-                        chunk = response.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        output.write(chunk)
+            _download_workspace_file(
+                _download_url(relative),
+                dest,
+                workspace_root,
+            )
             return None
         except Exception as exc:  # noqa: BLE001
             return f"{relative}: {exc}"
@@ -325,14 +392,7 @@ def pull_files(prefix: str, relative_paths: list) -> int:
             logger.warning("pull_files: refusing gateway-owned path: %s", rel)
             continue
         try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with urllib.request.urlopen(_download_url(rel), timeout=60) as response:
-                with dest.open("wb") as output:
-                    while True:
-                        chunk = response.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        output.write(chunk)
+            _download_workspace_file(_download_url(rel), dest, workspace_root)
             pulled += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("pull_files: failed %s: %s", rel, str(exc)[:200])
@@ -350,6 +410,39 @@ def push_workspace(prefix: str) -> int:
         return 0
     if not WORKSPACE_DIR.exists():
         return 0
+    if os.geteuid() == 0:
+        child_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {
+                "AGENT_INVOCATION_SIGNING_SECRET",
+                "AGENT_INVOCATION_SIGNING_SECRET_ID",
+                "PSD_INVOCATION_CONTEXT_FILE",
+                "PSD_INVOCATION_REQUEST_PROOF_KEY_FILE",
+            }
+        }
+        result = subprocess.run(
+            [sys.executable, __file__, "--push-as-node", prefix],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=child_env,
+            user="node",
+            group="node",
+            extra_groups=[],
+            umask=0o077,
+            cwd=str(WORKSPACE_DIR),
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"node workspace push failed ({result.returncode}): "
+                f"{result.stderr[:500]}"
+            )
+        try:
+            return int(result.stdout.strip())
+        except ValueError as exc:
+            raise RuntimeError("node workspace push returned invalid output") from exc
 
     # Parallelized for the same reason as pull: 10k+ files over a serial
     # upload blocks both the idle-push background thread and the final
@@ -364,17 +457,48 @@ def push_workspace(prefix: str) -> int:
 
     from concurrent.futures import ThreadPoolExecutor
 
+    def _read_regular_file(relative: str) -> bytes:
+        parts = Path(relative).parts
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            raise RuntimeError("invalid workspace path")
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | no_follow
+        opened: list[int] = []
+        try:
+            directory_fd = os.open(WORKSPACE_DIR, directory_flags)
+            opened.append(directory_fd)
+            for part in parts[:-1]:
+                directory_fd = os.open(
+                    part,
+                    directory_flags,
+                    dir_fd=directory_fd,
+                )
+                opened.append(directory_fd)
+            file_fd = os.open(
+                parts[-1],
+                os.O_RDONLY | no_follow,
+                dir_fd=directory_fd,
+            )
+            opened.append(file_fd)
+            metadata = os.fstat(file_fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError("workspace path is not a regular file")
+            with os.fdopen(os.dup(file_fd), "rb") as source:
+                return source.read()
+        finally:
+            for descriptor in reversed(opened):
+                os.close(descriptor)
+
     def _upload_one(pair: tuple[str, str]) -> Optional[str]:
         path, relative = pair
         try:
-            with open(path, "rb") as source:
-                request = urllib.request.Request(
-                    _upload_url(relative),
-                    data=source.read(),
-                    method="PUT",
-                )
-                with urllib.request.urlopen(request, timeout=60):
-                    pass
+            request = urllib.request.Request(
+                _upload_url(relative),
+                data=_read_regular_file(relative),
+                method="PUT",
+            )
+            with urllib.request.urlopen(request, timeout=60):
+                pass
             return None
         except Exception as exc:  # noqa: BLE001
             return f"{path}: {exc}"
@@ -446,4 +570,14 @@ def stop_periodic_push() -> None:
         stop.set()
     if _periodic_thread is not None and _periodic_thread.is_alive():
         _periodic_thread.join(timeout=15)
+        if _periodic_thread.is_alive():
+            raise RuntimeError(
+                "periodic workspace push did not stop before authority change"
+            )
     _periodic_thread = None
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3 or sys.argv[1] != "--push-as-node":
+        raise SystemExit(2)
+    sys.stdout.write(str(push_workspace(sys.argv[2])))

@@ -32,7 +32,10 @@ import * as chatPkg from '@googleapis/chat';
 import * as crypto from 'crypto';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { extractRichEnvelope } from './rich-envelope';
-import { createScheduledInvocationContextToken } from './invocation-context';
+import {
+  createScheduledInvocationContextToken,
+  deriveScheduledRequestProofKey,
+} from './invocation-context';
 import {
   loadAuthorizedSchedule,
   type ScheduleReferenceEvent,
@@ -356,8 +359,9 @@ async function invokeAgentCore(
       runtimeArn = `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`;
     }
 
+    const invocationSecret = await getInvocationSigningSecret();
     const invocationContext = createScheduledInvocationContextToken(
-      await getInvocationSigningSecret(),
+      invocationSecret,
       {
         ownerEmail: userEmail,
         sessionId,
@@ -370,6 +374,10 @@ async function invokeAgentCore(
       user_display_name: userContext.displayName ?? '',
       workspace_prefix: userContext.workspacePrefix ?? '',
       invocation_context: invocationContext,
+      invocation_request_proof_key: deriveScheduledRequestProofKey(
+        invocationSecret,
+        invocationContext,
+      ),
       source: 'scheduled',
     });
 

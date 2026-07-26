@@ -134,6 +134,7 @@
     "137-nexus-conversation-retention.sql",
     "138-api-rate-limit-reservations.sql",
     "139-deep-research-reservations.sql",
-    "140-agentic-cost-reservations.sql"
+    "140-agentic-cost-reservations.sql",
+    "141-agent-request-nonces.sql"
   ]
 }

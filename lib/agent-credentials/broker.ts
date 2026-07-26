@@ -110,6 +110,29 @@ export class AgentCredentialBroker {
     return { name, value, scope }
   }
 
+  async getUserOnly(
+    ownerEmail: string,
+    rawName: unknown,
+    options: { sessionId?: string } = {}
+  ): Promise<{ name: string; value: string; scope: "user" } | null> {
+    const name = credentialName(rawName)
+    const value = await tryReadSecret(
+      this.secrets,
+      userSecretId(ownerEmail, name)
+    )
+    if (value === null) return null
+    await executeQuery(
+      (db) =>
+        db.insert(psdAgentCredentialReads).values({
+          credentialName: name,
+          userId: ownerEmail,
+          sessionId: options.sessionId?.slice(0, 512) || null,
+        }),
+      "agentOwnerCredentialReadAudit"
+    )
+    return { name, value, scope: "user" }
+  }
+
   async list(
     ownerEmail: string
   ): Promise<Array<{ name: string; scope: "user" | "shared" }>> {

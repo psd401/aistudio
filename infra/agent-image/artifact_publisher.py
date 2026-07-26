@@ -6,7 +6,6 @@ import json
 import os
 import re
 import urllib.error
-import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -14,27 +13,11 @@ from typing import Tuple
 
 
 def _broker(payload: dict) -> dict:
-    base = os.environ.get("APP_BASE_URL", "").rstrip("/")
-    parsed = urllib.parse.urlparse(base)
-    local_http = parsed.scheme == "http" and parsed.hostname in {
-        "127.0.0.1",
-        "localhost",
-    }
-    if parsed.scheme != "https" and not local_http:
-        raise RuntimeError("APP_BASE_URL must use HTTPS")
-    context_path = os.environ.get(
-        "PSD_INVOCATION_CONTEXT_FILE",
-        "/tmp/psd-agent-invocation-context",
-    )
-    token = Path(context_path).read_text(encoding="ascii").strip()
     request = urllib.request.Request(
-        f"{base}/api/agent/workspace-storage",
+        "http://127.0.0.1:18791/agent-broker/api/agent/workspace-storage",
         data=json.dumps(payload).encode("utf-8"),
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Agent-Invocation-Context": token,
-        },
+        headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(request, timeout=20) as response:
         result = json.loads(response.read())

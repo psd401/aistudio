@@ -16,7 +16,6 @@ import logging
 import os
 import traceback
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Any, Dict, Mapping, Optional
 
@@ -32,20 +31,6 @@ _cloudwatch_client = None
 
 
 def _post_failure_broker(payload: Mapping[str, Any]) -> None:
-    base = os.environ.get("APP_BASE_URL", "").rstrip("/")
-    parsed = urllib.parse.urlparse(base)
-    local_http = parsed.scheme == "http" and parsed.hostname in {
-        "127.0.0.1",
-        "localhost",
-    }
-    if parsed.scheme != "https" and not local_http:
-        raise RuntimeError("APP_BASE_URL must use HTTPS")
-    context_path = os.environ.get(
-        "PSD_INVOCATION_CONTEXT_FILE",
-        "/tmp/psd-agent-invocation-context",
-    )
-    with open(context_path, "r", encoding="ascii") as context_file:
-        token = context_file.read().strip()
     broker_payload = {
         "source": payload["source"],
         "severity": payload["severity"],
@@ -57,13 +42,10 @@ def _post_failure_broker(payload: Mapping[str, Any]) -> None:
         "context": payload["context"],
     }
     request = urllib.request.Request(
-        f"{base}/api/agent/failures",
+        "http://127.0.0.1:18791/agent-broker/api/agent/failures",
         data=json.dumps(broker_payload, default=str).encode("utf-8"),
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Agent-Invocation-Context": token,
-        },
+        headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(request, timeout=10):
         pass

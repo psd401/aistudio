@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-context"
-import { getSecretString } from "@/lib/agent-workspace/secrets-manager"
+import { executeOwnerAtriumOperation } from "@/lib/agent-workspace/atrium-owner-operation"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 
 const log = createLogger({ module: "agent-atrium-broker" })
@@ -13,23 +13,6 @@ const ALLOWED_QUERY_KEYS = new Set([
   "query",
 ])
 const IDENTIFIER = "[A-Za-z0-9%._~-]{1,384}"
-
-function environment(): string {
-  return process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
-}
-
-function contentBaseUrl(): URL {
-  const raw = process.env.APP_BASE_URL
-  if (!raw) throw new Error("APP_BASE_URL is not configured")
-  const base = new URL(raw)
-  const localHttp =
-    base.protocol === "http:" &&
-    (base.hostname === "localhost" || base.hostname === "127.0.0.1")
-  if (base.protocol !== "https:" && !localHttp) {
-    throw new Error("APP_BASE_URL must use HTTPS")
-  }
-  return new URL("/api/v1/content", base)
-}
 
 type AtriumBody = {
   method: "GET" | "POST" | "PATCH" | "DELETE"
@@ -123,39 +106,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Request is too large" }, { status: 413 })
   }
 
-  const key = await getSecretString(
-    `psd-agent/${environment()}/atrium-content-api-key`
-  )
-  if (!key) {
-    return NextResponse.json(
-      { error: "Atrium credential is not configured" },
-      { status: 404 }
-    )
-  }
-
-  const url = contentBaseUrl()
-  url.pathname = `${url.pathname.replace(/\/$/, "")}${body.path}`
-  for (const [name, value] of Object.entries(body.query ?? {})) {
-    url.searchParams.set(name, value)
-  }
   try {
-    const upstream = await fetch(url, {
-      method: body.method,
-      headers: {
-        Authorization: `Bearer ${key}`,
-        ...(body.body ? { "Content-Type": "application/json" } : {}),
-      },
-      body: body.body ? JSON.stringify(body.body) : undefined,
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: context.ownerEmail,
+      requestId,
+      ...body,
     })
-    const text = await upstream.text()
-    let payload: unknown = null
-    try {
-      payload = text ? JSON.parse(text) : null
-    } catch {
-      payload = null
-    }
     log.info(
       "Owner-bound Atrium operation completed",
       sanitizeForLogging({
@@ -163,14 +119,10 @@ export async function POST(request: NextRequest) {
         ownerEmail: context.ownerEmail,
         method: body.method,
         path: body.path,
-        status: upstream.status,
+        status: result.httpStatus,
       })
     )
-    return NextResponse.json({
-      httpStatus: upstream.status,
-      payload,
-      rawText: payload === null ? text.slice(0, 512) : undefined,
-    })
+    return NextResponse.json(result)
   } catch (error) {
     log.warn(
       "Owner-bound Atrium operation failed",

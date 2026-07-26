@@ -78,7 +78,7 @@ This skill enforces the `skill.image-gen` capability at invocation time. The cap
 
 ## Operational Notes
 
-- Always reads the OpenAI key via `psd-credentials/get.js --shared --name openai_api_key`. The broker derives identity from the signed invocation, and `--shared` skips user-scoped overrides. Never reads from environment variables.
+- Always uses the fixed `openai-image` operation broker. The OpenAI key stays in the trusted web tier and is never returned to the model process.
 - Uploads through the owner-bound artifact broker, which derives the storage
   prefix from the signed invocation and returns a public-by-link URL.
 - Returned URL is **unsigned** and does not embed any STS token. It does not expire — anyone who receives the link can fetch until the object is deleted.

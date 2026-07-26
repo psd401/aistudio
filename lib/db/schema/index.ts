@@ -169,6 +169,7 @@ export * from "./tables/agent-credential-requests";
 // ============================================
 export * from "./tables/agent-workspace-tokens";
 export * from "./tables/agent-workspace-consent-nonces";
+export * from "./tables/agent-request-nonces";
 
 // ============================================
 // API Keys (External API Platform)

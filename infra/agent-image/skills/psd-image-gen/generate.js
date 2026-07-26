@@ -21,6 +21,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { publishArtifact } = require('../_shared/artifact-publisher');
+const { requestAgentBroker } = require('../_shared/agent-broker');
 
 // Skill output lives under `public-images/` which is granted public
 // `s3:GetObject` by the workspace bucket's resource policy (see
@@ -56,12 +57,6 @@ const ALLOWED_IMAGE_EXTS = new Map([
 // JSON payload reasonable (base64 inflates 33%, so 8MB → ~11MB on the wire).
 const MAX_REFERENCE_IMAGE_BYTES = 8 * 1024 * 1024;
 
-const CREDENTIALS_GET = path.resolve(
-  __dirname,
-  '..',
-  'psd-credentials',
-  'get.js',
-);
 const CREDENTIALS_CHECK_CAPABILITY = path.resolve(
   __dirname,
   '..',
@@ -164,42 +159,6 @@ function enforceCapability() {
 }
 
 /**
- * Fetch the shared (district-funded) OpenAI API key from psd-credentials.
- * Uses --shared to skip user-scoped lookups — ensures a per-user key
- * cannot override the district-funded key. The skill is its own process
- * and cannot share the credential cache, so we shell out and parse one
- * JSON object from stdout. The value is held in a local variable and
- * never written elsewhere.
- */
-function readSharedOpenAIKey() {
-  let stdout;
-  try {
-    stdout = execFileSync('node', [CREDENTIALS_GET, '--shared', '--name', 'openai_api_key'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'inherit'],
-    });
-  } catch (err) {
-    fail(`psd-credentials/get.js failed: ${err.message}`, 'shared_key_missing');
-  }
-
-  const lines = stdout.split('\n').filter((l) => l.trim().length > 0);
-  if (lines.length === 0) {
-    fail('psd-credentials returned no output', 'shared_key_missing');
-  }
-  const last = lines[lines.length - 1];
-  let parsed;
-  try {
-    parsed = JSON.parse(last);
-  } catch (err) {
-    fail(`psd-credentials returned non-JSON: ${err.message}`, 'shared_key_missing');
-  }
-  if (parsed.error || !parsed.value) {
-    fail('Shared OpenAI key not provisioned. Ask an admin to bootstrap psd-agent-creds/{env}/shared/openai_api_key.', 'shared_key_missing');
-  }
-  return parsed.value;
-}
-
-/**
  * Read a reference image from disk and return `{ dataUrl, mime }`.
  * Validates the extension is one OpenAI accepts and the file size is
  * under MAX_REFERENCE_IMAGE_BYTES so we fail fast with a clear message
@@ -233,64 +192,23 @@ function loadReferenceImage(imagePath) {
   return { dataUrl: `data:${mime};base64,${base64}`, mime };
 }
 
-async function editWithImage(apiKey, params, referenceDataUrl) {
-  const body = {
-    model: MODEL_ID,
-    images: [{ image_url: referenceDataUrl }],
-    prompt: params.prompt,
-  };
-  if (params.size && params.size !== 'auto') body.size = params.size;
-  if (params.quality && params.quality !== 'auto') body.quality = params.quality;
-  if (params.background && params.background !== 'auto') body.background = params.background;
-
-  const resp = await fetch('https://api.openai.com/v1/images/edits', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
+async function requestImage(params, referenceDataUrl) {
+  const result = await requestAgentBroker(
+    '/api/agent/credentials',
+    {
+      operation: 'openai-image',
+      ...params,
+      referenceDataUrl,
     },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    fail(`OpenAI API ${resp.status}: ${text.slice(0, 500)}`, 'upstream_error');
+    { timeoutMs: 130_000 },
+  );
+  if (
+    typeof result.imageBase64 !== 'string' ||
+    !/^[A-Za-z0-9+/=]+$/.test(result.imageBase64)
+  ) {
+    fail('Image broker returned invalid image data', 'upstream_error');
   }
-
-  const data = await resp.json();
-  const first = (data && Array.isArray(data.data)) ? data.data[0] : null;
-  if (!first || !first.b64_json) {
-    fail('OpenAI response missing b64_json image data', 'upstream_error');
-  }
-  return Buffer.from(first.b64_json, 'base64');
-}
-
-async function generateImage(apiKey, params) {
-  const body = { model: MODEL_ID, prompt: params.prompt };
-  if (params.size && params.size !== 'auto') body.size = params.size;
-  if (params.quality && params.quality !== 'auto') body.quality = params.quality;
-  if (params.background && params.background !== 'auto') body.background = params.background;
-
-  const resp = await fetch('https://api.openai.com/v1/images/generations', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    fail(`OpenAI API ${resp.status}: ${text.slice(0, 500)}`, 'upstream_error');
-  }
-
-  const data = await resp.json();
-  const first = (data && Array.isArray(data.data)) ? data.data[0] : null;
-  if (!first || !first.b64_json) {
-    fail('OpenAI response missing b64_json image data', 'upstream_error');
-  }
-  return Buffer.from(first.b64_json, 'base64');
+  return Buffer.from(result.imageBase64, 'base64');
 }
 
 async function uploadAndShare(bytes, userEmail) {
@@ -340,11 +258,11 @@ async function main() {
   const referenceImage = imagePath ? loadReferenceImage(imagePath) : null;
 
   enforceCapability();
-  const apiKey = readSharedOpenAIKey();
   const params = { prompt: args.prompt, size, quality, background };
-  const bytes = referenceImage
-    ? await editWithImage(apiKey, params, referenceImage.dataUrl)
-    : await generateImage(apiKey, params);
+  const bytes = await requestImage(
+    params,
+    referenceImage ? referenceImage.dataUrl : null,
+  );
   const { url, key } = await uploadAndShare(bytes, args.user);
 
   emit({

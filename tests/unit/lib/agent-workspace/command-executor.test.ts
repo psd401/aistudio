@@ -46,30 +46,30 @@ describe("trusted Workspace command policy", () => {
     ).toThrow(/destructive/)
   })
 
-  it("limits Drive shares to explicit district principals", () => {
+  it.each([
+    ["calendar", "events", "patch"],
+    ["calendar", "events", "update"],
+    ["docs", "documents", "batchUpdate"],
+    ["drive", "permissions", "create"],
+    ["sheets", "spreadsheets", "batchUpdate"],
+    ["slides", "presentations", "batchUpdate"],
+    ["tasks", "tasks", "patch"],
+    ["tasks", "tasks", "update"],
+  ])("denies %s %s %s without server-recorded provenance", (...argv) => {
     expect(() =>
-      validateWorkspaceCommand({
-        scope: "agent",
-        argv: [
-          "drive",
-          "permissions",
-          "create",
-          "--json",
-          '{"type":"user","role":"writer","emailAddress":"outside@example.com"}',
-        ],
-      })
-    ).toThrow(/in-district/)
+      validateWorkspaceCommand({ scope: "agent", argv })
+    ).toThrow(/server-recorded agent-created provenance/)
+  })
+
+  it.each([
+    ["calendar", "events", "insert"],
+    ["docs", "documents", "create"],
+    ["sheets", "spreadsheets", "create"],
+    ["slides", "presentations", "create"],
+    ["tasks", "tasks", "insert"],
+  ])("preserves safe agent create operation %s %s %s", (...argv) => {
     expect(() =>
-      validateWorkspaceCommand({
-        scope: "agent",
-        argv: [
-          "drive",
-          "permissions",
-          "create",
-          "--json",
-          '{"type":"user","role":"reader","emailAddress":"teacher@psd401.net"}',
-        ],
-      })
+      validateWorkspaceCommand({ scope: "agent", argv })
     ).not.toThrow()
   })
 })

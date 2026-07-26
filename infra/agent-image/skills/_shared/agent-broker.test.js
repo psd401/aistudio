@@ -1,28 +1,18 @@
 'use strict';
 
 const { test, expect, beforeAll, afterAll, mock } = require('bun:test');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-
-const contextPath = path.join(os.tmpdir(), `agent-broker-context-${process.pid}`);
-const contextToken = `v1.${'C'.repeat(40)}.${'D'.repeat(43)}`;
 const originalFetch = globalThis.fetch;
 
 beforeAll(() => {
-  fs.writeFileSync(contextPath, contextToken, { mode: 0o600 });
-  process.env.PSD_INVOCATION_CONTEXT_FILE = contextPath;
   process.env.APP_BASE_URL = 'https://studio.example.test/untrusted/path';
 });
 
 afterAll(() => {
   globalThis.fetch = originalFetch;
-  fs.unlinkSync(contextPath);
-  delete process.env.PSD_INVOCATION_CONTEXT_FILE;
   delete process.env.APP_BASE_URL;
 });
 
-test('uses a fixed allowlisted route with the signed context and no shared bearer', async () => {
+test('uses the fixed local relay without exposing signing authority', async () => {
   globalThis.fetch = mock(async () =>
     new Response(JSON.stringify({ url: 'https://studio.example.test/connect' }), {
       status: 200,
@@ -32,9 +22,10 @@ test('uses a fixed allowlisted route with the signed context and no shared beare
   await requestAgentBroker('/api/agent/consent-link', { kind: 'plaud' });
   const [url, init] = globalThis.fetch.mock.calls[0];
   expect(String(url)).toBe(
-    'https://studio.example.test/api/agent/consent-link',
+    'http://127.0.0.1:18791/agent-broker/api/agent/consent-link',
   );
-  expect(init.headers['X-Agent-Invocation-Context']).toBe(contextToken);
+  expect(init.headers['X-Agent-Invocation-Context']).toBeUndefined();
+  expect(init.headers['X-Agent-Request-Proof-Signature']).toBeUndefined();
   expect(init.headers.Authorization).toBeUndefined();
   expect(init.redirect).toBe('error');
 });

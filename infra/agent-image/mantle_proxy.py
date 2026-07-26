@@ -16,12 +16,16 @@ should (a) verify the proxy's /health before starting the gateway and
 error bodies.
 """
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
 import sys
 import time
+import uuid
 from typing import Optional
 
 from aiohttp import web, ClientSession, ClientTimeout
@@ -42,10 +46,63 @@ def j(msg: str, **kw) -> str:
     return json.dumps(payload, default=str)
 
 
-UPSTREAM = (
-    os.environ.get("APP_BASE_URL", "").rstrip("/")
-    + "/api/agent/model-proxy"
-)
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "").rstrip("/")
+UPSTREAM = APP_BASE_URL + "/api/agent/model-proxy"
+AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
+INVOCATION_CONTEXT_PATH = f"{AUTHORITY_DIRECTORY}/invocation-context"
+REQUEST_PROOF_KEY_PATH = f"{AUTHORITY_DIRECTORY}/request-proof-key"
+ALLOWED_AGENT_BROKER_ROUTES = frozenset({
+    "/api/agent/account-request",
+    "/api/agent/aistudio",
+    "/api/agent/atrium",
+    "/api/agent/canva",
+    "/api/agent/classified-evaluation",
+    "/api/agent/consent-link",
+    "/api/agent/credentials",
+    "/api/agent/email-triage",
+    "/api/agent/failures",
+    "/api/agent/github-execute",
+    "/api/agent/schedules",
+    "/api/agent/skills",
+    "/api/agent/workspace-execute",
+    "/api/agent/workspace-storage",
+})
+
+
+def _read_authority() -> tuple[str, bytes]:
+    """Read authority that is inaccessible to the model's node UID."""
+    with open(INVOCATION_CONTEXT_PATH, "r", encoding="ascii") as handle:
+        context = handle.read().strip()
+    with open(REQUEST_PROOF_KEY_PATH, "r", encoding="ascii") as handle:
+        encoded_key = handle.read().strip()
+    padded = encoded_key + ("=" * (-len(encoded_key) % 4))
+    return context, base64.urlsafe_b64decode(padded)
+
+
+def _authority_headers(method: str, route: str, body: bytes) -> dict:
+    context, proof_key = _read_authority()
+    timestamp = str(int(time.time()))
+    nonce = str(uuid.uuid4())
+    body_sha256 = hashlib.sha256(body).hexdigest()
+    canonical = "\n".join([
+        "v1",
+        timestamp,
+        nonce,
+        method.upper(),
+        route,
+        body_sha256,
+    ]).encode("utf-8")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(proof_key, canonical, hashlib.sha256).digest()
+    ).rstrip(b"=").decode("ascii")
+    return {
+        "X-Agent-Invocation-Context": context,
+        "X-Agent-Request-Proof-Version": "v1",
+        "X-Agent-Request-Proof-Timestamp": timestamp,
+        "X-Agent-Request-Proof-Nonce": nonce,
+        "X-Agent-Request-Proof-Body-Sha256": body_sha256,
+        "X-Agent-Request-Proof-Signature": signature,
+    }
 
 # ---------------------------------------------------------------------------
 # Cumulative token-usage accounting (issue #1083)
@@ -881,6 +938,87 @@ async def handle_usage(_request: web.Request) -> web.Response:
     return web.json_response(payload)
 
 
+AGENT_BROKER_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
+
+
+class AgentBrokerResponseTooLarge(RuntimeError):
+    """Raised when a privileged broker exceeds the root relay response cap."""
+
+
+async def _read_bounded_agent_broker_response(
+    response,
+    max_bytes: int = AGENT_BROKER_RESPONSE_MAX_BYTES,
+) -> bytes:
+    """Read an upstream broker response without allowing root-memory exhaustion."""
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > max_bytes:
+            response.close()
+            raise AgentBrokerResponseTooLarge(
+                "agent broker response exceeds the configured limit"
+            )
+
+    body = bytearray()
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        if len(body) + len(chunk) > max_bytes:
+            response.close()
+            raise AgentBrokerResponseTooLarge(
+                "agent broker response exceeds the configured limit"
+            )
+        body.extend(chunk)
+    return bytes(body)
+
+
+async def handle_agent_broker(request: web.Request) -> web.StreamResponse:
+    """Relay only fixed, typed POST operations; never expose a signing oracle."""
+    route = f"/api/agent/{request.match_info.get('route', '')}"
+    if request.method != "POST" or route not in ALLOWED_AGENT_BROKER_ROUTES:
+        return web.json_response({"error": "Unsupported agent operation"}, status=404)
+    body = await request.read()
+    try:
+        parsed = json.loads(body)
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+    if not isinstance(parsed, dict):
+        return web.json_response({"error": "Invalid request body"}, status=400)
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            **_authority_headers("POST", route, body),
+        }
+        timeout = ClientTimeout(total=920, sock_read=920, sock_connect=30)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{APP_BASE_URL}{route}",
+                data=body,
+                headers=headers,
+                allow_redirects=False,
+            ) as upstream:
+                response_body = await _read_bounded_agent_broker_response(upstream)
+                content_type = upstream.headers.get(
+                    "Content-Type", "application/json"
+                )
+                return web.Response(
+                    status=upstream.status,
+                    body=response_body,
+                    headers={"Content-Type": content_type},
+                )
+    except AgentBrokerResponseTooLarge:
+        return web.json_response({"error": "Agent operation failed"}, status=502)
+    except (OSError, ValueError):
+        return web.json_response(
+            {"error": "Invocation authority is unavailable"},
+            status=503,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(j("agent_broker_failed", route=route, error=str(exc)[:200]))
+        return web.json_response({"error": "Agent operation failed"}, status=502)
+
+
 async def handle_proxy(request: web.Request) -> web.StreamResponse:
     path = request.match_info.get("path", "")
     url = f"{UPSTREAM}/{path}"
@@ -974,9 +1112,8 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
     _log_request_body(req_id, req_body, parsed)
 
-    # Forward content headers but strip the model-facing placeholder. The web
-    # broker authenticates the opaque signed invocation context and holds the
-    # provider credential.
+    # Forward content headers but strip any model-supplied authority. The root
+    # relay signs the final rewritten body for each upstream attempt.
     fwd_headers = {}
     for k, v in request.headers.items():
         kl = k.lower()
@@ -986,21 +1123,15 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             "connection",
             "transfer-encoding",
             "x-api-key",
+            "x-agent-invocation-context",
+            "x-agent-request-proof-version",
+            "x-agent-request-proof-timestamp",
+            "x-agent-request-proof-nonce",
+            "x-agent-request-proof-body-sha256",
+            "x-agent-request-proof-signature",
         }:
             continue
         fwd_headers[k] = v
-    context_path = os.environ.get(
-        "PSD_INVOCATION_CONTEXT_FILE",
-        "/tmp/psd-agent-invocation-context",
-    )
-    try:
-        with open(context_path, "r", encoding="ascii") as handle:
-            fwd_headers["X-Agent-Invocation-Context"] = handle.read().strip()
-    except OSError:
-        return web.json_response(
-            {"error": "Signed invocation context is unavailable"},
-            status=503,
-        )
 
     timeout = ClientTimeout(total=300, sock_read=300, sock_connect=30)
 
@@ -1031,9 +1162,17 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         `/usage` counters by the caller.
         """
         body_to_send = body_override if body_override is not None else req_body
+        proof_headers = _authority_headers(
+            request.method,
+            f"/api/agent/model-proxy/{path}",
+            body_to_send or b"",
+        )
         async with ClientSession(timeout=timeout) as session:
             async with session.request(
-                request.method, url, data=body_to_send, headers=fwd_headers,
+                request.method,
+                url,
+                data=body_to_send,
+                headers={**fwd_headers, **proof_headers},
                 allow_redirects=False,
             ) as upstream:
                 status = upstream.status
@@ -1388,6 +1527,7 @@ def main() -> None:
     app = web.Application(client_max_size=50 * 1024 * 1024)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/usage", handle_usage)
+    app.router.add_route("*", "/agent-broker/{route:.*}", handle_agent_broker)
     app.router.add_route("*", "/{path:.*}", handle_proxy)
     log.info(j("starting", host="127.0.0.1", port=18791, upstream=UPSTREAM))
     web.run_app(app, host="127.0.0.1", port=18791, access_log=None,

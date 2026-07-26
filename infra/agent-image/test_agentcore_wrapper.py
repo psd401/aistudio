@@ -40,40 +40,232 @@ _safe = agentcore_wrapper._safe_header_value
 
 
 class TestInvocationContextInstaller(unittest.TestCase):
-    def test_installs_well_formed_context_atomically_with_private_mode(self):
+    def test_installs_authority_atomically_with_root_only_modes(self):
         import os
         import tempfile
 
         token = f"v1.{'a' * 40}.{'b' * 43}"
+        proof_key = "c" * 43
         with tempfile.TemporaryDirectory() as directory:
             context_path = os.path.join(directory, "invocation-context")
-            with mock.patch.object(
+            key_path = os.path.join(directory, "request-proof-key")
+            with mock.patch.multiple(
                 agentcore_wrapper,
-                "_INVOCATION_CONTEXT_PATH",
-                context_path,
+                _AUTHORITY_DIRECTORY=directory,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
             ):
-                self.assertTrue(agentcore_wrapper._install_invocation_context(token))
+                self.assertTrue(
+                    agentcore_wrapper._install_invocation_authority(
+                        token, proof_key
+                    )
+                )
             with open(context_path, encoding="ascii") as context_file:
                 self.assertEqual(context_file.read(), token + "\n")
+            with open(key_path, encoding="ascii") as key_file:
+                self.assertEqual(key_file.read(), proof_key + "\n")
+            self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700)
             self.assertEqual(os.stat(context_path).st_mode & 0o777, 0o600)
+            self.assertEqual(os.stat(key_path).st_mode & 0o777, 0o600)
 
-    def test_rejects_malformed_context_and_removes_stale_value(self):
+    def test_rejects_malformed_authority_and_removes_stale_values(self):
         import os
         import tempfile
 
         with tempfile.TemporaryDirectory() as directory:
             context_path = os.path.join(directory, "invocation-context")
+            key_path = os.path.join(directory, "request-proof-key")
             with open(context_path, "w", encoding="ascii") as context_file:
                 context_file.write(f"v1.{'a' * 40}.{'b' * 43}\n")
-            with mock.patch.object(
+            with open(key_path, "w", encoding="ascii") as key_file:
+                key_file.write("c" * 43)
+            with mock.patch.multiple(
                 agentcore_wrapper,
-                "_INVOCATION_CONTEXT_PATH",
-                context_path,
+                _AUTHORITY_DIRECTORY=directory,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
             ):
                 self.assertFalse(
-                    agentcore_wrapper._install_invocation_context("attacker-controlled")
+                    agentcore_wrapper._install_invocation_authority(
+                        "attacker-controlled", "c" * 43
+                    )
                 )
             self.assertFalse(os.path.exists(context_path))
+            self.assertFalse(os.path.exists(key_path))
+
+    def test_revokes_both_authority_files(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            key_path = os.path.join(directory, "request-proof-key")
+            with open(context_path, "w", encoding="ascii") as context_file:
+                context_file.write("context")
+            with open(key_path, "w", encoding="ascii") as key_file:
+                key_file.write("proof")
+            with mock.patch.multiple(
+                agentcore_wrapper,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
+            ):
+                agentcore_wrapper._revoke_invocation_authority()
+            self.assertFalse(os.path.exists(context_path))
+            self.assertFalse(os.path.exists(key_path))
+
+    def test_image_keeps_wrapper_and_relay_immutable_to_model_uid(self):
+        from pathlib import Path
+
+        dockerfile = Path(__file__).with_name("Dockerfile").read_text()
+        harness = Path(__file__).with_name("harness_adapter.py").read_text()
+        self.assertIn("chown -R root:root /app", dockerfile)
+        self.assertIn("chmod -R a-w /app", dockerfile)
+        self.assertIn('user="node"', harness)
+        self.assertIn('group="node"', harness)
+        self.assertIn("extra_groups=[]", harness)
+        self.assertIn("umask=0o077", harness)
+        self.assertIn('cwd="/home/node"', harness)
+
+    @unittest.skipUnless(__import__("os").geteuid() == 0, "requires UID drop")
+    def test_model_uid_cannot_read_authority_or_mutate_relay_source(self):
+        import os
+        import pwd
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        node = pwd.getpwnam("node")
+        with tempfile.TemporaryDirectory() as directory:
+            os.chmod(directory, 0o755)
+            authority = Path(directory) / "authority"
+            authority.mkdir(mode=0o700)
+            proof_key = authority / "request-proof-key"
+            proof_key.write_text("secret")
+            proof_key.chmod(0o600)
+            source = Path(directory) / "mantle_proxy.py"
+            source.write_text("trusted")
+            source.chmod(0o444)
+
+            def drop_to_node():
+                os.setgroups([])
+                os.setgid(node.pw_gid)
+                os.setuid(node.pw_uid)
+
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; import os, sys; "
+                    "\nassert os.getuid() != 0 and os.getgid() != 0"
+                    "\nassert 0 not in os.getgroups()"
+                    f"\ntry: Path({str(proof_key)!r}).read_text(); sys.exit(10)"
+                    "\nexcept PermissionError: pass"
+                    f"\ntry: Path({str(source)!r}).open('a').write('x'); sys.exit(11)"
+                    "\nexcept PermissionError: pass",
+                ],
+                check=False,
+                preexec_fn=drop_to_node,
+            )
+            self.assertEqual(probe.returncode, 0)
+
+
+class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
+    async def test_post_turn_relay_authority_is_gone_after_final_push(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            key_path = os.path.join(directory, "request-proof-key")
+            with open(context_path, "w", encoding="ascii") as context_file:
+                context_file.write("context")
+            with open(key_path, "w", encoding="ascii") as key_file:
+                key_file.write("proof")
+
+            async def invocation():
+                yield {"type": "start"}
+                yield {"result": "done"}
+
+            serialized = agentcore_wrapper._serialize_invocations(invocation)
+            with mock.patch.multiple(
+                agentcore_wrapper,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
+                _current_workspace_prefix="owner-prefix",
+            ), mock.patch.object(
+                agentcore_wrapper.workspace_sync,
+                "stop_periodic_push",
+            ) as stop, mock.patch.object(
+                agentcore_wrapper.workspace_sync,
+                "push_workspace",
+                return_value=1,
+            ) as push:
+                events = [event async for event in serialized()]
+
+            self.assertEqual(events[-1], {"result": "done"})
+            stop.assert_called_once_with()
+            push.assert_called_once_with("owner-prefix")
+            self.assertFalse(os.path.exists(context_path))
+            self.assertFalse(os.path.exists(key_path))
+
+    async def test_client_disconnect_still_revokes_authority(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            key_path = os.path.join(directory, "request-proof-key")
+            for path in (context_path, key_path):
+                with open(path, "w", encoding="ascii") as authority_file:
+                    authority_file.write("authority")
+
+            async def invocation():
+                yield {"type": "start"}
+                yield {"result": "not-consumed"}
+
+            serialized = agentcore_wrapper._serialize_invocations(invocation)
+            with mock.patch.multiple(
+                agentcore_wrapper,
+                _INVOCATION_CONTEXT_PATH=context_path,
+                _REQUEST_PROOF_KEY_PATH=key_path,
+                _current_workspace_prefix="owner-prefix",
+            ), mock.patch.object(
+                agentcore_wrapper.workspace_sync,
+                "stop_periodic_push",
+            ), mock.patch.object(
+                agentcore_wrapper.workspace_sync,
+                "push_workspace",
+                return_value=1,
+            ):
+                stream = serialized()
+                self.assertEqual(await anext(stream), {"type": "start"})
+                await stream.aclose()
+
+            self.assertFalse(os.path.exists(context_path))
+            self.assertFalse(os.path.exists(key_path))
+
+
+class TestWorkspacePrefixBinding(unittest.TestCase):
+    def setUp(self):
+        agentcore_wrapper._current_workspace_prefix = None
+        agentcore_wrapper._workspace_prefix_bound = False
+        agentcore_wrapper._workspace_prefix_hydrated = False
+
+    def tearDown(self):
+        agentcore_wrapper._current_workspace_prefix = None
+        agentcore_wrapper._workspace_prefix_bound = False
+        agentcore_wrapper._workspace_prefix_hydrated = False
+
+    def test_live_microvm_rejects_a_different_prefix(self):
+        self.assertTrue(agentcore_wrapper._bind_workspace_prefix("owner-a"))
+        agentcore_wrapper._workspace_prefix_hydrated = True
+        self.assertTrue(agentcore_wrapper._bind_workspace_prefix("owner-a"))
+        self.assertFalse(agentcore_wrapper._bind_workspace_prefix("owner-b"))
+        self.assertEqual(
+            agentcore_wrapper._current_workspace_prefix,
+            "owner-a",
+        )
+        self.assertTrue(agentcore_wrapper._workspace_prefix_hydrated)
 
 
 class SafeHeaderValueTests(unittest.TestCase):

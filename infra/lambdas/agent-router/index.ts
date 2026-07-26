@@ -77,7 +77,9 @@ import {
   shouldPromoteToJob,
 } from './job-promotion';
 import {
+  createAgentRequestProof,
   createInvocationContextToken,
+  deriveInvocationRequestProofKey,
   type InvocationMode,
 } from './invocation-context';
 import { canInvokeOwnerAgent } from './delegation-policy';
@@ -862,9 +864,13 @@ async function issueInvocationContext(input: {
   mode: InvocationMode;
   sessionId: string;
   workspacePrefix: string;
-}): Promise<string> {
+}): Promise<{ token: string; requestProofKey: string }> {
   const secret = await getInvocationSigningSecret();
-  return createInvocationContextToken(secret, input);
+  const token = createInvocationContextToken(secret, input);
+  return {
+    token,
+    requestProofKey: deriveInvocationRequestProofKey(secret, token),
+  };
 }
 
 /**
@@ -947,21 +953,27 @@ async function maybeProvisionAgentAccount(
   try {
     const apiKey = await getInternalApiKey();
     if (!apiKey) return;
-    const invocationContext = await issueInvocationContext({
+    const invocationAuthority = await issueInvocationContext({
       actorEmail: senderEmail,
       ownerEmail: senderEmail,
       mode: 'owner',
       sessionId: `account-provision:${user.googleIdentity}`,
       workspacePrefix: user.workspacePrefix,
     });
+    const requestBody = JSON.stringify({ ownerEmail: senderEmail });
     const resp = await fetch(`${APP_BASE_URL.replace(/\/+$/, '')}/api/agent/account-request`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
-        'X-Agent-Invocation-Context': invocationContext,
+        'X-Agent-Invocation-Context': invocationAuthority.token,
+        ...createAgentRequestProof(invocationAuthority.requestProofKey, {
+          method: 'POST',
+          route: '/api/agent/account-request',
+          body: requestBody,
+        }),
       },
-      body: JSON.stringify({ ownerEmail: senderEmail }),
+      body: requestBody,
       signal: AbortSignal.timeout(5000),
     });
     if (!resp.ok) {
@@ -1568,7 +1580,7 @@ async function invokeAgentCore(
       : `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`;
     const ownerEmail = userId.trim().toLowerCase();
     const actorEmail = (userContext?.invokedBy?.email ?? userId).trim().toLowerCase();
-    const invocationContext = await issueInvocationContext({
+    const invocationAuthority = await issueInvocationContext({
       actorEmail,
       ownerEmail,
       mode: userContext?.invokedBy ? 'consultation' : 'owner',
@@ -1580,7 +1592,8 @@ async function invokeAgentCore(
       user_email: userId,
       user_display_name: userContext?.displayName ?? '',
       workspace_prefix: userContext?.workspacePrefix ?? '',
-      invocation_context: invocationContext,
+      invocation_context: invocationAuthority.token,
+      invocation_request_proof_key: invocationAuthority.requestProofKey,
       // Cross-user invocation fields
       ...(userContext?.invokedBy && {
         invoked_by_email: userContext.invokedBy.email,

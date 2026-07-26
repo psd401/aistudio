@@ -9,25 +9,17 @@ const path = require('node:path');
 
 const credentialStore = {};
 const brokerCalls = [];
+const operationResults = [];
 const modulePath = path.resolve(__dirname, '..', '_shared', 'agent-broker.js');
 
 mock.module(modulePath, () => ({
-  getOwnerCredential: async (name) => {
-    brokerCalls.push({ operation: 'get', name });
-    const value = credentialStore[name];
-    return value === undefined
-      ? null
-      : { name, value: JSON.stringify(value), scope: 'user' };
-  },
-  putOwnerCredential: async (name, value) => {
-    brokerCalls.push({ operation: 'put', name, value });
-    credentialStore[name] = JSON.parse(value);
-    return { name, action: 'rotated' };
-  },
   requestAgentBroker: async (route, body) => {
     brokerCalls.push({ operation: 'request', route, body });
+    if (route === '/api/agent/credentials') {
+      return { status: 'ok', result: operationResults.shift() };
+    }
     return { url: 'https://app.test/agent-connect-plaud?token=test' };
   },
 }));
 
-module.exports = { credentialStore, brokerCalls };
+module.exports = { credentialStore, brokerCalls, operationResults };

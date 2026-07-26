@@ -12,7 +12,9 @@ network or real filesystem outside the temp dir is touched.
 
 import os
 import io
+import pwd
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -43,6 +45,10 @@ class PullTraversalTests(unittest.TestCase):
         self.root = (Path(td) / "workspace")
         self.root.mkdir()
         self.root = self.root.resolve()
+        if os.geteuid() == 0:
+            node = pwd.getpwnam("node")
+            os.chmod(Path(td), 0o755)
+            os.chown(self.root, node.pw_uid, node.pw_gid)
 
     def _run_pull(self, keys, prefix="userA"):
         downloaded = []
@@ -94,6 +100,70 @@ class PullTraversalTests(unittest.TestCase):
         count, downloaded, escaped = self._run_pull(keys)
         self.assertEqual(count, 1)
         self.assertTrue((self.root / "a" / "b" / "c.md").exists())
+
+    def test_restored_file_is_writable_by_model_uid(self):
+        count, _, _ = self._run_pull(["memory/new.md"])
+        self.assertEqual(count, 1)
+        restored = self.root / "memory" / "new.md"
+        if os.geteuid() == 0:
+            node = pwd.getpwnam("node")
+            os.chmod(self.root.parent, 0o755)
+
+            def drop_to_node():
+                os.setgid(node.pw_gid)
+                os.setuid(node.pw_uid)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; "
+                    f"Path({str(restored)!r}).open('a').write('node')",
+                ],
+                check=False,
+                preexec_fn=drop_to_node,
+            )
+            self.assertEqual(result.returncode, 0)
+        else:
+            with restored.open("a") as output:
+                output.write("node")
+
+    def test_symlink_destination_cannot_change_protected_target(self):
+        protected = self.root.parent / "protected-root-file"
+        protected.write_text("unchanged")
+        protected.chmod(0o600)
+        original = protected.stat()
+        (self.root / "escape.md").symlink_to(protected)
+
+        count, downloaded, _ = self._run_pull(["escape.md"])
+
+        self.assertEqual(count, 0)
+        self.assertEqual(downloaded, [])
+        self.assertEqual(protected.read_text(), "unchanged")
+        after = protected.stat()
+        self.assertEqual(after.st_uid, original.st_uid)
+        self.assertEqual(after.st_gid, original.st_gid)
+        self.assertEqual(after.st_mode & 0o777, 0o600)
+
+    def test_push_refuses_symlink_to_authority_file(self):
+        authority = self.root.parent / "request-proof-key"
+        authority.write_text("do-not-upload")
+        (self.root / "memory-link").symlink_to(authority)
+        uploads = []
+
+        def fake_urlopen(request, **_kwargs):
+            uploads.append(getattr(request, "data", b""))
+            return _FakeResponse(b"")
+
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root), \
+                mock.patch.object(workspace_sync.os, "geteuid", return_value=1000), \
+                mock.patch.object(workspace_sync, "_upload_url", return_value="https://upload.invalid"), \
+                mock.patch.object(workspace_sync.urllib.request, "urlopen", side_effect=fake_urlopen):
+            count = workspace_sync.push_workspace("userA")
+
+        self.assertEqual(count, 0)
+        self.assertEqual(uploads, [])
+        self.assertEqual(authority.read_text(), "do-not-upload")
 
 
 class PeriodicPushLifecycleTests(unittest.TestCase):

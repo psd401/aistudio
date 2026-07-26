@@ -18,6 +18,7 @@ const putMock = jest.fn()
 const requestMock = jest.fn()
 const canAccessSkillMock = jest.fn()
 const brokerConstructorMock = jest.fn()
+const executeRedRoverOperationMock = jest.fn()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: jest.fn(
@@ -62,6 +63,13 @@ jest.mock("@/lib/logger", () => ({
   }),
   generateRequestId: () => "request-test",
 }))
+jest.mock("@/lib/agent-credentials/owner-operation-broker", () => ({
+  executeOpenAiImageOperation: jest.fn(),
+  executePlaudOperation: jest.fn(),
+  executePsdDataOperation: jest.fn(),
+  executeRedRoverOperation: (...args: unknown[]) =>
+    executeRedRoverOperationMock(...args),
+}))
 
 import type { NextRequest } from "next/server"
 import { POST } from "@/app/api/agent/credentials/route"
@@ -93,6 +101,10 @@ beforeEach(() => {
   })
   requestMock.mockReset().mockResolvedValue(42)
   canAccessSkillMock.mockReset().mockResolvedValue(true)
+  executeRedRoverOperationMock.mockReset().mockResolvedValue({
+    data: [],
+    total: 0,
+  })
 })
 
 describe("POST /api/agent/credentials", () => {
@@ -114,18 +126,25 @@ describe("POST /api/agent/credentials", () => {
     }
   )
 
-  it("derives credential identity and audit session from the signed context", async () => {
-    const response = await POST(
-      request({ operation: "get", name: "github" })
-    )
-    expect(response.status).toBe(200)
-    expect(getMock).toHaveBeenCalledWith("owner@psd401.net", "github", {
-      sharedOnly: false,
-      sessionId: "session-1",
-    })
+  it.each(["get", "list"])(
+    "denies the generic plaintext credential %s oracle",
+    async (operation) => {
+      const response = await POST(request({ operation, name: "github" }))
+      expect(response.status).toBe(403)
+      expect(await response.json()).toEqual({
+        error: "Plaintext credential access is not supported",
+      })
+      expect(getMock).not.toHaveBeenCalled()
+      expect(listMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it("never returns a reusable credential in a denial", async () => {
+    const response = await POST(request({ operation: "get", name: "github" }))
+    expect(JSON.stringify(await response.json())).not.toContain("secret")
   })
 
-  it("allows scheduled reads but forbids scheduled writes and requests", async () => {
+  it("allows scheduled access checks but forbids scheduled writes and requests", async () => {
     context = {
       actorEmail: "cron@internal",
       ownerEmail: "owner@psd401.net",
@@ -133,7 +152,14 @@ describe("POST /api/agent/credentials", () => {
       sessionId: "schedule-1",
     }
     expect(
-      (await POST(request({ operation: "get", name: "github" }))).status
+      (
+        await POST(
+          request({
+            operation: "check-skill-access",
+            capability: "restricted.research",
+          })
+        )
+      ).status
     ).toBe(200)
     expect(
       (
@@ -171,5 +197,53 @@ describe("POST /api/agent/credentials", () => {
       "restricted.research",
       undefined
     )
+  })
+
+  it("denies Red Rover before the shared credential operation", async () => {
+    canAccessSkillMock.mockResolvedValueOnce(false)
+    const response = await POST(
+      request({
+        operation: "redrover",
+        action: "vacancies",
+        startDate: "2026-07-01",
+        endDate: "2026-07-02",
+      })
+    )
+    expect(response.status).toBe(403)
+    expect(await response.json()).toEqual({ error: "Forbidden" })
+    expect(canAccessSkillMock).toHaveBeenCalledWith(
+      "owner@psd401.net",
+      "skill.redrover",
+      undefined
+    )
+    expect(executeRedRoverOperationMock).not.toHaveBeenCalled()
+    expect(getMock).not.toHaveBeenCalled()
+  })
+
+  it("allows a granted signed owner to run Red Rover", async () => {
+    const response = await POST(
+      request({
+        operation: "redrover",
+        action: "vacancies",
+        startDate: "2026-07-01",
+        endDate: "2026-07-02",
+        filledFilter: "unfilled",
+      })
+    )
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ data: [], total: 0 })
+    expect(canAccessSkillMock).toHaveBeenCalledWith(
+      "owner@psd401.net",
+      "skill.redrover",
+      undefined
+    )
+    expect(executeRedRoverOperationMock).toHaveBeenCalledWith({
+      ownerEmail: "owner@psd401.net",
+      sessionId: "session-1",
+      operation: "vacancies",
+      startDate: "2026-07-01",
+      endDate: "2026-07-02",
+      filledFilter: "unfilled",
+    })
   })
 })

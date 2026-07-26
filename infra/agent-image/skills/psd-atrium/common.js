@@ -1,4 +1,4 @@
-/** Owner-bound Atrium client. The scoped content key stays in the web tier. */
+/** Owner-bound Atrium client. Authority comes from the signed agent invocation. */
 
 'use strict';
 
@@ -82,9 +82,9 @@ function parseArgs(argv, startIndex = 2) {
  */
 
 /**
- * Single entry point for every Atrium content REST call. Handles auth (bearer sk-
- * content key), query serialization, the v1 `{ data, meta }` / `{ error }`
- * envelope, and uniform error surfacing.
+ * Single entry point for every Atrium content operation. The web tier resolves
+ * the signed owner to a Content Requester and invokes the shared service layer;
+ * no reusable content credential is exposed to the workspace.
  *
  *   - method: HTTP method ('GET' | 'POST' | 'PATCH' | 'DELETE')
  *   - path:   path under the content base (e.g. '', '/<id>', '/<id>/publish')
@@ -135,8 +135,7 @@ async function restFetch(method, path, opts = {}) {
     emit({
       status: 'unauthorized',
       message:
-        'AI Studio rejected the content API key (401). The key must be a valid ' +
-        'sk- key holding the content: scopes for this operation.',
+        'AI Studio rejected the signed owner authority for this operation.',
       detail: rawText.slice(0, 512),
     });
     process.exit(11);

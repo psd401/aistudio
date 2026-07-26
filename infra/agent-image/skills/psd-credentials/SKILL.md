@@ -1,38 +1,20 @@
 ---
 name: psd-credentials
 summary: Use the owner-bound credential broker without selecting an identity or accessing AWS directly.
-description: Retrieve shared or per-owner secrets, list credential names, store an owner credential, request provisioning, or check skill access. Identity comes only from a short-lived signed invocation context.
+description: Store an owner credential, request provisioning, or check skill access. Reusable credentials are consumed only by operation-specific trusted brokers and are never returned to the model.
 allowed-tools: Bash(node:*)
 ---
 
 # psd-credentials
 
-This is the only approved credential interface for agent skills. The model
-runtime has no Secrets Manager or database permissions. Each command forwards
-the opaque signed invocation context to AI Studio, where the owner is verified
-and all secret paths, audit rows, and access checks are derived server-side.
+The model runtime has no Secrets Manager or database permissions. Each command
+uses a fixed local relay operation; the relay signs the exact request at the
+trusted boundary after the owner is verified.
 
 Never pass `--user`, `--owner-email`, `--user-email`, or `--user-id`. Those
-arguments are rejected. Never print, log, persist, or repeat a returned secret.
+arguments are rejected. Plaintext credential get/list operations do not exist.
 
 ## Commands
-
-Retrieve a credential (owner-specific first, then shared):
-
-```bash
-node /opt/psd-skills/psd-credentials/get.js \
-  --name "<credential-name>" \
-  [--shared]
-```
-
-`--shared` permits only the district-wide credential. A successful response is
-`{"name":"...","value":"...","scope":"user|shared"}`.
-
-List available names (never values):
-
-```bash
-node /opt/psd-skills/psd-credentials/list.js
-```
 
 Store a credential for the verified owner:
 

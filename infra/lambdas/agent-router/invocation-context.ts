@@ -27,8 +27,80 @@ export interface InvocationContextInput {
   workspacePrefix: string;
 }
 
+export interface AgentRequestProof {
+  "X-Agent-Request-Proof-Version": "v1";
+  "X-Agent-Request-Proof-Timestamp": string;
+  "X-Agent-Request-Proof-Nonce": string;
+  "X-Agent-Request-Proof-Body-Sha256": string;
+  "X-Agent-Request-Proof-Signature": string;
+}
+
 function encodeBase64Url(value: string | Buffer): string {
   return Buffer.from(value).toString("base64url");
+}
+
+export function deriveInvocationRequestProofKey(
+  secret: string,
+  token: string,
+): string {
+  if (Buffer.byteLength(secret, "utf8") < 32) {
+    throw new Error("Agent invocation signing secret must contain at least 32 bytes");
+  }
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts[1]) {
+    throw new Error("Agent invocation context is malformed");
+  }
+  let nonce: unknown
+  try {
+    nonce = (JSON.parse(
+      Buffer.from(parts[1], "base64url").toString("utf8")
+    ) as { nonce?: unknown }).nonce
+  } catch {
+    throw new Error("Agent invocation context is malformed")
+  }
+  if (typeof nonce !== "string" || nonce.length === 0 || nonce.length > 128) {
+    throw new Error("Agent invocation context nonce is malformed")
+  }
+  return crypto
+    .createHmac("sha256", secret)
+    .update(`agent-request-proof:v1:${nonce}`)
+    .digest("base64url")
+}
+
+export function createAgentRequestProof(
+  requestProofKey: string,
+  input: {
+    method: string;
+    route: string;
+    body: string | Buffer;
+  },
+  options: { timestamp?: number; nonce?: string } = {},
+): AgentRequestProof {
+  const timestamp = String(
+    options.timestamp ?? Math.floor(Date.now() / 1000)
+  )
+  const nonce = options.nonce ?? crypto.randomUUID()
+  const method = input.method.toUpperCase()
+  const bodySha256 = crypto.createHash("sha256").update(input.body).digest("hex")
+  const canonical = [
+    "v1",
+    timestamp,
+    nonce,
+    method,
+    input.route,
+    bodySha256,
+  ].join("\n")
+  const signature = crypto
+    .createHmac("sha256", Buffer.from(requestProofKey, "base64url"))
+    .update(canonical)
+    .digest("base64url")
+  return {
+    "X-Agent-Request-Proof-Version": "v1",
+    "X-Agent-Request-Proof-Timestamp": timestamp,
+    "X-Agent-Request-Proof-Nonce": nonce,
+    "X-Agent-Request-Proof-Body-Sha256": bodySha256,
+    "X-Agent-Request-Proof-Signature": signature,
+  }
 }
 
 /**

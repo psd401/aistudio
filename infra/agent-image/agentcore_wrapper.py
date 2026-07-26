@@ -76,34 +76,106 @@ def _safe_header_value(value: str, limit: int = 100) -> str:
     return re.sub(r'[\[\]\n\r]', '', value or '')[:limit]
 
 
-_INVOCATION_CONTEXT_PATH = "/tmp/psd-agent-invocation-context"
+_AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
+_INVOCATION_CONTEXT_PATH = f"{_AUTHORITY_DIRECTORY}/invocation-context"
+_REQUEST_PROOF_KEY_PATH = f"{_AUTHORITY_DIRECTORY}/request-proof-key"
 _INVOCATION_CONTEXT_RE = re.compile(
     r"^v1\.[A-Za-z0-9_-]{40,3500}\.[A-Za-z0-9_-]{43}$"
 )
+_REQUEST_PROOF_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_invocation_lock = asyncio.Lock()
 
 
-def _install_invocation_context(token) -> bool:
-    """Install the router-signed owner context for in-image skills.
+def _install_invocation_authority(token, request_proof_key) -> bool:
+    """Install authority for the root-owned local relay.
 
-    The file is readable by model-launched skill processes, so it is not
-    treated as a secret. Privileged HTTP/broker boundaries verify its HMAC and
-    reject modified, expired, or consultation-mode tokens. An atomic replace
-    prevents a skill from observing a partially written token.
+    OpenClaw and every model-launched skill run as the unprivileged ``node``
+    user. They can call fixed relay operations, but cannot read either the
+    signed context or the derived per-invocation signing key.
     """
-    if not isinstance(token, str) or not _INVOCATION_CONTEXT_RE.fullmatch(token):
-        try:
-            os.unlink(_INVOCATION_CONTEXT_PATH)
-        except FileNotFoundError:
-            pass
+    if (
+        not isinstance(token, str)
+        or not _INVOCATION_CONTEXT_RE.fullmatch(token)
+        or not isinstance(request_proof_key, str)
+        or not _REQUEST_PROOF_KEY_RE.fullmatch(request_proof_key)
+    ):
+        for path in (_INVOCATION_CONTEXT_PATH, _REQUEST_PROOF_KEY_PATH):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
         return False
 
-    temporary_path = f"{_INVOCATION_CONTEXT_PATH}.{os.getpid()}.tmp"
-    with open(temporary_path, "w", encoding="ascii") as handle:
-        handle.write(token)
-        handle.write("\n")
-    os.chmod(temporary_path, 0o600)
-    os.replace(temporary_path, _INVOCATION_CONTEXT_PATH)
+    os.makedirs(_AUTHORITY_DIRECTORY, mode=0o700, exist_ok=True)
+    os.chmod(_AUTHORITY_DIRECTORY, 0o700)
+    for path, value in (
+        (_INVOCATION_CONTEXT_PATH, token),
+        (_REQUEST_PROOF_KEY_PATH, request_proof_key),
+    ):
+        temporary_path = f"{path}.{os.getpid()}.tmp"
+        with open(temporary_path, "w", encoding="ascii") as handle:
+            handle.write(value)
+            handle.write("\n")
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
     return True
+
+
+def _revoke_invocation_authority() -> None:
+    """Remove all local relay signing authority at the end of every turn."""
+    for path in (_INVOCATION_CONTEXT_PATH, _REQUEST_PROOF_KEY_PATH):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def _invocation_authority_is_installed() -> bool:
+    return all(
+        os.path.isfile(path)
+        for path in (_INVOCATION_CONTEXT_PATH, _REQUEST_PROOF_KEY_PATH)
+    )
+
+
+async def _finalize_invocation_authority() -> None:
+    """Stop background work, flush once with current authority, then revoke it."""
+    loop = asyncio.get_running_loop()
+    periodic_stopped = False
+    try:
+        try:
+            await loop.run_in_executor(None, workspace_sync.stop_periodic_push)
+            periodic_stopped = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("turn-final periodic workspace stop failed: %s", exc)
+        if (
+            periodic_stopped
+            and _current_workspace_prefix
+            and _invocation_authority_is_installed()
+        ):
+            try:
+                await loop.run_in_executor(
+                    None,
+                    workspace_sync.push_workspace,
+                    _current_workspace_prefix,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("turn-final workspace push failed: %s", exc)
+    finally:
+        _revoke_invocation_authority()
+
+
+def _serialize_invocations(function):
+    """Hold one owner's authority at a time and revoke it after every turn."""
+    async def serialized(*args, **kwargs):
+        async with _invocation_lock:
+            try:
+                async for event in function(*args, **kwargs):
+                    yield event
+            finally:
+                # Async-generator finalization also runs this path when the
+                # streaming client disconnects or the invocation raises.
+                await _finalize_invocation_authority()
+    return serialized
 
 
 def start_mantle_proxy() -> None:
@@ -209,6 +281,23 @@ def read_proxy_usage() -> dict:
 # Track which workspace prefix this microVM is currently serving so we can
 # (a) skip redundant S3 pulls and (b) push to the right prefix on shutdown.
 _current_workspace_prefix: str | None = None
+_workspace_prefix_bound = False
+_workspace_prefix_hydrated = False
+
+
+def _bind_workspace_prefix(prefix: str) -> bool:
+    """Permanently bind a live microVM to its first workspace prefix.
+
+    The local OpenClaw tree is not proven-cleanable while its gateway and
+    background processes remain alive. Rejecting a prefix change prevents files
+    and in-memory upload state from crossing owners.
+    """
+    global _current_workspace_prefix, _workspace_prefix_bound
+    if _workspace_prefix_bound:
+        return prefix == _current_workspace_prefix
+    _current_workspace_prefix = prefix
+    _workspace_prefix_bound = True
+    return True
 
 def hydrate_github_auth(user_email: str) -> None:
     """Compatibility no-op: GitHub authentication lives in the web broker."""
@@ -468,6 +557,7 @@ def main():
     app = BedrockAgentCoreApp()
 
     @app.entrypoint
+    @_serialize_invocations
     async def agent_invocation(payload, context):
         """
         Handle an agent invocation from AgentCore.
@@ -493,6 +583,8 @@ def main():
             user_display_name         — caller's display name for greetings
             workspace_prefix          — S3 prefix to mount as long-term memory
             invocation_context        — router-signed actor/owner/mode context
+            invocation_request_proof_key
+                                      — root-relay-only derived signing key
             model                     — optional model override
             invoked_by_email          — cross-user: email of the person consulting this agent
             invoked_by_display_name   — cross-user: display name of the invoker
@@ -501,7 +593,7 @@ def main():
                                         [{name, mimeType, source, driveFileId?,
                                           attachmentResourceName?}]
         """
-        global _current_workspace_prefix
+        global _workspace_prefix_hydrated
 
         session_id = getattr(context, "session_id", "unknown")
         user_message = payload.get("prompt", "")
@@ -509,6 +601,9 @@ def main():
         display_name = payload.get("user_display_name", "")
         workspace_prefix = payload.get("workspace_prefix", "")
         invocation_context = payload.get("invocation_context", "")
+        invocation_request_proof_key = payload.get(
+            "invocation_request_proof_key", ""
+        )
         model_override = payload.get("model")
         # Optional turn-deadline override (async-job runner, #1138). Only the
         # job runner sends this; interactive router turns omit it and get the
@@ -537,10 +632,33 @@ def main():
             yield {"result": "I didn't receive a message. Could you try again?"}
             return
 
+        # A previous turn's periodic workspace push may still be using the
+        # current authority. It must be fully stopped before authority can be
+        # replaced for this serialized turn; otherwise a background request
+        # can be signed as the next owner.
+        try:
+            workspace_sync.stop_periodic_push()
+        except RuntimeError as exc:
+            logger.error(
+                "Invocation rejected: prior owner workspace push is still active: %s",
+                exc,
+            )
+            yield {
+                "result": "The agent is still securing the previous workspace. Please retry.",
+                "metadata": {
+                    "failed": True,
+                    "error_class": "InvocationAuthorityBusy",
+                },
+            }
+            return
+
         # A model-visible email or workspace prefix is never authority. Install
         # the signed context before any skill can run; fail closed when an old
         # or untrusted caller invokes the runtime without one.
-        if not _install_invocation_context(invocation_context):
+        if not _install_invocation_authority(
+            invocation_context,
+            invocation_request_proof_key,
+        ):
             logger.error(
                 "Invocation rejected: missing or malformed signed context "
                 "(session=%s)",
@@ -558,6 +676,31 @@ def main():
             }
             return
 
+        # Only a successfully signed invocation may bind the persistent
+        # runtime. The gateway can retain open files and in-memory upload state,
+        # so one live microVM may serve exactly one workspace prefix.
+        if not _bind_workspace_prefix(workspace_prefix):
+            # Do not let the decorator's final flush pair this rejected
+            # invocation's authority with the already-bound owner's prefix.
+            _revoke_invocation_authority()
+            logger.error(
+                "Invocation rejected: workspace prefix changed in a live "
+                "microVM (current=%s requested=%s)",
+                _current_workspace_prefix or "-",
+                workspace_prefix or "-",
+            )
+            yield {
+                "result": (
+                    "This agent runtime is still bound to another workspace. "
+                    "Please retry in a fresh runtime."
+                ),
+                "metadata": {
+                    "failed": True,
+                    "error_class": "WorkspaceAuthorityChanged",
+                },
+            }
+            return
+
         # Compatibility hook. GitHub authentication and authorization are
         # enforced only by the signed, owner-bound web broker.
         if user_email and user_email != "unknown":
@@ -565,8 +708,9 @@ def main():
                 None, hydrate_github_auth, user_email
             )
 
-        # First invocation for a new workspace prefix → pull memory from S3.
-        if workspace_prefix and workspace_prefix != _current_workspace_prefix:
+        # This microVM is permanently bound to the prefix above, so a pull can
+        # never overlay a previous owner's local files.
+        if workspace_prefix and not _workspace_prefix_hydrated:
             try:
                 pulled = await asyncio.get_running_loop().run_in_executor(
                     None, workspace_sync.pull_workspace, workspace_prefix
@@ -575,10 +719,11 @@ def main():
                     "workspace mounted: prefix=%s files=%d",
                     workspace_prefix, pulled,
                 )
-                _current_workspace_prefix = workspace_prefix
-                workspace_sync.start_periodic_push(workspace_prefix, interval_s=120)
+                _workspace_prefix_hydrated = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning("workspace mount failed: %s", exc)
+        if workspace_prefix:
+            workspace_sync.start_periodic_push(workspace_prefix, interval_s=120)
 
         # Per-turn attachment delivery (issue #1138 F1): the router uploaded
         # Chat attachment bytes to S3 AFTER this microVM's one-time workspace

@@ -16,28 +16,17 @@ const {
   beforeEach,
   mock,
 } = require('bun:test');
-const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const contextPath = path.join(
-  os.tmpdir(),
-  `psd-credential-context-${process.pid}`,
-);
-const contextToken = `v1.${'A'.repeat(40)}.${'B'.repeat(43)}`;
 const originalFetch = globalThis.fetch;
 
 beforeAll(() => {
-  fs.writeFileSync(contextPath, contextToken, { mode: 0o600 });
-  process.env.PSD_INVOCATION_CONTEXT_FILE = contextPath;
   process.env.APP_BASE_URL = 'https://app.example.test/base?ignored=1';
 });
 
 afterAll(() => {
   globalThis.fetch = originalFetch;
-  fs.unlinkSync(contextPath);
-  delete process.env.PSD_INVOCATION_CONTEXT_FILE;
   delete process.env.APP_BASE_URL;
 });
 
@@ -51,7 +40,7 @@ beforeEach(() => {
     ));
 });
 
-test('broker requests use the fixed HTTPS route and signed context', async () => {
+test('broker requests use the fixed local authority relay', async () => {
   const common = require('./common');
   await common.requestCredentialOperation({
     operation: 'check-skill-access',
@@ -59,9 +48,11 @@ test('broker requests use the fixed HTTPS route and signed context', async () =>
   });
   expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   const [url, init] = globalThis.fetch.mock.calls[0];
-  expect(String(url)).toBe('https://app.example.test/api/agent/credentials');
+  expect(String(url)).toBe(
+    'http://127.0.0.1:18791/agent-broker/api/agent/credentials',
+  );
   expect(init.redirect).toBe('error');
-  expect(init.headers['X-Agent-Invocation-Context']).toBe(contextToken);
+  expect(init.headers['X-Agent-Invocation-Context']).toBeUndefined();
   expect(init.headers.Authorization).toBeUndefined();
   expect(JSON.parse(init.body)).toEqual({
     operation: 'check-skill-access',
@@ -78,12 +69,10 @@ test('broker errors fail closed and preserve no secret response text', async () 
   const common = require('./common');
   await expect(
     common.requestCredentialOperation({ operation: 'list' }),
-  ).rejects.toThrow('Credential broker rejected the request: Forbidden');
+  ).rejects.toThrow('Agent broker rejected the request: Forbidden');
 });
 
 const CLIS = [
-  'get.js',
-  'list.js',
   'put.js',
   'request_new.js',
   'check_capability.js',

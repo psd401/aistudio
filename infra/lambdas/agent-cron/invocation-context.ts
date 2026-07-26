@@ -49,3 +49,31 @@ export function createScheduledInvocationContextToken(
     .digest('base64url');
   return `${signingInput}.${signature}`;
 }
+
+export function deriveScheduledRequestProofKey(
+  secret: string,
+  token: string,
+): string {
+  if (Buffer.byteLength(secret, 'utf8') < 32) {
+    throw new Error('Agent invocation signing secret must contain at least 32 bytes');
+  }
+  const parts = token.split('.');
+  if (parts.length !== 3 || !parts[1]) {
+    throw new Error('Agent invocation context is malformed');
+  }
+  let nonce: unknown;
+  try {
+    nonce = (JSON.parse(
+      Buffer.from(parts[1], 'base64url').toString('utf8'),
+    ) as { nonce?: unknown }).nonce;
+  } catch {
+    throw new Error('Agent invocation context is malformed');
+  }
+  if (typeof nonce !== 'string' || nonce.length === 0 || nonce.length > 128) {
+    throw new Error('Agent invocation context nonce is malformed');
+  }
+  return crypto
+    .createHmac('sha256', secret)
+    .update(`agent-request-proof:v1:${nonce}`)
+    .digest('base64url');
+}

@@ -19,8 +19,6 @@
 
 process.env.APP_BASE_URL = 'https://app.test';
 process.env.ENVIRONMENT = 'dev';
-const { installTestInvocationContext } = require('../_shared/invocation-context-test-support');
-installTestInvocationContext();
 
 const { test, expect, beforeEach } = require('bun:test');
 const fs = require('node:fs');
@@ -67,7 +65,6 @@ common.startAndPollJob = originalStartAndPollJob;
 const EMAIL = 'teacher@psd401.net';
 
 beforeEach(() => {
-  installTestInvocationContext();
   fetchCalls = [];
   jobCalls = [];
   fetchError = null;

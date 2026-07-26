@@ -11,6 +11,12 @@ Read-only access to Red Rover absence/vacancy data for PSD. The skill never perf
 
 **Identity.** The district-wide credential is resolved through the owner-bound broker. Existing commands retain their caller argument for compatibility, but it is never forwarded to credential lookup.
 
+**Authorization.** The trusted web broker requires the signed workspace owner to
+hold the code-managed `skill.redrover` capability before it resolves or uses the
+district-wide credential. Administrator and staff roles receive this capability
+by default; administrators can change role assignments without introducing an
+API scope.
+
 **Credentials.** A single shared secret at `psd-agent-creds/{env}/shared/redrover_credentials` with shape `{"username":"...","password":"...","apiKey":"..."}`. The skill uses Basic Auth (`username` + `password`) for the `/organization` endpoint, then uses the dynamic `apiKey` returned there for vacancy calls. The static `apiKey` field is a fallback if Red Rover ever stops minting a dynamic one.
 
 If the credential is missing the skill exits non-zero with `error: "redrover_credentials_missing"` — an administrator must provision it out of band; users cannot register Red Rover credentials themselves.
@@ -141,7 +147,9 @@ PENINSULA HIGH SCHOOL, GIG HARBOR HIGH SCHOOL, HENDERSON BAY HIGH SCHOOL, GOODMA
 ## Read-only enforcement
 
 - All HTTP traffic flows through `rrGet()` in `lib/api.js`. There is no `rrPost`/`rrPut`/`rrDelete`.
+- The trusted credentials route checks `skill.redrover` before calling the
+  operation broker, so denied owners never resolve or use the shared credential.
 - The skill performs **no** filesystem writes (no `fs.writeFile`, `fs.appendFile`, `fs.mkdir`, `fs.unlink`, etc.).
-- The only `child_process` invocation is `node psd-credentials/get.js` — never `put.js`.
+- Provider credentials stay inside the fixed read-only Red Rover operation broker and are never returned to this process.
 - `/opt/psd-skills` is `chmod a-w` at container build time; the agent process cannot modify the skill at runtime.
 - Credential values are kept in module-scope memory only — never logged, echoed, or persisted to workspace/S3.

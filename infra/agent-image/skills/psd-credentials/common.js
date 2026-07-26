@@ -9,9 +9,7 @@
 
 'use strict';
 
-const {
-  agentRequestHeaders,
-} = require('../_shared/invocation-context');
+const { requestAgentBroker } = require('../_shared/agent-broker');
 
 const SAFE_CRED_NAME_RE = /^[A-Za-z0-9_.-]{1,128}$/;
 const AUTHORITY_ARGS = ['user', 'owner_email', 'user_email', 'user_id'];
@@ -62,54 +60,12 @@ function validateCredentialName(name) {
   }
 }
 
-function brokerUrl() {
-  const raw = process.env.APP_BASE_URL;
-  if (!raw) {
-    throw new Error('APP_BASE_URL is not configured');
-  }
-  let base;
-  try {
-    base = new URL(raw);
-  } catch {
-    throw new Error('APP_BASE_URL is invalid');
-  }
-  const localHttp =
-    base.protocol === 'http:' &&
-    (base.hostname === 'localhost' || base.hostname === '127.0.0.1');
-  if (base.protocol !== 'https:' && !localHttp) {
-    throw new Error('APP_BASE_URL must use HTTPS');
-  }
-  base.pathname = '/api/agent/credentials';
-  base.search = '';
-  base.hash = '';
-  return base;
-}
-
 async function requestCredentialOperation(payload) {
-  const response = await fetch(brokerUrl(), {
-    method: 'POST',
-    headers: agentRequestHeaders(),
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(15_000),
-    redirect: 'error',
-  });
-  let body;
   try {
-    body = await response.json();
-  } catch {
-    throw new Error(`Credential broker returned invalid JSON (HTTP ${response.status})`);
+    return await requestAgentBroker('/api/agent/credentials', payload);
+  } catch (error) {
+    throw new Error(`Credential broker rejected the request: ${error.message}`);
   }
-  if (!response.ok) {
-    const reason =
-      body && typeof body.error === 'string'
-        ? body.error
-        : `HTTP ${response.status}`;
-    const error = new Error(`Credential broker rejected the request: ${reason}`);
-    error.status = response.status;
-    error.responseBody = body;
-    throw error;
-  }
-  return body;
 }
 
 module.exports = {

@@ -202,10 +202,24 @@ class OpenClawAdapter(HarnessAdapter):
                     stdout=sys.stdout,
                     stderr=sys.stderr,
                     env={
-                        **os.environ,
+                        **{
+                            key: value
+                            for key, value in os.environ.items()
+                            if key not in {
+                                "AGENT_INVOCATION_SIGNING_SECRET",
+                                "AGENT_INVOCATION_SIGNING_SECRET_ID",
+                                "PSD_INVOCATION_CONTEXT_FILE",
+                                "PSD_INVOCATION_REQUEST_PROOF_KEY_FILE",
+                            }
+                        },
                         "HOME": "/home/node",
                         "OPENCLAW_NO_RESPAWN": "1",
                     },
+                    user="node",
+                    group="node",
+                    extra_groups=[],
+                    umask=0o077,
+                    cwd="/home/node",
                 )
                 self._wait_for_ready(timeout=60)
                 # Give the gateway time to fully initialize WebSocket handling

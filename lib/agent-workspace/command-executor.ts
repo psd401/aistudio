@@ -22,34 +22,33 @@ const READ_ACTIONS = new Set([
 
 const ALLOWED_WRITES = new Set([
   "calendar events insert",
-  "calendar events patch",
-  "calendar events update",
-  "docs documents batchupdate",
   "docs documents create",
   "drive files copy",
   "drive files create",
-  "drive permissions create",
   "gmail users drafts create",
   "gmail users drafts update",
   "gmail users messages modify",
-  "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
-  "slides presentations batchupdate",
   "slides presentations create",
   "tasks tasks insert",
+])
+
+const REQUIRES_AGENT_CREATED_PROVENANCE = new Set([
+  "calendar events patch",
+  "calendar events update",
+  "docs documents batchupdate",
+  "drive permissions create",
+  "sheets spreadsheets batchupdate",
+  "slides presentations batchupdate",
   "tasks tasks patch",
   "tasks tasks update",
 ])
 
 const AGENT_ONLY_WRITES = new Set([
-  "docs documents batchupdate",
   "docs documents create",
   "drive files copy",
   "drive files create",
-  "drive permissions create",
-  "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
-  "slides presentations batchupdate",
   "slides presentations create",
 ])
 
@@ -128,35 +127,6 @@ function validateGmailModify(argv: readonly string[]): void {
   }
 }
 
-function validatePermissionCreate(argv: readonly string[]): void {
-  const payload = parseObjectArgument(argv, "--json")
-  if (!payload) throw new Error("Permission creation requires a valid --json object")
-  const permission =
-    (payload.resource && typeof payload.resource === "object"
-      ? payload.resource
-      : payload.requestBody && typeof payload.requestBody === "object"
-        ? payload.requestBody
-        : payload) as Record<string, unknown>
-  const type = typeof permission.type === "string" ? permission.type.toLowerCase() : ""
-  const role = typeof permission.role === "string" ? permission.role.toLowerCase() : ""
-  const email =
-    typeof permission.emailAddress === "string"
-      ? permission.emailAddress.toLowerCase()
-      : ""
-  const domain =
-    typeof permission.domain === "string" ? permission.domain.toLowerCase() : ""
-
-  const namedDistrictUser =
-    type === "user" &&
-    /^[\w%+.-]+@psd401\.net$/.test(email) &&
-    (role === "reader" || role === "commenter" || role === "writer")
-  const readOnlyDistrictDomain =
-    type === "domain" && domain === "psd401.net" && role === "reader"
-  if (!namedDistrictUser && !readOnlyDistrictDomain) {
-    throw new Error("Drive sharing is limited to explicit in-district grants")
-  }
-}
-
 /**
  * Validate the complete argv at the trusted web boundary. The model-facing
  * runtime has no Google credential and no gws binary; only commands accepted
@@ -188,6 +158,11 @@ export function validateWorkspaceCommand(command: WorkspaceCommand): void {
 
   const { operation, action } = normalizedOperation(argv)
   if (READ_ACTIONS.has(action)) return
+  if (REQUIRES_AGENT_CREATED_PROVENANCE.has(operation)) {
+    throw new Error(
+      "Workspace mutation requires server-recorded agent-created provenance"
+    )
+  }
   if (!ALLOWED_WRITES.has(operation)) {
     throw new Error(`Workspace operation is not allowed: ${operation}`)
   }
@@ -195,7 +170,6 @@ export function validateWorkspaceCommand(command: WorkspaceCommand): void {
     throw new Error("This operation must use the agent-owned Workspace account")
   }
   if (operation === "gmail users messages modify") validateGmailModify(argv)
-  if (operation === "drive permissions create") validatePermissionCreate(argv)
 }
 
 export async function executeWorkspaceCommand(

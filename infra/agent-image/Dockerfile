@@ -414,11 +414,14 @@ COPY *.py /app/
 # which passes the IANA name explicitly to zoneinfo.
 ENV TZ=America/Los_Angeles
 
-# Set ownership for the node user (OpenClaw runs as node)
-RUN chown -R node:node /home/node/.openclaw /app
+# OpenClaw is explicitly dropped to node by harness_adapter.py. The wrapper
+# and local relay remain root so model-launched processes cannot read request
+# signing authority under /run/psd-agent-authority.
+RUN chown -R node:node /home/node/.openclaw && \
+    chown -R root:root /app && \
+    chmod -R a-w /app
 
-# Switch back to the non-root user
-USER node
+USER root
 
 # AgentCore invokes the container on port 8080
 EXPOSE 8080

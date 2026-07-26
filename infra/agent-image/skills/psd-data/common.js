@@ -7,26 +7,13 @@
  * /api/agent/consent-link endpoint (kind: cognito_data) so the agent can
  * post the link in chat and have the user authorize.
  *
- * Environment contract (set by infra/lib/agent-platform-stack.ts):
- *   APP_BASE_URL                        — Base URL of the AI Studio web app
- *   AUTH_COGNITO_USER_POOL_ID           — Cognito user pool (info only)
- *   AUTH_COGNITO_CLIENT_ID              — Cognito app client (used for refresh)
- *   AUTH_COGNITO_REGION                 — Cognito region (defaults to AWS_REGION)
- *   PSD_DATA_MCP_URL                    — MCP server JSON-RPC endpoint
+ * Credential refresh and MCP transport execute inside the trusted owner-bound
+ * web broker. This model-facing helper receives only operation results.
  */
 
 'use strict';
 
-const {
-  getOwnerCredential,
-  requestAgentBroker,
-} = require('../_shared/agent-broker');
-
-const REGION = process.env.AWS_REGION || 'us-east-1';
-const COGNITO_REGION =
-  process.env.AUTH_COGNITO_REGION || REGION;
-const COGNITO_CLIENT_ID = process.env.AUTH_COGNITO_CLIENT_ID || '';
-const PSD_DATA_MCP_URL = process.env.PSD_DATA_MCP_URL || '';
+const { requestAgentBroker } = require('../_shared/agent-broker');
 
 function fail(message, code = 1) {
   process.stderr.write(`psd-data: ${message}\n`);
@@ -226,73 +213,6 @@ function rejectAuthorityArgs(args) {
 }
 
 /**
- * Read the user's stored Cognito refresh-token record. Returns null when
- * the secret does not yet exist (user hasn't completed the consent flow).
- *
- * Record shape (written by `lib/auth/agent-token-sync.ts`):
- *   { refresh_token, obtained_at, user_pool_id, client_id, region }
- */
-async function getUserCognitoRefreshRecord() {
-  const credential = await getOwnerCredential('cognito-refresh');
-  if (!credential) return null;
-  try {
-    return JSON.parse(credential.value);
-  } catch {
-    throw new Error('Stored Cognito credential is not valid JSON');
-  }
-}
-
-/**
- * Exchange the user's Cognito refresh token for a fresh id_token by POSTing
- * directly to the Cognito Identity Provider service endpoint. No AWS
- * credentials required — InitiateAuth with REFRESH_TOKEN_AUTH is a public
- * endpoint that authenticates with the refresh token itself.
- *
- * Returns { id_token, access_token, expires_in } on success.
- * Throws an Error with `code === 'NotAuthorizedException'` when the
- * refresh token has been revoked or expired (caller should mint a fresh
- * consent URL).
- */
-async function refreshCognitoIdToken(refreshToken, clientId, region) {
-  const endpoint = `https://cognito-idp.${region}.amazonaws.com/`;
-  const body = JSON.stringify({
-    AuthFlow: 'REFRESH_TOKEN_AUTH',
-    ClientId: clientId,
-    AuthParameters: { REFRESH_TOKEN: refreshToken },
-  });
-
-  const resp = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-amz-json-1.1',
-      'X-Amz-Target': 'AWSCognitoIdentityProviderService.InitiateAuth',
-    },
-    body,
-  });
-
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    const err = new Error(
-      `Cognito InitiateAuth failed: ${resp.status} ${data.__type || data.message || ''}`
-    );
-    // Cognito returns errors as { __type: "NotAuthorizedException", message: "..." }
-    err.code = data.__type || `http_${resp.status}`;
-    err.cognito = data;
-    throw err;
-  }
-
-  const result = data.AuthenticationResult || {};
-  if (!result.IdToken) {
-    throw new Error('Cognito InitiateAuth returned no IdToken');
-  }
-  return {
-    id_token: result.IdToken,
-    access_token: result.AccessToken || null,
-    expires_in: result.ExpiresIn || null,
-  };
-}
-
-/**
  * Ask AI Studio for a fresh signed consent URL the agent can give the user
  * in chat. Uses the same internal-API-key auth as psd-workspace.
  */
@@ -340,66 +260,15 @@ async function emitNeedsAuthAndExit(reason) {
  * exits non-zero otherwise. Callers do not need to handle errors.
  */
 async function callMcp(method, params) {
-  if (!PSD_DATA_MCP_URL) {
-    fail('PSD_DATA_MCP_URL is not set');
-  }
-  if (!COGNITO_CLIENT_ID) {
-    fail('AUTH_COGNITO_CLIENT_ID is not set');
-  }
-
-  const record = await getUserCognitoRefreshRecord();
-  if (!record || !record.refresh_token) {
-    await emitNeedsAuthAndExit(
-      'no refresh token stored for this user yet'
-    );
-  }
-
-  // Prefer the client_id captured at consent time; fall back to env var.
-  const clientId = record.client_id || COGNITO_CLIENT_ID;
-  const region = record.region || COGNITO_REGION;
-
-  let auth;
-  try {
-    auth = await refreshCognitoIdToken(record.refresh_token, clientId, region);
-  } catch (err) {
-    if (
-      err.code === 'NotAuthorizedException' ||
-      err.code === 'invalid_grant' ||
-      err.code === 'UserNotFoundException'
-    ) {
-      await emitNeedsAuthAndExit(
-        `stored refresh token rejected: ${err.code}`
-      );
-    }
-    fail(`Cognito token refresh failed: ${err.message}`);
-  }
-
-  const requestId = Math.floor(Math.random() * 1e9);
-  const rpcBody = {
-    jsonrpc: '2.0',
-    id: requestId,
+  const response = await requestAgentBroker('/api/agent/credentials', {
+    operation: 'psd-data-mcp',
     method,
     params: params || {},
-  };
-
-  const resp = await fetch(PSD_DATA_MCP_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${auth.id_token}`,
-      'X-Client-Model': process.env.BUILD_MARKER || 'agentcore',
-      'mcp-protocol-version': '2025-11-25',
-    },
-    body: JSON.stringify(rpcBody),
   });
-
-  // psd-data-mcp uses HTTP status codes for auth/permission errors and the
-  // JSON-RPC error field for tool errors. Handle both.
-  if (resp.status === 401) {
-    await emitNeedsAuthAndExit('MCP server rejected token (401)');
+  if (response.status === 'needs-auth') {
+    await emitNeedsAuthAndExit(response.reason || 'owner authorization is required');
   }
-  if (resp.status === 403) {
-    const text = await resp.text().catch(() => '');
+  if (response.status === 'forbidden') {
     emit({
       status: 'forbidden',
       kind: 'data-permission',
@@ -407,11 +276,11 @@ async function callMcp(method, params) {
         'The data MCP server denied access. Most likely the user is not yet ' +
         'registered in the PSD data warehouse userpermissions table. Contact ' +
         'the data team to be added.',
-      detail: text.slice(0, 1024),
+      detail: String(response.detail || '').slice(0, 1024),
     });
     process.exit(13);
   }
-  if (resp.status === 429) {
+  if (response.status === 'rate-limited') {
     emit({
       status: 'rate-limited',
       message:
@@ -420,26 +289,18 @@ async function callMcp(method, params) {
     });
     process.exit(14);
   }
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    fail(`MCP HTTP ${resp.status}: ${text.slice(0, 512)}`, 12);
-  }
-
-  const data = await resp.json().catch(() => null);
-  if (!data) {
-    fail('MCP returned non-JSON body', 12);
-  }
-  if (data.error) {
+  if (response.status !== 'ok') fail('PSD data broker returned an invalid result', 12);
+  if (response.result && response.result.error) {
     emit({
       status: 'mcp-error',
       method,
-      jsonrpc_error: data.error,
+      jsonrpc_error: response.result.error,
     });
     process.exit(12);
   }
 
-  process.stdout.write(JSON.stringify(data.result ?? null) + '\n');
-  return data.result ?? null;
+  process.stdout.write(JSON.stringify(response.result ?? null) + '\n');
+  return response.result ?? null;
 }
 
 module.exports = {
@@ -447,11 +308,8 @@ module.exports = {
   emit,
   parseArgs,
   rejectAuthorityArgs,
-  getUserCognitoRefreshRecord,
-  refreshCognitoIdToken,
   mintConsentUrl,
   emitNeedsAuthAndExit,
   callMcp,
   findUnqualifiedNumericCasts,
-  PSD_DATA_MCP_URL,
 };

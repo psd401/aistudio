@@ -6,6 +6,12 @@ import {
   AgentCredentialInputError,
   AgentCredentialNotConfiguredError,
 } from "@/lib/agent-credentials/broker"
+import {
+  executeOpenAiImageOperation,
+  executePlaudOperation,
+  executePsdDataOperation,
+  executeRedRoverOperation,
+} from "@/lib/agent-credentials/owner-operation-broker"
 
 const log = createLogger({ module: "agent-credential-broker" })
 const AUTHORITY_FIELDS = [
@@ -49,25 +55,71 @@ export async function POST(request: NextRequest) {
   try {
     const broker = new AgentCredentialBroker()
     switch (body.operation) {
-      case "get": {
-        const credential = await broker.get(
-          invocation.ownerEmail,
-          body.name,
-          {
-            sharedOnly: body.sharedOnly === true,
-            sessionId: invocation.sessionId,
-          }
+      case "get":
+      case "list":
+        return NextResponse.json(
+          { error: "Plaintext credential access is not supported" },
+          { status: 403 }
         )
-        return credential
-          ? NextResponse.json({ credential })
-          : NextResponse.json({ error: "not_found" }, { status: 404 })
+      case "psd-data-mcp":
+        return NextResponse.json(
+          await executePsdDataOperation({
+            ownerEmail: invocation.ownerEmail,
+            sessionId: invocation.sessionId,
+            method: body.method,
+            params: body.params,
+          })
+        )
+      case "plaud-mcp":
+        return NextResponse.json(
+          await executePlaudOperation({
+            ownerEmail: invocation.ownerEmail,
+            sessionId: invocation.sessionId,
+            method: body.method,
+            toolName: body.toolName,
+            toolArgs: body.toolArgs,
+          })
+        )
+      case "openai-image": {
+        const granted = await broker.canAccessSkill(
+          invocation.ownerEmail,
+          "skill.image-gen",
+          undefined
+        )
+        if (!granted) {
+          return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+        }
+        return NextResponse.json(
+          await executeOpenAiImageOperation({
+            ownerEmail: invocation.ownerEmail,
+            sessionId: invocation.sessionId,
+            prompt: body.prompt,
+            size: body.size,
+            quality: body.quality,
+            background: body.background,
+            referenceDataUrl: body.referenceDataUrl,
+          })
+        )
       }
-      case "list": {
-        const credentials = await broker.list(invocation.ownerEmail)
-        return NextResponse.json({
-          credentials,
-          count: credentials.length,
-        })
+      case "redrover": {
+        const granted = await broker.canAccessSkill(
+          invocation.ownerEmail,
+          "skill.redrover",
+          undefined
+        )
+        if (!granted) {
+          return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+        }
+        return NextResponse.json(
+          await executeRedRoverOperation({
+            ownerEmail: invocation.ownerEmail,
+            sessionId: invocation.sessionId,
+            operation: body.action,
+            startDate: body.startDate,
+            endDate: body.endDate,
+            filledFilter: body.filledFilter,
+          })
+        )
       }
       case "put": {
         if (invocation.mode !== "owner") {

@@ -46,6 +46,8 @@ import asyncio  # noqa: E402
 
 import mantle_proxy  # noqa: E402
 from mantle_proxy import (  # noqa: E402
+    AgentBrokerResponseTooLarge,
+    _read_bounded_agent_broker_response,
     _extract_usage,
     _is_anthropic_model,
     inject_include_usage,
@@ -59,6 +61,53 @@ from mantle_proxy import (  # noqa: E402
     _parse_anthropic_stream,
     _parse_anthropic_response,
 )
+
+
+class _FakeResponseContent:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    async def iter_chunked(self, _size):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _FakeBrokerResponse:
+    def __init__(self, chunks, content_length=None):
+        self.headers = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
+        self.content = _FakeResponseContent(chunks)
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class TestBoundedAgentBrokerResponse(unittest.TestCase):
+    def test_accepts_response_at_limit(self):
+        response = _FakeBrokerResponse([b"ab", b"cd"], content_length=4)
+        body = asyncio.run(
+            _read_bounded_agent_broker_response(response, max_bytes=4)
+        )
+        self.assertEqual(body, b"abcd")
+        self.assertFalse(response.closed)
+
+    def test_rejects_declared_oversize_before_streaming(self):
+        response = _FakeBrokerResponse([b"not-read"], content_length=5)
+        with self.assertRaises(AgentBrokerResponseTooLarge):
+            asyncio.run(
+                _read_bounded_agent_broker_response(response, max_bytes=4)
+            )
+        self.assertTrue(response.closed)
+
+    def test_rejects_chunked_oversize_and_closes_response(self):
+        response = _FakeBrokerResponse([b"abc", b"de"])
+        with self.assertRaises(AgentBrokerResponseTooLarge):
+            asyncio.run(
+                _read_bounded_agent_broker_response(response, max_bytes=4)
+            )
+        self.assertTrue(response.closed)
 
 
 class TestExtractUsage(unittest.TestCase):
