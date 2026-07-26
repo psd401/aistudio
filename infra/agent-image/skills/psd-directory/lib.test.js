@@ -124,7 +124,8 @@ describe('resolveEmail', () => {
     const fetchImpl = stubFetch(() => ({ body: { people: [] } }));
     await lib.resolveEmail('x@psd401.net', 'tok', { fetchImpl });
     expect(fetchImpl.calls[0]).toContain('sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE');
-    expect(fetchImpl.calls[0]).toContain('people%3AsearchDirectoryPeople'.replace('%3A', ':'));
+    // The colon in the RPC-style verb is not percent-encoded in the request.
+    expect(fetchImpl.calls[0]).toContain('/people:searchDirectoryPeople');
   });
 });
 
