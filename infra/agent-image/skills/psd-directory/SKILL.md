@@ -13,14 +13,15 @@ Guessing is the failure mode this skill exists to remove. Ask the directory.
 
 ```bash
 # email -> person
-node /opt/psd-skills/psd-directory/run.js --user <owner@psd401.net> --email someone@psd401.net
+node /opt/psd-skills/psd-directory/run.js --email someone@psd401.net
 
 # Chat users/{id} -> person
-node /opt/psd-skills/psd-directory/run.js --user <owner@psd401.net> --chat-id users/116264913639920976203
+node /opt/psd-skills/psd-directory/run.js --chat-id users/116264913639920976203
 ```
 
-`--user` is the person whose `agnt_` account brokers the lookup — normally the
-owner of the conversation you are working in.
+There is no `--user` flag. Whose directory access is used is decided by the
+signed invocation context on the server, not by anything you pass — you cannot
+look someone up "as" a different person.
 
 ## What comes back
 
@@ -69,18 +70,13 @@ work around by other means.
 
 ## Cost and caching
 
-Lookups are cached on disk in the container: 12 hours for a hit, 5 minutes for
-a miss (a miss is often a race with account provisioning, and caching that for
-hours would make a new hire look permanently unresolvable).
+Lookups are cached server-side: 12 hours for a hit, 5 minutes for a miss (a
+miss is often a race with account provisioning, and caching that for hours
+would make a new hire look permanently unresolvable).
 
-A cache hit costs **nothing** — no directory call and no token mint. That
-second part matters: minting goes through the DWD broker, which allows 120
-mints per hour per person and shares that budget with `psd-workspace`, so a
-lookup that minted on every call could exhaust the limit and break Gmail,
-Calendar and Drive alongside it. Resolving the same person repeatedly is
-genuinely free, so resolve freely rather than rationing calls — but reach for
-`--no-cache` only when you have real reason to think someone was just created
-or renamed, since that one does spend a mint.
+Resolving the same person repeatedly is cheap, so resolve freely rather than
+rationing calls. Use `--no-cache` only when you have real reason to think
+someone was just created or renamed.
 
 ## When it fails
 
@@ -100,7 +96,12 @@ to name the setting.
 
 ## Scope and privilege
 
-Uses `directory.readonly`, which the agent slot already holds — no new OAuth
-scope, no consent flow, no admin role on the service account, and
-`contacts.readonly` is deliberately **not** used (it grants personal contacts,
-which is a different and wrong thing). See issue #1239.
+The lookup runs **server-side**, behind `/api/agent/directory-lookup`. The
+Google token is minted, used, and discarded there — it never enters this
+runtime, and you never see one. That is the same containment `psd-workspace`
+operates under.
+
+It uses `directory.readonly`, which the agent account already holds: no new
+OAuth scope, no consent flow, no admin role on the service account, and
+`contacts.readonly` is deliberately **not** used (that grants personal
+contacts, a different and wrong thing). See issue #1239.

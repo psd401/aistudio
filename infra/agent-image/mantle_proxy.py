@@ -61,6 +61,7 @@ ALLOWED_AGENT_BROKER_ROUTES = frozenset({
     "/api/agent/classified-evaluation",
     "/api/agent/consent-link",
     "/api/agent/credentials",
+    "/api/agent/directory-lookup",
     "/api/agent/email-triage",
     "/api/agent/failures",
     "/api/agent/github-execute",

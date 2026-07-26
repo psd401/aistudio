@@ -8,6 +8,7 @@ const ALLOWED_ROUTES = new Set([
   '/api/agent/classified-evaluation',
   '/api/agent/consent-link',
   '/api/agent/credentials',
+  '/api/agent/directory-lookup',
   '/api/agent/email-triage',
   '/api/agent/failures',
   '/api/agent/github-execute',
