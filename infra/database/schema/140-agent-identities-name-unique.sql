@@ -116,6 +116,32 @@
 -- CREATE TYPE/FUNCTION and DROP TYPE).
 
 -- ---------------------------------------------------------------------------
+-- 0) Index the repointed FK columns. Five of the six child tables never
+--    indexed their agent-identity FK (only content_publish_requests did:
+--    idx_cpr_requested_by_agent_id, migration 096). Without these the repoint
+--    UPDATEs below seq-scan each child table — a cost re-paid on every future
+--    fresh stand-up, since this file runs permanently, and content_audit_logs
+--    in particular is expected to grow large. They also serve ordinary
+--    attribution lookups by agent. Plain (non-CONCURRENT) CREATE INDEX for the
+--    same reason as the unique index in step 3.
+-- ---------------------------------------------------------------------------
+
+CREATE INDEX IF NOT EXISTS idx_content_created_by_agent_id
+  ON content_objects (created_by_agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_version_author_agent_id
+  ON content_versions (author_agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_content_audit_agent_id
+  ON content_audit_logs (agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_adc_author_agent_id
+  ON atrium_doc_comments (author_agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_content_assets_uploader_agent_id
+  ON content_assets (uploader_agent_id);
+
+-- ---------------------------------------------------------------------------
 -- 1) Consolidate attribution: repoint every FK reference from a duplicate row
 --    onto the canonical row for that name.
 --

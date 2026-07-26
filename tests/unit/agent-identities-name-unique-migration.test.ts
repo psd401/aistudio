@@ -140,12 +140,37 @@ describe("migration 140 — agent_identities name uniqueness (#1303)", () => {
       .split(";")
       .map((s) => s.trim())
       .filter(Boolean);
-    // repoint, tombstone, index
-    expect(statements).toHaveLength(3);
-    expect(statements[0]).toMatch(/^WITH canon AS/i);
-    expect(statements[1]).toMatch(/UPDATE\s+agent_identities\s+a/i);
-    expect(statements[1]).toMatch(/is_active\s*=\s*false/i);
-    expect(statements[2]).toMatch(/^CREATE UNIQUE INDEX/i);
+    // five FK indexes, repoint, tombstone, unique index
+    expect(statements).toHaveLength(8);
+    for (const stmt of statements.slice(0, 5)) {
+      expect(stmt).toMatch(/^CREATE INDEX IF NOT EXISTS idx_/i);
+    }
+    expect(statements[5]).toMatch(/^WITH canon AS/i);
+    expect(statements[6]).toMatch(/UPDATE\s+agent_identities\s+a/i);
+    expect(statements[6]).toMatch(/is_active\s*=\s*false/i);
+    expect(statements[7]).toMatch(/^CREATE UNIQUE INDEX/i);
+  });
+
+  it("indexes every repointed FK column that lacked one", () => {
+    // content_publish_requests.requested_by_agent_id already has
+    // idx_cpr_requested_by_agent_id (096); the other five child tables never
+    // indexed their agent-identity FK, so the repoint UPDATEs would seq-scan
+    // them on every fresh stand-up.
+    const pairs: Array<[string, string]> = [
+      ["content_objects", "created_by_agent_id"],
+      ["content_versions", "author_agent_id"],
+      ["content_audit_logs", "agent_id"],
+      ["atrium_doc_comments", "author_agent_id"],
+      ["content_assets", "uploader_agent_id"],
+    ];
+    for (const [table, column] of pairs) {
+      expect(migrationSql).toMatch(
+        new RegExp(
+          `CREATE INDEX IF NOT EXISTS \\S+\\s+ON ${table}\\s*\\(${column}\\)`,
+          "i"
+        )
+      );
+    }
   });
 
   it("keeps a tombstoned name inside varchar(200)", () => {
