@@ -58,13 +58,14 @@ const FIXTURE_ID_PREFIX = "a7100000-%";
 /**
  * Graph nodes created by the decision/graph E2E specs. Every node those specs
  * create carries an "E2E-<TAG>-<Date.now()>" token in its name (decision text
- * AND decidedBy actor names), so the anchored tag+timestamp shape is safe to
+ * AND decidedBy actor names) — plus the graph-admin spec's hyphen-less
+ * "E2EGRAPH<Date.now()>" form — so the anchored tag+timestamp shape is safe to
  * match on name alone across node types. Accumulation here breaks the semantic
  * search spec directly: each run adds a near-identical "zeppelin" decision, and
  * the fresh one must beat all its prior twins into the top-25 similarity
  * window — at ~100 twins it reliably loses (observed 2026-07-26).
  */
-const GRAPH_E2E_NAME_REGEX = "E2E-[A-Z]+-[0-9]{12,}";
+const GRAPH_E2E_NAME_REGEX = "(E2E-[A-Z]+-|E2EGRAPH)[0-9]{12,}";
 
 interface CandidateRow {
   id: string;
@@ -190,14 +191,54 @@ async function main(): Promise<void> {
     }
 
     if (candidates.length > 0) {
+      const ids = candidates.map((c) => c.id);
+
+      // Repository items the candidates were indexed into: captured BEFORE the
+      // content delete cascades away the content_index_links that reference
+      // them (repository_items itself does NOT hang off content_objects, so
+      // the cascade would orphan these rows and their chunks silently).
+      const linkedRepoItems = await sql<{ repository_item_id: number }[]>`
+        SELECT DISTINCT repository_item_id
+          FROM content_index_links
+         WHERE object_id IN ${sql(ids)}
+      `;
+
+      // Mirror contentService.delete: navigation_items.content_object_id is
+      // ON DELETE NO ACTION and unpublish only soft-hides the row, so debris
+      // from a published-then-abandoned probe would otherwise reject the whole
+      // batch delete with an FK violation.
+      await sql`
+        DELETE FROM navigation_items
+         WHERE content_object_id IN ${sql(ids)}
+      `;
+
       const deleted = await sql<{ id: string }[]>`
         DELETE FROM content_objects
-         WHERE id IN ${sql(candidates.map((c) => c.id))}
+         WHERE id IN ${sql(ids)}
          RETURNING id
       `;
       log.success(
         `Deleted ${deleted.length} content_objects rows (children removed via ON DELETE CASCADE).`
       );
+
+      // Now-unreferenced repository items from the captured set (an item still
+      // linked by any SURVIVING content is kept); chunks/versions cascade.
+      if (linkedRepoItems.length > 0) {
+        const orphaned = await sql<{ id: number }[]>`
+          DELETE FROM repository_items ri
+           WHERE ri.id IN ${sql(linkedRepoItems.map((r) => r.repository_item_id))}
+             AND NOT EXISTS (
+                   SELECT 1 FROM content_index_links l
+                    WHERE l.repository_item_id = ri.id
+                 )
+           RETURNING ri.id
+        `;
+        if (orphaned.length > 0) {
+          log.success(
+            `Deleted ${orphaned.length} orphaned repository_items rows (chunks/versions cascade).`
+          );
+        }
+      }
     }
 
     if (graphCandidates.length > 0) {
