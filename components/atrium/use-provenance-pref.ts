@@ -19,7 +19,18 @@
 
 import { useCallback, useSyncExternalStore } from "react";
 
-const PROVENANCE_PREF_KEY = "atrium.provenanceRail";
+/**
+ * Storage key, scoped PER VIEWER.
+ *
+ * The preference was originally stored under one global key, which on a shared
+ * or kiosk machine carried one user's choice into the next user's session on the
+ * same browser. Nothing sensitive leaks either way — the rail is CSS-only gating
+ * over marks that are in the document regardless — but a preference that follows
+ * the browser rather than the person is simply the wrong scope.
+ */
+function provenancePrefKey(userId: number): string {
+  return `atrium.provenanceRail:${userId}`;
+}
 
 /** Subscribers for same-tab updates (the `storage` event only fires cross-tab). */
 const listeners = new Set<() => void>();
@@ -41,18 +52,10 @@ function subscribe(onStoreChange: () => void): () => void {
 /**
  * In-memory fallback used when `localStorage` is unavailable (private mode,
  * storage disabled). Keeps the toggle working for the session even though the
- * choice cannot outlive it. `null` = no in-session choice made.
+ * choice cannot outlive it. Keyed the same way as storage, so it holds the same
+ * per-viewer scope. A missing entry = no in-session choice made.
  */
-let memoryFallback: boolean | null = null;
-
-/** Client snapshot: shown unless explicitly stored as "off". */
-function getSnapshot(): boolean {
-  try {
-    return window.localStorage.getItem(PROVENANCE_PREF_KEY) !== "off";
-  } catch {
-    return memoryFallback ?? true;
-  }
-}
+const memoryFallback = new Map<string, boolean>();
 
 /** Server snapshot: the rail defaults to SHOWN. */
 function getServerSnapshot(): boolean {
@@ -61,21 +64,35 @@ function getServerSnapshot(): boolean {
 
 /**
  * `[shown, toggle]` for the provenance rail. Defaults to shown; persists the
- * viewer's choice across sessions and tabs.
+ * viewer's choice across sessions and tabs, scoped to `userId`.
  */
-export function useProvenancePref(): [boolean, () => void] {
+export function useProvenancePref(userId: number): [boolean, () => void] {
+  const key = provenancePrefKey(userId);
+
+  // Client snapshot: shown unless explicitly stored as "off". Recreated when the
+  // key changes, which is what re-reads the new viewer's stored value. Safe for
+  // `useSyncExternalStore` despite the unstable identity: it returns a boolean
+  // PRIMITIVE, so React's snapshot comparison is by value, not by reference.
+  const getSnapshot = useCallback((): boolean => {
+    try {
+      return window.localStorage.getItem(key) !== "off";
+    } catch {
+      return memoryFallback.get(key) ?? true;
+    }
+  }, [key]);
+
   const on = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
   const toggle = useCallback(() => {
     const next = !on;
     try {
-      window.localStorage.setItem(PROVENANCE_PREF_KEY, next ? "on" : "off");
+      window.localStorage.setItem(key, next ? "on" : "off");
     } catch {
       // Storage unavailable: keep the choice for this session only.
-      memoryFallback = next;
+      memoryFallback.set(key, next);
     }
     emit();
-  }, [on]);
+  }, [on, key]);
 
   return [on, toggle];
 }

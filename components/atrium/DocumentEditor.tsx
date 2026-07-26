@@ -539,8 +539,16 @@ function useCommentsRail() {
 
   const handleOpenCountChange = useCallback((next: number) => {
     setOpenCount(next);
-    // Only the FIRST settled count seeds the default; later counts must not
-    // reopen a rail the user deliberately closed.
+    // The auto-default is STICKY-ON, not first-count-only: once a document has
+    // had an open thread, the rail's default stays open. That is deliberate and
+    // covers the case where the user starts the document's first thread — the
+    // rail appears to show the thread they just created, rather than filing it
+    // somewhere invisible.
+    //
+    // This cannot reopen a rail the user deliberately closed: an explicit toggle
+    // sets `userChoice`, which takes precedence over `autoOpen` from then on
+    // (see `commentsOpen` below). `autoOpen` only ever supplies the default for
+    // a user who has not expressed a preference on this document.
     setAutoOpen((prev) => prev || next > 0);
   }, []);
 
@@ -718,7 +726,7 @@ export function DocumentEditor({
     useCommentsRail();
 
   // Provenance-rail visibility, per viewer (#1336 B7).
-  const [provenanceOn, toggleProvenance] = useProvenancePref();
+  const [provenanceOn, toggleProvenance] = useProvenancePref(userId);
 
   // Real presence — the awareness roster (topbar + margin avatars), inline remote
   // carets, and the live "agent is writing" signal. Memoized so the awareness /

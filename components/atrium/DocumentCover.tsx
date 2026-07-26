@@ -188,13 +188,21 @@ export function DocumentCover({
     setOpen(false);
   }, [commitEmoji]);
 
+  // `closePicker`'s identity changes on every keystroke in the emoji field (via
+  // `commitEmoji` → `emojiDraft`). Depending on it directly would tear down and
+  // re-attach two document-level listeners per character typed, so the effect
+  // below reads it through a ref instead and depends only on `open`. Assigned in
+  // the render body, never in an effect — see CLAUDE.md's callback-ref pattern.
+  const closePickerRef = useRef(closePicker);
+  closePickerRef.current = closePicker;
+
   // Dismissal (#1336 B1): the picker previously had no way to close other than
   // re-clicking the pill. Escape closes it, and so does a click anywhere outside
   // the frame. Both listeners are attached only while it is open.
   useEffect(() => {
     if (!open) return;
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") closePicker();
+      if (e.key === "Escape") closePickerRef.current();
     }
     // `mousedown` rather than `click`: React unmounts the emoji input as soon as
     // the state update lands, which can pre-empt its blur handler — so the
@@ -202,7 +210,7 @@ export function DocumentCover({
     // on that blur firing.
     function onPointerDown(e: MouseEvent) {
       const frame = frameRef.current;
-      if (frame && !frame.contains(e.target as Node)) closePicker();
+      if (frame && !frame.contains(e.target as Node)) closePickerRef.current();
     }
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("mousedown", onPointerDown);
@@ -210,7 +218,7 @@ export function DocumentCover({
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("mousedown", onPointerDown);
     };
-  }, [open, closePicker]);
+  }, [open]);
 
   const addCover = useCallback(() => {
     void persist({ coverGradient: "default" });

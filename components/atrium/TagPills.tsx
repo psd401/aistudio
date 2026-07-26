@@ -23,8 +23,12 @@ export function TagPills({
   const overflow = tags.length - visible.length;
   return (
     <ul className="mer-tag-pills">
-      {visible.map((tag) => (
-        <li key={tag} className="mer-tag-pill">
+      {/* Keyed by index as well as value: `TagInput` dedupes case-insensitively,
+          so a duplicate cannot arrive through the UI — but a row written
+          directly via the API or DB can carry one, and a bare tag key would
+          collide. */}
+      {visible.map((tag, i) => (
+        <li key={`${i}-${tag}`} className="mer-tag-pill">
           {tag}
         </li>
       ))}
