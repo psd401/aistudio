@@ -13,36 +13,68 @@ Google Workspace access for the user's data, gated by Phase 1 boundaries (#912).
 
 Phase 1 introduces two parallel OAuth identities per user. The `--scope` flag selects which:
 
-- `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Scopes: `gmail.modify` (read + draft + send + archive/label, no permanent delete), `calendar`, `tasks`, `drive.file`. Use this for reading the user's mail, managing their tasks, writing to their calendar. **NEVER for creating Drive files/Docs/Sheets/Slides** — a file created on this slot is OWNED BY THE USER, which is impersonation (hard-blocked at the skill layer, 2026-07-07). Every document you produce is created with `--scope agent` and shared explicitly. Sending is gated by behavioral rules — always confirm before actually sending.
+- `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Scopes: `gmail.modify` (read + draft + send + archive/label, no permanent delete), `calendar`, `tasks`, `drive.file`, `drive.readonly`, `drive.metadata`. Use this for reading the user's mail, managing their tasks, writing to their calendar, and **reading and organizing their Drive** (see below). **NEVER for creating Drive files/Docs/Sheets/Slides** — a file created on this slot is OWNED BY THE USER, which is impersonation (hard-blocked at the skill layer, 2026-07-07). Folders are the single exception, because a folder has no content to author. Every *document* you produce is created with `--scope agent` and shared explicitly. Sending is gated by behavioral rules — always confirm before actually sending.
 - `--scope agent` — the agent identity (e.g. `agnt_hagelk@psd401.net`). Broad scopes. Use this for actions the agent takes *as itself* (the agent's own calendar, drafts owned by the agent, agent-owned Drive folder). **There is no consent step for this slot** (as of #1232): the skill mints a short-lived access token automatically from the token broker. If your agent account hasn't been created yet you'll get `status: "account-provisioning"` (exit 14) — it's being set up automatically; just tell the user to retry in ~30 minutes. **Never** show a consent link for the agent slot.
 
 If you omit `--scope`, the skill defaults to `user`. Phase 1 work is overwhelmingly on user data.
 
-## Reading a Drive file the user already has — the `drive.file` 404
+## Reading and organizing the user's Drive (`--scope user`)
 
-The **user** slot's `drive.file` scope only exposes files this OAuth client
-created or that the user explicitly opened through it. So `files.get` (or any
-read) on a **pre-existing** doc the user already owns returns Drive's
-`404 File not found`. **This is a scope limitation, not a sharing problem** —
-the user owns the file, and sharing it with their own account changes nothing.
+Since 2026-07-25 (#1305) the user slot holds `drive.readonly` +
+`drive.metadata` in addition to `drive.file`. On that slot you **can**:
 
-When you hit a 404 reading a Drive file or a Drive chip on the **user** slot:
+| Do this | How |
+|---|---|
+| List / search anything the user can see | `drive files list --params '{"q":"…"}'` |
+| Read or export a file | `drive files get` / `drive files export` |
+| Rename a file | `drive files update --params '{"fileId":"…"}' --json '{"name":"New name"}'` |
+| Move a file between folders | `drive files update --params '{"fileId":"…","addParents":"<new>","removeParents":"<old>"}' --json '{"name":"…"}'` |
+| Star / describe / recolour | `drive files update … --json '{"starred":true}'` |
+| **Create a folder** | `drive files create --json '{"name":"Budget 2026","mimeType":"application/vnd.google-apps.folder"}'` |
 
-1. **Retry with `--scope agent`.** Your agent identity is
-   `agnt_<caller-uniqname>@psd401.net` (for caller `hagelk@psd401.net` that is
-   `agnt_hagelk@psd401.net`). It can read anything shared with it.
-2. **If that still 404s,** the file simply hasn't been shared with your agent
-   account yet. Ask the user to **share it with your agent account** —
-   e.g. `agnt_hagelk@psd401.net` — Reader (view) access is enough.
+and you **cannot** — each refuses with a plain-language reason:
+
+| Not this | Blocked by |
+|---|---|
+| Create a doc/sheet/deck/file in the user's Drive | the skill gate (impersonation ban, 2026-07-07) |
+| Copy a file into the user's Drive | the skill gate — the copy would be owned by the user |
+| Change any file's **content** | **Google** — no granted scope permits a content write |
+| Trash a file (`{"trashed":true}`) | the skill gate, on both slots |
+| Permanently delete, or empty trash | **Google** — needs `drive`/`drive.file` on that file, which you do not have for anything you did not create |
+
+Note the asymmetry: content edits and permanent deletion are impossible at the
+**Google** layer, not merely refused by our regex. There is no phrasing that
+gets around them.
+
+Folders you create are exempt from the `[Agent] ` filename prefix — the user
+asked for "Budget 2026", so that is what they get. The invisible
+`appProperties.psdAgentCreated` marker is still applied.
+
+### "One more permission" — exit 15
+
+Users pick the new scopes up **lazily**, on their next consent click. A refresh
+token issued before 2026-07-25 still carries only the old scopes, so a Drive
+read or metadata update on that token exits **15** with
+`status: "scope-upgrade-required"` and a `consent_chat_hyperlink`. Handle it
+exactly like `needs-auth`: paste the hyperlink on its own line, then on a
+separate line say *"I need one more permission to read your Drive — click the
+link to grant it."* Do not retry until the user confirms. Everything the slot
+could already do (mail, calendar, tasks, folder creation) keeps working on the
+old token with no prompt.
+
+### If a read still 404s
+
+With `drive.readonly` a 404 now means the **user** genuinely cannot see that
+file — not a scope gap. Retry with `--scope agent` (your agent identity is
+`agnt_<caller-uniqname>@psd401.net`; for caller `hagelk@psd401.net` that is
+`agnt_hagelk@psd401.net`), which can read anything shared with it. If that
+also 404s, ask the user to **share it with your agent account** — Reader
+access is enough.
 
 **Never** tell the user to share the file with their **own** address
 (`hagelk@psd401.net`): they already own it, so that guidance sends them in
-circles. Name the **agent** account (`agnt_…`) every time.
-
-Do **not** describe a 404 as "the file doesn't exist" or "you need to share it
-with yourself." Say instead: *"I can't open that file with the access I have
-yet — share it with my agent account `agnt_<you>@psd401.net` (Reader is fine)
-and I'll read it."*
+circles. Name the **agent** account (`agnt_…`) every time. Do **not** describe
+a 404 as "the file doesn't exist" or "you need to share it with yourself."
 
 Chat message attachments arrive to you as an `[attachments: …]` header at the
 top of the turn. A Drive chip / Drive-file attachment carries a `driveFileId` —
@@ -165,7 +197,8 @@ These cannot be bypassed by phrasing. The skill returns exit code 13 with `statu
 - **No sending mail.** `gmail.users.messages.send`, `gmail.users.drafts.send`, `+send`, `+reply`, `+reply-all`, `+forward` — all blocked. Drafts only.
 - **No deletes.** Mail (delete/trash/batchDelete), events, calendars, Drive files, drive trash, tasks, tasklists.
 - **No permission changes.** `drive.permissions.create/update/delete` (except the explicit in-district shapes below).
-- **No file creation as the user.** `drive files create/copy`, `docs documents create`, `sheets spreadsheets create`, `slides presentations create` on `--scope user` are hard-blocked — a file created there is owned by the user's account (impersonation; no attribution trail). Create with `--scope agent`, then share explicitly. This has NO exception and no phrasing gets around it.
+- **No file creation as the user.** `drive files create/copy`, `docs documents create`, `sheets spreadsheets create`, `slides presentations create` on `--scope user` are hard-blocked — a file created there is owned by the user's account (impersonation; no attribution trail). Create with `--scope agent`, then share explicitly. **One exception, added 2026-07-25 (#1305):** `drive files create` with `mimeType` exactly `application/vnd.google-apps.folder` is allowed, because a folder carries no content and creating one is organizing, not authoring. The mimeType is matched exactly — a shortcut, a Doc, or a lookalike mimeType still refuses — and any media/upload flag alongside it refuses too. Nothing else gets through, and no phrasing changes that.
+- **User-slot `drive files update` is metadata-only.** Rename, move, star, describe and recolour are allowed; anything else — an unrecognised field, a media/upload flag, or `{"trashed":true}` — refuses the whole call. The allowlist is all-or-nothing: one unknown key poisons the payload.
 
 **Exception — explicit in-district shares of YOUR OWN files.** `drive.permissions.create` is permitted only on files the agent owns (`--scope agent`), only as `create` (never update/delete), and only in these explicit shapes:
 
@@ -225,6 +258,7 @@ health), not runtime availability.
 - **Transport error (exit 12):** `gws`-style stderr message — the skill couldn't reach the token broker or Google (network/5xx). This is transient: tell the user Workspace access is temporarily unavailable and to try again shortly. Do not paste a consent link (there isn't one).
 - **Phase 1 forbidden (exit 13):** stdout is `{"status":"phase1-forbidden","reason":"<short>","message":"<longer>"}`. The user asked you to do something Phase 1 disallows (send mail, delete, etc.). Tell them what you can do instead — usually "I'll draft it; reply 'send' if it's right." Do **not** retry with a workaround.
 - **Account provisioning (exit 14):** stdout is `{"status":"account-provisioning","kind":"agent_account","message":"..."}`. Only the **agent slot** produces this: your `agnt_` Workspace account is being created automatically. Tell the user their agent account is being set up and to try again in about 30 minutes. There is **NOTHING to click** — do not show a consent link, do not retry in the same turn.
+- **Scope upgrade required (exit 15):** stdout is `{"status":"scope-upgrade-required","consent_url":"...","consent_chat_hyperlink":"<url|label>","kind":"user_account","missing_scopes":[...],"message":"..."}`. Only the **user slot** produces this, and only for the Drive read/organize operations added in #1305: the user authorized you *before* that feature existed, so their stored token predates the scope. Same rule as exits 10/11 — paste `consent_chat_hyperlink` on its own line, no surrounding markdown, then on a separate line say *"I need one more permission to read your Drive — click the link to grant it."* Frame it as **one more permission**, not as "you never authorized me" (exit 10) or "your access was revoked" (exit 11). Do not retry until the user confirms they clicked it.
 - **gws failure (exit 2+):** `gws` stderr is surfaced. Report the error to the user; do not invent workarounds.
 
 ## My inbox vs your inbox
