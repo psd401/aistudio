@@ -60,7 +60,7 @@ import { publicWebAdapter } from "./publish-adapters/public-web";
 import { schoologyAdapter } from "./publish-adapters/schoology";
 import { googleAdapter } from "./publish-adapters/google";
 import { okfAdapter } from "./publish-adapters/okf";
-import { contentDeepLink } from "./reader-links";
+import { contentDeepLink, publicReaderLink } from "./reader-links";
 import { reachesAtLeast } from "./audience-rank";
 import type {
   Requester,
@@ -627,12 +627,49 @@ export interface LivePublicationDTO {
   destination: PublishDestination;
   /**
    * The destination's reader URL: the persisted `external_ref` when the adapter
-   * recorded one (`public_web` → `/p/{slug}`), else the derived internal reader
-   * link for `intranet` (whose adapter deliberately records null), else null.
+   * recorded one (`public_web` → `/p/{slug}`), else DERIVED from the slug for
+   * both reader destinations, else null.
+   *
+   * Both derivations matter. `intranet`'s adapter deliberately records a null
+   * `external_ref` (it addresses the object by slug), so its link is only ever
+   * derived. `public_web`'s adapter does return one — but `runPublishAdapter`
+   * catches a failure to PERSIST it and leaves the publication live rather than
+   * unwinding a working `/p/{slug}` page, so a live public row can carry a null
+   * ref. Deriving it here too means the Share dialog still offers the copyable
+   * public link after such a transient failure, and for legacy rows written
+   * before the ref was recorded.
    */
   readerUrl: string | null;
   publishedVersionId: string | null;
   publishedAt: string | null;
+}
+
+/**
+ * The reader URL a destination serves an object at, derived from its slug —
+ * the fallback for a publication row with no persisted `external_ref`.
+ *
+ * Kept as one function rather than two inline ternaries so the two call sites
+ * (`listLive` and `publish`) cannot drift: both must agree on which
+ * destinations have a reader at all, and the previous inline form already
+ * disagreed — it derived `intranet` and returned null for a `public_web` row
+ * whose ref failed to persist, hiding a working `/p/{slug}` page from Share.
+ *
+ * The remaining destinations (`schoology`, `google`, `okf`) publish through a
+ * connector and have no slug-addressable reader of ours, so null is correct
+ * for them, not a gap.
+ */
+function derivedReaderUrl(
+  destination: PublishDestination,
+  slug: string
+): string | null {
+  switch (destination) {
+    case "intranet":
+      return contentDeepLink(slug);
+    case "public_web":
+      return publicReaderLink(slug);
+    default:
+      return null;
+  }
 }
 
 export const publishService = {
@@ -683,14 +720,15 @@ export const publishService = {
       "publish.listLive"
     );
 
-    return rows.map((row) => ({
-      destination: row.destination as PublishDestination,
-      readerUrl:
-        row.externalRef ??
-        (row.destination === "intranet" ? contentDeepLink(obj.slug) : null),
-      publishedVersionId: row.publishedVersionId ?? null,
-      publishedAt: row.publishedAt ? row.publishedAt.toISOString() : null,
-    }));
+    return rows.map((row) => {
+      const destination = row.destination as PublishDestination;
+      return {
+        destination,
+        readerUrl: row.externalRef ?? derivedReaderUrl(destination, obj.slug),
+        publishedVersionId: row.publishedVersionId ?? null,
+        publishedAt: row.publishedAt ? row.publishedAt.toISOString() : null,
+      };
+    });
   },
 
   /**
@@ -886,8 +924,7 @@ export const publishService = {
       publishedVersionId,
       becamePublic,
       readerUrl:
-        externalRef ??
-        (input.destination === "intranet" ? contentDeepLink(obj.slug) : null),
+        externalRef ?? derivedReaderUrl(input.destination, obj.slug),
     };
   },
 

@@ -147,6 +147,45 @@ describe("listPublicationsAction results", () => {
     expect(res.data[0].publishedAt).toBeNull();
   });
 
+  it("DERIVES the public_web reader URL when the ref never persisted", async () => {
+    queryResults.set("publish.listLive", [
+      {
+        destination: "public_web",
+        externalRef: null,
+        publishedVersionId: "v1",
+        publishedAt: null,
+      },
+    ]);
+    const res = await listPublicationsAction("obj-1");
+    expect(res.isSuccess).toBe(true);
+    if (!res.isSuccess) return;
+    // `runPublishAdapter` catches a failure to PERSIST external_ref and leaves
+    // the publication live rather than unwinding a working /p/{slug} page, so a
+    // null ref on a live public row does not mean "no reader". Returning null
+    // here made the Share dialog omit the copyable public link for a page that
+    // was serving fine — and did the same for legacy rows written before the
+    // ref was recorded.
+    expect(res.data[0].readerUrl).toBe("/p/my-doc");
+  });
+
+  it("leaves connector destinations without a reader URL", async () => {
+    queryResults.set("publish.listLive", [
+      {
+        destination: "schoology",
+        externalRef: null,
+        publishedVersionId: "v1",
+        publishedAt: null,
+      },
+    ]);
+    const res = await listPublicationsAction("obj-1");
+    expect(res.isSuccess).toBe(true);
+    if (!res.isSuccess) return;
+    // The slug-derived fallback covers OUR two reader routes only; a connector
+    // publication has no /c/ or /p/ page, so null stays correct rather than
+    // becoming a link that 404s.
+    expect(res.data[0].readerUrl).toBeNull();
+  });
+
   it("returns an empty list when nothing is live", async () => {
     const res = await listPublicationsAction("obj-1");
     expect(res.isSuccess).toBe(true);
