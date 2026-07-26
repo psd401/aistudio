@@ -69,6 +69,11 @@ export function TagInput({
       className={`flex min-h-[40px] w-full flex-wrap gap-1.5 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${disabled ? "cursor-not-allowed opacity-50" : ""} ${className}`}
       onClick={() => inputRef.current?.focus()}
       onKeyDown={(e) => {
+        // Only the WRAPPER's own key events activate it. Keydown bubbles, so
+        // without this guard the Space branch cancelled every space typed in
+        // the inner input, making multi-word tags ("professional development")
+        // impossible to enter, and swallowed Space/Enter on the remove buttons.
+        if (e.target !== e.currentTarget) return
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
           inputRef.current?.focus()
