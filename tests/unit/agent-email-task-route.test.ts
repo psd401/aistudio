@@ -5,7 +5,7 @@ import { beforeAll, beforeEach, describe, expect, it, jest } from "@jest/globals
 type Invocation = {
   ownerEmail: string
   actorEmail: string
-  mode: "email-task"
+  mode: "owner" | "email-task"
   sessionId: string
   nonce: string
 }
@@ -19,7 +19,12 @@ const executeWorkspaceCommandMock =
   jest.fn<(...args: unknown[]) => Promise<unknown>>()
 const mintAgentTokenMock = jest.fn<() => Promise<{ accessToken: string }>>()
 const getUserTokenMock =
-  jest.fn<(...args: unknown[]) => Promise<{ access_token: string } | null>>()
+  jest.fn<
+    (...args: unknown[]) => Promise<{
+      access_token: string
+      scope?: string
+    } | null>
+  >()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: (...args: unknown[]) =>
@@ -157,5 +162,60 @@ describe("email-task route confinement", () => {
     expect(getUserTokenMock).toHaveBeenCalledTimes(1)
     expect(executeWorkspaceCommandMock).toHaveBeenCalledTimes(1)
     expect(mintAgentTokenMock).not.toHaveBeenCalled()
+  })
+
+  it("requires a scope upgrade before executing a newly authorized Drive read", async () => {
+    verifyContextMock.mockResolvedValue({
+      ownerEmail: "owner@example.com",
+      actorEmail: "owner@example.com",
+      mode: "owner",
+      sessionId: "owner-session",
+      nonce: "owner-nonce",
+    })
+    getUserTokenMock.mockResolvedValue({
+      access_token: "owner-google-token",
+      scope: "https://www.googleapis.com/auth/drive.file",
+    })
+
+    const response = await workspacePost(
+      request({
+        scope: "user",
+        argv: ["drive", "files", "list", "--params", "{}"],
+      }) as never,
+    )
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({
+      status: "scope-upgrade-required",
+      missingScopes: ["https://www.googleapis.com/auth/drive.readonly"],
+    })
+    expect(executeWorkspaceCommandMock).not.toHaveBeenCalled()
+  })
+
+  it("surfaces revoked user authorization without executing a command", async () => {
+    verifyContextMock.mockResolvedValue({
+      ownerEmail: "owner@example.com",
+      actorEmail: "owner@example.com",
+      mode: "owner",
+      sessionId: "owner-session",
+      nonce: "owner-nonce",
+    })
+    const revoked = Object.assign(new Error("revoked"), {
+      code: "invalid_grant",
+    })
+    getUserTokenMock.mockRejectedValue(revoked)
+
+    const response = await workspacePost(
+      request({
+        scope: "user",
+        argv: ["gmail", "users", "messages", "list"],
+      }) as never,
+    )
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toMatchObject({
+      status: "token-revoked",
+    })
+    expect(executeWorkspaceCommandMock).not.toHaveBeenCalled()
   })
 })

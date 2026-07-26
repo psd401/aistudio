@@ -1,7 +1,13 @@
 import {
+  requiredWorkspaceScopeGap,
   validateEmailTaskWorkspaceCommand,
   validateWorkspaceCommand,
 } from "@/lib/agent-workspace/command-executor"
+
+const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
+const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+const DRIVE_METADATA_SCOPE = "https://www.googleapis.com/auth/drive.metadata"
+const DRIVE_READ_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 
 describe("trusted Workspace command policy", () => {
   it("limits sender-influenced email tasks to one task-insert operation", () => {
@@ -42,6 +48,15 @@ describe("trusted Workspace command policy", () => {
     ).not.toThrow()
   })
 
+  it("rejects a mutation token hidden before a read action", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["drive", "files", "delete", "list"],
+      })
+    ).toThrow(/contains a mutation/)
+  })
+
   it.each([
     ["gmail", "users", "messages", "send"],
     ["gmail", "users", "messages", "delete"],
@@ -60,6 +75,127 @@ describe("trusted Workspace command policy", () => {
         argv: ["docs", "documents", "create", "--json", "{}"],
       })
     ).toThrow(/agent-owned/)
+  })
+
+  it("allows a user-owned Drive folder with no content", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: [
+          "drive",
+          "files",
+          "create",
+          "--json",
+          JSON.stringify({
+            name: "Budget 2026",
+            mimeType: DRIVE_FOLDER_MIME,
+          }),
+        ],
+      })
+    ).not.toThrow()
+  })
+
+  it.each([
+    {
+      name: "non-folder",
+      argv: [
+        "drive",
+        "files",
+        "create",
+        "--json",
+        JSON.stringify({
+          name: "Report",
+          mimeType: "application/vnd.google-apps.document",
+        }),
+      ],
+    },
+    {
+      name: "content attachment",
+      argv: [
+        "drive",
+        "files",
+        "create",
+        "--json",
+        JSON.stringify({ name: "Folder", mimeType: DRIVE_FOLDER_MIME }),
+        "--media",
+        "/tmp/content",
+      ],
+    },
+    {
+      name: "trash field",
+      argv: [
+        "drive",
+        "files",
+        "create",
+        "--json",
+        JSON.stringify({
+          name: "Folder",
+          mimeType: DRIVE_FOLDER_MIME,
+          trashed: false,
+        }),
+      ],
+    },
+  ])("rejects user-owned Drive folder creation with $name", ({ argv }) => {
+    expect(() =>
+      validateWorkspaceCommand({ scope: "user", argv })
+    ).toThrow(/limited to an untrashed folder/)
+  })
+
+  it("allows approved user-owned Drive metadata updates", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: [
+          "drive",
+          "files",
+          "update",
+          "--params",
+          JSON.stringify({
+            fileId: "file-1",
+            addParents: "folder-1",
+            removeParents: "folder-2",
+          }),
+          "--json",
+          JSON.stringify({ name: "Renamed", starred: true }),
+        ],
+      })
+    ).not.toThrow()
+  })
+
+  it.each([
+    { name: "content field", resource: { contentHints: { indexableText: "x" } } },
+    { name: "trash field", resource: { trashed: true } },
+    { name: "unknown field", resource: { name: "x", owners: ["other"] } },
+  ])("rejects user-owned Drive updates with $name", ({ resource }) => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: [
+          "drive",
+          "files",
+          "update",
+          "--json",
+          JSON.stringify(resource),
+        ],
+      })
+    ).toThrow(/approved metadata/)
+  })
+
+  it("rejects user-owned Drive metadata updates that attach content", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: [
+          "drive",
+          "files",
+          "update",
+          "--json",
+          JSON.stringify({ name: "Renamed" }),
+          "--upload-type",
+          "media",
+        ],
+      })
+    ).toThrow(/approved metadata/)
   })
 
   it("rejects Gmail modify attempts that add TRASH", () => {
@@ -103,5 +239,41 @@ describe("trusted Workspace command policy", () => {
     expect(() =>
       validateWorkspaceCommand({ scope: "agent", argv })
     ).not.toThrow()
+  })
+})
+
+describe("Workspace user-slot scope upgrades", () => {
+  const oldScopes = DRIVE_FILE_SCOPE
+  const currentScopes = [
+    DRIVE_FILE_SCOPE,
+    DRIVE_METADATA_SCOPE,
+    DRIVE_READ_SCOPE,
+  ].join(" ")
+
+  it.each([
+    ["drive files list", ["drive", "files", "list"], DRIVE_READ_SCOPE],
+    ["drive files get", ["drive", "files", "get"], DRIVE_READ_SCOPE],
+    ["drive files export", ["drive", "files", "export"], DRIVE_READ_SCOPE],
+    ["drive changes list", ["drive", "changes", "list"], DRIVE_READ_SCOPE],
+    ["drive files update", ["drive", "files", "update"], DRIVE_METADATA_SCOPE],
+  ])("detects the missing scope for %s", (_name, argv, expectedScope) => {
+    expect(requiredWorkspaceScopeGap(argv, oldScopes)).toMatchObject({
+      scopes: [expectedScope],
+    })
+  })
+
+  it("does not prompt after the user grants the current scopes", () => {
+    expect(
+      requiredWorkspaceScopeGap(["drive", "files", "list"], currentScopes)
+    ).toBeNull()
+    expect(
+      requiredWorkspaceScopeGap(["drive", "files", "update"], currentScopes)
+    ).toBeNull()
+  })
+
+  it("does not force a migration when Google omits the granted scope string", () => {
+    expect(
+      requiredWorkspaceScopeGap(["drive", "files", "list"], undefined)
+    ).toBeNull()
   })
 })

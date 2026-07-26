@@ -10,10 +10,15 @@
  *
  *   --scope user (default for Phase 1) →
  *     OAuth on the human user's identity (hagelk@psd401.net), scopes
- *     (gmail.modify, calendar, tasks, drive.file). gmail.modify covers
- *     read + draft + archive/label + (technically) send — sending is
- *     blocked by the skill's regex gate, not by the OAuth scope. Use for
- *     reading/writing the human's own data.
+ *     (gmail.modify, calendar, tasks, drive.file, drive.readonly,
+ *     drive.metadata). gmail.modify covers read + draft + archive/label +
+ *     (technically) send — sending is blocked by the skill's regex gate, not
+ *     by the OAuth scope. drive.readonly + drive.metadata (#1305) let the
+ *     agent READ and ORGANIZE the user's Drive: list/get/export anything,
+ *     rename/move/star, and create FOLDERS. Creating a non-folder item,
+ *     writing file content, trashing and deleting all remain impossible —
+ *     see the Phase 1 gate notes below. Use for reading/writing the human's
+ *     own data.
  *
  *   --scope agent →
  *     The agent account (agnt_hagelk@psd401.net), broad scopes. The trusted
@@ -47,6 +52,9 @@
  *   12 transport error (broker/network failure)
  *   13 phase1-forbidden (Phase 1 hard gate refused the command)
  *   14 account-provisioning (agent slot; agnt_ account being auto-created)
+ *   15 scope-upgrade-required (user slot; the stored token predates a scope
+ *      this command needs — #1305. Distinct from 10/11 so the caller can say
+ *      "one more permission" rather than "you never authorized me")
  */
 
 'use strict';
@@ -165,7 +173,11 @@ async function main() {
       });
       process.exit(14);
     }
-    if (response.status === 'needs-auth') {
+    if (
+      response.status === 'needs-auth'
+      || response.status === 'token-revoked'
+      || response.status === 'scope-upgrade-required'
+    ) {
       let consent;
       try {
         consent = await requestAgentBroker('/api/agent/consent-link', {
@@ -174,14 +186,24 @@ async function main() {
       } catch (consentError) {
         fail(`Workspace authorization is required and consent-link creation failed: ${consentError.message}`, 12);
       }
+      const revoked = response.status === 'token-revoked';
+      const scopeUpgrade = response.status === 'scope-upgrade-required';
       emit({
-        status: 'needs-auth',
+        status: response.status,
         consent_url: consent.url,
-        consent_chat_hyperlink: `<${consent.url}|Authorize Google Workspace>`,
+        consent_chat_hyperlink:
+          `<${consent.url}|${revoked || scopeUpgrade ? 'Re-authorize' : 'Authorize'} Google Workspace>`,
         kind: 'user_account',
-        message: 'Click the link to authorize Google Workspace, then retry.',
+        ...(scopeUpgrade && Array.isArray(response.missingScopes)
+          ? { missing_scopes: response.missingScopes }
+          : {}),
+        message: scopeUpgrade
+          ? `I need one more permission to ${response.capability || 'use this Drive feature'} — click the link to grant it. Do not retry until the user confirms.`
+          : revoked
+            ? 'Workspace access was revoked — click the link to re-authorize.'
+            : 'Click the link to authorize Google Workspace, then retry.',
       });
-      process.exit(10);
+      process.exit(scopeUpgrade ? 15 : revoked ? 11 : 10);
     }
     fail(`Workspace broker failed: ${err.message}`, 12);
   }

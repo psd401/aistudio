@@ -20,6 +20,29 @@ const READ_ACTIONS = new Set([
   "search",
 ])
 
+const MUTATING_ACTIONS = new Set([
+  "batchdelete",
+  "batchmodify",
+  "batchupdate",
+  "copy",
+  "create",
+  "delete",
+  "emptytrash",
+  "forward",
+  "insert",
+  "modify",
+  "move",
+  "patch",
+  "reply",
+  "reply-all",
+  "send",
+  "stop",
+  "trash",
+  "untrash",
+  "update",
+  "watch",
+])
+
 const ALLOWED_WRITES = new Set([
   "calendar events insert",
   "docs documents create",
@@ -51,6 +74,20 @@ const AGENT_ONLY_WRITES = new Set([
   "sheets spreadsheets create",
   "slides presentations create",
 ])
+
+const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
+const DRIVE_READ_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+const DRIVE_METADATA_SCOPE = "https://www.googleapis.com/auth/drive.metadata"
+const DRIVE_METADATA_FIELDS = new Set([
+  "name",
+  "starred",
+  "description",
+  "foldercolorrgb",
+  "properties",
+  "appproperties",
+])
+const DRIVE_CONTENT_FLAG =
+  /^--(media|media-file|media-body|upload|upload-file|upload-type|content|content-file|data|data-file|body|body-file|text|text-file|file|source|source-file)$/i
 
 const MAX_ARGUMENTS = 80
 const MAX_ARGUMENT_LENGTH = 200_000
@@ -99,16 +136,75 @@ function parseObjectArgument(argv: readonly string[], flag: string): Record<stri
   }
 }
 
+function driveResource(argv: readonly string[]): Record<string, unknown> | null {
+  const payload = parseObjectArgument(argv, "--json")
+  if (!payload) return null
+  const wrapped = payload.resource ?? payload.requestBody ?? payload
+  return wrapped && typeof wrapped === "object" && !Array.isArray(wrapped)
+    ? (wrapped as Record<string, unknown>)
+    : null
+}
+
+function carriesDriveContent(argv: readonly string[]): boolean {
+  for (let index = 0; index < argv.length; index += 1) {
+    if (DRIVE_CONTENT_FLAG.test(argv[index])) return true
+    if (
+      argv[index] === "--params" &&
+      /uploadtype/i.test(argv[index + 1] ?? "")
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+function validateUserDriveFolderCreate(argv: readonly string[]): void {
+  const resource = driveResource(argv)
+  const mimeType =
+    typeof resource?.mimeType === "string"
+      ? resource.mimeType.trim().toLowerCase()
+      : ""
+  const hasTrashField = Object.keys(resource ?? {}).some(
+    (key) => key.toLowerCase() === "trashed"
+  )
+  if (
+    !resource ||
+    mimeType !== DRIVE_FOLDER_MIME ||
+    hasTrashField ||
+    carriesDriveContent(argv)
+  ) {
+    throw new Error(
+      "Drive user-owned creation is limited to an untrashed folder without content"
+    )
+  }
+}
+
+function validateUserDriveMetadataUpdate(argv: readonly string[]): void {
+  const resource = driveResource(argv)
+  const keys = Object.keys(resource ?? {})
+  if (
+    !resource ||
+    keys.length === 0 ||
+    carriesDriveContent(argv) ||
+    !keys.every((key) => DRIVE_METADATA_FIELDS.has(key.toLowerCase()))
+  ) {
+    throw new Error(
+      "Drive user-owned updates are limited to approved metadata fields"
+    )
+  }
+}
+
 function normalizedOperation(argv: readonly string[]): {
   operation: string
   action: string
+  tokens: string[]
 } {
   const tokens = operationTokens(argv)
   if (tokens.length < 2) {
     throw new Error("Workspace command must name a service and operation")
   }
   const action = tokens[tokens.length - 1]
-  return { operation: tokens.join(" "), action }
+  return { operation: tokens.join(" "), action, tokens }
 }
 
 function validateGmailModify(argv: readonly string[]): void {
@@ -156,8 +252,21 @@ export function validateWorkspaceCommand(command: WorkspaceCommand): void {
     throw new Error("Workspace command is too large")
   }
 
-  const { operation, action } = normalizedOperation(argv)
-  if (READ_ACTIONS.has(action)) return
+  const { operation, action, tokens } = normalizedOperation(argv)
+  if (READ_ACTIONS.has(action)) {
+    if (tokens.slice(0, -1).some((token) => MUTATING_ACTIONS.has(token))) {
+      throw new Error("Workspace read command contains a mutation operation")
+    }
+    return
+  }
+  if (scope === "user" && operation === "drive files create") {
+    validateUserDriveFolderCreate(argv)
+    return
+  }
+  if (scope === "user" && operation === "drive files update") {
+    validateUserDriveMetadataUpdate(argv)
+    return
+  }
   if (REQUIRES_AGENT_CREATED_PROVENANCE.has(operation)) {
     throw new Error(
       "Workspace mutation requires server-recorded agent-created provenance"
@@ -170,6 +279,44 @@ export function validateWorkspaceCommand(command: WorkspaceCommand): void {
     throw new Error("This operation must use the agent-owned Workspace account")
   }
   if (operation === "gmail users messages modify") validateGmailModify(argv)
+}
+
+export interface WorkspaceScopeGap {
+  scopes: string[]
+  capability: string
+}
+
+export function requiredWorkspaceScopeGap(
+  argv: readonly string[],
+  grantedScopeString: string | undefined,
+): WorkspaceScopeGap | null {
+  if (!grantedScopeString?.trim()) return null
+  const tokens = operationTokens(argv)
+  const operation = tokens.join(" ")
+  const granted = new Set(grantedScopeString.split(/\s+/).filter(Boolean))
+  const required: WorkspaceScopeGap | null =
+    operation === "drive files update"
+      ? {
+          scopes: [DRIVE_METADATA_SCOPE],
+          capability: "rename and move files in your Drive",
+        }
+      : (
+            operation === "drive files list" ||
+            operation === "drive files get" ||
+            operation === "drive files export" ||
+            (tokens[0] === "drive" &&
+              (tokens[1] === "about" || tokens[1] === "changes"))
+          )
+        ? {
+            scopes: [DRIVE_READ_SCOPE],
+            capability: "read files in your Drive",
+          }
+        : null
+  if (!required) return null
+  const missing = required.scopes.filter((scope) => !granted.has(scope))
+  return missing.length
+    ? { scopes: missing, capability: required.capability }
+    : null
 }
 
 export function validateEmailTaskWorkspaceCommand(

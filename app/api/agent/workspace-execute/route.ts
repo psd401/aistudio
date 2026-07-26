@@ -8,7 +8,9 @@ import {
 import { getFreshAccessTokenForUser } from "@/lib/agent/workspace-token"
 import {
   executeWorkspaceCommand,
+  requiredWorkspaceScopeGap,
   validateEmailTaskWorkspaceCommand,
+  validateWorkspaceCommand,
   type WorkspaceCommand,
 } from "@/lib/agent-workspace/command-executor"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
@@ -45,20 +47,22 @@ export async function POST(request: NextRequest) {
   if (!isCommand(body)) {
     return NextResponse.json({ error: "Invalid Workspace command" }, { status: 400 })
   }
-  if (context.mode === "email-task") {
-    try {
+  try {
+    if (context.mode === "email-task") {
       validateEmailTaskWorkspaceCommand(body)
-    } catch (error) {
-      return NextResponse.json(
-        {
-          error:
-            error instanceof Error
-              ? error.message
-              : "Email task command rejected",
-        },
-        { status: 400 },
-      )
+    } else {
+      validateWorkspaceCommand(body)
     }
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Workspace command rejected",
+      },
+      { status: 400 },
+    )
   }
 
   try {
@@ -80,6 +84,18 @@ export async function POST(request: NextRequest) {
           { status: 409 }
         )
       }
+      const scopeGap = requiredWorkspaceScopeGap(body.argv, token.scope)
+      if (scopeGap) {
+        return NextResponse.json(
+          {
+            status: "scope-upgrade-required",
+            missingScopes: scopeGap.scopes,
+            capability: scopeGap.capability,
+            error: "Additional Workspace authorization is required",
+          },
+          { status: 409 },
+        )
+      }
       accessToken = token.access_token
     }
 
@@ -95,6 +111,19 @@ export async function POST(request: NextRequest) {
     )
     return NextResponse.json(result)
   } catch (error) {
+    const errorCode =
+      error && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined
+    if (errorCode === "invalid_grant") {
+      return NextResponse.json(
+        {
+          status: "token-revoked",
+          error: "Workspace authorization was revoked",
+        },
+        { status: 409 },
+      )
+    }
     if (error instanceof AccountNotProvisionedError) {
       return NextResponse.json(
         { status: "account-not-provisioned", error: "Agent account is being provisioned" },
