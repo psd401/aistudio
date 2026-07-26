@@ -84,6 +84,27 @@ describe('argv parsing', () => {
   });
 });
 
+describe('output shape', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'run.js'), 'utf8');
+
+  test('emits cached:false explicitly on a fresh result', () => {
+    // The server omits `cached` entirely on a miss and sets it true only on a
+    // hit, so emitting its result verbatim would drop the field that SKILL.md
+    // documents. Callers use it to tell a fresh answer from a malformed or
+    // legacy response.
+    expect(src).toContain('emit({ cached: false, ...result })');
+  });
+
+  test('a cache hit still reports cached:true', () => {
+    // The spread must come AFTER the default, or every hit would report false.
+    const emitLine = src.match(/emit\(\{[^}]*\.\.\.result[^}]*\}\)/);
+    expect(emitLine).not.toBeNull();
+    expect(emitLine[0].indexOf('cached: false')).toBeLessThan(
+      emitLine[0].indexOf('...result')
+    );
+  });
+});
+
 describe('security posture', () => {
   const src = fs.readFileSync(path.join(__dirname, 'run.js'), 'utf8');
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');

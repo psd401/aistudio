@@ -29,17 +29,62 @@ import path from "node:path"
 
 const root = process.cwd()
 
-const helperSrc = fs.readFileSync(
-  path.join(root, "infra/agent-image/skills/_shared/agent-broker.js"),
-  "utf8",
+/**
+ * Every parser below reads COMMENT-STRIPPED source.
+ *
+ * A commented-out entry still contains the literal text, so a raw substring
+ * or regex check would keep this suite green while the deployed policy
+ * default-denies the route — the test would assert the presence of prose
+ * rather than of an active rule.
+ *
+ * The stripper is QUOTE-AWARE on purpose. A naive line-comment regex destroys
+ * every line here, because these allowlists are lists of URLs and "https://"
+ * itself contains the comment marker. So the scan walks each line character by
+ * character and only cuts at a marker found OUTSIDE a quoted string.
+ */
+function stripComments(src: string, marker: "//" | "#"): string {
+  const out: string[] = []
+  for (const line of src.split("\n")) {
+    let quote: string | null = null
+    let cut = line.length
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      if (quote) {
+        if (ch === "\\") i++
+        else if (ch === quote) quote = null
+        continue
+      }
+      if (ch === "'" || ch === '"' || ch === "`") {
+        quote = ch
+        continue
+      }
+      if (marker === "#" && ch === "#") {
+        cut = i
+        break
+      }
+      if (marker === "//" && ch === "/" && line[i + 1] === "/") {
+        cut = i
+        break
+      }
+    }
+    out.push(line.slice(0, cut))
+  }
+  return out.join("\n")
+}
+
+/** Block comments never contain an active allowlist entry. */
+const stripBlocks = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "")
+
+const read = (rel: string) => fs.readFileSync(path.join(root, rel), "utf8")
+
+const helperSrc = stripComments(
+  stripBlocks(read("infra/agent-image/skills/_shared/agent-broker.js")),
+  "//",
 )
-const proxySrc = fs.readFileSync(
-  path.join(root, "infra/agent-image/mantle_proxy.py"),
-  "utf8",
-)
-const cedarSrc = fs.readFileSync(
-  path.join(root, "infra/policies/cedar/psd-agent-governance.cedar"),
-  "utf8",
+const proxySrc = stripComments(read("infra/agent-image/mantle_proxy.py"), "#")
+const cedarSrc = stripComments(
+  read("infra/policies/cedar/psd-agent-governance.cedar"),
+  "//",
 )
 
 /** Routes in the skill-side helper's ALLOWED_ROUTES set. */

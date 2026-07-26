@@ -165,7 +165,12 @@ async function main() {
     return 12;
   }
 
-  emit(result);
+  // `cached: false` first so a server result that omits the field still
+  // reports it explicitly — SKILL.md documents `"cached":false` on fresh
+  // results, and callers use its presence to tell a fresh answer from a
+  // malformed or legacy response. A cache hit sets `cached: true` and the
+  // spread overrides.
+  emit({ cached: false, ...result });
   return 0;
 }
 
