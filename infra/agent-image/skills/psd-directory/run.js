@@ -103,12 +103,16 @@ function exitCodeForStatus(status, httpStatus) {
     case 'INVALID_INPUT':
       return 1;
     default:
-      // No typed status in the body. That happens when the failure is BELOW
-      // the route: the local relay's own 502/503, or a mint-boundary error
-      // the route could not classify. Those are transient infrastructure, so
-      // they must map to the documented retryable 12 rather than 2 ("do not
-      // retry blindly") — otherwise a proxy blip looks like a permanent
-      // lookup failure.
+      // The HTTP fallback applies ONLY when the body carried no typed status
+      // at all — i.e. the failure happened BELOW the route (the relay's own
+      // 502/503, or a mint-boundary error the route never saw). Those are
+      // transient infrastructure and map to the retryable 12.
+      //
+      // A typed-but-unrecognized status is a DEFINITE answer from the route
+      // and must stay 2. The route returns permanent failures like
+      // LOOKUP_FAILED and FORBIDDEN with HTTP 502, so keying off the status
+      // code alone would advertise a People API 400 as a transient outage.
+      if (status !== null && status !== undefined) return 2;
       return typeof httpStatus === 'number' && httpStatus >= 500 ? 12 : 2;
   }
 }

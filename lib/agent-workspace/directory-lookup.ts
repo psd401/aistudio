@@ -202,6 +202,24 @@ export function classifyError(
   return { code: "LOOKUP_FAILED", message: message || `HTTP ${status}` }
 }
 
+/**
+ * A token, or a function that mints one on demand.
+ *
+ * The provider form exists so a CACHE HIT COSTS NO MINT. Minting runs the
+ * WIF -> signJwt -> token-exchange chain through the mint Lambda, and the
+ * broker rate-limits per owner. Minting before consulting the cache means a
+ * fully-cached lookup still pays that cost — and worse, FAILS whenever the
+ * mint boundary is down despite a valid cached answer already being in hand.
+ *
+ * (This exact bug was fixed once in the container implementation and then
+ * reintroduced when the lookup moved server-side. Hence the explicit type.)
+ */
+export type TokenSource = string | (() => Promise<string>)
+
+async function resolveToken(source: TokenSource): Promise<string> {
+  return typeof source === "function" ? await source() : source
+}
+
 export type FetchLike = (
   url: string,
   init: { headers: Record<string, string> },
@@ -385,7 +403,7 @@ function emailResult(
 
 export async function resolveEmail(
   email: string,
-  accessToken: string,
+  token: TokenSource,
   opts: LookupOptions = {},
 ): Promise<DirectoryResult> {
   const normalized = normalizeEmail(email)
@@ -405,7 +423,8 @@ export async function resolveEmail(
     `?query=${encodeURIComponent(normalized)}` +
     `&readMask=${encodeURIComponent(READ_MASK)}` +
     `&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE`
-  const body = (await callPeople(url, accessToken, opts.fetchImpl)) as {
+  // Token resolved HERE — after the cache miss, never before it.
+  const body = (await callPeople(url, await resolveToken(token), opts.fetchImpl)) as {
     people?: PeoplePerson[]
   }
 
@@ -419,7 +438,7 @@ export async function resolveEmail(
 /** Chat `users/{id}` -> district person, via people.get on the same id. */
 export async function resolvePersonId(
   rawId: string,
-  accessToken: string,
+  token: TokenSource,
   opts: LookupOptions = {},
 ): Promise<DirectoryResult> {
   const id = normalizePersonId(rawId)
@@ -437,7 +456,8 @@ export async function resolvePersonId(
   const url = `${PEOPLE_BASE}/people/${encodeURIComponent(id)}?personFields=${encodeURIComponent(READ_MASK)}`
   let body: unknown
   try {
-    body = await callPeople(url, accessToken, opts.fetchImpl)
+    // Token resolved HERE — after the cache miss, never before it.
+    body = await callPeople(url, await resolveToken(token), opts.fetchImpl)
   } catch (err) {
     // A 404 is a legitimate "no such person", not a failure to report upward.
     if (

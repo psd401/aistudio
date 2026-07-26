@@ -47,6 +47,15 @@ describe('status -> exit code', () => {
     expect(exitCodeForStatus(undefined, 500)).toBe(12);
   });
 
+  test('a typed permanent failure is NOT upgraded to retryable by its HTTP code', () => {
+    // The route returns LOOKUP_FAILED and FORBIDDEN with HTTP 502, so keying
+    // off the status code alone would advertise a People API 400 as a
+    // transient outage. A typed status is a definite answer from the route.
+    expect(exitCodeForStatus('LOOKUP_FAILED', 502)).toBe(2);
+    expect(exitCodeForStatus('FORBIDDEN', 502)).toBe(2);
+    expect(exitCodeForStatus('some-future-status', 503)).toBe(2);
+  });
+
   test('an untyped 4xx stays 2 — a bad request is not retryable', () => {
     expect(exitCodeForStatus(null, 400)).toBe(2);
     expect(exitCodeForStatus(null, 403)).toBe(2);

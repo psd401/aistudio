@@ -274,6 +274,67 @@ describe("caching", () => {
     expect(fetchImpl.calls.length).toBe(2)
   })
 
+  it("a cache HIT costs no token mint (codex round 2)", async () => {
+    // Minting runs WIF -> signJwt -> token exchange through the mint Lambda.
+    // Minting BEFORE the cache is consulted means a fully-cached lookup still
+    // pays that cost, and fails outright when the mint boundary is down
+    // despite a valid cached answer being in hand.
+    //
+    // This exact bug was fixed once in the container implementation and then
+    // reintroduced when the lookup moved server-side — hence the test.
+    let mints = 0
+    const mintToken = async () => {
+      mints += 1
+      return "tok"
+    }
+    const fetchImpl = stubFetch(() => ({
+      body: { people: [person("116", "Kris Hagel", "hagelk@psd401.net")] },
+    }))
+
+    await resolveEmail("hagelk@psd401.net", mintToken, { fetchImpl, ownerKey: OWNER })
+    expect(mints).toBe(1)
+
+    await resolveEmail("hagelk@psd401.net", mintToken, { fetchImpl, ownerKey: OWNER })
+    await resolveEmail("hagelk@psd401.net", mintToken, { fetchImpl, ownerKey: OWNER })
+    expect(mints).toBe(1)
+    expect(fetchImpl.calls.length).toBe(1)
+  })
+
+  it("a cached id lookup mints nothing either", async () => {
+    let mints = 0
+    const mintToken = async () => {
+      mints += 1
+      return "tok"
+    }
+    const fetchImpl = stubFetch(() => ({
+      body: person("999", "Someone", "someone@psd401.net"),
+    }))
+    await resolvePersonId("users/999", mintToken, { fetchImpl, ownerKey: OWNER })
+    await resolvePersonId("users/999", mintToken, { fetchImpl, ownerKey: OWNER })
+    expect(mints).toBe(1)
+  })
+
+  it("a mint failure never happens for a cached answer", async () => {
+    // The operational point of laziness: an outage in the mint boundary must
+    // not take down lookups the cache can already answer.
+    const fetchImpl = stubFetch(() => ({
+      body: { people: [person("116", "Kris Hagel", "hagelk@psd401.net")] },
+    }))
+    await resolveEmail("hagelk@psd401.net", async () => "tok", {
+      fetchImpl,
+      ownerKey: OWNER,
+    })
+    const brokenMint = async () => {
+      throw new Error("mint lambda unavailable")
+    }
+    const cached = await resolveEmail("hagelk@psd401.net", brokenMint, {
+      fetchImpl,
+      ownerKey: OWNER,
+    })
+    expect(cached.found).toBe(true)
+    expect(cached.cached).toBe(true)
+  })
+
   it("NEVER serves one owner's cached result to another (codex P1)", async () => {
     // The cache is process-global — one Next.js instance serves every agent —
     // so an unpartitioned key would let owner B receive owner A's authorized

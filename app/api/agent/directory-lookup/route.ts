@@ -86,9 +86,18 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { accessToken } = await mintAgentWorkspaceTokenViaBoundary(
-      context.ownerEmail,
-    )
+    // LAZY. The lookup calls this only after its cache misses, so a cached
+    // answer costs no mint — no WIF/signJwt/token-exchange round trip, and no
+    // failure when the mint boundary is down despite a valid cached answer.
+    // Memoized so one request can never mint twice.
+    let minted: string | null = null
+    const mintToken = async () => {
+      if (minted === null) {
+        minted = (await mintAgentWorkspaceTokenViaBoundary(context.ownerEmail))
+          .accessToken
+      }
+      return minted
+    }
     // ownerKey partitions the process-global lookup cache. It MUST come from
     // the signed context, never the body — that is what stops one agent's
     // authorized result being served to another.
@@ -97,8 +106,8 @@ export async function POST(request: NextRequest) {
       ownerKey: context.ownerEmail,
     }
     const result = body.email
-      ? await resolveEmail(body.email, accessToken, opts)
-      : await resolvePersonId(body.chatId as string, accessToken, opts)
+      ? await resolveEmail(body.email, mintToken, opts)
+      : await resolvePersonId(body.chatId as string, mintToken, opts)
 
     log.info(
       "Directory lookup completed",
