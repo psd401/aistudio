@@ -148,6 +148,20 @@ class DirectoryError extends Error {
   }
 }
 
+/**
+ * Accept either a token string or an async provider that mints one.
+ *
+ * The provider form exists so a CACHE HIT COSTS NO TOKEN. Minting goes through
+ * the DWD broker, which rate-limits to 120 mints/hour per owner
+ * (lib/agent-workspace/token-rate-limit.ts) and shares that budget with
+ * psd-workspace. Minting eagerly on every lookup would mean a heavily-cached
+ * identity lookup could still exhaust the limit and take Gmail/Calendar/Drive
+ * down with it. Resolve the token only once the cache has actually missed.
+ */
+async function resolveToken(tokenOrProvider) {
+  return typeof tokenOrProvider === 'function' ? await tokenOrProvider() : tokenOrProvider;
+}
+
 async function callPeople(url, accessToken, fetchImpl) {
   const doFetch = fetchImpl || globalThis.fetch;
   let resp;
@@ -212,7 +226,7 @@ function shapePerson(person) {
  * would be worse than not resolving at all, given the agent uses this to
  * decide who it is talking about.
  */
-async function resolveEmail(email, accessToken, opts = {}) {
+async function resolveEmail(email, tokenOrProvider, opts = {}) {
   const normalized = normalizeEmail(email);
   if (!normalized) throw new DirectoryError('INVALID_INPUT', `Not a valid email address: ${email}`);
   const now = opts.now || Date.now();
@@ -228,7 +242,8 @@ async function resolveEmail(email, accessToken, opts = {}) {
     `?query=${encodeURIComponent(normalized)}` +
     `&readMask=${encodeURIComponent(READ_MASK)}` +
     `&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE`;
-  const body = await callPeople(url, accessToken, opts.fetchImpl);
+  // Token resolved HERE, after the cache miss — never before it.
+  const body = await callPeople(url, await resolveToken(tokenOrProvider), opts.fetchImpl);
 
   const candidates = Array.isArray(body.people) ? body.people : [];
   // Exact-address match only. searchDirectoryPeople is a prefix/substring
@@ -259,7 +274,7 @@ async function resolveEmail(email, accessToken, opts = {}) {
 /**
  * Chat `users/{id}` -> district person, via people.get on the same id.
  */
-async function resolvePersonId(rawId, accessToken, opts = {}) {
+async function resolvePersonId(rawId, tokenOrProvider, opts = {}) {
   const id = normalizePersonId(rawId);
   if (!id) throw new DirectoryError('INVALID_INPUT', `Not a valid person/Chat id: ${rawId}`);
   const now = opts.now || Date.now();
@@ -273,7 +288,8 @@ async function resolvePersonId(rawId, accessToken, opts = {}) {
   const url = `${PEOPLE_BASE}/people/${encodeURIComponent(id)}?personFields=${encodeURIComponent(READ_MASK)}`;
   let body;
   try {
-    body = await callPeople(url, accessToken, opts.fetchImpl);
+    // Token resolved HERE, after the cache miss — never before it.
+    body = await callPeople(url, await resolveToken(tokenOrProvider), opts.fetchImpl);
   } catch (err) {
     // A 404 is a legitimate "no such person", not a failure to report upward.
     if (err instanceof DirectoryError && err.code === 'LOOKUP_FAILED' && /HTTP 404|not found/i.test(err.message)) {
@@ -295,6 +311,7 @@ async function resolvePersonId(rawId, accessToken, opts = {}) {
 module.exports = {
   resolveEmail,
   addressesOf,
+  resolveToken,
   resolvePersonId,
   shapePerson,
   normalizeEmail,

@@ -83,25 +83,50 @@ async function main() {
   if (wantEmail && wantChatId) fail('--email and --chat-id are mutually exclusive');
 
   // Agent-slot token via the DWD broker (directory.readonly already granted).
-  let broker;
-  try {
-    broker = await WS.fetchBrokerToken(userEmail);
-  } catch (err) {
-    fail(`could not mint an agent token: ${err.message}`, 12);
-  }
-  if (broker && broker.notProvisioned) {
-    emit({ status: 'account-provisioning', ownerEmail: userEmail });
-    return 14;
-  }
+  //
+  // LAZY ON PURPOSE. The broker rate-limits to 120 mints/hour per owner
+  // (lib/agent-workspace/token-rate-limit.ts) and that budget is SHARED with
+  // psd-workspace. Minting up-front would charge a token to every lookup even
+  // when the on-disk cache answers it, so a chatty-but-cached workload could
+  // exhaust the limit and take Gmail/Calendar/Drive down with it. The lookup
+  // calls this only after its cache has missed. Memoized so a single
+  // invocation can never mint twice.
+  let minted = null;
+  const mintToken = async () => {
+    if (!minted) {
+      let broker;
+      try {
+        broker = await WS.fetchBrokerToken(userEmail);
+      } catch (err) {
+        const e = new Error(`could not mint an agent token: ${err.message}`);
+        e.code = 'MINT_TRANSPORT';
+        throw e;
+      }
+      if (broker && broker.notProvisioned) {
+        const e = new Error('account-not-provisioned');
+        e.code = 'ACCOUNT_NOT_PROVISIONED';
+        throw e;
+      }
+      minted = broker;
+    }
+    return minted.accessToken;
+  };
 
   const opts = { noCache: args.no_cache === true };
   try {
     const result = wantEmail
-      ? await lib.resolveEmail(wantEmail, broker.accessToken, opts)
-      : await lib.resolvePersonId(wantChatId, broker.accessToken, opts);
+      ? await lib.resolveEmail(wantEmail, mintToken, opts)
+      : await lib.resolvePersonId(wantChatId, mintToken, opts);
     emit({ cached: false, ...result });
     return 0;
   } catch (err) {
+    if (err && err.code === 'ACCOUNT_NOT_PROVISIONED') {
+      emit({ status: 'account-provisioning', ownerEmail: userEmail });
+      return 14;
+    }
+    if (err && err.code === 'MINT_TRANSPORT') {
+      fail(err.message, 12);
+    }
     if (err instanceof lib.DirectoryError) {
       switch (err.code) {
         case 'DIRECTORY_SHARING_DISABLED':

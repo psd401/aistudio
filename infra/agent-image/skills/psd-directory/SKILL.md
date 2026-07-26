@@ -71,10 +71,16 @@ work around by other means.
 
 Lookups are cached on disk in the container: 12 hours for a hit, 5 minutes for
 a miss (a miss is often a race with account provisioning, and caching that for
-hours would make a new hire look permanently unresolvable). Repeated lookups of
-the same person inside one session cost nothing — resolve freely rather than
-rationing calls. `--no-cache` forces a fresh read if you have reason to think
-someone was just created or renamed.
+hours would make a new hire look permanently unresolvable).
+
+A cache hit costs **nothing** — no directory call and no token mint. That
+second part matters: minting goes through the DWD broker, which allows 120
+mints per hour per person and shares that budget with `psd-workspace`, so a
+lookup that minted on every call could exhaust the limit and break Gmail,
+Calendar and Drive alongside it. Resolving the same person repeatedly is
+genuinely free, so resolve freely rather than rationing calls — but reach for
+`--no-cache` only when you have real reason to think someone was just created
+or renamed, since that one does spend a mint.
 
 ## When it fails
 

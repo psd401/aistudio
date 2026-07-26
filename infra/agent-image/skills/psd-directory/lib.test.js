@@ -238,6 +238,53 @@ describe('caching', () => {
     expect(fetchImpl.calls.length).toBe(1);
   });
 
+  test('a cache HIT never mints a token (codex P2)', async () => {
+    // The DWD broker rate-limits to 120 mints/hour per owner and shares that
+    // budget with psd-workspace. If a lookup mints before consulting the
+    // cache, a chatty-but-cached workload burns the limit and takes
+    // Gmail/Calendar/Drive down with it — while SKILL.md is telling the model
+    // repeated lookups are free. The token must be resolved only on a miss.
+    let mints = 0;
+    const mintToken = async () => {
+      mints += 1;
+      return 'tok';
+    };
+    const fetchImpl = stubFetch(() => ({
+      body: { people: [person('116', 'Kris Hagel', 'hagelk@psd401.net', null)] },
+    }));
+
+    await lib.resolveEmail('hagelk@psd401.net', mintToken, { fetchImpl });
+    expect(mints).toBe(1); // miss -> one mint
+
+    await lib.resolveEmail('hagelk@psd401.net', mintToken, { fetchImpl });
+    await lib.resolveEmail('hagelk@psd401.net', mintToken, { fetchImpl });
+    expect(mints).toBe(1); // hits -> still one
+    expect(fetchImpl.calls.length).toBe(1);
+  });
+
+  test('a cached id lookup never mints either', async () => {
+    let mints = 0;
+    const mintToken = async () => {
+      mints += 1;
+      return 'tok';
+    };
+    const fetchImpl = stubFetch(() => ({
+      body: person('999', 'Someone Else', 'else@psd401.net', null),
+    }));
+    await lib.resolvePersonId('users/999', mintToken, { fetchImpl });
+    await lib.resolvePersonId('users/999', mintToken, { fetchImpl });
+    expect(mints).toBe(1);
+    expect(fetchImpl.calls.length).toBe(1);
+  });
+
+  test('a plain token string still works (provider is optional)', async () => {
+    const fetchImpl = stubFetch(() => ({
+      body: { people: [person('116', 'Kris Hagel', 'hagelk@psd401.net', null)] },
+    }));
+    const r = await lib.resolveEmail('hagelk@psd401.net', 'literal-token', { fetchImpl });
+    expect(r.found).toBe(true);
+  });
+
   test('--no-cache forces a fresh call', async () => {
     const fetchImpl = stubFetch(() => ({
       body: { people: [person('116', 'Kris Hagel', 'hagelk@psd401.net', null)] },
