@@ -206,6 +206,7 @@ export async function storeAistudioOAuthTokens(
     const response = await client.send(
       new PutSecretValueCommand({ SecretId: secretId, SecretString: secretString })
     )
+    _secretCache.delete(secretId)
     return response.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
   } catch (error) {
     if (!(error instanceof ResourceNotFoundException)) throw error
@@ -222,6 +223,7 @@ export async function storeAistudioOAuthTokens(
           ],
         })
       )
+      _secretCache.delete(secretId)
       return response.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
     } catch (createError) {
       if (
@@ -234,6 +236,7 @@ export async function storeAistudioOAuthTokens(
             SecretString: secretString,
           })
         )
+        _secretCache.delete(secretId)
         return response.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
       }
       throw createError
@@ -245,7 +248,10 @@ export async function deleteAistudioOAuthSecret(
   ownerEmail: string
 ): Promise<boolean> {
   const secretId = aistudioOAuthSecretId(ownerEmail)
-  if (process.env.NODE_ENV === "development") return false
+  if (process.env.NODE_ENV === "development") {
+    _secretCache.delete(secretId)
+    return false
+  }
   const { DeleteSecretCommand, ResourceNotFoundException } = await import(
     "@aws-sdk/client-secrets-manager"
   )
@@ -257,9 +263,13 @@ export async function deleteAistudioOAuthSecret(
         ForceDeleteWithoutRecovery: true,
       })
     )
+    _secretCache.delete(secretId)
     return true
   } catch (error) {
-    if (error instanceof ResourceNotFoundException) return false
+    if (error instanceof ResourceNotFoundException) {
+      _secretCache.delete(secretId)
+      return false
+    }
     throw error
   }
 }

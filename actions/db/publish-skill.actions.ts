@@ -238,11 +238,11 @@ export async function publishAssistantArchitectAsSkillAction(
 
       await tx
         .delete(skillRepositoryBindings)
-        .where(eq(skillRepositoryBindings.skillId, resolvedId))
+        .where(eq(skillRepositoryBindings.skillId, resolved.id))
       if (repositoryIds.length > 0) {
         await tx.insert(skillRepositoryBindings).values(
           repositoryIds.map((repositoryId) => ({
-            skillId: resolvedId,
+            skillId: resolved.id,
             repositoryId,
           }))
         )
