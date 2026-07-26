@@ -264,6 +264,8 @@ unless {
   resource.url like "https://psd401.ai/api/agent/classified-evaluation" ||
   resource.url like "https://*.psd401.ai/api/agent/credentials" ||
   resource.url like "https://psd401.ai/api/agent/credentials" ||
+  resource.url like "https://*.psd401.ai/api/agent/directory-lookup" ||
+  resource.url like "https://psd401.ai/api/agent/directory-lookup" ||
   resource.url like "https://*.psd401.ai/api/agent/email-triage" ||
   resource.url like "https://psd401.ai/api/agent/email-triage" ||
   resource.url like "https://*.psd401.ai/api/agent/failures" ||
