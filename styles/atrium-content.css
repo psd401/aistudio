@@ -271,23 +271,23 @@
 :root {
   --atrium-comment: #d97706;      /* amber — comment anchor */
   --atrium-comment-soft: rgba(217, 119, 6, 0.16);
-  /* Proposed insertion is BLUE (#1336 B6), deliberately NOT the human green.
-   * It was previously `#3e7c4f` — byte-identical to `--atrium-human` — so a
-   * person's suggested insertion differed from their ordinary (already
-   * green-provenance) typing by nothing but a thin underline, making Suggesting
-   * mode effectively invisible. Blue is the Meridian bubble-palette accent
-   * (`--mer-human-other-2`) and collides with neither provenance color.
-   * Deletion stays red — a strikethrough reads as "removed", not "human vs
-   * agent". */
-  /* Cyan, deliberately outside every other color family in the editor: not the
-     human/agent provenance greens/violets, not any TEXT_COLORS swatch in
-     EditorBubbleMenu (whose "Blue" #4a7ce8 this used to collide with — manually
-     blue-colored text read as a pending suggestion), and not a presence color
-     (#4a7ce8 is also --mer-human-other-2 / PRESENCE_OTHERS blue). */
+  /* Proposed insertion is CYAN (#1336 B6), deliberately outside every other
+   * color family in the editor. It was originally `#3e7c4f` — byte-identical
+   * to `--atrium-human` — so a person's suggested insertion differed from
+   * their ordinary (already green-provenance) typing by nothing but a thin
+   * underline, making Suggesting mode effectively invisible. The first recolor
+   * (`#4a7ce8`) traded that for a different collision: byte-identical to the
+   * "Blue" TEXT_COLORS swatch in EditorBubbleMenu (manually blue-colored text
+   * read as a pending suggestion) AND to `--mer-human-other-2`/PRESENCE_OTHERS
+   * blue. Cyan collides with none of them: not the human/agent provenance
+   * green/violet, not any bubble swatch, not a presence color. Deletion stays
+   * red — a strikethrough reads as "removed", not "human vs agent". The
+   * document-level mode cue below uses the SAME hue so the sheet border
+   * reinforces the inline underline rather than introducing a third color. */
   --atrium-suggest-insert: #0e7490; /* cyan underline — proposed insertion */
   --atrium-suggest-insert-soft: rgba(14, 116, 144, 0.14);
   --atrium-suggest-delete: #dc2626; /* red strikethrough — proposed deletion */
-  --atrium-suggest-cue: rgba(74, 124, 232, 0.55);
+  --atrium-suggest-cue: rgba(14, 116, 144, 0.55);
 }
 
 /* Comment anchor: a subtle amber highlight the reviewer can click/hover. */
