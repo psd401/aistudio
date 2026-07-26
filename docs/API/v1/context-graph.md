@@ -984,9 +984,9 @@ List content objects the caller may view (permission-filtered server-side). Requ
 |------|------|-------------|
 | `kind` | `document` \| `artifact` | Filter by content kind |
 | `collection` | string (slug or UUID) | Scope to one collection |
-| `tag` | string | Filter by a single tag (exact match) |
+| `tag` | string | Filter by a single tag (whole-tag match, case-insensitive) |
 | `status` | `draft` \| `published` \| `archived` | Filter by lifecycle status |
-| `query` | string (1–200 chars) | Case-insensitive title substring search |
+| `query` | string (1–200 chars) | Case-insensitive substring search over the title **or any tag**. Unlike `tag` (whole-tag equality), this matches partial text anywhere in a tag; supplying both ANDs them |
 
 **Example request:**
 

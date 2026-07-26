@@ -28,6 +28,7 @@ import {
 import { unpublishDocumentAction } from "@/actions/db/atrium/unpublish-document";
 import { toCleanMarkdown } from "@/lib/content/collab/suggestions";
 import type { ActionState } from "@/types";
+import type { VisibilityLevel } from "@/lib/content";
 
 /**
  * Human-readable destination labels for the success/confirm copy. Shared with
@@ -51,13 +52,31 @@ interface UseEditorActionsParams {
 
 export interface EditorActions {
   message: string | null;
+  /**
+   * The reader URL for a successful publish (#1336 C3), rendered as a copyable
+   * link beside the caption. Null for every other outcome.
+   */
+  messageUrl: string | null;
+  /**
+   * Increments after every completed publish/unpublish. `PublishMenu` watches it
+   * to re-read live publication state instead of showing what it loaded on mount.
+   */
+  actionSeq: number;
   actionError: boolean;
   /** True when the last action returned a §26.4 pending-approval outcome. */
   pendingApproval: boolean;
   busy: boolean;
   handleSnapshot: () => void;
-  /** Publish the working head to the picked destination (toolbar picker). */
-  handlePublish: (destination: EditorPublishDestination) => void;
+  /**
+   * Publish the working head to the picked destination (toolbar picker).
+   * `widenTo` (#1336 C2) rides along as the action's existing `visibility`
+   * parameter so the visibility widen and the publish commit in ONE
+   * transaction — no separate, ungated write path.
+   */
+  handlePublish: (
+    destination: EditorPublishDestination,
+    widenTo?: VisibilityLevel,
+  ) => void;
   /** Unpublish from the picked destination (confirm-guarded). */
   handleUnpublish: (destination: EditorPublishDestination) => void;
 }
@@ -69,7 +88,7 @@ export interface EditorActions {
  * the invalid `{ ok: true, pending: true }` combination unrepresentable.
  */
 type ActionOutcome =
-  | { status: "success"; text: string }
+  | { status: "success"; text: string; url?: string | null }
   | { status: "pending"; text: string }
   | { status: "error"; text: string };
 
@@ -87,14 +106,23 @@ function mapActionResult<T>(
   opts: {
     successText: string | ((data: T) => string);
     failureFallback: string;
-  }
+    /**
+     * Optional reader URL to surface alongside a success caption (#1336 C3), so
+     * the editor can render a real copyable link rather than a bare sentence.
+     */
+    successUrl?: (data: T) => string | null;
+  },
 ): ActionOutcome {
   if (result.isSuccess) {
     const text =
       typeof opts.successText === "function"
         ? opts.successText(result.data)
         : opts.successText;
-    return { status: "success", text };
+    return {
+      status: "success",
+      text,
+      url: opts.successUrl?.(result.data) ?? null,
+    };
   }
   // §26.4: an approval-required result is NOT a failure — surface it amber, like
   // VisibilityChip, instead of red.
@@ -113,6 +141,8 @@ export function useEditorActions({
   docNameRef,
 }: UseEditorActionsParams): EditorActions {
   const [message, setMessage] = useState<string | null>(null);
+  const [messageUrl, setMessageUrl] = useState<string | null>(null);
+  const [actionSeq, setActionSeq] = useState(0);
   const [actionError, setActionError] = useState(false);
   const [pendingApproval, setPendingApproval] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -121,18 +151,25 @@ export function useEditorActions({
   // while one is in flight, records success / error / pending-approval for the
   // caption styling.
   const runAction = useCallback(
-    async (run: () => Promise<ActionOutcome>) => {
+    async (run: () => Promise<ActionOutcome>, { publishy = false } = {}) => {
       setBusy(true);
       try {
         const outcome = await run();
         setPendingApproval(outcome.status === "pending");
         setActionError(outcome.status === "error");
         setMessage(outcome.text);
+        setMessageUrl(
+          outcome.status === "success" ? (outcome.url ?? null) : null,
+        );
+        // Publication state changed (or was attempted) — let PublishMenu re-read
+        // it. Bumped even on failure: a partial/idempotent server outcome must
+        // not leave the menu asserting stale "Live" badges.
+        if (publishy) setActionSeq((n) => n + 1);
       } finally {
         setBusy(false);
       }
     },
-    []
+    [],
   );
 
   const handleSnapshot = useCallback(() => {
@@ -155,21 +192,44 @@ export function useEditorActions({
   }, [editor, idOrSlug, docNameRef, runAction]);
 
   const handlePublish = useCallback(
-    (destination: EditorPublishDestination) => {
+    (destination: EditorPublishDestination, widenTo?: VisibilityLevel) => {
       const target = docNameRef.current ?? idOrSlug;
       const label = DESTINATION_LABELS[destination];
-      void runAction(async () => {
-        const result = await publishDocumentAction(target, { destination });
-        // §26.4: a public destination (public_web/schoology/google) without
-        // authority returns `approvalRequired`, which mapActionResult surfaces
-        // as `pending` (amber "submitted for review"), not `error`.
-        return mapActionResult(result, {
-          successText: `Published to ${label}`,
-          failureFallback: "Publish failed",
-        });
-      });
+      void runAction(
+        async () => {
+          const result = await publishDocumentAction(target, {
+            destination,
+            // The widen the confirm dialog offered, if any. `grants` are omitted:
+            // they are only meaningful for `level: "group"`, and the widen targets
+            // are always `internal` or `public`.
+            // `widenOnly` marks this an OFFER: the server applies it only if it
+            // actually broadens the LOCKED current audience. PublishMenu already
+            // re-reads visibility before confirming, but a re-read is not a lock —
+            // this closes the remaining window in the one place that holds one.
+            ...(widenTo
+              ? { visibility: { level: widenTo, widenOnly: true } }
+              : {}),
+          });
+          // §26.4: a caller without public-publish authority returns
+          // `approvalRequired`, which mapActionResult surfaces as `pending`
+          // (amber "submitted for review"), not `error`. As of #1336 the in-app
+          // authoring surface grants that authority to any author, so this path
+          // is now reserved for API/MCP/agent callers — it is deliberately kept
+          // rather than removed, because the service still owns the decision.
+          return mapActionResult(result, {
+            // #1336 C3: show the reader URL the content is now served at. Before
+            // this, the public URL was computed by the adapter, persisted to
+            // `content_publications.external_ref`, and then never surfaced
+            // anywhere — so users shared the editor URL instead.
+            successText: `Published to ${label}`,
+            successUrl: (data) => data.readerUrl,
+            failureFallback: "Publish failed",
+          });
+        },
+        { publishy: true },
+      );
     },
-    [idOrSlug, docNameRef, runAction]
+    [idOrSlug, docNameRef, runAction],
   );
 
   // Unpublish: removes the live publication at the picked destination (for the
@@ -184,31 +244,36 @@ export function useEditorActions({
       if (
         typeof window !== "undefined" &&
         !window.confirm(
-          `Unpublish this document from ${label}? Readers will no longer see it (you can republish later).`
+          `Unpublish this document from ${label}? Readers will no longer see it (you can republish later).`,
         )
       ) {
         return;
       }
       const target = docNameRef.current ?? idOrSlug;
-      void runAction(async () => {
-        const result = await unpublishDocumentAction(target, { destination });
-        // §26.4: taking a public destination offline needs the same authority
-        // as publishing it — an unauthorized caller gets the same pending
-        // (amber) outcome as handlePublish.
-        return mapActionResult(result, {
-          successText: (data) =>
-            data.unpublished
-              ? `Unpublished from ${label}`
-              : "Not currently published there",
-          failureFallback: "Unpublish failed",
-        });
-      });
+      void runAction(
+        async () => {
+          const result = await unpublishDocumentAction(target, { destination });
+          // §26.4: taking a public destination offline needs the same authority
+          // as publishing it — an unauthorized caller gets the same pending
+          // (amber) outcome as handlePublish.
+          return mapActionResult(result, {
+            successText: (data) =>
+              data.unpublished
+                ? `Unpublished from ${label}`
+                : "Not currently published there",
+            failureFallback: "Unpublish failed",
+          });
+        },
+        { publishy: true },
+      );
     },
-    [idOrSlug, docNameRef, runAction]
+    [idOrSlug, docNameRef, runAction],
   );
 
   return {
     message,
+    messageUrl,
+    actionSeq,
     actionError,
     pendingApproval,
     busy,

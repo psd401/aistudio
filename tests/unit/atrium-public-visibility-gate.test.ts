@@ -283,9 +283,13 @@ describe("§26.4 gate — visibilityService.setLevel to 'public'", () => {
     // non-admin owner without publish_public must pass WITHOUT approval (the exact
     // regression #1090 fixes), and the check reads the level UNDER the lock.
     txResults = [[{ id: "o1", visibilityLevel: "public" }]];
+    // ...and it reports `becamePublic: false`, so a surface cannot mistake this
+    // no-op re-save for a new public exposure. The gate and the notification now
+    // read the SAME locked judgement instead of disagreeing (the visibility
+    // dialog permits unchanged saves, which used to record a fresh exposure).
     await expect(
       visibilityService.setLevel(staffUser, "o1", { level: "public" })
-    ).resolves.toEqual({ visibilityLevel: "public" });
+    ).resolves.toEqual({ visibilityLevel: "public", becamePublic: false });
     expect(
       emitCalls.some((c) => c.type === "content.public_publish_requested")
     ).toBe(false);
@@ -297,7 +301,8 @@ describe("§26.4 gate — visibilityService.setLevel to 'public'", () => {
     txResults = [[{ id: "o1", visibilityLevel: "internal" }]];
     await expect(
       visibilityService.setLevel(adminUser, "o1", { level: "public" })
-    ).resolves.toEqual({ visibilityLevel: "public" });
+      // A genuine internal → public transition, so `becamePublic` is true.
+    ).resolves.toEqual({ visibilityLevel: "public", becamePublic: true });
     expect(executeTransactionCalls).toBeGreaterThan(0);
     // The gate did NOT emit an approval request for an authorized caller.
     expect(
@@ -314,14 +319,15 @@ describe("§26.4 gate — visibilityService.setLevel to 'public'", () => {
         { level: "public" },
         { hasPublishPublicCapability: true }
       )
-    ).resolves.toEqual({ visibilityLevel: "public" });
+    ).resolves.toEqual({ visibilityLevel: "public", becamePublic: true });
   });
 
   it("does NOT gate a non-public setLevel (group/internal pass the gate)", async () => {
     txResults = [[{ id: "o1", visibilityLevel: "private" }]];
     await expect(
       visibilityService.setLevel(staffUser, "o1", { level: "internal" })
-    ).resolves.toEqual({ visibilityLevel: "internal" });
+      // Not a public exposure at all — nothing to notify about.
+    ).resolves.toEqual({ visibilityLevel: "internal", becamePublic: false });
     expect(
       emitCalls.some((c) => c.type === "content.public_publish_requested")
     ).toBe(false);

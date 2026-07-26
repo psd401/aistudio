@@ -49,7 +49,11 @@ import type {
 /** Upper bound on a `listVisible` tag filter, mirroring the tags column width. */
 const MAX_TAG_LENGTH = 100;
 
-/** Upper bound on a `listVisible` free-text `query` filter (title search). */
+/**
+ * Upper bound on a `listVisible` free-text `query` filter. Bounds BOTH arms of
+ * that filter — the title `ILIKE` and the per-tag `unnest(tags) ILIKE` added in
+ * #1336 — since they share one escaped, truncated pattern.
+ */
 const MAX_QUERY_LENGTH = 200;
 
 /**
@@ -575,7 +579,18 @@ export const visibilityService = {
    *
    * The object must exist (404 otherwise) and the caller is expected to have
    * already passed `assertCanEdit`. Does NOT change `status`. Returns the new
-   * level so the surface can reflect it without a re-read.
+   * level so the surface can reflect it without a re-read, plus `becamePublic`
+   * — whether this call actually TRANSITIONED the object from non-public to
+   * public, decided against the FOR-UPDATE-locked previous level.
+   *
+   * `becamePublic` exists because "the caller asked for public" and "this call
+   * created a new public exposure" are different questions, and the
+   * allow-then-notify policy (#1336) cares only about the second. The visibility
+   * dialog permits unchanged saves, so a surface keying its public-exposure
+   * notification off the requested level alone floods the admin audit feed with
+   * exposures that never happened — this service already treats an
+   * already-public save as a no-op for the §26.4 gate directly below, and
+   * reporting it is what lets the surfaces agree with that judgement.
    *
    * §26.4 — widening to `public` through this standalone path is the SAME
    * privilege boundary as `publishService.publish`'s visibility widen, so it
@@ -588,7 +603,7 @@ export const visibilityService = {
     objectId: string,
     visibility: VisibilityInput,
     opts: { hasPublishPublicCapability?: boolean } = {}
-  ): Promise<{ visibilityLevel: VisibilityLevel }> {
+  ): Promise<{ visibilityLevel: VisibilityLevel; becamePublic: boolean }> {
     // Whether this caller holds the §26.4 public-publish authority (pure, no IO).
     // The ACTUAL gate decision (is this a NEW public exposure?) is made INSIDE the
     // transaction against the FOR-UPDATE-locked level — never against a pre-lock
@@ -600,6 +615,10 @@ export const visibilityService = {
       req,
       opts.hasPublishPublicCapability ?? false
     );
+    // Set from INSIDE the transaction against the locked previous level (see the
+    // docblock). Declared here so the decision survives the closure; reassigned
+    // on every attempt, so a retried transaction cannot leave a stale verdict.
+    let becamePublic = false;
     await executeTransaction(async (tx) => {
       // Guard against a missing object inside the tx so the level write does not
       // silently no-op (UPDATE ... WHERE id = <absent> affects zero rows). Lock
@@ -640,9 +659,14 @@ export const visibilityService = {
         );
       }
 
+      // Decided under the SAME lock as the §26.4 gate above, and only once the
+      // write is committed-bound: a genuine non-public → public transition.
+      becamePublic =
+        visibility.level === "public" && rows[0].visibilityLevel !== "public";
+
       await setLevelInTx(tx, objectId, visibility);
     }, "content.setLevel");
-    return { visibilityLevel: visibility.level };
+    return { visibilityLevel: visibility.level, becamePublic };
   },
 
   /**
@@ -734,20 +758,47 @@ export const visibilityService = {
     }
     if (filter.tag) {
       // Bound parameter (injection-safe); cap length so an oversized tag string
-      // cannot be pushed to the driver on every list call. Array-overlap (`&&`
-      // against a one-element text[]) rather than `= ANY(tags)`: only the
-      // overlap operator can use the `idx_content_tags` GIN index (migration
-      // 085) — `<tag> = ANY(column)` forces a sequential scan.
+      // cannot be pushed to the driver on every list call. CASE-INSENSITIVE
+      // whole-tag equality (#1336 review): tags are stored case-preserved
+      // ("Science") and never normalized on write, so the previous
+      // case-sensitive `&&` array-overlap silently zero-matched a user typing
+      // "science" — while the free-text `filter.query` arm below matched it via
+      // ILIKE. The two entry points must agree. `lower() = lower()` over
+      // `unnest` cannot use the `idx_content_tags` GIN index (which only serves
+      // case-sensitive overlap), but like the query arm this runs only on
+      // explicit user filter text and is bounded by the visibility predicate +
+      // LIMIT.
       const tag = filter.tag.slice(0, MAX_TAG_LENGTH);
-      filters.push(sql`${o.tags} && ARRAY[${tag}]::text[]`);
+      filters.push(
+        sql`EXISTS (
+          SELECT 1 FROM unnest(${o.tags}) AS exact_tag
+          WHERE lower(exact_tag) = lower(${tag})
+        )`
+      );
     }
     if (filter.query) {
-      // Case-insensitive title substring search. Bounded + LIKE-escaped so an
-      // oversized or wildcard-bearing query can neither bloat the bound
+      // Case-insensitive substring search over the TITLE **or any TAG** (#1336:
+      // the library search box searches both, so "phoenix" finds a doc tagged
+      // `phoenix` as well as one titled "Phoenix plan"). Bounded + LIKE-escaped
+      // so an oversized or wildcard-bearing query can neither bloat the bound
       // parameter nor act as a pattern; the pattern is a bound parameter
       // (injection-safe).
+      //
+      // The tag arm is an `EXISTS (SELECT 1 FROM unnest(tags) ...)` rather than
+      // the `&&` array-overlap used by the exact-match `filter.tag` arm above:
+      // overlap can only test equality (and so cannot do substring/`ILIKE`
+      // matching), and `unnest` is the only way to apply a per-element pattern.
+      // This arm cannot use the `idx_content_tags` GIN index, but it runs only
+      // on explicit user search text and is already bounded by the visibility
+      // predicate + LIMIT.
       const q = escapeLikePattern(filter.query.slice(0, MAX_QUERY_LENGTH));
-      filters.push(ilike(o.title, `%${q}%`));
+      const pattern = `%${q}%`;
+      filters.push(
+        sql`(${ilike(o.title, pattern)} OR EXISTS (
+          SELECT 1 FROM unnest(${o.tags}) AS search_tag
+          WHERE search_tag ILIKE ${pattern}
+        ))`
+      );
     }
 
     // List-only projection: the shared `objectSelectFields` (single-object loads)

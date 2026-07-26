@@ -17,11 +17,19 @@
  */
 
 import Link from "next/link";
-import { FileText, Loader2, Sparkles, ArrowUpRight, Archive } from "lucide-react";
+import {
+  FileText,
+  Loader2,
+  Sparkles,
+  ArrowUpRight,
+  Archive,
+  SearchX,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { timeAgo } from "@/lib/atrium/relative-time";
 import type { ContentObjectDTO } from "@/lib/content";
 import { ArtifactThumbnail } from "./ArtifactThumbnail";
+import { TagPills } from "./TagPills";
 
 /** Meridian status pill class for a content object's lifecycle status. */
 function statusBadge(status: ContentObjectDTO["status"]): {
@@ -85,9 +93,7 @@ function DocCard({ it }: { it: ContentObjectDTO }): React.JSX.Element {
           {it.ownerName}
         </p>
       )}
-      {it.tags.length > 0 && (
-        <p className="mer-lib-card-tags">{it.tags.slice(0, 3).join(" · ")}</p>
-      )}
+      <TagPills tags={it.tags} />
     </Link>
   );
 }
@@ -128,6 +134,7 @@ function ArtifactCard({
           {it.ownerName}
         </p>
       )}
+      <TagPills tags={it.tags} />
       <div className="mer-lib-card-foot">
         <span className="mer-lib-card-meta">
           {isAgent ? "Agent-maintained" : "Interactive"}
@@ -138,6 +145,67 @@ function ArtifactCard({
         </span>
       </div>
     </Link>
+  );
+}
+
+/**
+ * Wraps one card with its selection checkbox (#1336). The checkbox is a SIBLING
+ * of the card's `<Link>`, never a descendant: nesting an interactive control
+ * inside an anchor is invalid HTML and every click would also navigate. The
+ * wrapper is `position: relative` so the checkbox can overlay the card's
+ * top-left corner without participating in the card's own layout.
+ */
+function SelectableCard({
+  it,
+  selected,
+  onToggle,
+  children,
+}: {
+  it: ContentObjectDTO;
+  selected: boolean;
+  onToggle: (id: string) => void;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <div
+      className="mer-lib-card-wrap"
+      data-selected={selected ? "true" : "false"}
+      data-testid="library-card-wrap"
+    >
+      <input
+        type="checkbox"
+        className="mer-lib-card-check"
+        checked={selected}
+        onChange={() => onToggle(it.id)}
+        aria-label={`Select ${it.title}`}
+        data-testid={`select-${it.id}`}
+      />
+      {children}
+    </div>
+  );
+}
+
+/** The zero-match empty state for an active search/tag filter (#1336). */
+function SearchEmpty({
+  query,
+  /** Which input produced the zero-match, so the recovery hint names it. */
+  source = "search",
+}: {
+  query: string;
+  source?: "search" | "tag";
+}): React.JSX.Element {
+  return (
+    <div className="mer-lib-empty" role="status" data-testid="library-search-empty">
+      <span className="mer-lib-empty-icon" aria-hidden="true">
+        <SearchX className="h-6 w-6" />
+      </span>
+      <p className="mer-lib-empty-title">No matches for “{query}”</p>
+      <p className="mer-lib-empty-sub">
+        {source === "tag"
+          ? "Nothing in your library carries that tag. Try a different tag, or clear the tag filter to see everything."
+          : "Nothing in your library matches that title or tag. Try a shorter term, or clear the search to see everything."}
+      </p>
+    </div>
   );
 }
 
@@ -188,6 +256,28 @@ interface LibraryListProps {
    * create affordance.
    */
   archivedView: boolean;
+  /**
+   * The ids currently multi-selected for a bulk action (#1336). Owned by
+   * `LibraryView`; this component only renders the checkbox state.
+   */
+  selected: ReadonlySet<string>;
+  /** Toggle one id's membership in the selection. */
+  onToggleSelect: (id: string) => void;
+  /**
+   * The active search term, non-empty only when the user is filtering. Drives
+   * the zero-match empty state (which must NOT be confused with an empty
+   * library — the copy and the missing "create" affordance differ).
+   */
+  searchTerm: string;
+  /**
+   * The active tag-chip filter, non-empty only while a tag is applied. A
+   * SEPARATE input from `searchTerm` (the free-text box), and it needs the same
+   * zero-match empty state: a tag that matches nothing otherwise falls through
+   * to the ordinary empty-library grid + create card — exactly the "is my
+   * library empty, or did my filter match nothing?" confusion this state exists
+   * to remove (#1336).
+   */
+  tagTerm: string;
 }
 
 export function LibraryList({
@@ -197,10 +287,17 @@ export function LibraryList({
   onCreate,
   sandboxSrc,
   archivedView,
+  selected,
+  onToggleSelect,
+  searchTerm,
+  tagTerm,
 }: LibraryListProps): React.JSX.Element {
   if (loading) {
     return (
-      <div className="flex items-center gap-2 py-10 text-sm text-[color:var(--mer-ink-muted)]">
+      <div
+        className="flex items-center gap-2 py-10 text-sm text-[color:var(--mer-ink-muted)]"
+        role="status"
+      >
         <Loader2 className="h-4 w-4 animate-spin" /> Loading content…
       </div>
     );
@@ -213,6 +310,18 @@ export function LibraryList({
     );
   }
 
+  // A filter that matched nothing gets its own empty state — and NO create card,
+  // which would otherwise read as "your library is empty" (#1336). Checked
+  // before the archived-empty branch so filtering inside Archived also explains
+  // itself as a zero-match rather than "nothing archived". The free-text box
+  // wins when both are active, since it is the more specific of the two.
+  if (items.length === 0) {
+    const search = searchTerm.trim();
+    if (search.length > 0) return <SearchEmpty query={search} />;
+    const tag = tagTerm.trim();
+    if (tag.length > 0) return <SearchEmpty query={tag} source="tag" />;
+  }
+
   // Archived view + nothing archived: its own empty state, no create card.
   if (archivedView && items.length === 0) {
     return <ArchivedEmpty />;
@@ -220,13 +329,20 @@ export function LibraryList({
 
   return (
     <div className="mer-card-grid">
-      {items.map((it) =>
-        it.kind === "artifact" ? (
-          <ArtifactCard key={it.id} it={it} sandboxSrc={sandboxSrc} />
-        ) : (
-          <DocCard key={it.id} it={it} />
-        )
-      )}
+      {items.map((it) => (
+        <SelectableCard
+          key={it.id}
+          it={it}
+          selected={selected.has(it.id)}
+          onToggle={onToggleSelect}
+        >
+          {it.kind === "artifact" ? (
+            <ArtifactCard it={it} sandboxSrc={sandboxSrc} />
+          ) : (
+            <DocCard it={it} />
+          )}
+        </SelectableCard>
+      ))}
       {/* No "create" affordance in the archived management view. */}
       {!archivedView && <CreateCard onCreate={onCreate} />}
     </div>

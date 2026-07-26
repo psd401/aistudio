@@ -1,10 +1,11 @@
 /**
  * Unit tests for the listVisible tag + query filters (Epic #1059 completion).
  *
- *  - Tag filter: must use the array-overlap form (`tags && ARRAY[$1]::text[]`)
- *    so the `idx_content_tags` GIN index (migration 085) applies — the previous
- *    `<tag> = ANY(tags)` form forced a sequential scan. The tag stays a bound
- *    parameter (injection-safe) and is length-clamped.
+ *  - Tag filter: CASE-INSENSITIVE whole-tag equality via `lower() = lower()`
+ *    over `unnest(tags)` (#1336 review) — tags are stored case-preserved, so
+ *    the earlier case-sensitive `&&` overlap zero-matched "science" against a
+ *    stored "Science" while the free-text arm matched it via ILIKE. The tag
+ *    stays a bound parameter (injection-safe) and is length-clamped.
  *  - Query filter: case-insensitive title substring search, clamped to 200
  *    chars, with LIKE metacharacters (`\`, `%`, `_`) escaped so user text can
  *    never act as a wildcard pattern.
@@ -131,54 +132,96 @@ beforeEach(() => {
   executeQueryMock.mockReset();
 });
 
-describe("listVisible tag filter (GIN-usable overlap form)", () => {
-  it("builds `tags && ARRAY[$tag]::text[]` with the tag as a bound value", async () => {
-    const filters = await captureFilters({ tag: "science" });
-    const tagFilter = filters
-      .filter(isSql)
-      .find((f) => f.chunks.some((c) => c.includes("&&")));
+/** Find the exact-tag chip predicate by its distinctive `exact_tag` alias. */
+const exactTagFilter = (filters: unknown[]): CapturedSql | undefined =>
+  filters
+    .filter(isSql)
+    .find((f) => f.chunks.some((c) => c.includes("lower(exact_tag)")));
+
+describe("listVisible tag filter (case-insensitive whole-tag match — #1336)", () => {
+  it("builds a lower()=lower() EXISTS over unnest(tags) with the tag as a bound value", async () => {
+    const filters = await captureFilters({ tag: "Science" });
+    const tagFilter = exactTagFilter(filters);
     expect(tagFilter).toBeDefined();
-    // Overlap against a bound single-element array — the GIN-indexable form.
-    expect(tagFilter!.chunks.join("?")).toContain("&& ARRAY[");
-    expect(tagFilter!.chunks.join("?")).toContain("]::text[]");
-    // Column first, then the bound tag value (never string-concatenated).
-    expect(tagFilter!.values).toEqual(["COL_tags", "science"]);
+    const shape = tagFilter!.chunks.join("?");
+    expect(shape).toContain("EXISTS");
+    expect(shape).toContain("unnest(");
+    // Both sides case-folded: a stored "Science" must match a typed "science"
+    // and vice versa — the same answer the free-text ILIKE arm gives.
+    expect(shape).toContain("lower(exact_tag) = lower(");
+    // Column first, then the bound tag value (never string-concatenated, and
+    // NOT pre-lowercased in JS — the fold happens in SQL on both sides).
+    expect(tagFilter!.values).toEqual(["COL_tags", "Science"]);
   });
 
   it("clamps an oversized tag to 100 chars before binding", async () => {
     const filters = await captureFilters({ tag: "x".repeat(500) });
-    const tagFilter = filters
-      .filter(isSql)
-      .find((f) => f.chunks.some((c) => c.includes("&&")));
+    const tagFilter = exactTagFilter(filters);
     expect(tagFilter!.values[1]).toBe("x".repeat(100));
   });
 });
 
-describe("listVisible query filter (title ILIKE)", () => {
+/**
+ * Find the free-text `query` predicate. Since #1336 it is a single `sql`
+ * fragment ORing a title ILIKE with a per-TAG ILIKE over `unnest(tags)`, so the
+ * `ilike()` call is a VALUE inside that fragment rather than a top-level filter.
+ * Keyed on the `search_tag` alias — the exact-tag chip predicate also uses
+ * `unnest(` (under the `exact_tag` alias), so `unnest(` alone is ambiguous.
+ */
+const queryFilter = (filters: unknown[]): CapturedSql | undefined =>
+  filters
+    .filter(isSql)
+    .find((f) => f.chunks.some((c) => c.includes("search_tag")));
+
+/** The title `ilike()` nested inside the query fragment. */
+const queryTitleIlike = (filters: unknown[]): CapturedIlike | undefined => {
+  const frag = queryFilter(filters);
+  return frag?.values.find(isIlike);
+};
+
+describe("listVisible query filter (title OR tag ILIKE — #1336)", () => {
   it("builds an ILIKE on title with a %-wrapped bound pattern", async () => {
     const filters = await captureFilters({ query: "budget report" });
-    const q = filters.find(isIlike);
+    const q = queryTitleIlike(filters);
     expect(q).toBeDefined();
     expect(q!.column).toBe("COL_title");
     expect(q!.pattern).toBe("%budget report%");
   });
 
+  it("ORs a per-TAG ILIKE over unnest(tags) so a tag search matches", async () => {
+    // #1336 A1: the library search box searches titles AND tags. `unnest` (not
+    // the `&&` overlap the exact-match `tag` filter uses) is required because
+    // overlap can only test equality, never a substring.
+    const filters = await captureFilters({ query: "phoenix" });
+    const frag = queryFilter(filters);
+    expect(frag).toBeDefined();
+    const sqlText = frag!.chunks.join("?");
+    expect(sqlText).toContain("OR EXISTS");
+    expect(sqlText).toContain("unnest(");
+    expect(sqlText).toContain("search_tag ILIKE");
+    // The tags COLUMN and the pattern are bound values, never concatenated.
+    expect(frag!.values).toContain("COL_tags");
+    expect(frag!.values).toContain("%phoenix%");
+  });
+
   it("escapes LIKE metacharacters so user text cannot act as a wildcard", async () => {
     const filters = await captureFilters({ query: String.raw`50%_off\deal` });
-    const q = filters.find(isIlike);
-    expect(q!.pattern).toBe(String.raw`%50\%\_off\\deal%`);
+    const escaped = String.raw`%50\%\_off\\deal%`;
+    expect(queryTitleIlike(filters)!.pattern).toBe(escaped);
+    // The tag arm binds the SAME escaped pattern — a wildcard must not slip
+    // through the arm the title check does not cover.
+    expect(queryFilter(filters)!.values).toContain(escaped);
   });
 
   it("clamps the query to 200 chars before escaping", async () => {
     const filters = await captureFilters({ query: "a".repeat(1000) });
-    const q = filters.find(isIlike);
     // 200 payload chars + the two wrapping wildcards.
-    expect(q!.pattern).toBe(`%${"a".repeat(200)}%`);
+    expect(queryTitleIlike(filters)!.pattern).toBe(`%${"a".repeat(200)}%`);
   });
 
-  it("adds no title filter when query is absent or empty", async () => {
-    expect((await captureFilters({})).find(isIlike)).toBeUndefined();
-    expect((await captureFilters({ query: "" })).find(isIlike)).toBeUndefined();
+  it("adds no query filter when query is absent or empty", async () => {
+    expect(queryFilter(await captureFilters({}))).toBeUndefined();
+    expect(queryFilter(await captureFilters({ query: "" }))).toBeUndefined();
   });
 });
 

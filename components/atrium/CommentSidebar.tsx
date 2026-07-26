@@ -32,6 +32,14 @@ export interface CommentSidebarProps {
   editor: Editor | null;
   /** Whether this user may add/reply/resolve (mirrors the collab edit token). */
   canEdit: boolean;
+  /**
+   * Reports the number of UNRESOLVED threads whenever it changes (#1336 B3).
+   * Lets the editor topbar badge the count and decide the rail's initial
+   * visibility WITHOUT a second `useComments` fetch — this component stays
+   * mounted (the rail is collapsed with `display: none`, not unmounted) so it
+   * remains the single owner of the thread data.
+   */
+  onOpenCountChange?: (openCount: number) => void;
 }
 
 function formatTime(iso: string | null): string {
@@ -246,6 +254,7 @@ export function CommentSidebar({
   idOrSlug,
   editor,
   canEdit,
+  onOpenCountChange,
 }: CommentSidebarProps): React.JSX.Element {
   const { threads, loading, error, createThread, reply, resolve } =
     useComments(idOrSlug);
@@ -297,6 +306,15 @@ export function CommentSidebar({
     () => threads.filter((t) => !t.resolved).length,
     [threads]
   );
+
+  // Report the open count upward (topbar chip + initial rail visibility). This
+  // fires on EVERY count change; the `loading` guard only suppresses it until
+  // the first load has settled, so the editor never decides "no open comments →
+  // keep the rail hidden" from the empty pre-fetch state.
+  useEffect(() => {
+    if (loading) return;
+    onOpenCountChange?.(openCount);
+  }, [loading, openCount, onOpenCountChange]);
 
   return (
     <aside

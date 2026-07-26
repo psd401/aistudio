@@ -1311,7 +1311,7 @@ paths:
             maxLength: 200
         - name: tag
           in: query
-          description: Filter by a single tag (exact match)
+          description: Filter by a single tag (whole-tag match, case-insensitive)
           schema:
             type: string
             maxLength: 100
@@ -1323,7 +1323,11 @@ paths:
             enum: [draft, published, archived]
         - name: query
           in: query
-          description: Case-insensitive title substring search
+          description: >-
+            Case-insensitive substring search over the title OR any tag. An
+            object matches when the text appears anywhere in its title or
+            anywhere within one of its tags. Distinct from the `tag` parameter,
+            which is a whole-tag equality filter; combining the two ANDs them.
           schema:
             type: string
             minLength: 1

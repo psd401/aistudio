@@ -244,9 +244,23 @@
   border-left-color: var(--atrium-agent);
 }
 
-/* Optional subtle inline tint of authored ranges (the atriumAuthored mark span). */
-.atrium-authored[data-author="human"] { background: var(--atrium-human-soft); }
-.atrium-authored[data-author="agent"] { background: var(--atrium-agent-soft); }
+/*
+ * Provenance visibility toggle (#1336 B7). `data-provenance="off"` on the
+ * `.atrium-editor` wrapper hides the rail. This is CSS-ONLY gating: the
+ * `atriumAuthored` marks and the rail decorations stay in the document
+ * untouched, so nothing is written to Yjs and turning the rail back on is free.
+ *
+ * The per-span inline background wash that used to sit here
+ * (`.atrium-authored[data-author]` → `--atrium-*-soft`) is DELETED, not merely
+ * gated: it was ~90% of the visual noise, it made a whole document read as a
+ * highlighter sweep, and it contradicted `authored-mark.ts`'s own header stating
+ * that the mark "carries no styling itself". The `--atrium-human-soft` /
+ * `--atrium-agent-soft` tokens are kept — the reader's provenance badges use
+ * them.
+ */
+.atrium-editor[data-provenance="off"] .ProseMirror > .atrium-rail-block {
+  border-left-color: transparent;
+}
 
 /* ----------------------------------------------------------------------------
  * Comments + track-changes marks (§18.1). These are a SEPARATE visual layer over
@@ -257,10 +271,23 @@
 :root {
   --atrium-comment: #d97706;      /* amber — comment anchor */
   --atrium-comment-soft: rgba(217, 119, 6, 0.16);
-  /* Proposed insertion re-shaded to the Meridian human green (slice C); deletion
-   * stays red — a strikethrough deletion reads as "removed", not "human vs agent". */
-  --atrium-suggest-insert: #3e7c4f; /* green underline — proposed insertion */
+  /* Proposed insertion is CYAN (#1336 B6), deliberately outside every other
+   * color family in the editor. It was originally `#3e7c4f` — byte-identical
+   * to `--atrium-human` — so a person's suggested insertion differed from
+   * their ordinary (already green-provenance) typing by nothing but a thin
+   * underline, making Suggesting mode effectively invisible. The first recolor
+   * (`#4a7ce8`) traded that for a different collision: byte-identical to the
+   * "Blue" TEXT_COLORS swatch in EditorBubbleMenu (manually blue-colored text
+   * read as a pending suggestion) AND to `--mer-human-other-2`/PRESENCE_OTHERS
+   * blue. Cyan collides with none of them: not the human/agent provenance
+   * green/violet, not any bubble swatch, not a presence color. Deletion stays
+   * red — a strikethrough reads as "removed", not "human vs agent". The
+   * document-level mode cue below uses the SAME hue so the sheet border
+   * reinforces the inline underline rather than introducing a third color. */
+  --atrium-suggest-insert: #0e7490; /* cyan underline — proposed insertion */
+  --atrium-suggest-insert-soft: rgba(14, 116, 144, 0.14);
   --atrium-suggest-delete: #dc2626; /* red strikethrough — proposed deletion */
+  --atrium-suggest-cue: rgba(14, 116, 144, 0.55);
 }
 
 /* Comment anchor: a subtle amber highlight the reviewer can click/hover. */
@@ -275,12 +302,23 @@
   opacity: 0.7;
 }
 
-/* Proposed insertion: green underline, text kept until accepted. */
+/* Proposed insertion: blue, tinted and thickly underlined so it separates from
+ * the provenance rail at a glance (#1336 B6). */
 .atrium-suggest-insert {
   color: var(--atrium-suggest-insert);
+  background: var(--atrium-suggest-insert-soft);
   text-decoration: underline;
   text-decoration-color: var(--atrium-suggest-insert);
+  text-decoration-thickness: 2px;
   text-underline-offset: 2px;
+}
+
+/* Document-level Suggesting cue (#1336 B6): while the mode is on, the editor
+ * carries a tinted top border so the state is legible from anywhere on the page,
+ * not only from the small topbar chip. */
+.atrium-editor[data-suggesting="true"] {
+  border-top: 3px solid var(--atrium-suggest-cue);
+  padding-top: 0.5rem;
 }
 
 /* Proposed deletion: red strikethrough, text kept until accepted. */

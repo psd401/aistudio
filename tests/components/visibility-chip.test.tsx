@@ -31,6 +31,13 @@ jest.mock("lucide-react", () => {
     Lock: icon("lock"),
     Users: icon("users"),
     Building2: icon("building2"),
+    // #1336: the chip trigger is now a labelled "Share" control, and the people
+    // picker / copyable link render their own icons.
+    Share2: icon("share2"),
+    Search: icon("search"),
+    Loader2: icon("loader2"),
+    Copy: icon("copy"),
+    Check: icon("check"),
     X: icon("x"),
   };
 });
@@ -178,6 +185,27 @@ jest.mock("@/actions/db/atrium/get-visibility", () => ({
 jest.mock("@/actions/db/atrium/set-visibility", () => ({
   setVisibilityAction: jest.fn(),
 }));
+// #1336: the chip now also reads live publication state (for the Public
+// consequence notice) and searches people (for the `user` grant picker). Both
+// are server actions whose real modules drag in the publish/DB graph — including
+// the ESM-only `unified` markdown stack via the OKF publish adapter — so they
+// are mocked here exactly like the other actions in this suite.
+jest.mock("@/actions/db/atrium/list-publications", () => ({
+  listPublicationsAction: jest.fn(async () => ({
+    isSuccess: true,
+    data: [],
+    message: "Publications listed",
+  })),
+}));
+
+jest.mock("@/actions/db/atrium/search-people", () => ({
+  searchPeopleAction: jest.fn(async () => ({
+    isSuccess: true,
+    data: [],
+    message: "People found",
+  })),
+}));
+
 jest.mock("@/actions/db/atrium/list-grant-options", () => ({
   listGrantOptionsAction: jest.fn(),
 }));
@@ -244,11 +272,11 @@ describe("VisibilityChip", () => {
     // default "Private" placeholder/chrome never appears for a public object.
     await waitFor(() => {
       expect(
-        screen.getByLabelText("Visibility: Public (click to edit)")
+        screen.getByLabelText("Share — visibility: Public (click to edit)")
       ).toBeTruthy();
     });
     expect(
-      screen.queryByLabelText(/Visibility: Private/)
+      screen.queryByLabelText(/visibility: Private/)
     ).toBeNull();
     expect(screen.queryByLabelText("Loading visibility…")).toBeNull();
   });
@@ -343,7 +371,7 @@ describe("VisibilityChip", () => {
     // (level is group, caller can edit) sets the shared error banner.
     await act(async () => {
       fireEvent.click(
-        screen.getByLabelText("Visibility: Group (click to edit)")
+        screen.getByLabelText("Share — visibility: Group (click to edit)")
       );
     });
     await waitFor(() => {
@@ -375,8 +403,8 @@ describe("VisibilityChip", () => {
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     // No level chrome of any kind — placeholder persists.
-    expect(screen.queryByLabelText(/Visibility: Private/)).toBeNull();
-    expect(screen.queryByLabelText(/Visibility: Public/)).toBeNull();
+    expect(screen.queryByLabelText(/visibility: Private/)).toBeNull();
+    expect(screen.queryByLabelText(/visibility: Public/)).toBeNull();
     // The placeholder/unavailable aria-label is present and the button is enabled.
     const trigger = screen.getByLabelText("Visibility unavailable");
     expect(trigger).toBeTruthy();
@@ -450,7 +478,7 @@ describe("VisibilityChip", () => {
 
     await act(async () => {
       fireEvent.click(
-        screen.getByLabelText("Visibility: Group (click to edit)")
+        screen.getByLabelText("Share — visibility: Group (click to edit)")
       );
     });
 
@@ -497,7 +525,7 @@ describe("VisibilityChip", () => {
     // Open the editor (level is group) — the first role-options load runs and fails.
     await act(async () => {
       fireEvent.click(
-        screen.getByLabelText("Visibility: Group (click to edit)")
+        screen.getByLabelText("Share — visibility: Group (click to edit)")
       );
     });
     await waitFor(() => {
