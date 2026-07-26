@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * load.js — skills.load
- * Usage: node load.js --user <email> --name <skill-name>
+ * Usage: node load.js --name <skill-name>
  *
  * Loads a skill's full SKILL.md content from S3 and outputs it,
  * making the skill available for the current session.
@@ -11,30 +11,28 @@
 
 const {
   fail,
-  validateEnv,
-  validateUserEmail,
+  rejectAuthorityArgs,
   parseArgs,
   emit,
-  loadSkillMd,
+  skillBroker,
 } = require('./common');
 
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
-    console.log('Usage: load.js --user <email> --name <skill-name>');
+    console.log('Usage: load.js --name <skill-name>');
     process.exit(0);
   }
-  validateEnv();
-  validateUserEmail(args.user);
+  rejectAuthorityArgs(args);
 
   if (!args.name) {
     fail('--name is required (skill name to load)');
   }
 
   try {
-    const content = await loadSkillMd(args.name, args.user);
+    const skill = await skillBroker('load', { name: args.name });
 
-    if (!content) {
+    if (!skill) {
       emit({
         error: 'not_found',
         message: `Skill "${args.name}" not found in the catalog or not accessible. ` +
@@ -43,7 +41,7 @@ async function main() {
       process.exit(0);
     }
 
-    emit({ name: args.name, skillMd: content });
+    emit(skill);
   } catch (err) {
     fail(`Failed to load skill: ${err.message}`);
   }

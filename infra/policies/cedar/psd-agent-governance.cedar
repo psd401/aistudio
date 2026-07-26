@@ -19,46 +19,8 @@
 // AUTO-PERMITTED ACTIONS (read-only operations, safe by default)
 // =========================================================================
 
-// Allow reading calendar and email (non-destructive)
-permit(
-  principal,
-  action == Action::"google.calendar.read",
-  resource
-);
-
-permit(
-  principal,
-  action == Action::"google.gmail.read",
-  resource
-);
-
-// Allow reading Google Drive files
-permit(
-  principal,
-  action == Action::"google.drive.read",
-  resource
-);
-
-// Allow per-user schedule management via DynamoDB on the schedules table only.
-// The agent can only act on schedule rows keyed to the authenticated caller's
-// email (enforced in application logic — DynamoDB does not natively scope by
-// item attribute). The ${env} placeholder is rendered server-side when
-// AgentCore loads the policy bundle from S3.
-permit(
-  principal,
-  action in [
-    Action::"dynamodb.PutItem",
-    Action::"dynamodb.UpdateItem",
-    Action::"dynamodb.DeleteItem",
-    Action::"dynamodb.GetItem",
-    Action::"dynamodb.Query"
-  ],
-  resource
-)
-when {
-  principal.type == "AgentCore::Runtime" &&
-  resource.table like "psd-agent-schedules-*"
-};
+// Google Workspace and schedule operations cross signed web brokers. The
+// model runtime receives no direct Google or DynamoDB action.
 
 // Allow file writes within the agent's own workspace (sandboxed per-user in S3)
 permit(
@@ -92,20 +54,6 @@ permit(
   resource
 )
 when { resource.url like "https://api.psd401.net/*" };
-
-permit(
-  principal,
-  action == Action::"http.request",
-  resource
-)
-when { resource.url like "https://*.googleapis.com/*" };
-
-permit(
-  principal,
-  action == Action::"http.request",
-  resource
-)
-when { resource.url like "https://*.google.com/*" };
 
 // PSD Agent Gateway — psd-classified-evaluation skill (#1230). The n8n MCP
 // Server Trigger that runs the classified-evaluation pipeline server-side. Only
@@ -232,48 +180,14 @@ when { resource.path like "/home/node/.openclaw/skills-drafts/*" };
 // CREDENTIALS — scope-based access policies (#910)
 // =========================================================================
 
-// Allow reading shared (district-wide) credentials
-permit(
+// All model-runtime secret access is blocked. Credential operations cross the
+// signed web broker, which binds the owner at the final data boundary.
+forbid(
   principal,
   action == Action::"secret.read",
   resource
-)
-when { resource.name like "psd-agent-creds/*/shared/*" };
+);
 
-// Allow reading user's own per-user credentials.
-// Note: Cedar's `like` operator does not support variable interpolation
-// for principal attributes. Per-user isolation is enforced at the application
-// layer: the psd-credentials skill resolves the caller's email (injected by
-// AgentCore) to the correct Secrets Manager path. IAM tag-based conditions
-// will provide hard enforcement once secret provisioning supports tagging
-// (see agent-platform-stack.ts SECURITY NOTE). This Cedar permit serves as
-// a documentation marker and coarse-grained authorization.
-permit(
-  principal,
-  action == Action::"secret.read",
-  resource
-)
-when { resource.name like "psd-agent-creds/*/user/*" };
-
-// Allow reading shared Google Workspace OAuth client credentials and the
-// internal API key used by the psd-workspace skill to call the consent-link
-// endpoint. Scoped to specific secret name patterns under psd-agent/{env}/
-// (distinct from psd-agent-creds/, which holds per-user refresh tokens).
-// NOTE: Cedar uses `*` for the environment segment because the policy file is
-// shared across environments. Cross-environment isolation is enforced at the
-// IAM layer (scoped to psd-agent/${environment}/* in ecs-service.ts).
-// Issue #912.
-permit(
-  principal,
-  action == Action::"secret.read",
-  resource
-)
-when {
-  resource.name like "psd-agent/*/google-oauth-client" ||
-  resource.name like "psd-agent/*/internal-api-key"
-};
-
-// Block agents from writing secrets — provisioning is admin-only
 forbid(
   principal,
   action == Action::"secret.write",
@@ -284,9 +198,8 @@ forbid(
 // GOOGLE WORKSPACE — psd-workspace skill (#912)
 // =========================================================================
 
-// Allow the consent-link endpoint on the Next.js app. The agent calls this
-// with a shared-secret Bearer token to mint a one-time signed URL when a
-// user has not yet connected (or has revoked) their agent's Workspace access.
+// Allow the consent-link endpoint on the Next.js app. It verifies the signed
+// invocation context before minting a one-time owner-bound URL.
 permit(
   principal,
   action == Action::"http.request",
@@ -297,30 +210,18 @@ when {
   resource.url like "https://psd401.ai/api/agent/consent-link"
 };
 
-// Allow the DWD workspace-token broker (#1232) and the agnt_ account-request
-// provisioning endpoint (#1233) on the Next.js app. The psd-workspace skill
-// calls workspace-token (Bearer shared-secret) to mint a short-lived agent
-// access token; the router calls account-request to auto-provision agnt_
-// accounts. Same host + auth as consent-link.
+// Allow only the agnt_ account-request provisioning endpoint (#1233).
+// Raw Workspace-token delivery to the model was retired; Workspace operations
+// use the signed, allowlisted operation broker.
 permit(
   principal,
   action == Action::"http.request",
   resource
 )
 when {
-  resource.url like "https://*.psd401.ai/api/agent/workspace-token" ||
-  resource.url like "https://psd401.ai/api/agent/workspace-token" ||
   resource.url like "https://*.psd401.ai/api/agent/account-request" ||
   resource.url like "https://psd401.ai/api/agent/account-request"
 };
-
-// Allow the Google OAuth token endpoint (refresh_token → access_token).
-permit(
-  principal,
-  action == Action::"http.request",
-  resource
-)
-when { resource.url like "https://oauth2.googleapis.com/*" };
 
 // Block installing external skills from non-approved sources.
 // The bucket naming convention is psd-agents-{env}-{accountId}.
@@ -346,16 +247,37 @@ forbid(
 )
 unless {
   resource.url like "https://api.psd401.net/*" ||
-  resource.url like "https://*.googleapis.com/*" ||
-  resource.url like "https://*.google.com/*" ||
   // psd-workspace skill (#912): consent-link endpoint on the Next.js app
   resource.url like "https://*.psd401.ai/api/agent/consent-link" ||
   resource.url like "https://psd401.ai/api/agent/consent-link" ||
-  // DWD workspace-token broker (#1232) + agnt_ account-request (#1233)
-  resource.url like "https://*.psd401.ai/api/agent/workspace-token" ||
-  resource.url like "https://psd401.ai/api/agent/workspace-token" ||
+  // agnt_ account-request (#1233); raw token delivery is intentionally absent
   resource.url like "https://*.psd401.ai/api/agent/account-request" ||
   resource.url like "https://psd401.ai/api/agent/account-request" ||
+  // Fixed signed brokers. No wildcard below /api/agent/ is intentional.
+  resource.url like "https://*.psd401.ai/api/agent/aistudio" ||
+  resource.url like "https://psd401.ai/api/agent/aistudio" ||
+  resource.url like "https://*.psd401.ai/api/agent/atrium" ||
+  resource.url like "https://psd401.ai/api/agent/atrium" ||
+  resource.url like "https://*.psd401.ai/api/agent/canva" ||
+  resource.url like "https://psd401.ai/api/agent/canva" ||
+  resource.url like "https://*.psd401.ai/api/agent/classified-evaluation" ||
+  resource.url like "https://psd401.ai/api/agent/classified-evaluation" ||
+  resource.url like "https://*.psd401.ai/api/agent/credentials" ||
+  resource.url like "https://psd401.ai/api/agent/credentials" ||
+  resource.url like "https://*.psd401.ai/api/agent/email-triage" ||
+  resource.url like "https://psd401.ai/api/agent/email-triage" ||
+  resource.url like "https://*.psd401.ai/api/agent/failures" ||
+  resource.url like "https://psd401.ai/api/agent/failures" ||
+  resource.url like "https://*.psd401.ai/api/agent/github-execute" ||
+  resource.url like "https://psd401.ai/api/agent/github-execute" ||
+  resource.url like "https://*.psd401.ai/api/agent/schedules" ||
+  resource.url like "https://psd401.ai/api/agent/schedules" ||
+  resource.url like "https://*.psd401.ai/api/agent/skills" ||
+  resource.url like "https://psd401.ai/api/agent/skills" ||
+  resource.url like "https://*.psd401.ai/api/agent/workspace-execute" ||
+  resource.url like "https://psd401.ai/api/agent/workspace-execute" ||
+  resource.url like "https://*.psd401.ai/api/agent/workspace-storage" ||
+  resource.url like "https://psd401.ai/api/agent/workspace-storage" ||
   // PSD Agent Gateway (#1230): n8n MCP Server Trigger for psd-classified-evaluation.
   // Hostname + generic /mcp prefix only — the full gateway path stays out of this
   // public repo and lives only in the psd-agent/{env}/agent-gateway secret.

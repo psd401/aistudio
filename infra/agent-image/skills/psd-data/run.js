@@ -2,23 +2,22 @@
 /**
  * run.js — psd-data skill entrypoint.
  *
- * Subcommands mirror the 8 tools exposed by psd-data-mcp. Every subcommand
- * requires `--user <caller-email>` so the skill can look up the caller's
- * Cognito refresh token in Secrets Manager.
+ * Subcommands mirror the tools exposed by psd-data-mcp. The caller identity
+ * comes only from the signed invocation context.
  *
  * Usage:
- *   node run.js tables --user <email> [--detailed]
- *   node run.js schema --user <email> --table <name|json-array>
- *   node run.js permissions --user <email> --table <name|json-array>
- *   node run.js query --user <email> --reason <text> --sql <sql>
+ *   node run.js tables [--detailed]
+ *   node run.js schema --table <name|json-array>
+ *   node run.js permissions --table <name|json-array>
+ *   node run.js query --reason <text> --sql <sql>
  *                     [--export] [--view-results] [--limit N] [--offset N]
- *   node run.js lesson-save --user <email> --lesson <text> --tables <json>
+ *   node run.js lesson-save --lesson <text> --tables <json>
  *                           --task <text> --category <enum>
  *                           --significance <1-10> [--columns <json>]
- *   node run.js lesson-delete --user <email> --uuid <id>
- *   node run.js lesson-check --user <email> --task <text> --tables <json>
+ *   node run.js lesson-delete --uuid <id>
+ *   node run.js lesson-check --task <text> --tables <json>
  *                            [--columns <json>]
- *   node run.js lesson-rate --user <email> --id <int>
+ *   node run.js lesson-rate --id <int>
  *                           --rating <helpful|unhelpful> [--feedback <text>]
  *
  * Exit codes:
@@ -36,7 +35,7 @@
 const {
   fail,
   parseArgs,
-  validateUserEmail,
+  rejectAuthorityArgs,
   callMcp,
   findUnqualifiedNumericCasts,
 } = require('./common');
@@ -44,7 +43,7 @@ const {
 function usage() {
   process.stdout.write(
     [
-      'Usage: node run.js <subcommand> --user <email> [...]',
+      'Usage: node run.js <subcommand> [...]',
       '',
       'Typed subcommands (validated args, recommended for known tools):',
       '  tables [--detailed]',
@@ -122,14 +121,13 @@ async function main() {
     process.exit(0);
   }
 
-  validateUserEmail(args.user);
-  const ownerEmail = args.user;
+  rejectAuthorityArgs(args);
 
   switch (subcommand) {
     case 'list': {
       // Discovery — surface the MCP server's current tool catalog so the
       // agent can detect new tools or schema changes without a redeploy.
-      await callMcp('tools/list', {}, ownerEmail);
+      await callMcp('tools/list', {});
       return;
     }
 
@@ -144,7 +142,7 @@ async function main() {
         checkSqlOrFail(toolArgs.sql_query);
       }
       const params = { name: toolName, arguments: toolArgs };
-      await callMcp('tools/call', params, ownerEmail);
+      await callMcp('tools/call', params);
       return;
     }
 
@@ -153,7 +151,7 @@ async function main() {
         name: 'list_available_tables',
         arguments: { detailed: !!args.detailed },
       };
-      await callMcp('tools/call', params, ownerEmail);
+      await callMcp('tools/call', params);
       return;
     }
 
@@ -168,7 +166,7 @@ async function main() {
         name: 'inspect_table_schema',
         arguments: { table_name: arg },
       };
-      await callMcp('tools/call', params, ownerEmail);
+      await callMcp('tools/call', params);
       return;
     }
 
@@ -182,7 +180,7 @@ async function main() {
         name: 'view_table_permissions',
         arguments: { table_name: arg },
       };
-      await callMcp('tools/call', params, ownerEmail);
+      await callMcp('tools/call', params);
       return;
     }
 
@@ -200,7 +198,7 @@ async function main() {
       if (limit !== undefined) toolArgs.limit = limit;
       if (offset !== undefined) toolArgs.offset = offset;
       const params = { name: 'query_data', arguments: toolArgs };
-      await callMcp('tools/call', params, ownerEmail);
+      await callMcp('tools/call', params);
       return;
     }
 
@@ -221,7 +219,7 @@ async function main() {
       };
       if (columnsInvolved !== undefined) toolArgs.columns_involved = columnsInvolved;
       const params = { name: 'save_lesson', arguments: toolArgs };
-      await callMcp('tools/call', params, ownerEmail);
+      await callMcp('tools/call', params);
       return;
     }
 
@@ -231,7 +229,7 @@ async function main() {
         name: 'delete_lesson',
         arguments: { lesson_uuid: uuid },
       };
-      await callMcp('tools/call', params, ownerEmail);
+      await callMcp('tools/call', params);
       return;
     }
 
@@ -243,7 +241,7 @@ async function main() {
         toolArgs.columns = parseJsonArg('columns', args.columns);
       }
       const params = { name: 'check_lessons', arguments: toolArgs };
-      await callMcp('tools/call', params, ownerEmail);
+      await callMcp('tools/call', params);
       return;
     }
 
@@ -260,7 +258,7 @@ async function main() {
         toolArgs.feedback = args.feedback;
       }
       const params = { name: 'rate_lesson', arguments: toolArgs };
-      await callMcp('tools/call', params, ownerEmail);
+      await callMcp('tools/call', params);
       return;
     }
 

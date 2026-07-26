@@ -20,6 +20,7 @@ import { execSync } from 'child_process';
 import {
   installSkillDependencies,
   auditInstalledDeps,
+  hashDependencyLockfile,
   downloadSkillFromS3,
 } from '../index';
 
@@ -106,21 +107,21 @@ describe('auditInstalledDeps (REV-INFRA-062)', () => {
     expect(auditInstalledDeps('/work', collectingLogger([]), fakeExec)).toEqual([]);
   });
 
-  test('unparseable audit output degrades gracefully with a WARNING (never a silent pass)', () => {
+  test('unparseable audit output blocks promotion', () => {
     const warnings: Warn[] = [];
     const fakeExec = () => 'npm error code ENOLOCK\nThis is not JSON';
-    const out = auditInstalledDeps('/work', collectingLogger(warnings), fakeExec);
-    expect(out).toEqual([]);
+    expect(() => auditInstalledDeps('/work', collectingLogger(warnings), fakeExec))
+      .toThrow(/parseable JSON/);
     expect(warnings.some((w) => /not evaluated/i.test(w.message))).toBe(true);
   });
 
-  test('audit tooling throwing (no stdout) degrades gracefully with a WARNING', () => {
+  test('audit tooling throwing without stdout blocks promotion', () => {
     const warnings: Warn[] = [];
     const fakeExec = () => {
       throw new Error('spawn npm ENOENT');
     };
-    const out = auditInstalledDeps('/work', collectingLogger(warnings), fakeExec);
-    expect(out).toEqual([]);
+    expect(() => auditInstalledDeps('/work', collectingLogger(warnings), fakeExec))
+      .toThrow(/could not run/);
     expect(warnings.some((w) => /not evaluated/i.test(w.message))).toBe(true);
   });
 
@@ -138,12 +139,41 @@ describe('auditInstalledDeps (REV-INFRA-062)', () => {
     expect(warnings.length).toBe(0);
   });
 
-  test('a top-level `error` field (registry/auth failure) degrades gracefully with a WARNING, never a silent clean', () => {
+  test('a top-level registry/auth error blocks promotion', () => {
     const warnings: Warn[] = [];
     const fakeExec = () => JSON.stringify({ error: { code: 'E401', summary: 'unauthorized' } });
-    const out = auditInstalledDeps('/work', collectingLogger(warnings), fakeExec);
-    expect(out).toEqual([]);
+    expect(() => auditInstalledDeps('/work', collectingLogger(warnings), fakeExec))
+      .toThrow(/did not evaluate/);
     expect(warnings.some((w) => /not evaluated/i.test(w.message))).toBe(true);
+  });
+
+  test('records the exact installed lockfile digest as audit evidence', () => {
+    const dir = makeSkillDir();
+    try {
+      const lockfile = '{"lockfileVersion":3,"packages":{"":{"name":"clean"}}}';
+      fs.writeFileSync(path.join(dir, 'package-lock.json'), lockfile);
+      expect(hashDependencyLockfile(dir)).toBe(
+        '0db61f8d84ddaefa04349de1eade84a0493951e50c300610efc24d13c0fa1ecd',
+      );
+      fs.writeFileSync(
+        path.join(dir, 'package-lock.json'),
+        `${lockfile}\n`,
+      );
+      expect(hashDependencyLockfile(dir)).not.toBe(
+        '0db61f8d84ddaefa04349de1eade84a0493951e50c300610efc24d13c0fa1ecd',
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('blocks promotion evidence when npm produced no lockfile', () => {
+    const dir = makeSkillDir();
+    try {
+      expect(() => hashDependencyLockfile(dir)).toThrow(/package-lock\.json/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

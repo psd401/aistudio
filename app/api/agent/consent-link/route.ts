@@ -2,7 +2,7 @@
  * Agent Consent Link Generator
  *
  * POST /api/agent/consent-link
- * Auth: Bearer {shared-secret} from psd-agent/{env}/internal-api-key
+ * Auth: short-lived router-signed invocation context
  *
  * Mints a signed, short-lived consent URL that the agent can give to a user
  * in Google Chat. The user clicks it to start the Google OAuth flow.
@@ -17,8 +17,7 @@ import { executeQuery } from "@/lib/db/drizzle-client"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces"
 import { sql } from "drizzle-orm"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
-import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
-import { validateInternalSecret } from "@/lib/agent-workspace/internal-auth"
+import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-context"
 import { randomBytes } from "node:crypto"
 
 const log = createLogger({ module: "agent-consent-link" })
@@ -26,9 +25,8 @@ const log = createLogger({ module: "agent-consent-link" })
 /**
  * The credential slot a consent link is capturing.
  *
- * `agent_account` is RETIRED (#1232): the agent slot no longer uses a
- * user-facing consent flow — access tokens are minted on demand by the DWD
- * token broker (POST /api/agent/workspace-token). This route rejects it.
+ * `agent_account` is RETIRED (#1232): Workspace operations now execute only
+ * through the owner-bound operation broker. This route rejects the old slot.
  */
 type Kind = "user_account" | "cognito_data" | "plaud" | "canva"
 const ALLOWED_KINDS: Kind[] = ["user_account", "cognito_data", "plaud", "canva"]
@@ -87,17 +85,16 @@ async function checkRateLimit(ownerEmail: string): Promise<boolean> {
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
 
-  // Auth
-  if (!(await validateInternalSecret(request))) {
-    log.warn("Unauthorized consent-link request", { requestId })
-    return NextResponse.json(
-      { error: "Unauthorized" },
-      { status: 401 }
-    )
+  const invocationContext = await verifyAgentInvocationContext(request, {
+    allowedModes: ["owner", "scheduled"],
+  })
+  if (!invocationContext) {
+    log.warn("Consent-link request has no authorized owner context", { requestId })
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
   // Parse body
-  let body: { ownerEmail?: string; kind?: string }
+  let body: unknown
   try {
     body = await request.json()
   } catch {
@@ -107,23 +104,31 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  const { ownerEmail } = body
-  if (!ownerEmail || typeof ownerEmail !== "string" || !SAFE_EMAIL_RE.test(ownerEmail)) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
     return NextResponse.json(
-      { error: "ownerEmail is required and must be a valid email" },
+      { error: "Request body must be an object" },
       { status: 400 }
     )
   }
+  const requestBody = body as Record<string, unknown>
+  for (const field of ["ownerEmail", "userEmail", "userId"] as const) {
+    if (Object.prototype.hasOwnProperty.call(requestBody, field)) {
+      return NextResponse.json(
+        { error: "Owner selectors are not accepted" },
+        { status: 400 }
+      )
+    }
+  }
+  const ownerEmail = invocationContext.ownerEmail
 
   // The agent slot no longer has a consent flow (#1232) — reject it explicitly
-  // with a pointer to the broker so an un-updated skill fails loudly rather than
-  // minting a dead nonce.
-  if (body.kind === "agent_account") {
+  // so an un-updated skill fails loudly rather than minting a dead nonce.
+  if (requestBody.kind === "agent_account") {
     return NextResponse.json(
       {
         error:
-          "agent_account consent is retired. The agent slot now uses the DWD token broker " +
-          "(POST /api/agent/workspace-token) — no consent link is issued for it.",
+          "agent_account consent is retired. Workspace operations use the " +
+          "owner-bound operation broker; no consent link is issued for this slot.",
       },
       { status: 400 }
     )
@@ -131,15 +136,21 @@ export async function POST(request: NextRequest) {
 
   // Validate kind. Default to 'user_account' (the only Google-Workspace consent
   // slot that remains) for skills that don't pass kind explicitly.
-  if (body.kind !== undefined && !(ALLOWED_KINDS as readonly string[]).includes(body.kind)) {
+  if (
+    requestBody.kind !== undefined &&
+    (typeof requestBody.kind !== "string" ||
+      !(ALLOWED_KINDS as readonly string[]).includes(requestBody.kind))
+  ) {
     return NextResponse.json(
       { error: "kind must be 'user_account', 'cognito_data', 'plaud', or 'canva' if provided" },
       { status: 400 }
     )
   }
   const kind: Kind =
-    body.kind !== undefined && (ALLOWED_KINDS as readonly string[]).includes(body.kind)
-      ? (body.kind as Kind)
+    requestBody.kind !== undefined &&
+    typeof requestBody.kind === "string" &&
+    (ALLOWED_KINDS as readonly string[]).includes(requestBody.kind)
+      ? (requestBody.kind as Kind)
       : "user_account"
 
   // Rate limit

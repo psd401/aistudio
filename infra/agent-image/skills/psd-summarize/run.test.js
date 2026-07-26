@@ -14,30 +14,40 @@
 'use strict';
 
 const { test, expect, afterEach } = require('bun:test');
+const http = require('node:http');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 let server;
+let serverPort;
 let capturedBody;
 
 function startCaptureServer() {
-  return new Promise((resolve) => {
-    server = Bun.serve({
-      port: 0,
-      async fetch(req) {
-        capturedBody = await req.json();
-        return new Response(
-          JSON.stringify({ content: [{ type: 'text', text: 'summary text' }] }),
-          { headers: { 'content-type': 'application/json' } },
-        );
-      },
+  return new Promise((resolve, reject) => {
+    server = http.createServer((req, res) => {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        capturedBody = JSON.parse(body);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          content: [{ type: 'text', text: 'summary text' }],
+        }));
+      });
     });
-    resolve(server);
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      serverPort = typeof address === 'object' && address ? address.port : undefined;
+      resolve(server);
+    });
   });
 }
 
 afterEach(() => {
-  if (server) { server.stop(true); server = undefined; }
+  if (server) { server.close(); server = undefined; }
+  serverPort = undefined;
   capturedBody = undefined;
 });
 
@@ -46,8 +56,7 @@ function runSummarize({ stdin }) {
     const child = spawn('node', [path.join(__dirname, 'run.js')], {
       env: {
         ...process.env,
-        AWS_BEARER_TOKEN_BEDROCK: 'test-bearer-token',
-        MANTLE_ANTHROPIC_URL: `http://127.0.0.1:${server.port}/anthropic/v1/messages`,
+        MANTLE_ANTHROPIC_URL: `http://127.0.0.1:${serverPort}/anthropic/v1/messages`,
       },
     });
     let stdout = '';

@@ -1,40 +1,33 @@
 #!/usr/bin/env node
 /**
- * list.js — credentials.list
- * Usage: node list.js --user <email>
- *
- * Lists all credentials the user has access to (names and scopes,
- * never values).
+ * List credential names available to the signed invocation owner.
+ * Usage: node list.js
  */
 
 'use strict';
 
 const {
   fail,
-  validateEnv,
-  validateUserEmail,
   parseArgs,
+  rejectAuthorityArgs,
   emit,
-  listCredentials,
+  requestCredentialOperation,
 } = require('./common');
 
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
-    console.log('Usage: list.js --user <email>');
+    console.log('Usage: list.js');
     process.exit(0);
   }
-  validateEnv();
-  validateUserEmail(args.user);
-
+  rejectAuthorityArgs(args);
   try {
-    const credentials = await listCredentials(args.user);
-    emit({ credentials, count: credentials.length });
-  } catch (err) {
-    fail(`Failed to list credentials: ${err.message}`);
+    emit(await requestCredentialOperation({ operation: 'list' }));
+  } catch (error) {
+    fail(`Failed to list credentials: ${error.message}`);
   }
 }
 
-main().catch((err) => {
-  fail(err instanceof Error ? err.message : String(err));
+main().catch((error) => {
+  fail(error instanceof Error ? error.message : String(error));
 });

@@ -131,6 +131,9 @@
     "134-oauth-first-party-clients.sql",
     "135-atrium-asset-initiation-idempotency.sql",
     "136-google-content-connectors.sql",
-    "137-nexus-conversation-retention.sql"
+    "137-nexus-conversation-retention.sql",
+    "138-api-rate-limit-reservations.sql",
+    "139-deep-research-reservations.sql",
+    "140-agentic-cost-reservations.sql"
   ]
 }

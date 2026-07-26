@@ -18,6 +18,7 @@
 import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { execSync, type ExecSyncOptionsWithStringEncoding } from 'child_process';
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Handler } from 'aws-lambda';
@@ -156,6 +157,9 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
 
     // 4. Run npm install in sandbox
     const packageJsonPath = path.join(workDir, 'package.json');
+    let dependencyAuditEvidence:
+      | { status: 'not_applicable' }
+      | { status: 'clean'; lockfileSha256: string };
     if (fs.existsSync(packageJsonPath)) {
       try {
         installSkillDependencies(workDir);
@@ -184,7 +188,30 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
       // (ENOLOCK) before install, which is why the pre-install scan could never
       // catch dependency CVEs (REV-INFRA-062). A high/critical advisory flags
       // the skill and skips promotion — nothing has been uploaded yet.
-      const npmAudit = auditInstalledDeps(workDir, log);
+      let npmAudit: { severity: string; title: string }[];
+      let lockfileSha256: string;
+      try {
+        npmAudit = auditInstalledDeps(workDir, log);
+        lockfileSha256 = hashDependencyLockfile(workDir);
+      } catch (auditErr: unknown) {
+        const message = auditErr instanceof Error ? auditErr.message : String(auditErr);
+        const auditFindings: ScanFindings = {
+          secrets: [],
+          pii: [],
+          npmAudit: [],
+          skillMdLint: [`Dependency audit unavailable: ${message.substring(0, 500)}`],
+          summary: 'dependency audit unavailable',
+        };
+        await updateSkillStatus(event.skillId, 'flagged', auditFindings);
+        await writeAuditLog(event.skillId, 'audit_error', event.actorUserId, {
+          error: message.substring(0, 500),
+        });
+        return {
+          status: 'audit_error',
+          skillId: event.skillId,
+          findings: auditFindings,
+        };
+      }
       if (npmAudit.some(a => a.severity === 'critical' || a.severity === 'high')) {
         const auditFindings: ScanFindings = {
           secrets: [],
@@ -196,6 +223,11 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
         await updateSkillStatus(event.skillId, 'flagged', auditFindings);
         await writeAuditLog(event.skillId, 'scan_flagged', event.actorUserId, {
           findings: auditFindings.summary,
+          dependencyAudit: {
+            status: 'vulnerable',
+            lockfileSha256,
+            findings: npmAudit,
+          },
         });
 
         return {
@@ -204,6 +236,9 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
           findings: auditFindings,
         };
       }
+      dependencyAuditEvidence = { status: 'clean', lockfileSha256 };
+    } else {
+      dependencyAuditEvidence = { status: 'not_applicable' };
     }
 
     // 5. Upload built skill to destination prefix
@@ -220,6 +255,7 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
     const action = event.scope === 'shared' ? 'promoted_to_shared' : 'auto_promoted';
     await writeAuditLog(event.skillId, action, event.actorUserId, {
       destinationPrefix: event.destinationPrefix,
+      dependencyAudit: dependencyAuditEvidence,
     });
 
     return {
@@ -495,11 +531,8 @@ export function installSkillDependencies(workDir: string): void {
  * exist — `npm audit` is a no-op (ENOLOCK) without them, which is why the
  * pre-install scan could never see dependency vulns (REV-INFRA-062).
  *
- * Graceful degradation (documented behavior): if the audit tooling itself
- * cannot produce parseable JSON (npm/network error), we log a WARNING and
- * return []. A tooling error is therefore VISIBLE in logs, never a silent
- * "clean" — but it does not hard-block promotion, matching the best-effort
- * intent of the other scan steps. `exec` is injectable for testing.
+ * Audit tooling failures throw and block promotion. An unevaluated audit is not
+ * equivalent to a clean dependency tree. `exec` is injectable for testing.
  */
 export function auditInstalledDeps(
   dir: string,
@@ -534,7 +567,7 @@ export function auditInstalledDeps(
       log.warn('npm audit could not run; dependency vulnerabilities were NOT evaluated', {
         error: message.substring(0, 300),
       });
-      return results;
+      throw new Error(`Dependency audit could not run: ${message}`);
     }
   }
 
@@ -543,7 +576,7 @@ export function auditInstalledDeps(
     audit = JSON.parse(auditOutput);
   } catch {
     log.warn('npm audit produced no parseable JSON; dependency vulnerabilities were NOT evaluated');
-    return results;
+    throw new Error('Dependency audit produced no parseable JSON');
   }
 
   // A registry/auth failure can still exit with valid JSON that carries a
@@ -556,7 +589,7 @@ export function auditInstalledDeps(
     log.warn('npm audit did not evaluate dependencies; dependency vulnerabilities were NOT evaluated', {
       error: audit.error ? JSON.stringify(audit.error).substring(0, 300) : undefined,
     });
-    return results;
+    throw new Error('Dependency audit did not evaluate dependencies');
   }
 
   const vulns = audit.vulnerabilities;
@@ -566,6 +599,15 @@ export function auditInstalledDeps(
     }
   }
   return results;
+}
+
+/** Return auditable evidence for the exact dependency graph that was scanned. */
+export function hashDependencyLockfile(dir: string): string {
+  const lockfilePath = path.join(dir, 'package-lock.json');
+  if (!fs.existsSync(lockfilePath)) {
+    throw new Error('Dependency audit completed without package-lock.json evidence');
+  }
+  return createHash('sha256').update(fs.readFileSync(lockfilePath)).digest('hex');
 }
 
 async function updateSkillStatus(

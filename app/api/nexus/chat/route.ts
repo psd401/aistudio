@@ -10,6 +10,7 @@ import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { getContentSafetyService } from '@/lib/safety';
 import type { TokenMapping } from '@/lib/safety/types';
+import { runRequiredSecurityScan } from '@/lib/security/required-security-scan';
 import {
   createTokenMappingSink,
   type TokenMappingSink,
@@ -706,6 +707,23 @@ async function handleDeepResearch(params: {
   const { conversationId, conversationTitle } = convSetup;
   await persistLastUserMessage({ conversationId, messages, dbModelId });
 
+  const { reserveDeepResearch, releaseDeepResearch } =
+    await import('@/lib/ai/deep-research-budget');
+  const reservation = await reserveDeepResearch(userId);
+  if (!reservation.allowed) {
+    timer({ status: 'rate_limited', reason: reservation.reason });
+    return new Response(
+      JSON.stringify({
+        error: 'Deep Research capacity or cost budget is currently exhausted. Try again later.',
+        requestId,
+      }),
+      {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'Retry-After': '60' },
+      }
+    );
+  }
+
   const messageId = `dr-${Date.now()}`;
   const isNewConversation = !existingConversationId;
 
@@ -811,6 +829,16 @@ async function handleDeepResearch(params: {
             writer.write({ type: 'text-end', id: messageId });
           }
           timer({ status: 'error', conversationId, errType });
+        } finally {
+          await releaseDeepResearch(reservation.leaseId).catch((releaseError: unknown) => {
+            log.error('Failed to release Deep Research concurrency lease', {
+              leaseId: reservation.leaseId,
+              error:
+                releaseError instanceof Error
+                  ? releaseError.message
+                  : String(releaseError),
+            });
+          });
         }
       },
     }),
@@ -1291,6 +1319,63 @@ function collectAttachmentTexts(
   return out;
 }
 
+function applyAttachmentTokenMappings(
+  messagesWithParts: UIMessage[],
+  tokens: TokenMapping[],
+): void {
+  if (tokens.length === 0) return;
+  const reversedIdx = [...messagesWithParts].reverse().findIndex(
+    (message) => message.role === 'user'
+  );
+  if (reversedIdx === -1) return;
+  const lastUserIdx = messagesWithParts.length - 1 - reversedIdx;
+  const lastUserMsg = messagesWithParts[lastUserIdx];
+  if (!Array.isArray(lastUserMsg.parts)) return;
+  const attachmentTexts = collectAttachmentTexts(lastUserMsg.parts);
+  const replacements = new Map(
+    tokens.map((token) => [token.original, token.placeholder])
+  );
+  const updatedParts = [...lastUserMsg.parts];
+
+  for (const { partIdx, text } of attachmentTexts) {
+    let tokenizedText = text;
+    for (const [original, placeholder] of replacements) {
+      tokenizedText = tokenizedText.replaceAll(original, placeholder);
+    }
+    if (tokenizedText === text) continue;
+
+    const originalPart = updatedParts[partIdx] as Record<string, unknown>;
+    const field = originalPart.content !== undefined ? 'content' : 'data';
+    const rawValue = originalPart[field];
+    if (typeof rawValue === 'string') {
+      updatedParts[partIdx] = {
+        ...originalPart,
+        [field]: tokenizedText,
+      } as typeof updatedParts[number];
+    } else if (Array.isArray(rawValue)) {
+      const tokenizedArray = rawValue.map((contentPart) => {
+        const contentRecord = contentPart as Record<string, unknown>;
+        if (
+          contentRecord.type === 'text'
+          && typeof contentRecord.text === 'string'
+        ) {
+          let tokenizedSegment = contentRecord.text;
+          for (const [original, placeholder] of replacements) {
+            tokenizedSegment = tokenizedSegment.replaceAll(original, placeholder);
+          }
+          return { ...contentRecord, text: tokenizedSegment };
+        }
+        return contentPart;
+      });
+      updatedParts[partIdx] = {
+        ...originalPart,
+        [field]: tokenizedArray,
+      } as typeof updatedParts[number];
+    }
+  }
+  messagesWithParts[lastUserIdx] = { ...lastUserMsg, parts: updatedParts };
+}
+
 /**
  * Scan PII in file / document attachment parts of the last user message BEFORE
  * processMessagesWithAttachments moves their content to S3. Returns token
@@ -1331,53 +1416,20 @@ async function scanAttachmentPII(
     combinedLength: combinedText.length,
   });
 
-  const scanResult = await contentSafetyService.processInput(combinedText, sessionId)
-    .catch((err: unknown) => {
-      log.warn('Pre-flight attachment PII scan failed — continuing without tokenization', {
+  const scanResult = await runRequiredSecurityScan(
+    () => contentSafetyService.processInput(combinedText, sessionId),
+    (err: unknown) => {
+      log.error('Pre-flight attachment PII scan failed — attachment quarantined', {
         requestId,
         error: err instanceof Error ? err.message : String(err),
       });
-      return null;
-    });
+    },
+    'Attachment privacy scan failed; the attachment was not processed',
+  );
 
-  if (!scanResult || !scanResult.tokens || scanResult.tokens.length === 0) return [];
+  if (!scanResult.tokens || scanResult.tokens.length === 0) return [];
 
-  // Build a quick-lookup map: original value → placeholder string (e.g. "[PII:uuid]")
-  // TokenMapping.token is the raw UUID; TokenMapping.placeholder is the formatted
-  // [PII:uuid] string that the model receives and the detokenizer looks up.
-  const replacements = new Map(scanResult.tokens.map(t => [t.original, t.placeholder]));
-
-  // Apply tokenization to each attachment part text in-place
-  const updatedParts = [...lastUserMsg.parts];
-  for (const { partIdx, text } of attachmentTexts) {
-    let tokenizedText = text;
-    for (const [original, placeholder] of replacements) {
-      tokenizedText = tokenizedText.replaceAll(original, placeholder);
-    }
-    if (tokenizedText === text) continue;
-
-    const originalPart = updatedParts[partIdx] as Record<string, unknown>;
-    // Preserve whichever field held the text (content vs data)
-    const field = originalPart.content !== undefined ? 'content' : 'data';
-    const rawValue = originalPart[field];
-
-    if (typeof rawValue === 'string') {
-      updatedParts[partIdx] = { ...originalPart, [field]: tokenizedText } as typeof updatedParts[number];
-    } else if (Array.isArray(rawValue)) {
-      const tokenizedArray = rawValue.map(cp => {
-        const cpObj = cp as Record<string, unknown>;
-        if (cpObj.type === 'text' && typeof cpObj.text === 'string') {
-          let tokenizedSegment = cpObj.text;
-          for (const [orig, ph] of replacements) tokenizedSegment = tokenizedSegment.replaceAll(orig, ph);
-          return { ...cpObj, text: tokenizedSegment };
-        }
-        return cp;
-      });
-      updatedParts[partIdx] = { ...originalPart, [field]: tokenizedArray } as typeof updatedParts[number];
-    }
-  }
-
-  messagesWithParts[lastUserIdx] = { ...lastUserMsg, parts: updatedParts };
+  applyAttachmentTokenMappings(messagesWithParts, scanResult.tokens);
   log.info('Pre-flight attachment PII tokenized', {
     requestId,
     tokenCount: scanResult.tokens.length,
@@ -1861,6 +1913,19 @@ export async function POST(req: Request) {
     const messagesWithParts = convertMessagesToPartsFormat(
       safeModelMessages as UIMessage[]
     );
+    // This security gate precedes binding, message persistence, attachment
+    // upload, and provider/tool dispatch. Scanner failure therefore leaves no
+    // raw attachment text in durable storage.
+    const precomputedInputTokenMappings = await scanAttachmentPII(
+      messagesWithParts, session.sub, log, requestId
+    );
+    const persistenceMessagesWithParts = convertMessagesToPartsFormat(
+      safePersistenceMessages as UIMessage[]
+    );
+    applyAttachmentTokenMappings(
+      persistenceMessagesWithParts,
+      precomputedInputTokenMappings,
+    );
     const bindingError = await bindAttachmentReferencesOrError({
       ownerId: userId,
       conversationId,
@@ -1873,7 +1938,10 @@ export async function POST(req: Request) {
     if (bindingError) return bindingError;
     await persistLastUserMessage({
       conversationId,
-      messages: safePersistenceMessages,
+      messages:
+        persistenceMessagesWithParts as z.infer<
+          typeof ChatRequestSchema
+        >['messages'],
       dbModelId,
     });
     const attachmentRepositoryIds =
@@ -1892,9 +1960,6 @@ export async function POST(req: Request) {
           tokenMappingSink: attachmentTokenMappingSink,
         })
       : {};
-    const precomputedInputTokenMappings = await scanAttachmentPII(
-      messagesWithParts, session.sub, log, requestId
-    );
     const { lightweightMessages } = await processMessagesWithAttachments(
       conversationId,
       messagesWithParts

@@ -14,14 +14,11 @@ Design (why this differs from upstream):
   to KEYLESS sources only: Hacker News, Reddit, arXiv, GitHub, and Google News.
 - Pure Python stdlib (urllib + xml.etree + json) — NO new pip dependency, so the
   image footprint stays lean and the AgentCore Firecracker microVM boot is not
-  put at risk (the matplotlib/pymupdf1.x precedent). boto3 (already baked into
-  the venv) is used only for the optional S3 HTML upload.
-- No secret reads from env/.env/~/.config. The only environment reads are
-  non-secret deployment config (WORKSPACE_BUCKET, AWS_REGION) for the optional
-  S3 upload. GitHub optionally borrows the container's `gh auth token` for a
-  higher rate limit, but every source works without any key. If a paid source
-  is ever provisioned, its key must come from
-  `psd-credentials get --shared --name <key>` — never the environment.
+  put at risk (the matplotlib/pymupdf1.x precedent). Optional HTML artifacts
+  upload through the signed owner-bound storage broker.
+- No secret reads from env/.env/~/.config. GitHub and artifact operations cross
+  signed, allowlisted web brokers; every source works without a model-visible
+  key.
 
 The engine is deliberately synthesis-light: it fetches, filters to the window,
 ranks by each source's native engagement signal (or recency), de-duplicates, and
@@ -789,31 +786,19 @@ class UploadError(Exception):
 
 
 def upload_html(html_text, user_email):
-    """Upload the rendered HTML to S3 public-by-link and return (url, key).
+    """Upload rendered HTML through the owner-bound broker and return (url, key).
     Raises UploadError so the caller controls fail-vs-degrade per format."""
-    bucket = os.environ.get("WORKSPACE_BUCKET")
-    if not bucket:
-        raise UploadError("misconfigured", "WORKSPACE_BUCKET env var not set — cannot upload HTML artifact")
-    region = os.environ.get("AWS_REGION", "us-east-1")
     try:
-        import boto3  # baked into the container venv
-    except ImportError:
-        raise UploadError("misconfigured", "boto3 not available in the runtime — cannot upload HTML artifact")
-    key = f"public-images/{user_email}/{uuid.uuid4()}.html"
-    try:
-        s3 = boto3.client("s3", region_name=region)
-        s3.put_object(
-            Bucket=bucket,
-            Key=key,
-            Body=html_text.encode("utf-8"),
-            ContentType="text/html; charset=utf-8",
-            Metadata={"generated_by": "psd-last30days"},
+        sys.path.insert(0, "/app")
+        from artifact_publisher import publish_artifact
+        _ = user_email
+        return publish_artifact(
+            html_text.encode("utf-8"),
+            ".html",
+            "text/html; charset=utf-8",
         )
     except Exception as exc:  # noqa: BLE001 — botocore ClientError, network failure, etc.
-        raise UploadError("upstream_error", f"failed to upload HTML artifact to S3: {exc}")
-    encoded_key = "/".join(urllib.parse.quote(seg) for seg in key.split("/"))
-    url = f"https://{bucket}.s3.{region}.amazonaws.com/{encoded_key}"
-    return url, key
+        raise UploadError("upstream_error", f"failed to publish HTML artifact: {exc}")
 
 
 # --------------------------------------------------------------------------- #

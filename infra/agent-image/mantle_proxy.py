@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Transparent logging proxy for Bedrock Mantle.
+Transparent logging proxy for the owner-bound AI Studio model broker.
 
 Why: we need ground-truth visibility into what OpenClaw actually sends to
 Mantle. OpenClaw's logs don't include request bodies, and the "!"-loop
 degeneracy we see isn't reproducible via direct curl calls with the same
 apparent payload. This proxy sits on 127.0.0.1:18791, logs request +
-response to stdout (CloudWatch), and forwards byte-for-byte to
-https://bedrock-mantle.us-east-1.api.aws.
+response to stdout (CloudWatch), and forwards byte-for-byte to the trusted web
+tier. The web tier holds the provider credential and enforces the signed owner
+context plus a model/output allowlist.
 
 If this process dies, OpenClaw's requests also fail — so the entrypoint
 should (a) verify the proxy's /health before starting the gateway and
@@ -41,7 +42,10 @@ def j(msg: str, **kw) -> str:
     return json.dumps(payload, default=str)
 
 
-UPSTREAM = "https://bedrock-mantle.us-east-1.api.aws"
+UPSTREAM = (
+    os.environ.get("APP_BASE_URL", "").rstrip("/")
+    + "/api/agent/model-proxy"
+)
 
 # ---------------------------------------------------------------------------
 # Cumulative token-usage accounting (issue #1083)
@@ -970,13 +974,33 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
     _log_request_body(req_id, req_body, parsed)
 
-    # Forward — preserve auth + content-type, drop hop-by-hop headers
+    # Forward content headers but strip the model-facing placeholder. The web
+    # broker authenticates the opaque signed invocation context and holds the
+    # provider credential.
     fwd_headers = {}
     for k, v in request.headers.items():
         kl = k.lower()
-        if kl in {"host", "content-length", "connection", "transfer-encoding"}:
+        if kl in {
+            "host",
+            "content-length",
+            "connection",
+            "transfer-encoding",
+            "x-api-key",
+        }:
             continue
         fwd_headers[k] = v
+    context_path = os.environ.get(
+        "PSD_INVOCATION_CONTEXT_FILE",
+        "/tmp/psd-agent-invocation-context",
+    )
+    try:
+        with open(context_path, "r", encoding="ascii") as handle:
+            fwd_headers["X-Agent-Invocation-Context"] = handle.read().strip()
+    except OSError:
+        return web.json_response(
+            {"error": "Signed invocation context is unavailable"},
+            status=503,
+        )
 
     timeout = ClientTimeout(total=300, sock_read=300, sock_connect=30)
 
@@ -1359,6 +1383,8 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
 
 def main() -> None:
+    if not UPSTREAM.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+        raise RuntimeError("APP_BASE_URL is not a trusted model broker URL")
     app = web.Application(client_max_size=50 * 1024 * 1024)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/usage", handle_usage)

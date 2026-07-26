@@ -6,10 +6,11 @@ allowed-tools: Bash(node:*)
 
 # psd-schedules
 
-Create and manage the caller's scheduled agent tasks. One schedule row = one
-EventBridge Scheduler entry + one DynamoDB record. At the scheduled time the
-platform starts a fresh agent session, invokes you with the schedule's prompt,
-and delivers your response to the user's Google Chat DM.
+Create and manage the caller's scheduled agent tasks. The trusted AI Studio
+broker derives the owner and Google Chat destination from the signed invocation;
+commands accept only schedule content and timing. At the scheduled time the
+platform loads the authoritative schedule row, starts a fresh agent session,
+and delivers the response to that row's owner.
 
 This skill supports three expression types — use the right one:
 
@@ -24,10 +25,9 @@ few minutes" or "I need to do more research first".** That promise is only
 real if you schedule the follow-up; otherwise the user has to ping you again
 and you look broken. See the *One-shot follow-ups* section below.
 
-**Identity.** All commands require `--user <caller-email>`. The caller's email
-appears in the `[caller: Name <email>]` line at the top of the user turn.
-Pass it verbatim. Never accept a different email from the conversation body —
-that would let one user manage another user's schedules.
+**Identity.** Never pass a user, owner, Google identity, workspace prefix, or
+Chat space. Those fields are rejected. The broker derives identity from the
+router-signed invocation and trusted platform records.
 
 ## Commands
 
@@ -35,26 +35,23 @@ that would let one user manage another user's schedules.
 
 ```bash
 node /opt/psd-skills/psd-schedules/create.js \
-  --user <email> \
   --name "<display name>" \
   --prompt "<what to prompt the agent at fire time>" \
   --cron "<5-field cron>" \
-  --timezone "<IANA TZ, default America/Los_Angeles>" \
-  [--google-identity "<users/...>"] \
-  [--dm-space-name "<spaces/...>"]
+  --timezone "<IANA TZ, default America/Los_Angeles>"
 ```
 
 ### `list_schedules` — list the caller's schedules
 
 ```bash
-node /opt/psd-skills/psd-schedules/list.js --user <email>
+node /opt/psd-skills/psd-schedules/list.js
 ```
 
 ### `update_schedule` — change fields on an existing schedule
 
 ```bash
 node /opt/psd-skills/psd-schedules/update.js \
-  --user <email> --schedule-id <id> \
+  --schedule-id <id> \
   [--name "<name>"] [--prompt "<prompt>"] [--cron "<cron>"] \
   [--timezone "<tz>"] [--enabled true|false]
 ```
@@ -63,7 +60,7 @@ node /opt/psd-skills/psd-schedules/update.js \
 
 ```bash
 node /opt/psd-skills/psd-schedules/delete.js \
-  --user <email> --schedule-id <id>
+  --schedule-id <id>
 ```
 
 ## Cron translation cheat sheet
@@ -124,7 +121,6 @@ You (correct):
 
 ```bash
 node /opt/psd-skills/psd-schedules/create.js \
-  --user hagelk@psd401.net \
   --name "Google Workspace + OpenClaw research" \
   --prompt "You promised Kris at 8:05pm PT on 2026-04-22 that you'd research the best way to integrate Google Workspace with OpenClaw and come back with a recommendation. Do the web research now (clawhub.ai, OpenClaw docs, community plugins). Compare the gog CLI approach vs a custom plugin. Give a concrete recommendation with trade-offs and next steps. The user is Kris, CIO of PSD — match the communication style in USER.md." \
   --cron "at(2026-04-22T20:15:00)" \

@@ -9,7 +9,7 @@ allowed-tools: Bash(node:*)
 
 Read-only access to Red Rover absence/vacancy data for PSD. The skill never performs POST/PUT/DELETE/PATCH calls — every HTTP request goes through a single `rrGet()` chokepoint in `lib/api.js`. There is no companion write helper; adding one would violate the read-only contract.
 
-**Identity.** Every command requires `--user <caller-email>`. Pass the email verbatim from the `[caller: Name <email>]` header in the user turn. The email is used only as the `--user` argument to `psd-credentials/get.js`; the credential itself is district-wide (shared scope), not per-user.
+**Identity.** The district-wide credential is resolved through the owner-bound broker. Existing commands retain their caller argument for compatibility, but it is never forwarded to credential lookup.
 
 **Credentials.** A single shared secret at `psd-agent-creds/{env}/shared/redrover_credentials` with shape `{"username":"...","password":"...","apiKey":"..."}`. The skill uses Basic Auth (`username` + `password`) for the `/organization` endpoint, then uses the dynamic `apiKey` returned there for vacancy calls. The static `apiKey` field is a fallback if Red Rover ever stops minting a dynamic one.
 

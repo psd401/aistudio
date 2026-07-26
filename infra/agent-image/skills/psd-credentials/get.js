@@ -1,66 +1,48 @@
 #!/usr/bin/env node
 /**
- * get.js — credentials.get
- * Usage: node get.js --user <email> --name <credential-name> [--shared]
- *
- * Retrieves a credential value from AWS Secrets Manager. By default,
- * checks user-scoped first, then shared. Pass --shared to skip user
- * scope and read only from the shared namespace (for district-funded
- * keys that must not be overridden by per-user values).
- *
- * Logs the read to telemetry (name only, never value).
+ * Retrieve a credential for the signed invocation owner.
+ * Usage: node get.js --name <credential-name> [--shared]
  */
 
 'use strict';
 
 const {
   fail,
-  validateEnv,
-  validateUserEmail,
   parseArgs,
+  rejectAuthorityArgs,
   emit,
-  getCredential,
-  logCredentialRead,
+  validateCredentialName,
+  requestCredentialOperation,
 } = require('./common');
 
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
-    console.log('Usage: get.js --user <email> --name <credential-name> [--shared]');
+    console.log('Usage: get.js --name <credential-name> [--shared]');
     process.exit(0);
   }
-  validateEnv();
-  validateUserEmail(args.user);
-
-  if (!args.name) {
-    fail('--name is required (credential name to retrieve)');
-  }
+  rejectAuthorityArgs(args);
+  validateCredentialName(args.name);
 
   try {
-    const result = await getCredential(args.name, args.user, {
+    const result = await requestCredentialOperation({
+      operation: 'get',
+      name: args.name,
       sharedOnly: args.shared === true,
     });
-
-    if (!result) {
+    emit(result.credential);
+  } catch (error) {
+    if (error.status === 404) {
       emit({
         error: 'not_found',
-        message: `Credential "${args.name}" not found. It may not be provisioned yet. ` +
-          'Use request_new to ask an admin to create it.',
+        message: `Credential "${args.name}" is not provisioned.`,
       });
-      process.exit(0);
+      return;
     }
-
-    // Log the read to telemetry (best-effort, never blocks)
-    await logCredentialRead(args.name, args.user, process.env.SESSION_ID || '').catch((err) => {
-      console.error(`Telemetry log failed (non-fatal): ${err.message}`);
-    });
-
-    emit({ name: result.name, value: result.value, scope: result.scope });
-  } catch (err) {
-    fail(`Failed to retrieve credential: ${err.message}`);
+    fail(`Failed to retrieve credential: ${error.message}`);
   }
 }
 
-main().catch((err) => {
-  fail(err instanceof Error ? err.message : String(err));
+main().catch((error) => {
+  fail(error instanceof Error ? error.message : String(error));
 });

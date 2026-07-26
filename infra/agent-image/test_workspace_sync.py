@@ -11,6 +11,7 @@ network or real filesystem outside the temp dir is touched.
 """
 
 import os
+import io
 import shutil
 import sys
 import tempfile
@@ -24,28 +25,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 import workspace_sync  # noqa: E402
 
 
-class _FakePaginator:
-    def __init__(self, keys):
-        self._keys = keys
+class _FakeResponse(io.BytesIO):
+    def __enter__(self):
+        return self
 
-    def paginate(self, Bucket, Prefix):  # noqa: N803 (boto3 kw casing)
-        yield {"Contents": [{"Key": k} for k in self._keys]}
-
-
-class _FakeS3:
-    def __init__(self, keys):
-        self._keys = keys
-        self.downloaded = []  # list of (key, dest_str)
-
-    def get_paginator(self, name):
-        return _FakePaginator(self._keys)
-
-    def download_file(self, bucket, key, dest):
-        # Record and actually create the file so an escape would be observable
-        # on disk, not just in the call log.
-        self.downloaded.append((key, dest))
-        Path(dest).parent.mkdir(parents=True, exist_ok=True)
-        Path(dest).write_text("x", encoding="utf-8")
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
 
 class PullTraversalTests(unittest.TestCase):
@@ -60,38 +45,52 @@ class PullTraversalTests(unittest.TestCase):
         self.root = self.root.resolve()
 
     def _run_pull(self, keys, prefix="userA"):
-        fake = _FakeS3(keys)
+        downloaded = []
+
+        def fake_broker(payload):
+            self.assertEqual(payload, {"operation": "list"})
+            return {"paths": keys}
+
+        def fake_download_url(relative):
+            downloaded.append((relative, str(self.root / relative)))
+            return f"https://download.invalid/{relative}"
+
         with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root), \
-                mock.patch.object(workspace_sync, "_bucket", return_value="b"), \
-                mock.patch.object(workspace_sync, "_s3", return_value=fake):
+                mock.patch.object(workspace_sync, "_broker_request", side_effect=fake_broker), \
+                mock.patch.object(workspace_sync, "_download_url", side_effect=fake_download_url), \
+                mock.patch.object(
+                    workspace_sync.urllib.request,
+                    "urlopen",
+                    side_effect=lambda *_args, **_kwargs: _FakeResponse(b"x"),
+                ):
             count = workspace_sync.pull_workspace(prefix)
-        escaped = [d for (_, d) in fake.downloaded
+        escaped = [d for (_, d) in downloaded
                    if not Path(d).resolve().is_relative_to(self.root)]
-        return count, fake.downloaded, escaped
+        return count, downloaded, escaped
 
     def test_traversal_key_is_skipped_not_written(self):
         keys = [
-            "userA/../../home/node/.ssh/authorized_keys",  # classic zip-slip
-            "userA/../evil.txt",                            # single-level escape
-            "userA/notes/ok.md",                            # benign control
+            "../../home/node/.ssh/authorized_keys",  # classic zip-slip
+            "../evil.txt",                            # single-level escape
+            "notes/ok.md",                            # benign control
         ]
         count, downloaded, escaped = self._run_pull(keys)
         # Only the benign file downloads; both traversal keys are skipped.
         self.assertEqual(count, 1)
-        self.assertEqual([k for (k, _) in downloaded], ["userA/notes/ok.md"])
+        self.assertEqual([k for (k, _) in downloaded], ["notes/ok.md"])
         self.assertEqual(escaped, [])
         self.assertTrue((self.root / "notes" / "ok.md").exists())
 
     def test_no_write_outside_workspace_dir(self):
         # Even if download_file were reached, assert nothing lands outside root.
-        keys = ["userA/../../tmp/pwned"]
+        keys = ["../../tmp/pwned"]
         count, downloaded, escaped = self._run_pull(keys)
         self.assertEqual(count, 0)
         self.assertEqual(downloaded, [])
         self.assertEqual(escaped, [])
 
     def test_benign_nested_key_downloads(self):
-        keys = ["userA/a/b/c.md"]
+        keys = ["a/b/c.md"]
         count, downloaded, escaped = self._run_pull(keys)
         self.assertEqual(count, 1)
         self.assertTrue((self.root / "a" / "b" / "c.md").exists())

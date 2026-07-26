@@ -209,8 +209,20 @@ export async function refreshCognitoToken(params: RefreshTokenParams): Promise<A
   const timer = startTimer("refreshCognitoToken")
   const log = createLogger({ requestId, action: "refreshCognitoToken" })
 
-  // Check if there's already a refresh in progress for this user
-  const existingRefresh = activeRefreshPromises.get(params.tokenSub)
+  // A caller-controlled subject must never select a token-bearing shared
+  // promise. Deduplicate only requests that possess the exact same refresh
+  // token. This opaque in-memory key is never logged or persisted.
+  let validatedRefreshToken: string
+  try {
+    validatedRefreshToken = validateRefreshToken(params.refreshToken)
+    validateTokenSub(params.tokenSub)
+  } catch {
+    // Preserve the server-action ActionState contract; the internal path
+    // performs the same validation and converts the error with handleError.
+    return performTokenRefresh(params, requestId, timer, log)
+  }
+  const refreshKey = validatedRefreshToken
+  const existingRefresh = activeRefreshPromises.get(refreshKey)
   if (existingRefresh) {
     log.info("Token refresh already in progress, returning existing promise", {
       tokenSub: params.tokenSub
@@ -222,11 +234,11 @@ export async function refreshCognitoToken(params: RefreshTokenParams): Promise<A
   const refreshPromise = performTokenRefresh(params, requestId, timer, log)
 
   // Store the promise for deduplication
-  activeRefreshPromises.set(params.tokenSub, refreshPromise)
+  activeRefreshPromises.set(refreshKey, refreshPromise)
 
   // Clean up the promise when it completes (success or failure)
   refreshPromise.finally(() => {
-    activeRefreshPromises.delete(params.tokenSub)
+    activeRefreshPromises.delete(refreshKey)
   })
 
   return refreshPromise
@@ -311,6 +323,27 @@ async function performTokenRefresh(
         hasIdToken: !!authResult.IdToken
       })
       throw ErrorFactories.authInvalidToken("refresh", { message: "Incomplete token refresh response" })
+    }
+
+    // Cognito returned this ID token directly for the supplied refresh token.
+    // Verify its subject before returning it to the caller or installing it in a
+    // session; a forged tokenSub can no longer relabel another user's refresh.
+    let refreshedSubject: string | undefined
+    try {
+      const payload = JSON.parse(
+        Buffer.from(authResult.IdToken.split(".")[1] ?? "", "base64url").toString("utf8")
+      ) as { sub?: unknown }
+      refreshedSubject = typeof payload.sub === "string" ? payload.sub : undefined
+    } catch {
+      refreshedSubject = undefined
+    }
+    if (!refreshedSubject || refreshedSubject !== validTokenSub) {
+      log.warn("Refreshed token subject did not match requested session", {
+        tokenSub: validTokenSub,
+      })
+      throw ErrorFactories.authInvalidToken("refresh", {
+        message: "Refreshed token subject mismatch",
+      })
     }
 
     log.info("Token refresh successful", {

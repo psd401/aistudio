@@ -400,6 +400,9 @@ export class EcsServiceConstruct extends Construct {
               ],
               resources: [
                 `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent/${environment}/*`,
+                // Read only in the trusted web model broker. The model-facing
+                // AgentCore role is explicitly not granted this credential.
+                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-bedrock-api-key-${environment}-*`,
               ],
             }),
             // Write ONLY the Plaud OAuth client_id secret. The /agent-connect-plaud
@@ -473,8 +476,8 @@ export class EcsServiceConstruct extends Construct {
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
                 // #1203: admin "Sync now" async-invokes the hourly group-sync Lambda
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-group-sync-${environment}`,
-                // #1232 confused-deputy isolation: the /api/agent/workspace-token
-                // and /api/agent/account-request routes invoke the isolated mint
+                // #1232 confused-deputy isolation: trusted Workspace execution
+                // and /api/agent/account-request invoke the isolated mint
                 // Lambda instead of running WIF/signJwt in-process. INVOKE-ONLY —
                 // the frontend never holds the WIF credential; the mint Lambda's
                 // own role is the sole principal the Google WIF provider trusts.
@@ -507,6 +510,22 @@ export class EcsServiceConstruct extends Construct {
               resources: [
                 `arn:aws:s3:::${agentWorkspaceBucketName}/skills/*`,
               ],
+            }),
+            // Owner-bound agent storage broker. The trusted web route derives
+            // the only usable key prefix from a router-signed invocation
+            // context before minting a short-lived per-object URL. AgentCore
+            // itself has no S3 permission.
+            new iam.PolicyStatement({
+              sid: 'AgentWorkspaceStorageBrokerList',
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:ListBucket'],
+              resources: [`arn:aws:s3:::${agentWorkspaceBucketName}`],
+            }),
+            new iam.PolicyStatement({
+              sid: 'AgentWorkspaceStorageBrokerObjects',
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:GetObject', 's3:PutObject'],
+              resources: [`arn:aws:s3:::${agentWorkspaceBucketName}/*`],
             }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
@@ -548,6 +567,55 @@ export class EcsServiceConstruct extends Construct {
               resources: [
                 `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-triage-${environment}`,
               ],
+            }),
+            // Owner-bound schedule broker. The web tier verifies the signed
+            // owner context, resolves the trusted Chat destination, and is the
+            // sole principal allowed to persist/synchronize schedules.
+            new iam.PolicyStatement({
+              sid: 'AgentScheduleTableWrite',
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'dynamodb:PutItem',
+                'dynamodb:UpdateItem',
+                'dynamodb:DeleteItem',
+              ],
+              resources: [
+                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-schedules-${environment}`,
+              ],
+            }),
+            new iam.PolicyStatement({
+              sid: 'AgentUserIdentityLookup',
+              effect: iam.Effect.ALLOW,
+              actions: ['dynamodb:Query'],
+              resources: [
+                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-users-${environment}/index/email-index`,
+              ],
+            }),
+            new iam.PolicyStatement({
+              sid: 'AgentScheduleBrokerCrud',
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'scheduler:CreateSchedule',
+                'scheduler:UpdateSchedule',
+                'scheduler:DeleteSchedule',
+              ],
+              resources: [
+                `arn:aws:scheduler:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:schedule/psd-agent-${environment}/*`,
+                `arn:aws:scheduler:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:schedule-group/psd-agent-${environment}`,
+              ],
+            }),
+            new iam.PolicyStatement({
+              sid: 'AgentScheduleBrokerPassRole',
+              effect: iam.Effect.ALLOW,
+              actions: ['iam:PassRole'],
+              resources: [
+                `arn:aws:iam::${cdk.Stack.of(this).account}:role/psd-agent-scheduler-invoke-${environment}`,
+              ],
+              conditions: {
+                StringEquals: {
+                  'iam:PassedToService': 'scheduler.amazonaws.com',
+                },
+              },
             }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
@@ -769,6 +837,14 @@ export class EcsServiceConstruct extends Construct {
         // shape is honest.
         GOOGLE_WORKSPACE_OAUTH_SECRET_ID: `psd-agent/${environment}/google-oauth-client`,
         AGENT_INTERNAL_API_KEY_SECRET_ID: `psd-agent/${environment}/internal-api-key`,
+        AGENT_INVOCATION_SIGNING_SECRET_ID: `psd-agent/${environment}/invocation-signing-key`,
+        AGENT_SCHEDULES_TABLE: `psd-agent-schedules-${environment}`,
+        AGENT_USERS_TABLE: `psd-agent-users-${environment}`,
+        AGENT_SCHEDULE_GROUP: `psd-agent-${environment}`,
+        AGENT_CRON_LAMBDA_ARN:
+          `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-cron-${environment}`,
+        AGENT_SCHEDULER_ROLE_ARN:
+          `arn:aws:iam::${cdk.Stack.of(this).account}:role/psd-agent-scheduler-invoke-${environment}`,
         // DWD token broker (#1232) + agnt_ auto-provisioning (#1233) config —
         // the GCP project number, WIF pool/provider ids, DWD service-account
         // email, and the OneSync provisioning sheet id all live in ONE JSON
@@ -781,14 +857,23 @@ export class EcsServiceConstruct extends Construct {
         // above. The ECS task role already holds GetSecretValue on
         // psd-agent/${environment}/* (below), so no new IAM grant is required.
         GCP_DWD_CONFIG_SECRET_ID: `psd-agent/${environment}/gcp-dwd-config`,
-        // #1232 confused-deputy isolation: the DWD workspace-token + account-
-        // request routes proxy to this dedicated mint Lambda (IAM-authed
+        // #1232 confused-deputy isolation: trusted Workspace execution and
+        // account-request proxy to this dedicated mint Lambda (IAM-authed
         // InvokeFunction) instead of performing WIF/signJwt in-process. Setting
-        // this env var switches the routes into Lambda mode; when it is UNSET
+        // this env var switches the helpers into Lambda mode; when it is UNSET
         // (local dev) they fall back to running the broker in-process (no real
         // WIF locally). The task role's lambda:InvokeFunction grant above is
         // scoped to exactly this function.
         AGENT_MINT_LAMBDA_NAME: `psd-agent-mint-${environment}`,
+        // Opaque connector credential profiles. Values contain secret IDs and
+        // approved provider origins, never secret material. Empty by default;
+        // deployments opt in with `-c mcpOauthCredentialProfiles='<json>'`.
+        MCP_OAUTH_CREDENTIAL_PROFILES: (() => {
+          const profiles = this.node.tryGetContext('mcpOauthCredentialProfiles') as unknown;
+          return typeof profiles === 'string'
+            ? profiles
+            : JSON.stringify(profiles ?? {});
+        })(),
         // Memory optimization - 70% of container memory
         NODE_OPTIONS: `--max-old-space-size=${Math.floor(memory * 0.7)}`,
         // Application configuration
@@ -844,6 +929,7 @@ export class EcsServiceConstruct extends Construct {
         // the skill-builder Lambda scans/promotes drafts. Both are optional at
         // runtime — if absent, publishing falls back to a reviewable draft row.
         AGENT_WORKSPACE_BUCKET: agentWorkspaceBucketName,
+        AGENT_BEDROCK_API_KEY_SECRET_ID: `psd-agent-bedrock-api-key-${environment}`,
         SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
         // Atrium artifact sandbox origin (#1052). Server-only runtime var (NOT
         // NEXT_PUBLIC): the reader/edit Server Components resolve the iframe src

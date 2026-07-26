@@ -132,12 +132,10 @@ to the Markdown brief plus a warning (see **Errors**).
   recency. Don't over-read the ordering of the recency-ranked sources.
 - **Reddit relevance is loose.** Keyless Reddit search returns recent posts that
   loosely match; treat low-signal Reddit hits with skepticism when you synthesize.
-- **No dedicated secrets.** The engine needs no API key. Its only environment
-  reads are non-secret deployment config (`WORKSPACE_BUCKET`, `AWS_REGION`) for
-  the S3 upload, and GitHub optionally borrows the container's `gh auth token`
-  (never printed) for a higher rate limit. If a paid source is ever added, its
-  key must come from `psd-credentials get --shared --name <key>` — never the
-  environment.
+- **No dedicated secrets.** The engine needs no API key. Artifact uploads use
+  the signed, owner-bound storage broker. GitHub access uses the allowlisted
+  GitHub broker; neither credentials nor storage authority enter the model
+  process.
 - **De-duplication is mechanical.** Items with the same normalized title or URL
   are folded to their first occurrence; the same story *retitled* by two outlets
   can still appear twice — fold those in your synthesis.
@@ -156,9 +154,9 @@ Errors are a single JSON object `{ "status": "error", "error": "<code>", "messag
   `--format html|both` without a valid `--user` email, or any malformed flag
   (non-integer `--days`/`--limit`, unknown option — argparse failures honor the
   JSON contract too).
-- **`misconfigured`** — `--format html` requested but `WORKSPACE_BUCKET` is unset
-  or `boto3` is unavailable (S3 upload impossible).
-- **`upstream_error`** — `--format html` requested but the S3 upload failed.
+- **`misconfigured`** — `--format html` requested but the trusted web broker is
+  unavailable.
+- **`upstream_error`** — `--format html` requested but the artifact upload failed.
 
 Two kinds of failure are **not** fatal — they surface under `warnings` in a
 successful (`status: "ok"`) result, not as an error:

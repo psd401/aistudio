@@ -202,18 +202,15 @@ You don't need to remember to add markers — the skill does it. **Do not** stri
 
 ## Where the token comes from
 
-- **User slot (`--scope user`):** the skill reads the user's refresh token
-  directly from AWS Secrets Manager at
-  `psd-agent-creds/{env}/user/{email}/google-workspace-user` and exchanges it
-  for an access token. First-time / revoked → consent flow (exit 10/11).
-- **Agent slot (`--scope agent`):** as of #1232 there is **no refresh token and
-  no consent**. The skill POSTs to the app's DWD token broker
-  (`/api/agent/workspace-token`) which mints a short-lived access token for
-  `agnt_<you>@psd401.net` via domain-wide delegation. If the agnt_ account
-  doesn't exist yet the broker returns "not provisioned" and the skill emits
-  exit 14 (the router creates the account automatically).
+- The model-facing skill never receives a Google token for either slot.
+- It submits an allowlisted argv array to `/api/agent/workspace-execute`.
+- The trusted web broker derives the owner from the signed invocation context,
+  obtains the appropriate user/agent credential, executes the pinned Workspace
+  CLI outside the model boundary, and returns bounded output.
+- First-time/revoked user access and unprovisioned agent accounts remain
+  structured broker outcomes; no reusable access token is returned.
 
-Neither slot reads the `psd_agent_workspace_tokens` DB manifest at runtime —
+Neither slot reads the `psd_agent_workspace_tokens` DB manifest in the model runtime —
 that manifest exists for the admin dashboard (operator-visible connection
 health), not runtime availability.
 

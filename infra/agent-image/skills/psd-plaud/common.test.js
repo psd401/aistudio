@@ -9,7 +9,7 @@
  *    digestRecording would pipe the error text into psd-summarize as if it
  *    were the transcript.
  *
- * The Secrets Manager and Plaud MCP/OAuth HTTP calls are stubbed so these
+ * The credential broker and Plaud MCP/OAuth HTTP calls are stubbed so these
  * tests exercise the real invokeTool/digestRecording logic end-to-end.
  */
 
@@ -17,13 +17,9 @@
 
 const { test, expect, beforeEach, afterEach, mock } = require('bun:test');
 
-const { secretsStore } = require('./mcp-test-support'); // registers the shared Secrets Manager mock
+const { credentialStore, brokerCalls } = require('./mcp-test-support');
 
 const common = require('./common');
-
-const EMAIL = 'teacher@psd401.net';
-const PLAUD_TOKEN_SECRET_ID = `psd-agent-creds/dev/user/${EMAIL}/plaud`;
-const PLAUD_OAUTH_SECRET_ID = 'psd-agent/dev/plaud-oauth-client';
 
 let mcpToolResultQueue;
 let fetchCalls;
@@ -37,9 +33,9 @@ function jsonResponse(body, { headers = {} } = {}) {
 }
 
 beforeEach(() => {
-  for (const key of Object.keys(secretsStore)) delete secretsStore[key];
-  secretsStore[PLAUD_TOKEN_SECRET_ID] = { refresh_token: 'stored-refresh', client_id: 'client-abc' };
-  secretsStore[PLAUD_OAUTH_SECRET_ID] = { client_id: 'client-abc' };
+  for (const key of Object.keys(credentialStore)) delete credentialStore[key];
+  credentialStore.plaud = { refresh_token: 'stored-refresh', client_id: 'client-abc' };
+  brokerCalls.length = 0;
   mcpToolResultQueue = [];
   fetchCalls = [];
   originalFetch = globalThis.fetch;
@@ -91,7 +87,7 @@ test('digestRecording calls get_transcript with file_id (not id)', async () => {
   const chunks = [];
   process.stdout.write = (chunk) => { chunks.push(chunk); return true; };
   try {
-    await common.digestRecording(EMAIL, 'rec-555', {});
+    await common.digestRecording('rec-555', {});
   } finally {
     process.stdout.write = originalWrite;
     cp.spawnSync = originalSpawnSync;
@@ -114,7 +110,7 @@ test('invokeTool treats an isError:true tool result as a failure (exit 12, mcp-e
   let exitCode;
   process.exit = (code) => { exitCode = code; throw new Error('__test_exit__'); };
   try {
-    await expect(common.callTool('get_transcript', { file_id: 'rec-1' }, EMAIL)).rejects.toThrow('__test_exit__');
+    await expect(common.callTool('get_transcript', { file_id: 'rec-1' })).rejects.toThrow('__test_exit__');
   } finally {
     process.stdout.write = originalWrite;
     process.exit = originalExit;
@@ -140,7 +136,7 @@ test('digestRecording does not pipe an isError tool result into psd-summarize', 
   const originalWrite = process.stdout.write.bind(process.stdout);
   process.stdout.write = () => true;
   try {
-    await expect(common.digestRecording(EMAIL, 'rec-2', {})).rejects.toThrow('__test_exit__');
+    await expect(common.digestRecording('rec-2', {})).rejects.toThrow('__test_exit__');
   } finally {
     process.exit = originalExit;
     process.stdout.write = originalWrite;
@@ -148,4 +144,11 @@ test('digestRecording does not pipe an isError tool result into psd-summarize', 
   }
   expect(exitCode).toBe(12);
   expect(spawnCalled).toBe(false);
+});
+
+test('all Plaud credential operations are owner-bound broker calls', async () => {
+  mcpToolResultQueue.push({ content: [] });
+  await common.callTool('get_current_user', {});
+  expect(brokerCalls[0]).toEqual({ operation: 'get', name: 'plaud' });
+  expect(brokerCalls.some((call) => 'ownerEmail' in call)).toBe(false);
 });

@@ -30,6 +30,7 @@ import { loadOAuthCredentials, rejectUnsafeMcpUrl } from "@/lib/mcp/connector-se
 import { encryptToken, decryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { getOAuthStateCookieName } from "@/lib/mcp/oauth-state"
+import { safeFetch } from "@/lib/security/safe-fetch"
 
 const log = createLogger({ action: "oauth-callback" })
 
@@ -263,7 +264,7 @@ export async function GET(req: Request): Promise<Response> {
     }
 
     // 7. Load OAuth credentials
-    const credentials = await loadOAuthCredentials(server.credentialsKey)
+    const credentials = await loadOAuthCredentials(server.credentialsKey, server.url)
 
     // 8. Build redirect URI (must match authorize request exactly)
     const baseUrl = getIssuerUrl()
@@ -299,11 +300,11 @@ export async function GET(req: Request): Promise<Response> {
       code_verifier: cookieData.codeVerifier,
     }
 
-    const tokenResponse = await fetch(tokenEndpoint, {
+    const tokenResponse = await safeFetch(tokenEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       signal: AbortSignal.timeout(15_000),
-      body: new URLSearchParams(tokenBody),
+      body: new URLSearchParams(tokenBody).toString(),
     })
 
     if (!tokenResponse.ok) {

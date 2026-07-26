@@ -17,21 +17,17 @@
 'use strict';
 
 const { execFileSync } = require('node:child_process');
-const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { publishArtifact } = require('../_shared/artifact-publisher');
 
-const REGION = process.env.AWS_REGION || 'us-east-1';
-const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET || '';
 // Skill output lives under `public-images/` which is granted public
 // `s3:GetObject` by the workspace bucket's resource policy (see
 // agent-platform-stack.ts:AgentWorkspaceBucket). Anyone who receives the
 // returned URL can fetch the image — same security model as Google
 // Drive "anyone with the link" sharing. The UUID in the key makes the
 // path unguessable. Keep this prefix in sync with the bucket policy.
-const PUBLIC_PREFIX = 'public-images';
 // The unversioned alias rather than a dated snapshot. The dated form
 // (`gpt-image-2-2026-04-21`) is gated by an OpenAI per-project allowlist
 // and silently 404s for projects that don't have that snapshot enabled —
@@ -142,11 +138,10 @@ function validateEmail(email) {
  * Catalog-level filtering (so the skill is not even visible) is a
  * future change once OpenClaw exposes a per-session catalog hook.
  */
-function enforceCapability(userEmail) {
+function enforceCapability() {
   try {
     execFileSync('node', [
       CREDENTIALS_CHECK_CAPABILITY,
-      '--user', userEmail,
       '--capability', REQUIRED_CAPABILITY,
     ], {
       encoding: 'utf8',
@@ -162,7 +157,7 @@ function enforceCapability(userEmail) {
   // We do NOT trust stdout {granted: true} when the process exited non-zero
   // (e.g. signal, crash) — exit code is the sole source of truth for RBAC gates.
   fail(
-    `User ${userEmail} lacks the ${REQUIRED_CAPABILITY} capability. ` +
+    `The signed invocation owner lacks the ${REQUIRED_CAPABILITY} capability. ` +
     'Ask an administrator to grant it via the role assignments at /admin/roles.',
     'forbidden_capability',
   );
@@ -176,10 +171,10 @@ function enforceCapability(userEmail) {
  * JSON object from stdout. The value is held in a local variable and
  * never written elsewhere.
  */
-function readSharedOpenAIKey(userEmail) {
+function readSharedOpenAIKey() {
   let stdout;
   try {
-    stdout = execFileSync('node', [CREDENTIALS_GET, '--user', userEmail, '--shared', '--name', 'openai_api_key'], {
+    stdout = execFileSync('node', [CREDENTIALS_GET, '--shared', '--name', 'openai_api_key'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'inherit'],
     });
@@ -299,34 +294,8 @@ async function generateImage(apiKey, params) {
 }
 
 async function uploadAndShare(bytes, userEmail) {
-  // Defense-in-depth guard — main() checks WORKSPACE_BUCKET before the OpenAI
-  // call, so this is only reachable if the function is called from a new path.
-  if (!WORKSPACE_BUCKET) {
-    fail('WORKSPACE_BUCKET env var not set — cannot upload generated image', 'misconfigured');
-  }
-  // Encode each path segment so emails with `+` (subaddressing) survive the
-  // URL round-trip. randomUUID() returns RFC4122 hex with hyphens — already
-  // URL-safe.
-  const key = `${PUBLIC_PREFIX}/${userEmail}/${randomUUID()}.png`;
-  const s3 = new S3Client({ region: REGION });
-
-  await s3.send(new PutObjectCommand({
-    Bucket: WORKSPACE_BUCKET,
-    Key: key,
-    Body: bytes,
-    ContentType: 'image/png',
-    Metadata: {
-      generated_by: 'psd-image-gen',
-      model: MODEL_ID,
-    },
-  }));
-
-  // Path-style URL: avoids any DNS-vs-virtual-hosted-style ambiguity for
-  // bucket names that contain dots. Path segments are URL-encoded so
-  // emails with reserved characters (`+`, `/`, `&`) survive intact.
-  const encodedKey = key.split('/').map(encodeURIComponent).join('/');
-  const url = `https://${WORKSPACE_BUCKET}.s3.${REGION}.amazonaws.com/${encodedKey}`;
-  return { url, key };
+  void userEmail;
+  return publishArtifact(bytes, '.png', 'image/png');
 }
 
 async function main() {
@@ -360,12 +329,6 @@ async function main() {
     fail(`Invalid --background. Allowed: ${[...ALLOWED_BACKGROUNDS].join(', ')}`, 'bad_args');
   }
 
-  // Validate WORKSPACE_BUCKET early — before capability checks or OpenAI calls —
-  // so we don't spend API quota only to fail on upload. (Review PR #934 feedback)
-  if (!WORKSPACE_BUCKET) {
-    fail('WORKSPACE_BUCKET env var not set — cannot upload generated image', 'misconfigured');
-  }
-
   // --image is optional. When present it must be a real path (no `--image`
   // followed by another flag) and selects the /v1/images/edits endpoint so
   // the model composes the output around the reference image. Validate the
@@ -376,8 +339,8 @@ async function main() {
   // before the RBAC shell-out and API-key fetch.
   const referenceImage = imagePath ? loadReferenceImage(imagePath) : null;
 
-  enforceCapability(args.user);
-  const apiKey = readSharedOpenAIKey(args.user);
+  enforceCapability();
+  const apiKey = readSharedOpenAIKey();
   const params = { prompt: args.prompt, size, quality, background };
   const bytes = referenceImage
     ? await editWithImage(apiKey, params, referenceImage.dataUrl)

@@ -39,6 +39,43 @@ for _m in _stubbed_by_us:
 _safe = agentcore_wrapper._safe_header_value
 
 
+class TestInvocationContextInstaller(unittest.TestCase):
+    def test_installs_well_formed_context_atomically_with_private_mode(self):
+        import os
+        import tempfile
+
+        token = f"v1.{'a' * 40}.{'b' * 43}"
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            with mock.patch.object(
+                agentcore_wrapper,
+                "_INVOCATION_CONTEXT_PATH",
+                context_path,
+            ):
+                self.assertTrue(agentcore_wrapper._install_invocation_context(token))
+            with open(context_path, encoding="ascii") as context_file:
+                self.assertEqual(context_file.read(), token + "\n")
+            self.assertEqual(os.stat(context_path).st_mode & 0o777, 0o600)
+
+    def test_rejects_malformed_context_and_removes_stale_value(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            context_path = os.path.join(directory, "invocation-context")
+            with open(context_path, "w", encoding="ascii") as context_file:
+                context_file.write(f"v1.{'a' * 40}.{'b' * 43}\n")
+            with mock.patch.object(
+                agentcore_wrapper,
+                "_INVOCATION_CONTEXT_PATH",
+                context_path,
+            ):
+                self.assertFalse(
+                    agentcore_wrapper._install_invocation_context("attacker-controlled")
+                )
+            self.assertFalse(os.path.exists(context_path))
+
+
 class SafeHeaderValueTests(unittest.TestCase):
     def test_strips_brackets_and_newlines(self):
         for ch in ("[", "]", "\n", "\r"):
@@ -210,41 +247,55 @@ class TestPullFiles(unittest.TestCase):
     """workspace_sync.pull_files — the per-turn attachment fetch (#1138 F1)."""
 
     def _run(self, relative_paths):
+        import io
         import tempfile
         from pathlib import Path
         from unittest import mock
 
         import workspace_sync
 
+        class FakeResponse(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.close()
+
         with tempfile.TemporaryDirectory() as tmp:
-            s3 = mock.MagicMock()
+            downloaded = []
+
+            def fake_download_url(relative):
+                downloaded.append(relative)
+                return f"https://download.invalid/{relative}"
+
             with mock.patch.object(workspace_sync, "WORKSPACE_DIR", Path(tmp)), \
-                 mock.patch.object(workspace_sync, "_bucket", return_value="b"), \
-                 mock.patch.object(workspace_sync, "_s3", return_value=s3):
+                 mock.patch.object(
+                     workspace_sync, "_download_url", side_effect=fake_download_url
+                 ), \
+                 mock.patch.object(
+                     workspace_sync.urllib.request,
+                     "urlopen",
+                     side_effect=lambda *_args, **_kwargs: FakeResponse(b"x"),
+                 ):
                 pulled = workspace_sync.pull_files("user-prefix", relative_paths)
-        return pulled, s3
+        return pulled, downloaded
 
     def test_downloads_valid_attachment_key(self):
-        pulled, s3 = self._run(["attachments/20260706T235133-0-a.pdf"])
+        pulled, downloaded = self._run(["attachments/20260706T235133-0-a.pdf"])
         self.assertEqual(pulled, 1)
-        args = s3.download_file.call_args[0]
-        self.assertEqual(args[0], "b")
-        self.assertEqual(args[1], "user-prefix/attachments/20260706T235133-0-a.pdf")
+        self.assertEqual(downloaded, ["attachments/20260706T235133-0-a.pdf"])
 
     def test_refuses_traversal_and_gateway_paths(self):
-        pulled, s3 = self._run(
+        pulled, downloaded = self._run(
             ["../outside.txt", "attachments/../../etc/passwd", "openclaw.json", "SOUL.md"]
         )
         self.assertEqual(pulled, 0)
-        s3.download_file.assert_not_called()
+        self.assertEqual(downloaded, [])
 
-    def test_no_bucket_is_a_noop(self):
-        from unittest import mock
-
+    def test_empty_prefix_is_a_noop(self):
         import workspace_sync
 
-        with mock.patch.object(workspace_sync, "_bucket", return_value=None):
-            self.assertEqual(workspace_sync.pull_files("p", ["attachments/x"]), 0)
+        self.assertEqual(workspace_sync.pull_files("", ["attachments/x"]), 0)
 
 
 class TestSanitizeHeaderField(unittest.TestCase):
@@ -258,38 +309,6 @@ class TestSanitizeHeaderField(unittest.TestCase):
     def test_non_string_returns_empty(self):
         self.assertEqual(_sanitize_header_field(None, 10), "")
         self.assertEqual(_sanitize_header_field(123, 10), "")
-
-
-class TestInlineBearerToken(unittest.TestCase):
-    """Boot must not abort when the native aws-sdk provider is active (#1138 r10 regression)."""
-
-    def _run(self, cfg):
-        import json as _json
-        import tempfile, os
-        from agentcore_wrapper import _inline_bearer_token
-        fd, path = tempfile.mkstemp(suffix=".json")
-        with os.fdopen(fd, "w") as f:
-            _json.dump(cfg, f)
-        try:
-            result = _inline_bearer_token(path, "tok-123")
-            with open(path) as f:
-                return result, _json.load(f)
-        finally:
-            os.unlink(path)
-
-    def test_native_provider_config_returns_false_untouched(self):
-        cfg = {"models": {"providers": {"amazon-bedrock": {"auth": "aws-sdk"}}}}
-        result, after = self._run(cfg)
-        self.assertFalse(result)
-        self.assertEqual(after, cfg)
-
-    def test_mantle_provider_gets_token_inlined(self):
-        cfg = {"models": {"providers": {"amazon-bedrock-mantle": {"apiKey": "env:X"}}}}
-        result, after = self._run(cfg)
-        self.assertTrue(result)
-        self.assertEqual(
-            after["models"]["providers"]["amazon-bedrock-mantle"]["apiKey"], "tok-123"
-        )
 
 
 if __name__ == "__main__":

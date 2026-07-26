@@ -52,6 +52,7 @@ function synthTemplate(): Template {
 }
 
 interface Statement {
+  Sid?: string;
   Effect?: string;
   Action?: unknown;
   Resource?: unknown;
@@ -124,6 +125,100 @@ describe('ECS task role — mint Lambda invoke-only grant (#1232)', () => {
     const mintEnv = envPairs.find((e) => e.Name === 'AGENT_MINT_LAMBDA_NAME');
     expect(mintEnv).toBeDefined();
     expect(mintEnv!.Value).toBe(MINT_FN);
+  });
+
+  it('sets the invocation-signing secret id on the trusted frontend verifier', () => {
+    const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+    const envPairs: Array<{ Name?: string; Value?: unknown }> = [];
+    for (const td of Object.values(taskDefs)) {
+      const containers = (
+        td as {
+          Properties?: {
+            ContainerDefinitions?: Array<{
+              Environment?: Array<{ Name?: string; Value?: unknown }>;
+            }>;
+          };
+        }
+      ).Properties?.ContainerDefinitions ?? [];
+      for (const container of containers) {
+        if (Array.isArray(container.Environment)) {
+          envPairs.push(...container.Environment);
+        }
+      }
+    }
+    expect(
+      envPairs.find(
+        (entry) => entry.Name === 'AGENT_INVOCATION_SIGNING_SECRET_ID'
+      )
+    ).toEqual({
+      Name: 'AGENT_INVOCATION_SIGNING_SECRET_ID',
+      Value: `psd-agent/${ENV}/invocation-signing-key`,
+    });
+  });
+
+  it('configures the frontend as the sole schedule broker', () => {
+    const statements = allStatements(template);
+    expect(
+      statements.find((statement) => statement.Sid === 'AgentScheduleTableWrite')
+    ).toMatchObject({
+      Effect: 'Allow',
+      Action: [
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+        'dynamodb:DeleteItem',
+      ],
+    });
+    expect(
+      statements.find((statement) => statement.Sid === 'AgentScheduleBrokerCrud')
+    ).toMatchObject({
+      Effect: 'Allow',
+      Action: [
+        'scheduler:CreateSchedule',
+        'scheduler:UpdateSchedule',
+        'scheduler:DeleteSchedule',
+      ],
+    });
+    expect(
+      statements.find((statement) => statement.Sid === 'AgentScheduleBrokerPassRole')
+    ).toMatchObject({
+      Effect: 'Allow',
+      Action: 'iam:PassRole',
+      Condition: {
+        StringEquals: {
+          'iam:PassedToService': 'scheduler.amazonaws.com',
+        },
+      },
+    });
+  });
+
+  it('injects only server-side schedule broker coordinates', () => {
+    const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+    const environment: Array<{ Name?: string; Value?: unknown }> = [];
+    for (const taskDefinition of Object.values(taskDefs)) {
+      const containers = (
+        taskDefinition as {
+          Properties?: {
+            ContainerDefinitions?: Array<{
+              Environment?: Array<{ Name?: string; Value?: unknown }>;
+            }>;
+          };
+        }
+      ).Properties?.ContainerDefinitions ?? [];
+      for (const container of containers) {
+        if (Array.isArray(container.Environment)) {
+          environment.push(...container.Environment);
+        }
+      }
+    }
+    for (const variable of [
+      'AGENT_SCHEDULES_TABLE',
+      'AGENT_USERS_TABLE',
+      'AGENT_SCHEDULE_GROUP',
+      'AGENT_CRON_LAMBDA_ARN',
+      'AGENT_SCHEDULER_ROLE_ARN',
+    ]) {
+      expect(environment.find((entry) => entry.Name === variable)).toBeDefined();
+    }
   });
 
   it('injects the dedicated OIDC cookie secret into the frontend container', () => {

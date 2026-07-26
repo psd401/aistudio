@@ -76,6 +76,11 @@ import {
   buildJobPayload,
   shouldPromoteToJob,
 } from './job-promotion';
+import {
+  createInvocationContextToken,
+  type InvocationMode,
+} from './invocation-context';
+import { canInvokeOwnerAgent } from './delegation-policy';
 
 // ---------------------------------------------------------------------------
 // Structured logging (Lambda-compatible, no console.* per CLAUDE.md exception)
@@ -213,6 +218,8 @@ const SIGNAL_TTL_DAYS = 90;
 const APP_BASE_URL = process.env.APP_BASE_URL || '';
 const AGENT_INTERNAL_API_KEY_SECRET_ID =
   process.env.AGENT_INTERNAL_API_KEY_SECRET_ID || '';
+const AGENT_INVOCATION_SIGNING_SECRET_ID =
+  process.env.AGENT_INVOCATION_SIGNING_SECRET_ID || '';
 // Once an account isn't active, don't re-check more than hourly per user (the
 // OneSync sync cadence is ~10–30 min, so hourly is ample).
 const AGENT_ACCOUNT_RECHECK_MS = 60 * 60 * 1000;
@@ -820,6 +827,46 @@ async function getInternalApiKey(): Promise<string | null> {
   return cachedInternalApiKey;
 }
 
+// The model-facing runtime never receives this secret. It receives only a
+// short-lived signed context that binds actor, owner, mode, session, and
+// workspace. The Next.js agent routes verify the token before honoring an
+// owner-scoped operation.
+let cachedInvocationSigningSecret: string | null = null;
+let invocationSigningSecretCachedAt: number | null = null;
+async function getInvocationSigningSecret(): Promise<string> {
+  if (
+    cachedInvocationSigningSecret &&
+    invocationSigningSecretCachedAt &&
+    Date.now() - invocationSigningSecretCachedAt < CREDENTIALS_TTL_MS
+  ) {
+    return cachedInvocationSigningSecret;
+  }
+  if (!AGENT_INVOCATION_SIGNING_SECRET_ID) {
+    throw new Error('AGENT_INVOCATION_SIGNING_SECRET_ID not configured');
+  }
+  const result = await secretsClient.send(
+    new GetSecretValueCommand({ SecretId: AGENT_INVOCATION_SIGNING_SECRET_ID })
+  );
+  const secret = result.SecretString || '';
+  if (Buffer.byteLength(secret, 'utf8') < 32) {
+    throw new Error('Agent invocation signing secret is missing or too short');
+  }
+  cachedInvocationSigningSecret = secret;
+  invocationSigningSecretCachedAt = Date.now();
+  return secret;
+}
+
+async function issueInvocationContext(input: {
+  actorEmail: string;
+  ownerEmail: string;
+  mode: InvocationMode;
+  sessionId: string;
+  workspacePrefix: string;
+}): Promise<string> {
+  const secret = await getInvocationSigningSecret();
+  return createInvocationContextToken(secret, input);
+}
+
 /**
  * Deterministically ensure the caller's agnt_ Workspace account is provisioned
  * (#1233). Fire-and-forget (`void`): must NOT add latency to the user reply, so
@@ -900,9 +947,20 @@ async function maybeProvisionAgentAccount(
   try {
     const apiKey = await getInternalApiKey();
     if (!apiKey) return;
+    const invocationContext = await issueInvocationContext({
+      actorEmail: senderEmail,
+      ownerEmail: senderEmail,
+      mode: 'owner',
+      sessionId: `account-provision:${user.googleIdentity}`,
+      workspacePrefix: user.workspacePrefix,
+    });
     const resp = await fetch(`${APP_BASE_URL.replace(/\/+$/, '')}/api/agent/account-request`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'X-Agent-Invocation-Context': invocationContext,
+      },
       body: JSON.stringify({ ownerEmail: senderEmail }),
       signal: AbortSignal.timeout(5000),
     });
@@ -1508,11 +1566,21 @@ async function invokeAgentCore(
     const runtimeArn = runtimeId.startsWith('arn:')
       ? runtimeId
       : `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`;
+    const ownerEmail = userId.trim().toLowerCase();
+    const actorEmail = (userContext?.invokedBy?.email ?? userId).trim().toLowerCase();
+    const invocationContext = await issueInvocationContext({
+      actorEmail,
+      ownerEmail,
+      mode: userContext?.invokedBy ? 'consultation' : 'owner',
+      sessionId,
+      workspacePrefix: userContext?.workspacePrefix ?? '',
+    });
     const body = JSON.stringify({
       prompt: message,
       user_email: userId,
       user_display_name: userContext?.displayName ?? '',
       workspace_prefix: userContext?.workspacePrefix ?? '',
+      invocation_context: invocationContext,
       // Cross-user invocation fields
       ...(userContext?.invokedBy && {
         invoked_by_email: userContext.invokedBy.email,
@@ -3044,6 +3112,25 @@ async function processRecord(
         threadName,
         'Agent not found. If you believe this is an error, contact your workspace admin.',
         log
+      );
+      return;
+    }
+
+    // There is no durable delegation-grant store yet. Same-domain membership,
+    // a slash command, and model instructions are not authorization to mount
+    // another owner's workspace or hydrate their credentials. Fail closed
+    // before attachment delivery, session selection, or AgentCore invocation.
+    if (!canInvokeOwnerAgent(senderEmail, targetUser.email)) {
+      log.warn('Cross-owner invocation denied: no explicit delegation', {
+        actorEmail: senderEmail,
+        ownerEmail: targetUser.email,
+        source: crossUserInvocation.source,
+      });
+      await sendGoogleChatResponse(
+        spaceName,
+        threadName,
+        'Cross-user agent consultation is unavailable until the owner grants explicit access.',
+        log,
       );
       return;
     }

@@ -54,8 +54,8 @@ export async function getSkillBuilderLambdaArn(): Promise<string | null> {
 export interface SkillFile {
   /** Relative path within the skill folder, e.g. "SKILL.md". */
   path: string
-  /** UTF-8 text content. */
-  content: string
+  /** Text or binary content. */
+  content: string | Uint8Array
   contentType?: string
 }
 

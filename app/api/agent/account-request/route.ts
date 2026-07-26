@@ -2,14 +2,14 @@
  * agnt_ Account Provisioning Request
  *
  * POST /api/agent/account-request
- * Auth: Bearer {shared-secret} from psd-agent/{env}/internal-api-key
+ * Auth: short-lived router-signed invocation context
  *
  * Idempotently ensures the caller's agnt_<localpart>@psd401.net Workspace
  * account is either present or queued for creation via the OneSync sheet
  * (#1233). Called deterministically by the agent-router on a user's messages —
  * NOT by any AI decision.
  *
- * Request:  { ownerEmail }
+ * Request:  {}
  * Response: { status: "active" }      — the agnt_ account already exists
  *           { status: "requested" }   — a row exists / was written; wait for OneSync
  *           { error }                  — 400 / 401 / 503 / 502
@@ -38,8 +38,7 @@
 
 import { NextRequest, NextResponse } from "next/server"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
-import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
-import { validateInternalSecret } from "@/lib/agent-workspace/internal-auth"
+import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-context"
 import {
   AccountNotProvisionedError,
   BrokerNotConfiguredError,
@@ -107,9 +106,12 @@ async function probeAgentAccount(ownerEmail: string, requestId: string): Promise
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
 
-  if (!(await validateInternalSecret(request))) {
-    log.warn("Unauthorized account-request", { requestId })
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const invocationContext = await verifyAgentInvocationContext(request, {
+    allowedModes: ["owner"],
+  })
+  if (!invocationContext) {
+    log.warn("Account-request has no authorized owner context", { requestId })
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
   let body: unknown
@@ -119,12 +121,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  // request.json() can return a bare `null` / non-object literal — guard before
-  // destructuring so a null body is a 400, not a 500 (gemini review).
-  const ownerEmail = body && typeof body === "object" ? (body as { ownerEmail?: unknown }).ownerEmail : undefined
-  if (!ownerEmail || typeof ownerEmail !== "string" || !SAFE_EMAIL_RE.test(ownerEmail)) {
-    return NextResponse.json({ error: "ownerEmail is required and must be a valid email" }, { status: 400 })
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json(
+      { error: "Request body must be an object" },
+      { status: 400 }
+    )
   }
+  for (const field of ["ownerEmail", "userEmail", "userId"] as const) {
+    if (Object.prototype.hasOwnProperty.call(body, field)) {
+      return NextResponse.json(
+        { error: "Owner selectors are not accepted" },
+        { status: 400 }
+      )
+    }
+  }
+  const ownerEmail = invocationContext.ownerEmail
 
   const localPart = ownerEmail.split("@")[0] ?? ""
   if (isStudentUsername(localPart)) {

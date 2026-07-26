@@ -188,4 +188,4 @@ Markdown, so artifacts are disposable — regenerate rather than version them.
   and was **not** uploaded. The JSON lists each blocking rule (`id`, `impact`, `helpUrl`).
   Fix them in the HTML and re-deliver — do not work around the gate. (Contrast/reflow are
   not in this check; verify those in a browser.)
-- **`misconfigured`** — `WORKSPACE_BUCKET` env var not set. Surface to the user; do not retry.
+- **`misconfigured`** — the trusted artifact broker is not configured. Surface to the user; do not retry.

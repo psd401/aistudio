@@ -1,37 +1,25 @@
 #!/usr/bin/env node
-/**
- * list.js — list_schedules
- * Usage: node list.js --user <email>
- */
 
 'use strict';
 
 const {
   fail,
-  validateEnv,
-  validateUserEmail,
+  rejectLegacyAuthorityArgs,
   parseArgs,
   emit,
-  querySchedules,
+  requestScheduleOperation,
 } = require('./common');
 
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
-    console.log('Usage: list.js --user <email>');
-    process.exit(0);
+    process.stdout.write('Usage: list.js\n');
+    return;
   }
-  validateEnv();
-  validateUserEmail(args.user);
-
-  try {
-    const items = await querySchedules(args.user);
-    emit({ schedules: items, count: items.length });
-  } catch (err) {
-    fail(`DynamoDB Query failed: ${err.message}`);
-  }
+  rejectLegacyAuthorityArgs(args);
+  emit(await requestScheduleOperation({ operation: 'list' }));
 }
 
-main().catch((err) => {
-  fail(err instanceof Error ? err.message : String(err));
+main().catch((error) => {
+  fail(error instanceof Error ? error.message : String(error));
 });

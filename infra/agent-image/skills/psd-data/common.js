@@ -8,10 +8,7 @@
  * post the link in chat and have the user authorize.
  *
  * Environment contract (set by infra/lib/agent-platform-stack.ts):
- *   AWS_REGION                          — e.g. us-east-1 (Cognito region)
- *   ENVIRONMENT                         — dev/staging/prod
  *   APP_BASE_URL                        — Base URL of the AI Studio web app
- *   AGENT_INTERNAL_API_KEY_SECRET_ID    — Secrets Manager ID for shared secret
  *   AUTH_COGNITO_USER_POOL_ID           — Cognito user pool (info only)
  *   AUTH_COGNITO_CLIENT_ID              — Cognito app client (used for refresh)
  *   AUTH_COGNITO_REGION                 — Cognito region (defaults to AWS_REGION)
@@ -20,38 +17,16 @@
 
 'use strict';
 
-// Load the AWS SDK from psd-workspace's already-installed copy. Both skills
-// would otherwise install the same `@aws-sdk/client-secrets-manager` tree;
-// importing absolutely keeps the image file-count identical to a no-psd-data
-// build. See Dockerfile for the rationale. Falls back to a bare require so
-// the skill is loadable/testable outside the container (e.g. from the repo
-// tree), matching the pattern in psd-plaud/common.js.
-function requireSecretsManager() {
-  try {
-    return require('/opt/psd-skills/psd-workspace/node_modules/@aws-sdk/client-secrets-manager');
-  } catch {
-    return require('@aws-sdk/client-secrets-manager');
-  }
-}
 const {
-  SecretsManagerClient,
-  GetSecretValueCommand,
-} = requireSecretsManager();
+  getOwnerCredential,
+  requestAgentBroker,
+} = require('../_shared/agent-broker');
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
-const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
-const APP_BASE_URL = process.env.APP_BASE_URL || '';
-const AGENT_INTERNAL_API_KEY_SECRET_ID =
-  process.env.AGENT_INTERNAL_API_KEY_SECRET_ID ||
-  `psd-agent/${ENVIRONMENT}/internal-api-key`;
 const COGNITO_REGION =
   process.env.AUTH_COGNITO_REGION || REGION;
 const COGNITO_CLIENT_ID = process.env.AUTH_COGNITO_CLIENT_ID || '';
 const PSD_DATA_MCP_URL = process.env.PSD_DATA_MCP_URL || '';
-
-const SAFE_EMAIL_RE = /^[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}$/;
-
-const smClient = new SecretsManagerClient({ region: REGION });
 
 function fail(message, code = 1) {
   process.stderr.write(`psd-data: ${message}\n`);
@@ -242,36 +217,12 @@ function parseArgs(argv) {
   return args;
 }
 
-function validateUserEmail(email) {
-  if (!email) fail('--user is required (authenticated caller email)');
-  if (typeof email !== 'string' || !SAFE_EMAIL_RE.test(email)) {
-    fail(`Invalid --user "${email}". Must be a valid email address.`);
+function rejectAuthorityArgs(args) {
+  for (const name of ['user', 'owner_email', 'user_email', 'user_id']) {
+    if (Object.prototype.hasOwnProperty.call(args, name)) {
+      fail(`--${name.replace(/_/g, '-')} is not accepted; identity comes from the signed invocation`);
+    }
   }
-}
-
-function cognitoRefreshSecretId(email) {
-  return `psd-agent-creds/${ENVIRONMENT}/user/${email}/cognito-refresh`;
-}
-
-async function getSecretJson(secretId) {
-  const resp = await smClient.send(
-    new GetSecretValueCommand({ SecretId: secretId })
-  );
-  if (!resp.SecretString) {
-    throw new Error(`Secret ${secretId} has no SecretString value`);
-  }
-  try {
-    return JSON.parse(resp.SecretString);
-  } catch (err) {
-    throw new Error(`Secret ${secretId} is not valid JSON: ${err.message}`);
-  }
-}
-
-async function getSecretString(secretId) {
-  const resp = await smClient.send(
-    new GetSecretValueCommand({ SecretId: secretId })
-  );
-  return resp.SecretString || null;
 }
 
 /**
@@ -281,13 +232,13 @@ async function getSecretString(secretId) {
  * Record shape (written by `lib/auth/agent-token-sync.ts`):
  *   { refresh_token, obtained_at, user_pool_id, client_id, region }
  */
-async function getUserCognitoRefreshRecord(email) {
-  const secretId = cognitoRefreshSecretId(email);
+async function getUserCognitoRefreshRecord() {
+  const credential = await getOwnerCredential('cognito-refresh');
+  if (!credential) return null;
   try {
-    return await getSecretJson(secretId);
-  } catch (err) {
-    if (err && err.name === 'ResourceNotFoundException') return null;
-    throw err;
+    return JSON.parse(credential.value);
+  } catch {
+    throw new Error('Stored Cognito credential is not valid JSON');
   }
 }
 
@@ -345,33 +296,12 @@ async function refreshCognitoIdToken(refreshToken, clientId, region) {
  * Ask AI Studio for a fresh signed consent URL the agent can give the user
  * in chat. Uses the same internal-API-key auth as psd-workspace.
  */
-async function mintConsentUrl(ownerEmail) {
-  if (!APP_BASE_URL) {
-    throw new Error('APP_BASE_URL env var not set — cannot mint consent URL');
-  }
-  const apiKey = await getSecretString(AGENT_INTERNAL_API_KEY_SECRET_ID);
-  if (!apiKey) {
-    throw new Error(
-      `Internal API key secret ${AGENT_INTERNAL_API_KEY_SECRET_ID} is empty`
-    );
-  }
-  const resp = await fetch(
-    `${APP_BASE_URL.replace(/\/$/, '')}/api/agent/consent-link`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({ ownerEmail, kind: 'cognito_data' }),
-    }
+async function mintConsentUrl() {
+  const data = await requestAgentBroker(
+    '/api/agent/consent-link',
+    { kind: 'cognito_data' },
   );
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok || !data.url) {
-    throw new Error(
-      `Consent-link API failed: ${resp.status} ${data.error || ''}`
-    );
-  }
+  if (!data.url) throw new Error('Consent-link API returned no URL');
   return data.url;
 }
 
@@ -379,10 +309,10 @@ async function mintConsentUrl(ownerEmail) {
  * Emit a needs-auth payload and exit 10. Encapsulates the chat-format
  * conventions (psd-rules rule 9) so callers don't have to duplicate them.
  */
-async function emitNeedsAuthAndExit(ownerEmail, reason) {
+async function emitNeedsAuthAndExit(reason) {
   let consentUrl;
   try {
-    consentUrl = await mintConsentUrl(ownerEmail);
+    consentUrl = await mintConsentUrl();
   } catch (err) {
     fail(`Unable to mint consent URL: ${err.message}`);
   }
@@ -405,13 +335,11 @@ async function emitNeedsAuthAndExit(ownerEmail, reason) {
  *
  *   - method: MCP method name ('tools/call', 'tools/list', etc.)
  *   - params: object — the JSON-RPC params field
- *   - ownerEmail: caller identity (used for the SM secret lookup)
- *
  * Side effects: writes the JSON-RPC result to stdout on success; emits a
  * needs-auth payload + exits 10 if no token; emits a structured error and
  * exits non-zero otherwise. Callers do not need to handle errors.
  */
-async function callMcp(method, params, ownerEmail) {
+async function callMcp(method, params) {
   if (!PSD_DATA_MCP_URL) {
     fail('PSD_DATA_MCP_URL is not set');
   }
@@ -419,10 +347,9 @@ async function callMcp(method, params, ownerEmail) {
     fail('AUTH_COGNITO_CLIENT_ID is not set');
   }
 
-  const record = await getUserCognitoRefreshRecord(ownerEmail);
+  const record = await getUserCognitoRefreshRecord();
   if (!record || !record.refresh_token) {
     await emitNeedsAuthAndExit(
-      ownerEmail,
       'no refresh token stored for this user yet'
     );
   }
@@ -441,7 +368,6 @@ async function callMcp(method, params, ownerEmail) {
       err.code === 'UserNotFoundException'
     ) {
       await emitNeedsAuthAndExit(
-        ownerEmail,
         `stored refresh token rejected: ${err.code}`
       );
     }
@@ -470,7 +396,7 @@ async function callMcp(method, params, ownerEmail) {
   // psd-data-mcp uses HTTP status codes for auth/permission errors and the
   // JSON-RPC error field for tool errors. Handle both.
   if (resp.status === 401) {
-    await emitNeedsAuthAndExit(ownerEmail, 'MCP server rejected token (401)');
+    await emitNeedsAuthAndExit('MCP server rejected token (401)');
   }
   if (resp.status === 403) {
     const text = await resp.text().catch(() => '');
@@ -520,13 +446,12 @@ module.exports = {
   fail,
   emit,
   parseArgs,
-  validateUserEmail,
+  rejectAuthorityArgs,
   getUserCognitoRefreshRecord,
   refreshCognitoIdToken,
   mintConsentUrl,
   emitNeedsAuthAndExit,
   callMcp,
-  cognitoRefreshSecretId,
   findUnqualifiedNumericCasts,
   PSD_DATA_MCP_URL,
 };

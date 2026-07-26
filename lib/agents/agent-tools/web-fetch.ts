@@ -11,6 +11,7 @@
 
 import type { McpToolHandler, McpToolResult } from "@/lib/mcp/types";
 import { createLogger } from "@/lib/logger";
+import { safeFetch } from "@/lib/security/safe-fetch";
 
 const DEFAULT_MAX_CHARS = 20_000;
 const HARD_MAX_CHARS = 100_000;
@@ -106,8 +107,9 @@ function isBlockedHost(host: string): boolean {
  * Reject URLs that target private, loopback, link-local, or cloud-metadata hosts
  * (SSRF guard). Mirrors the host checks in `lib/mcp/connector-service.ts`
  * (`rejectUnsafeMcpUrl`) but is self-contained so this handler does not pull the
- * MCP client graph. Hostname-only (DNS rebinding is not mitigated here, same as
- * the connector guard). Throws on an unsafe or malformed URL.
+ * MCP client graph. The actual request additionally resolves and pins the
+ * hostname through `safeFetch`, closing DNS-rebinding gaps. Throws on an unsafe
+ * or malformed URL.
  */
 export function assertSafeFetchUrl(rawUrl: string): URL {
   let url: URL;
@@ -271,9 +273,8 @@ function resolveMaxChars(value: unknown): number {
 async function fetchWithGuardedRedirects(url: URL, signal: AbortSignal): Promise<Response> {
   let currentUrl = url;
   for (let hop = 0; ; hop++) {
-    const res = await fetch(currentUrl, {
+    const res = await safeFetch(currentUrl, {
       signal,
-      redirect: "manual",
       headers: { Accept: "text/html,text/plain,application/json;q=0.9,*/*;q=0.1" },
     });
 

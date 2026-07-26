@@ -167,9 +167,8 @@ Notes:
 
 - Renders synchronously via the AWS SDK (`lambda:InvokeFunction` on the render function ARN
   only) using the AgentCore execution-role credentials — no API key.
-- The MP4 lands at `s3://$WORKSPACE_BUCKET/public-images/<email>/<uuid>.mp4` with `video/mp4`
-  content type; the `public-images/` prefix has a bucket-policy ALLOW for `s3:GetObject` to
-  `Principal: *`. Other prefixes stay private.
+- The trusted render function publishes the MP4 under the signed caller's
+  public artifact prefix. The model role has no S3 authority.
 - The returned URL is unsigned and does not expire — anyone with the link can fetch until the
   object is deleted.
 - `--dry-run` is a diagnostic flag (renders without uploading, returns a local path + byte

@@ -25,6 +25,7 @@ import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-wor
 import { verifyConsentToken } from "@/lib/agent-workspace/consent-token"
 import { getSecretJson, putSecretString, storePlaudRefreshToken } from "@/lib/agent-workspace/secrets-manager"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
+import { getServerSession } from "@/lib/auth/server-session"
 
 const PLAUD_AUTHORIZE_URL = process.env.PLAUD_AUTHORIZE_URL ?? "https://mcp.plaud.ai/authorize"
 const PLAUD_TOKEN_URL = process.env.PLAUD_TOKEN_URL ?? "https://mcp.plaud.ai/token"
@@ -128,6 +129,14 @@ function s256Challenge(verifier: string): string {
   return createHash("sha256").update(verifier).digest("base64url")
 }
 
+async function isAuthenticatedOwner(ownerEmail: string): Promise<boolean> {
+  const session = await getServerSession()
+  return (
+    typeof session?.email === "string" &&
+    session.email.trim().toLowerCase() === ownerEmail.trim().toLowerCase()
+  )
+}
+
 export interface PlaudConsentVerifyResult {
   valid: boolean
   ownerEmail?: string
@@ -153,6 +162,13 @@ export async function verifyPlaudConsentAndGetOAuthUrl(
       timer({ status: "error" })
       return createSuccess({ valid: false, error: "This consent link is invalid or for a different flow." })
     }
+    if (!(await isAuthenticatedOwner(payload.sub))) {
+      timer({ status: "error" })
+      return createSuccess({
+        valid: false,
+        error: "Sign in as the AI Studio owner named in this link to connect Plaud.",
+      })
+    }
 
     const clientId = await ensurePlaudClientId(log)
     if (!clientId) {
@@ -166,7 +182,11 @@ export async function verifyPlaudConsentAndGetOAuthUrl(
     const [row] = await executeQuery(
       (db) =>
         db
-          .select({ codeVerifier: psdAgentWorkspaceConsentNonces.codeVerifier })
+          .select({
+            ownerEmail: psdAgentWorkspaceConsentNonces.ownerEmail,
+            tokenKind: psdAgentWorkspaceConsentNonces.tokenKind,
+            codeVerifier: psdAgentWorkspaceConsentNonces.codeVerifier,
+          })
           .from(psdAgentWorkspaceConsentNonces)
           .where(
             sql`${psdAgentWorkspaceConsentNonces.nonce} = ${payload.nonce}
@@ -176,7 +196,12 @@ export async function verifyPlaudConsentAndGetOAuthUrl(
           .limit(1),
       "lookupPlaudNonce"
     )
-    if (!row || !row.codeVerifier) {
+    if (
+      !row ||
+      row.tokenKind !== "plaud" ||
+      row.ownerEmail.toLowerCase() !== payload.sub.toLowerCase() ||
+      !row.codeVerifier
+    ) {
       timer({ status: "error" })
       return createSuccess({ valid: false, error: "This consent link has expired or was already used. Ask your agent for a new one." })
     }
@@ -257,6 +282,13 @@ export async function handlePlaudCallback(
     if (!row || row.tokenKind !== "plaud" || !row.codeVerifier) {
       timer({ status: "error" })
       return createSuccess({ success: false, error: "This consent link has already been used or has expired. Ask your agent for a new one." })
+    }
+    if (!(await isAuthenticatedOwner(row.ownerEmail))) {
+      timer({ status: "error" })
+      return createSuccess({
+        success: false,
+        error: "This Plaud consent link belongs to a different AI Studio user.",
+      })
     }
 
     const clientId = await ensurePlaudClientId(log)

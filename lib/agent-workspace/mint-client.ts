@@ -1,8 +1,8 @@
 /**
  * Frontend → mint Lambda invoker (#1232 confused-deputy hardening).
  *
- * The `/api/agent/workspace-token` and `/api/agent/account-request` routes call
- * these helpers instead of the DWD broker / provisioning-sheet directly. In
+ * Trusted web-tier Workspace execution and account provisioning call these
+ * helpers instead of the DWD broker / provisioning-sheet directly. In
  * EVERY deployed environment `AGENT_MINT_LAMBDA_NAME` is set, so the WIF-backed
  * work runs in the isolated `psd-agent-mint-{env}` Lambda (IAM-authed
  * InvokeFunction) — the frontend never touches the WIF credential and cannot

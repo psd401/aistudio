@@ -1,160 +1,141 @@
-/**
- * Unit tests for psd-canva common.js — the auth + REST boundary.
- *
- * Covers:
- *   1. refreshCanvaAccessToken uses HTTP Basic auth (confidential client) with
- *      the refresh_token grant and returns the rotated refresh token.
- *   2. authorizeUser emits needs-auth (exit 10) when the user has no stored
- *      token yet, minting a consent link.
- *   3. authorizeUser writes the ROTATED refresh token back to Secrets Manager
- *      before returning (Canva single-use grant — the critical invariant).
- *   4. canvaFetch retries a 429 and then succeeds.
- *   5. canvaFetch surfaces a 401 as a typed 'unauthorized' error.
- *
- * Secrets Manager is stubbed via test-support; fetch is stubbed per-test.
- */
-
 'use strict';
 
-// common.js reads these at module-load time — set them BEFORE requiring it.
-process.env.APP_BASE_URL = 'https://app.test';
-process.env.ENVIRONMENT = 'dev';
+const fs = require('node:fs');
+const path = require('node:path');
+const { afterEach, beforeEach, expect, mock, test } = require('bun:test');
 
-const { test, expect, beforeEach, afterEach, mock } = require('bun:test');
+const brokerMock = mock(async () => ({ connected: true }));
 
-const { secretsStore, smFailures } = require('./test-support');
 const common = require('./common');
 
-const EMAIL = 'teacher@psd401.net';
-const CANVA_TOKEN_SECRET_ID = `psd-agent-creds/dev/user/${EMAIL}/canva`;
-const CANVA_OAUTH_SECRET_ID = 'psd-agent/dev/canva-oauth-client';
-const INTERNAL_API_KEY_SECRET_ID = 'psd-agent/dev/internal-api-key';
-
-let originalFetch;
-
-function jsonResponse(body, status = 200, headers = {}) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json', ...headers },
-  });
+class ExitError extends Error {
+  constructor(code) {
+    super(`process.exit(${code})`);
+    this.code = code;
+  }
 }
 
+let output;
+let originalExit;
+let originalStdoutWrite;
+let originalStderrWrite;
+
 beforeEach(() => {
-  for (const key of Object.keys(secretsStore)) delete secretsStore[key];
-  secretsStore[CANVA_OAUTH_SECRET_ID] = { client_id: 'cid-123', client_secret: 'csecret-xyz' };
-  secretsStore[INTERNAL_API_KEY_SECRET_ID] = 'internal-api-key';
-  smFailures.put = null;
-  originalFetch = globalThis.fetch;
+  brokerMock.mockReset();
+  brokerMock.mockResolvedValue({ connected: true });
+  common._internals.requestAgentBroker = brokerMock;
+  output = [];
+  originalExit = process.exit;
+  originalStdoutWrite = process.stdout.write;
+  originalStderrWrite = process.stderr.write;
+  process.exit = (code) => {
+    throw new ExitError(code);
+  };
+  process.stdout.write = (value) => {
+    output.push(String(value));
+    return true;
+  };
+  process.stderr.write = () => true;
 });
 
 afterEach(() => {
-  globalThis.fetch = originalFetch;
+  process.exit = originalExit;
+  process.stdout.write = originalStdoutWrite;
+  process.stderr.write = originalStderrWrite;
 });
 
-test('refreshCanvaAccessToken uses Basic auth + refresh_token grant and returns the rotated token', async () => {
-  let seen;
-  globalThis.fetch = mock(async (url, init) => {
-    seen = { url: String(url), init };
-    return jsonResponse({ access_token: 'access-tok', refresh_token: 'rotated-rt', expires_in: 14400 });
+test('authorization check passes no owner selector and returns only an opaque sentinel', async () => {
+  await expect(
+    common.authorizeUser('attacker-selected@psd401.net')
+  ).resolves.toBe('owner-bound-canva-broker');
+  expect(brokerMock).toHaveBeenCalledWith('/api/agent/canva', {
+    operation: 'status',
   });
-
-  const auth = await common.refreshCanvaAccessToken('stored-rt', 'cid-123', 'csecret-xyz');
-
-  expect(seen.url).toContain('/rest/v1/oauth/token');
-  expect(seen.init.method).toBe('POST');
-  expect(seen.init.headers['Content-Type']).toBe('application/x-www-form-urlencoded');
-  expect(seen.init.headers.Authorization).toBe(
-    'Basic ' + Buffer.from('cid-123:csecret-xyz').toString('base64')
+  expect(JSON.stringify(brokerMock.mock.calls[0])).not.toContain(
+    'attacker-selected'
   );
-  const body = new URLSearchParams(seen.init.body);
-  expect(body.get('grant_type')).toBe('refresh_token');
-  expect(body.get('refresh_token')).toBe('stored-rt');
-  expect(auth.access_token).toBe('access-tok');
-  expect(auth.refresh_token).toBe('rotated-rt');
 });
 
-test('authorizeUser emits needs-auth (exit 10) when the user has no stored token', async () => {
-  // No canva token slot for this user → getUserCanvaRecord returns null.
-  globalThis.fetch = mock(async (url) => {
-    if (String(url).includes('/api/agent/consent-link')) {
-      return jsonResponse({ url: 'https://app.test/agent-connect-canva?token=abc' });
+test('missing authorization mints consent for the signed owner only', async () => {
+  brokerMock
+    .mockResolvedValueOnce({ connected: false })
+    .mockResolvedValueOnce({
+      url: 'https://app.example/agent-connect-canva?token=opaque',
+    });
+  await expect(
+    common.authorizeUser('attacker-selected@psd401.net')
+  ).rejects.toMatchObject({ code: 10 });
+  expect(brokerMock).toHaveBeenNthCalledWith(
+    2,
+    '/api/agent/consent-link',
+    { kind: 'canva' }
+  );
+  expect(output.join('')).toContain('needs-auth');
+});
+
+test('Canva requests contain no bearer or owner and encode binary uploads', async () => {
+  brokerMock.mockResolvedValue({
+    httpStatus: 200,
+    payload: { job: { id: 'job-1', status: 'in_progress' } },
+  });
+  const result = await common.canvaFetch(
+    'model-controlled-token',
+    'POST',
+    '/v1/asset-uploads',
+    {
+      rawBody: Buffer.from('asset'),
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Asset-Upload-Metadata': '{"name_base64":"YS5wbmc="}',
+      },
     }
-    throw new Error(`Unexpected fetch to ${url}`);
-  });
-
-  const chunks = [];
-  const originalWrite = process.stdout.write.bind(process.stdout);
-  process.stdout.write = (chunk) => { chunks.push(chunk); return true; };
-  const originalExit = process.exit.bind(process);
-  let exitCode;
-  process.exit = (code) => { exitCode = code; throw new Error('__test_exit__'); };
-  try {
-    await expect(common.authorizeUser(EMAIL)).rejects.toThrow('__test_exit__');
-  } finally {
-    process.stdout.write = originalWrite;
-    process.exit = originalExit;
-  }
-  expect(exitCode).toBe(10);
-  const emitted = JSON.parse(chunks.join(''));
-  expect(emitted.status).toBe('needs-auth');
-  expect(emitted.kind).toBe('canva');
-  expect(emitted.consent_chat_hyperlink).toContain('Connect your Canva account');
+  );
+  expect(result).toEqual({ job: { id: 'job-1', status: 'in_progress' } });
+  expect(brokerMock).toHaveBeenCalledWith(
+    '/api/agent/canva',
+    {
+      operation: 'request',
+      method: 'POST',
+      path: '/v1/asset-uploads',
+      rawBodyBase64: Buffer.from('asset').toString('base64'),
+      uploadMetadata: '{"name_base64":"YS5wbmc="}',
+    },
+    { timeoutMs: 35_000 }
+  );
+  const serialized = JSON.stringify(brokerMock.mock.calls[0]);
+  expect(serialized).not.toContain('model-controlled-token');
+  expect(serialized).not.toContain('Authorization');
 });
 
-test('authorizeUser writes the rotated refresh token back to Secrets Manager', async () => {
-  secretsStore[CANVA_TOKEN_SECRET_ID] = { refresh_token: 'stored-rt', obtained_at: '2026-01-01T00:00:00Z' };
-  globalThis.fetch = mock(async (url) => {
-    if (String(url).includes('/rest/v1/oauth/token')) {
-      return jsonResponse({ access_token: 'access-tok', refresh_token: 'rotated-rt', expires_in: 14400 });
-    }
-    throw new Error(`Unexpected fetch to ${url}`);
-  });
-
-  const accessToken = await common.authorizeUser(EMAIL);
-  expect(accessToken).toBe('access-tok');
-  // The stored refresh token must have been replaced with the rotated one.
-  expect(secretsStore[CANVA_TOKEN_SECRET_ID].refresh_token).toBe('rotated-rt');
+test('retries a brokered 429 and then succeeds', async () => {
+  brokerMock
+    .mockResolvedValueOnce({
+      httpStatus: 429,
+      payload: null,
+      retryAfter: '0',
+    })
+    .mockResolvedValueOnce({
+      httpStatus: 200,
+      payload: { items: [] },
+    });
+  await expect(
+    common.canvaFetch('opaque', 'GET', '/v1/designs')
+  ).resolves.toEqual({ items: [] });
+  expect(brokerMock).toHaveBeenCalledTimes(2);
 });
 
-test('authorizeUser survives a failed rotated-token write-back (non-fatal)', async () => {
-  secretsStore[CANVA_TOKEN_SECRET_ID] = { refresh_token: 'stored-rt', obtained_at: '2026-01-01T00:00:00Z' };
-  smFailures.put = new Error('SM throttled');
-  globalThis.fetch = mock(async (url) => {
-    if (String(url).includes('/rest/v1/oauth/token')) {
-      return jsonResponse({ access_token: 'access-tok', refresh_token: 'rotated-rt', expires_in: 14400 });
-    }
-    throw new Error(`Unexpected fetch to ${url}`);
-  });
-
-  // The write-back failure must not discard the access token already in hand;
-  // the old refresh token is dead at Canva either way, so the next call
-  // surfaces needs-auth cleanly.
-  const accessToken = await common.authorizeUser(EMAIL);
-  expect(accessToken).toBe('access-tok');
-  expect(secretsStore[CANVA_TOKEN_SECRET_ID].refresh_token).toBe('stored-rt');
+test('surfaces a brokered 401 as an authorization failure', async () => {
+  brokerMock.mockResolvedValue({ httpStatus: 401, payload: null });
+  await expect(
+    common.canvaFetch('opaque', 'GET', '/v1/users/me')
+  ).rejects.toMatchObject({ code: 'unauthorized', status: 401 });
 });
 
-test('canvaFetch retries a 429 then succeeds', async () => {
-  let calls = 0;
-  globalThis.fetch = mock(async () => {
-    calls += 1;
-    if (calls === 1) return new Response('', { status: 429, headers: { 'Retry-After': '0' } });
-    return jsonResponse({ items: [], continuation: null });
-  });
-  const result = await common.canvaFetch('access-tok', 'GET', '/v1/designs', { query: { query: 'x' } });
-  expect(calls).toBe(2);
-  expect(result).toEqual({ items: [], continuation: null });
-});
-
-test('canvaFetch surfaces a 401 as a typed unauthorized error', async () => {
-  globalThis.fetch = mock(async () => new Response('', { status: 401 }));
-  let caught;
-  try {
-    await common.canvaFetch('access-tok', 'GET', '/v1/users/me/profile');
-  } catch (err) {
-    caught = err;
-  }
-  expect(caught).toBeDefined();
-  expect(caught.code).toBe('unauthorized');
-  expect(caught.status).toBe(401);
+test('model-facing helper contains no OAuth or Secrets Manager credential path', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, 'common.js'), 'utf8');
+  expect(source).not.toContain('SecretsManager');
+  expect(source).not.toContain('GetSecretValue');
+  expect(source).not.toContain('PutSecretValue');
+  expect(source).not.toContain('Authorization');
+  expect(source).not.toContain('refresh_token');
 });

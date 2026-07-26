@@ -76,14 +76,13 @@ let _credentialsCache = null;
  * Fetch the shared Red Rover credential bundle from psd-credentials.
  * Cached for the process lifetime. Never logged, never echoed.
  */
-function getCredentials(userEmail) {
+function getCredentials(_userEmail) {
   if (_credentialsCache) return _credentialsCache;
 
   let stdout = '';
   try {
     stdout = execFileSync('node', [
       CREDENTIALS_GET,
-      '--user', userEmail,
       '--name', 'redrover_credentials',
       '--shared',
     ], {

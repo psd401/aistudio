@@ -133,40 +133,28 @@ docker build \
   "${SCRIPT_DIR}"
 
 # ---------------------------------------------------------------------------
-# Build-time eval gate (issue #1161): runtime boot probe + canary turn.
-# Runs the freshly-built image with canary credentials and refuses to push a
-# dead-boot or non-answering image. Probe results (pass/fail + latency) are
-# written to a build artifact so canary quality is trendable across builds.
-#
-# Needs the Bedrock canary secret (for provider hydration + a real model call).
-# Resolution order: AGENT_CANARY_SECRET_ARN env -> the stack's
-# BedrockApiKeySecretArn CFN output. If neither resolves (e.g. the output isn't
-# deployed yet, or no canary creds on this host) the runtime probe is SKIPPED
-# with a loud warning — the static gates above still gate the build. Set
-# REQUIRE_PROBE_GATE=1 to make an un-runnable probe a hard failure instead.
+# Build-time eval gate (issue #1161): runtime boot probe + signed canary turn.
+# The image never receives a provider credential. A canary can run only when
+# the caller supplies the trusted web origin and a short-lived router-signed
+# invocation context. Otherwise the probe is skipped unless REQUIRE_PROBE_GATE
+# makes that a hard failure.
 if [ "${SKIP_PROBE_GATE:-0}" = "1" ]; then
   echo ""
   echo "WARNING: SKIP_PROBE_GATE=1 — runtime boot/canary probe BYPASSED."
 else
   echo ""
   echo "=== Build-time eval gate (1161): runtime boot probe + canary turn ==="
-  CANARY_SECRET_ARN="${AGENT_CANARY_SECRET_ARN:-}"
-  if [ -z "${CANARY_SECRET_ARN}" ]; then
-    CANARY_SECRET_ARN=$(aws cloudformation describe-stacks \
-      --stack-name "${STACK_NAME}" \
-      --query "Stacks[0].Outputs[?OutputKey=='BedrockApiKeySecretArn'].OutputValue" \
-      --output text --region "${REGION}" 2>/dev/null || echo "")
-    [ "${CANARY_SECRET_ARN}" = "None" ] && CANARY_SECRET_ARN=""
-  fi
+  PROBE_APP_BASE_URL="${AGENT_PROBE_APP_BASE_URL:-}"
+  PROBE_INVOCATION_CONTEXT="${AGENT_PROBE_INVOCATION_CONTEXT:-}"
 
   PROBE_DIR="${PROBE_ARTIFACT_DIR:-${SCRIPT_DIR}/.build-probes}"
   mkdir -p "${PROBE_DIR}"
   PROBE_ARTIFACT="${PROBE_DIR}/${TAG}.json"
 
-  if [ -z "${CANARY_SECRET_ARN}" ]; then
-    MSG="runtime probe SKIPPED — no canary secret (set AGENT_CANARY_SECRET_ARN or deploy the BedrockApiKeySecretArn output). Static gates still enforced."
+  if [ -z "${PROBE_APP_BASE_URL}" ] || [ -z "${PROBE_INVOCATION_CONTEXT}" ]; then
+    MSG="runtime probe SKIPPED — set AGENT_PROBE_APP_BASE_URL and a short-lived AGENT_PROBE_INVOCATION_CONTEXT. Static gates still enforced."
     echo "WARNING: ${MSG}"
-    printf '{"tag":"%s","skipped":true,"reason":"no_canary_secret"}\n' "${TAG}" > "${PROBE_ARTIFACT}"
+    printf '{"tag":"%s","skipped":true,"reason":"missing_signed_broker_context"}\n' "${TAG}" > "${PROBE_ARTIFACT}"
     if [ "${REQUIRE_PROBE_GATE:-0}" = "1" ]; then
       echo "ERROR: REQUIRE_PROBE_GATE=1 but ${MSG}" >&2
       exit 1
@@ -181,12 +169,12 @@ else
     cleanup_probe() { [ -n "${CID}" ] && docker rm -f "${CID}" >/dev/null 2>&1 || true; }
     trap cleanup_probe EXIT
 
-    echo "Starting probe container (secret=${CANARY_SECRET_ARN##*:})..."
+    echo "Starting probe container against the signed web broker..."
     # Pass through host AWS creds only when present. Build an array (rather than
     # unquoted ${VAR:+...} word-splitting) so the args are robust regardless of
     # the credential alphabet / IFS.
     PROBE_ENV_ARGS=(-e "ENVIRONMENT=${ENVIRONMENT}" -e "AWS_REGION=${REGION}"
-      -e "BUILD_MARKER=${TAG}@probe" -e "BEDROCK_API_KEY_SECRET_ARN=${CANARY_SECRET_ARN}")
+      -e "BUILD_MARKER=${TAG}@probe" -e "APP_BASE_URL=${PROBE_APP_BASE_URL}")
     [ -n "${AWS_ACCESS_KEY_ID:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}")
     [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}")
     [ -n "${AWS_SESSION_TOKEN:-}" ] && PROBE_ENV_ARGS+=(-e "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}")
@@ -250,8 +238,8 @@ else
     echo "Canary turn: '${CANARY_MESSAGE}' (via /invocations)..."
     CANARY_TIMEOUT="${PROBE_CANARY_TIMEOUT:-120}"
     CANARY_PAYLOAD=$("${PYTHON}" -c \
-      'import json, sys; print(json.dumps({"prompt": sys.argv[1], "user_email": "canary@build-gate"}))' \
-      "${CANARY_MESSAGE}")
+      'import json, sys; print(json.dumps({"prompt": sys.argv[1], "user_email": "canary@build-gate", "invocation_context": sys.argv[2]}))' \
+      "${CANARY_MESSAGE}" "${PROBE_INVOCATION_CONTEXT}")
     CANARY_START=$(date +%s)
     CANARY_OUT=$(docker exec "${CID}" curl -sS -f -m "${CANARY_TIMEOUT}" \
       -X POST "http://127.0.0.1:8080/invocations" \
