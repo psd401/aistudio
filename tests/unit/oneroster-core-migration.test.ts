@@ -134,6 +134,16 @@ describe("OneRoster core migration", () => {
     expect(migration).not.toMatch(/^\s*DO\s+\$\$/m);
   });
 
+  it("documents a complete manual rollback", () => {
+    expect(migration).toContain(
+      "-- ROLLBACK SQL (for manual rollback if needed)"
+    );
+
+    for (const tableName of tableNames) {
+      expect(migration).toContain(`-- DROP TABLE IF EXISTS ${tableName};`);
+    }
+  });
+
   it("is registered in the migration manifest", () => {
     const manifest = JSON.parse(
       fs.readFileSync(

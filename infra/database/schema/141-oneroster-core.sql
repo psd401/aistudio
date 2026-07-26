@@ -267,3 +267,16 @@ DROP TRIGGER IF EXISTS update_oneroster_enrollments_updated_at
 CREATE TRIGGER update_oneroster_enrollments_updated_at
   BEFORE UPDATE ON oneroster_enrollments
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ===========================================================================
+-- ROLLBACK SQL (for manual rollback if needed)
+-- Drop dependents first so this remains safe if foreign keys are added later.
+-- ===========================================================================
+-- DROP TABLE IF EXISTS oneroster_enrollments;
+-- DROP TABLE IF EXISTS oneroster_user_roles;
+-- DROP TABLE IF EXISTS oneroster_users;
+-- DROP TABLE IF EXISTS oneroster_class_terms;
+-- DROP TABLE IF EXISTS oneroster_classes;
+-- DROP TABLE IF EXISTS oneroster_courses;
+-- DROP TABLE IF EXISTS oneroster_academic_sessions;
+-- DROP TABLE IF EXISTS oneroster_orgs;
