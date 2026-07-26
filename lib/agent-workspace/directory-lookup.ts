@@ -133,7 +133,36 @@ export function normalizeEmail(raw: unknown): string | null {
   const trimmed = raw.trim().toLowerCase()
   // Deliberately loose — Google is the authority on whether an address
   // exists. This only rejects input that cannot be an address at all.
-  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(trimmed) ? trimmed : null
+  //
+  // Parsed rather than regex-matched. The obvious pattern
+  // /^[^@\s]+@[^@\s]+\.[^@\s]+$/ draws CodeQL js/polynomial-redos: `[^@\s]`
+  // also matches `.`, so the domain half is genuinely ambiguous about which
+  // dot is the separator.
+  //
+  // Honest caveat: I could NOT reproduce a practical slowdown. V8 evaluates
+  // CodeQL's own witness string ("!@!." plus many "!." repetitions) in under
+  // 0.1 ms at 20k repetitions, so this is a theoretical ambiguity rather than
+  // a live DoS. The parse is kept anyway because it is clearer about what an
+  // address must look like and removes the ambiguity outright — not because a
+  // measured attack was fixed.
+  //
+  // One deliberate behaviour change, found by differential-testing the two
+  // forms across a case table: the old regex ACCEPTED a trailing-dot domain
+  // ("a@b.c.") purely because `[^@\s]` also matches `.`, so the final
+  // `[^@\s]+$` happily consumed "c.". This rejects it. That is a narrowing,
+  // and an intentional one — such an address resolves to nothing at Google
+  // anyway, so failing here is a clearer answer than an empty directory miss.
+  if (/\s/.test(trimmed)) return null
+  const at = trimmed.indexOf("@")
+  if (at <= 0 || at !== trimmed.lastIndexOf("@")) return null
+  const domain = trimmed.slice(at + 1)
+  // A domain needs a dot with at least one character on each side. Checking
+  // only the FIRST dot's position is not enough — that accepts "b.c." — so
+  // both ends are tested explicitly.
+  if (!domain.includes(".") || domain.startsWith(".") || domain.endsWith(".")) {
+    return null
+  }
+  return trimmed
 }
 
 /**

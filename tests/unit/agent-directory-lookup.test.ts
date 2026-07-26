@@ -317,8 +317,38 @@ describe("shapePerson", () => {
 })
 
 describe("normalizeEmail", () => {
-  it("lowercases and rejects non-addresses", () => {
+  it("lowercases and trims a real address", () => {
     expect(normalizeEmail("  HagelK@PSD401.net ")).toBe("hagelk@psd401.net")
-    expect(normalizeEmail("nope")).toBeNull()
+    expect(normalizeEmail("a.b@sub.psd401.net")).toBe("a.b@sub.psd401.net")
+  })
+
+  it("rejects anything that cannot be an address", () => {
+    for (const bad of [
+      "nope",
+      "",
+      "@psd401.net",
+      "a@",
+      "a@psd401",
+      "a@.net",
+      "a@psd401.",
+      "a@psd401.net.",
+      "a@b.c.",
+      "a@b@psd401.net",
+      "a b@psd401.net",
+      "a@psd 401.net",
+      null,
+      42,
+    ]) {
+      expect(normalizeEmail(bad)).toBeNull()
+    }
+  })
+
+  it("handles CodeQL's ReDoS witness string without misparsing it", () => {
+    // Not a timing assertion: the regex this replaced evaluates the same
+    // witness in under 0.1 ms in V8, so a timing test would pass either way
+    // and prove nothing. What is worth pinning is that the linear parse still
+    // REJECTS this input rather than accidentally accepting it — the domain
+    // ends in "." and so is not a valid address.
+    expect(normalizeEmail(`!@!.${"!.".repeat(20_000)}`)).toBeNull()
   })
 })
