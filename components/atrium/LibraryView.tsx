@@ -306,6 +306,15 @@ function useLibraryPage(filter: ListFilter) {
   // means the end was reached, so "Load more" hides.
   const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The query/status the COMMITTED items were fetched with (undefined until the
+  // first fetch commits), set in the same state batch as `setItems` (so they can
+  // never describe a grid the view isn't showing). Rendered as `data-results-*`
+  // on the library section: the only deterministic "the grid now reflects THIS
+  // search + view" signal — `loading` flips inside a post-paint effect, leaving
+  // a window where the filters have changed but neither `loading` nor the items
+  // say so. E2E search pinning awaits these instead of racing the debounce.
+  const [settledQuery, setSettledQuery] = useState<string | undefined>(undefined);
+  const [settledStatus, setSettledStatus] = useState<string | undefined>(undefined);
   const reqSeqRef = useRef(0);
 
   const { collectionId, kind, owner, status, tag, query } = filter;
@@ -332,6 +341,8 @@ function useLibraryPage(filter: ListFilter) {
         if (res.isSuccess) {
           setItems((prev) => (append ? [...prev, ...res.data] : res.data));
           setHasMore(res.data.length === PAGE_SIZE);
+          setSettledQuery(query ?? "");
+          setSettledStatus(status ?? "");
         } else {
           setError(res.message ?? "Could not load content");
           log.warn("listContentAction failed", { message: res.message });
@@ -370,7 +381,17 @@ function useLibraryPage(filter: ListFilter) {
     void fetchPageRef.current(0);
   }, []);
 
-  return { items, loading, loadingMore, hasMore, error, fetchPage, refresh };
+  return {
+    items,
+    loading,
+    loadingMore,
+    hasMore,
+    error,
+    settledQuery,
+    settledStatus,
+    fetchPage,
+    refresh,
+  };
 }
 
 /**
@@ -466,8 +487,17 @@ export function LibraryView({
   const { kind, owner, status } = viewToFilter(view);
   const archivedView = view === "archived";
 
-  const { items, loading, loadingMore, hasMore, error, fetchPage, refresh } =
-    useLibraryPage({
+  const {
+    items,
+    loading,
+    loadingMore,
+    hasMore,
+    error,
+    settledQuery,
+    settledStatus,
+    fetchPage,
+    refresh,
+  } = useLibraryPage({
       collectionId: collectionId ?? undefined,
       kind,
       owner,
@@ -500,7 +530,14 @@ export function LibraryView({
 
   return (
     <div className="w-full px-5 py-6 md:px-8 md:py-8">
-      <section className="mx-auto min-w-0 max-w-6xl">
+      {/* `data-results-*`: which query/view the committed grid was fetched for
+          (absent until the first fetch commits) — see the settled-state note in
+          `useLibraryPage`. */}
+      <section
+        className="mx-auto min-w-0 max-w-6xl"
+        data-results-query={settledQuery}
+        data-results-status={settledStatus}
+      >
         <LibraryHeader
           search={search}
           onSearch={setSearch}

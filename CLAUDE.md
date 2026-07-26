@@ -376,6 +376,7 @@ tree, and anti-patterns.
 - **Don't** return internal state getters from hooks when the caller also supplies `fn` — use `onFailure(count)` event callbacks
 - **Don't** read a ref mutated inside a hook's `.catch()` without `+1` — use `onFailure(count)` callback instead (callers see pre-mutation value)
 - **Don't** pass unstable adapter references to `useChatRuntime` — use ref-based getters with empty dep arrays to prevent runtime re-initialization and duplicate messages
+- **Don't** `router.push()` away from a page that may still have server actions in flight (e.g. mount-time fetch bursts) — a straggler resolving after the push rebases the App Router back onto its origin route, silently yanking the user back. For leave-the-page mutations (archive/delete → library), use a document navigation (`window.location.assign`) so page teardown cancels the stragglers (see `ContentSettings.tsx`)
 
 ## 📖 Documentation
 
